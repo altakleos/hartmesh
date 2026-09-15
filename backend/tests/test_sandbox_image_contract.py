@@ -193,7 +193,9 @@ def test_sandbox_smoke_checks_the_font_cache_as_the_runtime_user() -> None:
 
     # The vendor entrypoint wipes ~/.cache/matplotlib at start; the cache must be found at MPLCONFIGDIR instead.
     assert 'ls \\"$MPLCONFIGDIR\\"/fontlist-*.json && python3 -c' in workflow
-    assert "grep -qi 'building the font cache'" in workflow
+    # The cache directory in use is asserted (a read-only MPLCONFIGDIR makes matplotlib fall back to a temp dir silently).
+    assert "assert matplotlib.get_cachedir() == os.environ[" in workflow
+    assert "grep -Eqi 'building the font cache|temporary cache directory'" in workflow
     assert "printf '%s\\n' \"$font_response\"" in workflow
 
 

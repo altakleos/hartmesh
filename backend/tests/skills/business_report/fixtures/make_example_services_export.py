@@ -16,8 +16,9 @@ Files written next to this script:
 - example_services_export.xlsx  the same rows on a "Jobs" sheet plus a "Notes" sheet
                                 without a data table, so sheet selection is exercised
 - example_services_export_small.csv  300 jobs, July and August 2026, amounts written
-                                as "$1,234.50" under a "Total (USD)" header
-- example_services_export_small.xls  the 300 rows as a legacy workbook
+                                as "$1,234.50" under a "Total (USD)" header, plus a
+                                free-text "Notes" column that no profile alias matches
+- example_services_export_small.xls  the 300 rows as a legacy workbook, with "Notes"
 """
 
 from __future__ import annotations
@@ -122,10 +123,21 @@ def generate_rows(count: int, months: list[tuple[dt.date, int]], seed: int) -> l
     return rows
 
 
-def write_csv(path: Path, rows: list[list[object]], *, currency_strings: bool) -> None:
+NOTES = ["", "", "", "Follow-up call booked", "Customer asked for a quote", "", "Parts on order", ""]
+
+
+def _note(row: list[object]) -> str:
+    """A deterministic free-text note: an unmapped column the report must carry through untouched."""
+
+    return NOTES[sum(ord(char) for char in str(row[0])) % len(NOTES)]
+
+
+def write_csv(path: Path, rows: list[list[object]], *, currency_strings: bool, notes: bool = False) -> None:
     columns = list(COLUMNS)
     if currency_strings:
         columns[-1] = "Total (USD)"
+    if notes:
+        columns.append("Notes")
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(columns)
@@ -133,6 +145,8 @@ def write_csv(path: Path, rows: list[list[object]], *, currency_strings: bool) -
             out = list(row)
             out[1] = row[1].isoformat()
             out[-1] = f"${row[-1]:,.2f}" if currency_strings else f"{row[-1]:.2f}"
+            if notes:
+                out.append(_note(row))
             writer.writerow(out)
 
 
@@ -163,10 +177,10 @@ def write_xls(path: Path, rows: list[list[object]]) -> None:
     sheet = workbook.add_sheet("Jobs")
     date_style = xlwt.XFStyle()
     date_style.num_format_str = "yyyy-mm-dd"
-    for column, name in enumerate(COLUMNS):
+    for column, name in enumerate([*COLUMNS, "Notes"]):
         sheet.write(0, column, name)
     for row_index, row in enumerate(rows, start=1):
-        for column, value in enumerate(row):
+        for column, value in enumerate([*row, _note(row)]):
             if column == 1:
                 sheet.write(row_index, column, value, date_style)
             else:
@@ -179,7 +193,7 @@ def main() -> None:
     small = generate_rows(300, SMALL_MONTHS, SEED + 1)
     write_csv(HERE / "example_services_export.csv", large, currency_strings=False)
     write_xlsx(HERE / "example_services_export.xlsx", large)
-    write_csv(HERE / "example_services_export_small.csv", small, currency_strings=True)
+    write_csv(HERE / "example_services_export_small.csv", small, currency_strings=True, notes=True)
     write_xls(HERE / "example_services_export_small.xls", small)
     for label, rows in (("large", large), ("small", small)):
         by_month: dict[str, int] = {}

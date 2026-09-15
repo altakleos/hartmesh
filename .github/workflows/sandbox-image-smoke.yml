@@ -130,10 +130,13 @@ jobs:
           # so the first chart a skill draws does not spend seconds building it.
           font_response="$(curl --fail-with-body --silent --show-error \
             --header 'Content-Type: application/json' \
-            --data '{"command":"ls \"$MPLCONFIGDIR\"/fontlist-*.json && python3 -c \"import matplotlib.pyplot\""}' \
+            --data '{"command":"ls \"$MPLCONFIGDIR\"/fontlist-*.json && python3 -c \"import os, matplotlib, matplotlib.pyplot; assert matplotlib.get_cachedir() == os.environ[\\\"MPLCONFIGDIR\\\"], matplotlib.get_cachedir()\""}' \
             http://127.0.0.1:18080/v1/bash/exec)"
+          # matplotlib falls back to a temporary directory (rebuilding the cache
+          # every process) when MPLCONFIGDIR is not writable, so the cache dir
+          # in use is asserted, not only the file's presence.
           if ! printf '%s' "$font_response" | jq -e '.data.exit_code == 0' >/dev/null \
-            || printf '%s' "$font_response" | jq --raw-output '.data.stderr' | grep -qi 'building the font cache'; then
+            || printf '%s' "$font_response" | jq --raw-output '.data.stderr' | grep -Eqi 'building the font cache|temporary cache directory'; then
             printf '%s\n' "$font_response"
             echo "::error::matplotlib font cache is not pre-built for the runtime user"
             exit 1

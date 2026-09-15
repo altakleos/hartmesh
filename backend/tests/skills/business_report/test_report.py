@@ -153,15 +153,17 @@ def _write_csv(path: Path, columns: list[str], rows: list[list[object]]) -> Path
 
 
 def test_script_installs_nothing_never_shells_out_and_runs_on_the_image_python() -> None:
-    source = SCRIPT.read_text(encoding="utf-8")
-
-    ast.parse(source, feature_version=(3, 10))
-    assert "subprocess" not in source
-    assert "os.system" not in source
-    assert not re.search(r"\bpip\b", source)
-    assert not re.search(r"\b(urllib|requests|http\.client|socket)\b", source)
-    assert "__import__" not in source
-    assert "importlib" not in source
+    modules = sorted((SKILL_DIR / "scripts").glob("*.py"))
+    assert [module.name for module in modules] == ["business_report_common.py", "business_report_render.py", "business_report_sections.py", "report.py"]
+    for module in modules:
+        source = module.read_text(encoding="utf-8")
+        ast.parse(source, feature_version=(3, 10))
+        assert "subprocess" not in source, module.name
+        assert "os.system" not in source, module.name
+        assert not re.search(r"\bpip\b", source), module.name
+        assert not re.search(r"\b(urllib|requests|http\.client|socket)\b", source), module.name
+        assert "__import__" not in source, module.name
+        assert "importlib" not in source, module.name
 
 
 def test_missing_document_library_exits_with_a_message_naming_the_image(tmp_path, capsys) -> None:
@@ -431,7 +433,7 @@ def test_exclusions_remove_rows_and_say_so(report, capsys, tmp_path) -> None:
     assert kpis["jobs"]["value"] == expected["jobs"] - expected["warranty"]
     exclusions = next(check for check in built["checks"] if check["id"] == "exclusions")
     assert exclusions["status"] == "pass"
-    assert f"Excluded {expected['warranty']} jobs where service = Warranty ($0)" in exclusions["text"]
+    assert f"Excluded {expected['warranty']} jobs where service = Warranty ($0.00)" in exclusions["text"]
 
 
 def test_new_customers_need_earlier_rows_to_mean_anything(report, capsys, tmp_path) -> None:
@@ -633,6 +635,7 @@ def test_every_other_failure_produces_the_report_with_the_line(report, tmp_path,
     statuses = {check["id"]: check["status"] for check in built["checks"]}
 
     assert statuses["totals_reconcile"] == "pass"
+    assert "dates_in_period" not in statuses
     assert statuses["duplicate_ids"] == "warn"
     assert statuses["unmapped_rows"] == "warn"
     assert statuses["unparsed_amounts"] == "warn"
@@ -699,7 +702,7 @@ def test_prose_accepts_rounded_and_formatted_variants_of_report_numbers(report, 
     revenue = built["kpis"][0]["value"]
     average = next(kpi for kpi in built["kpis"] if kpi["id"] == "average_ticket")["value"]
     rounded_thousands = f"${revenue / 1000:,.0f}k"
-    text = f"Revenue reached about {rounded_thousands}, or {report.format_value(round(revenue), 'currency')} exactly, at an average of ${average:.0f} per job in 2026."
+    text = f"Revenue reached about {rounded_thousands}, or ${round(revenue):,} in round figures, at an average of ${average:.0f} per job in 2026."
 
     clean, removed = report.verify_prose_numbers(built, text)
 
@@ -822,12 +825,383 @@ def test_period_forms_and_labels(report) -> None:
 
 
 def test_format_value_is_the_one_formatting_function(report) -> None:
-    assert report.format_value(186420, "currency") == "$186,420"
+    assert report.format_value(186420, "currency") == "$186,420.00"
     assert report.format_value(153.55, "currency") == "$153.55"
-    assert report.format_value(-120, "currency") == "-$120"
+    assert report.format_value(-120, "currency") == "-$120.00"
+    assert report.format_value(0, "currency") == "$0.00"
     assert report.format_value(1214, "integer") == "1,214"
     assert report.format_value(8.21, "percent") == "8.2%"
     assert report.format_value(None, "currency") == "—"
     assert report.format_value(1234.5, "currency", "EUR") == "€1,234.50"
     assert report.format_value(1234.5, "currency", "CHF") == "CHF 1,234.50"
     assert report.format_value("Unassigned", "text") == "Unassigned"
+
+
+# --- review panel: dates, amounts, checks --------------------------------------
+
+
+def test_day_first_dates_are_read_per_column_not_per_row(report, tmp_path, capsys) -> None:
+    rows = [[f"{day:02d}/08/2026", "10"] for day in range(1, 13)] + [["25/08/2026", "10"], ["30/07/2026", "10"]]
+    path = _write_csv(tmp_path / "dayfirst.csv", ["Date", "Amount"], rows)
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    assert built["kpis"][1]["value"] == 13
+    assert not any(check["id"] == "date_order" for check in built["checks"])
+
+    code, out, err = _run(report, capsys, "inspect", str(path))
+    assert code == 0, err
+    table = json.loads(out)["files"][0]["tables"][0]
+    assert table["date_range"] == {"start": "2026-07-30", "end": "2026-08-25"}
+    assert table["date_order"] == "day-first"
+
+
+def test_ambiguous_slash_dates_are_read_month_first_and_say_so(report, tmp_path, capsys) -> None:
+    path = _write_csv(tmp_path / "ambiguous.csv", ["Date", "Amount"], [["03/08/2026", "10"], ["03/09/2026", "20"], ["05/09/2026", "30"]])
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-03")
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    assert built["kpis"][1]["value"] == 2
+    order = next(check for check in built["checks"] if check["id"] == "date_order")
+    assert order["status"] == "warn"
+    assert "month/day" in order["text"] and "03/08/2026" in order["text"]
+    assert order["text"] in report.checks_line(built)
+
+
+def test_timestamps_with_mixed_offsets_and_iso_times_do_not_crash(report, tmp_path, capsys) -> None:
+    path = _write_csv(
+        tmp_path / "offsets.csv",
+        ["Date", "Amount"],
+        [["2026-08-01T10:00:00+02:00", "1"], ["2026-08-02T10:00:00-05:00", "2"], ["2026-08-03", "4"], ["2026-08-31 23:15", "8"], ["2026-09-01T10:30:00+02:00", "16"]],
+    )
+    code, out, err = _run(report, capsys, "inspect", str(path))
+    assert code == 0, err
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    assert built["kpis"][1]["value"] == 4
+    assert built["kpis"][0]["value"] == 15
+
+
+def test_sub_cent_amounts_are_not_withheld(report, tmp_path, capsys) -> None:
+    path = _write_csv(tmp_path / "halfcent.csv", ["Date", "Service", "Amount"], [[f"2026-08-{day:02d}", "A", "1.005"] for day in (3, 10, 17, 24, 31)])
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    assert built["kpis"][0]["value"] == 5.03
+    assert next(check for check in built["checks"] if check["id"] == "totals_reconcile")["status"] == "pass"
+
+
+def test_european_amounts_are_read_consistently_by_both_readers(report, tmp_path, capsys) -> None:
+    path = _write_csv(tmp_path / "eu.csv", ["Datum", "Dienst", "Betrag"], [["2026-08-03", "A", "1.234,56"], ["2026-08-10", "A", "2.000,00"], ["2026-08-17", "A", "3.000"], ["2026-08-24", "A", "1234,567"]])
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    assert built["kpis"][0]["value"] == 7469.13
+    assert built["meta"]["build"]["mapping"]["amount"] == "Betrag"
+    assert report.detect_number_style(["1.234,56", "2.000,00"]) == "eu"
+    assert report.detect_number_style(["1,234.56", "12.50"]) == "us"
+    assert report.detect_number_style(["12", "15"]) is None
+
+
+def test_overlapping_exclusions_are_counted_once(report, tmp_path, capsys) -> None:
+    path = _write_csv(
+        tmp_path / "overlap.csv",
+        ["Date", "Service", "Status", "Amount"],
+        [["2026-08-01", "A", "Paid", "1"], ["2026-08-02", "A", "Unpaid", "2"], ["2026-08-03", "B", "Paid", "4"], ["2026-08-04", "B", "Unpaid", "8"]],
+    )
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08", "--exclude", "category=A", "--exclude", "status=Paid")
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    checks = {check["id"]: check["text"] for check in built["checks"]}
+    assert built["kpis"][1]["value"] == 1
+    assert "3 were excluded" in checks["rows_used"]
+    assert "Excluded 2 jobs where service = A ($3.00); Excluded 1 job where status = Paid ($4.00)." == checks["exclusions"]
+
+
+def test_blank_amount_column_is_a_warning_not_a_pass(report, tmp_path, capsys) -> None:
+    path = _write_csv(tmp_path / "blank.csv", ["Date", "Service", "Amount"], [["2026-08-01", "A", ""], ["2026-08-02", "B", ""]])
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    amounts = next(check for check in built["checks"] if check["id"] == "unparsed_amounts")
+    assert amounts["status"] == "warn"
+    assert "No row has a usable amount" in amounts["text"]
+
+
+def test_a_period_with_no_rows_is_an_error_not_a_report(report, tmp_path, capsys) -> None:
+    code, out, err = _build(report, capsys, tmp_path / "out", str(SMALL_CSV), "--period", "2026-03")
+    assert code == 1
+    assert "March 2026" in err and "2026-07-01" in err and "2026-08-31" in err
+    assert not list((tmp_path / "out").glob("*"))
+
+
+def test_cancelled_and_zero_amount_rows_are_said_in_the_checks_line(report, august_report) -> None:
+    _out_dir, built = august_report
+    included = next(check for check in built["checks"] if check["id"] == "included_zero_rows")
+    assert included["status"] == "warn"
+    assert "cancelled" in included["text"] and "$0.00" in included["text"] and "included in the job count" in included["text"]
+    assert included["text"] in report.checks_line(built)
+    assert not any("cancelled" in note for note in built["notes"])
+
+
+def test_generated_text_uses_singular_forms_for_one_row(report, tmp_path, capsys) -> None:
+    path = _write_csv(tmp_path / "one.csv", ["Job #", "Date", "Assigned To", "Status", "Amount"], [["1", "2026-08-01", "", "Unpaid", "250"], ["2", "2026-07-01", "A", "Paid", "100"]])
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    checks = {check["id"]: check["text"] for check in built["checks"]}
+    summary = next(section for section in built["sections"] if section["id"] == "summary")["paragraphs"][0]
+
+    assert checks["unmapped_rows"] == "1 job had no technician and is listed as Unassigned."
+    assert checks["rows_used"].startswith("Used 1 of 2 rows: 1 is outside August 2026")
+    assert "across 1 job," in summary
+    assert "$250.00 across 1 job is unpaid." in summary
+
+
+def test_inspect_types_reference_columns_as_text(report, tmp_path, capsys) -> None:
+    path = _write_csv(tmp_path / "refs.csv", ["Job #", "Date", "Total"], [["J-10001", "2026-08-01", "USD 12.50"], ["J-10002", "2026-08-02", "USD 7"]])
+    code, out, err = _run(report, capsys, "inspect", str(path))
+    assert code == 0, err
+    columns = {column["name"]: column["type"] for column in json.loads(out)["files"][0]["tables"][0]["columns"]}
+    assert columns == {"Job #": "text", "Date": "date", "Total": "number"}
+
+
+# --- review panel: mapping, drafts, prose ---------------------------------------
+
+
+def test_one_question_covers_every_ambiguous_role_and_overrides_displace_auto_roles(report, tmp_path, capsys) -> None:
+    path = _write_csv(
+        tmp_path / "twice.csv",
+        ["Invoice Date", "Completed On", "Subtotal", "Invoice Total"],
+        [["2026-08-01", "2026-08-03", "10", "12"], ["2026-08-02", "2026-08-05", "20", "24"]],
+    )
+    code, out, err = _run(report, capsys, "inspect", str(path))
+    assert code == 0, err
+    inspected = json.loads(out)
+    question = inspected["question"]
+    assert "Invoice Date" in question and "Completed On" in question and "Subtotal" in question and "Invoice Total" in question
+    assert inspected["files"][0]["tables"][0]["ambiguous"] == {"date": ["Invoice Date", "Completed On"], "amount": ["Subtotal", "Invoice Total"]}
+
+    mapping_file = tmp_path / "m.json"
+    mapping_file.write_text(json.dumps({"date": "Completed On", "amount": "Invoice Total"}), encoding="utf-8")
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08", "--mapping", str(mapping_file))
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    assert built["meta"]["build"]["mapping"]["id"] is None
+    assert built["kpis"][0]["value"] == 36
+
+    mapping_file.write_text(json.dumps({"date": "Completed On", "amount": "Invoice Total", "id": "Invoice Total"}), encoding="utf-8")
+    code, out, err = _build(report, capsys, tmp_path / "out2", str(path), "--period", "2026-08", "--mapping", str(mapping_file))
+    assert code == 1
+    assert "amount" in err and "id" in err and "null" in err
+
+
+def test_an_explicit_mapping_names_the_section_after_the_users_column(report, tmp_path, capsys) -> None:
+    path = _write_csv(tmp_path / "treatments.csv", ["Date", "Treatment", "Amount"], [["2026-08-01", "Cleaning", "80"], ["2026-08-02", "Filling", "120"]])
+    code, out, err = _build(report, capsys, tmp_path / "plain", str(path), "--period", "2026-08")
+    assert code == 0, err
+    plain = _read_report(tmp_path / "plain")
+    assert any(note == "By service: not included, no column matched service." for note in plain["notes"])
+
+    mapping_file = tmp_path / "m.json"
+    mapping_file.write_text(json.dumps({"category": "Treatment"}), encoding="utf-8")
+    code, out, err = _build(report, capsys, tmp_path / "mapped", str(path), "--period", "2026-08", "--mapping", str(mapping_file))
+    assert code == 0, err
+    mapped = _read_report(tmp_path / "mapped")
+    section = next(section for section in mapped["sections"] if section["id"] == "by_category")
+    assert section["heading"] == "By treatment"
+    assert section["table"]["columns"][0] == "Treatment"
+
+
+def test_a_rebuild_removes_stale_renders_and_says_when_written_text_is_lost(report, tmp_path, capsys) -> None:
+    code, out, err = _build(report, capsys, tmp_path / "out", str(SMALL_CSV), "--period", "2026-08")
+    assert code == 0, err
+    report_path = _report_path(tmp_path / "out")
+    for target in ("html", "xlsx"):
+        code, out, err = _run(report, capsys, "render", str(report_path), "--to", target)
+        assert code == 0, err
+    prose = tmp_path / "prose.json"
+    prose.write_text(json.dumps({"summary": ["A short month."]}), encoding="utf-8")
+    code, out, err = _run(report, capsys, "prose", str(report_path), "--from", str(prose))
+    assert code == 0, err
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(SMALL_CSV), "--period", "2026-08", "--exclude", "category=Warranty")
+    assert code == 0, err
+    assert not report_path.with_name(report_path.name.replace(".report.json", ".html")).exists()
+    assert not report_path.with_name(report_path.name.replace(".report.json", ".xlsx")).exists()
+    assert "Removed stale renders" in out
+    assert "written text" in out.lower() and "prose" in out
+    assert _read_report(tmp_path / "out")["meta"]["draft"] == 3
+
+
+def test_prose_verifier_ignores_row_level_numbers_and_keeps_period_years(report, august_report) -> None:
+    _out_dir, built = august_report
+    text = "Revenue is up on August 2025 and July 2026. Gross margin reached 42.85% this month. The average ticket was about $401."
+    average = next(kpi for kpi in built["kpis"] if kpi["id"] == "average_ticket")["value"]
+
+    clean, removed = report.verify_prose_numbers(built, text)
+
+    assert removed == ["42.85%"]
+    assert "August 2025 and July 2026" in clean
+    assert f"${average:.0f}" in text
+    row_amount = next(row[1] for row in built["rows"]["rows"] if row[1] not in (None, 0) and str(row[1]).endswith("7"))
+    _clean, removed = report.verify_prose_numbers(built, f"The biggest job was {report.format_value(row_amount, 'currency')}.")
+    assert removed
+
+
+def test_prose_that_loses_every_sentence_keeps_the_built_summary(report, capsys, tmp_path) -> None:
+    code, out, err = _build(report, capsys, tmp_path / "out", str(SMALL_CSV), "--period", "2026-08")
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    original = next(section for section in built["sections"] if section["id"] == "summary")["paragraphs"]
+    prose = tmp_path / "prose.json"
+    prose.write_text(json.dumps({"summary": ["Churn fell to 8.25%."]}), encoding="utf-8")
+
+    code, out, err = _run(report, capsys, "prose", str(_report_path(tmp_path / "out")), "--from", str(prose))
+    assert code == 0, err
+    updated = _read_report(tmp_path / "out")
+    assert next(section for section in updated["sections"] if section["id"] == "summary")["paragraphs"] == original
+    assert "kept the built summary" in out.lower()
+
+
+def test_show_prints_the_figures_without_the_rows(report, august_report, capsys) -> None:
+    out_dir, built = august_report
+    code, out, err = _run(report, capsys, "show", str(_report_path(out_dir)))
+    assert code == 0, err
+    assert built["meta"]["title"] in out
+    for kpi in built["kpis"]:
+        assert kpi["label"] in out
+    for section in built["sections"]:
+        assert section["heading"] in out
+    assert "Not included" in out and "Checks" in out
+    assert built["rows"]["rows"][0][2] not in out.split("Rows:")[-1] if "Rows:" in out else True
+    assert len(out.splitlines()) < 120
+
+
+# --- review panel: renders ------------------------------------------------------
+
+
+def test_xlsx_average_totals_are_ratios_and_every_sum_reconciles(report, small_report, capsys) -> None:
+    out_dir, built = small_report
+    code, out, err = _run(report, capsys, "render", str(_report_path(out_dir)), "--to", "xlsx")
+    assert code == 0, err
+    workbook = openpyxl.load_workbook(_report_path(out_dir).with_name(_report_path(out_dir).name.replace(".report.json", ".xlsx")))
+    by_person = next(section for section in built["sections"] if section["id"] == "by_person")
+    assert by_person["table"]["ratios"] == [[3, 2, 1]]
+    sheet = workbook["By technician"]
+    total_row = next(row for row in range(1, 60) if sheet.cell(row=row, column=1).value == "Total")
+
+    assert sheet.cell(row=total_row, column=4).value == f"=IF(B{total_row}=0,0,C{total_row}/B{total_row})"
+    checked = 0
+    for section in built["sections"]:
+        table = section.get("table")
+        if not table or not table.get("totals"):
+            continue
+        ws = workbook[section["heading"][:31]]
+        t = next(row for row in range(1, 200) if ws.cell(row=row, column=1).value == "Total")
+        for column_index, (fmt, expected) in enumerate(zip(table["formats"], table["totals"]), start=1):
+            value = ws.cell(row=t, column=column_index).value
+            if isinstance(value, str) and value.startswith("=SUM("):
+                match = re.fullmatch(r"=SUM\(([A-Z]+)2:([A-Z]+)(\d+)\)", value)
+                assert match
+                column_sum = sum(ws[f"{match.group(1)}{row}"].value or 0 for row in range(2, int(match.group(3)) + 1))
+                assert round(column_sum, 2) == round(expected, 2), (section["id"], column_index)
+                checked += 1
+    assert checked >= 6
+
+
+def test_comparison_rows_carry_their_own_formats_and_a_year_is_not_compared_with_itself(report, august_report, tmp_path, capsys) -> None:
+    _out_dir, built = august_report
+    comparison = next(section for section in built["sections"] if section["id"] == "comparison")["table"]
+    assert comparison["row_formats"][0] == ["text", "currency", "currency", "percent", "currency", "percent"]
+    assert comparison["row_formats"][1] == ["text", "integer", "integer", "percent", "integer", "percent"]
+
+    code, out, err = _build(report, capsys, tmp_path / "year", str(LARGE_CSV), "--period", "2026")
+    assert code == 0, err
+    yearly = _read_report(tmp_path / "year")
+    columns = next(section for section in yearly["sections"] if section["id"] == "comparison")["table"]["columns"]
+    assert columns == ["Metric", "2026", "2025", "Change"]
+
+
+def test_group_tables_and_charts_are_capped_with_an_other_row(report, tmp_path, capsys) -> None:
+    rows = [[f"2026-08-{(index % 28) + 1:02d}", f"Person {index:03d}", "10"] for index in range(300)]
+    path = _write_csv(tmp_path / "many.csv", ["Date", "Technician", "Amount"], rows)
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    table = next(section for section in built["sections"] if section["id"] == "by_person")["table"]
+
+    assert len(table["rows"]) == report.TABLE_ROW_LIMIT + 1
+    assert table["rows"][-1][0] == f"Other ({300 - report.TABLE_ROW_LIMIT} technicians)"
+    assert table["rows"][-1][1] == 300 - report.TABLE_ROW_LIMIT
+    assert table["totals"][1] == 300
+    chart = next(chart for chart in built["charts"] if chart["id"] == "jobs_by_person")
+    assert chart["spec"]["type"] == "bar"
+    code, out, err = _run(report, capsys, "render", str(_report_path(tmp_path / "out")), "--to", "docx")
+    assert code == 0, err
+
+
+def test_control_characters_and_long_cells_render_in_every_format(report, tmp_path, capsys) -> None:
+    # pandas' CSV reader stops a field at a NUL byte, so the bell character is the one that reaches the script.
+    path = tmp_path / "control.csv"
+    path.write_text("Date,Customer,Amount\n2026-08-01,bell\x07ring,5\n2026-08-02," + "x" * 40000 + ",6\n", encoding="utf-8")
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+    assert code == 0, err
+    for target in ("html", "docx", "xlsx"):
+        code, out, err = _run(report, capsys, "render", str(_report_path(tmp_path / "out")), "--to", target)
+        assert code == 0, (target, err)
+    built = _read_report(tmp_path / "out")
+    customers = [row[2] for row in built["rows"]["rows"]]
+    assert customers[0] == "bellring"
+    assert len(customers[1]) == 32767
+
+
+def test_render_reads_pictures_only_from_the_report_directory_and_the_tenant_bundle(report, small_report, tmp_path, capsys) -> None:
+    out_dir, built = small_report
+    tampered_dir = tmp_path / "tampered"
+    tampered_dir.mkdir()
+    tampered = copy_report = json.loads(_report_path(out_dir).read_text(encoding="utf-8"))
+    tampered["meta"]["brand"]["logo"] = "/etc/passwd"
+    tampered["charts"][0]["png"] = "/etc/hostname"
+    tampered_path = tampered_dir / _report_path(out_dir).name
+    tampered_path.write_text(json.dumps(copy_report), encoding="utf-8")
+    code, out, err = _run(report, capsys, "render", str(tampered_path), "--to", "html")
+    assert code == 1
+    assert "charts/" in err
+
+    tampered["charts"][0]["png"] = "charts/../../etc/hostname"
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    code, out, err = _run(report, capsys, "render", str(tampered_path), "--to", "html")
+    assert code == 1
+
+    tampered["charts"] = []
+    for section in tampered["sections"]:
+        section["charts"] = []
+    tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
+    code, out, err = _run(report, capsys, "render", str(tampered_path), "--to", "html")
+    assert code == 0, err
+    html = tampered_path.with_name(tampered_path.name.replace(".report.json", ".html")).read_text(encoding="utf-8")
+    assert "data:" not in html
+    assert "root:" not in html
+
+    tenant = tmp_path / "tenant"
+    tenant.mkdir()
+    (tenant / "logo.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"><image href="http://127.0.0.1:1/x.png"/></svg>', encoding="utf-8")
+    (tenant / "brand.json").write_text(json.dumps({"company_name": "Example Services Co.", "logo": "logo.svg"}), encoding="utf-8")
+    code, out, err = _run(report, capsys, "render", str(tampered_path), "--to", "html", "--tenant", str(tenant))
+    assert code == 0, err
+    html = tampered_path.with_name(tampered_path.name.replace(".report.json", ".html")).read_text(encoding="utf-8")
+    assert "svg" not in html and "127.0.0.1" not in html and "Example Services Co." in html
+
+
+def test_pdf_rendering_refuses_every_url_that_is_not_inline_data(report) -> None:
+    pytest.importorskip("weasyprint")
+    with pytest.raises(ValueError, match="External"):
+        report.fetch_inline_only("http://127.0.0.1:1/x.png")
+    with pytest.raises(ValueError, match="External"):
+        report.fetch_inline_only("file:///etc/passwd")
+    assert report.fetch_inline_only("data:text/plain;base64,aGk=") is not None
+    assert report.fetch_inline_only._fail_on_errors is True

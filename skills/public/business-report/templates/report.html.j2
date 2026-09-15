@@ -2,6 +2,7 @@
 <html lang="{{ report.meta.lang }}">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{{ report.meta.title }}</title>
 <style>
 :root { --primary: {{ brand.primary }}; --secondary: {{ brand.secondary }}; }
@@ -24,7 +25,8 @@
       <span class="kpi-label">{{ kpi.label }}</span>
       <span class="kpi-value">{{ fmt(kpi.value, kpi.format) }}</span>
       {% if kpi.get("delta") and kpi.delta.pct is not none %}
-      <span class="kpi-delta {{ 'up' if kpi.delta.pct >= 0 else 'down' }}">{{ '▲' if kpi.delta.pct >= 0 else '▼' }} {{ fmt(kpi.delta.pct if kpi.delta.pct >= 0 else -kpi.delta.pct, 'percent') }} vs {{ kpi.delta.vs }}</span>
+      {% set direction = 'up' if kpi.delta.pct > 0 else ('down' if kpi.delta.pct < 0 else 'flat') %}
+      <span class="kpi-delta {{ direction }}">{{ {'up': '▲', 'down': '▼', 'flat': '='}[direction] }} {{ fmt(kpi.delta.pct if kpi.delta.pct >= 0 else -kpi.delta.pct, 'percent') }} vs {{ kpi.delta.vs }}</span>
       {% endif %}
     </td>
   {% endfor %}
@@ -44,7 +46,8 @@
     <thead><tr>{% for column in table.columns %}<th class="{{ table.formats[loop.index0] }}">{{ column }}</th>{% endfor %}</tr></thead>
     <tbody>
     {% for row in table.rows %}
-      <tr>{% for value in row %}<td class="{{ table.formats[loop.index0] }}">{{ fmt(value, table.formats[loop.index0]) }}</td>{% endfor %}</tr>
+      {% set row_index = loop.index0 %}
+      <tr>{% for value in row %}{% set f = cell_fmt(table, row_index, loop.index0) %}<td class="{{ f }}">{{ fmt(value, f) }}</td>{% endfor %}</tr>
     {% endfor %}
     </tbody>
     {% if table.totals %}
@@ -68,6 +71,7 @@
   {% endfor %}
   </ul>
   {% if report.notes %}
+  <p class="notes-label">Not included</p>
   <ul class="notes">{% for note in report.notes %}<li>{{ note }}</li>{% endfor %}</ul>
   {% endif %}
 </section>

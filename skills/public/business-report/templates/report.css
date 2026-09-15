@@ -1,5 +1,5 @@
 /* Brand colours arrive as --primary and --secondary from the template. */
-@page { size: Letter; margin: 16mm 16mm 18mm 16mm; }
+@page { size: Letter; margin: 16mm 16mm 18mm 16mm; @bottom-right { content: counter(page) " / " counter(pages); font-family: "DejaVu Sans", Helvetica, Arial, sans-serif; font-size: 8pt; color: #555555; } }
 html { font-family: "DejaVu Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 10.5pt; color: #222222; }
 body { margin: 0 auto; max-width: 180mm; line-height: 1.45; }
 h1 { font-size: 20pt; margin: 0; color: var(--primary); line-height: 1.2; }
@@ -17,6 +17,7 @@ table.kpis td { width: 20%; vertical-align: top; padding: 6pt 8pt; border-top: 3
 .kpi-delta { display: block; font-size: 8pt; margin-top: 2pt; color: #555555; }
 .kpi-delta.up { color: #1f7a3f; }
 .kpi-delta.down { color: #a33a2b; }
+.kpi-delta.flat { color: #555555; }
 table.data { width: 100%; border-collapse: collapse; margin: 4pt 0 8pt; font-size: 9.5pt; page-break-inside: auto; }
 table.data th { text-align: left; background: var(--primary); color: #ffffff; padding: 4pt 6pt; font-weight: bold; }
 table.data td { padding: 3pt 6pt; border-bottom: 0.5pt solid #d9dce1; }
@@ -29,8 +30,9 @@ figure img { width: 88%; max-width: 100%; height: auto; display: block; }
 .note { color: #555555; font-size: 9pt; }
 .checks-line { font-weight: bold; }
 ul.checks, ul.notes { list-style: none; margin-left: 0; font-size: 9pt; }
-.check .status { display: inline-block; min-width: 62pt; font-size: 8pt; text-transform: uppercase; letter-spacing: 0.05em; color: #555555; }
+.notes-label { margin-top: 8pt; font-weight: bold; }
+.check .status { display: inline-block; min-width: 74pt; font-size: 8pt; text-transform: uppercase; letter-spacing: 0.05em; color: #555555; }
 .check.pass .status { color: #1f7a3f; }
 .check.warn .status { color: #9a6700; }
 .check.fail .status { color: #a33a2b; }
-footer { margin-top: 16pt; padding-top: 6pt; border-top: 0.5pt solid #d9dce1; font-size: 8.5pt; color: #555555; }
+footer { page-break-inside: avoid; margin-top: 16pt; padding-top: 6pt; border-top: 0.5pt solid #d9dce1; font-size: 8.5pt; color: #555555; }
