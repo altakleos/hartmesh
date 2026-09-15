@@ -110,8 +110,10 @@ Two directories cross the container boundary:
   disk and the sandbox would get an empty workspace while everything reported
   healthy. `config.yaml` cannot interpolate paths, so its literal
   `/srv/hartmesh/home/skills` fixes `HARTMESH_DATA_DIR` to `/srv/hartmesh`:
-  changing it is a profile change, not a tenant setting. Whatever is placed
-  there must not run ahead of the pinned sandbox image: `data-analysis`
+  changing it is a profile change, not a tenant setting. Its `public/` is
+  mirrored from the Gateway image at every start and its `custom/` is the
+  operator's (§ "Public skills"). The library must not run ahead of the
+  pinned sandbox image: `data-analysis`
   imports `duckdb` and `business-report` imports `python-docx` from the
   image (both shipped from the first release with the skill-library layer,
   see RELEASING.md) and each exits with a message naming the image rather
@@ -170,6 +172,62 @@ here, so the probe performs the same `setpriv` drop before its Python runs.
 Proved on the published image: with those two capabilities the drop succeeds,
 the process reports `CapEff 0` and `NoNewPrivs 1`, and the docker CLI reaches
 the daemon from uid 1000.
+
+### Public skills
+
+The Gateway image carries the repository's public skill library at
+`/app/skills/public` (`backend/Dockerfile`, its last layer). At every start
+`gateway/run.sh` runs `gateway/seed_skills.sh`, which replaces
+`home/skills/public` on the data disk with that library: the copy is staged
+beside `public/` and swapped in, so a copy that fails leaves the previous set
+in place and stops the start before uvicorn runs. `public/` is therefore
+release material. A skill an earlier image shipped, a file dropped in by hand
+or an edit made in place is gone after the next start; a skill the operator
+adds goes in `home/skills/custom/`, which the seed never touches. The
+sandbox-visible projection, `home/skills_view/`, is the Gateway's own: it is
+rebuilt from `public/` at startup and bind-mounted read-only at
+`/mnt/skills/public`. Because the library travels in the image, a change to a
+public skill reaches a tenant only through a release (RELEASING.md).
+
+Not everything the image carries is seeded. `run.sh` names the exclusions in
+`EXCLUDED_PUBLIC_SKILLS`, seven at this release:
+
+- `chart-visualization` posts the data it charts to an external service; a
+  tenant's figures do not leave the VM to draw a chart.
+- `github-deep-research`, `image-generation`, `music-generation` and
+  `video-generation` (a secret assigned inside a script), `skill-creator`
+  (subprocess use) and `vercel-deploy-claimable` (a sensitive capability
+  declaration) are refused by the profile's own skill review, which
+  `tool_plane.validation_requires_skill_review: true` makes a condition of
+  promotion. A governed base holding any one of them could never be
+  promoted, so the profile does not ship them.
+  `backend/tests/test_compose_public_skills.py` pins that each is still
+  refused: an exclusion the review no longer requires fails the suite, and
+  the skill goes to tenants at the next release.
+
+Seventeen skills are seeded at this release; the seed's line in the Gateway
+log says how many and which names were excluded.
+
+**Governance.** The profile runs the governed tool plane
+(`tool_plane.enabled: true`) under the `local_development` deployment
+profile, so governance state never fails readiness: the seeded library is
+usable at once, and the tool-plane status reads `bootstrap_required` until an
+administrator adopts it (`POST /api/tool-plane/bootstrap/stage-current`, then
+validate and promote the returned base; docs/GOVERNED_TOOL_PLANE.md, "Upgrade
+bootstrap"). The capture is exactly the seeded bytes, so a restart, which
+seeds the same bytes again, is not drift. A release whose library differs
+is: after the upgrade the status reads `unmanaged` with `drift: true`, the
+skills keep working, and the same stage-current, validate, promote sequence
+adopts the new library. The upstream library carries review warnings
+(referenced files that do not exist, unreferenced resources, plain-HTTP
+links); none blocks promotion. All of this is pinned offline by
+`backend/tests/test_compose_public_skills.py` against the real tree and the
+profile's own policy values.
+
+**A tenant that predates this release** needs nothing: its first start on
+this release seeds the library into the empty `home/skills/` earlier releases
+created, and an `extensions_config.json` seeded earlier is kept as it is (no
+public skill is disabled by default, so it needs no entry).
 
 ## Ports
 
@@ -1318,7 +1376,7 @@ config ConfigMap under the chart README's recommended values, at
 | `sandbox.environment` | absent | the six `DISABLE_*` switches, each `"true"` | § "Slim services profile": the slim sandbox is what the four 512 MiB slots are measured for |
 | `sandbox.network` | absent | `allowlist` block | the chart's sandboxes are fenced by CiliumNetworkPolicy; the VM has no such fence, so the backend's own mode is the fence |
 | `sandbox.provisioner_url`, `provisioner_service_account_token_file`, `accepted_skill_projection_profile` | set | absent | the Kubernetes provisioner path; the local Docker backend has no provisioner and mounts skills directly |
-| `skills` | absent (PVC mounts) | `path` under `home/`, `container_path: /mnt/skills` | the local backend's skills mount |
+| `skills` | absent (PVC mounts) | `path` under `home/`, `container_path: /mnt/skills` | the local backend's skills mount; `public/` is seeded from the Gateway image at every start (§ "Public skills") |
 | `run_events.backend` | upstream default (`memory`) | `db` | run events survive a Gateway restart on a single-Gateway VM |
 | `auth.local.lockout_store` | absent (`memory`) | `redis` | § "Login lockout": one replica with a recreate rollout, so clearing a lockout must not need a restart |
 | `auth.local.source_max_failures` | absent (`300`) | `600` | § "Login lockout": twenty staff reaching their own account lock and retrying past it is 300 failures exactly, so the generic limit leaves the office no margin |
@@ -1924,3 +1982,45 @@ development-host stand-in, not the tenant-class gate.
   under the render load (the render here used the image built from the
   current tree). The readiness budget stays at 120 until the first of the
   tenant-class runs has run.
+
+Public skill library (2026-09-15). Same development host, the Gateway image
+built from this tree (`docker build -f backend/Dockerfile --build-arg
+UV_EXTRAS=postgres .`), so a stand-in for the image the next cut pins.
+
+- The Docker context: a scratch Dockerfile that only copies `skills/public`
+  under the repository's `.dockerignore` produced exactly the tracked tree
+  (30 `SKILL.md` files, no `__pycache__` or `.ruff_cache`); the built image
+  holds the 24 packages at `/app/skills/public`, root-owned, files `0644`,
+  and `seed_skills.sh` run inside it as uid 1000 seeded 17 packages, files
+  `0644`, in under a second.
+- A gateway-only stack (postgres, redis, gateway) from a scratch copy of this
+  directory with `skills.path` pointed at the scratch data disk of the P-s
+  entry (its `home/skills/` still empty from that run), the Gateway image
+  replaced by the tree build, `HARTMESH_SANDBOX_RESOLV_CONF=/etc/resolv.conf`
+  because this host runs no systemd-resolved. First start: the seed line
+  `17 public skills seeded into .../home/skills/public from /app/skills/public
+  (excluded: chart-visualization github-deep-research image-generation
+  music-generation skill-creator vercel-deploy-claimable video-generation)`,
+  then `Ensured the public skill projection`, the persistence bootstrap to
+  head `0037`, `Application startup complete`, healthy; `GET /health/ready`
+  200 `{"status":"ready",...}`. On the data disk `home/skills/public` and
+  `home/skills_view/public` list the same 17 packages, owned `1000:1000`,
+  directories `0755`, files `0644`; `business-report/SKILL.md` is
+  byte-identical in the tree, on the disk and in the projection (SHA-256
+  `4e0a1185…`); the excluded names are absent; `custom/` was not created.
+  `docker compose restart gateway`: healthy after 20 s, the seed line and the
+  projection line a second time, 17 and 17 again, no `public.seed` left.
+- The offline suite: `pytest tests/test_compose_public_skills.py` 17 passed
+  (the image layer and context rules, the seed's contract on a synthetic
+  tree and byte-for-byte on the real one, the exclusion list and that every
+  review exclusion is still refused, the projection to `/mnt/skills/public`,
+  and the governed tool plane's capture, validation, promotion, restart
+  without drift, upgrade with drift and repair, all under the template's own
+  `tool_plane` values); with `test_compose_profile.py` 103 passed; ruff and
+  shellcheck clean.
+- Not proved here: a sandbox opened through a chat listing
+  `/mnt/skills/public/business-report` (the mapping is pinned offline; the
+  live stack ran without the frontend and with no signed-in user), the
+  adoption through the HTTP endpoints (the service path is what the offline
+  test drives), and the pinned Gateway image itself, which the next cut
+  builds from this tree.

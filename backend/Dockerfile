@@ -133,6 +133,13 @@ COPY --from=builder /app/backend ./backend
 COPY --from=builder /app/hartmesh ./hartmesh
 COPY --from=builder /app/contracts ./contracts
 
+# Public skill library, last so a skill edit rebuilds only this layer. Stacks
+# that bind-mount ../skills at /app/skills (docker/docker-compose*.yaml, the
+# chart's skills volume) shadow it; the tenant VM profile seeds its skills root
+# from it at every start (deploy/compose/gateway/run.sh), so a public skill
+# reaches a tenant only through a release of this image.
+COPY skills/public ./skills/public
+
 # Expose Gateway API port.
 EXPOSE 8001
 

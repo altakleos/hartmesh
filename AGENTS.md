@@ -63,10 +63,20 @@ the optional `SANDBOX_READY_TIMEOUT` overrides it within 60 to 600 or refuses.
 Its sandboxes run the image's slim services profile (`sandbox.environment`
 carries the six `DISABLE_*` switches as quoted strings; browser, VNC, Jupyter,
 code-server and the Node REPL stay off) in four 512 MiB slots (`replicas: 4`,
-128 pids) on the same 5.0 GiB line the earlier two 1 GiB full-profile slots
+256 pids) on the same 5.0 GiB line the earlier two 1 GiB full-profile slots
 sat on; `deploy/compose/scripts/measure-sandbox-boot.sh` measures boot, idle
 and a command under exactly those limits, and the compose README's "Slim
-services profile" section holds the figures.
+services profile" section holds the figures. The Gateway image carries
+`skills/public` at `/app/skills/public` (the last layer of
+`backend/Dockerfile`; `.dockerignore` re-admits only that subtree), and the
+profile's `gateway/run.sh` mirrors it onto the tenant data disk at every
+start through `gateway/seed_skills.sh`: `public/` is release material,
+`custom/` is the operator's, and `EXCLUDED_PUBLIC_SKILLS` in `run.sh` names
+what the image carries but the profile does not ship (the skills its own
+skill review refuses, plus the one that posts data off the VM).
+`backend/tests/test_compose_public_skills.py` pins the layer, the seed, the
+projection to `/mnt/skills/public` and the tool plane's admission of the
+seeded set; the README's "Public skills" section is the operator's view.
 
 `durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
 AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or

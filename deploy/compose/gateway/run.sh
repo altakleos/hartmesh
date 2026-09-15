@@ -1,6 +1,7 @@
 #!/bin/sh
 # Runs as uid 1000 (see entrypoint.sh). Prepares the tenant's data directory,
-# renders config.yaml, seeds extensions_config.json once, then starts the
+# mirrors the image's public skill library onto it, renders config.yaml,
+# seeds extensions_config.json once, then starts the
 # Gateway with exactly one worker: DEER_FLOW_INTERNAL_AUTH_TOKEN is generated
 # per process when unset and the login lockout counter is per worker, so a
 # single worker is what keeps both coherent without a second configuration key.
@@ -20,6 +21,19 @@ export DOCKER_CONFIG="$HOME/.docker"
 mkdir -p "$HOME" "${UV_CACHE_DIR:-/tmp/uv-cache}"
 
 mkdir -p "$DEER_FLOW_HOME" "$DEER_FLOW_HOME/skills"
+
+# The public skill library is release material: the image carries it and
+# every start replaces public/ with it (README: "Public skills"); custom/ is
+# the operator's and is never touched. Skills the image carries that the
+# profile does not ship: chart-visualization posts the data it charts to an
+# external service, and a tenant's figures do not leave the VM to draw a
+# chart; the other six the profile's own skill review refuses
+# (tool_plane.validation_requires_skill_review), so a base holding any of
+# them could never be promoted. backend/tests/test_compose_public_skills.py
+# pins both lists and that every review exclusion is still needed.
+EXCLUDED_PUBLIC_SKILLS="chart-visualization github-deep-research image-generation music-generation skill-creator vercel-deploy-claimable video-generation"
+# shellcheck disable=SC2086
+sh "$PROFILE/gateway/seed_skills.sh" /app/skills/public "$DEER_FLOW_HOME/skills" $EXCLUDED_PUBLIC_SKILLS
 
 # Compose does not create a network no service joins. Under SANDBOX_EGRESS=open
 # every sandbox is started on this network, so it must exist before the first

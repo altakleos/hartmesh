@@ -62,6 +62,13 @@ scripts/
 logs/
 docker/
 skills/
+# The backend image carries the public skill library: backend/Dockerfile copies
+# skills/public to /app/skills/public and the tenant VM profile seeds its skills
+# root from it at every start (deploy/compose/gateway/run.sh). skills/custom
+# stays out: it is gitignored operator material, never release content.
+!skills/public
+skills/public/**/__pycache__
+skills/public/**/.ruff_cache
 frontend/.next
 frontend/node_modules
 frontend-hm/.next
