@@ -25,13 +25,18 @@ mkdir -p "$DEER_FLOW_HOME" "$DEER_FLOW_HOME/skills"
 # The public skill library is release material: the image carries it and
 # every start replaces public/ with it (README: "Public skills"); custom/ is
 # the operator's and is never touched. Skills the image carries that the
-# profile does not ship: chart-visualization posts the data it charts to an
-# external service, and a tenant's figures do not leave the VM to draw a
-# chart; the other six the profile's own skill review refuses
+# profile does not ship, by reason: chart-visualization and
+# podcast-generation post tenant content to an external service (a chart's
+# data, a script to narrate); web-design-guidelines fetches its own rules
+# from a third-party URL through the Gateway's web_fetch, which the sandbox
+# allowlist does not govern; find-skills and claude-to-deerflow describe
+# flows that cannot work here (an install into a read-only mount the next
+# start replaces, a DeerFlow at localhost:2026 a sandbox cannot reach); the
+# other six the profile's own skill review refuses
 # (tool_plane.validation_requires_skill_review), so a base holding any of
 # them could never be promoted. backend/tests/test_compose_public_skills.py
 # pins both lists and that every review exclusion is still needed.
-EXCLUDED_PUBLIC_SKILLS="chart-visualization github-deep-research image-generation music-generation skill-creator vercel-deploy-claimable video-generation"
+EXCLUDED_PUBLIC_SKILLS="chart-visualization claude-to-deerflow find-skills github-deep-research image-generation music-generation podcast-generation skill-creator vercel-deploy-claimable video-generation web-design-guidelines"
 # shellcheck disable=SC2086
 sh "$PROFILE/gateway/seed_skills.sh" /app/skills/public "$DEER_FLOW_HOME/skills" $EXCLUDED_PUBLIC_SKILLS
 

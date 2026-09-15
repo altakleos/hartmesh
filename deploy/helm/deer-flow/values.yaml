@@ -389,7 +389,8 @@ persistence:
     accessMode: ReadWriteOnce  # Use ReadWriteMany (NFS/etc.) for multi-node
     size: 10Gi
 
-# -- Skills library mounted at /app/skills. Default: emptyDir (skills disabled).
+# -- Skills library mounted at /app/skills. Default: emptyDir (skills disabled;
+#    it shadows the public skill library the backend image carries).
 #    Populate via an existing PVC or ConfigMap, or bake skills into a custom
 #    gateway image. Provisioner PVC mode references this same claim when set.
 skills:

@@ -67,8 +67,14 @@ skills/
 # root from it at every start (deploy/compose/gateway/run.sh). skills/custom
 # stays out: it is gitignored operator material, never release content.
 !skills/public
+# The re-include above wins over every earlier pattern for that subtree, so the
+# blanket exclusions are restated for it.
 skills/public/**/__pycache__
 skills/public/**/.ruff_cache
+skills/public/**/.env
+skills/public/**/.env.*
+skills/public/**/.venv
+skills/public/**/node_modules
 frontend/.next
 frontend/node_modules
 frontend-hm/.next

@@ -919,7 +919,8 @@ termination/recovery has been qualified.
   name. Empty or `pvc` mode now rejects exactly-one-claim configurations during
   Helm rendering. Select `hostpath` explicitly only to preserve the legacy
   local/hybrid layout.
-- **Skills.** Disabled by default (emptyDir at `/app/skills`). Populate via
+- **Skills.** Disabled by default (an emptyDir at `/app/skills` shadows the
+  public skill library the backend image carries). Populate via
   `skills.existingClaim` or `skills.configMap`, or bake skills into a custom
   gateway image.
 

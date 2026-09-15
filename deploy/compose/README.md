@@ -113,11 +113,11 @@ Two directories cross the container boundary:
   changing it is a profile change, not a tenant setting. Its `public/` is
   mirrored from the Gateway image at every start and its `custom/` is the
   operator's (§ "Public skills"). The library must not run ahead of the
-  pinned sandbox image: `data-analysis`
-  imports `duckdb` and `business-report` imports `python-docx` from the
-  image (both shipped from the first release with the skill-library layer,
-  see RELEASING.md) and each exits with a message naming the image rather
-  than installing anything. `business-report` also reads an optional tenant
+  pinned sandbox image: `data-analysis` imports `duckdb` and
+  `business-report` imports `python-docx` from the image (both shipped from
+  the first release with the skill-library layer, see RELEASING.md) and each
+  exits with a message naming the image rather than installing anything.
+  `business-report` also reads an optional tenant
   bundle at `/mnt/tenant` (`brand.json`, a logo, `report-profiles/`) when a
   deployment mounts one; without it, reports carry no company branding. The Gateway keeps
   uploads and artifacts under `home/threads/<thread>/user-data/`, so the
@@ -179,50 +179,89 @@ The Gateway image carries the repository's public skill library at
 `/app/skills/public` (`backend/Dockerfile`, its last layer). At every start
 `gateway/run.sh` runs `gateway/seed_skills.sh`, which replaces
 `home/skills/public` on the data disk with that library: the copy is staged
-beside `public/` and swapped in, so a copy that fails leaves the previous set
-in place and stops the start before uvicorn runs. `public/` is therefore
-release material. A skill an earlier image shipped, a file dropped in by hand
-or an edit made in place is gone after the next start; a skill the operator
-adds goes in `home/skills/custom/`, which the seed never touches. The
-sandbox-visible projection, `home/skills_view/`, is the Gateway's own: it is
-rebuilt from `public/` at startup and bind-mounted read-only at
-`/mnt/skills/public`. Because the library travels in the image, a change to a
-public skill reaches a tenant only through a release (RELEASING.md).
+beside `public/` and swapped in by two renames, so a copy that fails leaves
+the previous set in place and stops the start before uvicorn runs. `public/`
+is therefore release material. A skill an earlier image shipped, a file
+dropped in by hand or an edit made in place is gone after the next start;
+until that start an edited public skill is live, and the sandbox projection
+picks the edit up at the next sandbox acquire, so the seed is a restore, not
+a tamper guard. A skill the operator adds goes in `home/skills/custom/`,
+which the seed never touches. The sandbox-visible projection,
+`home/skills_view/`, is the Gateway's own: it is rebuilt from `public/` at
+startup and bind-mounted read-only at `/mnt/skills/public`. Because the
+library travels in the image, a change to a public skill reaches a tenant
+only through a release (RELEASING.md). A Gateway image older than this
+feature carries no library; the seed says so in the log and leaves `public/`
+as it is, so a profile checked out ahead of its pinned image still starts.
+A library directory that holds no skill, or that carries a symlink, is the
+wrong image and is refused.
 
-Not everything the image carries is seeded. `run.sh` names the exclusions in
-`EXCLUDED_PUBLIC_SKILLS`, seven at this release:
+The seeded set is the repository's public library minus the exclusions
+below, not a set chosen for business use; it includes authoring- and
+developer-facing skills. `run.sh` names the exclusions in
+`EXCLUDED_PUBLIC_SKILLS`, 11 at this release, by reason:
 
-- `chart-visualization` posts the data it charts to an external service; a
-  tenant's figures do not leave the VM to draw a chart.
+- `chart-visualization` posts the data it charts to an external service, and
+  `podcast-generation` posts the script it narrates to a third-party
+  text-to-speech service; a tenant's content does not leave the VM for
+  that. The sandbox network is allowlisted, but `approval: prompt` lets a
+  user grant a host for a session, so the fence alone is not the guarantee.
+- `web-design-guidelines` fetches its own rules from a third-party URL and
+  tells the agent that the fetched text carries the instructions to follow.
+  `web_fetch` runs from the Gateway, so the sandbox allowlist does not govern
+  that fetch; the profile does not ship a skill whose instructions come from
+  outside the release.
+- `find-skills` and `claude-to-deerflow` describe flows that cannot work
+  here: a skill install into a read-only mount that the next start replaces,
+  and a DeerFlow at `localhost:2026` that a sandbox cannot reach.
 - `github-deep-research`, `image-generation`, `music-generation` and
-  `video-generation` (a secret assigned inside a script), `skill-creator`
-  (subprocess use) and `vercel-deploy-claimable` (a sensitive capability
-  declaration) are refused by the profile's own skill review, which
-  `tool_plane.validation_requires_skill_review: true` makes a condition of
-  promotion. A governed base holding any one of them could never be
-  promoted, so the profile does not ship them.
+  `video-generation` assign a credential read from the environment to a
+  variable the review's `secret-env-assignment` rule treats as blocking;
+  `skill-creator` uses `subprocess`; and `vercel-deploy-claimable` declares a
+  sensitive capability. The profile's own skill review refuses each, and
+  `tool_plane.validation_requires_skill_review: true` makes that review a
+  condition of promotion: a governed base holding any one of them could
+  never be promoted, so the profile does not ship them.
   `backend/tests/test_compose_public_skills.py` pins that each is still
-  refused: an exclusion the review no longer requires fails the suite, and
-  the skill goes to tenants at the next release.
+  refused and that the policy exclusions are not review refusals; an
+  exclusion the review no longer requires fails the suite, and the skill goes
+  to tenants at the next release.
 
-Seventeen skills are seeded at this release; the seed's line in the Gateway
-log says how many and which names were excluded.
+The list can only subtract: it names skills the image carries, and there is
+no entry that adds one. It lives in `run.sh`, so changing it is a profile
+change, not a tenant setting. A skill the operator wants goes in
+`home/skills/custom/`, with the same caveat: a package the review refuses
+blocks promotion of a governed base from `custom/` exactly as it would from
+`public/`. 13 skills are seeded at this release; the seed's line in the
+Gateway log says how many and which names were excluded.
 
 **Governance.** The profile runs the governed tool plane
 (`tool_plane.enabled: true`) under the `local_development` deployment
 profile, so governance state never fails readiness: the seeded library is
-usable at once, and the tool-plane status reads `bootstrap_required` until an
-administrator adopts it (`POST /api/tool-plane/bootstrap/stage-current`, then
-validate and promote the returned base; docs/GOVERNED_TOOL_PLANE.md, "Upgrade
-bootstrap"). The capture is exactly the seeded bytes, so a restart, which
-seeds the same bytes again, is not drift. A release whose library differs
-is: after the upgrade the status reads `unmanaged` with `drift: true`, the
-skills keep working, and the same stage-current, validate, promote sequence
-adopts the new library. The upstream library carries review warnings
-(referenced files that do not exist, unreferenced resources, plain-HTTP
-links); none blocks promotion. All of this is pinned offline by
-`backend/tests/test_compose_public_skills.py` against the real tree and the
-profile's own policy values.
+usable at once, and adoption is optional. Until an administrator adopts it
+the tool-plane status reads `unmanaged`: the settings notice says no active
+revision is available and that direct skill and MCP changes are disabled,
+which is the governed tool plane, not the seed; in every state the direct
+skill and MCP controls stay read-only. To adopt it, `POST
+/api/tool-plane/bootstrap/stage-current`, then validate and promote the
+returned base through `/api/tool-plane/admin/revisions/{revision_id}/validate`
+and `.../promote` (docs/GOVERNED_TOOL_PLANE.md, "Upgrade bootstrap");
+stage-current also returns an overlay revision for every user with custom
+skills, and those must be promoted too before bootstrap clears, while a
+tenant whose users have added no custom skill gets a base and nothing else.
+The capture is exactly the seeded bytes, so a restart, which seeds the same
+bytes again, is not drift. A release whose library differs is: after the
+upgrade the base stays `governed` and reports `drift: true`, the skills keep
+working, and the same stage-current, validate, promote sequence adopts the
+new library. Once adopted, `public/` has two writers and the seed is the last
+one: promoting a base that adds or drops a *public* skill changes `public/`
+immediately, and the next start puts the image's library back. `public/` is
+image-owned on this profile; operator material belongs in `custom/`, which
+neither the seed nor a base projection replaces. The upstream library
+carries review warnings (referenced files that do not exist, unreferenced
+resources, plain-HTTP links); none blocks promotion. All of this is pinned
+offline by `backend/tests/test_compose_public_skills.py` against the real
+tree and the profile's own policy values.
 
 **A tenant that predates this release** needs nothing: its first start on
 this release seeds the library into the empty `home/skills/` earlier releases
@@ -1989,35 +2028,48 @@ UV_EXTRAS=postgres .`), so a stand-in for the image the next cut pins.
 
 - The Docker context: a scratch Dockerfile that only copies `skills/public`
   under the repository's `.dockerignore` produced exactly the tracked tree
-  (30 `SKILL.md` files, no `__pycache__` or `.ruff_cache`); the built image
-  holds the 24 packages at `/app/skills/public`, root-owned, files `0644`,
-  and `seed_skills.sh` run inside it as uid 1000 seeded 17 packages, files
-  `0644`, in under a second.
+  (30 `SKILL.md` files, no `__pycache__` or `.ruff_cache`), and a probe
+  context with `.env`, `.env.local`, `node_modules/` and `.venv/` planted
+  under `skills/public` kept all four out while keeping `SKILL.md`; the
+  built image holds the 24 packages at `/app/skills/public`, root-owned,
+  and `seed_skills.sh` run inside it as uid 1000 seeded the profile's set,
+  files `0644`, directories `0755`, in under a second.
 - A gateway-only stack (postgres, redis, gateway) from a scratch copy of this
   directory with `skills.path` pointed at the scratch data disk of the P-s
   entry (its `home/skills/` still empty from that run), the Gateway image
   replaced by the tree build, `HARTMESH_SANDBOX_RESOLV_CONF=/etc/resolv.conf`
-  because this host runs no systemd-resolved. First start: the seed line
-  `17 public skills seeded into .../home/skills/public from /app/skills/public
-  (excluded: chart-visualization github-deep-research image-generation
-  music-generation skill-creator vercel-deploy-claimable video-generation)`,
-  then `Ensured the public skill projection`, the persistence bootstrap to
-  head `0037`, `Application startup complete`, healthy; `GET /health/ready`
-  200 `{"status":"ready",...}`. On the data disk `home/skills/public` and
-  `home/skills_view/public` list the same 17 packages, owned `1000:1000`,
-  directories `0755`, files `0644`; `business-report/SKILL.md` is
-  byte-identical in the tree, on the disk and in the projection (SHA-256
-  `4e0a1185…`); the excluded names are absent; `custom/` was not created.
-  `docker compose restart gateway`: healthy after 20 s, the seed line and the
-  projection line a second time, 17 and 17 again, no `public.seed` left.
-- The offline suite: `pytest tests/test_compose_public_skills.py` 17 passed
+  because this host runs no systemd-resolved. First start, healthy after
+  26 s: the seed line `13 public skills seeded into .../home/skills/public
+  from /app/skills/public (excluded: chart-visualization claude-to-deerflow
+  find-skills github-deep-research image-generation music-generation
+  podcast-generation skill-creator vercel-deploy-claimable video-generation
+  web-design-guidelines)`, then `Ensured the public skill projection`, the
+  persistence bootstrap to head `0037`, `Application startup complete`;
+  `GET /health/ready` 200 `{"status":"ready",...}`. On the data disk
+  `home/skills/public` and `home/skills_view/public` list the same 13
+  packages, owned `1000:1000`, directories `0755`, files `0644`;
+  `business-report/SKILL.md` is byte-identical in the tree, on the disk and
+  in the projection (SHA-256 `4e0a1185…`); the excluded names are absent;
+  `custom/` was not created (the storage creates it on the first install).
+  `docker compose restart gateway`: healthy after 19 s, the seed line and the
+  projection line a second time, 13 and 13 again, no `public.seed` or
+  `public.old` left.
+- The older-image shape, with the tree image's `/app/skills` shadowed by an
+  empty read-only mount so `/app/skills/public` is absent (what the
+  previous release's pinned Gateway image looks like to `run.sh`): healthy
+  after 25 s, the log line `/app/skills/public is absent; this Gateway image
+  predates the public skill library. Leaving .../home/skills/public as it
+  is.`, the 13 packages and the projection untouched.
+- The offline suite: `pytest tests/test_compose_public_skills.py` 23 passed
   (the image layer and context rules, the seed's contract on a synthetic
-  tree and byte-for-byte on the real one, the exclusion list and that every
-  review exclusion is still refused, the projection to `/mnt/skills/public`,
-  and the governed tool plane's capture, validation, promotion, restart
-  without drift, upgrade with drift and repair, all under the template's own
-  `tool_plane` values); with `test_compose_profile.py` 103 passed; ruff and
-  shellcheck clean.
+  tree and byte for byte on the real one, the older-image degrade, the
+  empty, linked, relative and non-name refusals, the exclusion list and that
+  every review exclusion is still refused while no policy exclusion is, the
+  README counts, the projection to `/mnt/skills/public`, and the governed
+  tool plane's capture, validation, promotion, `unmanaged` before adoption,
+  restart without drift, upgrade to `governed` with `drift: true` and its
+  repair, all under the template's own `tool_plane` values); with
+  `test_compose_profile.py` 109 passed; ruff and shellcheck clean.
 - Not proved here: a sandbox opened through a chat listing
   `/mnt/skills/public/business-report` (the mapping is pinned offline; the
   live stack ran without the frontend and with no signed-in user), the

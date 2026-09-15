@@ -73,7 +73,10 @@ profile's `gateway/run.sh` mirrors it onto the tenant data disk at every
 start through `gateway/seed_skills.sh`: `public/` is release material,
 `custom/` is the operator's, and `EXCLUDED_PUBLIC_SKILLS` in `run.sh` names
 what the image carries but the profile does not ship (the skills its own
-skill review refuses, plus the one that posts data off the VM).
+skill review refuses, those that post tenant content to or fetch their
+instructions from an external service, and flows that cannot work on a
+tenant VM). An image without the library is an older release: the seed says
+so and leaves `public/` alone.
 `backend/tests/test_compose_public_skills.py` pins the layer, the seed, the
 projection to `/mnt/skills/public` and the tool plane's admission of the
 seeded set; the README's "Public skills" section is the operator's view.

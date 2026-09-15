@@ -56,16 +56,17 @@ DOCKERIGNORE = REPO_ROOT / ".dockerignore"
 PUBLIC = REPO_ROOT / "skills" / "public"
 # Where the image carries the library and the one seed line run.sh must hold.
 IMAGE_PUBLIC = "/app/skills/public"
-# Excluded from the tenant default because it posts the data it charts to an
-# external service; a tenant's figures do not leave the VM to draw a chart.
-EXCLUDED_BY_POLICY = ("chart-visualization",)
+# Excluded by the profile's policy (run.sh says why per name: tenant content
+# posted to an external service, instructions fetched from a third-party URL,
+# flows that cannot work on this profile). None is a review refusal.
+EXCLUDED_BY_POLICY = ("chart-visualization", "claude-to-deerflow", "find-skills", "podcast-generation", "web-design-guidelines")
 # Excluded because the profile's own skill review refuses them (secret
 # assignments in scripts, subprocess use, a sensitive capability declaration):
 # a governed base holding any one of them could never be promoted. Each must
 # still be refused, or its exclusion is stale (a test below pins that).
 EXCLUDED_BY_REVIEW = ("github-deep-research", "image-generation", "music-generation", "skill-creator", "vercel-deploy-claimable", "video-generation")
 EXCLUDED = EXCLUDED_BY_POLICY + EXCLUDED_BY_REVIEW
-EXCLUSION_LINE = f'EXCLUDED_PUBLIC_SKILLS="{" ".join(EXCLUDED)}"'
+EXCLUSION_LINE = f'EXCLUDED_PUBLIC_SKILLS="{" ".join(sorted(EXCLUDED))}"'  # run.sh keeps the list alphabetical
 SEED_LINE = f'sh "$PROFILE/gateway/seed_skills.sh" {IMAGE_PUBLIC} "$DEER_FLOW_HOME/skills" $EXCLUDED_PUBLIC_SKILLS'
 
 
@@ -134,8 +135,10 @@ def test_backend_image_carries_the_public_skill_library() -> None:
     assert "skills/" in ignore and "!skills/public" in ignore, "the context excludes skills/ and re-admits only the public library"
     assert ignore.index("!skills/public") > ignore.index("skills/")
     assert "!skills/custom" not in ignore and "!skills" not in ignore, "custom/ is operator material, never release content"
-    for cache in ("skills/public/**/__pycache__", "skills/public/**/.ruff_cache"):
-        assert cache in ignore and ignore.index(cache) > ignore.index("!skills/public"), cache
+    # The re-include wins over every earlier pattern for the subtree, so the
+    # blanket exclusions must be restated after it.
+    for pattern in ("skills/public/**/__pycache__", "skills/public/**/.ruff_cache", "skills/public/**/.env", "skills/public/**/.env.*", "skills/public/**/.venv", "skills/public/**/node_modules"):
+        assert pattern in ignore and ignore.index(pattern) > ignore.index("!skills/public"), pattern
 
 
 def test_the_public_tree_holds_no_symlinks_and_tracks_no_caches() -> None:
@@ -196,6 +199,7 @@ def test_seed_mirrors_the_image_library_and_leaves_everything_else_alone(tmp_pat
     assert _tree(root / "custom") == before_custom
     assert _tree(tmp_path / "home" / "skills_view") == before_view, "the projection is the Gateway's to rebuild"
     assert not (root / "public.seed").exists(), "an interrupted earlier seed is cleaned up"
+    assert not (root / "public.old").exists(), "the previous set is gone once the swap is complete"
     assert sorted(path.name for path in root.iterdir()) == ["custom", "public"]
 
     # A second start with a changed image: one skill gone, one changed, one new.
@@ -218,21 +222,43 @@ def test_seed_refuses_an_exclusion_that_is_not_a_directory_name(tmp_path: Path) 
         assert not root.exists(), bad
 
 
-def test_seed_refuses_a_missing_or_empty_library_and_keeps_the_previous_set(tmp_path: Path) -> None:
+def test_seed_skips_an_older_image_and_refuses_an_empty_or_linked_library(tmp_path: Path) -> None:
     root = tmp_path / "home" / "skills"
     _skill(root / "public", "alpha")
     before = _tree(root)
 
+    # No library directory at all: a Gateway image that predates the feature.
+    # The profile between cuts carries the previous release's pin, so this must
+    # start the Gateway, not crash-loop it.
     missing = _seed(tmp_path / "image" / "public", root)
-    assert missing.returncode != 0
-    assert str(tmp_path / "image" / "public") in missing.stderr
+    assert missing.returncode == 0, missing.stderr
+    assert str(tmp_path / "image" / "public") in missing.stderr and "predates" in missing.stderr
     assert _tree(root) == before
+    fresh = tmp_path / "fresh" / "skills"
+    assert _seed(tmp_path / "image" / "public", fresh).returncode == 0
+    assert not (fresh / "public").exists(), "the degrade must not create an empty library"
 
     empty = tmp_path / "image" / "public"
     empty.mkdir(parents=True)
     result = _seed(empty, root)
-    assert result.returncode != 0, "an image without a single skill is the wrong image, not an empty library"
+    assert result.returncode != 0, "an image without a single skill is the wrong image, not an older one"
     assert _tree(root) == before
+
+    linked = tmp_path / "linked" / "public"
+    _skill(linked, "alpha")
+    (linked / "alpha" / "escape").symlink_to(tmp_path)
+    result = _seed(linked, root)
+    assert result.returncode != 0 and "symlink" in result.stderr
+    assert _tree(root) == before
+
+
+def test_seed_refuses_a_relative_or_empty_path(tmp_path: Path) -> None:
+    source = tmp_path / "image" / "public"
+    _skill(source, "alpha")
+    for bad_source, bad_root in (("", tmp_path / "home" / "skills"), ("image/public", tmp_path / "home" / "skills"), (source, ""), (source, "home/skills"), (source, "/")):
+        result = subprocess.run(["sh", str(SEED), str(bad_source), str(bad_root)], env={"PATH": os.environ["PATH"]}, cwd=tmp_path, capture_output=True, text=True, timeout=60, check=False)
+        assert result.returncode == 2, (bad_source, bad_root, result.stderr)
+    assert not (tmp_path / "home").exists()
 
 
 def test_seed_creates_the_skills_root_and_takes_no_exclusions_by_default(tmp_path: Path) -> None:
@@ -242,7 +268,15 @@ def test_seed_creates_the_skills_root_and_takes_no_exclusions_by_default(tmp_pat
     result = _seed(source, root)
     assert result.returncode == 0, result.stderr
     assert _tree(root / "public") == _tree(source)
-    assert (root / "public" / "alpha" / "SKILL.md").stat().st_mode & 0o444 == 0o444, "the Gateway and the sandbox user must be able to read it"
+    # The script pins its umask, so the modes are its own whatever the host's.
+    assert (root / "public" / "alpha" / "SKILL.md").stat().st_mode & 0o777 == 0o644
+    assert (root / "public" / "alpha").stat().st_mode & 0o777 == 0o755
+
+
+def test_readme_counts_follow_the_tree() -> None:
+    readme = (PROFILE / "README.md").read_text(encoding="utf-8")
+    assert f"{len(_seeded_names())} skills are seeded at this release" in readme
+    assert f"`EXCLUDED_PUBLIC_SKILLS`, {len(EXCLUDED)} at this release" in readme
 
 
 # ── the real tree ────────────────────────────────────────────────────────────
@@ -350,7 +384,9 @@ async def test_the_governed_tool_plane_admits_the_seeded_library_and_a_reseed_is
     fails readiness on governance state), and an administrator who governs it
     captures exactly the seeded bytes. A restart re-seeds the same bytes, which
     is not drift; a release that changes a skill is, and the same capture is
-    the repair."""
+    the repair. The revision repository is substituted (the tenant's is the
+    SQL one); the projection, artifact store, review and drift computation
+    are the real ones."""
     env = projection_env
     template = env.template
     assert template["deployment"]["profile"] == "local_development"
@@ -388,8 +424,11 @@ async def test_the_governed_tool_plane_admits_the_seeded_library_and_a_reseed_is
     )
     admin = _admin()
     base = ToolPlaneRevisionScopeV1(kind="deployment_base")
-    await service.initialize(existing_projection=True)
-    assert (await service.admin_status(base, admin)).governance_state == "bootstrap_required"
+    # The profile's seeded extensions_config.json is {"mcpServers":{},"skills":{}},
+    # so the Gateway computes no pre-governance material to adopt: the status
+    # is unmanaged, never bootstrap_required.
+    await service.initialize(existing_projection=await projection.has_existing_projection())
+    assert (await service.admin_status(base, admin)).governance_state == "unmanaged"
     assert await service.readiness_reason() is None, "local_development: an ungoverned library never blocks readiness"
 
     staged = await service.stage_current_projection(admin)
@@ -423,7 +462,7 @@ async def test_the_governed_tool_plane_admits_the_seeded_library_and_a_reseed_is
     (changed / "business-report" / "SKILL.md").write_text((PUBLIC / "business-report" / "SKILL.md").read_text(encoding="utf-8") + "\nA later release.\n", encoding="utf-8")
     assert _seed(changed, env.skills_root, *EXCLUDED).returncode == 0
     drifted = await service.admin_status(base, admin)
-    assert drifted.drift is True
+    assert drifted.governance_state == "governed" and drifted.drift is True
     assert await service.readiness_reason() is None, "still usable; the notice is the operator's cue to capture again"
 
     recaptured = await service.stage_current_projection(admin)
