@@ -167,6 +167,80 @@ jobs:
           docker rm --force "$container_id" >/dev/null
           trap - EXIT
 
+      - name: Exercise the slim services profile at the tenant limits
+        # The tenant Compose profile ships every sandbox with the image's six
+        # DISABLE_* switches (deploy/compose/config.yaml sandbox.environment)
+        # at 512 MiB and the pinned pid limit (deploy/compose/compose.yaml).
+        # The entrypoint that reads the switches lives in the vendor base, so
+        # this run is the only proof that the built image still honours them:
+        # ready inside the limits, none of the switched-off services running,
+        # the report path rendering, no OOM kill. The values below are pinned
+        # to the profile files by backend/tests/test_sandbox_image_contract.py.
+        run: |
+          set -euo pipefail
+          container_id="$(docker run --detach \
+            --user 1000:1000 \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --memory 512m --memory-swap 512m \
+            --pids-limit 256 \
+            --env DISABLE_BROWSER=true \
+            --env DISABLE_JUPYTER=true \
+            --env DISABLE_CODE_SERVER=true \
+            --env DISABLE_VNC=true \
+            --env DISABLE_MCP_BROWSER=true \
+            --env DISABLE_NODEJS_REPL=true \
+            --publish 127.0.0.1:18081:8080 \
+            --volume "$PWD/skills/public/business-report:/mnt/smoke/business-report:ro" \
+            --volume "$PWD/backend/tests/skills/business_report/fixtures/example_services_export_small.xls:/mnt/smoke/example_services_export_small.xls:ro" \
+            --volume "$PWD/backend/tests/skills/business_report/check_pdf_on_image.py:/mnt/smoke/check_pdf_on_image.py:ro" \
+            deer-flow-sandbox-smoke)"
+          trap 'docker logs "$container_id" 2>&1 || true; docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
+
+          ready=false
+          for _attempt in $(seq 1 90); do
+            if curl --fail --silent --show-error --max-time 5 \
+              http://127.0.0.1:18081/v1/sandbox >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            echo "::error::slim sandbox did not become ready inside the tenant limits"
+            exit 1
+          fi
+
+          # The switches stop services, not runtimes: none of the switched-off
+          # programs may be running (matched on process names, since the
+          # command's own shell carries the pattern on its command line), and
+          # node, npx and the document libraries must still answer.
+          services_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"if ps -eo comm= | grep -Ei '"'"'chrom|jupyter|code-server|tigervnc|websocat|openbox'"'"'; then exit 1; fi; node --version && npx --version && python3 -c \"import weasyprint, matplotlib, pandas, docx, duckdb\" && ls /proc | grep -c ^[0-9]"}' \
+            http://127.0.0.1:18081/v1/bash/exec)"
+          if ! printf '%s' "$services_response" | jq -e '.data.exit_code == 0' >/dev/null; then
+            printf '%s\n' "$services_response"
+            echo "::error::slim sandbox is running a switched-off service or lost a runtime"
+            exit 1
+          fi
+
+          slim_report_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"set -e; R=/mnt/smoke/business-report/scripts/report.py; python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/slim-report; python3 $R render /tmp/slim-report/2026-08-business-review.report.json --to pdf; python3 $R render /tmp/slim-report/2026-08-business-review.report.json --to docx; python3 $R render /tmp/slim-report/2026-08-business-review.report.json --to xlsx; python3 /mnt/smoke/check_pdf_on_image.py /tmp/slim-report/2026-08-business-review.pdf"}' \
+            http://127.0.0.1:18081/v1/bash/exec)"
+          if ! printf '%s' "$slim_report_response" | jq -e '.data.exit_code == 0' >/dev/null; then
+            printf '%s\n' "$slim_report_response"
+            echo "::error::slim sandbox could not render the report inside 512 MiB"
+            exit 1
+          fi
+
+          oom_killed="$(docker inspect --format '{{.State.OOMKilled}}' "$container_id")"
+          test "$oom_killed" = false || { echo "::error::slim sandbox was OOM-killed"; exit 1; }
+          printf 'slim sandbox: ready, services off, report rendered, processes: %s\n' "$(printf '%s' "$services_response" | jq --raw-output '.data.stdout' | grep -E '^[0-9]+$' | tail -n 1)"
+          docker rm --force "$container_id" >/dev/null
+          trap - EXIT
+
   sandbox-image-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 25

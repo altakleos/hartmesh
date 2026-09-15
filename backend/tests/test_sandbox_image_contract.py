@@ -11,6 +11,8 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SU_SHIM = REPO_ROOT / "docker/sandbox/su-shim.sh"
 SANDBOX_DOCKERFILE = REPO_ROOT / "docker/sandbox/Dockerfile"
 SANDBOX_SMOKE_WORKFLOW = REPO_ROOT / ".github/workflows/sandbox-image-smoke.yml"
+TENANT_TEMPLATE = REPO_ROOT / "deploy/compose/config.yaml"
+TENANT_COMPOSE = REPO_ROOT / "deploy/compose/compose.yaml"
 
 
 def test_sandbox_dockerfile_pins_the_verified_base_and_non_root_user() -> None:
@@ -159,7 +161,7 @@ def test_sandbox_smoke_imports_the_document_libraries_as_the_runtime_user() -> N
     assert f'[ "$library_version" != "{duckdb_pin}" ]' in workflow
     # The endpoint answers 200 whatever the command's exit code.
     # library import, data-analysis run, font cache, business-report run
-    assert workflow.count("jq -e '.data.exit_code == 0'") == 4
+    assert workflow.count("jq -e '.data.exit_code == 0'") == 6
     assert "printf '%s\\n' \"$library_response\"" in workflow
 
 
@@ -221,3 +223,31 @@ def test_sandbox_smoke_runs_when_a_public_skill_script_changes() -> None:
     # Both the push and the pull_request trigger list the skill paths the job exercises.
     for path in ('"skills/public/data-analysis/**"', '"skills/public/business-report/**"', '"backend/tests/skills/**"'):
         assert workflow.count(path) == 2, path
+
+
+def test_sandbox_smoke_runs_the_slim_services_profile_at_the_tenant_limits() -> None:
+    """The tenant profile ships every sandbox with the image's DISABLE_* switches
+    and half the memory the full profile needed. Nothing in the tree owns the
+    vendor entrypoint that reads those switches, so the smoke job must prove
+    the built image still honours them at exactly the shipped limits: ready,
+    none of the switched-off services running, the report path rendering, no
+    OOM kill. A base-image bump that ignored one switch would otherwise put
+    the full profile inside a 512 MiB cgroup on every tenant."""
+    import yaml
+
+    workflow = SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8")
+    switches = yaml.safe_load(TENANT_TEMPLATE.read_text(encoding="utf-8"))["sandbox"]["environment"]
+    gateway = yaml.safe_load(TENANT_COMPOSE.read_text(encoding="utf-8"))["services"]["gateway"]["environment"]
+    assert len(switches) == 6 and all(value == "true" for value in switches.values())
+    slim = workflow[workflow.index("Exercise the slim services profile") :]
+    for key, value in switches.items():
+        assert f"--env {key}={value}" in slim, key
+    memory = gateway["DEER_FLOW_SANDBOX_MEMORY"]
+    assert f"--memory {memory} --memory-swap {memory}" in slim, "the limit the tenant profile ships"
+    assert f"--pids-limit {gateway['DEER_FLOW_SANDBOX_PIDS_LIMIT']}" in slim
+    for flag in ("--user 1000:1000", "--cap-drop=ALL", "--security-opt=no-new-privileges"):
+        assert flag in slim, flag
+    assert "ps -eo comm= | grep -Ei " in slim and "chrom|jupyter|code-server|tigervnc|websocat|openbox" in slim, "the switched-off services must not be running (matched on process names)"
+    assert "python3 $R build /mnt/smoke/example_services_export_small.xls" in slim and "--to pdf" in slim, "the report path renders inside the slim limits"
+    assert "docker inspect --format '{{.State.OOMKilled}}'" in slim and 'test "$oom_killed" = false' in slim
+    assert "::error::slim sandbox" in slim

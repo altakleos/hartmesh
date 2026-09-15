@@ -246,7 +246,7 @@ def test_four_slim_sandboxes_with_proxies_fit_the_five_gib_budget(compose: dict)
     proxy = _mib(env["DEER_FLOW_SANDBOX_PROXY_MEMORY"])
     services = sum(MEMORY_MIB.values())
     assert sandbox == 512, "half the 1 GiB the full services profile needed: the slim profile idles at about a quarter of that (README: Slim services profile)"
-    assert int(env["DEER_FLOW_SANDBOX_PIDS_LIMIT"]) == 128, "the slim profile idles at eleven processes; 128 still bounds a fork bomb"
+    assert int(env["DEER_FLOW_SANDBOX_PIDS_LIMIT"]) == 256, "host-side tasks: 58 idle, 62 rendering, 134 under a forty-way fan-out (README: Slim services profile)"
     assert services + SANDBOX_SLOTS * (sandbox + proxy) == 5120, "exactly on the 5.0 GiB line: raising any limit in compose.yaml must be paid for by lowering another"
     assert 5120 < services + (SANDBOX_SLOTS + 1) * (sandbox + proxy)
     assert services + SANDBOX_SLOTS * sandbox <= 5120 < services + (SANDBOX_SLOTS + 1) * sandbox, "open mode carries no proxy, fits four and not five"
@@ -310,14 +310,16 @@ def test_measurement_script_runs_the_profile_flags_and_the_slim_switches(compose
     pinned image, the compose limits, the hardening the backend emits, and the
     slim switches config.yaml carries, so a figure it records is a figure of
     this profile. A stub ``docker`` records every invocation and refuses
-    ``run``, which is the script's run_failed path."""
+    ``run``, which is the script's run_failed path. The environment is built
+    from scratch: the script's knobs are plain uppercase names a runner may
+    already export."""
     stub = tmp_path / "bin"
     stub.mkdir()
     log = tmp_path / "docker.log"
     (stub / "docker").write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{log}"\n[ "$1" = run ] && exit 1\nexit 0\n', encoding="utf-8")
     (stub / "docker").chmod(0o755)
     out = tmp_path / "rows.tsv"
-    env = {**os.environ, "PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}", "CPUS": "1", "RUNS": "1", "CONCURRENT": "1", "SETTLE": "0", "OUT": str(out)}
+    env = {"PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}", "HOME": str(tmp_path), "TMPDIR": str(tmp_path), "CPUS": "1", "RUNS": "1", "CONCURRENT": "1", "SETTLE": "0", "OUT": str(out)}
     result = subprocess.run(["bash", str(MEASURE_SCRIPT)], cwd=PROFILE, env=env, capture_output=True, text=True, timeout=60)
     assert result.returncode == 0, result.stderr
     runs = [line for line in log.read_text(encoding="utf-8").splitlines() if line.startswith("run ")]
@@ -326,19 +328,34 @@ def test_measurement_script_runs_the_profile_flags_and_the_slim_switches(compose
     template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))["sandbox"]
     for line in runs:
         assert line.endswith(" " + template["image"]), "the image is the template's digest pin"
-        assert "--runtime runsc" in line and "--cpus 1" in line
-        assert f"--memory {gateway['DEER_FLOW_SANDBOX_MEMORY']} --memory-swap {gateway['DEER_FLOW_SANDBOX_MEMORY']}" in line
+        assert "--runtime runsc" in line and "--cpus 1" in line and "--rm" not in line.split(), "kept until its row is written, so an OOM kill is recorded"
         assert f"--pids-limit {gateway['DEER_FLOW_SANDBOX_PIDS_LIMIT']}" in line
         for flag in ("--user 1000:1000", "--cap-drop=ALL", "--security-opt no-new-privileges", "--security-opt seccomp=builtin", "--network none"):
             assert flag in line, flag
     full, slim = runs
+    assert "--memory 1024m --memory-swap 1024m" in full, "the full profile is measured at the limit it was released at"
+    assert f"--memory {gateway['DEER_FLOW_SANDBOX_MEMORY']} --memory-swap {gateway['DEER_FLOW_SANDBOX_MEMORY']}" in slim
     assert "DISABLE_" not in full
     assert all(f"-e {key}={value}" in slim for key, value in SLIM_SANDBOX_SERVICES.items()), "the slim run carries exactly the switches config.yaml ships"
     assert slim.count("-e DISABLE_") == len(SLIM_SANDBOX_SERVICES)
     rows = out.read_text(encoding="utf-8").splitlines()
-    assert rows[0].split("\t") == ["profile", "cpus", "run", "index", "ready_s", "procs", "mem_MiB", "peak_MiB", "pids_peak", "oom_kills", "exec_s", "exec_exit", "status"]
+    assert rows[0].split("\t") == ["profile", "cpus", "run", "index", "memory", "ready_s", "procs", "mem_MiB", "peak_MiB", "pids_peak", "oom_kills", "exec_s", "exec_exit", "status"]
     assert [row.split("\t")[0] for row in rows[1:]] == ["full", "slim"] and all(row.endswith("run_failed") for row in rows[1:])
+    rejected = subprocess.run(["bash", str(MEASURE_SCRIPT)], cwd=PROFILE, env={**env, "PROFILES": "Slim"}, capture_output=True, text=True, timeout=60)
+    assert rejected.returncode == 2 and "PROFILES accepts full and slim" in rejected.stderr, "a mislabelled row is worse than a refusal"
     assert (PROFILE / "README.md").read_text(encoding="utf-8").count("scripts/measure-sandbox-boot.sh") >= 2, "the README names the script where the figures are recorded"
+
+
+def test_readme_tells_the_operator_to_remove_orphaned_sandboxes_before_an_upgrade() -> None:
+    """The provider adopts a surviving sandbox by its labels and networks, never
+    by its image, environment or limits, so a Gateway that was killed rather than
+    stopped brings pre-upgrade 1 GiB full-profile sandboxes into the new budget.
+    Until the backend compares those, the README carries the upgrade step."""
+    readme = (PROFILE / "README.md").read_text(encoding="utf-8")
+    note = readme[readme.index("**Upgrading a guest that already runs sandboxes.**") :]
+    assert "docker ps --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-" in note
+    assert "docker rm -f $(docker ps -q --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-)" in note
+    assert "7168 MiB" in note, "four adopted 1 GiB sandboxes on the 6 GiB guest"
 
 
 def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
@@ -360,7 +377,7 @@ def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
     assert env["DEER_FLOW_SANDBOX_NETWORK"] == "hartmesh_sandbox"
     assert env["DEER_FLOW_SANDBOX_MEMORY"] == "512m"
     assert env["DEER_FLOW_SANDBOX_CPUS"] == "1"
-    assert env["DEER_FLOW_SANDBOX_PIDS_LIMIT"] == "128"
+    assert env["DEER_FLOW_SANDBOX_PIDS_LIMIT"] == "256"
     assert env["DEER_FLOW_SANDBOX_PROXY_MEMORY"].endswith("m")
     assert env["DEER_FLOW_SANDBOX_CONTAINER_USER"] == "1000:1000"
     assert env["DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS"] == "0"

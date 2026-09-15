@@ -4,9 +4,11 @@ The existing live smoke tests start the image directly (``backend.create`` on
 Docker's default runtime) and drive the relay with a throwaway image. Neither
 exercises what the released Compose profile actually does on a tenant VM: the
 allowlist topology (per-sandbox internal and egress networks, the authenticated
-relay sidecar), the released resource limits and hardening (``--cpus 1``, 1 GiB
-memory, 384 pids, uid 1000, ``--cap-drop=ALL``, ``no-new-privileges``, Docker's
-built-in seccomp), gVisor's ``runsc``, and the provider's own readiness budget
+relay sidecar), the released resource limits and hardening, read from
+``compose.yaml`` (``--cpus 1``, 512 MiB memory, 256 pids, uid 1000,
+``--cap-drop=ALL``, ``no-new-privileges``, Docker's built-in seccomp), the
+template's ``sandbox.environment`` (the slim service switches), gVisor's
+``runsc``, and the provider's own readiness budget
 with its ownership-fenced teardown. This module does, through both acquisition
 paths of the real provider, with a never-ready control.
 
@@ -18,8 +20,9 @@ Gateway would enforce, resolved by the same function; no test extends it.
 
 Opt in with ``pytest -m live tests/test_restricted_runsc_readiness_live.py -s``
 on a host whose Docker daemon (28+) registers a ``runsc`` runtime; anywhere else
-the module skips. Each cold start costs about a CPU-minute and a gibibyte, and
-the never-ready controls run the whole budget on purpose. On failure the tests
+the module skips. Each cold start costs about a CPU-minute and 512 MiB, the
+concurrent test starts ``sandbox.replicas`` of them at once, and the
+never-ready controls run the whole budget on purpose. On failure the tests
 print the inner listener state and the python-server/nginx program logs, with
 the relay token redacted; they never print ``docker inspect`` output for the
 sidecar, whose environment carries that token.
@@ -138,9 +141,16 @@ def _released_backend(section: dict, *, extra_environment: dict[str, str] | None
         base_port=base_port,
         container_prefix=CONTAINER_PREFIX,
         config_mounts=[],
-        environment={**{key: str(value) for key, value in (section.get("environment") or {}).items()}, **(extra_environment or {})},
+        environment={**_resolved_environment(section), **(extra_environment or {})},
         network_config=dict(section["network"]),
     )
+
+
+def _resolved_environment(section: dict) -> dict[str, str]:
+    """The template's ``sandbox.environment`` resolved the way the provider resolves it (``$NAME`` from the process environment)."""
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+
+    return AioSandboxProvider._resolve_env_vars(dict(section.get("environment") or {}))
 
 
 def _released_ceiling(section: dict) -> int:
@@ -148,7 +158,7 @@ def _released_ceiling(section: dict) -> int:
     return int(section["replicas"])
 
 
-def _live_provider(backend: LocalContainerBackend, budget: float, monkeypatch: pytest.MonkeyPatch):
+def _live_provider(backend: LocalContainerBackend, budget: float, monkeypatch: pytest.MonkeyPatch, section: dict | None = None):
     """A real AioSandboxProvider over *backend*, built without an AppConfig."""
     from deerflow.community.aio_sandbox import aio_sandbox_provider as aio_mod
     from deerflow.community.aio_sandbox.ownership.memory import MemoryOwnershipStore
@@ -176,7 +186,7 @@ def _live_provider(backend: LocalContainerBackend, budget: float, monkeypatch: p
     provider._idle_checker_thread = None
     provider._renewal_stop = threading.Event()
     provider._renewal_thread = None
-    provider._config = {"idle_timeout": 0, "replicas": _released_ceiling(_released_sandbox_section()), "ready_timeout": budget}
+    provider._config = {"idle_timeout": 0, "replicas": _released_ceiling(section or _released_sandbox_section()), "ready_timeout": budget}
     provider._backend = backend
     provider._owner_id = "pz-live"
     provider._ownership_config = SandboxOwnershipConfig()
@@ -325,7 +335,7 @@ def _assert_released_hardening(backend: LocalContainerBackend, sandbox_id: str) 
     assert host["PidsLimit"] == int(released["DEER_FLOW_SANDBOX_PIDS_LIMIT"])
     # The slim services profile reached the container as environment, so the
     # readiness measured here is the shipped sandbox's, not the full image's.
-    for key, value in (_released_sandbox_section().get("environment") or {}).items():
+    for key, value in _resolved_environment(_released_sandbox_section()).items():
         assert f"{key}={value}" in sandbox["Config"]["Env"], f"{key} did not reach the sandbox"
     assert host["CapDrop"] == ["ALL"] and not host.get("CapAdd")
     assert "no-new-privileges" in host["SecurityOpt"] and "seccomp=builtin" in host["SecurityOpt"]
@@ -420,7 +430,7 @@ def test_concurrent_restricted_runsc_cold_starts_up_to_the_ceiling_each_fit_the_
     section = _released_sandbox_section()
     budget = _production_budget()
     backend = _released_backend(section, base_port=18420)
-    provider = _live_provider(backend, budget, monkeypatch)
+    provider = _live_provider(backend, budget, monkeypatch, section)
     timer = _CreateTimer(backend)
     for sample in range(SAMPLES):
         _one_concurrent_batch(provider, backend, timer, budget, sample=sample, size=_released_ceiling(section))

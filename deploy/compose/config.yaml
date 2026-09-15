@@ -57,9 +57,11 @@ sandbox:
   port: 8080
   # Concurrent-sandbox ceiling from the memory budget (README: "Memory
   # budget"): four 512 MiB slim sandboxes with their relays sit on the same
-  # 5.0 GiB line the two 1 GiB full ones did. This is a maximum with LRU
-  # eviction: a fifth acquisition evicts the least-recently-used sandbox
-  # instead of failing.
+  # 5.0 GiB line the two 1 GiB full ones did. This is a soft maximum with
+  # LRU eviction of warm sandboxes: a fifth acquisition evicts the
+  # least-recently-used idle sandbox instead of failing; with all four in
+  # active use the provider logs a soft-cap breach and creates a fifth, which
+  # the guest's unallocated memory absorbs once (README: "Memory budget").
   replicas: 4
   # How long an idle sandbox keeps one of the four slots. The budget reserves
   # every slot whether or not it is used, and a cold start of the sandbox
@@ -69,9 +71,11 @@ sandbox:
   # The sandbox image's own service switches, passed to every sandbox as
   # environment by the local Docker backend. Off: the browser and its MCP
   # server, VNC, Jupyter, code-server and the Node REPL (this last one also
-  # stops its on-demand start). Left running: the sandbox API server, its
-  # nginx and the relay, which is everything the shipped tools (bash, files)
-  # and the public skills use. Measured on a development host under gVisor
+  # stops its on-demand start). Left running in the container: the sandbox
+  # API server and its nginx (the relay is a separate sidecar, unchanged).
+  # The switches stop services; the node, npx and python3 runtimes that bash
+  # and the public skills invoke are unaffected (checked). Measured on a
+  # development host under gVisor
   # at one CPU: ready in 10.2 s and 238 MiB idle against 20.2 s and 1,209 MiB
   # for the full profile (README: "Slim services profile"). Each value must
   # stay the quoted string "true": the image's entrypoint compares strings,
