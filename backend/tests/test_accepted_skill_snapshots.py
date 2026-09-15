@@ -2672,3 +2672,182 @@ def test_live_registry_change_creates_a_later_revision_only(
     assert second_material.enabled_skill_objects[0].skill_file.read_text(encoding="utf-8").strip().endswith("Revision two")
     first_material.release_process_material()
     second_material.release_process_material()
+
+
+class _ProjectionOnlyProvider(AcceptedSkillProjection):
+    """The tenant profile's shape: an accepted-skills projection, no materializer.
+
+    A local container backend never answers a qualified durable selection, so
+    the only accepted population it can serve is the projection one (ordinary
+    Kind: thread resource key, park terminal, ``.accepted`` as the sole skills
+    mount). Every member records what the worker asked of it.
+    """
+
+    def __init__(self) -> None:
+        self.provisioned: list[tuple[str, str, str]] = []
+        self.bound: list[tuple[str, str]] = []
+        self.released: list[str] = []
+
+    async def provision_accepted_skills_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding,
+    ) -> str:
+        self.provisioned.append((thread_id, user_id, binding.snapshot_id))
+        return "sandbox-projection"
+
+    def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
+        return sandbox_id == "sandbox-projection"
+
+    def accepted_skill_material_capability(self, sandbox_id: str) -> AcceptedMaterialCapability:
+        assert sandbox_id == "sandbox-projection"
+        return AcceptedMaterialCapability.IMMUTABLE_READ_ONLY
+
+    async def bind_accepted_skill_snapshot_async(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+        binding,
+    ) -> None:
+        self.bound.append((sandbox_id, binding.snapshot_id))
+
+    def clear_accepted_skill_snapshot(self, clear) -> bool:
+        return True
+
+    def get(self, sandbox_id: str):
+        return SimpleNamespace(id=sandbox_id)
+
+    def release(self, sandbox_id: str) -> None:
+        self.released.append(sandbox_id)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "expect_projection"),
+    [
+        ("local_development", True),
+        ("durable_production", False),
+        ("durable_two_gateway_v1", False),
+    ],
+)
+async def test_worker_materialization_follows_the_deployment_profile(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+    profile: str,
+    expect_projection: bool,
+) -> None:
+    """A run record does not make an admission durable; the profile does.
+
+    Every Gateway run has a record. On a profile that promises no durability
+    (``local_development``, the tenant VM profile) an accepted nonempty
+    snapshot executes through the accepted-skills projection, the ordinary
+    Kind the provider parks and reuses per (user, thread). The durable
+    profiles keep failing closed when the provider offers no qualified
+    materializer, before anything is provisioned.
+    """
+    from deerflow.config.deployment_config import DeploymentConfig
+    from deerflow.runtime.runs.store.base import RecoveryPolicy
+    from deerflow.runtime.runs.worker import (
+        _materialize_accepted_skill_projection,
+    )
+    from deerflow.runtime.skill_projection import (
+        SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
+        get_skill_projection_coordinator,
+    )
+    from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
+    from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
+    from deerflow.subagents.batch_acceptance import (
+        PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
+    )
+
+    skill_file = _write_skill(tmp_path, body="Profile-gated material")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    material = revision.material
+    assert material is not None and material.skill_snapshot is not None
+    snapshot_id = material.skill_snapshot.snapshot_id
+    accepted = _accepted(revision)
+    provider = _ProjectionOnlyProvider()
+    monkeypatch.setattr("deerflow.sandbox.get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr(
+        "deerflow.authz.sandbox_authz.authorize_sandbox_execution_async",
+        AsyncMock(return_value=None),
+    )
+    # The coordinator is process-global and other tests in this module park
+    # thread-1, so this thread is the profile's own.
+    thread_id = f"thread-profile-{profile}"
+    runtime = SimpleNamespace(
+        context={
+            "thread_id": thread_id,
+            "run_id": f"run-profile-{profile}",
+            "app_config": AppConfig(
+                sandbox=SandboxConfig(use="test"),
+                deployment=DeploymentConfig(profile=profile),
+            ),
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+            TENANT_REFERENCE_CONTEXT_KEY: _TEST_TENANT,
+            PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY: accepted,
+            "accepted_agent_revision_digest": revision.digest,
+        },
+    )
+    record = SimpleNamespace(
+        owner_worker_id="worker-pending",
+        state_version=3,
+        execution_takeover=False,
+        execution_evidence_json=None,
+        recovery_policy=RecoveryPolicy.terminalize_v1,
+    )
+    claim_validations = 0
+
+    async def validate_claim(_claim) -> bool:
+        nonlocal claim_validations
+        claim_validations += 1
+        return True
+
+    token = None
+    try:
+        if expect_projection:
+            result = await _materialize_accepted_skill_projection(
+                runtime,
+                user_id="user-1",
+                record=record,
+                claim_validator=validate_claim,
+            )
+            assert result.sandbox_id == "sandbox-projection"
+            assert result.materializer is None
+            assert result.lease is None
+            assert result.evidence is None
+            assert runtime.context["sandbox_id"] == "sandbox-projection"
+            assert provider.provisioned == [(thread_id, "user-1", snapshot_id)]
+            assert provider.bound == [("sandbox-projection", snapshot_id)]
+            assert claim_validations == 0
+            token = runtime.context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
+            assert token is not None
+        else:
+            with pytest.raises(
+                AcceptedSkillSandboxBindingError,
+                match="accepted_skill_snapshot_materialization_failed",
+            ):
+                await _materialize_accepted_skill_projection(
+                    runtime,
+                    user_id="user-1",
+                    record=record,
+                    claim_validator=validate_claim,
+                )
+            assert provider.provisioned == []
+            assert provider.bound == []
+            assert "sandbox_id" not in runtime.context
+    finally:
+        if token is not None:
+            release_accepted_skill_consumer(token)
+        get_skill_projection_coordinator().release_unactivated_run(
+            user_id="user-1",
+            thread_id=thread_id,
+            run_id=f"run-profile-{profile}",
+        )
+        material.release_process_material()

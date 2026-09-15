@@ -181,12 +181,17 @@ def _frame_carries_text(data: Any) -> tuple[bool, bool]:
     return text, reasoning
 
 
-@pytest.fixture(scope="module")
-def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Gateway]:
+@contextlib.contextmanager
+def serve_gateway(home: Path, *, config_yaml: str = _MINIMAL_CONFIG_YAML) -> Iterator[_Gateway]:
+    """Serve the real Gateway over ``home`` on a loopback socket.
+
+    ``home/skills`` is the skill library the Gateway sees (a caller seeds
+    ``public/<name>/SKILL.md`` there before entering); everything else under
+    ``home`` is written here. Shared with the seeded-skill suite.
+    """
     monkeypatch = pytest.MonkeyPatch()
-    home = tmp_path_factory.mktemp("turn-phase-e2e")
-    (home / "skills").mkdir()
-    (home / "config.yaml").write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
+    (home / "skills").mkdir(exist_ok=True)
+    (home / "config.yaml").write_text(config_yaml, encoding="utf-8")
     (home / "extensions_config.json").write_text('{"mcpServers": {}, "skills": {}}', encoding="utf-8")
     monkeypatch.setenv("DEER_FLOW_HOME", str(home / "deer-flow-home"))
     monkeypatch.setenv("DEER_FLOW_CONFIG_PATH", str(home / "config.yaml"))
@@ -268,6 +273,12 @@ def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Gateway]:
         journal_logger.removeHandler(sink)
         journal_logger.setLevel(previous_level)
         monkeypatch.undo()
+
+
+@pytest.fixture(scope="module")
+def gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[_Gateway]:
+    with serve_gateway(tmp_path_factory.mktemp("turn-phase-e2e")) as served:
+        yield served
 
 
 # ── Driving the route ────────────────────────────────────────────────────

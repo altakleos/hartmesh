@@ -121,6 +121,41 @@ to the provider's own id, which the declaration carries as `provider_ref`, for
 the declaring execution only; a stranger's call resolves to no events and no
 decision, and the provider id never appears in state, logs, or evidence.
 
+### Which population a deployment profile runs
+
+Every Gateway run is an accepted invocation with a run record, and a nonempty
+effective-skill snapshot makes its materialization mandatory before the
+authoritative running transition. The population that serves it is the
+deployment profile's decision, not the record's:
+
+| Profile | Nonempty snapshot | Empty snapshot |
+| --- | --- | --- |
+| `local_development` | Accepted-skills projection: the provider's own parked `(user, thread)` sandbox with `.accepted` as its only skills mount, bound before the model is called, cleared at release and re-projected at the next bind | Ordinary thread sandbox, acquired on the first tool call |
+| `durable_production`, `durable_two_gateway_v1` | A qualified materializer, or `sandbox_provider_unqualified` before any sandbox exists | Ordinary thread sandbox |
+
+`_durable_admission_required` in `runtime/runs/worker.py` reads the configured
+profile; an unreadable configuration counts as durable. From 2026-09-03 until
+this rule the worker keyed the refusal on the record's presence instead, which
+made the projection population unreachable from any real run: the first tenant
+release that seeded a public library (v2.1.0+hartmesh.13) refused every chat
+turn with `AcceptedSkillSandboxBindingError` (reason
+`sandbox_provider_unqualified`) on a healthy stack, and no earlier release had
+noticed because no tenant had a skill, so every snapshot was empty. Two
+properties of the projection path matter when reading timings and paths: the
+sandbox is provisioned before the model runs, so on a new thread the cold
+start precedes first text; and the model-visible skill path is
+`/mnt/skills/.accepted/<snapshot digest>/<category>/<name>`, the live
+`/mnt/skills/public` mount is absent from such a sandbox, and the sandbox
+tools refuse skill paths outside the snapshot. A provider that cannot declare
+immutable accepted material refuses a nonempty snapshot under every profile
+(`accepted_skill_snapshot_immutability_unsupported`): the host-local provider
+answers `empty_only`, so `tests/_seeded_skill_sandbox_provider.py` is the
+test-only subclass that declares it for the scripted-Gateway regression
+(`tests/test_seeded_skill_gateway_stream_e2e.py`);
+`test_worker_materialization_follows_the_deployment_profile` pins the three
+profiles. The boundary error stays opaque to callers; the worker logs the
+reason code (`Accepted skill materialization failed ... reason=`).
+
 ### Park means reuse
 
 Park is only worth its name if the next turn actually takes the container

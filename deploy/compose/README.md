@@ -183,13 +183,18 @@ beside `public/` and swapped in by two renames, so a copy that fails leaves
 the previous set in place and stops the start before uvicorn runs. `public/`
 is therefore release material. A skill an earlier image shipped, a file
 dropped in by hand or an edit made in place is gone after the next start;
-until that start an edited public skill is live, and the sandbox projection
-picks the edit up at the next sandbox acquire, so the seed is a restore, not
-a tamper guard. A skill the operator adds goes in `home/skills/custom/`,
-which the seed never touches. The sandbox-visible projection,
-`home/skills_view/`, is the Gateway's own: it is rebuilt from `public/` at
-startup and bind-mounted read-only at `/mnt/skills/public`. Because the
-library travels in the image, a change to a public skill reaches a tenant
+until that start an edited public skill is live, and the next turn admitted
+after the edit snapshots it, so the seed is a restore, not a tamper guard. A
+skill the operator adds goes in `home/skills/custom/`, which the seed never
+touches. A chat's sandbox never mounts `public/` itself: every turn is
+admitted with an immutable snapshot of the skills enabled for that user,
+projected read-only at `/mnt/skills/.accepted/<snapshot digest>/public/<name>`
+for the turn and cleared when it ends, and the sandbox tools refuse skill
+paths outside it (`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which
+population a deployment profile runs"). The Gateway's own projection,
+`home/skills_view/`, is rebuilt from `public/` at startup; the measurement
+script below mounts `home/skills` directly, so its paths carry `public/`.
+Because the library travels in the image, a change to a public skill reaches a tenant
 only through a release (RELEASING.md). A Gateway image older than this
 feature carries no library; the seed says so in the log and leaves `public/`
 as it is, so a profile checked out ahead of its pinned image still starts.
@@ -633,7 +638,7 @@ a workbook to build from:
 ```sh
 PROFILES=slim CPUS=1 CONCURRENT=4 RUNS=2 \
   MOUNTS="-v /srv/hartmesh/home/skills:/mnt/skills:ro -v /srv/hartmesh/operator/measure:/mnt/measure:ro" \
-  EXEC='set -e; R=/mnt/skills/business-report/scripts/report.py; python3 $R build /mnt/measure/export.xlsx --period 2026-08 --out /tmp/r >/dev/null; for f in pdf docx xlsx; do python3 $R render /tmp/r/2026-08-business-review.report.json --to $f >/dev/null; done' \
+  EXEC='set -e; R=/mnt/skills/public/business-report/scripts/report.py; python3 $R build /mnt/measure/export.xlsx --period 2026-08 --out /tmp/r >/dev/null; for f in pdf docx xlsx; do python3 $R render /tmp/r/2026-08-business-review.report.json --to $f >/dev/null; done' \
   bash scripts/measure-sandbox-boot.sh
 ```
 
@@ -2076,3 +2081,58 @@ UV_EXTRAS=postgres .`), so a stand-in for the image the next cut pins.
   adoption through the HTTP endpoints (the service path is what the offline
   test drives), and the pinned Gateway image itself, which the next cut
   builds from this tree.
+
+Normal chat with the seeded library (2026-09-15). The tenant-class
+qualification of v2.1.0+hartmesh.13 found the first browser turn of a fresh
+user failing in under three seconds with `AcceptedSkillSandboxBindingError`
+before any sandbox existed, on a healthy stack that had seeded the 13
+packages. Reproduced and repaired on the same development host and
+gateway-only stack as the entry above, this time with a model: the operator
+model file (`HARTMESH_MODELS_FILE`) selecting the repository's scripted
+probe model (`backend/tests/_turn_phase_probe_model.py`, mounted into the
+Gateway; it streams a fixed answer and calls no tool), the Gateway image the
+previous entry built, and turns driven over the released run-stream route
+by a registered user.
+
+- Cause: every Gateway run is an accepted invocation; with a nonempty
+  effective-skill snapshot the worker must materialize it before the run
+  starts; since 2026-09-03 the worker refused a provider without a qualified
+  durable materializer whenever a run record existed, which is always, and
+  the local container backend never offers one. No earlier tenant release
+  carried a skill, so the snapshot was empty and the guard never fired. The
+  worker now decides by the deployment profile: `local_development` runs the
+  accepted-skills projection, the durable profiles refuse as before
+  (`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which population a
+  deployment profile runs").
+- Before the repair, the image as it is: `Run created`, `Using local
+  container sandbox backend` and `Run failed ...
+  error_class=AcceptedSkillSandboxBindingError` in the same second; the
+  stream `metadata`, `error` (`Runtime operation failed (reference: ...)`),
+  `end` after 3.8 s; no sandbox container.
+- After, with the repaired worker mounted over the image's file: the first
+  turn on a new chat streamed `metadata`, six `messages`, `end`. Its
+  container `deer-flow-sandbox-<id>-accepted` was created before the model
+  was called (first text 30.3 s after the request on this host under
+  runsc: the cold start now precedes the model), mounting
+  `/mnt/user-data/{workspace,uploads,outputs}` read-write and
+  `/mnt/skills/.accepted` read-only, no `/mnt/skills/public`; then
+  `Released sandbox ... to warm pool (container still running)`. The second
+  turn on the same chat: `Reclaimed warm-pool sandbox <same id>` in the same
+  second, first text after 9.8 s, the same container. A third turn on a
+  second chat created a second container; during it,
+  `/mnt/skills/.accepted/<snapshot digest>/public/` listed the 13 seeded
+  packages with `business-report/SKILL.md` intact, while the idle chat's
+  container showed an empty `.accepted` (cleared at release, re-projected at
+  the next bind).
+- Offline: `test_worker_materialization_follows_the_deployment_profile`
+  (three profiles) and `test_seeded_skill_gateway_stream_e2e.py` (the real
+  route, admission and worker with one seeded public skill); the accepted
+  material, AIO provider, turn-phase and warm-reuse suites, 274 passed.
+- Observed, not this repair's: the Gateway logs `Refused to recreate missing
+  authoritative lifecycle row ... during completion persistence` at ERROR
+  after every turn, failed or successful; and a reclaimed sandbox still
+  costs about ten seconds before first text on this host, the warm-acquire
+  latency the warm-reuse entry left unmeasured.
+- Not proved here: the tenant class itself (Part A of the private test guide
+  is to be rerun on the repaired release), and a turn that runs a tool in
+  the projected skill through a real model.
