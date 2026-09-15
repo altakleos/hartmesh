@@ -90,7 +90,9 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   new container is owned and marked starting *before* the wait, so
   reconciliation and renewal treat it as this instance's; a cancelled async
   wait rolls back under the same fences. Live regression for the released
-  Compose limits under runsc: `tests/test_restricted_runsc_readiness_live.py`.
+  Compose limits under runsc, with the template's `sandbox.environment`
+  applied and as many concurrent starts as `sandbox.replicas`:
+  `tests/test_restricted_runsc_readiness_live.py`.
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway
   via `RunManager` + `run_agent()` + `StreamBridge`
   (`packages/harness/deerflow/runtime/`); Nginx exposes it at

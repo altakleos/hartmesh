@@ -56,14 +56,33 @@ sandbox:
   image: ghcr.io/altakleos/hartmesh-sandbox@sha256:bc82c578b0be9793b9dcf3d23821460a4760cf992e1f2217bd014a8a2a0c648f
   port: 8080
   # Concurrent-sandbox ceiling from the memory budget (README: "Memory
-  # budget"). This is a maximum with LRU eviction: a third acquisition evicts
-  # the least-recently-used sandbox instead of failing.
-  replicas: 2
-  # How long an idle sandbox keeps one of the two slots. The budget reserves
-  # both slots whether or not they are used, and a cold start of the sandbox
+  # budget"): four 512 MiB slim sandboxes with their relays sit on the same
+  # 5.0 GiB line the two 1 GiB full ones did. This is a maximum with LRU
+  # eviction: a fifth acquisition evicts the least-recently-used sandbox
+  # instead of failing.
+  replicas: 4
+  # How long an idle sandbox keeps one of the four slots. The budget reserves
+  # every slot whether or not it is used, and a cold start of the sandbox
   # image under gVisor takes tens of seconds, so idle sandboxes are kept warm
-  # for 30 minutes; a third thread still evicts the least recently used one.
+  # for 30 minutes; a fifth thread still evicts the least recently used one.
   idle_timeout: 1800
+  # The sandbox image's own service switches, passed to every sandbox as
+  # environment by the local Docker backend. Off: the browser and its MCP
+  # server, VNC, Jupyter, code-server and the Node REPL (this last one also
+  # stops its on-demand start). Left running: the sandbox API server, its
+  # nginx and the relay, which is everything the shipped tools (bash, files)
+  # and the public skills use. Measured on a development host under gVisor
+  # at one CPU: ready in 10.2 s and 238 MiB idle against 20.2 s and 1,209 MiB
+  # for the full profile (README: "Slim services profile"). Each value must
+  # stay the quoted string "true": the image's entrypoint compares strings,
+  # and the harness types this mapping as text.
+  environment:
+    DISABLE_BROWSER: "true"
+    DISABLE_JUPYTER: "true"
+    DISABLE_CODE_SERVER: "true"
+    DISABLE_VNC: "true"
+    DISABLE_MCP_BROWSER: "true"
+    DISABLE_NODEJS_REPL: "true"
   # Cold-start readiness budget, in seconds: the provider polls a new
   # sandbox's /v1/sandbox for this long and destroys it when the budget runs
   # out. At `--cpus 1` under gVisor the released image answered after 80 to

@@ -62,9 +62,9 @@ CLEANUP_ALLOWANCE_SECONDS = 60.0
 # enough for the image's services to have started failing.
 SETTLE_SECONDS = 25.0
 REDACTED = "<relay-token redacted>"
-# How many cold starts each healthy test performs (serially, and as pairs for
-# the concurrent test). One is a regression run; the acceptance gate wants
-# repeated starts on each representative host.
+# How many cold starts each healthy test performs (serially, and as batches of
+# the profile's ceiling for the concurrent test). One is a regression run; the
+# acceptance gate wants repeated starts on each representative host.
 SAMPLES = max(1, int(os.environ.get("HARTMESH_READINESS_SAMPLES", "1")))
 
 
@@ -106,6 +106,12 @@ def _released_gateway_environment() -> dict[str, str]:
     return released
 
 
+def _mib(value: str) -> int:
+    """A Docker memory string as compose.yaml writes it (``512m``) in MiB."""
+    assert value.endswith("m"), value
+    return int(value[:-1])
+
+
 def _production_budget() -> float:
     """The budget the released Gateway enforces, resolved the way it resolves it."""
     from deerflow.community.aio_sandbox.aio_sandbox_provider import resolve_ready_timeout
@@ -124,14 +130,22 @@ def _apply_released_environment(monkeypatch: pytest.MonkeyPatch) -> dict[str, st
 
 
 def _released_backend(section: dict, *, extra_environment: dict[str, str] | None = None, base_port: int = 18400) -> LocalContainerBackend:
+    # ``sandbox.environment`` is what makes the shipped sandbox the slim one
+    # (the image's DISABLE_* switches); a start measured without it would be
+    # the full profile at the slim profile's limits.
     return LocalContainerBackend(
         image=section["image"],
         base_port=base_port,
         container_prefix=CONTAINER_PREFIX,
         config_mounts=[],
-        environment=dict(extra_environment or {}),
+        environment={**{key: str(value) for key, value in (section.get("environment") or {}).items()}, **(extra_environment or {})},
         network_config=dict(section["network"]),
     )
+
+
+def _released_ceiling(section: dict) -> int:
+    """``sandbox.replicas`` as the template ships it: the concurrent test starts that many at once."""
+    return int(section["replicas"])
 
 
 def _live_provider(backend: LocalContainerBackend, budget: float, monkeypatch: pytest.MonkeyPatch):
@@ -162,7 +176,7 @@ def _live_provider(backend: LocalContainerBackend, budget: float, monkeypatch: p
     provider._idle_checker_thread = None
     provider._renewal_stop = threading.Event()
     provider._renewal_thread = None
-    provider._config = {"idle_timeout": 0, "replicas": 2, "ready_timeout": budget}
+    provider._config = {"idle_timeout": 0, "replicas": _released_ceiling(_released_sandbox_section()), "ready_timeout": budget}
     provider._backend = backend
     provider._owner_id = "pz-live"
     provider._ownership_config = SandboxOwnershipConfig()
@@ -304,10 +318,15 @@ def _assert_released_hardening(backend: LocalContainerBackend, sandbox_id: str) 
     sidecar = _inspect(proxy)
     assert sandbox is not None and sidecar is not None
     host = sandbox["HostConfig"]
+    released = _released_gateway_environment()
     assert host["Runtime"] == "runsc"
-    assert host["NanoCpus"] == 1_000_000_000, "the released profile caps every sandbox at one CPU"
-    assert host["Memory"] == 1024 * 1024 * 1024 and host["MemorySwap"] == host["Memory"]
-    assert host["PidsLimit"] == 384
+    assert host["NanoCpus"] == int(float(released["DEER_FLOW_SANDBOX_CPUS"]) * 1_000_000_000), "the released profile caps every sandbox at one CPU"
+    assert host["Memory"] == _mib(released["DEER_FLOW_SANDBOX_MEMORY"]) * 1024 * 1024 and host["MemorySwap"] == host["Memory"]
+    assert host["PidsLimit"] == int(released["DEER_FLOW_SANDBOX_PIDS_LIMIT"])
+    # The slim services profile reached the container as environment, so the
+    # readiness measured here is the shipped sandbox's, not the full image's.
+    for key, value in (_released_sandbox_section().get("environment") or {}).items():
+        assert f"{key}={value}" in sandbox["Config"]["Env"], f"{key} did not reach the sandbox"
     assert host["CapDrop"] == ["ALL"] and not host.get("CapAdd")
     assert "no-new-privileges" in host["SecurityOpt"] and "seccomp=builtin" in host["SecurityOpt"]
     assert sandbox["Config"]["User"] == "1000:1000"
@@ -388,12 +407,14 @@ def _one_healthy_cold_start(monkeypatch: pytest.MonkeyPatch, provider, backend: 
     assert sandbox_id not in provider._sandboxes and provider._local_teardown == set()
 
 
-# ── Two cold starts at once, one CPU each ───────────────────────────────────
+# ── A full ceiling of cold starts at once, one CPU each ─────────────────────
 
 
-def test_two_concurrent_restricted_runsc_cold_starts_each_fit_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The profile's ceiling is two sandboxes; both starting at once, each on
-    its own CPU quota, must each fit the budget on their own."""
+def test_concurrent_restricted_runsc_cold_starts_up_to_the_ceiling_each_fit_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    """As many sandboxes as the profile's ceiling (``sandbox.replicas``)
+    starting at once, each on its own CPU quota, must each fit the budget on
+    their own. The four-vCPU tenant class is oversubscribed during that burst
+    by design (README: "Process and CPU limits")."""
     _require_runsc_daemon()
     _apply_released_environment(monkeypatch)
     section = _released_sandbox_section()
@@ -402,11 +423,11 @@ def test_two_concurrent_restricted_runsc_cold_starts_each_fit_the_budget(monkeyp
     provider = _live_provider(backend, budget, monkeypatch)
     timer = _CreateTimer(backend)
     for sample in range(SAMPLES):
-        _one_concurrent_pair(provider, backend, timer, budget, sample=sample)
+        _one_concurrent_batch(provider, backend, timer, budget, sample=sample, size=_released_ceiling(section))
 
 
-def _one_concurrent_pair(provider, backend: LocalContainerBackend, timer: _CreateTimer, budget: float, *, sample: int) -> None:
-    ids = [f"pz-conc-{sample}-a", f"pz-conc-{sample}-b"]
+def _one_concurrent_batch(provider, backend: LocalContainerBackend, timer: _CreateTimer, budget: float, *, sample: int, size: int) -> None:
+    ids = [f"pz-conc-{sample}-{index}" for index in range(size)]
     outcomes: dict[str, dict[str, object]] = {sid: {} for sid in ids}
 
     def start(sid: str) -> None:
@@ -432,6 +453,7 @@ def _one_concurrent_pair(provider, backend: LocalContainerBackend, timer: _Creat
             _record(
                 path="sync-concurrent",
                 sample=sample,
+                batch=len(ids),
                 sandbox=sid,
                 runtime="runsc",
                 cpus=1,
