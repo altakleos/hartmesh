@@ -5,6 +5,21 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.15] — 2026-09-15
+
+- hartmesh#83 — make a turn's timing readable in a deployment's own log, and stop dropping its completion data. `TurnPhaseJournal.emit` put the whole journal in `extra=`, which neither the default text format nor `JsonTraceFormatter` renders, so every released deployment printed the bare words `turn phase timings` and none could see where a turn's time went; the journal now renders its reading into the message (`@` start offsets, `+` measured durations, unobservable phases with their reasons, bounded independently of the record cap) and the JSON formatter carries the structured field. The per-turn `Refused to recreate missing authoritative lifecycle row … during completion persistence` was not noise: a durable store stamps a row's terminal projection whether or not lease heartbeats run, while `RunManager.update_run_completion` named that projection only when `run_ownership.heartbeat_enabled` was true — the default on every single-Gateway profile — so each turn silently lost its token counts, message count and message previews, and the refusal was then misreported as a missing row. Completions now name the projection on both paths and a refusal over an existing row is reported as one; a compatibility store keeps its write-through recovery. Operators on those profiles should note that `first_human_message` and `last_ai_message` (up to 2 KB each) are now stored where they had always been NULL, in the same tenant database as the rest of the row. `deploy/compose/README.md` gains "Reading a turn's timing".
+
+Verified live on a development host against the released compose shape
+(PostgreSQL, Redis, heartbeats at their default, `SANDBOX_RUNTIME=runsc`): the
+counters and preview are stored, the per-turn ERROR is gone, and a reclaimed
+chat reads its sandbox-to-first-text span off one line. Offline: the full
+backend suite, with each new test proven to fail with its fix reverted. Not a
+tenant-class qualification, not token counters against a real provider (the
+scripted probe reports no usage), and not the heartbeat-enabled path, which was
+exercised offline only.
+
+[2.1.0+hartmesh.15]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.15
+
 ## [2.1.0+hartmesh.14] — 2026-09-15
 
 - hartmesh#82 — run an accepted skill snapshot through the accepted-skills projection on a non-durable deployment profile. Since 48dd3aa7 the worker reached that branch only when a run had no record, which never holds for a Gateway run, so on `local_development` the first turn of any deployment whose effective skills were non-empty failed before a sandbox existed with `AcceptedSkillSandboxBindingError`; the guard first mattered in 2.1.0+hartmesh.13, which is the first release that gives a deployment a seeded skill library. The two durable profiles keep refusing without a qualified materializer, and the opaque boundary error is now preceded by a log line naming the reason code.
