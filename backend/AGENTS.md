@@ -310,6 +310,7 @@ float filters accept integer or real JSON numbers through `json_value_matches`.
 **Every new feature or bug fix MUST be accompanied by unit tests. No exceptions.**
 
 - Write tests in `backend/tests/` following the existing naming convention `test_<feature>.py`
+- Public skill scripts (`skills/public/<name>/scripts/`) are tested from `backend/tests/skills/<name>/` so `make test` and the CI shards run them (the root `tests/skills/` suite predates this and is not wired into CI); load the script by file path with `importlib` because sandbox scripts are not a package, and keep it runnable on the libraries the sandbox image ships with nothing installed at runtime
 - Run the offline and blocking-I/O suites before and after your change: `make test` and `make test-blocking-io`
 - `make test` explicitly selects the lock-pinned `opensandbox` extra because the
   offline Phase 0 feasibility probe verifies the installed SDK bytes. The

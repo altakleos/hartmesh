@@ -235,7 +235,16 @@ and upstream [issue #1690](https://github.com/opensandbox-group/OpenSandbox/issu
   tag exists. The sandbox image adapts the upstream AIO runtime to uid 1000
   and the Kubernetes Pod Security `restricted` profile; build-time source
   assertions deliberately stop publication when the pinned vendor entrypoint
-  changes.
+  changes. It also layers pinned Python libraries for skill scripts
+  (`duckdb`, imported by the data-analysis skill; `python-docx`, pinned ahead
+  of any skill that writes `.docx` files) on the base image's pandas,
+  openpyxl, xlrd and WeasyPrint; the build imports them once as root, and the
+  smoke workflow imports them again as uid 1000 and runs the data-analysis
+  script, so skill scripts install nothing at runtime. Changing that layer
+  changes the sandbox digest and therefore needs a release cut. The public
+  skill library must not run ahead of the pinned image: from the first
+  release that ships this layer on, `data-analysis` requires it and exits
+  with a message naming the image when it is missing.
 - `.github/workflows/chart.yaml` — packages the Helm chart and pushes it as an
   OCI artifact to `ghcr.io`. Users install with:
   ```bash

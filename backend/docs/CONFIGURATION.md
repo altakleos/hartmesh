@@ -1050,6 +1050,8 @@ continue to use the normal environment proxy configuration.
 
 `AioSandboxProvider` talks to the sandbox container through the `agent-sandbox` SDK. The Dockerfile for the default `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` image is not part of this repository; DeerFlow treats that image as an upstream AIO sandbox runtime.
 
+This repository's own `docker/sandbox/Dockerfile` (the image the tenant Compose profile pins) follows the pattern below: it layers pinned Python libraries for skill scripts (`duckdb`, imported by the data-analysis skill; `python-docx`, pinned ahead of any skill that writes `.docx` files) on the upstream base, next to the pandas, openpyxl, xlrd and WeasyPrint the base already carries, so skill scripts install nothing at runtime. The upstream image alone does not carry `duckdb`: on it the data-analysis skill exits with a message naming this Dockerfile instead of installing anything. Add libraries there rather than in a skill script; the build verifies the imports.
+
 For persistent system or language dependencies, extend the published image and keep its startup command intact:
 
 ```dockerfile

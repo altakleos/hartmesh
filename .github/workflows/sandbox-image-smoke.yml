@@ -53,6 +53,8 @@ jobs:
             --cap-drop=ALL \
             --security-opt=no-new-privileges \
             --publish 127.0.0.1:18080:8080 \
+            --volume "$PWD/skills/public/data-analysis/scripts/analyze.py:/mnt/smoke/analyze.py:ro" \
+            --volume "$PWD/backend/tests/skills/data_analysis/fixtures/example_orders.xls:/mnt/smoke/example_orders.xls:ro" \
             deer-flow-sandbox-smoke)"
           trap 'docker logs "$container_id" 2>&1 || true; docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
 
@@ -84,6 +86,36 @@ jobs:
           bash_user="$(printf '%s' "$bash_response" | jq --raw-output '.data.stdout' | tr -d '\r\n')"
           test "$bash_user" = "gem"
 
+          # The document libraries must import as the runtime user, not only as
+          # the build-time root that installed them. The endpoint answers 200
+          # whatever the command's exit code, so check that explicitly and print
+          # the whole response (it carries stderr) on failure.
+          library_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"python3 -c \"import docx, duckdb, xlrd, weasyprint, xlsxwriter, matplotlib, pandas, openpyxl; print(duckdb.__version__)\""}' \
+            http://127.0.0.1:18080/v1/bash/exec)"
+          library_version="$(printf '%s' "$library_response" | jq --raw-output '.data.stdout' | tr -d '\r\n')"
+          if ! printf '%s' "$library_response" | jq -e '.data.exit_code == 0' >/dev/null \
+            || [ "$library_version" != "1.5.5" ]; then
+            printf '%s\n' "$library_response"
+            echo "::error::document libraries did not import as the runtime user"
+            exit 1
+          fi
+
+          # Run the data-analysis skill script (mounted read-only above) on the
+          # image it ships with, so a library drift between the image and the
+          # backend test environment cannot pass unnoticed.
+          skill_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"python3 /mnt/smoke/analyze.py --files /mnt/smoke/example_orders.xls --action inspect"}' \
+            http://127.0.0.1:18080/v1/bash/exec)"
+          if ! printf '%s' "$skill_response" | jq -e '.data.exit_code == 0' >/dev/null \
+            || ! printf '%s' "$skill_response" | jq --raw-output '.data.stdout' | grep -q 'Rows: 12'; then
+            printf '%s\n' "$skill_response"
+            echo "::error::data-analysis script failed on the built image"
+            exit 1
+          fi
+
           logs="$(docker logs "$container_id" 2>&1)"
           if printf '%s' "$logs" | grep -Eiq 'permission denied|operation not permitted'; then
             printf '%s\n' "$logs"
@@ -91,7 +123,7 @@ jobs:
             exit 1
           fi
 
-          printf 'shell user: %s\nbash user: %s\n' "$shell_user" "$bash_user"
+          printf 'shell user: %s\nbash user: %s\nduckdb: %s\n' "$shell_user" "$bash_user" "$library_version"
           docker rm --force "$container_id" >/dev/null
           trap - EXIT
 

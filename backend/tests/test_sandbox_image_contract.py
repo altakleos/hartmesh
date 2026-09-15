@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -132,3 +133,41 @@ def test_su_shim_preserves_login_environment_and_stdin_for_same_uid(
 
     assert result.returncode == 0, result.stderr
     assert result.stdout == f"stdin-preserved|{home}|gem|{home}"
+
+
+DOCUMENT_LIBRARY_LAYER = (
+    "RUN set -eux; \\\n    pip install --no-cache-dir --no-deps --disable-pip-version-check \\\n        python-docx==1.2.0 duckdb==1.5.5; \\\n    python3 -c 'import docx, duckdb, xlrd, weasyprint, xlsxwriter, matplotlib, pandas, openpyxl'"
+)
+
+
+def test_sandbox_dockerfile_ships_the_document_libraries_pinned() -> None:
+    dockerfile = SANDBOX_DOCKERFILE.read_text(encoding="utf-8")
+
+    assert DOCUMENT_LIBRARY_LAYER in dockerfile
+    assert dockerfile.count("pip install") == 1
+    assert dockerfile.index("USER 0") < dockerfile.index(DOCUMENT_LIBRARY_LAYER) < dockerfile.index("USER 1000:1000")
+
+
+def test_sandbox_smoke_imports_the_document_libraries_as_the_runtime_user() -> None:
+    dockerfile = SANDBOX_DOCKERFILE.read_text(encoding="utf-8")
+    workflow = SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8")
+    duckdb_pin = re.search(r"duckdb==([0-9.]+)", dockerfile).group(1)
+    import_payload = "import docx, duckdb, xlrd, weasyprint, xlsxwriter, matplotlib, pandas, openpyxl; print(duckdb.__version__)"
+
+    assert import_payload in workflow
+    assert workflow.index("/v1/bash/exec", workflow.index(import_payload)) < workflow.index("library_version=")
+    assert f'[ "$library_version" != "{duckdb_pin}" ]' in workflow
+    # The endpoint answers 200 whatever the command's exit code.
+    assert workflow.count("jq -e '.data.exit_code == 0'") == 2
+    assert "printf '%s\\n' \"$library_response\"" in workflow
+
+
+def test_sandbox_smoke_runs_the_data_analysis_script_on_the_built_image() -> None:
+    workflow = SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8")
+
+    # Bind-mounted at start rather than copied in later: a gVisor sandbox does not see files copied into a running container.
+    assert '--volume "$PWD/skills/public/data-analysis/scripts/analyze.py:/mnt/smoke/analyze.py:ro"' in workflow
+    assert '--volume "$PWD/backend/tests/skills/data_analysis/fixtures/example_orders.xls:/mnt/smoke/example_orders.xls:ro"' in workflow
+    assert "python3 /mnt/smoke/analyze.py --files /mnt/smoke/example_orders.xls --action inspect" in workflow
+    assert "grep -q 'Rows: 12'" in workflow
+    assert (REPO_ROOT / "backend/tests/skills/data_analysis/fixtures/example_orders.xls").is_file()
