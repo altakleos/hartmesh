@@ -30,11 +30,10 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   fails `assembly_evidence_unavailable`, drift fails `agent_assembly_drift`,
   stale owners cannot finalize). Fail closed rather than falling back to a less
   durable path; see the runtime guide and `docs/INVOCATION_RUNTIME.md`.
-  Durability is the deployment profile's promise, not a run record's: under
-  `local_development` a nonempty accepted skill snapshot runs through the
-  accepted-skills projection, and the durable profiles refuse without a
-  qualified materializer (`docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which
-  population a deployment profile runs").
+  Durability is the deployment profile's promise, not a run record's:
+  `local_development` runs a nonempty accepted skill snapshot through the
+  accepted-skills projection; durable profiles refuse without a qualified
+  materializer (`docs/ACCEPTED_SANDBOX_EXECUTION.md`).
 - Every sandbox is a session of a declared Kind, ordinary or accepted,
   dispatched by the session provider from `sandbox/session.py`; see
   `docs/ACCEPTED_SANDBOX_EXECUTION.md`.
