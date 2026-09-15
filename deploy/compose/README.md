@@ -103,7 +103,11 @@ Two directories cross the container boundary:
   disk and the sandbox would get an empty workspace while everything reported
   healthy. `config.yaml` cannot interpolate paths, so its literal
   `/srv/hartmesh/home/skills` fixes `HARTMESH_DATA_DIR` to `/srv/hartmesh`:
-  changing it is a profile change, not a tenant setting. The Gateway keeps
+  changing it is a profile change, not a tenant setting. Whatever is placed
+  there must not run ahead of the pinned sandbox image: `data-analysis`
+  imports `duckdb` from the image (shipped from the first release with the
+  skill-library layer, see RELEASING.md) and exits with a message naming
+  the image rather than installing anything. The Gateway keeps
   uploads and artifacts under `home/threads/<thread>/user-data/`, so the
   pre-created `uploads/` and `artifacts/` directories are unused by this
   profile and stay empty.

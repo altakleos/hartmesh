@@ -34,5 +34,17 @@ RUN set -eux; \
 # Stage 3: replace su only for its same-uid, setgroups-free path.
 COPY --chmod=0755 su-shim.sh /usr/local/bin/su
 
+# Stage 4: pinned Python libraries for skill scripts, installed without
+# dependency resolution on top of the base image's pandas, openpyxl, xlrd and
+# lxml. duckdb is imported by the data-analysis skill; python-docx is pinned
+# here so a skill that writes .docx files can rely on the image instead of
+# installing at runtime (no public skill imports it yet). The import line
+# also asserts the base still carries the libraries skills may import, so a
+# base change fails the build rather than a skill at runtime.
+RUN set -eux; \
+    pip install --no-cache-dir --no-deps --disable-pip-version-check \
+        python-docx==1.2.0 duckdb==1.5.5; \
+    python3 -c 'import docx, duckdb, xlrd, weasyprint, xlsxwriter, matplotlib, pandas, openpyxl'
+
 ENV BROWSER_NO_SANDBOX=--no-sandbox
 USER 1000:1000

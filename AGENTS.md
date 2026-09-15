@@ -86,7 +86,7 @@ deer-flow/
 ├── contracts/                      # Cross-component JSON contracts
 ├── examples/deerflow-extension-example/ # Standalone package demonstrating all extension contribution kinds
 ├── scripts/                        # Root orchestration and release scripts invoked by the Makefile
-├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
+├── tests/                          # Root-level tests (tests/skills/: earlier public-skill tests, not run in CI; new skill tests live in backend/tests/skills/)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
 
