@@ -63,10 +63,13 @@ the optional `SANDBOX_READY_TIMEOUT` overrides it within 60 to 600 or refuses.
 Its sandboxes run the image's slim services profile (`sandbox.environment`
 carries the six `DISABLE_*` switches as quoted strings; browser, VNC, Jupyter,
 code-server and the Node REPL stay off) in four 512 MiB slots (`replicas: 4`,
-128 pids) on the same 5.0 GiB line the earlier two 1 GiB full-profile slots
+256 pids) on the same 5.0 GiB line the earlier two 1 GiB full-profile slots
 sat on; `deploy/compose/scripts/measure-sandbox-boot.sh` measures boot, idle
 and a command under exactly those limits, and the compose README's "Slim
-services profile" section holds the figures.
+services profile" section holds the figures. The Gateway image carries
+`skills/public`; the profile's `gateway/run.sh` seeds it onto the tenant
+data disk at every start minus `EXCLUDED_PUBLIC_SKILLS` (reasons in
+`run.sh`); see that README's "Public skills" section.
 
 `durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
 AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or

@@ -112,8 +112,10 @@ sandbox:
     proxy_image: ghcr.io/altakleos/hartmesh-sandbox-network-proxy@sha256:21ffa26790f58d2cf9b5a3926583591aa5e365a0c0798ce54658c47c23939394
 
 skills:
-  # Operator-managed skill library on the tenant data disk (created empty by
-  # gateway/run.sh); the same host path is what the sandbox bind-mounts.
+  # Skill library on the tenant data disk: public/ is mirrored from the
+  # Gateway image at every start by gateway/run.sh (README: "Public skills"),
+  # custom/ is the operator's. The same host path is what the sandbox
+  # bind-mounts (through the Gateway's skills_view projection).
   path: /srv/hartmesh/home/skills
   container_path: /mnt/skills
 

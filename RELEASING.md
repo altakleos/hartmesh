@@ -253,7 +253,11 @@ and upstream [issue #1690](https://github.com/opensandbox-group/OpenSandbox/issu
   the sandbox digest and therefore needs a release cut. The public skill
   library must not run ahead of the pinned image: from the first release
   that ships these layers on, `data-analysis` and `business-report` require
-  them and exit with a message naming the image when they are missing.
+  them and exit with a message naming the image when they are missing. The
+  backend image carries that library itself (`skills/public` copied to
+  `/app/skills/public` as its last layer), and the compose profile seeds it
+  onto each tenant's data disk at every start, so a change to a public skill
+  reaches tenants only through a cut that rebuilds the backend image.
 - `.github/workflows/chart.yaml` — packages the Helm chart and pushes it as an
   OCI artifact to `ghcr.io`. Users install with:
   ```bash
