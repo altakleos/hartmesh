@@ -115,15 +115,6 @@ one conditional mutation. Explicit human/admin updates remain independent APIs,
 and the memory adapter serializes them with projection writes so neither can
 resurrect a deleted row or overwrite a disjoint concurrent update.
 
-A durable store stamps that terminal projection whether or not lease
-heartbeats are on, and refuses a completion write that does not name it, so
-`RunManager.update_run_completion` supplies the authority on both paths: the
-asserted worker id with heartbeats (a peer's row never authorizes this
-worker), the projection the run itself recorded without them (the single-worker
-default; the Gateway refuses to start more than one worker without heartbeats).
-A refused completion over a row that exists is reported as a refusal --
-recreation is only for a row the store no longer has.
-
 `runtime/tool_evidence.py` is the deep module for durable tool-attempt evidence.
 It owns the V1 context/receipt schemas, canonical full SHA-256 identities and
 projections, bounded redaction policy, state transitions, trusted runtime keys,
@@ -150,7 +141,7 @@ visibility. Parent cancellation cascades to neither MCP tasks nor batches.
 
 ### Turn phase timings
 
-`turn_phases.py`: one in-memory journal per run, monotonic offsets, opened by `run_agent`, found by run id from the SSE consumer; first text means visible assistant text; see its docstring. The journal is emitted once per turn as a *rendered* line (`TurnPhaseSnapshot.to_log_line`) plus the structured `turn_phases` field, because a deployment's formatter prints only the message; keep new fields in both or an operator cannot read them.
+`turn_phases.py`: one in-memory journal per run, monotonic offsets, opened by `run_agent`, found by run id from the SSE consumer; first text means visible assistant text; see its docstring.
 
 ### Stream Bridge Heartbeats
 

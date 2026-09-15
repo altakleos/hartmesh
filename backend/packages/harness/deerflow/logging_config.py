@@ -44,14 +44,20 @@ class JsonTraceFormatter(logging.Formatter):
         # The turn-phase journal is the one structured payload this process
         # emits as a field rather than as text; a JSON line that dropped it
         # would say less than the text format it replaced.
+        # The version stamp is the journal's own (``TurnPhaseSnapshot.to_wire``),
+        # so only a record this process wrote travels under that name; anything
+        # else setting ``turn_phases`` does not inherit the module's closed
+        # vocabulary.
         turn_phases = getattr(record, "turn_phases", None)
-        if isinstance(turn_phases, dict):
+        if isinstance(turn_phases, dict) and isinstance(turn_phases.get("version"), int):
             payload["turn_phases"] = turn_phases
         if record.exc_info:
             payload["exc_info"] = self.formatException(record.exc_info)
         if record.stack_info:
             payload["stack_info"] = self.formatStack(record.stack_info)
-        return json.dumps(payload, ensure_ascii=False)
+        # A formatter that raises loses the record it was formatting, so an
+        # unserialisable value degrades to its text instead.
+        return json.dumps(payload, ensure_ascii=False, default=str)
 
 
 class TraceTextFormatter(logging.Formatter):

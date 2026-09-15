@@ -2090,7 +2090,29 @@ class RunManager:
             raise AcceptedEvidenceIntegrityError() from None
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
-        """Persist token usage and completion data to the backing store."""
+        """Persist token usage and completion data to the backing store.
+
+        Terminal authority
+        ------------------
+        A durable store stamps the row's terminal projection (displaced owner,
+        its last active state version, the terminal state version the lifecycle
+        CAS minted) whether or not lease heartbeats run, and refuses a
+        completion write that does not name it. This method therefore supplies
+        that authority on both paths: with heartbeats the owner is *asserted*
+        as this worker, so a row a peer terminalized can never authorize this
+        write; without them (the single-worker default) it names the projection
+        this run's own terminal CAS returned, which must equal this worker --
+        the record's projection fields are never populated by hydration, only
+        by a transition this process won. Supplying nothing is what dropped
+        every turn's counters, message count and previews on a durable
+        single-worker deployment.
+
+        A refused write over a row that *exists* is a refusal, not a missing
+        row: a durable store's refusal is final and is logged as one, while a
+        compatibility store (``durable_lifecycle`` false, where the in-memory
+        record is the authority) keeps its write-through recovery -- persist
+        the record's snapshot, then retry.
+        """
         row_recovery_payload: dict[str, Any] | None = None
         record: RunRecord | None = None
         terminal_authority: dict[str, object] = {}
@@ -2116,17 +2138,18 @@ class RunManager:
                                 "expected_terminal_state_version": terminal_version,
                             }
                     elif terminal_recorded:
-                        # Single worker (the default, and what the single-Gateway
-                        # deployments run): there is no peer to fence against --
-                        # the Gateway refuses to start with more than one worker
-                        # unless heartbeats are on -- but the terminal transition
+                        # Without heartbeats (the default) the terminal transition
                         # still stamped the row's projection, and a durable store
-                        # refuses a completion write that does not name it. Naming
-                        # the projection this run recorded is what keeps a turn's
-                        # counters, message count and previews from being dropped.
+                        # refuses a completion write that does not name it, so a
+                        # turn's counters, message count and previews were dropped.
+                        # The authority is still asserted, not taken on the row's
+                        # word: the projection is read from what this run's own
+                        # terminal CAS returned, it must name this worker, and the
+                        # store proves the whole tuple against a row that is
+                        # already terminal and unowned.
                         projection_owner = record.terminal_projection_owner_worker_id
                         projection_active_version = record.terminal_projection_active_state_version
-                        if isinstance(projection_owner, str) and projection_owner and type(projection_active_version) is int:
+                        if projection_owner == self._worker_id and type(projection_active_version) is int:
                             terminal_authority = {
                                 "expected_owner_worker_id": projection_owner,
                                 "expected_active_state_version": projection_active_version,
@@ -2177,17 +2200,21 @@ class RunManager:
                                 require_active=False,
                             )
                         return
-                    # The row is there and already carries the outcome this
-                    # write reports: the store refused the write itself, on
-                    # its terminal authority. Recreation is not the answer to
-                    # a row that exists, and calling it missing hides both the
-                    # counters this turn lost and any real missing row.
-                    logger.warning(
-                        "Run completion data for %s was refused by the store on its terminal authority; the %s row keeps its earlier counters",
-                        run_id,
-                        requested_status,
-                    )
-                    return
+                    if self._store.durable_lifecycle:
+                        # The row is there and already carries the outcome this
+                        # write reports: the store refused the write itself, on
+                        # its terminal authority. Recreation is not the answer
+                        # to a row that exists, and calling it missing hides
+                        # both the counters this turn lost and any real missing
+                        # row. A compatibility store keeps its write-through
+                        # recovery below, where the in-memory record is the
+                        # authority and rewriting the row is how it recovers.
+                        logger.warning(
+                            "Run completion data for %s was refused by the store on its terminal authority; the %s row keeps its earlier counters",
+                            run_id,
+                            requested_status,
+                        )
+                        return
                 if row_recovery_payload is None:
                     logger.warning("Failed to recreate missing run %s for completion persistence", run_id)
                     return

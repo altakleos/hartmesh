@@ -219,11 +219,13 @@ class TurnPhaseSnapshot:
     def to_log_line(self) -> str:
         """Render the journal as one bounded line a text formatter will print.
 
-        The structured record is the complete one; this is the same reading
-        for whoever has only the deployment's log. Offsets are ``@`` and
-        measured durations ``+``, both in milliseconds from the turn's start,
-        so ``first_stream_text@1904ms`` minus ``sandbox_acquire@145ms`` is the
-        wait a reader is usually after, with no second log line to correlate.
+        The structured record is the complete one; this carries the reading an
+        operator needs from a deployment's log alone. ``@`` is an offset from
+        the turn's start and ``+`` the phase's own measured duration, both in
+        milliseconds, so a phase carrying both *ends* at ``@ + duration``:
+        ``first_stream_text@1904ms`` minus the end of
+        ``sandbox_acquire@145ms+1600ms`` (1745 ms) is the 159 ms wait a reader
+        is usually after, with no second log line to correlate.
         """
         parts = [f"turn phase timings run={self.run_id or '-'}", f"correlation={self.correlation_id}", f"total={round(self.total_ms)}ms"]
         if self.outcome:
@@ -559,7 +561,9 @@ class TurnPhaseJournal:
 
         The message carries the reading (``TurnPhaseSnapshot.to_log_line``)
         because that is all a deployment's formatter prints; the structured
-        payload rides along for anything that reads fields.
+        payload rides along for anything that reads fields. A new field that an
+        operator needs belongs in both: the record alone reaches nobody running
+        the default text format.
         """
         snapshot = self.snapshot()
         (target or logger).info("%s", snapshot.to_log_line(), extra={"turn_phases": snapshot.to_wire()})

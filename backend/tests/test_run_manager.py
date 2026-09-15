@@ -3132,7 +3132,76 @@ async def test_multi_worker_completion_still_claims_this_worker_as_the_terminal_
     record = await manager.create("thread-1")
     await manager.set_status(record.run_id, RunStatus.running)
     await manager.set_status(record.run_id, RunStatus.success)
+    # The row now says a peer owns the terminal projection. With heartbeats on,
+    # that must not become this worker's claim (the store then refuses, which is
+    # the point); the recording double captures the arguments either way.
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    store._runs[record.run_id]["terminal_projection_owner_worker_id"] = "worker-B"
 
     await manager.update_run_completion(record.run_id, status="success", total_tokens=7)
 
     assert seen.get("expected_owner_worker_id") == "worker-A"
+
+
+@pytest.mark.anyio
+async def test_a_compatibility_store_keeps_its_write_through_recovery():
+    """A store that is not lifecycle-durable still recovers by rewriting the row.
+
+    `RunStore.__init_subclass__` forces `durable_lifecycle` off for any store
+    that does not claim it, and for those the in-memory record is the authority:
+    a refused completion write is recovered by persisting the record's snapshot
+    and retrying. Only a durable store's refusal is final, so the refusal branch
+    must not swallow this path.
+    """
+
+    class CompatibilityCompletionRunStore(MemoryRunStore):
+        # Deliberately does not re-declare durable_lifecycle: forced False.
+        def __init__(self) -> None:
+            super().__init__()
+            self.attempts = 0
+
+        async def update_run_completion(self, run_id, *, status, **kwargs):
+            self.attempts += 1
+            if self.attempts == 1:
+                return False
+            return await super().update_run_completion(run_id, status=status, **kwargs)
+
+    store = CompatibilityCompletionRunStore()
+    assert store.durable_lifecycle is False
+    manager = RunManager(store=store)
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    await manager.set_status(record.run_id, RunStatus.success)
+
+    await manager.update_run_completion(record.run_id, status="success", total_tokens=42, message_count=3)
+
+    assert store.attempts == 2
+    stored = await store.get(record.run_id)
+    assert stored is not None
+    assert stored["total_tokens"] == 42
+    assert stored["message_count"] == 3
+
+
+@pytest.mark.anyio
+async def test_a_terminal_projection_naming_another_worker_is_not_claimed():
+    """Even without heartbeats the authority is asserted, not taken on the row's word."""
+    seen: dict[str, object] = {}
+
+    class RecordingCompletionRunStore(MemoryRunStore):
+        durable_lifecycle = True
+
+        async def update_run_completion(self, run_id, *, status, **kwargs):
+            seen.update(kwargs)
+            return await super().update_run_completion(run_id, status=status, **kwargs)
+
+    store = RecordingCompletionRunStore()
+    manager = RunManager(store=store, worker_id="worker-A")
+    record = await manager.create("thread-1")
+    await manager.set_status(record.run_id, RunStatus.running)
+    await manager.set_status(record.run_id, RunStatus.success)
+    record.terminal_projection_owner_worker_id = "worker-B"
+
+    await manager.update_run_completion(record.run_id, status="success", total_tokens=42)
+
+    assert "expected_owner_worker_id" not in seen

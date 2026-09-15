@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT
 from deerflow.runtime.turn_phases import (
     MAX_PHASE_RECORDS,
     MAX_TRACKED_RUNS,
@@ -376,6 +377,9 @@ def test_the_emitted_message_carries_the_timings_a_plain_formatter_shows(caplog)
     assert "sandbox_acquire@" in message
     # The structured record stays for anything that reads fields.
     assert caplog.records[0].turn_phases["run_id"] == "run-msg"
+    # And the same reading survives the format a released deployment runs.
+    rendered = logging.Formatter(DEFAULT_LOG_FORMAT, datefmt=DEFAULT_LOG_DATE_FORMAT).format(caplog.records[0])
+    assert "first_stream_text@" in rendered and "run=run-msg" in rendered
 
 
 def test_an_unobservable_phase_is_named_in_the_message_with_its_reason(caplog):

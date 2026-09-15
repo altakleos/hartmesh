@@ -1539,29 +1539,44 @@ with `json-file` on the root disk.
 ### Reading a turn's timing
 
 Every turn ends with one `turn phase timings` line from
-`deerflow.runtime.turn_phases`, which carries the whole reading:
+`deerflow.runtime.turn_phases`, which carries the reading an operator needs
+(the structured record behind it is the complete one). One turn, one line —
+wrapped here only to fit the page:
 
 ```text
-turn phase timings run=<run id> correlation=<id> total=16624ms outcome=success
-kind=accepted acquisition=created acquire_reason=accepted_binding snapshot=13pkg/mandatory
-phases=admission@0ms assembly@19ms sandbox_lookup@409ms+4ms sandbox_create@417ms+4777ms
-sandbox_readiness@5201ms+10654ms sandbox_acquire@407ms+15747ms model_request@16176ms
-first_provider_text@16385ms first_stream_text@16387ms model_completion@16519ms terminal@16624ms
+turn phase timings run=<run id> correlation=<id> total=16624ms outcome=success kind=accepted \
+acquisition=created acquire_reason=accepted_binding snapshot=present/13pkg/mandatory queue=0ms creates=1 \
+phases=admission@0ms assembly@19ms sandbox_lookup@409ms+4ms sandbox_create@417ms+4777ms \
+sandbox_readiness@5201ms+10654ms sandbox_acquire@407ms+15747ms model_request@16176ms \
+first_provider_text@16385ms first_stream_text@16387ms model_completion@16519ms terminal@16624ms \
 unobservable=browser_first_text(requires_a_browser_measurement_through_public_ingress)
 ```
 
-`@` is an offset from the turn's start and `+` a measured duration, both in
-milliseconds, so questions are subtractions on one line:
-`first_stream_text - sandbox_acquire` is the wait between the chat's sandbox
-being in hand and the first assistant text leaving the Gateway;
-`first_stream_text - first_provider_text` is what the Gateway added to the
-provider's own first token; `acquisition=` says whether the turn created its
-sandbox or reclaimed a warm one (`accepted_warm_reclaim`). What the server
-cannot see it declares instead of inferring: `browser_first_text` is always
-`unobservable` here, because only a browser measuring through the front door
-can time what the person actually waited for. `journalctl -u ... | grep "turn
-phase timings"` is therefore a complete per-turn latency record, with the same
-fields also attached to the record for JSON logging.
+`@` is an offset from the turn's start and `+` the phase's own measured
+duration, both in milliseconds, so a phase carrying both **ends** at
+`@ + duration` and the questions are arithmetic on one line. The sandbox is in
+hand at the end of `sandbox_acquire` (`407 + 15747 = 16154ms`), so
+`first_stream_text@16387ms` leaves 233 ms between the sandbox being in hand and
+the first assistant text leaving the Gateway. `first_stream_text -
+first_provider_text` is what the Gateway added to the provider's own first
+token (both are instants, so that one is a plain subtraction). `acquisition=`
+says whether the turn created its sandbox or reclaimed a warm one
+(`accepted_warm_reclaim`). What the server cannot see it declares instead of
+inferring: `browser_first_text` is always `unobservable` here, because only a
+browser measuring through the front door can time what the person actually
+waited for.
+
+```sh
+docker compose --project-directory /opt/hartmesh --env-file "$ENV" \
+  logs gateway | grep 'turn phase timings'
+```
+
+is therefore a complete per-turn latency record. The same fields also ride the
+log record as a structured `turn_phases` field for deployments that enable
+`logging.enhance.format: json`; this profile logs text. The line reports
+confirmed resource counts (`creates=`, `teardowns=`), not attempts: the
+structured record keeps `create_attempts` and `unknown_create_results`
+separately, and one confirmed create can stand for several attempts.
 
 ## Release pinning
 
@@ -2188,7 +2203,11 @@ timings, and the lifecycle ERROR of the previous entry still followed every
 turn, this time after successes. Both reproduced on the same development host,
 now on the released profile shape (this directory's `compose.yaml` and
 `config.yaml`, PostgreSQL and Redis, `run_ownership.heartbeat_enabled` at its
-default `false`, the probe model as above), and repaired.
+default `false`, the probe model as above, `SANDBOX_RUNTIME=runsc`), and
+repaired. As in the entry above, the Gateway ran the previous entry's image
+with four working-tree files (`turn_phases.py`, `runs/manager.py`,
+`logging_config.py`, `runs/worker.py`) and the probe model mounted over it, so
+the figures below are this host's, not a pinned image's.
 
 - The timing line was emitted only into the log record's `extra`, which the
   default text format drops and the JSON formatter rebuilt without; a turn
@@ -2199,7 +2218,13 @@ default `false`, the probe model as above), and repaired.
   first_stream_text@16387ms terminal@16624ms`; the next turn on that chat
   `acquisition=accepted_warm_reclaim sandbox_acquire@336ms+159ms
   first_stream_text@715ms total=967ms` — the reclaim-to-first-text figure the
-  qualification could not observe is now one subtraction on one line.
+  qualification could not observe is 220 ms, readable off one line (the reclaim
+  finished at `336 + 159 = 495ms` and first text left at `715ms`; a phase with
+  a `+` duration ends at `@ + duration`). About 300 ms of that warm turn is the
+  probe's own scripted delay (`HARTMESH_PROBE_FIRST_TEXT_DELAY_S=0.2`,
+  `HARTMESH_PROBE_TAIL_DELAY_S=0.1`), visible as the 201 ms between
+  `model_request` and `first_provider_text`: the line's shape is what this
+  entry proves, not a model-latency figure.
 - `Refused to recreate missing authoritative lifecycle row ... during
   completion persistence` was neither a missing row nor only noise. A durable
   store stamps the terminal projection whether or not lease heartbeats run and
@@ -2214,6 +2239,10 @@ default `false`, the probe model as above), and repaired.
 - Offline: the run-manager, turn-phase, logging and Gateway stream-e2e suites,
   including a new e2e assertion that the line a deployment prints carries
   `first_stream_text@`, and a single-worker completion regression.
-- Not proved here: the tenant class itself, and a four-turn or concurrent
-  measurement of what the added line costs (it is one formatted string per
-  turn, built from the journal already taken).
+- Not proved here: the tenant class itself; the pinned release image (the
+  Gateway ran the previous entry's image with four working-tree files mounted
+  over it); token counters against a real provider (the probe reports no usage,
+  so only `message_count` and the previews were observed repaired); the
+  heartbeat-enabled path this change restructures, exercised offline only; and
+  a four-turn or concurrent measurement of what the added line costs (it is one
+  formatted string per turn, built from the journal already taken).
