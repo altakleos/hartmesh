@@ -46,5 +46,20 @@ RUN set -eux; \
         python-docx==1.2.0 duckdb==1.5.5; \
     python3 -c 'import docx, duckdb, xlrd, weasyprint, xlsxwriter, matplotlib, pandas, openpyxl'
 
+# Stage 5: build matplotlib's font cache once, in the image. The vendor
+# entrypoint deletes ~/.cache/matplotlib/fontlist-*.json at every start, so
+# a fresh sandbox would otherwise pay about seven seconds at one CPU on the
+# first chart a skill draws. MPLCONFIGDIR moves the cache (and the vendor's
+# matplotlibrc, copied here so it stays in effect) to a path the entrypoint
+# leaves alone; the runtime shell inherits the variable, and the smoke
+# workflow checks the cache is found there without a rebuild.
+ENV MPLCONFIGDIR=/opt/aio/matplotlib
+RUN set -eux; \
+    mkdir -p "$MPLCONFIGDIR"; \
+    cp /opt/gem/matplotlibrc "$MPLCONFIGDIR/matplotlibrc"; \
+    python3 -c 'import matplotlib.pyplot'; \
+    chown -R 1000:1000 "$MPLCONFIGDIR"; \
+    test -n "$(ls "$MPLCONFIGDIR"/fontlist-*.json)"
+
 ENV BROWSER_NO_SANDBOX=--no-sandbox
 USER 1000:1000

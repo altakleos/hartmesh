@@ -1,0 +1,36 @@
+/* Brand colours arrive as --primary and --secondary from the template. */
+@page { size: Letter; margin: 16mm 16mm 18mm 16mm; }
+html { font-family: "DejaVu Sans", "Helvetica Neue", Helvetica, Arial, sans-serif; font-size: 10.5pt; color: #222222; }
+body { margin: 0 auto; max-width: 180mm; line-height: 1.45; }
+h1 { font-size: 20pt; margin: 0; color: var(--primary); line-height: 1.2; }
+h2 { font-size: 13pt; margin: 18pt 0 6pt; color: var(--primary); border-bottom: 1.5pt solid var(--secondary); padding-bottom: 2pt; page-break-after: avoid; }
+p { margin: 0 0 6pt; }
+ul { margin: 0 0 6pt 16pt; padding: 0; }
+li { margin: 0 0 3pt; }
+.masthead { display: block; margin-bottom: 10pt; }
+.masthead .logo { max-height: 40pt; max-width: 120pt; display: block; margin-bottom: 6pt; }
+.subtitle { color: #555555; margin-top: 2pt; }
+table.kpis { width: 100%; border-collapse: collapse; margin: 6pt 0 10pt; }
+table.kpis td { width: 20%; vertical-align: top; padding: 6pt 8pt; border-top: 3pt solid var(--primary); background: #f5f6f8; }
+.kpi-label { display: block; font-size: 8pt; text-transform: uppercase; letter-spacing: 0.06em; color: #555555; }
+.kpi-value { display: block; font-size: 15pt; font-weight: bold; margin-top: 2pt; font-variant-numeric: tabular-nums; }
+.kpi-delta { display: block; font-size: 8pt; margin-top: 2pt; color: #555555; }
+.kpi-delta.up { color: #1f7a3f; }
+.kpi-delta.down { color: #a33a2b; }
+table.data { width: 100%; border-collapse: collapse; margin: 4pt 0 8pt; font-size: 9.5pt; page-break-inside: auto; }
+table.data th { text-align: left; background: var(--primary); color: #ffffff; padding: 4pt 6pt; font-weight: bold; }
+table.data td { padding: 3pt 6pt; border-bottom: 0.5pt solid #d9dce1; }
+table.data tr { page-break-inside: avoid; }
+table.data th.currency, table.data th.integer, table.data th.number, table.data th.percent,
+table.data td.currency, table.data td.integer, table.data td.number, table.data td.percent { text-align: right; font-variant-numeric: tabular-nums; }
+table.data tfoot td { font-weight: bold; border-top: 1.5pt solid var(--primary); border-bottom: none; }
+figure { margin: 6pt 0 10pt; page-break-inside: avoid; }
+figure img { width: 88%; max-width: 100%; height: auto; display: block; }
+.note { color: #555555; font-size: 9pt; }
+.checks-line { font-weight: bold; }
+ul.checks, ul.notes { list-style: none; margin-left: 0; font-size: 9pt; }
+.check .status { display: inline-block; min-width: 62pt; font-size: 8pt; text-transform: uppercase; letter-spacing: 0.05em; color: #555555; }
+.check.pass .status { color: #1f7a3f; }
+.check.warn .status { color: #9a6700; }
+.check.fail .status { color: #a33a2b; }
+footer { margin-top: 16pt; padding-top: 6pt; border-top: 0.5pt solid #d9dce1; font-size: 8.5pt; color: #555555; }

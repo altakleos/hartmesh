@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="{{ report.meta.lang }}">
+<head>
+<meta charset="utf-8">
+<title>{{ report.meta.title }}</title>
+<style>
+:root { --primary: {{ brand.primary }}; --secondary: {{ brand.secondary }}; }
+{{ css | safe }}
+</style>
+</head>
+<body>
+<header class="masthead">
+  {% if logo %}<img class="logo" src="{{ logo }}" alt="">{% endif %}
+  <div class="masthead-text">
+    <h1>{{ report.meta.title }}</h1>
+    <p class="subtitle">{% if company %}{{ company }} · {% endif %}{{ report.meta.period.label }} · draft {{ report.meta.draft }}</p>
+  </div>
+</header>
+
+<table class="kpis">
+  <tr>
+  {% for kpi in report.kpis %}
+    <td>
+      <span class="kpi-label">{{ kpi.label }}</span>
+      <span class="kpi-value">{{ fmt(kpi.value, kpi.format) }}</span>
+      {% if kpi.get("delta") and kpi.delta.pct is not none %}
+      <span class="kpi-delta {{ 'up' if kpi.delta.pct >= 0 else 'down' }}">{{ '▲' if kpi.delta.pct >= 0 else '▼' }} {{ fmt(kpi.delta.pct if kpi.delta.pct >= 0 else -kpi.delta.pct, 'percent') }} vs {{ kpi.delta.vs }}</span>
+      {% endif %}
+    </td>
+  {% endfor %}
+  </tr>
+</table>
+
+{% for section in report.sections %}
+<section id="{{ section.id }}">
+  <h2>{{ section.heading }}</h2>
+  {% for paragraph in section.get("paragraphs", []) %}<p>{{ paragraph }}</p>{% endfor %}
+  {% if section.get("bullets") %}
+  <ul>{% for bullet in section.bullets %}<li>{{ bullet }}</li>{% endfor %}</ul>
+  {% endif %}
+  {% if section.get("table") %}
+  {% set table = section.table %}
+  <table class="data">
+    <thead><tr>{% for column in table.columns %}<th class="{{ table.formats[loop.index0] }}">{{ column }}</th>{% endfor %}</tr></thead>
+    <tbody>
+    {% for row in table.rows %}
+      <tr>{% for value in row %}<td class="{{ table.formats[loop.index0] }}">{{ fmt(value, table.formats[loop.index0]) }}</td>{% endfor %}</tr>
+    {% endfor %}
+    </tbody>
+    {% if table.totals %}
+    <tfoot><tr>{% for value in table.totals %}<td class="{{ table.formats[loop.index0] }}">{{ fmt(value, table.formats[loop.index0]) }}</td>{% endfor %}</tr></tfoot>
+    {% endif %}
+  </table>
+  {% endif %}
+  {% for chart_id in section.get("charts", []) %}
+    {% if chart_id in charts %}<figure><img src="{{ charts[chart_id] }}" alt="{{ chart_id | replace('_', ' ') }}"></figure>{% endif %}
+  {% endfor %}
+  {% if section.get("note") %}<p class="note">{{ section.note }}</p>{% endif %}
+</section>
+{% endfor %}
+
+<section id="checks">
+  <h2>Checks</h2>
+  <p class="checks-line">{{ checks_line }}</p>
+  <ul class="checks">
+  {% for check in report.checks %}
+    <li class="check {{ check.status }}"><span class="status">{{ check.status | replace('_', ' ') }}</span> {{ check.text }}</li>
+  {% endfor %}
+  </ul>
+  {% if report.notes %}
+  <ul class="notes">{% for note in report.notes %}<li>{{ note }}</li>{% endfor %}</ul>
+  {% endif %}
+</section>
+
+<footer>
+  Built from {% for input in report.meta.inputs %}{{ input.name }} (uploaded {{ input.uploaded }}){% if not loop.last %}, {% endif %}{% endfor %}. Checked by the report script.
+</footer>
+</body>
+</html>
