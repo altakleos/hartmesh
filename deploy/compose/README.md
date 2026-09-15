@@ -1903,7 +1903,11 @@ development-host stand-in, not the tenant-class gate.
   after 146.4 s and 147.0 s in total (`create` 3.5 and 3.9 s, cleanup 22.9
   and 23.1 s against the 60 s allowance); sandbox, sidecar and both networks
   gone afterwards. The full-profile figures on the same host were 57.4 s
-  sync, 49.6 s async and 23.0 to 38.3 s in concurrent pairs.
+  sync, 49.6 s async and 23.0 to 38.3 s in concurrent pairs. Re-run after
+  the pid limit moved from the 128 candidate to 256 and the switches were
+  routed through the provider's resolver (5 passed in 8 m 03 s): sync
+  10.9 s, async 10.8 s, four concurrent 11.8 to 12.8 s (worst margin
+  107.2 s), never-ready controls 146.7 and 146.4 s.
 - Not proved here, and the estate's gate: the slim boot on the tenant VM
   class (serial and four at once, ten runs, both CPU quotas) and the
   four-way render there with the skill at its data-disk path; both
