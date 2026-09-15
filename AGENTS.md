@@ -67,19 +67,9 @@ code-server and the Node REPL stay off) in four 512 MiB slots (`replicas: 4`,
 sat on; `deploy/compose/scripts/measure-sandbox-boot.sh` measures boot, idle
 and a command under exactly those limits, and the compose README's "Slim
 services profile" section holds the figures. The Gateway image carries
-`skills/public` at `/app/skills/public` (the last layer of
-`backend/Dockerfile`; `.dockerignore` re-admits only that subtree), and the
-profile's `gateway/run.sh` mirrors it onto the tenant data disk at every
-start through `gateway/seed_skills.sh`: `public/` is release material,
-`custom/` is the operator's, and `EXCLUDED_PUBLIC_SKILLS` in `run.sh` names
-what the image carries but the profile does not ship (the skills its own
-skill review refuses, those that post tenant content to or fetch their
-instructions from an external service, and flows that cannot work on a
-tenant VM). An image without the library is an older release: the seed says
-so and leaves `public/` alone.
-`backend/tests/test_compose_public_skills.py` pins the layer, the seed, the
-projection to `/mnt/skills/public` and the tool plane's admission of the
-seeded set; the README's "Public skills" section is the operator's view.
+`skills/public`; the profile's `gateway/run.sh` seeds it onto the tenant
+data disk at every start minus `EXCLUDED_PUBLIC_SKILLS` (reasons in
+`run.sh`); see that README's "Public skills" section.
 
 `durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
 AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or
