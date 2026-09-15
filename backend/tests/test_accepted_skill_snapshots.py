@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import importlib
 import json
+import logging
 import os
 import shutil
 import stat
@@ -292,7 +293,7 @@ def test_accepted_execution_rejects_live_skill_reads_before_sandbox_io(
         ),
         (
             lambda runtime: sandbox_tools.bash_tool.func(runtime, "bash /mnt/skills/custom/tool/run.sh", "execute mutable script"),
-            "Error: Durable invocation may access only its accepted skill snapshot",
+            "Error: Accepted invocation may access only its accepted skill snapshot",
         ),
         (
             lambda runtime: sandbox_tools.bash_tool.func(
@@ -300,7 +301,7 @@ def test_accepted_execution_rejects_live_skill_reads_before_sandbox_io(
                 "cd /mnt/skills/.accepted/" + "a" * 64 + "; cat ../../custom/tool/SKILL.md",
                 "escape accepted tree",
             ),
-            "Error: Durable invocation may access only its accepted skill snapshot",
+            "Error: Accepted invocation may access only its accepted skill snapshot",
         ),
     ],
 )
@@ -2738,6 +2739,7 @@ async def test_worker_materialization_follows_the_deployment_profile(
     monkeypatch,
     tmp_path: Path,
     snapshot_paths: Paths,
+    caplog: pytest.LogCaptureFixture,
     profile: str,
     expect_projection: bool,
 ) -> None:
@@ -2829,9 +2831,12 @@ async def test_worker_materialization_follows_the_deployment_profile(
             token = runtime.context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
             assert token is not None
         else:
-            with pytest.raises(
-                AcceptedSkillSandboxBindingError,
-                match="accepted_skill_snapshot_materialization_failed",
+            with (
+                caplog.at_level(logging.ERROR, logger="deerflow.runtime.runs.worker"),
+                pytest.raises(
+                    AcceptedSkillSandboxBindingError,
+                    match="accepted_skill_snapshot_materialization_failed",
+                ),
             ):
                 await _materialize_accepted_skill_projection(
                     runtime,
@@ -2839,6 +2844,8 @@ async def test_worker_materialization_follows_the_deployment_profile(
                     record=record,
                     claim_validator=validate_claim,
                 )
+            # The right refusal, not merely a refusal.
+            assert any("reason='sandbox_provider_unqualified'" in message for message in caplog.messages), caplog.messages
             assert provider.provisioned == []
             assert provider.bound == []
             assert "sandbox_id" not in runtime.context

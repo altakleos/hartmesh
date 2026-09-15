@@ -50,6 +50,7 @@ def seeded_gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[e2e._Ga
         "use: _seeded_skill_sandbox_provider:ProjectionProvider",
     )
     assert config_yaml != e2e._MINIMAL_CONFIG_YAML
+    config_yaml += "deployment:\n  profile: local_development\n"
     with e2e.serve_gateway(home, config_yaml=config_yaml) as served:
         yield served
 

@@ -14,11 +14,18 @@ about immutability and must never be configured outside tests.
 
 from __future__ import annotations
 
+import sys
+
 from deerflow.sandbox.accepted_material import AcceptedMaterialCapability
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 
 
 class ProjectionProvider(LocalSandboxProvider):
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        if "pytest" not in sys.modules:
+            raise RuntimeError("ProjectionProvider is test-only and must never be configured")
+        super().__init__(*args, **kwargs)
+
     def accepted_skill_material_capability(self, sandbox_id: str) -> AcceptedMaterialCapability:
         if self.has_accepted_skill_isolation(sandbox_id):
             return AcceptedMaterialCapability.IMMUTABLE_READ_ONLY

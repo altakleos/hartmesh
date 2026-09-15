@@ -131,7 +131,11 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
     from deerflow.config import app_config as app_config_module
     from deerflow.config import paths as paths_module
     from deerflow.persistence import engine as engine_module
+    from deerflow.sandbox.sandbox_provider import shutdown_sandbox_provider
 
+    # The provider singleton outlives a served Gateway; the next one must
+    # build its own from its own config.
+    shutdown_sandbox_provider()
     for module, attr in (
         (app_config_module, "_app_config"),
         (app_config_module, "_app_config_path"),
@@ -272,6 +276,9 @@ def serve_gateway(home: Path, *, config_yaml: str = _MINIMAL_CONFIG_YAML) -> Ite
             loopback.close()
         journal_logger.removeHandler(sink)
         journal_logger.setLevel(previous_level)
+        from deerflow.sandbox.sandbox_provider import shutdown_sandbox_provider
+
+        shutdown_sandbox_provider()
         monkeypatch.undo()
 
 

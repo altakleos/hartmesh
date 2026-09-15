@@ -404,7 +404,7 @@ async def _await_accepted_skill_projection_claim(
     return False
 
 
-def _durable_admission_required(context: dict[str, Any]) -> bool:
+def _durable_admission_required(app_config: AppConfig | None) -> bool:
     """Whether the configured deployment promise makes this admission durable.
 
     Every Gateway run has a record, so a record's presence says nothing about
@@ -412,23 +412,19 @@ def _durable_admission_required(context: dict[str, Any]) -> bool:
     no durable execution, and its accepted nonempty material runs through the
     accepted-skills projection (an ordinary Kind: thread resource key, park
     terminal, ``.accepted`` as the only skills mount). The durable profiles
-    admit only a qualified materializer and fail closed without one. An
-    unreadable configuration counts as durable, so nothing degrades by
-    accident.
+    admit only a qualified materializer and fail closed without one. A
+    missing configuration or profile counts as durable, so nothing degrades
+    by accident.
     """
     from deerflow.deployment.topology import coerce_deployment_profile
 
-    configured = context.get("app_config")
-    deployment = configured.deployment if isinstance(configured, AppConfig) else None
-    if deployment is None:
-        try:
-            from deerflow.config import get_app_config
-
-            deployment = get_app_config().deployment
-        except Exception:
-            return True
+    if not isinstance(app_config, AppConfig):
+        return True
+    profile = getattr(getattr(app_config, "deployment", None), "profile", None)
+    if profile is None:
+        return True
     try:
-        return coerce_deployment_profile(getattr(deployment, "profile", None)).is_durable
+        return coerce_deployment_profile(profile).is_durable
     except ValueError:
         return True
 
@@ -479,9 +475,10 @@ async def _materialize_accepted_skill_projection(
         )
 
         configured_app = context.get("app_config")
+        resolved_app = configured_app if isinstance(configured_app, AppConfig) else await safe_app_config_async()
         await authorize_sandbox_execution_async(
             context=context,
-            app_config=(configured_app if isinstance(configured_app, AppConfig) else await safe_app_config_async()),
+            app_config=resolved_app,
         )
         provider = get_sandbox_provider()
         from deerflow.runtime.kubernetes_qualification import (
@@ -498,7 +495,7 @@ async def _materialize_accepted_skill_projection(
             validate_accepted_materialization,
         )
 
-        durable_admission = record is not None and _durable_admission_required(context)
+        durable_admission = record is not None and _durable_admission_required(resolved_app)
         selection = await resolve_accepted_materializer(
             provider,
             binding=binding,
@@ -659,7 +656,7 @@ async def _materialize_accepted_skill_projection(
                 evidence=evidence,
             )
             sandbox_id = sandbox.id
-        elif not durable_admission:
+        elif not durable_admission and not accepted_sandbox_qualification_candidate_enabled():
             # The accepted-skills projection: the provider's own parked,
             # per-thread sandbox with the snapshot bound as its only skills
             # mount. This is the released tenant profile's execution path,
@@ -751,11 +748,12 @@ async def _materialize_accepted_skill_projection(
         # The boundary error is deliberately opaque to callers; the reason
         # code behind it is what an operator needs to read in the log.
         logger.error(
-            "Accepted skill materialization failed run_id=%s error_class=%s reason=%s",
+            "Accepted skill materialization failed run_id=%s error_class=%s reason=%r",
             binding.run_id,
             type(exc).__name__,
-            exc,
+            str(exc)[:500],
         )
+        logger.debug("Accepted skill materialization failure detail", exc_info=True)
         raise AcceptedSkillSandboxBindingError(
             "accepted_skill_snapshot_materialization_failed",
         ) from None

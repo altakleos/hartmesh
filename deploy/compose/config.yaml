@@ -114,8 +114,9 @@ sandbox:
 skills:
   # Skill library on the tenant data disk: public/ is mirrored from the
   # Gateway image at every start by gateway/run.sh (README: "Public skills"),
-  # custom/ is the operator's. The same host path is what the sandbox
-  # bind-mounts (through the Gateway's skills_view projection).
+  # custom/ is the operator's. A chat's sandbox sees an immutable per-turn
+  # snapshot under container_path/.accepted instead of this path (README:
+  # "Public skills").
   path: /srv/hartmesh/home/skills
   container_path: /mnt/skills
 
@@ -134,7 +135,9 @@ run_events:
 # local_development is the self-migrating profile this single Gateway runs
 # with. durable_production is also self-migrating but hard-requires the
 # EXECUTION_POLICY_HMAC_KEYS / EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID credentials,
-# which are not in the .env contract (README: "Deployment profile").
+# which are not in the .env contract; a nonempty skill snapshot also needs a
+# qualified durable materializer, which this backend has none of (README:
+# "Deployment profile").
 deployment:
   profile: local_development
   readiness:
