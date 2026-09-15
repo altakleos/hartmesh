@@ -320,6 +320,7 @@ def projection_env(tmp_path: Path):
 
 
 def test_seeded_skills_project_to_the_sandbox_public_mount(projection_env) -> None:
+    """Pins the ordinary-sandbox mount; a chat turn is an accepted session and never sees this path."""
     env = projection_env
     storage = LocalSkillStorage(host_path=str(env.skills_root), container_path=env.config.skills.container_path, app_config=env.config)
 

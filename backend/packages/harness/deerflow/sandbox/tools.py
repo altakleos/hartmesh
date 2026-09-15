@@ -199,11 +199,11 @@ def _is_skills_path(path: str) -> bool:
     return path == skills_prefix or path.startswith(f"{skills_prefix}/")
 
 
-_ACCEPTED_SKILL_ACCESS_DENIED = "Durable invocation may access only its accepted skill snapshot"
+_ACCEPTED_SKILL_ACCESS_DENIED = "Accepted invocation may access only its accepted skill snapshot"
 
 
 def _validate_runtime_skill_path(runtime: object, path: str) -> None:
-    """Restrict durable runs to their exact immutable ``.accepted`` tree."""
+    """Restrict an accepted invocation to its exact immutable ``.accepted`` tree."""
     accepted, snapshot_id = accepted_skill_access_from_runtime(runtime)
     if not accepted or not _is_skills_path(path):
         return

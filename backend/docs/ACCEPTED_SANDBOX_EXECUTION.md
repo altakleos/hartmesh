@@ -121,6 +121,53 @@ to the provider's own id, which the declaration carries as `provider_ref`, for
 the declaring execution only; a stranger's call resolves to no events and no
 decision, and the provider id never appears in state, logs, or evidence.
 
+### Which population a deployment profile runs
+
+Every Gateway run is an accepted invocation with a run record, and a nonempty
+effective-skill snapshot makes its materialization mandatory before the
+authoritative running transition. The population that serves it is the
+deployment profile's decision, not the record's:
+
+| Profile | Nonempty snapshot | Empty snapshot |
+| --- | --- | --- |
+| `local_development` | Accepted-skills projection: the provider's own parked `(user, thread)` sandbox with `.accepted` as its only skills mount, bound before the model is called, cleared at release and re-projected at the next bind | Accepted-skills projection with no snapshot bound: no materialization before the model, the sandbox is provisioned at the first tool call, `.accepted` is empty and every skills path is refused |
+| `durable_production`, `durable_two_gateway_v1` | A qualified materializer, or `sandbox_provider_unqualified` before any sandbox exists | Accepted-skills projection with no snapshot bound: no materialization before the model, the sandbox is provisioned at the first tool call, `.accepted` is empty and every skills path is refused |
+
+The ordinary thread sandbox, which mounts the Gateway's `skills_view/public`
+read-only at `/mnt/skills/public`, belongs to runs that carry no resolved
+agent material; no Gateway turn is one. The profile decides only when the
+provider offers no materializer; a provider that offers one whose
+qualification is stale or whose capabilities fall short still refuses under
+every profile, and the Kubernetes qualification candidate never takes the
+projection.
+
+`_durable_admission_required` in `runtime/runs/worker.py` reads the resolved
+configuration's profile; a missing configuration or profile counts as
+durable. From 2026-09-03 until
+this rule the worker keyed the refusal on the record's presence instead, which
+made the projection population unreachable from any real run: the first tenant
+release that seeded a public library (v2.1.0+hartmesh.13) refused every chat
+turn with `AcceptedSkillSandboxBindingError` (reason
+`sandbox_provider_unqualified`) on a healthy stack, and no earlier release had
+noticed because no tenant had a skill, so every snapshot was empty. Two
+properties of the projection path matter when reading timings and paths: the
+sandbox is provisioned before the model runs, so on a new thread the cold
+start precedes first text; and the model-visible skill path is
+`/mnt/skills/.accepted/<snapshot digest>/<category>/<name>`, the live
+`/mnt/skills/public` mount is absent from such a sandbox, and the sandbox
+tools refuse skill paths outside the snapshot. A provider that cannot declare
+immutable accepted material refuses a nonempty snapshot under every profile
+(`accepted_skill_snapshot_immutability_unsupported`): the host-local provider
+answers `empty_only`. A stock `make dev` stack uses that provider and the
+repository's own `skills/`, so any turn by a user with a skill enabled refuses
+with that reason; a local stack that runs skills needs the AIO provider over
+Docker. `tests/_seeded_skill_sandbox_provider.py` is the
+test-only subclass that declares it for the scripted-Gateway regression
+(`tests/test_seeded_skill_gateway_stream_e2e.py`);
+`test_worker_materialization_follows_the_deployment_profile` pins the three
+profiles. The boundary error stays opaque to callers; the worker logs the
+reason code (`Accepted skill materialization failed ... reason=`).
+
 ### Park means reuse
 
 Park is only worth its name if the next turn actually takes the container
@@ -600,7 +647,7 @@ evidence for a configured deployment. Both are required for durable admission.
 | Provider/profile | Ordinary use | Immutable accepted material | Ownership / shared expiry | Atomic operation fence | Resolved image and restricted isolation | Protected lookup after process loss | Durable one replica | Exact two |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | Remote AIO/Kubernetes `rwx_verified_copy_v2` | Yes | Declared and verified per attempt | Declared atomic ownership and authoritative shared expiry | **No**; baseline check-then-call only | Declared; each attempt binds observed digests | **No** | Eligible only with a current pinned passing artifact | **No** |
-| Local/container AIO | Yes | Existing local accepted-only behavior only; no durable V2 selection | No qualified durable profile | No | No live durable qualification | No | No | No |
+| Local/container AIO | Yes | The accepted-skills projection only ("Which population a deployment profile runs"); no durable V2 selection | No qualified durable profile | No | No live durable qualification | No | No | No |
 | Local host, E2B, BoxLite, Tenki | Yes under their ordinary contracts | No durable accepted profile | Not claimed for this contract | No | Not qualified for this contract | Not claimed | No | No |
 | OpenSandbox 0.1.14 / SDK 0.1.15 | Yes | `empty_only`; nonempty durable paths rejected | Required ownership CAS is absent | No | Resolved-image readback is absent | No | No | No |
 | In-memory accepted adapter | Tests only | Contract fixture | Test state only | No production claim | No production claim | No | No production claim | No |

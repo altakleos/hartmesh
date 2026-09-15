@@ -137,8 +137,9 @@ Missing qualification infrastructure is an unpassed gate, never a skip.
 Skill review: `skills/public/skill-reviewer/` is the read-only reviewer using
 the `review_skill_package` tool and `contracts/skill_review/`; model-visible
 data is compact and tag-neutralized, raw payloads stay in tool artifacts.
-Durable invocations snapshot effective skills before admission and execute only
-accepted immutable material (nonempty packages require Docker/AIO); live edits
+Every admission snapshots effective skills and executes only that immutable
+snapshot at `/mnt/skills/.accepted` (durable profiles need a qualified
+materializer, `local_development` the provider's projection); live edits
 affect later invocations only. CI skill-review waivers
 (`.github/skill-review-waivers.v1.json`, enforced by
 `scripts/review_changed_public_skills.py`) come only from the trusted base

@@ -183,14 +183,19 @@ beside `public/` and swapped in by two renames, so a copy that fails leaves
 the previous set in place and stops the start before uvicorn runs. `public/`
 is therefore release material. A skill an earlier image shipped, a file
 dropped in by hand or an edit made in place is gone after the next start;
-until that start an edited public skill is live, and the sandbox projection
-picks the edit up at the next sandbox acquire, so the seed is a restore, not
-a tamper guard. A skill the operator adds goes in `home/skills/custom/`,
-which the seed never touches. The sandbox-visible projection,
-`home/skills_view/`, is the Gateway's own: it is rebuilt from `public/` at
-startup and bind-mounted read-only at `/mnt/skills/public`. Because the
-library travels in the image, a change to a public skill reaches a tenant
-only through a release (RELEASING.md). A Gateway image older than this
+until that start an edited public skill is live, and the next turn admitted
+after the edit snapshots it, so the seed is a restore, not a tamper guard. A
+skill the operator adds goes in `home/skills/custom/`, which the seed never
+touches. A chat's sandbox never mounts `public/` itself: every turn is
+admitted with an immutable snapshot of the skills enabled for that user,
+projected read-only at `/mnt/skills/.accepted/<snapshot digest>/public/<name>`
+for the turn and cleared when it ends, and the sandbox tools refuse skill
+paths outside it (`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which
+population a deployment profile runs"). The Gateway's own projection,
+`home/skills_view/`, is rebuilt from `public/` at startup; the measurement
+script below mounts `home/skills` directly, so its paths carry `public/`.
+Because the library travels in the image, a change to a public skill reaches
+a tenant only through a release (RELEASING.md). A Gateway image older than this
 feature carries no library; the seed says so in the log and leaves `public/`
 as it is, so a profile checked out ahead of its pinned image still starts.
 A library directory that holds no skill, or that carries a symlink, is the
@@ -628,12 +633,13 @@ pid peak sits at a quarter of the 256 limit. This host gave each of the four
 sandboxes two vCPUs where the tenant class gives one, so the concurrency
 figures are the least transferable in this section. The invocation, from
 the bundle directory on a guest whose skills directory carries the skill and
-a workbook to build from:
+a workbook to build from (the recorded figures predate the `public/` seed
+and were taken with `/mnt/skills/business-report/...`):
 
 ```sh
 PROFILES=slim CPUS=1 CONCURRENT=4 RUNS=2 \
   MOUNTS="-v /srv/hartmesh/home/skills:/mnt/skills:ro -v /srv/hartmesh/operator/measure:/mnt/measure:ro" \
-  EXEC='set -e; R=/mnt/skills/business-report/scripts/report.py; python3 $R build /mnt/measure/export.xlsx --period 2026-08 --out /tmp/r >/dev/null; for f in pdf docx xlsx; do python3 $R render /tmp/r/2026-08-business-review.report.json --to $f >/dev/null; done' \
+  EXEC='set -e; R=/mnt/skills/public/business-report/scripts/report.py; python3 $R build /mnt/measure/export.xlsx --period 2026-08 --out /tmp/r >/dev/null; for f in pdf docx xlsx; do python3 $R render /tmp/r/2026-08-business-review.report.json --to $f >/dev/null; done' \
   bash scripts/measure-sandbox-boot.sh
 ```
 
@@ -683,6 +689,11 @@ at readiness completed a public hello (streamed output, one model call, a
 stored answer) in 46.963 s. Nothing about the model, keys, egress, runtime or
 Gateway configuration was involved. These figures compared CPU quotas on one
 installed runtime; they say nothing about any particular `runsc` release.
+Since the seeded library makes every turn's skill snapshot nonempty, the
+sandbox is bound before the model is called, so a new chat's first text waits
+out the whole cold start (80 to 91 s measured on one CPU, 9.0 to 11.7 s on the
+slim profile) and a chat whose sandbox was evicted pays it again; a reused
+sandbox does not (§ "Public skills").
 
 **The setting.** `SANDBOX_READY_TIMEOUT` in the tenant `.env` overrides the
 template: whole seconds, 60 to 600 inclusive, absent means 120. The floor is
@@ -874,7 +885,8 @@ while at least one slot is idle. With all four in active use the provider
 logs a soft-cap breach and creates a fifth anyway; one such overflow
 (512 + 96 MiB) fits inside the 1024 MiB the line leaves unallocated, a second
 does not. Eviction is customer-visible: a thread whose sandbox was evicted
-gets a fresh one on its next turn (its files persist under `home/`).
+gets a fresh one on its next turn (its files persist under `home/`, and that
+turn waits a cold start before its first text).
 `idle_timeout: 1800` keeps an idle sandbox warm for thirty minutes: the budget
 reserves every slot whether or not it is used, and a cold start of the
 sandbox image under gVisor takes tens of seconds, so idle slots are kept
@@ -1026,7 +1038,14 @@ credentials at start, which are not in the `.env` contract; adopting it is a
 two-key contract change the operator must make, after which it is a one-line
 change here. Everything the durable profile would otherwise check is already
 in place: PostgreSQL for every store, `run_events.backend: db`,
-`dedupe_storage: auto`, and an explicit `DEER_FLOW_TENANT_ID`.
+`dedupe_storage: auto`, and an explicit `DEER_FLOW_TENANT_ID`. One thing is
+not: under `durable_production` a turn whose skill snapshot is nonempty, which
+every tenant's is since `public/` is seeded, admits only a qualified durable
+materializer, and the local container backend offers none, so every chat turn
+would fail with `AcceptedSkillSandboxBindingError` before a sandbox existed
+(`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which population a deployment
+profile runs"). Adopting the durable profile is blocked on a qualified
+materializer, not only on the two keys.
 
 The Gateway runs exactly one worker. `DEER_FLOW_INTERNAL_AUTH_TOKEN` is
 generated per process when unset, so a single worker is what keeps it coherent
@@ -2076,3 +2095,61 @@ UV_EXTRAS=postgres .`), so a stand-in for the image the next cut pins.
   adoption through the HTTP endpoints (the service path is what the offline
   test drives), and the pinned Gateway image itself, which the next cut
   builds from this tree.
+
+Normal chat with the seeded library (2026-09-15). The tenant-class
+qualification of v2.1.0+hartmesh.13 found the first browser turn of a fresh
+user failing in under three seconds with `AcceptedSkillSandboxBindingError`
+before any sandbox existed, on a healthy stack that had seeded the 13
+packages. Reproduced and repaired on the same development host and
+gateway-only stack as the entry above, this time with a model: the operator
+model file (`HARTMESH_MODELS_FILE`) selecting the repository's scripted
+probe model (`backend/tests/_turn_phase_probe_model.py`, mounted into the
+Gateway; it streams a fixed answer and calls no tool), the Gateway image the
+previous entry built, and turns driven over the released run-stream route
+by a registered user.
+
+- Cause: every Gateway run is an accepted invocation; with a nonempty
+  effective-skill snapshot the worker must materialize it before the run
+  starts; since 2026-09-03 the worker refused a provider without a qualified
+  durable materializer whenever a run record existed, which is always, and
+  the local container backend never offers one. No earlier tenant release
+  carried a skill, so the snapshot was empty and the guard never fired. The
+  worker now decides by the deployment profile: `local_development` runs the
+  accepted-skills projection, the durable profiles refuse as before
+  (`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which population a
+  deployment profile runs").
+- Before the repair, the image as it is: `Run created`, `Using local
+  container sandbox backend` and `Run failed ...
+  error_class=AcceptedSkillSandboxBindingError` in the same second; the
+  stream `metadata`, `error` (`Runtime operation failed (reference: ...)`),
+  `end` after 3.8 s; no sandbox container.
+- After, with the repaired worker mounted over the image's file: the first
+  turn on a new chat streamed `metadata`, six `messages`, `end`. Its
+  container `deer-flow-sandbox-<id>-accepted` was created before the model
+  was called (first text 30.3 s after the request on this host under
+  runsc: the cold start now precedes the model), mounting
+  `/mnt/user-data/{workspace,uploads,outputs}` read-write and
+  `/mnt/skills/.accepted` read-only, no `/mnt/skills/public` (this settles
+  the previous entry's open item the other way: a chat sandbox does not list
+  `/mnt/skills/public/business-report`; that mount belongs to sandboxes of
+  runs with no accepted material, which no chat turn is); then
+  `Released sandbox ... to warm pool (container still running)`. The second
+  turn on the same chat: `Reclaimed warm-pool sandbox <same id>` in the same
+  second, first text after 9.8 s, the same container. A third turn on a
+  second chat created a second container; during it,
+  `/mnt/skills/.accepted/<snapshot digest>/public/` listed the 13 seeded
+  packages with `business-report/SKILL.md` intact, while the idle chat's
+  container showed an empty `.accepted` (cleared at release, re-projected at
+  the next bind).
+- Offline: `test_worker_materialization_follows_the_deployment_profile`
+  (three profiles) and `test_seeded_skill_gateway_stream_e2e.py` (the real
+  route, admission and worker with one seeded public skill); the accepted
+  material, AIO provider, turn-phase and warm-reuse suites, 274 passed.
+- Observed, not this repair's: the Gateway logs `Refused to recreate missing
+  authoritative lifecycle row ... during completion persistence` at ERROR
+  after every turn, failed or successful; and a reclaimed sandbox still
+  costs about ten seconds before first text on this host, the warm-acquire
+  latency the warm-reuse entry left unmeasured.
+- Not proved here: the tenant class itself (the tenant-class qualification
+  is to be rerun on a release that carries the repair), and a turn that runs
+  a tool in the projected skill through a real model.
