@@ -5,6 +5,19 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.14] — 2026-09-15
+
+- hartmesh#82 — run an accepted skill snapshot through the accepted-skills projection on a non-durable deployment profile. Since 48dd3aa7 the worker reached that branch only when a run had no record, which never holds for a Gateway run, so on `local_development` the first turn of any deployment whose effective skills were non-empty failed before a sandbox existed with `AcceptedSkillSandboxBindingError`; the guard first mattered in 2.1.0+hartmesh.13, which is the first release that gives a deployment a seeded skill library. The two durable profiles keep refusing without a qualified materializer, and the opaque boundary error is now preceded by a log line naming the reason code.
+
+Verified live on a development host against the released compose shape
+(cold and reclaimed chats, the snapshot's packages visible under
+`/mnt/skills/.accepted/<digest>/` during a turn and empty between turns) and
+offline by a scripted-Gateway stream test over a seeded skill. Not a
+tenant-class qualification, and not a turn that runs a tool from the
+projected skill through a real model.
+
+[2.1.0+hartmesh.14]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.14
+
 ## [2.1.0+hartmesh.13] — 2026-09-15
 
 - hartmesh#78 — sandbox image: ship the document libraries skill scripts import (`duckdb`, `python-docx`) and pre-build matplotlib's font cache; `data-analysis` reads `.xls` and installs nothing at runtime.
