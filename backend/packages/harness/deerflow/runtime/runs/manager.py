@@ -2090,7 +2090,29 @@ class RunManager:
             raise AcceptedEvidenceIntegrityError() from None
 
     async def update_run_completion(self, run_id: str, **kwargs) -> None:
-        """Persist token usage and completion data to the backing store."""
+        """Persist token usage and completion data to the backing store.
+
+        Terminal authority
+        ------------------
+        A durable store stamps the row's terminal projection (displaced owner,
+        its last active state version, the terminal state version the lifecycle
+        CAS minted) whether or not lease heartbeats run, and refuses a
+        completion write that does not name it. This method therefore supplies
+        that authority on both paths: with heartbeats the owner is *asserted*
+        as this worker, so a row a peer terminalized can never authorize this
+        write; without them (the single-worker default) it names the projection
+        this run's own terminal CAS returned, which must equal this worker --
+        the record's projection fields are never populated by hydration, only
+        by a transition this process won. Supplying nothing is what dropped
+        every turn's counters, message count and previews on a durable
+        single-worker deployment.
+
+        A refused write over a row that *exists* is a refusal, not a missing
+        row: a durable store's refusal is final and is logged as one, while a
+        compatibility store (``durable_lifecycle`` false, where the in-memory
+        record is the authority) keeps its write-through recovery -- persist
+        the record's snapshot, then retry.
+        """
         row_recovery_payload: dict[str, Any] | None = None
         record: RunRecord | None = None
         terminal_authority: dict[str, object] = {}
@@ -2101,15 +2123,38 @@ class RunManager:
                 logger.warning("Skipped completion persistence for run %s after lease ownership was lost", run_id)
                 return
             if record is not None:
-                if self._store is not None and self._store.durable_lifecycle and self.heartbeat_enabled and record.operation_kind == ThreadOperationKind.run:
+                if self._store is not None and self._store.durable_lifecycle and record.operation_kind == ThreadOperationKind.run:
                     terminal_version = record.checkpoint_terminal_state_version
-                    terminal_authority_missing = not (type(terminal_version) is int and terminal_version > 0 and record.status.value == kwargs.get("status"))
-                    if not terminal_authority_missing:
-                        terminal_authority = {
-                            "expected_owner_worker_id": self._worker_id,
-                            "expected_active_state_version": terminal_version - 1,
-                            "expected_terminal_state_version": terminal_version,
-                        }
+                    terminal_recorded = type(terminal_version) is int and terminal_version > 0 and record.status.value == kwargs.get("status")
+                    if self.heartbeat_enabled:
+                        # Multi-worker: only this worker's own terminal write
+                        # authorizes the projection, so the owner is asserted,
+                        # never read back from the row a peer may have written.
+                        terminal_authority_missing = not terminal_recorded
+                        if terminal_recorded:
+                            terminal_authority = {
+                                "expected_owner_worker_id": self._worker_id,
+                                "expected_active_state_version": terminal_version - 1,
+                                "expected_terminal_state_version": terminal_version,
+                            }
+                    elif terminal_recorded:
+                        # Without heartbeats (the default) the terminal transition
+                        # still stamped the row's projection, and a durable store
+                        # refuses a completion write that does not name it, so a
+                        # turn's counters, message count and previews were dropped.
+                        # The authority is still asserted, not taken on the row's
+                        # word: the projection is read from what this run's own
+                        # terminal CAS returned, it must name this worker, and the
+                        # store proves the whole tuple against a row that is
+                        # already terminal and unowned.
+                        projection_owner = record.terminal_projection_owner_worker_id
+                        projection_active_version = record.terminal_projection_active_state_version
+                        if projection_owner == self._worker_id and type(projection_active_version) is int:
+                            terminal_authority = {
+                                "expected_owner_worker_id": projection_owner,
+                                "expected_active_state_version": projection_active_version,
+                                "expected_terminal_state_version": terminal_version,
+                            }
                 for key, value in kwargs.items():
                     if key == "status":
                         continue
@@ -2140,20 +2185,36 @@ class RunManager:
             if updated is False:
                 existing = await self._store.get(run_id)
                 requested_status = kwargs.get("status")
-                if existing is not None and existing.get("status") != requested_status:
+                if existing is not None:
                     existing_status = existing.get("status")
-                    logger.warning(
-                        "Run completion update for %s skipped because store row is already at %s",
-                        run_id,
-                        existing_status,
-                    )
-                    if existing_status == "error" and record is not None and self.heartbeat_enabled:
-                        await self._mark_ownership_lost(
-                            record,
-                            reason="A peer terminalized the run before completion data was persisted.",
-                            require_active=False,
+                    if existing_status != requested_status:
+                        logger.warning(
+                            "Run completion update for %s skipped because store row is already at %s",
+                            run_id,
+                            existing_status,
                         )
-                    return
+                        if existing_status == "error" and record is not None and self.heartbeat_enabled:
+                            await self._mark_ownership_lost(
+                                record,
+                                reason="A peer terminalized the run before completion data was persisted.",
+                                require_active=False,
+                            )
+                        return
+                    if self._store.durable_lifecycle:
+                        # The row is there and already carries the outcome this
+                        # write reports: the store refused the write itself, on
+                        # its terminal authority. Recreation is not the answer
+                        # to a row that exists, and calling it missing hides
+                        # both the counters this turn lost and any real missing
+                        # row. A compatibility store keeps its write-through
+                        # recovery below, where the in-memory record is the
+                        # authority and rewriting the row is how it recovers.
+                        logger.warning(
+                            "Run completion data for %s was refused by the store on its terminal authority; the %s row keeps its earlier counters",
+                            run_id,
+                            requested_status,
+                        )
+                        return
                 if row_recovery_payload is None:
                     logger.warning("Failed to recreate missing run %s for completion persistence", run_id)
                     return

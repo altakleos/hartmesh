@@ -93,18 +93,27 @@ database:
 
 
 class _JournalSink(logging.Handler):
-    """Collects the one structured record each turn emits, by run id."""
+    """Collects the one record each turn emits, by run id: fields and message."""
 
     def __init__(self) -> None:
         super().__init__(level=logging.INFO)
         self._lock = threading.Lock()
         self._by_run: dict[str, dict[str, Any]] = {}
+        self._messages: dict[str, str] = {}
 
     def emit(self, record: logging.LogRecord) -> None:
         wire = getattr(record, "turn_phases", None)
         if isinstance(wire, dict) and isinstance(wire.get("run_id"), str):
             with self._lock:
                 self._by_run[wire["run_id"]] = wire
+                self._messages[wire["run_id"]] = record.getMessage()
+
+    def message_for(self, run_id: str) -> str:
+        """The line a deployment's formatter prints for *run_id*."""
+        with self._lock:
+            message = self._messages.get(run_id)
+        assert message is not None, f"no turn-phase message was emitted for run {run_id}"
+        return message
 
     def wait_for(self, run_id: str, *, timeout: float = 10.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout
@@ -430,6 +439,32 @@ def test_text_is_delivered_incrementally_and_the_phases_line_up(gateway: _Gatewa
         f"journal model_request={model_request:.0f}ms provider_text={provider_text:.0f}ms stream_text={stream_text:.0f}ms "
         f"completion={completion:.0f}ms terminal={terminal:.0f}ms total={wire['total_ms']:.0f}ms"
     )
+
+
+def test_the_emitted_line_carries_the_turn_timing_a_deployment_can_read(gateway: _Gateway) -> None:
+    """One line, one turn: the offsets an operator needs without a second source.
+
+    A deployment prints ``%(message)s``. Reading a turn's timing from a
+    released Gateway therefore has to be possible from the message alone --
+    including the outgoing-text offset, which no SSE body timestamps and no
+    other log line records.
+    """
+    with httpx.Client() as client:
+        csrf, thread_id = _register_and_create_thread(client, gateway.loopback_url)
+        observed = _observe_stream(client, gateway.loopback_url, thread_id, csrf, "probe:text please")
+
+    wire = gateway.journals.wait_for(observed.run_id)
+    message = gateway.journals.message_for(observed.run_id)
+
+    assert message.startswith("turn phase timings")
+    assert f"run={observed.run_id}" in message
+    assert "outcome=success" in message
+    for phase in ("admission", "model_request", "first_provider_text", "first_stream_text", "model_completion", "terminal"):
+        assert f"{phase}@" in message, message
+    stream_text_ms = _phase_at(wire, "first_stream_text")
+    assert f"first_stream_text@{round(stream_text_ms)}ms" in message
+    assert "unobservable=browser_first_text(" in message
+    print(f"turn-phase e2e (released log line): {message}")
 
 
 def test_a_silent_turn_manufactures_no_text_timestamps(gateway: _Gateway) -> None:
