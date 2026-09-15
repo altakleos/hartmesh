@@ -5,6 +5,24 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.13] — 2026-09-15
+
+- hartmesh#78 — sandbox image: ship the document libraries skill scripts import (`duckdb`, `python-docx`) and pre-build matplotlib's font cache; `data-analysis` reads `.xls` and installs nothing at runtime.
+- hartmesh#79 — add the `business-report` skill: a tabular export becomes a branded PDF, DOCX and XLSX management report from one `report.json`, with a number verifier for model prose and a checks line; the smoke job builds and renders one on the image.
+- hartmesh#80 — tenant profile: the sandbox image's slim services profile (six `DISABLE_*` switches), four 512 MiB slots at 256 pids on the same 5.0 GiB line with the Gateway at 1152 MiB, a measurement script for boot and idle under those limits, and a smoke step that runs the image under them.
+- hartmesh#81 — ship the public skill library in the backend image and seed it onto the tenant data disk at every start, minus the skills the profile's own skill review refuses or its policy excludes (13 of 24 seeded); an older Gateway image without the library still starts.
+- frontend-hm (042e044d, be53b015, e3e0a2be) — isolate the Hartmesh UI from the pinned upstream snapshot: the frontend image now builds from `frontend-hm/Dockerfile` and `make check-frontend-isolation` guards the snapshot.
+
+Verified on a development host under runsc (boot, four concurrent renders,
+the seed and projection on a gateway-only stack) and offline against the
+real skill tree and the profile's own tool-plane policy. Not a tenant-class
+boot or render measurement (the slim projection there is 40 to 50 s at one
+CPU and the readiness budget stays 120), not package installation at
+512 MiB, not the Gateway's peak at four concurrent turns, and not a sandbox
+opened through a chat on the released images.
+
+[2.1.0+hartmesh.13]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.13
+
 ## [2.1.0+hartmesh.12] — 2026-09-14
 
 - hartmesh#73 — reuse a compatible accepted warm sandbox instead of destroying and recreating it, and bound turn-phase timing so the phase a turn reports is the phase it is in. Source evidence only: no warm-acquire percentile, cold-start or browser-timing claim.
