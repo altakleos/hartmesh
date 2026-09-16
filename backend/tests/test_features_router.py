@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from app.gateway.deps import get_config
 from app.gateway.routers import features
+from deerflow.config.ui_config import StarterConfig, UiConfig
 
 
 def _app_with_config(
@@ -16,6 +17,7 @@ def _app_with_config(
     mcp_tasks_available: bool = False,
     subagent_batches_available: bool = False,
     subagent_batch_repo_available: bool | None = None,
+    ui: UiConfig | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.state.mcp_tasks_available = mcp_tasks_available
@@ -35,9 +37,18 @@ def _app_with_config(
         agents_api=SimpleNamespace(enabled=agents_api_enabled),
         tools=tools,
         subagent_runtime=SimpleNamespace(max_running=3),
+        ui=ui if ui is not None else UiConfig(),
     )
     app.dependency_overrides[get_config] = lambda: fake_config
     return app
+
+
+def _default_ui_payload() -> dict:
+    """What a deployment that configured no presentation reports."""
+    return {
+        "profile": "developer",
+        "starters": [{"id": starter.id, "title": starter.title, "prompt": starter.prompt} for starter in UiConfig().starters],
+    }
 
 
 def test_features_reports_agents_api_enabled() -> None:
@@ -54,6 +65,7 @@ def test_features_reports_agents_api_enabled() -> None:
             "worker_running": False,
             "max_running": 3,
         },
+        "ui": _default_ui_payload(),
     }
 
 
@@ -71,6 +83,7 @@ def test_features_reports_agents_api_disabled() -> None:
             "worker_running": False,
             "max_running": 3,
         },
+        "ui": _default_ui_payload(),
     }
 
 
@@ -150,3 +163,36 @@ def test_features_reports_browser_control_disabled_for_unguarded_cdp() -> None:
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json()["browser_control"] == {"enabled": False}
+
+
+def test_features_reports_the_workspace_profile_and_its_starters() -> None:
+    # The frontend cannot decide either of these for itself: the profile is a
+    # deployment's choice and the starters are its words.
+    ui = UiConfig(
+        profile="business",
+        starters=[StarterConfig(id="review", title="Monthly review", prompt="Build my monthly review.")],
+    )
+
+    with TestClient(_app_with_config(agents_api_enabled=True, ui=ui)) as client:
+        payload = client.get("/api/features").json()
+
+    assert payload["ui"]["profile"] == "business"
+    assert payload["ui"]["starters"] == [{"id": "review", "title": "Monthly review", "prompt": "Build my monthly review."}]
+
+
+def test_features_reports_a_developer_deployment_with_an_empty_grid() -> None:
+    # What an untouched install serves: every screen offered, and the Home it
+    # already had. The helper supplies `UiConfig()`, the same value the
+    # `AppConfig` default factory builds.
+    with TestClient(_app_with_config(agents_api_enabled=True)) as client:
+        payload = client.get("/api/features").json()
+
+    assert payload["ui"]["profile"] == "developer"
+    assert payload["ui"]["starters"] == []
+
+
+def test_an_operator_can_clear_the_starter_grid() -> None:
+    with TestClient(_app_with_config(agents_api_enabled=True, ui=UiConfig(profile="business", starters=[]))) as client:
+        payload = client.get("/api/features").json()
+
+    assert payload["ui"]["starters"] == []

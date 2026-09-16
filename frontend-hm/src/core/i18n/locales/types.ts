@@ -72,6 +72,8 @@ export interface Translations {
   welcome: {
     greeting: string;
     description: string;
+    startersLabel: string;
+    startersHint: string;
     createYourOwnSkill: string;
     createYourOwnSkillDescription: string;
   };

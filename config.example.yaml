@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 56
+config_version: 57
 
 # ============================================================================
 # Logging
@@ -1184,6 +1184,48 @@ tool_output:
 suggestions:
   enabled: true
   max_suggestions: 3
+
+
+# ============================================================================
+# Workspace Presentation
+# ============================================================================
+# What the workspace shows before anyone has asked for anything, and which
+# screens people who are not administrators are offered.
+#
+# profile:
+#   developer (default) - every screen is offered to everyone, which is what a
+#                         deployment that says nothing gets.
+#   business            - the skills, tools, subagents and integrations
+#                         screens, and the scheduled-task recipe chips, are
+#                         kept for administrators. Nothing else changes:
+#                         chats, agents, scheduled tasks, channels, memory and
+#                         a person's own account and preferences stay put.
+#                         `agents_api.enabled: false` is the switch for Agents.
+#
+# This is presentation: it hides screens and changes no route. `authorization`
+# has no permission covering these APIs, so it is not the lever that closes
+# them - an administrator-only action is already refused by the API, and what
+# limits a person is their `system_role`. `business` tells administrators from
+# everyone else, so it has no effect when authentication is disabled.
+#
+# starters are what Home offers before anyone types. Choosing one fills the
+# message box; nothing is sent, so the person adds their files and their own
+# words first. At most 6. Unset takes the profile's default (`business` opens
+# on a small built-in set, `developer` on none); an empty list shows no grid.
+#
+# These two strings are served verbatim to every signed-in person, so keep
+# secrets out of them - a value beginning with `$` is replaced from the
+# environment before this block is validated. A malformed `ui:` block makes
+# the Gateway return 503 on every route until it is fixed.
+
+ui:
+  profile: developer
+  # starters:
+  #   - id: business-review
+  #     title: Monthly business review
+  #     prompt: >-
+  #       Build a monthly business review from the spreadsheet I am about to
+  #       attach, and give me the PDF, Word and Excel versions.
 
 
 # ============================================================================

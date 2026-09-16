@@ -71,6 +71,7 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
+import { useWorkspacePresentation } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
@@ -133,6 +134,7 @@ import {
   DropdownMenuTrigger,
 } from "../ui/dropdown-menu";
 
+import { ComposerFocusProvider } from "./composer-focus";
 import {
   abortGoalRequest,
   beginGoalRequest,
@@ -2075,6 +2077,20 @@ export function InputBox({
     threadId,
   ]);
 
+  const focusComposer = useCallback(() => {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    // Synchronously, still inside the click: iOS Safari only opens the
+    // keyboard for a focus that is part of the user gesture.
+    textarea.focus();
+    // The filled text arrives on the next render, so the caret waits for it —
+    // otherwise the next thing typed lands in front of the prompt.
+    requestAnimationFrame(() => {
+      const end = textarea.value.length;
+      textarea.setSelectionRange(end, end);
+    });
+  }, []);
+
   const onSelectPlaceholder = useCallback((newText: string) => {
     const placeholder = findSuggestionTemplatePlaceholder(newText);
     if (placeholder) {
@@ -2195,7 +2211,9 @@ export function InputBox({
         {extraHeader && (
           <div className="absolute top-0 right-0 left-0 z-10">
             <div className="absolute right-0 bottom-0 left-0 flex items-center justify-center">
-              {extraHeader}
+              <ComposerFocusProvider value={focusComposer}>
+                {extraHeader}
+              </ComposerFocusProvider>
             </div>
           </div>
         )}
@@ -2809,6 +2827,13 @@ function SuggestionList({
 }) {
   const { t } = useI18n();
   const { textInput } = usePromptInputController();
+  // A deployment that named its own starters has said what Home offers; this
+  // row is the default it replaced, not a second one to sit beside it. The
+  // hook belongs here and not on `InputBox`: `InputBox` also mounts on the
+  // public showcase route, where an unauthenticated `/api/features` would
+  // 401 and bounce the visitor to the login page. `SuggestionList` mounts
+  // only in welcome mode, which showcase never reaches.
+  const { starters, isLoading } = useWorkspacePresentation();
   const handleSuggestionClick = useCallback(
     (prompt: string | undefined) => {
       if (!prompt) return;
@@ -2817,6 +2842,9 @@ function SuggestionList({
     },
     [textInput, onSelectPlaceholder],
   );
+  if (isLoading || starters?.length) {
+    return null;
+  }
   return (
     <Suggestions className="min-h-16 w-full max-w-full justify-center px-4 sm:w-fit sm:px-0">
       <ConfettiButton

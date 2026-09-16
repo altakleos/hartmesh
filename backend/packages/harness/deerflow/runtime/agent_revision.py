@@ -98,6 +98,10 @@ APP_CONFIG_FACTORY_EXCLUDED_FIELDS = frozenset(
         "tool_plane",
         # Bound independently as ExecutionBudgetV1 at durable admission.
         "execution_policy",
+        # Which screens a workspace draws and what Home offers first. Nothing
+        # here reaches the agent: it changes no tool, model, skill or prompt,
+        # so an edit must not invalidate an accepted run's assembly.
+        "ui",
     }
 )
 

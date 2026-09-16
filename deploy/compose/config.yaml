@@ -17,7 +17,7 @@
 # Everything else is copied through unchanged. Paths are literal because this
 # file cannot interpolate them: HARTMESH_DATA_DIR is therefore fixed at
 # /srv/hartmesh by this file (README: "Mount points").
-config_version: 56
+config_version: 57
 log_level: info
 
 models: []

@@ -1165,6 +1165,53 @@ title:
   model_name: null  # null = fast local fallback; set a model name to use LLM title generation
 ```
 
+### Workspace Presentation
+
+What the web workspace shows before anyone has asked for anything:
+
+```yaml
+ui:
+  profile: developer   # or: business
+  starters:
+    - id: business-review
+      title: Monthly business review
+      prompt: >-
+        Build a monthly business review from the spreadsheet I am about to
+        attach, and give me the PDF, Word and Excel versions.
+```
+
+`profile: business` keeps the skills, tools, subagents and integrations
+settings screens, and the scheduled-task recipe chips, for administrators, and
+drops the product blurb from Home. Nothing else changes: chats, agents,
+scheduled tasks, channels, memory and a person's own account and preferences
+stay put. Channels and memory are deliberately excluded — the phone someone
+messages the agent from, and what it has remembered about them, are theirs.
+`agents_api.enabled: false` is the switch for Agents.
+
+**This is presentation, not access control.** It hides screens and changes no
+route. `authorization` has no permission covering these APIs — its vocabulary
+is threads, runs and the tool plane — so it is not the lever that closes them.
+An administrator-only action is already refused by the API, and what limits a
+person is their `system_role`. Because `business` tells administrators from
+everyone else, it has no effect when authentication is disabled.
+
+`starters` is what Home offers before anyone types; choosing one fills the
+message box and sends nothing. At most 6, with a 60-character title and a
+2000-character prompt. Leaving it unset takes the profile's default —
+`business` opens on a small built-in set, `developer` on none — and an empty
+list shows no grid. When a grid exists it replaces the built-in suggestion row
+under the composer rather than appearing alongside it.
+
+Two cautions. The titles and prompts are served verbatim to every signed-in
+person, so keep secrets out of them; note that any config string beginning with
+`$` is replaced from the environment before this block is validated. And the
+strings have no per-locale form, so a multi-language deployment gets whichever
+language the operator wrote.
+
+Both fields are read per request, so an edit to `config.yaml` reaches the next
+page load without a restart — but a malformed `ui:` block makes the Gateway
+return 503 on every route until it is fixed.
+
 ### GitHub API Token (Optional for GitHub Deep Research Skill)
 
 The default GitHub API rate limits are quite restrictive. For frequent project research, we recommend configuring a personal access token (PAT) with read-only permissions.
