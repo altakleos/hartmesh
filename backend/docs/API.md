@@ -246,6 +246,42 @@ GET /api/langgraph/threads/{thread_id}/state
 }
 ```
 
+#### Get Thread History
+
+```http
+POST /api/langgraph/threads/{thread_id}/history
+Content-Type: application/json
+
+{"limit": 1}
+```
+
+Returns one entry per checkpoint, newest first. Unlike `/state`, each entry's
+`values` is a **narrow projection**, not the whole channel. Every key below is
+emitted only when it is set:
+
+| Key | Entries |
+| --- | --- |
+| `title`, `thread_data` | every entry |
+| `messages` | newest returned entry |
+| `artifacts` (cumulative `present_files`), `todos`, `goal` | newest returned entry |
+
+The last three are whole-thread state, so repeating them on every checkpoint
+would only duplicate them. "Newest returned" is not "newest that exists": a
+request carrying `before` starts the page at that checkpoint and gets that
+checkpoint's state, which is the same checkpoint whose `messages` the entry
+already carries.
+
+`goal` and `todos` are omitted rather than sent as `null`/`[]` when unset,
+because a client distinguishes "the server answered" from "the server said
+nothing" and the former clears a local override.
+
+This is the read a client makes when it merely *opens* a conversation — it never
+sees a `values` stream frame — so a key the UI renders from thread state must
+appear here or it is blank on every fresh session. In hartmesh-tenancy/DF16 that
+cost an empty artifact panel, a business-report card offering no downloads under
+a report whose files were present and downloadable, no todo list, and an active
+goal that stayed invisible while it drove hidden continuation turns.
+
 ### Runs
 
 #### Create Run

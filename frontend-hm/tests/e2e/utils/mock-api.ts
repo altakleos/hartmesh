@@ -241,6 +241,21 @@ function runStreamThreadId(route: Route) {
  * during message sending.  Without these mocks the pages would hang waiting
  * for a real backend.
  */
+/**
+ * Every key the Gateway's `/history` projection can put in an entry's
+ * `values`. Keep in lockstep with `get_thread_history`; a key the app reads
+ * from `thread.values` and this list does not name is blank on a reopened
+ * chat, whatever the mock says.
+ */
+export const HISTORY_VALUE_KEYS = [
+  "title",
+  "thread_data",
+  "messages",
+  "artifacts",
+  "todos",
+  "goal",
+] as const;
+
 export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   let threads = [...(options?.threads ?? [])];
   const agents = options?.agents ?? [];
@@ -1018,7 +1033,15 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
-  // Thread history — useStream fetches state history on mount
+  // Thread history — useStream fetches state history on mount.
+  //
+  // This body must not be more generous than the Gateway's. Its `values` is a
+  // narrow projection (`backend/app/gateway/routers/threads.py`), and for a
+  // release this mock answered with `artifacts` the Gateway did not send, so
+  // every reopened chat lost its artifact list in production while the suite
+  // stayed green (hartmesh-tenancy/DF16). `HISTORY_VALUE_KEYS` is the
+  // projection, and `tests/unit/core/threads/history-contract.test.ts` fails if
+  // this handler answers with a key outside it.
   void page.route("**/api/langgraph/threads/*/history", (route) => {
     const url = route.request().url();
 

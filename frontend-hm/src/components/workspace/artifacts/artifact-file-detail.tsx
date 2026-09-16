@@ -672,6 +672,7 @@ export function ArtifactFileDetail({
                 artifacts={artifacts}
                 filepath={filepath}
                 isMock={isMock}
+                presentedKnown={!thread.isThreadLoading}
                 report={report}
                 threadId={threadId}
               />
