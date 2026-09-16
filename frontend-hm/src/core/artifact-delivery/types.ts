@@ -32,17 +32,13 @@ function readStringArray(value: unknown): string[] | null {
 }
 
 /**
- * Narrow a custom stream event into a delivery failure, or `null` when it is
- * any other event. Nothing partial is accepted: a notice that named the wrong
- * files, or none, would be worse than the silence it replaces.
+ * Read the verdict's own fields, wherever they arrived from. Nothing partial is
+ * accepted: a notice that named the wrong files, or none, would be worse than
+ * the silence it replaces.
  */
-export function parseArtifactDeliveryFailure(
-  event: unknown,
+function readFailure(
+  value: Record<string, unknown>,
 ): ArtifactDeliveryFailure | null {
-  if (typeof event !== "object" || event === null) return null;
-  const value = event as Record<string, unknown>;
-  if (value.type !== ARTIFACT_DELIVERY_INCOMPLETE_EVENT) return null;
-
   const undeliveredPaths = readStringArray(value.undelivered_paths);
   if (
     typeof value.run_id !== "string" ||
@@ -64,6 +60,37 @@ export function parseArtifactDeliveryFailure(
     undeliveredPaths,
     undeliveredCount: value.undelivered_count,
   };
+}
+
+/**
+ * Narrow a custom stream event into a delivery failure, or `null` when it is
+ * any other event.
+ */
+export function parseArtifactDeliveryFailure(
+  event: unknown,
+): ArtifactDeliveryFailure | null {
+  if (typeof event !== "object" || event === null) return null;
+  const value = event as Record<string, unknown>;
+  if (value.type !== ARTIFACT_DELIVERY_INCOMPLETE_EVENT) return null;
+  return readFailure(value);
+}
+
+/**
+ * Narrow the durable verdict a rejoining client reads over HTTP.
+ *
+ * Same fields, same strictness, deliberately the same reader: the live frame
+ * and the receipt describe one run, and a reload must not change what the
+ * notice says (hartmesh-tenancy/DF14). `available: false` is the ordinary
+ * answer — almost every run delivered what it produced — so it is `null` here,
+ * not a failure to report.
+ */
+export function parseArtifactDeliveryRecord(
+  record: unknown,
+): ArtifactDeliveryFailure | null {
+  if (typeof record !== "object" || record === null) return null;
+  const value = record as Record<string, unknown>;
+  if (value.available !== true) return null;
+  return readFailure(value);
 }
 
 export const ARTIFACT_DELIVERY_UNVERIFIED_EVENT =

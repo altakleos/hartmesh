@@ -589,7 +589,11 @@ function MessageContent_({
       />
       <CitationSourcesPanel sources={citationSources} />
       {message.type === "ai" && showWorkspaceChanges && (
-        <UndeliveredFilesNotice threadId={threadId} runId={runId} />
+        <UndeliveredFilesNotice
+          threadId={threadId}
+          runId={runId}
+          disabled={isLoading}
+        />
       )}
       {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge

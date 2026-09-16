@@ -1,0 +1,98 @@
+"""The durable delivery verdict a rejoining client reads (hartmesh-tenancy/DF14).
+
+The e2e counterpart in ``test_delivery_failure_gateway_stream_e2e.py`` proves
+the happy path against a real Gateway, worker and receipt. These cover the
+shapes that path cannot produce on demand: a fenced run whose best-effort
+receipt never landed, a receipt that says everything was presented, and a run
+holding more paths than one response may disclose.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pytest
+
+from deerflow.runtime.runs.delivery import (
+    DELIVERY_INCOMPLETE_STOP_REASON,
+    MAX_DISCLOSED_UNDELIVERED_PATHS,
+    get_run_delivery_response,
+    undelivered_paths,
+)
+
+UNAVAILABLE = {"available": False, "version": 1}
+ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
+
+
+class _Events:
+    """An event store that returns what it was handed, and records the query."""
+
+    def __init__(self, events: list[dict[str, Any]]) -> None:
+        self._events = events
+        self.queries: list[tuple[tuple, dict]] = []
+
+    async def list_events(self, *args: Any, **kwargs: Any) -> list[dict[str, Any]]:
+        self.queries.append((args, kwargs))
+        return self._events
+
+
+def _receipt(produced: list[str], matched: list[str] | None = None) -> dict[str, Any]:
+    return {"content": {"produced_paths": produced, "matched_paths": matched or []}}
+
+
+async def _project(events: _Events, *, stop_reason: str | None, error: str | None = ERROR) -> dict[str, Any]:
+    return await get_run_delivery_response(events, "thread-1", "run-1", stop_reason=stop_reason, error=error)
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_delivered_is_answered_without_reading_a_receipt() -> None:
+    """Almost every run takes this path, so it must not cost an event query."""
+    events = _Events([_receipt(["/mnt/user-data/outputs/a.pdf"])])
+
+    assert await _project(events, stop_reason=None, error=None) == UNAVAILABLE
+    assert await _project(events, stop_reason="loop_capped", error="capped") == UNAVAILABLE
+    assert events.queries == []
+
+
+@pytest.mark.asyncio
+async def test_a_fenced_run_reports_what_it_never_presented() -> None:
+    events = _Events([_receipt(["/mnt/user-data/outputs/a.pdf", "/mnt/user-data/outputs/b.docx"])])
+
+    assert await _project(events, stop_reason=DELIVERY_INCOMPLETE_STOP_REASON) == {
+        "available": True,
+        "version": 1,
+        "run_id": "run-1",
+        "message": ERROR,
+        "undelivered_paths": ["/mnt/user-data/outputs/a.pdf", "/mnt/user-data/outputs/b.docx"],
+        "undelivered_count": 2,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_fenced_run_without_a_receipt_shows_nothing_rather_than_an_empty_notice() -> None:
+    """The receipt is best-effort; a correction naming no file is worse than none."""
+    assert await _project(_Events([]), stop_reason=DELIVERY_INCOMPLETE_STOP_REASON) == UNAVAILABLE
+    assert await _project(_Events([{"content": None}]), stop_reason=DELIVERY_INCOMPLETE_STOP_REASON) == UNAVAILABLE
+    assert await _project(_Events([_receipt([])]), stop_reason=DELIVERY_INCOMPLETE_STOP_REASON) == UNAVAILABLE
+    # Two receipts for one run means the terminal one is not identifiable.
+    duplicated = _Events([_receipt(["/mnt/user-data/outputs/a.pdf"]), _receipt(["/mnt/user-data/outputs/b.pdf"])])
+    assert await _project(duplicated, stop_reason=DELIVERY_INCOMPLETE_STOP_REASON) == UNAVAILABLE
+
+
+@pytest.mark.asyncio
+async def test_the_disclosed_path_list_is_bounded_and_the_count_is_not() -> None:
+    produced = [f"/mnt/user-data/outputs/report-{index}.pdf" for index in range(MAX_DISCLOSED_UNDELIVERED_PATHS + 7)]
+    response = await _project(_Events([_receipt(produced)]), stop_reason=DELIVERY_INCOMPLETE_STOP_REASON)
+
+    assert response["undelivered_count"] == len(produced)
+    assert response["undelivered_paths"] == produced[:MAX_DISCLOSED_UNDELIVERED_PATHS]
+
+
+def test_presented_outputs_are_subtracted_in_scan_order() -> None:
+    content = {
+        "produced_paths": ["/out/a.pdf", "/out/b.pdf", "/out/c.pdf"],
+        "matched_paths": ["/out/b.pdf"],
+    }
+
+    assert undelivered_paths(content) == ["/out/a.pdf", "/out/c.pdf"]
+    assert undelivered_paths({}) == []
