@@ -84,6 +84,13 @@ _BLOCKED_TAG_NAMES: frozenset[str] = frozenset(
         "available_skills",
         "disabled_skills",
         "memory_tool_system",
+        # The todo-list prompt section. It was once tagged
+        # <todo_list_system>, which a model in the tenant-class .17 trace
+        # called twice as if it were a tool; the section is <task_tracking>
+        # now and the retired name stays blocked because it costs nothing.
+        # "memory_tool_system" above is left as it is: it describes four tools,
+        # none of them named after the tag, and no trace shows it being called.
+        "task_tracking",
         "todo_list_system",
         "durable_context_data",
         "slash_skill_activation",

@@ -7,7 +7,7 @@ Commands (see SKILL.md for the workflow):
     report.py build   <files…> --period P --out DIR  report.json, charts/*.png, checks.json
     report.py show    <report.json>                  the figures, checks and notes, without the rows
     report.py prose   <report.json> --from prose.json  model-written text, numbers verified
-    report.py render  <report.json> --to html|pdf|docx|xlsx
+    report.py render  <report.json> --to pdf,docx,xlsx   every named format in one run
     report.py checks  <report.json> <files…>         re-run the checks on their own
 
 Everything the renderers show comes from one report.json, so the HTML, PDF,
@@ -48,12 +48,15 @@ try:
         EXIT_MISSING_LIBRARY,
         EXIT_OK,
         EXIT_WITHHELD,
+        PRESENTED_TARGETS,
         PROFILES_DIR,
         RENDER_TARGETS,
+        RENDERS_MANIFEST,
         REPORT_SUFFIX,
         REQUIRED_ROLES,
         ROLES,
         SYMBOL_TO_CODE,
+        TARGET_ORDER,
         TEXT_ROLES,
         BuildContext,
         BuildOptions,
@@ -69,6 +72,7 @@ try:
         is_color,
         is_missing,
         load_brand,
+        one_line,
         parse_period,
         plural,
         previous_period,
@@ -1063,7 +1067,8 @@ def show_report(report: dict) -> str:
         change = f" ({'+' if (delta['pct'] or 0) > 0 else ''}{format_value(delta['pct'], 'percent')} vs {delta['vs']})" if delta and delta.get("pct") is not None else ""
         lines.append(f"  {kpi['label']}: {format_value(kpi['value'], kpi['format'], currency)}{change}")
     for section in report["sections"]:
-        lines.append(f"\n{section['heading']}")
+        lines.append("")
+        lines.append(section["heading"])
         for paragraph in section.get("paragraphs", []):
             lines.append(f"  {paragraph}")
         for bullet in section.get("bullets", []):
@@ -1077,13 +1082,17 @@ def show_report(report: dict) -> str:
                 lines.append(f"  … {len(table['rows']) - 12} more rows in the file")
             if table.get("totals"):
                 lines.append("  " + " | ".join(format_value(value, table["formats"][index], currency) for index, value in enumerate(table["totals"])))
-    lines.append(f"\nChecks: {checks_line(report)}")
+    lines.append("")
+    lines.append(f"Checks: {checks_line(report)}")
     for check in report["checks"]:
         lines.append(f"  [{check['status']}] {check['text']}")
-    lines.append("\nNot included: " + (" ".join(report["notes"]) if report["notes"] else "nothing; every section the profile lists is in the report."))
+    lines.append("")
+    lines.append("Not included: " + (" ".join(report["notes"]) if report["notes"] else "nothing; every section the profile lists is in the report."))
     inputs = ", ".join(f"{entry['name']} (uploaded {entry['uploaded']}, {entry['rows']} rows)" for entry in meta["inputs"])
     lines.append(f"Inputs: {inputs}")
-    return "\n".join(lines)
+    # A cell, a column name or a profile word must not be able to start a line:
+    # the model is told to act on whole lines of this digest.
+    return "\n".join(one_line(line) for line in lines)
 
 
 # --- command line --------------------------------------------------------------
@@ -1130,6 +1139,137 @@ def _load_report(path: Path) -> dict:
     return report
 
 
+def parse_targets(values: list[str] | None, flag: str) -> list[str]:
+    """`pdf,docx,xlsx`, repeated flags, or `all`; validated before anything is written."""
+
+    named: list[str] = []
+    for value in values or []:
+        for item in str(value).split(","):
+            item = item.strip().lower()
+            if not item:
+                continue
+            if item == "all":
+                named.extend(PRESENTED_TARGETS)
+            else:
+                named.append(item)
+    unknown = [item for item in named if item not in RENDER_TARGETS]
+    if unknown:
+        raise InputError(f"{flag} does not know {', '.join(sorted(set(unknown)))}; use {', '.join(RENDER_TARGETS)}, a comma-separated list of them, or all.")
+    return [target for target in TARGET_ORDER if target in named]
+
+
+def _render_base(report_path: Path) -> tuple[Path, str]:
+    name = report_path.name
+    return report_path.parent, name[: -len(REPORT_SUFFIX)] if name.endswith(REPORT_SUFFIX) else report_path.stem
+
+
+def _render_name(report_path: Path, target: str) -> str:
+    return f"{_render_base(report_path)[1]}.{target}"
+
+
+def read_render_manifest(report_path: Path) -> list[str]:
+    """The renders this skill recorded writing beside *report_path*.
+
+    Ownership is recorded rather than inferred from the file name, because the
+    name says nothing about who wrote the file. A report directory with no
+    manifest — one this skill has not rendered into, or a bundle the user
+    re-uploaded — owns nothing, so nothing in it is ever removed.
+    """
+
+    directory, base = _render_base(report_path)
+    path = directory / RENDERS_MANIFEST
+    if not path.is_file():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(data, dict) or data.get("base") != base:
+        return []
+    names = data.get("files")
+    if not isinstance(names, list):
+        return []
+    known = [f"{base}.{target}" for target in TARGET_ORDER]
+    return [name for name in known if name in names]
+
+
+def write_render_manifest(report_path: Path, names: list[str]) -> None:
+    directory, base = _render_base(report_path)
+    _write_json(directory / RENDERS_MANIFEST, {"version": 1, "base": base, "files": [name for name in (f"{base}.{target}" for target in TARGET_ORDER) if name in set(names)]})
+
+
+def existing_renders(report_path: Path) -> list[Path]:
+    """This skill's own renders beside the report, in the order they are offered."""
+
+    directory, _ = _render_base(report_path)
+    return [directory / name for name in read_render_manifest(report_path) if (directory / name).is_file()]
+
+
+def unowned_renders(report_path: Path) -> list[str]:
+    """Files named like renders of this report that this skill did not write."""
+
+    directory, base = _render_base(report_path)
+    owned = set(read_render_manifest(report_path))
+    return [f"{base}.{target}" for target in TARGET_ORDER if f"{base}.{target}" not in owned and (directory / f"{base}.{target}").is_file()]
+
+
+def remove_stale_renders(report_path: Path, keep: list[str]) -> list[str]:
+    """Drop this skill's renders of the draft just replaced, except the ones rewritten."""
+
+    directory, _ = _render_base(report_path)
+    kept = {_render_name(report_path, target) for target in keep}
+    removed = []
+    for name in read_render_manifest(report_path):
+        if name in kept:
+            continue
+        path = directory / name
+        if path.is_file():
+            path.unlink()
+        removed.append(name)
+    return removed
+
+
+def render_targets(report: dict, report_path: Path, targets: list[str], tenant_dir: str | None) -> list[Path]:
+    """Every named format from one already-loaded report, in one process."""
+
+    written = []
+    for target in targets:
+        path = render(report, report_path, target, None, tenant_dir)
+        print(f"Rendered {target}: {path}")
+        written.append(path)
+    return written
+
+
+def publish_renders(report: dict, report_path: Path, targets: list[str], tenant_dir: str | None) -> None:
+    """Write this draft's renders, then drop the ones it did not replace.
+
+    In that order: a render that fails leaves the previous draft's files where
+    they are rather than deleting them first and then raising, and the removal
+    notice is printed the moment the removal happens rather than after work
+    that might not finish.
+    """
+
+    written = render_targets(report, report_path, targets, tenant_dir)
+    removed = remove_stale_renders(report_path, targets)
+    write_render_manifest(report_path, [path.name for path in written])
+    if removed:
+        print("Removed stale renders from the previous draft: " + ", ".join(removed) + ". Render again.")
+
+
+def print_present_block(report_path: Path) -> None:
+    """Name the files to hand over, the report first, so none of them is left out.
+
+    One path per line: the directory is chosen by the caller and a space in it
+    would make a single joined line impossible to split back apart.
+    """
+
+    print("Present:")
+    for path in [report_path] + existing_renders(report_path):
+        print(f"  {path.resolve()}")
+    for name in unowned_renders(report_path):
+        print(f"Not presented: {name} sits beside this report but was not written by it; it may show a different draft.")
+
+
 def command_inspect(args) -> int:
     tenant_dir = resolve_tenant_dir(args.tenant)
     profile = load_profile(args.profile, tenant_dir)
@@ -1157,6 +1297,7 @@ def command_build(args) -> int:
     if args.short:
         options.summary_length = "short"
     mapping_override = _load_json_file(args.mapping, "mapping file") if args.mapping else None
+    targets = parse_targets(args.render, "--render")
     ctx = prepare(args.files, args.period, options, mapping_override, profile)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1174,18 +1315,16 @@ def command_build(args) -> int:
     draw_charts(charts, out_dir, options.brand, ctx.currency)
     _write_json(report_path, report)
     print(f"Built draft {report['meta']['draft']}: {report['meta']['title']} -> {report_path}")
-    stale = [out_dir / f"{base}.{target}" for target in RENDER_TARGETS if (out_dir / f"{base}.{target}").exists()]
-    for path in stale:
-        path.unlink()
-    if stale:
-        print("Removed stale renders from the previous draft: " + ", ".join(path.name for path in stale) + ". Render again.")
     if previous and any(check["id"] == "prose_numbers" for check in previous.get("checks", [])):
         print("The previous draft carried written text (summary or actions); this rebuild replaced it with the computed text. Run prose again if it still applies.")
-    print(f"Checks: {checks_line(report)}")
-    if report["notes"]:
-        print("Not included: " + " ".join(report["notes"]))
+    # The figures the next step is written from, so reading them is not a second
+    # run: this is exactly what `show` prints, and the rows stay in the file.
+    print()
+    print(show_report(report))
     if report["charts"]:
         print("Charts: " + ", ".join(chart["png"] for chart in report["charts"]))
+    publish_renders(report, report_path, targets, tenant_dir)
+    print_present_block(report_path)
     return EXIT_OK
 
 
@@ -1211,6 +1350,7 @@ def command_prose(args) -> int:
         actions = list(args.action)
     if summary is None and actions is None:
         raise InputError("Give --from prose.json, --summary text or --action text.")
+    targets = parse_targets(args.render, "--render")
     updated, removed, notes = apply_prose(report, summary, actions)
     _write_json(report_path, updated)
     _write_json(report_path.parent / "checks.json", updated["checks"])
@@ -1221,14 +1361,38 @@ def command_prose(args) -> int:
         print("Every number in the written text matches the report.")
     for note in notes:
         print(note)
+    # The report as it now stands, read out of the draft that was just written
+    # rather than out of the text that was handed in: a sentence the number
+    # check dropped is not in here, and the KPI strip, the checks line and the
+    # not-included items are what the user has to be told about this draft.
+    print()
+    print(show_report(updated))
+    publish_renders(updated, report_path, targets, resolve_tenant_dir(args.tenant))
+    print_present_block(report_path)
     return EXIT_OK
 
 
 def command_render(args) -> int:
     tenant_dir = resolve_tenant_dir(args.tenant)
     report_path = Path(args.report)
-    path = render(_load_report(report_path), report_path, args.to, Path(args.out) if args.out else None, tenant_dir)
-    print(f"Rendered {args.to}: {path}")
+    targets = parse_targets(args.to, "--to")
+    if not targets:
+        raise InputError("--to needs at least one of html, pdf, docx, xlsx, or all.")
+    if args.out and len(targets) > 1:
+        raise InputError("--out names one file, so it goes with one --to target.")
+    report = _load_report(report_path)
+    if args.out:
+        # A name the caller chose: this skill did not place it beside the
+        # report, so it is not recorded as one of the report's own renders.
+        path = render(report, report_path, targets[0], Path(args.out), tenant_dir)
+        print(f"Rendered {targets[0]}: {path}")
+        print("Present:")
+        print(f"  {report_path.resolve()}")
+        print(f"  {path.resolve()}")
+        return EXIT_OK
+    written = render_targets(report, report_path, targets, tenant_dir)
+    write_render_manifest(report_path, read_render_manifest(report_path) + [path.name for path in written])
+    print_present_block(report_path)
     return EXIT_OK
 
 
@@ -1272,6 +1436,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser_.add_argument("--name", help="Base file name (default: <period>-<title slug>)")
     build_parser_.add_argument("--draft", type=int, help="Draft number (default: previous draft in --out plus one)")
     build_parser_.add_argument("--short", action="store_true", help="One-sentence summary")
+    build_parser_.add_argument("--render", action="append", help="Render in the same run: pdf,docx,xlsx or all; repeatable")
     build_parser_.set_defaults(handler=command_build)
 
     show_parser = commands.add_parser("show", help="Print the figures, tables, checks and notes of a report (not its rows).")
@@ -1283,11 +1448,13 @@ def build_parser() -> argparse.ArgumentParser:
     prose_parser.add_argument("--from", dest="source", help='JSON file: {"summary": [paragraphs], "actions": [bullets]}')
     prose_parser.add_argument("--summary", action="append", help="A summary paragraph; repeatable")
     prose_parser.add_argument("--action", action="append", help="An action bullet; repeatable")
+    prose_parser.add_argument("--render", action="append", help="Render the new draft in the same run: pdf,docx,xlsx or all; repeatable")
+    prose_parser.add_argument("--tenant", help="Tenant bundle directory for the logo and colours (default: /mnt/tenant when present)")
     prose_parser.set_defaults(handler=command_prose)
 
-    render_parser = commands.add_parser("render", help="Render report.json to html, pdf, docx or xlsx.")
+    render_parser = commands.add_parser("render", help="Render report.json to html, pdf, docx or xlsx; several formats in one run.")
     render_parser.add_argument("report", help="The .report.json to render")
-    render_parser.add_argument("--to", required=True, choices=list(RENDER_TARGETS))
+    render_parser.add_argument("--to", required=True, action="append", help="html, pdf, docx, xlsx, a comma-separated list of them, or all (pdf, docx and xlsx); repeatable")
     render_parser.add_argument("--out", help="Output path (default: next to the report)")
     render_parser.add_argument("--tenant", help="Tenant bundle directory for the logo and colours (default: /mnt/tenant when present)")
     render_parser.set_defaults(handler=command_render)

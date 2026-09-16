@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _TODO_SYSTEM_PROMPT = """
-<todo_list_system>
+<task_tracking>
 You have access to the `write_todos` tool to help you manage and track complex multi-step objectives.
 
 **CRITICAL RULES:**
@@ -52,7 +52,7 @@ You have access to the `write_todos` tool to help you manage and track complex m
 - Keep EXACTLY ONE task as `in_progress` at any time (unless tasks can run in parallel)
 - Update the todo list in REAL-TIME as you work - this gives users visibility into your progress
 - DO NOT use this tool for simple tasks (< 3 steps) - just complete them directly
-</todo_list_system>
+</task_tracking>
 """
 
 _TODO_TOOL_DESCRIPTION = "Use this tool to create and manage a structured task list for complex work sessions.  Only use for complex tasks (3+ steps)."
