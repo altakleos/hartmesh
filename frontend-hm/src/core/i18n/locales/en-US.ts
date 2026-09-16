@@ -181,6 +181,28 @@ export const enUS: Translations = {
       "Your files were created, but we couldn't confirm they were saved to this chat. Reload to check.",
   },
 
+  businessReport: {
+    draft: (draft) => `Draft ${draft}`,
+    comparedWith: (period) => `vs ${period}`,
+    downloadPdf: "PDF",
+    downloadWord: "Word",
+    downloadExcel: "Excel",
+    checksHeading: "Checks",
+    notIncludedHeading: "Not included",
+    noRenders:
+      "No file to download yet — ask for the PDF, Word or Excel version.",
+    downloadRender: (format) => `Download the ${format}`,
+    checkStatus: {
+      pass: "ok",
+      warn: "heads up",
+      fail: "problem",
+      not_checked: "not checked",
+    },
+    uploadedOn: (name, uploaded) => `${name} (uploaded ${uploaded})`,
+    builtFrom: (inputs) =>
+      `Built from ${inputs.join(", ")}. Checked by the report script.`,
+  },
+
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",

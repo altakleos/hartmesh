@@ -51,6 +51,10 @@ import {
   resolveStoredArtifactLanguage,
 } from "@/core/artifacts/viewer";
 import { useAuth } from "@/core/auth/AuthProvider";
+import {
+  isBusinessReportPath,
+  parseBusinessReport,
+} from "@/core/business-report";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
@@ -73,6 +77,7 @@ import {
   formatArtifactBytes,
 } from "./artifact-file-preview";
 import { useArtifacts } from "./context";
+import { ReportCard } from "./report-card";
 
 const WRITE_FILE_PREVIEW_REFRESH_INTERVAL_MS = 3000;
 
@@ -169,9 +174,9 @@ export function ArtifactFileDetail({
   const canPreviewInBrowser = useMemo(() => {
     return canBrowserPreviewFile(filepath);
   }, [filepath]);
-  const isSupportPreview = useMemo(() => {
-    return language === "html" || language === "markdown";
-  }, [language]);
+  const isReportFile = useMemo(() => {
+    return !isWriteFile && isBusinessReportPath(filepath);
+  }, [filepath, isWriteFile]);
   const toolResult = (() => {
     if (!isWriteFile) {
       return undefined;
@@ -183,11 +188,6 @@ export function ArtifactFileDetail({
     }
     return findToolCallResult(toolCallId, thread.messages);
   })();
-  const artifactViewState = getArtifactViewState({
-    filepath: filepathFromProps,
-    isSupportPreview,
-    toolResult,
-  });
   const {
     content,
     url,
@@ -203,6 +203,27 @@ export function ArtifactFileDetail({
     threadId,
     filepath: filepathFromProps,
     enabled: isCodeFile && !isWriteFile,
+  });
+  // A built report is previewed as the card the downloads were rendered from.
+  // Parsing decides it: a `.report.json` this app cannot draw stays a JSON
+  // file, and a truncated body is not a document at all.
+  const report = useMemo(() => {
+    if (!isReportFile || truncated || content === undefined) {
+      return null;
+    }
+    return parseBusinessReport(content);
+  }, [content, isReportFile, truncated]);
+  // Previewable from the first render, before the body has arrived: treating a
+  // report as JSON until it parses shows the card's own moment as a flash of
+  // raw JSON. Once the body is here, only a report the app can draw keeps it.
+  const isReportPreview =
+    isReportFile && !truncated && (content === undefined || report !== null);
+  const isSupportPreview =
+    language === "html" || language === "markdown" || isReportPreview;
+  const artifactViewState = getArtifactViewState({
+    filepath: filepathFromProps,
+    isSupportPreview,
+    toolResult,
   });
 
   const displayContent = content ?? "";
@@ -252,9 +273,15 @@ export function ArtifactFileDetail({
   const isLoadingFullContent = fullContentRequested && isLoading;
   const effectiveViewMode =
     truncated && language === "html" ? "code" : viewMode;
+  // Whether this file is previewable now depends on its content, so saving a
+  // repair to a broken report would otherwise eject its editor mid-edit.
+  const restoredViewMode =
+    editingPath === filepath ? null : artifactViewState.initialViewMode;
   useEffect(() => {
-    setViewMode(artifactViewState.initialViewMode);
-  }, [artifactViewState.initialViewMode]);
+    if (restoredViewMode) {
+      setViewMode(restoredViewMode);
+    }
+  }, [restoredViewMode]);
 
   const confirmDiscard = useCallback(() => {
     return !isDirty || window.confirm(t.artifactEditing.discardChanges);
@@ -637,6 +664,18 @@ export function ArtifactFileDetail({
               downloadLabel={t.common.download}
             />
           )}
+          {report !== null &&
+            !error &&
+            effectiveViewMode === "preview" &&
+            !isLoading && (
+              <ReportCard
+                artifacts={artifacts}
+                filepath={filepath}
+                isMock={isMock}
+                report={report}
+                threadId={threadId}
+              />
+            )}
           {artifactViewState.canPreview &&
             !error &&
             effectiveViewMode === "preview" &&

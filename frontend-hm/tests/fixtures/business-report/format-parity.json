@@ -1,0 +1,881 @@
+{
+  "description": "Generated from the skill's own format_value; see tests/unit/core/business-report/format.test.ts.",
+  "cases": [
+    {
+      "value": 0,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$0.00"
+    },
+    {
+      "value": 1,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$1.00"
+    },
+    {
+      "value": -1,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "-$1.00"
+    },
+    {
+      "value": 0.5,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$0.50"
+    },
+    {
+      "value": -0.5,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "-$0.50"
+    },
+    {
+      "value": 1234,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$1,234.00"
+    },
+    {
+      "value": 1234567,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$1,234,567.00"
+    },
+    {
+      "value": 74702.61,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$74,702.61"
+    },
+    {
+      "value": 455.5,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$455.50"
+    },
+    {
+      "value": 8.35,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$8.35"
+    },
+    {
+      "value": 8.25,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$8.25"
+    },
+    {
+      "value": 8.15,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$8.15"
+    },
+    {
+      "value": 2.675,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$2.68"
+    },
+    {
+      "value": -2.675,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "-$2.68"
+    },
+    {
+      "value": 0.004,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$0.00"
+    },
+    {
+      "value": -0.004,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "-$0.00"
+    },
+    {
+      "value": -0.4,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "-$0.40"
+    },
+    {
+      "value": 0.04,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$0.04"
+    },
+    {
+      "value": -0.04,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "-$0.04"
+    },
+    {
+      "value": 999.95,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$999.95"
+    },
+    {
+      "value": -999.95,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "-$999.95"
+    },
+    {
+      "value": 1e21,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$1,000,000,000,000,000,000,000.00"
+    },
+    {
+      "value": 1e-6,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$0.00"
+    },
+    {
+      "value": 1000000.005,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$1,000,000.01"
+    },
+    {
+      "value": -0.0,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$0.00"
+    },
+    {
+      "value": 999.995,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$1,000.00"
+    },
+    {
+      "value": -999.995,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "-$1,000.00"
+    },
+    {
+      "value": 9999.995,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$10,000.00"
+    },
+    {
+      "value": 0.999,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$1.00"
+    },
+    {
+      "value": 99999.995,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$100,000.00"
+    },
+    {
+      "value": 9.9999,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "$10.00"
+    },
+    {
+      "value": 0,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "0"
+    },
+    {
+      "value": 1,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "1"
+    },
+    {
+      "value": -1,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "-1"
+    },
+    {
+      "value": 0.5,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "1"
+    },
+    {
+      "value": -0.5,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "-1"
+    },
+    {
+      "value": 1234,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "1,234"
+    },
+    {
+      "value": 1234567,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "1,234,567"
+    },
+    {
+      "value": 74702.61,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "74,703"
+    },
+    {
+      "value": 455.5,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "456"
+    },
+    {
+      "value": 8.35,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "8"
+    },
+    {
+      "value": 8.25,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "8"
+    },
+    {
+      "value": 8.15,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "8"
+    },
+    {
+      "value": 2.675,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "3"
+    },
+    {
+      "value": -2.675,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "-3"
+    },
+    {
+      "value": 0.004,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "0"
+    },
+    {
+      "value": -0.004,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "0"
+    },
+    {
+      "value": -0.4,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "0"
+    },
+    {
+      "value": 0.04,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "0"
+    },
+    {
+      "value": -0.04,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "0"
+    },
+    {
+      "value": 999.95,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "1,000"
+    },
+    {
+      "value": -999.95,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "-1,000"
+    },
+    {
+      "value": 1e21,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "1,000,000,000,000,000,000,000"
+    },
+    {
+      "value": 1e-6,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "0"
+    },
+    {
+      "value": 1000000.005,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "1,000,000"
+    },
+    {
+      "value": -0.0,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "0"
+    },
+    {
+      "value": 999.995,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "1,000"
+    },
+    {
+      "value": -999.995,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "-1,000"
+    },
+    {
+      "value": 9999.995,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "10,000"
+    },
+    {
+      "value": 0.999,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "1"
+    },
+    {
+      "value": 99999.995,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "100,000"
+    },
+    {
+      "value": 9.9999,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "10"
+    },
+    {
+      "value": 0,
+      "format": "number",
+      "currency": "USD",
+      "expected": "0"
+    },
+    {
+      "value": 1,
+      "format": "number",
+      "currency": "USD",
+      "expected": "1"
+    },
+    {
+      "value": -1,
+      "format": "number",
+      "currency": "USD",
+      "expected": "-1"
+    },
+    {
+      "value": 0.5,
+      "format": "number",
+      "currency": "USD",
+      "expected": "0.50"
+    },
+    {
+      "value": -0.5,
+      "format": "number",
+      "currency": "USD",
+      "expected": "-0.50"
+    },
+    {
+      "value": 1234,
+      "format": "number",
+      "currency": "USD",
+      "expected": "1,234"
+    },
+    {
+      "value": 1234567,
+      "format": "number",
+      "currency": "USD",
+      "expected": "1,234,567"
+    },
+    {
+      "value": 74702.61,
+      "format": "number",
+      "currency": "USD",
+      "expected": "74,702.61"
+    },
+    {
+      "value": 455.5,
+      "format": "number",
+      "currency": "USD",
+      "expected": "455.50"
+    },
+    {
+      "value": 8.35,
+      "format": "number",
+      "currency": "USD",
+      "expected": "8.35"
+    },
+    {
+      "value": 8.25,
+      "format": "number",
+      "currency": "USD",
+      "expected": "8.25"
+    },
+    {
+      "value": 8.15,
+      "format": "number",
+      "currency": "USD",
+      "expected": "8.15"
+    },
+    {
+      "value": 2.675,
+      "format": "number",
+      "currency": "USD",
+      "expected": "2.68"
+    },
+    {
+      "value": -2.675,
+      "format": "number",
+      "currency": "USD",
+      "expected": "-2.68"
+    },
+    {
+      "value": 0.004,
+      "format": "number",
+      "currency": "USD",
+      "expected": "0.00"
+    },
+    {
+      "value": -0.004,
+      "format": "number",
+      "currency": "USD",
+      "expected": "-0.00"
+    },
+    {
+      "value": -0.4,
+      "format": "number",
+      "currency": "USD",
+      "expected": "-0.40"
+    },
+    {
+      "value": 0.04,
+      "format": "number",
+      "currency": "USD",
+      "expected": "0.04"
+    },
+    {
+      "value": -0.04,
+      "format": "number",
+      "currency": "USD",
+      "expected": "-0.04"
+    },
+    {
+      "value": 999.95,
+      "format": "number",
+      "currency": "USD",
+      "expected": "999.95"
+    },
+    {
+      "value": -999.95,
+      "format": "number",
+      "currency": "USD",
+      "expected": "-999.95"
+    },
+    {
+      "value": 1e21,
+      "format": "number",
+      "currency": "USD",
+      "expected": "1,000,000,000,000,000,000,000"
+    },
+    {
+      "value": 1e-6,
+      "format": "number",
+      "currency": "USD",
+      "expected": "0.00"
+    },
+    {
+      "value": 1000000.005,
+      "format": "number",
+      "currency": "USD",
+      "expected": "1,000,000.01"
+    },
+    {
+      "value": -0.0,
+      "format": "number",
+      "currency": "USD",
+      "expected": "0"
+    },
+    {
+      "value": 999.995,
+      "format": "number",
+      "currency": "USD",
+      "expected": "1,000.00"
+    },
+    {
+      "value": -999.995,
+      "format": "number",
+      "currency": "USD",
+      "expected": "-1,000.00"
+    },
+    {
+      "value": 9999.995,
+      "format": "number",
+      "currency": "USD",
+      "expected": "10,000.00"
+    },
+    {
+      "value": 0.999,
+      "format": "number",
+      "currency": "USD",
+      "expected": "1.00"
+    },
+    {
+      "value": 99999.995,
+      "format": "number",
+      "currency": "USD",
+      "expected": "100,000.00"
+    },
+    {
+      "value": 9.9999,
+      "format": "number",
+      "currency": "USD",
+      "expected": "10.00"
+    },
+    {
+      "value": 0,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "0.0%"
+    },
+    {
+      "value": 1,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "1.0%"
+    },
+    {
+      "value": -1,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "-1.0%"
+    },
+    {
+      "value": 0.5,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "0.5%"
+    },
+    {
+      "value": -0.5,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "-0.5%"
+    },
+    {
+      "value": 1234,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "1,234.0%"
+    },
+    {
+      "value": 1234567,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "1,234,567.0%"
+    },
+    {
+      "value": 74702.61,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "74,702.6%"
+    },
+    {
+      "value": 455.5,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "455.5%"
+    },
+    {
+      "value": 8.35,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "8.4%"
+    },
+    {
+      "value": 8.25,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "8.3%"
+    },
+    {
+      "value": 8.15,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "8.2%"
+    },
+    {
+      "value": 2.675,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "2.7%"
+    },
+    {
+      "value": -2.675,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "-2.7%"
+    },
+    {
+      "value": 0.004,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "0.0%"
+    },
+    {
+      "value": -0.004,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "-0.0%"
+    },
+    {
+      "value": -0.4,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "-0.4%"
+    },
+    {
+      "value": 0.04,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "0.0%"
+    },
+    {
+      "value": -0.04,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "-0.0%"
+    },
+    {
+      "value": 999.95,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "1,000.0%"
+    },
+    {
+      "value": -999.95,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "-1,000.0%"
+    },
+    {
+      "value": 1e21,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "1,000,000,000,000,000,000,000.0%"
+    },
+    {
+      "value": 1e-6,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "0.0%"
+    },
+    {
+      "value": 1000000.005,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "1,000,000.0%"
+    },
+    {
+      "value": -0.0,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "-0.0%"
+    },
+    {
+      "value": 999.995,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "1,000.0%"
+    },
+    {
+      "value": -999.995,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "-1,000.0%"
+    },
+    {
+      "value": 9999.995,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "10,000.0%"
+    },
+    {
+      "value": 0.999,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "1.0%"
+    },
+    {
+      "value": 99999.995,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "100,000.0%"
+    },
+    {
+      "value": 9.9999,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "10.0%"
+    },
+    {
+      "value": 1234.5,
+      "format": "currency",
+      "currency": "EUR",
+      "expected": "€1,234.50"
+    },
+    {
+      "value": 1234.5,
+      "format": "currency",
+      "currency": "JPY",
+      "expected": "¥1,234.50"
+    },
+    {
+      "value": 1234.5,
+      "format": "currency",
+      "currency": "CHF",
+      "expected": "CHF 1,234.50"
+    },
+    {
+      "value": 1234.5,
+      "format": "currency",
+      "currency": "ZZZ",
+      "expected": "ZZZ 1,234.50"
+    },
+    {
+      "value": null,
+      "format": "text",
+      "currency": "USD",
+      "expected": ""
+    },
+    {
+      "value": null,
+      "format": "date",
+      "currency": "USD",
+      "expected": "—"
+    },
+    {
+      "value": "",
+      "format": "text",
+      "currency": "USD",
+      "expected": ""
+    },
+    {
+      "value": "",
+      "format": "date",
+      "currency": "USD",
+      "expected": ""
+    },
+    {
+      "value": "  spaced  ",
+      "format": "text",
+      "currency": "USD",
+      "expected": "spaced"
+    },
+    {
+      "value": "  spaced  ",
+      "format": "date",
+      "currency": "USD",
+      "expected": "spaced"
+    },
+    {
+      "value": "J-10001",
+      "format": "text",
+      "currency": "USD",
+      "expected": "J-10001"
+    },
+    {
+      "value": "J-10001",
+      "format": "date",
+      "currency": "USD",
+      "expected": "J-10001"
+    },
+    {
+      "value": 10001,
+      "format": "text",
+      "currency": "USD",
+      "expected": "10001"
+    },
+    {
+      "value": 10001,
+      "format": "date",
+      "currency": "USD",
+      "expected": "10001"
+    },
+    {
+      "value": 10001.5,
+      "format": "text",
+      "currency": "USD",
+      "expected": "10001.5"
+    },
+    {
+      "value": 10001.5,
+      "format": "date",
+      "currency": "USD",
+      "expected": "10001.5"
+    },
+    {
+      "value": true,
+      "format": "text",
+      "currency": "USD",
+      "expected": "Yes"
+    },
+    {
+      "value": true,
+      "format": "date",
+      "currency": "USD",
+      "expected": "Yes"
+    },
+    {
+      "value": null,
+      "format": "currency",
+      "currency": "USD",
+      "expected": "—"
+    },
+    {
+      "value": null,
+      "format": "integer",
+      "currency": "USD",
+      "expected": "—"
+    },
+    {
+      "value": null,
+      "format": "number",
+      "currency": "USD",
+      "expected": "—"
+    },
+    {
+      "value": null,
+      "format": "percent",
+      "currency": "USD",
+      "expected": "—"
+    }
+  ]
+}

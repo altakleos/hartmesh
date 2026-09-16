@@ -71,7 +71,31 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `workspace/` — Chat page components (messages, artifacts, settings)
   - `landing/` — Landing page sections
   - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `artifact-delivery/` (run-scoped undelivered-file verdicts), `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `tool-plane/` (governance status/history client and legacy-mutation ceiling), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `artifact-delivery/` (run-scoped undelivered-file verdicts), `business-report/` (the `report.json` contract, its formatting and its companion paths), `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `tool-plane/` (governance status/history client and legacy-mutation ceiling), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+
+A `*.report.json` artifact is previewed as a report card rather than as JSON.
+`core/business-report/` parses
+[the contract](../contracts/business_report/report.schema.json) and decides it:
+a file the app cannot draw stays a JSON file, and the panel's existing
+code/preview toggle switches between the two. `formatValue` there is a port of
+the skill's own `format_value`, down to rounding the decimal spelling of a
+number rather than the binary double, so a figure reads the same on the card as
+in the PDF, Word and Excel renders; `tests/unit/core/business-report/` checks
+that against cases generated from the Python. Download buttons appear for each
+render the thread has presented; a render a later rebuild deleted is still
+offered until it is made again. Each chart is addressed inside the report's own
+directory, and the brand colour is spent on rules and borders only, because the
+card renders on whichever ground the viewer's theme paints.
+
+Three things decide whether a card appears at all: the `.report.json` suffix, a
+body that parses as `version: 1`, and — for each picture — the contract's
+`charts/<id>.png` shape. A body over `ARTIFACT_PREVIEW_MAX_BYTES` (1 MiB)
+arrives truncated and stays JSON until _Load full file_. `report.json` embeds
+every cleaned row of the period, which the card never draws, so that ceiling is
+around four thousand rows in one period (measured: 121,540 bytes for 502
+in-period rows). Dropping `rows` before the size check is the real fix and is
+not done. The card's own chrome follows the UI locale while the report body
+follows `meta.lang`, which the skill only ever writes as `en-US`.
 
 Skill, MCP, and managed-integration settings are governance-aware. When
 `GET /api/tool-plane/status` succeeds, these existing screens render the safe
