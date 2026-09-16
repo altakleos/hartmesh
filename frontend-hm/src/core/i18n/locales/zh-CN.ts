@@ -162,6 +162,16 @@ export const zhCN: Translations = {
     truncatedSummary: "部分变更已被截断。",
   },
 
+  artifactDelivery: {
+    title: (count) => `已生成 ${count} 个文件，但没有附在这条回复里`,
+    description:
+      "上面的回答可能看起来像文件已经给你了。文件没有丢失，可在这里打开或下载。",
+    shownOfTotal: (shown, total) => `共 ${total} 个，显示前 ${shown} 个。`,
+    toast: "有文件没有附在回复里，就在回答下方等着你。",
+    receiptToast:
+      "文件已经生成，但我们无法确认交接是否完成 — 如果发现缺东西，请刷新页面。",
+  },
+
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",

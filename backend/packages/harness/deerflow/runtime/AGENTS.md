@@ -227,28 +227,32 @@ regular file created or modified under `/mnt/user-data/outputs`; internal
 process-feedback files are excluded (the scanner's `EXCLUDED_DIR_NAMES` plus
 the configured `tool_output.storage_subdir`), so a run that only externalized
 oversized tool outputs does not fail delivery. At least one candidate must be
-covered by a path attributed by the journal to `present_files`; presenting only
-an unrelated pre-existing path does not satisfy delivery. Receipts for such
-runs add `produced_paths`, `presented_paths`, `matched_paths`, `verification`,
-`stage`, and `satisfied` to the Slice 1 fact fields. Missing a matching
-presentation becomes a run error; a successful presentation is also downgraded
-to error if its receipt cannot be durably verified. Runs without changed
-outputs preserve ordinary chat behavior and the original receipt shape. Orphan
-recovery first atomically claims an expired lease, then uses the same singleton
-write to backfill a zero-delivery receipt — a stale recovery scan cannot
-overwrite a live run's later detailed receipt, an event-store outage does not
-undo the terminal takeover, and an existing detailed receipt is preserved when
-a worker crashed after writing it. Event stores serialize `put_if_absent` with
-ordinary thread writers: memory and JSONL provide the documented
-single-process guarantee, while the DB store adds per-thread in-process locks
-and PostgreSQL advisory locks for cross-process writers. Moving journal
-construction ahead of preflight is receipt-only on early failure paths: a
-separate boundary flag preserves the previous completion-data semantics, so
-checkpoint incompatibility or cancellation while waiting for an older
-finalizing run does not persist an empty completion snapshot. Worker tests pin
-one accumulated receipt across multiple goal-continuation `_stream_once` calls;
-journal tests drive LangChain's real async callback dispatcher against a single
-journal to pin serialized, deduplicated parallel tool callbacks.
+covered by a path attributed by the journal to `present_files`; presenting
+only an unrelated pre-existing path does not satisfy delivery. Receipts for
+such runs add `produced_paths`, `presented_paths`, `matched_paths`,
+`verification`, `stage`, and `satisfied` to the Slice 1 fact fields. Missing a
+matching presentation becomes a run error; a successful presentation is also
+downgraded to error if its receipt cannot be durably verified. Both publish an
+`error` stream frame, the fence preceded by a `custom`
+`artifact_delivery_incomplete` frame naming the withheld paths (bounded, exact
+count), so a failure after a normal graph completion cannot read as success.
+Runs without changed outputs preserve ordinary chat behavior and the original
+receipt shape. Orphan recovery first atomically claims an expired lease, then
+uses the same singleton write to backfill a zero-delivery receipt — a stale
+recovery scan cannot overwrite a live run's later detailed receipt, an
+event-store outage does not undo the terminal takeover, and an existing
+detailed receipt is preserved when a worker crashed after writing it. Event
+stores serialize `put_if_absent` with ordinary thread writers: memory and
+JSONL provide the documented single-process guarantee, while the DB store adds
+per-thread in-process locks and PostgreSQL advisory locks for cross-process
+writers. Moving journal construction ahead of preflight is receipt-only on
+early failure paths: a separate boundary flag preserves the previous
+completion-data semantics, so checkpoint incompatibility or cancellation while
+waiting for an older finalizing run does not persist an empty completion
+snapshot. Worker tests pin one accumulated receipt across multiple
+goal-continuation `_stream_once` calls; journal tests drive LangChain's real
+async callback dispatcher against a single journal to pin serialized,
+deduplicated parallel tool callbacks.
 
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error

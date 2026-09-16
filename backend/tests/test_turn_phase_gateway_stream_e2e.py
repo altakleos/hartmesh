@@ -172,6 +172,10 @@ class _StreamObservation:
     t_first_text: float | None = None
     t_end: float | None = None
     events: list[str] = field(default_factory=list)
+    # Every dispatched frame as ``(event, payload)``. ``events`` stays the
+    # order-only view most timing assertions read; suites that assert on what a
+    # control frame carried (the delivery-failure suite) read this.
+    frames: list[tuple[str, Any]] = field(default_factory=list)
     text_frames: int = 0
     reasoning_frames: int = 0
 
@@ -375,6 +379,7 @@ def _observe_stream(
             if data_lines:
                 with contextlib.suppress(ValueError):
                     payload = json.loads("\n".join(data_lines))
+            observation.frames.append((event, payload))
             if event == "messages":
                 has_text, has_reasoning = _frame_carries_text(payload)
                 if has_reasoning:

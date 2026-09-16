@@ -62,6 +62,7 @@ import { cn } from "@/lib/utils";
 import { WorkspaceChangeBadge } from "../changes";
 import { CitationSourcesPanel } from "../citations/citation-sources-panel";
 import { CopyButton } from "../copy-button";
+import { UndeliveredFilesNotice } from "../delivery";
 import { ReferenceAttachmentSummary } from "../sidecar/reference-attachments";
 import { SlashSkillChip } from "../slash-skill-chip";
 import { Tooltip } from "../tooltip";
@@ -587,6 +588,9 @@ function MessageContent_({
         components={components}
       />
       <CitationSourcesPanel sources={citationSources} />
+      {message.type === "ai" && showWorkspaceChanges && (
+        <UndeliveredFilesNotice threadId={threadId} runId={runId} />
+      )}
       {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge
           threadId={threadId}

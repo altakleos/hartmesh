@@ -167,6 +167,20 @@ export const enUS: Translations = {
     truncatedSummary: "Some changes were truncated.",
   },
 
+  artifactDelivery: {
+    title: (count) =>
+      count === 1
+        ? "1 file was created but not attached to this reply"
+        : `${count} files were created but not attached to this reply`,
+    description:
+      "The answer above may read as if they were already included. Nothing is lost — open or download them here.",
+    shownOfTotal: (shown, total) => `Showing the first ${shown} of ${total}.`,
+    toast:
+      "Some files didn't make it into the reply. They're waiting just below the answer.",
+    receiptToast:
+      "Your files were created. We couldn't confirm the handover — reload if anything looks missing.",
+  },
+
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",

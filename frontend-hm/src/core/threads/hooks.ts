@@ -17,6 +17,10 @@ import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
+import {
+  parseArtifactDeliveryFailure,
+  useArtifactDeliveryContext,
+} from "../artifact-delivery";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import { getMessageRunId } from "../messages/run-duration";
@@ -1709,6 +1713,7 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+  const { recordFailure: recordDeliveryFailure } = useArtifactDeliveryContext();
 
   const clearPreparedReplayMasks = useCallback(
     (replay: PendingPreparedReplayMask | null) => {
@@ -1849,8 +1854,22 @@ export function useThreadStream({
         localTurnOrderBaselineIdentitiesRef.current = null;
         tasksRef.current = {};
         setTasks({});
+        // Delivery verdicts deliberately survive a gap. Everything else cleared
+        // here is rebuilt from the durable state this recovery reloads; a
+        // verdict is not stored anywhere the client can re-read, so dropping it
+        // would restore the silence this frame exists to end.
         invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
         toast.warning(t.conversation.streamReplayGap);
+        return;
+      }
+
+      // The turn produced files and ended without presenting them. The
+      // ``error`` frame that follows this one raises the toast and reloads
+      // history; this detail frame is what lets the thread offer the files the
+      // run withheld, under the turn that withheld them.
+      const deliveryFailure = parseArtifactDeliveryFailure(event);
+      if (deliveryFailure) {
+        recordDeliveryFailure(deliveryFailure);
         return;
       }
 
@@ -1891,7 +1910,18 @@ export function useThreadStream({
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
-      toast.error(getStreamErrorMessage(error));
+      // The two delivery failures are the only stream errors a person is meant
+      // to read. Their backend messages are the durable run error operators
+      // read, so branch on the name the SDK preserves rather than reword either
+      // side. Kept red — the run did fail; the words carry the calm.
+      const errorName = error instanceof Error ? error.name : undefined;
+      toast.error(
+        errorName === "ArtifactDeliveryIncompleteError"
+          ? t.artifactDelivery.toast
+          : errorName === "DeliveryReceiptUnverifiedError"
+            ? t.artifactDelivery.receiptToast
+            : getStreamErrorMessage(error),
+      );
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
@@ -2026,6 +2056,10 @@ export function useThreadStream({
     setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
+    // Delivery verdicts deliberately survive a thread switch. They are keyed by
+    // run, so they cannot render under the wrong turn, and clearing them would
+    // drop the notice on the most ordinary navigation there is — glancing at
+    // another chat and coming back.
   }, [threadId]);
 
   // Release entries individually once canonical history confirms their stable

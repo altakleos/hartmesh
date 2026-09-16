@@ -36,12 +36,17 @@ export function ArtifactFileList({
   className,
   files,
   runId,
+  // Off for a list the assistant chose *not* to present: a one-click admin
+  // install belongs behind a deliberate presentation, not behind copy that
+  // invites recovering work the turn dropped.
+  skillInstallEnabled = true,
   threadId,
 }: {
   archiveDownloadsEnabled?: boolean;
   className?: string;
   files: string[];
   runId?: string;
+  skillInstallEnabled?: boolean;
   threadId: string;
 }) {
   const { t } = useI18n();
@@ -177,7 +182,7 @@ export function ArtifactFileList({
                 {getFileExtensionDisplayName(file)} file
               </CardDescription>
               <CardAction className="row-span-1 self-center">
-                {file.endsWith(".skill") && isAdmin && (
+                {skillInstallEnabled && file.endsWith(".skill") && isAdmin && (
                   <Button
                     variant="ghost"
                     disabled={installingFile === file}

@@ -960,6 +960,95 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
     return _DELIVERY_INCOMPLETE_ERROR
 
 
+# A client learns a run's outcome from the stream, and every other terminal
+# error branch below publishes an ``error`` frame before the end marker. The
+# delivery fence is the exception that mattered: it runs *after* an ordinary
+# graph completion, so a run that produced files and never presented them was
+# ``error`` in SQL and in the journal while the browser showed confident prose
+# followed by a normal end (hartmesh-tenancy/DF13).
+#
+# The frames are a pair because clients cannot carry detail on an error: the
+# LangGraph SDK turns an ``error`` frame into an ``Error`` holding only
+# ``message`` and ``name`` and stops reading the stream there. The files the
+# run withheld therefore ride a ``custom`` frame published first, on the same
+# channel as the other worker-authored control events, and the ``error`` frame
+# that follows keeps the ordinary failure handling every other branch gets.
+_DELIVERY_INCOMPLETE_ERROR_NAME = "ArtifactDeliveryIncompleteError"
+_DELIVERY_RECEIPT_FAILED_ERROR_NAME = "DeliveryReceiptUnverifiedError"
+_DELIVERY_INCOMPLETE_EVENT_TYPE = "artifact_delivery_incomplete"
+
+# Enough to act on, bounded so one run cannot push an unbounded list through
+# every subscriber's replay buffer. ``undelivered_count`` stays exact, and the
+# full set remains on the durable ``run.delivery`` receipt.
+MAX_DISCLOSED_UNDELIVERED_PATHS = 20
+
+
+def _undelivered_paths(content: dict[str, Any]) -> list[str]:
+    """Produced outputs this run never presented, in scan order.
+
+    The fence only fires when nothing matched, so at today's call sites this
+    subtracts an empty set; the subtraction keeps the helper honest if the
+    satisfaction rule ever narrows below "any match satisfies".
+    """
+    matched = set(content.get("matched_paths") or [])
+    return [path for path in content.get("produced_paths") or [] if path not in matched]
+
+
+async def _publish_delivery_failure(
+    bridge: Any,
+    run_id: str,
+    *,
+    message: str,
+    name: str,
+    content: dict[str, Any] | None = None,
+) -> None:
+    """Tell the client the run failed delivery, and what it is still holding.
+
+    Best-effort by contract: the run's terminal status is already committed or
+    staged when this runs, so a stream that has gone away must not replace the
+    run's real outcome with a publication error. The sibling branches publish
+    bare because they already sit in an ``except`` handler, where a publication
+    failure cannot re-enter terminalization; the delivery fence publishes from
+    the ``try`` body, where an escaping error would be caught below and stage a
+    second terminal status over the one already written.
+
+    The two frames are guarded separately, and not because it reads tidier: the
+    detail frame is decoration, the ``error`` frame is the whole point. Sharing
+    one handler would let a transport failure on the larger, model-influenced
+    payload take the error frame with it and hand the client back the confident
+    prose and clean end this exists to prevent.
+    """
+    try:
+        if content is not None:
+            undelivered = _undelivered_paths(content)
+            if undelivered:
+                await bridge.publish(
+                    run_id,
+                    "custom",
+                    {
+                        "type": _DELIVERY_INCOMPLETE_EVENT_TYPE,
+                        "run_id": run_id,
+                        "message": message,
+                        "undelivered_paths": undelivered[:MAX_DISCLOSED_UNDELIVERED_PATHS],
+                        "undelivered_count": len(undelivered),
+                    },
+                )
+    except Exception:
+        logger.warning(
+            "Failed to publish undelivered-file detail for run %s",
+            run_id,
+            exc_info=True,
+        )
+    try:
+        await bridge.publish(run_id, "error", {"message": message, "name": name})
+    except Exception:
+        logger.error(
+            "Failed to publish delivery failure for run %s",
+            run_id,
+            exc_info=True,
+        )
+
+
 def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str]:
     """Directory names workspace snapshots must skip for this deployment.
 
@@ -3455,6 +3544,23 @@ async def _run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
+            elif delivery_error is not None and not record.ownership_lost:
+                # Guarded and shielded like the receipt path below:
+                # ``set_status_if_not_cancelled`` also returns None on the
+                # ownership-loss outcomes, and a fenced worker must not narrate
+                # a terminal outcome onto a stream a peer now owns. The shield
+                # keeps a cancellation on this await from routing into
+                # ``_finish_cancellation`` and rewriting the error just
+                # committed as ``interrupted``.
+                await _await_terminal_cleanup(
+                    _publish_delivery_failure(
+                        bridge,
+                        run_id,
+                        message=delivery_error,
+                        name=_DELIVERY_INCOMPLETE_ERROR_NAME,
+                        content=delivery_content,
+                    ),
+                )
 
     except _ExecutionRecoveryTerminalized as exc:
         # RunManager already committed the bounded terminal lifecycle under
@@ -3817,6 +3923,14 @@ async def _run_agent(
                         RunStatus.error,
                         error=_DELIVERY_RECEIPT_FAILED_ERROR,
                         persist=False,
+                    ),
+                )
+                await _await_terminal_cleanup(
+                    _publish_delivery_failure(
+                        bridge,
+                        run_id,
+                        message=_DELIVERY_RECEIPT_FAILED_ERROR,
+                        name=_DELIVERY_RECEIPT_FAILED_ERROR_NAME,
                     ),
                 )
 

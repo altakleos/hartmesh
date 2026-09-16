@@ -141,6 +141,15 @@ export interface Translations {
     truncatedSummary: string;
   };
 
+  // Files a run produced but never presented
+  artifactDelivery: {
+    title: (count: number) => string;
+    description: string;
+    shownOfTotal: (shown: number, total: number) => string;
+    toast: string;
+    receiptToast: string;
+  };
+
   // Input Box
   inputBox: {
     placeholder: string;
