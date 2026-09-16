@@ -489,9 +489,7 @@ def test_the_time_before_the_model_request_is_accounted_for(gateway: _Gateway) -
     model_request = _phase_at(wire, "model_request")
     assert None not in (admission, assembly, agent_build, preflight, graph_start, model_request), wire
     assert admission <= assembly <= agent_build <= preflight <= graph_start <= model_request, wire
-    assert not any(record["phase"] == "skill_materialization" for record in wire["phases"]), (
-        "an ordinary turn projects no accepted snapshot, so that phase must be absent rather than zero"
-    )
+    assert not any(record["phase"] == "skill_materialization" for record in wire["phases"]), "an ordinary turn projects no accepted snapshot, so that phase must be absent rather than zero"
     build = next(record for record in wire["phases"] if record["phase"] == "agent_build")
     assert "duration_ms" in build, build  # a span, not a bare mark
     build_ms = build["duration_ms"]
