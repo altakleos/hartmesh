@@ -728,3 +728,33 @@ class TestAwrapModelCall:
         assert isinstance(injected, HumanMessage)
         assert injected.name == "todo_completion_reminder"
         assert injected.additional_kwargs["hide_from_ui"] is True
+
+
+class TestTodoSectionTagIsNotMistakenForATool:
+    """The section that describes `write_todos` must not read like a tool name.
+
+    In the tenant-class .17 trace a model called a tool named
+    ``todo_list_system`` twice — the exact name of the XML tag this prompt
+    section was wrapped in — and paid a round trip for each before retrying
+    with the real ``write_todos``. The section is ``<task_tracking>`` now.
+    Whether the tag was the cause is not provable from one trace; the rename
+    costs nothing and removes the collision.
+    """
+
+    def test_neither_todo_prompt_wraps_itself_in_a_tool_shaped_tag(self):
+        from deerflow.agents.factory import _TODO_SYSTEM_PROMPT
+        from deerflow.agents.lead_agent.agent import _create_todo_list_middleware
+
+        lead = _create_todo_list_middleware(True)
+        assert lead is not None
+        for prompt in (_TODO_SYSTEM_PROMPT, lead.system_prompt):
+            assert "<task_tracking>" in prompt and "</task_tracking>" in prompt
+            assert "todo_list_system" not in prompt
+            # The one name in here that *is* a tool is the tool.
+            assert "`write_todos`" in prompt
+
+    def test_both_tag_names_stay_blocked_in_untrusted_input(self):
+        from deerflow.agents.middlewares.input_sanitization_middleware import _BLOCKED_TAG_NAMES
+
+        assert "task_tracking" in _BLOCKED_TAG_NAMES
+        assert "todo_list_system" in _BLOCKED_TAG_NAMES

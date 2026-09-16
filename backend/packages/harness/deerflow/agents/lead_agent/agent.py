@@ -326,7 +326,7 @@ def _create_todo_list_middleware(is_plan_mode: bool) -> TodoMiddleware | None:
 
     # Custom prompts matching DeerFlow's style
     system_prompt = """
-<todo_list_system>
+<task_tracking>
 You have access to the `write_todos` tool to help you manage and track complex multi-step objectives.
 
 **CRITICAL RULES:**
@@ -358,7 +358,7 @@ This tool is designed for complex objectives that require systematic tracking:
 
 **Task Management:**
 Writing todos takes time and tokens - use it when helpful for managing complex problems, not for simple requests.
-</todo_list_system>
+</task_tracking>
 """
 
     tool_description = """Use this tool to create and manage a structured task list for complex work sessions.

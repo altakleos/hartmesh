@@ -182,7 +182,7 @@ config = RunnableConfig(
 DeerFlow uses custom `system_prompt` and `tool_description` for the TodoListMiddleware that match the overall DeerFlow prompt style:
 
 ### System Prompt Features
-- Uses XML tags (`<todo_list_system>`) for structure consistency with DeerFlow's main prompt
+- Uses XML tags (`<task_tracking>`) for structure consistency with DeerFlow's main prompt
 - Emphasizes CRITICAL rules and best practices
 - Clear "When to Use" vs "When NOT to Use" guidelines
 - Focuses on real-time updates and immediate task completion
