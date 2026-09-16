@@ -250,7 +250,10 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
     }
     assert record.status == RunStatus.error
     assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
-    assert record.stop_reason is None
+    # Was ``None`` until hartmesh-tenancy/DF13: the fence was one of the only
+    # two terminal-error branches that named no reason, which left a fenced run
+    # indistinguishable over HTTP from a generic runtime failure.
+    assert record.stop_reason == "artifact_delivery_incomplete"
 
 
 @pytest.mark.anyio

@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { expect, test } from "@playwright/test";
+import { expect, test, type Request } from "@playwright/test";
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -87,6 +87,23 @@ test.describe("real backend render (replay, no API key)", () => {
       );
     });
 
+    // An aborted follow-up request and an empty one render identically, so the
+    // chip locator alone cannot tell a settled turn from a torn one. Pin the
+    // request reaching a response (hartmesh-tenancy/DF13).
+    const suggestionOutcomes: string[] = [];
+    const isSuggestionPost = (request: Request) =>
+      request.method() === "POST" && request.url().includes("/suggestions");
+    page.on("requestfinished", (request) => {
+      if (isSuggestionPost(request)) suggestionOutcomes.push("finished");
+    });
+    page.on("requestfailed", (request) => {
+      if (isSuggestionPost(request)) {
+        suggestionOutcomes.push(
+          `failed:${request.failure()?.errorText ?? "unknown"}`,
+        );
+      }
+    });
+
     await page.goto("/workspace/chats/new");
 
     const textarea = page.getByPlaceholder(/how can i assist you/i);
@@ -113,6 +130,10 @@ test.describe("real backend render (replay, no API key)", () => {
     await expect(chat.getByText(EXPECTED_SUGGESTION)).toBeVisible({
       timeout: 30_000,
     });
+    expect(
+      suggestionOutcomes,
+      "the follow-up request must reach a response; an abort renders the same as an empty answer",
+    ).toEqual(["finished"]);
 
     // Visual regression is OS-sensitive (a macOS baseline won't match CI's
     // Linux render), so it's a local dev gate only; in CI we capture the render

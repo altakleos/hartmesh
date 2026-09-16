@@ -63,6 +63,15 @@ async function captureThreadStreamOptions() {
     }),
     useUpdateSubtask: () => rs.fn(),
   }));
+  // Mocked here for the same reason as the subtask context: the react mock
+  // above has no `createContext`, so the real module cannot be imported.
+  rs.doMock("@/core/artifact-delivery", () => ({
+    parseArtifactDeliveryFailure: () => null,
+    parseArtifactDeliveryUnverified: () => null,
+    useArtifactDeliveryContext: () => ({
+      recordFailure: rs.fn(),
+    }),
+  }));
 
   const { useThreadStream } = await import("@/core/threads/hooks");
   function ThreadStreamCapture() {
@@ -86,6 +95,7 @@ afterEach(() => {
   rs.doUnmock("@/core/api");
   rs.doUnmock("@/core/i18n/hooks");
   rs.doUnmock("@/core/tasks/context");
+  rs.doUnmock("@/core/artifact-delivery");
   rs.resetModules();
 });
 

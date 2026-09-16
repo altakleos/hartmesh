@@ -227,28 +227,39 @@ regular file created or modified under `/mnt/user-data/outputs`; internal
 process-feedback files are excluded (the scanner's `EXCLUDED_DIR_NAMES` plus
 the configured `tool_output.storage_subdir`), so a run that only externalized
 oversized tool outputs does not fail delivery. At least one candidate must be
-covered by a path attributed by the journal to `present_files`; presenting only
-an unrelated pre-existing path does not satisfy delivery. Receipts for such
-runs add `produced_paths`, `presented_paths`, `matched_paths`, `verification`,
-`stage`, and `satisfied` to the Slice 1 fact fields. Missing a matching
-presentation becomes a run error; a successful presentation is also downgraded
-to error if its receipt cannot be durably verified. Runs without changed
-outputs preserve ordinary chat behavior and the original receipt shape. Orphan
-recovery first atomically claims an expired lease, then uses the same singleton
-write to backfill a zero-delivery receipt — a stale recovery scan cannot
-overwrite a live run's later detailed receipt, an event-store outage does not
-undo the terminal takeover, and an existing detailed receipt is preserved when
-a worker crashed after writing it. Event stores serialize `put_if_absent` with
-ordinary thread writers: memory and JSONL provide the documented
-single-process guarantee, while the DB store adds per-thread in-process locks
-and PostgreSQL advisory locks for cross-process writers. Moving journal
-construction ahead of preflight is receipt-only on early failure paths: a
-separate boundary flag preserves the previous completion-data semantics, so
-checkpoint incompatibility or cancellation while waiting for an older
-finalizing run does not persist an empty completion snapshot. Worker tests pin
-one accumulated receipt across multiple goal-continuation `_stream_once` calls;
-journal tests drive LangChain's real async callback dispatcher against a single
-journal to pin serialized, deduplicated parallel tool callbacks.
+covered by a path attributed by the journal to `present_files`; presenting
+only an unrelated pre-existing path does not satisfy delivery. Receipts for
+such runs add `produced_paths`, `presented_paths`, `matched_paths`,
+`verification`, `stage`, and `satisfied` to the Slice 1 fact fields. Missing a
+matching presentation becomes a run error; a successful presentation is also
+downgraded to error if its receipt cannot be durably verified. Neither
+publishes an `error` stream frame: the graph completed and the answer is
+checkpointed, so the stream reaches its end marker normally and the verdict
+rides `stop_reason` on the run record (`artifact_delivery_incomplete` /
+`delivery_receipt_failed`, also the `run.terminal.v1` failure code) plus one
+advisory `custom` frame for live clients — `artifact_delivery_incomplete`
+naming the withheld paths (bounded at 20, exact count) or
+`artifact_delivery_unverified` carrying only the run and the message. The
+frame is published outside the negotiated stream modes, which is acceptable
+precisely because it is advisory: a consumer that never requested `custom`
+reads the same verdict from the record, as `/wait` and the IM follow-up
+watcher already do after the end marker. Runs without changed outputs preserve
+ordinary chat behavior and the original receipt shape. Orphan recovery first
+atomically claims an expired lease, then uses the same singleton write to
+backfill a zero-delivery receipt — a stale recovery scan cannot overwrite a
+live run's later detailed receipt, an event-store outage does not undo the
+terminal takeover, and an existing detailed receipt is preserved when a worker
+crashed after writing it. Event stores serialize `put_if_absent` with ordinary
+thread writers: memory and JSONL provide the documented single-process
+guarantee, while the DB store adds per-thread in-process locks and PostgreSQL
+advisory locks for cross-process writers. Moving journal construction ahead of
+preflight is receipt-only on early failure paths: a separate boundary flag
+preserves the previous completion-data semantics, so checkpoint
+incompatibility or cancellation while waiting for an older finalizing run does
+not persist an empty completion snapshot. Worker tests pin one accumulated
+receipt across multiple goal-continuation `_stream_once` calls; journal tests
+drive LangChain's real async callback dispatcher against a single journal to
+pin serialized, deduplicated parallel tool callbacks.
 
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error
@@ -323,20 +334,7 @@ summarizer automatically excludes them from baseline summaries with a warning.
 Storage-size collection relies on saver-specific diagnostic layouts; if those
 layouts change, the timing/correctness row remains successful while storage
 fields become `null` and `storage_stats_error` records the diagnostic failure.
-Example:
-
-```bash
-cd backend
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
-  --backends sqlite --updates 100,500,999,1000,1001 --payload-bytes 128 \
-  --repetitions 7 --output /tmp/checkpoint-bench.jsonl
-TEST_POSTGRES_URI=postgresql://... \
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
-  --backends sqlite,postgres --updates 100 --payload-bytes 128 \
-  --output /tmp/checkpoint-cross-backend.jsonl
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_channels.py \
-  /tmp/checkpoint-bench.jsonl
-```
+Invocations live in the script's own `Examples::` docstring.
 
 The production-shaped layer lives in
 `scripts/benchmark/checkpoint/bench_production.py`: per-case child processes
@@ -375,17 +373,7 @@ large to run blindly):
   `ThreadHistoryRequest.limit`), so `--history-limits` values above 100 are
   measured and reported by their effective (clamped) limit.
 
-Example:
-
-```bash
-cd backend
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
-  --turns 10,100,500,1000,2000 --payload-bytes 128 \
-  --snapshot-frequencies 10,50,100,500,1000 \
-  --repetitions 7 --output /tmp/production-bench.jsonl
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
-  /tmp/production-bench.jsonl
-```
+Invocations live in the script's own `Examples::` docstring.
 
 ## Exact two-Gateway boundary
 

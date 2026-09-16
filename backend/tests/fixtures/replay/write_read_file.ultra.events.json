@@ -208,6 +208,16 @@
       ]
     },
     {
+      "event": "custom",
+      "keys": [
+        "message",
+        "run_id",
+        "type",
+        "undelivered_count",
+        "undelivered_paths"
+      ]
+    },
+    {
       "event": "end",
       "keys": null
     }

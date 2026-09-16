@@ -32,11 +32,13 @@ _LIFECYCLE_EVIDENCE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
 _LIFECYCLE_SAFE_REASONS = {
     "agent_assembly_drift",
     "agent_revision_drift",
+    "artifact_delivery_incomplete",
     "assembly_evidence_unavailable",
     "accepted_skill_execution_fence_failed",
     "accepted_skill_execution_lease_unavailable",
     "constraint_evidence_mismatch",
     "constraint_expired_before_start",
+    "delivery_receipt_failed",
     "loop_capped",
     "model_length_capped",
     "orphan_recovered",

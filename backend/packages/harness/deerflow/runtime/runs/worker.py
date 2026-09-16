@@ -960,6 +960,101 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
     return _DELIVERY_INCOMPLETE_ERROR
 
 
+# A client learns a run's outcome from the stream, and every other terminal
+# error branch below publishes an ``error`` frame before the end marker. The
+# delivery fence is the exception that mattered: it runs *after* an ordinary
+# graph completion, so a run that produced files and never presented them was
+# ``error`` in SQL and in the journal while the browser showed confident prose
+# followed by a normal end (hartmesh-tenancy/DF13).
+#
+# It stays the exception, deliberately. ``event: error`` means "this stream
+# carries no valid assistant turn": the LangGraph SDK stops reading there,
+# discards the ``end`` marker, throws, and skips the ``onSuccess`` that settles
+# the turn onto canonical history. Asserting that about a turn whose graph
+# completed and whose answer is checkpointed is false, and the client pays for
+# it — measured: a spurious reconnect, an aborted follow-up request, and (once
+# the SDK's one-shot reconnect latch is spent) a composer pinned in a failed
+# state for the rest of the thread. Orphan recovery already ships the honest
+# shape: ``app/gateway/deps.py`` durably marks a run ``error`` and publishes
+# only the end marker.
+#
+# So the verdict rides one advisory ``custom`` frame for live clients and
+# ``stop_reason`` on the run record for everyone else. ``/wait``, the IM
+# follow-up watcher and every reconnect already re-read the record after the end
+# marker, and ``RunResponse.stop_reason`` rides the exact call the browser makes
+# on every rejoin. A client that never negotiated ``custom`` therefore loses
+# nothing, which is what makes publishing this frame outside the negotiated mode
+# set acceptable rather than load-bearing.
+_DELIVERY_INCOMPLETE_EVENT_TYPE = "artifact_delivery_incomplete"
+_DELIVERY_UNVERIFIED_EVENT_TYPE = "artifact_delivery_unverified"
+_DELIVERY_INCOMPLETE_STOP_REASON = "artifact_delivery_incomplete"
+_DELIVERY_RECEIPT_STOP_REASON = "delivery_receipt_failed"
+
+# Enough to act on, bounded so one run cannot push an unbounded list through
+# every subscriber's replay buffer. ``undelivered_count`` stays exact, and the
+# full set remains on the durable ``run.delivery`` receipt.
+MAX_DISCLOSED_UNDELIVERED_PATHS = 20
+
+
+def _undelivered_paths(content: dict[str, Any]) -> list[str]:
+    """Produced outputs this run never presented, in scan order.
+
+    The fence only fires when nothing matched, so at today's call sites this
+    subtracts an empty set; the subtraction keeps the helper honest if the
+    satisfaction rule ever narrows below "any match satisfies".
+    """
+    matched = set(content.get("matched_paths") or [])
+    return [path for path in content.get("produced_paths") or [] if path not in matched]
+
+
+async def _publish_delivery_failure(
+    bridge: Any,
+    run_id: str,
+    *,
+    event_type: str,
+    message: str,
+    content: dict[str, Any] | None = None,
+) -> None:
+    """Tell live clients this run failed delivery, and what it is still holding.
+
+    Advisory by contract. The authority is the run record — ``status``,
+    ``error`` and ``stop_reason`` — plus the durable ``run.delivery`` receipt,
+    which carries the full path set this bounded frame truncates. A client that
+    reloads, gaps, or never negotiated ``custom`` reads the same verdict over
+    HTTP; this frame only saves a live client the round-trip, so losing it
+    degrades latency rather than correctness.
+
+    Deliberately not an ``error`` frame. The graph completed, ``run.end`` was
+    appended and the answer is checkpointed: every frame the client already
+    consumed is valid and final. ``error`` asserts the opposite, and the SDK
+    acts on that assertion by discarding the rest of the stream and skipping the
+    settle.
+
+    Best-effort publication, whole body guarded: the run's terminal status is
+    already committed or staged when this runs, and the fence calls it from the
+    ``try`` body where an escaping error — a transport failure or a malformed
+    ``content`` — would be caught below and stage a second terminal status over
+    the one already written.
+    """
+    try:
+        payload: dict[str, Any] = {
+            "type": event_type,
+            "run_id": run_id,
+            "message": message,
+        }
+        if content is not None:
+            undelivered = _undelivered_paths(content)
+            payload["undelivered_paths"] = undelivered[:MAX_DISCLOSED_UNDELIVERED_PATHS]
+            payload["undelivered_count"] = len(undelivered)
+        await bridge.publish(run_id, "custom", payload)
+    except Exception:
+        logger.error(
+            "Failed to publish delivery verdict for run %s",
+            run_id,
+            exc_info=True,
+        )
+
+
 def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str]:
     """Directory names workspace snapshots must skip for this deployment.
 
@@ -3441,6 +3536,15 @@ async def _run_agent(
                     code="artifact_delivery_incomplete",
                     error_class="ArtifactDeliveryFailure",
                 )
+                # The terminal status being reported is the delivery error, so
+                # the reason has to explain that one; a guard cap that fired
+                # earlier in this turn stays on the journal's middleware
+                # evidence. These two delivery branches were the only
+                # terminal-error branches in this worker that left
+                # ``stop_reason`` unset, which is what made a fenced run
+                # indistinguishable over HTTP from a generic ``RuntimeFailure``
+                # — the half of hartmesh-tenancy/DF13 that outlives the stream.
+                stop_reason = _DELIVERY_INCOMPLETE_STOP_REASON
             if accepted_sandbox_session is not None:
                 # Success is not staged from a provider lease that was lost
                 # after the final graph operation. The subsequent run-store
@@ -3455,6 +3559,23 @@ async def _run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
+            elif delivery_error is not None and not record.ownership_lost:
+                # Guarded and shielded like the receipt path below:
+                # ``set_status_if_not_cancelled`` also returns None on the
+                # ownership-loss outcomes, and a fenced worker must not narrate
+                # a terminal outcome onto a stream a peer now owns. The shield
+                # keeps a cancellation on this await from routing into
+                # ``_finish_cancellation`` and rewriting the error just
+                # committed as ``interrupted``.
+                await _await_terminal_cleanup(
+                    _publish_delivery_failure(
+                        bridge,
+                        run_id,
+                        event_type=_DELIVERY_INCOMPLETE_EVENT_TYPE,
+                        message=delivery_error,
+                        content=delivery_content,
+                    ),
+                )
 
     except _ExecutionRecoveryTerminalized as exc:
         # RunManager already committed the bounded terminal lifecycle under
@@ -3816,7 +3937,16 @@ async def _run_agent(
                         run_id,
                         RunStatus.error,
                         error=_DELIVERY_RECEIPT_FAILED_ERROR,
+                        stop_reason=_DELIVERY_RECEIPT_STOP_REASON,
                         persist=False,
+                    ),
+                )
+                await _await_terminal_cleanup(
+                    _publish_delivery_failure(
+                        bridge,
+                        run_id,
+                        event_type=_DELIVERY_UNVERIFIED_EVENT_TYPE,
+                        message=_DELIVERY_RECEIPT_FAILED_ERROR,
                     ),
                 )
 

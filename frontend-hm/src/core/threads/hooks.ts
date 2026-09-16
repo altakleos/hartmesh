@@ -17,6 +17,11 @@ import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
 import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
+import {
+  parseArtifactDeliveryFailure,
+  parseArtifactDeliveryUnverified,
+  useArtifactDeliveryContext,
+} from "../artifact-delivery";
 import { getBackendBaseURL } from "../config";
 import { useI18n } from "../i18n/hooks";
 import { getMessageRunId } from "../messages/run-duration";
@@ -1709,6 +1714,7 @@ export function useThreadStream({
   const queryClient = useQueryClient();
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
+  const { recordFailure: recordDeliveryFailure } = useArtifactDeliveryContext();
 
   const clearPreparedReplayMasks = useCallback(
     (replay: PendingPreparedReplayMask | null) => {
@@ -1849,8 +1855,38 @@ export function useThreadStream({
         localTurnOrderBaselineIdentitiesRef.current = null;
         tasksRef.current = {};
         setTasks({});
+        // Delivery verdicts deliberately survive a gap. Everything else cleared
+        // here is rebuilt from the durable state this recovery reloads; a
+        // verdict is not stored anywhere the client can re-read, so dropping it
+        // would restore the silence this frame exists to end.
         invalidateStoppedThreadCaches(queryClient, threadIdRef.current, isMock);
         toast.warning(t.conversation.streamReplayGap);
+        return;
+      }
+
+      // The turn produced files and ended without presenting them. The graph
+      // completed and the answer is checkpointed, so this is a correction, not
+      // a stream failure: the worker publishes a control frame and lets the
+      // stream reach ``end``, which keeps the SDK's ``onSuccess`` settle —
+      // canonical history, the app's ``onFinish``, and the composer's view of
+      // the turn that just finished. The notice anchored under that turn is the
+      // whole signal; there is deliberately no toast, because the notice lands
+      // where the reader already is and, unlike a toast, is still there
+      // tomorrow.
+      const deliveryFailure = parseArtifactDeliveryFailure(event);
+      if (deliveryFailure) {
+        recordDeliveryFailure(deliveryFailure);
+        return;
+      }
+
+      // The sibling verdict: the files were presented, but the durable delivery
+      // receipt could not be written. Nothing can be offered in place — the
+      // files are already attached — and the archive path is unreliable until
+      // someone re-reads durable state, so this one is a toast and it stays
+      // red. The system's own bookkeeping is broken, which is a different fact
+      // from "your file is one click away".
+      if (parseArtifactDeliveryUnverified(event)) {
+        toast.error(t.artifactDelivery.receiptToast);
         return;
       }
 
@@ -2026,6 +2062,10 @@ export function useThreadStream({
     setPendingSupersededMessageIds(new Set());
     prevHumanMsgCountRef.current =
       latestMessageCountsRef.current.humanMessageCount;
+    // Delivery verdicts deliberately survive a thread switch. They are keyed by
+    // run, so they cannot render under the wrong turn, and clearing them would
+    // drop the notice on the most ordinary navigation there is — glancing at
+    // another chat and coming back.
   }, [threadId]);
 
   // Release entries individually once canonical history confirms their stable

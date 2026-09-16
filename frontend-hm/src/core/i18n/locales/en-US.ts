@@ -167,6 +167,20 @@ export const enUS: Translations = {
     truncatedSummary: "Some changes were truncated.",
   },
 
+  artifactDelivery: {
+    title: (count) =>
+      count === 1
+        ? "1 file wasn't attached to the reply above"
+        : `${count} files weren't attached to the reply above`,
+    description: (count) =>
+      count === 1
+        ? "Open or download it here. The reply above may read as if it was already included."
+        : "Open or download them here. The reply above may read as if they were already included.",
+    shownOfTotal: (shown, total) => `Showing the first ${shown} of ${total}.`,
+    receiptToast:
+      "Your files were created, but we couldn't confirm they were saved to this chat. Reload to check.",
+  },
+
   // Input Box
   inputBox: {
     placeholder: "How can I assist you today?",
