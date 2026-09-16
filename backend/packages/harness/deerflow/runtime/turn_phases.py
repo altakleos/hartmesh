@@ -114,7 +114,12 @@ MAX_RENDERED_REASON = 80
 
 
 class TurnPhase(StrEnum):
-    """The closed set of phases a turn is measured in."""
+    """The closed set of phases a turn is measured in.
+
+    Closed to callers, not frozen: members are added as a phase is broken into
+    the steps it is made of. ``to_wire``'s version stamps the record *shape*,
+    which is why it does not move when a member is added.
+    """
 
     ADMISSION = "admission"
     ASSEMBLY = "assembly"
@@ -124,6 +129,44 @@ class TurnPhase(StrEnum):
     # ``SANDBOX_READINESS``). The middleware's later ``SANDBOX_BINDING`` and
     # ``SANDBOX_ACQUIRE`` run after the graph starts and do not.
     SKILL_MATERIALIZATION = "skill_materialization"
+    # The steps that phase is made of, so its own figure is attributed rather
+    # than being one unexplained block. Tenant-class .17 measured 5 to 6 s
+    # before the first model request on a *warm* turn, which is most of a
+    # one-sentence revision's budget, and named none of it.
+    #
+    #   ACCEPTED_AUTHORIZATION     authorizing the execution and choosing who
+    #                              materializes it. Not free and not local: it
+    #                              resolves the provider, and on a durable
+    #                              profile the selection asks the sandbox
+    #                              backend for its pinned runtime digest.
+    #   ACCEPTED_MATERIAL_VERIFY   re-digesting the published snapshot and
+    #                              capturing its file manifest -- three walks
+    #                              of the same tree. Durable profiles only.
+    #   SKILL_PROJECTION           the provider putting the accepted material
+    #                              in a sandbox (``SANDBOX_LOOKUP`` and, on a
+    #                              cold turn, ``SANDBOX_CREATE`` and
+    #                              ``SANDBOX_READINESS`` nest inside this one).
+    #                              A provider that binds while it provisions
+    #                              publishes the snapshot in here too.
+    #   SKILL_SNAPSHOT_BIND        binding that snapshot as the thread's only
+    #                              skills mount. Against a provider that has
+    #                              already bound, this is the idempotent
+    #                              receipt check, which still captures and
+    #                              stages the whole tree before discarding it.
+    #
+    # Each span is read back by its *first* record, so one name must not be
+    # opened twice in a turn: the second is measured and then dropped, and its
+    # cost reappears as residual nobody can account for.
+    #
+    # What is left inside ``SKILL_MATERIALIZATION`` on the released projection
+    # profile is the binding lookup and the isolation assertions, and a turn
+    # where that residual is not small is itself the finding. A durable profile
+    # leaves more there: the materialization validation and two execution-fence
+    # round trips.
+    ACCEPTED_AUTHORIZATION = "accepted_authorization"
+    ACCEPTED_MATERIAL_VERIFY = "accepted_material_verify"
+    SKILL_PROJECTION = "skill_projection"
+    SKILL_SNAPSHOT_BIND = "skill_snapshot_bind"
     # The window between assembly and the model request is most of a warm
     # turn's wait. Tenant-class .15 measured 2.6 to 3.4 s of it per turn with
     # nothing named, so these three say where the rest of it goes: building the
