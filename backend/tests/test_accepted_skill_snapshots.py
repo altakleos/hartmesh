@@ -289,20 +289,21 @@ def test_accepted_execution_rejects_live_skill_reads_before_sandbox_io(
     assert result == (
         "Error: Accepted invocation may access only its accepted skill snapshot at "
         f"/mnt/skills/.accepted/{snapshot.snapshot_id}. "
+        "Listing that directory shows every skill this invocation may read. "
         f"Use /mnt/skills/.accepted/{snapshot.snapshot_id}/custom/immutable-skill/SKILL.md "
         "instead of /mnt/skills/custom/immutable-skill/SKILL.md; "
-        "describe_skill reports each skill's exact directory."
+        "describe_skill reports each skill's exact Directory."
     )
     assert sandbox_calls == 0
     revision.material.release_process_material()
 
 
 def _rule(snapshot_id: str) -> str:
-    return f"Error: Accepted invocation may access only its accepted skill snapshot at /mnt/skills/.accepted/{snapshot_id}."
+    return f"Error: Accepted invocation may access only its accepted skill snapshot at /mnt/skills/.accepted/{snapshot_id}. Listing that directory shows every skill this invocation may read."
 
 
 def _redirect(snapshot_id: str, requested: str, relative: str) -> str:
-    return f"{_rule(snapshot_id)} Use /mnt/skills/.accepted/{snapshot_id}{relative} instead of {requested}; describe_skill reports each skill's exact directory."
+    return f"{_rule(snapshot_id)} Use /mnt/skills/.accepted/{snapshot_id}{relative} instead of {requested}; describe_skill reports each skill's exact Directory."
 
 
 @pytest.mark.parametrize(
@@ -368,6 +369,31 @@ def test_accepted_execution_rejects_all_live_skill_tool_bypasses_before_io(
 
     assert invoke(runtime) == expected(snapshot.snapshot_id)
     assert sandbox_calls == 0
+    revision.material.release_process_material()
+
+
+def test_a_refused_path_is_echoed_back_bounded(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """The refusal quotes what the model wrote, so it cannot quote it forever.
+
+    ``bash`` returns this message outside its own output truncation, so an
+    enormous path in a command would otherwise return an enormous error.
+    """
+    skill_file = _write_skill(tmp_path, body="ACCEPTED")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    runtime = _runtime_for_revision(revision)
+    monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda _runtime: pytest.fail("denial must precede sandbox IO"))
+
+    huge = "/mnt/skills/public/" + ("a" * 50_000)
+    result = sandbox_tools.bash_tool.func(runtime, f"python {huge}/run.py", "run a very long path")
+
+    assert result.startswith("Error: Accepted invocation may access only")
+    # Two bounded echoes (the rewrite and the original) plus the fixed text.
+    assert len(result) < 1_200, len(result)
+    assert "(50026 characters)" in result
     revision.material.release_process_material()
 
 

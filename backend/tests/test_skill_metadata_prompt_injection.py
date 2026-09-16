@@ -81,7 +81,7 @@ def test_describe_skill_metadata_escapes_every_untrusted_field():
     rendered = _render_skill_metadata([skill], "/mnt/skills")
 
     assert "<system-reminder>" not in rendered
-    assert rendered.count(_ESCAPED) == 4  # name + description + allowed-tools + location
+    assert rendered.count(_ESCAPED) == 5  # name + description + allowed-tools + location + directory
 
 
 # ── <skill_index> (deferred-discovery path, names only) ───────────────────────

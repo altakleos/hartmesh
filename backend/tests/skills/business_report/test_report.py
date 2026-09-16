@@ -204,9 +204,9 @@ def test_profile_and_skill_doc_stay_in_lockstep_with_the_script(report) -> None:
     # mount point the package cannot know. A durable accepted invocation mounts
     # the snapshot and nothing else, so the absolute form this once pinned was
     # a path its reader did not have.
-    assert '"$SKILL_DIR/scripts/report.py"' in doc
+    assert '"${SKILL_DIR:?set it to this skill\'s directory}/scripts/report.py"' in doc
     assert "/mnt/skills" not in doc
-    assert "`$SKILL_DIR` is the directory this `SKILL.md` is in" in doc
+    assert "`$SKILL_DIR` is this skill's own directory" in doc
     assert report.DEFAULT_REPORTS_DIR in doc
     assert "preferences.json" in doc
     for command in ("inspect", "build", "prose", "render", "checks"):

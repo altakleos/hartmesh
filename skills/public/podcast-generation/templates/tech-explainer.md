@@ -47,8 +47,11 @@ This is commonly used in signup flows, admin dashboards, or when importing users
 
 ## Generation Command
 
+**Script paths.** `$SKILL_DIR` is the podcast-generation skill's own directory, which `describe_skill("podcast-generation")` reports as `Directory` (`Location` is the `SKILL.md` inside it). Set `SKILL_DIR` to that directory at the start of the command below. Where a skill is mounted differs between deployments, so no absolute path can be written here.
+
+
 ```bash
-python "$SKILL_DIR/scripts/generate.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/generate.py" \
   --script-file /mnt/user-data/workspace/tech-explainer-script.json \
   --output-file /mnt/user-data/outputs/tech-explainer-podcast.mp3 \
   --transcript-file /mnt/user-data/outputs/tech-explainer-transcript.md

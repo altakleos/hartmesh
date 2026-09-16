@@ -9,7 +9,7 @@ description: Use this skill when the user uploads Excel (.xlsx/.xlsm/.xls) or CS
 
 This skill analyzes user-uploaded Excel/CSV files using DuckDB — an in-process analytical SQL engine. It supports schema inspection, SQL-based querying, statistical summaries, and result export, all through a single Python script.
 
-**Script paths.** `$SKILL_DIR` is the directory this `SKILL.md` is in — the path you read it from. Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here; `describe_skill` reports the directory as `Location`.
+**Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here.
 
 ## Core Capabilities
 
@@ -37,7 +37,7 @@ When a user uploads data files and requests analysis, identify:
 First, inspect the uploaded file to understand its schema:
 
 ```bash
-python "$SKILL_DIR/scripts/analyze.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/analyze.py" \
   --files /mnt/user-data/uploads/data.xlsx \
   --action inspect
 ```
@@ -55,7 +55,7 @@ Based on the schema, construct SQL queries to answer the user's questions.
 #### Run SQL Query
 
 ```bash
-python "$SKILL_DIR/scripts/analyze.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/analyze.py" \
   --files /mnt/user-data/uploads/data.xlsx \
   --action query \
   --sql "SELECT category, COUNT(*) as count, AVG(amount) as avg_amount FROM Sheet1 GROUP BY category ORDER BY count DESC"
@@ -64,7 +64,7 @@ python "$SKILL_DIR/scripts/analyze.py" \
 #### Generate Statistical Summary
 
 ```bash
-python "$SKILL_DIR/scripts/analyze.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/analyze.py" \
   --files /mnt/user-data/uploads/data.xlsx \
   --action summary \
   --table Sheet1
@@ -76,7 +76,7 @@ For string columns: count, unique, top value, frequency, null_count.
 #### Export Results
 
 ```bash
-python "$SKILL_DIR/scripts/analyze.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/analyze.py" \
   --files /mnt/user-data/uploads/data.xlsx \
   --action query \
   --sql "SELECT * FROM Sheet1 WHERE amount > 1000" \
@@ -185,7 +185,7 @@ User uploads `sales_2024.xlsx` (with sheets: `Orders`, `Products`, `Customers`) 
 ### Step 1: Inspect the file
 
 ```bash
-python "$SKILL_DIR/scripts/analyze.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/analyze.py" \
   --files /mnt/user-data/uploads/sales_2024.xlsx \
   --action inspect
 ```
@@ -193,7 +193,7 @@ python "$SKILL_DIR/scripts/analyze.py" \
 ### Step 2: Top products by revenue
 
 ```bash
-python "$SKILL_DIR/scripts/analyze.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/analyze.py" \
   --files /mnt/user-data/uploads/sales_2024.xlsx \
   --action query \
   --sql "SELECT p.product_name, SUM(o.quantity * o.unit_price) as total_revenue, SUM(o.quantity) as total_units FROM Orders o JOIN Products p ON o.product_id = p.id GROUP BY p.product_name ORDER BY total_revenue DESC LIMIT 10"
@@ -202,7 +202,7 @@ python "$SKILL_DIR/scripts/analyze.py" \
 ### Step 3: Monthly revenue trends
 
 ```bash
-python "$SKILL_DIR/scripts/analyze.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/analyze.py" \
   --files /mnt/user-data/uploads/sales_2024.xlsx \
   --action query \
   --sql "SELECT DATE_TRUNC('month', order_date) as month, SUM(quantity * unit_price) as revenue FROM Orders GROUP BY month ORDER BY month" \
@@ -212,7 +212,7 @@ python "$SKILL_DIR/scripts/analyze.py" \
 ### Step 4: Statistical summary
 
 ```bash
-python "$SKILL_DIR/scripts/analyze.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/analyze.py" \
   --files /mnt/user-data/uploads/sales_2024.xlsx \
   --action summary \
   --table Orders
@@ -225,7 +225,7 @@ Present results to the user with clear explanations of findings, trends, and act
 User uploads `orders.csv` and `customers.xlsx` and asks: "Which region has the highest average order value?"
 
 ```bash
-python "$SKILL_DIR/scripts/analyze.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/analyze.py" \
   --files /mnt/user-data/uploads/orders.csv /mnt/user-data/uploads/customers.xlsx \
   --action query \
   --sql "SELECT c.region, AVG(o.amount) as avg_order_value, COUNT(*) as order_count FROM orders o JOIN Customers c ON o.customer_id = c.id GROUP BY c.region ORDER BY avg_order_value DESC"

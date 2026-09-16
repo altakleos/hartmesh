@@ -237,6 +237,19 @@ def _accepted_snapshot_counterpart(path: str, snapshot_root: str) -> str | None:
     return f"{snapshot_root}/{relative}"
 
 
+#: The refusal quotes the path the model wrote back to it. That path is bounded
+#: only by the model's own output, and for ``bash`` the refusal is returned
+#: outside ``_truncate_bash_output``, so it is bounded here instead. The value
+#: of the redirect is the prefix swap, which a trimmed tail still delivers.
+_DENIED_PATH_ECHO_MAX_CHARS = 240
+
+
+def _echo_path(path: str) -> str:
+    if len(path) <= _DENIED_PATH_ECHO_MAX_CHARS:
+        return path
+    return f"{path[:_DENIED_PATH_ECHO_MAX_CHARS]}… ({len(path)} characters)"
+
+
 def _accepted_skill_snapshot_rule(snapshot_id: str | None) -> str:
     """State the rule and name the one tree it admits."""
     skills_root = _get_skills_container_path()
@@ -244,7 +257,9 @@ def _accepted_skill_snapshot_rule(snapshot_id: str | None) -> str:
         # Accepted with an empty skill set: there is no tree to redirect to,
         # and saying so is what stops a search for one.
         return f"{_ACCEPTED_SKILL_ACCESS_DENIED}. This invocation accepted no skills, so nothing under {skills_root} is readable."
-    return f"{_ACCEPTED_SKILL_ACCESS_DENIED} at {skills_root}/.accepted/{snapshot_id}."
+    # Naming the root is not enough on its own when no rewrite is offered, so
+    # name the one cheap move that works from it: the fence admits that listing.
+    return f"{_ACCEPTED_SKILL_ACCESS_DENIED} at {skills_root}/.accepted/{snapshot_id}. Listing that directory shows every skill this invocation may read."
 
 
 def _accepted_skill_access_denied(path: str, snapshot_id: str | None) -> AcceptedSkillPathError:
@@ -264,7 +279,8 @@ def _accepted_skill_access_denied(path: str, snapshot_id: str | None) -> Accepte
     counterpart = _accepted_snapshot_counterpart(path, f"{_get_skills_container_path()}/.accepted/{snapshot_id}")
     if counterpart is None:
         return AcceptedSkillPathError(rule)
-    return AcceptedSkillPathError(f"{rule} Use {counterpart} instead of {path}; describe_skill reports each skill's exact directory.")
+
+    return AcceptedSkillPathError(f"{rule} Use {_echo_path(counterpart)} instead of {_echo_path(path)}; describe_skill reports each skill's exact Directory.")
 
 
 def _validate_runtime_skill_path(runtime: object, path: str) -> None:
@@ -2897,8 +2913,6 @@ def str_replace_tool(
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: File not found: {requested_path}"
-    except AcceptedSkillPathError as e:
-        return f"Error: {e}"
     except PermissionError:
         return f"Error: Permission denied accessing file: {requested_path}"
     except Exception as e:

@@ -29,20 +29,22 @@ from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PUBLIC_SKILLS = REPO_ROOT / "skills" / "public"
 
-#: Skill text that still names an absolute skills path. Each of these packages
-#: already fails deterministic skill review on ``main`` for an unrelated reason
-#: — a secret-like assignment, a ``subprocess`` call without ``shell=True``, a
-#: declared sensitive capability — and CI reviews a package only when it
-#: changes, so editing this text would fail the gate on debt this repair did not
-#: create and has not evaluated. The harness half of the fix still covers them:
-#: a stale path now costs one redirected tool call instead of a filesystem walk.
+#: Skill text that still names an absolute skills path. Each of these four
+#: packages fails the deterministic skill-review gate on ``main`` — a
+#: secret-like assignment in ``image``/``music``/``video``'s ``generate.py``, a
+#: declared sensitive capability in ``vercel-deploy-claimable`` — with no
+#: trusted waiver, and CI reviews a package only when it changes, so editing
+#: this text would fail the gate on debt this repair did not create and has not
+#: evaluated. (``skill-creator`` looked like a fifth until the gate was actually
+#: run with the trusted manifest: its two findings are waived, so it is fixed
+#: here like the rest.) The harness half of the fix still covers these four: a
+#: stale path now costs one redirected tool call instead of a filesystem walk.
 #: Clearing a package's review debt is what removes its entry, and ``strict``
 #: xfail is what makes this test say so once the entry is stale.
 SKILL_TEXT_AWAITING_REVIEW_DEBT = frozenset(
     {
         "image-generation/SKILL.md",
         "music-generation/SKILL.md",
-        "skill-creator/SKILL.md",
         "vercel-deploy-claimable/SKILL.md",
         "video-generation/SKILL.md",
     }
@@ -76,9 +78,12 @@ def test_review_debt_entries_all_exist() -> None:
 
 
 #: ``$SKILL_DIR``/``$IMAGE_SKILL_DIR`` is the convention the files establish:
-#: the directory the reader loaded the file from, which ``describe_skill``
-#: reports as ``Location``.
-_SKILL_DIR_VARIABLE = re.compile(r"\$[A-Z][A-Z0-9_]*SKILL_DIR\b")
+#: a skill's own directory, which ``describe_skill`` reports as ``Directory``.
+#: Matches the bare name as well as a prefixed one, braced or not — an earlier
+#: spelling required a character between ``$`` and ``SKILL_DIR`` and so could
+#: only ever see ``$IMAGE_SKILL_DIR``, which is how an undefined ``$SKILL_DIR``
+#: shipped in a template.
+_SKILL_DIR_VARIABLE = re.compile(r"\$\{?((?:[A-Z][A-Z0-9_]*_)?SKILL_DIR)\b")
 
 
 def test_public_skills_exist() -> None:
@@ -99,13 +104,22 @@ def test_public_skill_text_names_no_absolute_skills_path(path: Path) -> None:
 
 @pytest.mark.parametrize("path", SKILL_TEXT_FILES, ids=lambda p: str(p.relative_to(PUBLIC_SKILLS)))
 def test_public_skill_text_defines_every_directory_variable_it_uses(path: Path) -> None:
-    """A variable no one defines is the same dead end by another name."""
+    """A variable no one defines is the same dead end by another name.
+
+    Unset, ``"$SKILL_DIR/scripts/x.py"`` expands to ``/scripts/x.py`` — not a
+    skills path, so the accepted-snapshot fence never sees it and the model gets
+    a bare "no such file" with no redirect. That is strictly worse than the
+    absolute path this convention replaced, so every file that uses one of these
+    variables has to say, in prose, which directory it is.
+    """
     text = path.read_text(encoding="utf-8")
-    used = set(_SKILL_DIR_VARIABLE.findall(text))
-    if not used:
-        return
-    for variable in sorted(used):
-        name = variable.lstrip("$")
-        # The definition is prose, not an assignment: the file has to say what
-        # the directory is, because the reader is the one who substitutes it.
-        assert f"`{variable}` is" in text or f"{name} is that" in text or f"is `{variable}`" in text, f"{path.relative_to(REPO_ROOT)} uses {variable} without saying which directory it is"
+    for name in sorted(set(_SKILL_DIR_VARIABLE.findall(text))):
+        # The reader is the one who substitutes it, so the definition is prose.
+        assert f"`${name}` is" in text, f"{path.relative_to(REPO_ROOT)} uses ${name} without saying which directory it is"
+
+
+@pytest.mark.parametrize("path", SKILL_TEXT_FILES, ids=lambda p: str(p.relative_to(PUBLIC_SKILLS)))
+def test_every_command_example_fails_loudly_when_the_variable_is_unset(path: Path) -> None:
+    """A copied-verbatim command must say what is missing, not resolve to ``/``."""
+    offenders = [line for line in path.read_text(encoding="utf-8").splitlines() if "$SKILL_DIR/" in line or "${SKILL_DIR}/" in line]
+    assert not offenders, f"{path.relative_to(REPO_ROOT)} uses an unguarded expansion; write ${{SKILL_DIR:?…}}: {offenders}"

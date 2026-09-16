@@ -60,6 +60,10 @@ def test_render_metadata_format(sample_skills: list[Skill]):
     assert "[built-in]" in rendered
     assert "Allowed tools: execute_code, read_file" in rendered
     assert "Location: /mnt/skills/public/data-analysis/SKILL.md" in rendered
+    # The directory is stated outright rather than left to be derived from the
+    # file path: a skill's own command examples are written against it, and
+    # dropping the `/SKILL.md` is a step a reader can get wrong.
+    assert "Directory: /mnt/skills/public/data-analysis" in rendered
 
 
 def test_render_custom_skill_mutability(sample_skills: list[Skill]):
@@ -202,12 +206,21 @@ def test_skill_index_without_evolution_section():
     assert "Skill Self-Evolution" not in section
 
 
-def test_skill_index_custom_container_path():
+def test_skill_index_states_no_root_of_its_own():
+    """The index must not name a mount point it cannot know is right.
+
+    A durable accepted invocation executes an immutable snapshot, so
+    ``skills.container_path`` is the one prefix that is refused there. Saying it
+    with framework authority above every skill's real location is how a model
+    ends up running a path that does not exist (hartmesh-tenancy/DF15).
+    """
     section = get_skill_index_prompt_section(
         skill_names=frozenset({"a"}),
         container_base_path="/custom/skills",
     )
-    assert "/custom/skills" in section
+    assert "/custom/skills" not in section
+    assert "do not assume a\npath" in section
+    assert "describe_skill reports each skill's exact Location and Directory." in section
 
 
 def test_skill_index_names_are_sorted():

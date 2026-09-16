@@ -9,7 +9,7 @@ description: Use this skill when the user requests to generate, create, or produ
 
 This skill generates high-quality podcast audio from text content. The workflow includes creating a structured JSON script (conversational dialogue) and executing audio generation through text-to-speech synthesis.
 
-**Script paths.** `$SKILL_DIR` is the directory this `SKILL.md` is in — the path you read it from. Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here; `describe_skill` reports the directory as `Location`.
+**Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here.
 
 ## Core Capabilities
 
@@ -49,7 +49,7 @@ The JSON structure:
 
 Call the Python script:
 ```bash
-python "$SKILL_DIR/scripts/generate.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/generate.py" \
   --script-file /mnt/user-data/workspace/script-file.json \
   --output-file /mnt/user-data/outputs/generated-podcast.mp3 \
   --transcript-file /mnt/user-data/outputs/generated-podcast-transcript.md
@@ -138,7 +138,7 @@ Step 1: Create script file `/mnt/user-data/workspace/ai-history-script.json`:
 
 Step 2: Execute generation:
 ```bash
-python "$SKILL_DIR/scripts/generate.py" \
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/generate.py" \
   --script-file /mnt/user-data/workspace/ai-history-script.json \
   --output-file /mnt/user-data/outputs/ai-history-podcast.mp3 \
   --transcript-file /mnt/user-data/outputs/ai-history-transcript.md
