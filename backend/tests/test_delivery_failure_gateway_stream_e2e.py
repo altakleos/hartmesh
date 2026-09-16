@@ -2,8 +2,9 @@
 
 What runs for real: the same Gateway, route, worker, admission, graph and SSE
 consumer as ``test_turn_phase_gateway_stream_e2e.py``, plus the real delivery
-fence — the post-run outputs scan, the terminal ``error`` status, and the
-frames the worker publishes before the stream's end marker.
+fence — the post-run outputs scan, the terminal ``error`` status, the advisory
+frame the worker publishes before the stream's end marker, and the durable
+verdict the run record then reports over HTTP.
 
 What is synthetic: the produced artifact. The probe model emits no tool call,
 so the test writes one file into the thread's outputs directory while the graph
@@ -74,7 +75,7 @@ def _frames_of(observed: e2e._StreamObservation, event: str) -> list[Any]:
     return [payload for name, payload in observed.frames if name == event]
 
 
-def test_a_turn_that_never_presented_its_file_ends_as_a_failure_on_the_wire(
+def test_a_turn_that_never_presented_its_file_reports_the_failure_without_breaking_the_stream(
     delivery_gateway: e2e._Gateway,
 ) -> None:
     base = delivery_gateway.loopback_url
@@ -82,11 +83,12 @@ def test_a_turn_that_never_presented_its_file_ends_as_a_failure_on_the_wire(
         csrf, thread_id = e2e._register_and_create_thread(client, base)
         on_frame, written = _produce_one_artifact_mid_turn(delivery_gateway.tmp_home, thread_id)
         observed = e2e._observe_stream(client, base, thread_id, csrf, "probe:text please", on_frame=on_frame)
+        run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
 
     assert written["done"], "the turn produced no artifact, so the fence was never exercised"
     assert observed.text_frames >= 1, "the turn must have shown prose, or there is no contradiction to correct"
-    assert "error" in observed.events, observed.events
-    assert observed.events.index("custom") < observed.events.index("error") < observed.events.index("end"), observed.events
+    assert "error" not in observed.events, observed.events
+    assert observed.events.index("custom") < observed.events.index("end"), observed.events
 
     detail = _frames_of(observed, "custom")[-1]
     assert detail["type"] == "artifact_delivery_incomplete"
@@ -94,9 +96,11 @@ def test_a_turn_that_never_presented_its_file_ends_as_a_failure_on_the_wire(
     assert detail["undelivered_count"] == 1
     assert detail["undelivered_paths"] == [f"/mnt/user-data/outputs/{ARTIFACT_NAME}"]
 
-    failure = _frames_of(observed, "error")[-1]
-    assert failure["name"] == "ArtifactDeliveryIncompleteError"
-    assert "delivery incomplete" in failure["message"]
+    # The durable half, on the exact call a browser already makes on every
+    # reconnect. This is the assertion that survives a reload, and it is what
+    # infra asked for: the verdict outlives the connection that carried it.
+    assert run["status"] == "error"
+    assert run["stop_reason"] == "artifact_delivery_incomplete"
 
 
 def test_an_ordinary_turn_on_the_same_gateway_still_ends_clean(

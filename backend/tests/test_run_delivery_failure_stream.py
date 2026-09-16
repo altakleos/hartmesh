@@ -1,11 +1,16 @@
 """The client must hear a delivery failure (hartmesh-tenancy/DF13).
 
-Every other terminal-error branch in ``run_agent`` publishes an ``error`` frame
-before the stream's end marker. The delivery fence runs after an ordinary graph
-completion, so until these regressions it terminalized the run in SQL and in the
-journal while the browser saw confident prose followed by a normal end: two
-tenant-class turns produced valid outputs, omitted ``present_files``, and looked
-successful on screen.
+The delivery fence runs after an ordinary graph completion, so until these
+regressions it terminalized the run in SQL and in the journal while the browser
+saw confident prose followed by a normal end: two tenant-class turns produced
+valid outputs, omitted ``present_files``, and looked successful on screen.
+
+The verdict deliberately does **not** ride an ``error`` frame. That frame means
+"this stream carries no valid assistant turn", which is false here and which the
+SDK acts on by discarding the end marker and skipping the settle. It rides one
+advisory ``custom`` frame for live clients and ``stop_reason`` on the run record
+for everyone else, so these tests pin both halves — and pin that losing the
+frame costs a round-trip, never the verdict.
 """
 
 from types import SimpleNamespace
@@ -28,6 +33,9 @@ from deerflow.runtime.runs.worker import (
     RunContext,
     run_agent,
 )
+
+INCOMPLETE_STOP_REASON = "artifact_delivery_incomplete"
+RECEIPT_STOP_REASON = "delivery_receipt_failed"
 
 END_FRAME = "__end__"
 
@@ -91,7 +99,7 @@ def _produced(monkeypatch, *paths: str) -> None:
 
 
 @pytest.mark.anyio
-async def test_an_undelivered_artifact_reaches_the_client_as_an_error(monkeypatch):
+async def test_an_undelivered_artifact_reaches_the_client_without_failing_the_stream(monkeypatch):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
     bridge, frames = _recording_bridge()
@@ -108,17 +116,14 @@ async def test_an_undelivered_artifact_reaches_the_client_as_an_error(monkeypatc
     )
 
     assert record.status == RunStatus.error
-    errors = _frames_of(frames, "error")
-    assert errors == [
-        {
-            "message": _DELIVERY_INCOMPLETE_ERROR,
-            "name": "ArtifactDeliveryIncompleteError",
-        }
-    ]
+    assert record.error == _DELIVERY_INCOMPLETE_ERROR
+    assert record.stop_reason == INCOMPLETE_STOP_REASON
+    assert _frames_of(frames, "error") == []
+    assert len(_frames_of(frames, "custom")) == 1
 
 
 @pytest.mark.anyio
-async def test_the_error_names_the_files_the_run_produced_but_never_handed_over(monkeypatch):
+async def test_the_frame_names_the_files_the_run_produced_but_never_handed_over(monkeypatch):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
     bridge, frames = _recording_bridge()
@@ -150,7 +155,7 @@ async def test_the_error_names_the_files_the_run_produced_but_never_handed_over(
 
 
 @pytest.mark.anyio
-async def test_the_detail_frame_precedes_the_error_and_both_precede_the_end(monkeypatch):
+async def test_the_delivery_frame_precedes_a_clean_end_and_no_error_frame_is_published(monkeypatch):
     run_manager = RunManager()
     record = await run_manager.create("thread-1")
     bridge, frames = _recording_bridge()
@@ -167,7 +172,8 @@ async def test_the_detail_frame_precedes_the_error_and_both_precede_the_end(monk
     )
 
     names = [name for name, _ in frames]
-    assert names.index("custom") < names.index("error") < names.index(END_FRAME)
+    assert "error" not in names
+    assert names.index("custom") < names.index(END_FRAME)
 
 
 @pytest.mark.anyio
@@ -265,7 +271,8 @@ async def test_a_large_undelivered_set_is_bounded_but_still_counted(monkeypatch)
 @pytest.mark.anyio
 async def test_an_unverifiable_receipt_also_reaches_the_client(monkeypatch):
     """A presented run downgraded to error because its receipt could not be
-    written is a terminal failure too, and was equally silent on the stream."""
+    written is a terminal failure too, and was equally silent. It carries no
+    paths: the files were presented, so there is nothing to offer in place."""
 
     class FailingReceiptStore(MemoryRunEventStore):
         async def put_if_absent(self, **kwargs):
@@ -289,50 +296,18 @@ async def test_an_unverifiable_receipt_also_reaches_the_client(monkeypatch):
     )
 
     assert record.status == RunStatus.error
-    assert _frames_of(frames, "error") == [
+    assert record.error == _DELIVERY_RECEIPT_FAILED_ERROR
+    assert record.stop_reason == RECEIPT_STOP_REASON
+    assert _frames_of(frames, "error") == []
+    assert _frames_of(frames, "custom") == [
         {
+            "type": "artifact_delivery_unverified",
+            "run_id": record.run_id,
             "message": _DELIVERY_RECEIPT_FAILED_ERROR,
-            "name": "DeliveryReceiptUnverifiedError",
         }
     ]
     names = [name for name, _ in frames]
-    assert names.index("error") < names.index(END_FRAME)
-
-
-@pytest.mark.anyio
-async def test_the_error_frame_survives_a_detail_frame_that_cannot_be_published(monkeypatch):
-    """The detail frame is decoration; the error frame is the fix.
-
-    A transport failure on the first must not take the second with it, or the
-    client is back to confident prose and a clean end.
-    """
-
-    run_manager = RunManager()
-    record = await run_manager.create("thread-1")
-    bridge, frames = _recording_bridge()
-    accepting_publish = bridge.publish
-
-    async def refuse_custom(run_id: str, event: str, data: Any) -> None:
-        if event == "custom":
-            raise RuntimeError("stream transport rejected the detail frame")
-        await accepting_publish(run_id, event, data)
-
-    bridge.publish = refuse_custom
-    _produced(monkeypatch, "/mnt/user-data/outputs/report.md")
-
-    await run_agent(
-        bridge,
-        run_manager,
-        record,
-        ctx=RunContext(checkpointer=None, event_store=MemoryRunEventStore()),
-        agent_factory=lambda *, config: _ProseOnlyAgent(),
-        graph_input={},
-        config={},
-    )
-
-    assert record.status == RunStatus.error
-    assert not _frames_of(frames, "custom")
-    assert _frames_of(frames, "error")[-1]["name"] == "ArtifactDeliveryIncompleteError"
+    assert names.index("custom") < names.index(END_FRAME)
 
 
 @pytest.mark.anyio
@@ -366,3 +341,125 @@ async def test_a_fenced_worker_narrates_nothing_onto_a_stream_a_peer_owns(monkey
 
     assert _frames_of(frames, "error") == []
     assert _frames_of(frames, "custom") == []
+    assert record.stop_reason is None
+
+
+@pytest.mark.anyio
+async def test_a_verdict_that_cannot_be_published_still_stands_on_the_record(monkeypatch):
+    """The frame is advisory; the record is the authority.
+
+    Losing the stream frame costs a live client a round-trip. It must not cost
+    anyone the verdict, which is the whole difference between this design and
+    one where the stream is the only carrier.
+    """
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge, frames = _recording_bridge()
+    accepting_publish = bridge.publish
+
+    async def refuse_custom(run_id: str, event: str, data: Any) -> None:
+        if event == "custom":
+            raise RuntimeError("stream transport rejected the verdict frame")
+        await accepting_publish(run_id, event, data)
+
+    bridge.publish = refuse_custom
+    _produced(monkeypatch, "/mnt/user-data/outputs/report.md")
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=MemoryRunEventStore()),
+        agent_factory=lambda *, config: _ProseOnlyAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert not _frames_of(frames, "custom")
+    assert record.status == RunStatus.error
+    assert record.error == _DELIVERY_INCOMPLETE_ERROR
+    assert record.stop_reason == INCOMPLETE_STOP_REASON
+
+
+@pytest.mark.anyio
+async def test_a_capped_turn_that_also_fails_delivery_reports_the_delivery_reason(monkeypatch):
+    """``stop_reason`` explains the status being reported, and that status is
+    the delivery error. The guard's cap stays on the journal's middleware
+    evidence."""
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge, _frames = _recording_bridge()
+    _produced(monkeypatch, "/mnt/user-data/outputs/report.md")
+
+    class CappedProseAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            runtime_context = config["context"]
+            runtime_context["stop_reason"] = "token_capped"
+            yield {"messages": [AIMessage(content="Your report is ready.")]}
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=MemoryRunEventStore()),
+        agent_factory=lambda *, config: CappedProseAgent(),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.error
+    assert record.stop_reason == INCOMPLETE_STOP_REASON
+
+
+@pytest.mark.anyio
+async def test_a_delivered_run_leaves_stop_reason_alone(monkeypatch):
+    """The fence must not stamp a reason onto a run it did not fail."""
+
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    bridge, _frames = _recording_bridge()
+    _produced(monkeypatch, "/mnt/user-data/outputs/report.md")
+
+    await run_agent(
+        bridge,
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=MemoryRunEventStore()),
+        agent_factory=lambda *, config: _PresentingAgent("/mnt/user-data/outputs/report.md"),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status == RunStatus.success
+    assert record.stop_reason is None
+
+
+def test_both_delivery_reasons_are_registered_lifecycle_evidence():
+    """``stop_reason`` is governed, not free text.
+
+    It reaches the durable row through ``LifecycleTransition.reason``, which
+    ``build_lifecycle_payload`` validates against a closed vocabulary; an
+    unregistered value raises there, the terminal CAS is caught as an
+    indeterminate store failure, and the worker marks its own lease lost and
+    overwrites the real error. So registering these two is load-bearing, and
+    this pins it directly instead of leaving it to a worker-level symptom.
+    """
+    from deerflow.runtime.runs.store.base import (
+        LifecycleTransition,
+        build_lifecycle_payload,
+        lifecycle_type_for_status,
+    )
+
+    for reason in (INCOMPLETE_STOP_REASON, RECEIPT_STOP_REASON):
+        payload = build_lifecycle_payload(
+            LifecycleTransition(
+                lifecycle_type=lifecycle_type_for_status(RunStatus.error.value),
+                status=RunStatus.error.value,
+                error="boom",
+                stop_reason=reason,
+                reason=reason,
+            )
+        )
+        assert payload["reason"] == reason

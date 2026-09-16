@@ -67,6 +67,7 @@ async function captureThreadStreamOptions() {
   // above has no `createContext`, so the real module cannot be imported.
   rs.doMock("@/core/artifact-delivery", () => ({
     parseArtifactDeliveryFailure: () => null,
+    parseArtifactDeliveryUnverified: () => null,
     useArtifactDeliveryContext: () => ({
       recordFailure: rs.fn(),
     }),

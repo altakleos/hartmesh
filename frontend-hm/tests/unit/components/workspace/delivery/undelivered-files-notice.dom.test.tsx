@@ -75,7 +75,7 @@ describe("UndeliveredFilesNotice", () => {
     renderNotice();
 
     expect(
-      screen.getByText("1 file was created but not attached to this reply"),
+      screen.getByText("1 file wasn't attached to the reply above"),
     ).toBeTruthy();
     expect(screen.getByText("report.md")).toBeTruthy();
   });

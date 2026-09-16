@@ -163,13 +163,12 @@ export const zhCN: Translations = {
   },
 
   artifactDelivery: {
-    title: (count) => `已生成 ${count} 个文件，但没有附在这条回复里`,
-    description:
-      "上面的回答可能看起来像文件已经给你了。文件没有丢失，可在这里打开或下载。",
+    title: (count) => `有 ${count} 个文件没有附在上面这条回复里`,
+    description: () =>
+      "可在这里打开或下载。上面的回答可能看起来像文件已经附上了。",
     shownOfTotal: (shown, total) => `共 ${total} 个，显示前 ${shown} 个。`,
-    toast: "有文件没有附在回复里，就在回答下方等着你。",
     receiptToast:
-      "文件已经生成，但我们无法确认交接是否完成 — 如果发现缺东西，请刷新页面。",
+      "文件已生成，但我们无法确认它们已保存到这条对话。请刷新页面确认。",
   },
 
   // Input Box

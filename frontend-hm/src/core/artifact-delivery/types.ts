@@ -4,9 +4,12 @@
  * The backend's delivery fence already failed such a run, but until
  * hartmesh-tenancy/DF13 the browser never heard about it: the stream ended
  * normally and the assistant's prose read as a success. The worker now
- * publishes the verdict as a ``custom`` frame immediately before the ``error``
- * frame, because the LangGraph SDK reduces an ``error`` frame to an ``Error``
- * carrying only ``message``/``name`` and stops reading the stream there.
+ * publishes the verdict as an advisory ``custom`` frame and lets the stream
+ * reach ``end`` — deliberately not an ``error`` frame, which the SDK reads as
+ * "this stream carries no valid turn", stops reading at, and throws on. The
+ * durable half of the same verdict is the run record's ``stop_reason``
+ * (``artifact_delivery_incomplete``), so a client that reloaded or never
+ * negotiated ``custom`` reads it over HTTP instead.
  */
 export interface ArtifactDeliveryFailure {
   runId: string;
@@ -61,4 +64,34 @@ export function parseArtifactDeliveryFailure(
     undeliveredPaths,
     undeliveredCount: value.undelivered_count,
   };
+}
+
+export const ARTIFACT_DELIVERY_UNVERIFIED_EVENT =
+  "artifact_delivery_unverified";
+
+/**
+ * The sibling verdict: the run *did* present its files, but the durable
+ * delivery receipt could not be written. There is nothing to offer under the
+ * turn — the files are already attached — so this carries no paths.
+ */
+export interface ArtifactDeliveryUnverified {
+  runId: string;
+  message: string;
+}
+
+export function parseArtifactDeliveryUnverified(
+  event: unknown,
+): ArtifactDeliveryUnverified | null {
+  if (typeof event !== "object" || event === null) return null;
+  const value = event as Record<string, unknown>;
+  if (value.type !== ARTIFACT_DELIVERY_UNVERIFIED_EVENT) return null;
+  if (
+    typeof value.run_id !== "string" ||
+    !value.run_id ||
+    typeof value.message !== "string" ||
+    !value.message
+  ) {
+    return null;
+  }
+  return { runId: value.run_id, message: value.message };
 }

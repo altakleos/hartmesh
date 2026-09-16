@@ -42,10 +42,12 @@ export function UndeliveredFilesNotice({
     <div
       aria-labelledby={titleId}
       className={cn(
-        // Deliberately not the neutral card the workspace-changes summary uses
-        // directly below: the two list the same files, and without this the
-        // only thing separating a correction from a summary is one grey glyph.
-        "mt-3 overflow-hidden rounded-xl border border-amber-500/40 bg-amber-500/5",
+        // Amber border and glyph on the ordinary neutral surface: enough to
+        // separate a correction from the workspace-changes summary stacked
+        // below it, not enough to read as an alert. This card is now the only
+        // signal — there is no toast — so it must be findable without being
+        // alarming.
+        "bg-muted/20 mt-3 overflow-hidden rounded-xl border border-amber-500/40",
         className,
       )}
       data-testid="undelivered-files-notice"
@@ -60,7 +62,7 @@ export function UndeliveredFilesNotice({
             {t.artifactDelivery.title(failure.undeliveredCount)}
           </div>
           <p className="text-muted-foreground mt-0.5 text-xs">
-            {t.artifactDelivery.description}
+            {t.artifactDelivery.description(failure.undeliveredCount)}
             {truncated
               ? ` ${t.artifactDelivery.shownOfTotal(shown, failure.undeliveredCount)}`
               : ""}

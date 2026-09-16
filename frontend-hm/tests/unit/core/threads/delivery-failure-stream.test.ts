@@ -1,10 +1,25 @@
 import { afterEach, expect, test, rs } from "@rstest/core";
 
-import { parseArtifactDeliveryFailure } from "@/core/artifact-delivery";
+import {
+  parseArtifactDeliveryFailure,
+  parseArtifactDeliveryUnverified,
+} from "@/core/artifact-delivery";
 
 const deliveryState = rs.hoisted(() => ({
   recordFailure: rs.fn(),
 }));
+
+const toastState = rs.hoisted(() => {
+  const error = rs.fn();
+  return {
+    error,
+    toast: Object.assign(rs.fn(), {
+      error,
+      success: rs.fn(),
+      warning: rs.fn(),
+    }),
+  };
+});
 
 async function captureThreadStreamOptions() {
   let capturedOptions: Record<string, unknown> | undefined;
@@ -57,6 +72,7 @@ async function captureThreadStreamOptions() {
   rs.doMock("@/core/i18n/hooks", () => ({
     useI18n: () => ({
       t: {
+        artifactDelivery: { receiptToast: "We couldn't confirm the save." },
         conversation: { streamReplayGap: "Reloading this conversation" },
         pages: { newChat: "New chat" },
         uploads: { uploadingFiles: "Uploading files" },
@@ -72,15 +88,10 @@ async function captureThreadStreamOptions() {
   }));
   rs.doMock("@/core/artifact-delivery", () => ({
     parseArtifactDeliveryFailure,
+    parseArtifactDeliveryUnverified,
     useArtifactDeliveryContext: () => deliveryState,
   }));
-  rs.doMock("sonner", () => ({
-    toast: Object.assign(rs.fn(), {
-      error: rs.fn(),
-      success: rs.fn(),
-      warning: rs.fn(),
-    }),
-  }));
+  rs.doMock("sonner", () => ({ toast: toastState.toast }));
 
   const { useThreadStream } = await import("@/core/threads/hooks");
   function ThreadStreamCapture() {
@@ -106,6 +117,7 @@ afterEach(() => {
   rs.doUnmock("sonner");
   rs.resetModules();
   deliveryState.recordFailure.mockClear();
+  toastState.error.mockClear();
 });
 
 test("a delivery failure frame is kept for the run that produced it", async () => {
@@ -165,4 +177,38 @@ test("a replay gap keeps the verdicts it cannot re-read from durable state", asy
   // hand it back, so the gap's wholesale reset deliberately leaves it alone.
   expect(deliveryState).not.toHaveProperty("clearFailures");
   expect(deliveryState.recordFailure).toHaveBeenCalledTimes(1);
+});
+
+test("the receipt verdict is a toast, not a notice", async () => {
+  const options = await captureThreadStreamOptions();
+
+  (options?.onCustomEvent as (event: unknown) => void)({
+    type: "artifact_delivery_unverified",
+    run_id: "run-1",
+    message:
+      "Artifact delivery verification failed: terminal delivery receipt could not be persisted",
+  });
+
+  // Nothing to offer under the turn — those files were presented — so this one
+  // is a toast, and the notice stays reserved for the case with files behind it.
+  expect(deliveryState.recordFailure).not.toHaveBeenCalled();
+  expect(toastState.error).toHaveBeenCalledWith(
+    "We couldn't confirm the save.",
+  );
+});
+
+test("an ordinary stream error still tears the turn down", async () => {
+  const options = await captureThreadStreamOptions();
+
+  // The client no longer knows either delivery error name: a verdict arrives on
+  // the custom channel, so anything reaching onError is a real stream failure
+  // and must be handled as one.
+  (options?.onError as (error: unknown) => void)(
+    Object.assign(new Error("Artifact delivery incomplete"), {
+      name: "ArtifactDeliveryIncompleteError",
+    }),
+  );
+
+  expect(toastState.error).toHaveBeenCalledWith("Artifact delivery incomplete");
+  expect(deliveryState.recordFailure).not.toHaveBeenCalled();
 });

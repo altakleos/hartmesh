@@ -144,9 +144,8 @@ export interface Translations {
   // Files a run produced but never presented
   artifactDelivery: {
     title: (count: number) => string;
-    description: string;
+    description: (count: number) => string;
     shownOfTotal: (shown: number, total: number) => string;
-    toast: string;
     receiptToast: string;
   };
 

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "@rstest/core";
 
-import { parseArtifactDeliveryFailure } from "@/core/artifact-delivery";
+import {
+  parseArtifactDeliveryFailure,
+  parseArtifactDeliveryUnverified,
+} from "@/core/artifact-delivery";
 
 const validEvent = {
   type: "artifact_delivery_incomplete",
@@ -49,6 +52,37 @@ describe("parseArtifactDeliveryFailure", () => {
   ])("refuses an event with %s rather than guess", (_label, override) => {
     expect(
       parseArtifactDeliveryFailure({ ...validEvent, ...override }),
+    ).toBeNull();
+  });
+});
+
+describe("parseArtifactDeliveryUnverified", () => {
+  const unverified = {
+    type: "artifact_delivery_unverified",
+    run_id: "run-1",
+    message:
+      "Artifact delivery verification failed: terminal delivery receipt could not be persisted",
+  };
+
+  it("reads the run and the reason, and carries no paths", () => {
+    expect(parseArtifactDeliveryUnverified(unverified)).toEqual({
+      runId: "run-1",
+      message:
+        "Artifact delivery verification failed: terminal delivery receipt could not be persisted",
+    });
+  });
+
+  it("does not answer for the incomplete verdict", () => {
+    expect(parseArtifactDeliveryUnverified(validEvent)).toBeNull();
+    expect(parseArtifactDeliveryFailure(unverified)).toBeNull();
+  });
+
+  it.each([
+    ["no run id", { run_id: "" }],
+    ["no message", { message: "" }],
+  ])("refuses an event with %s", (_label, override) => {
+    expect(
+      parseArtifactDeliveryUnverified({ ...unverified, ...override }),
     ).toBeNull();
   });
 });

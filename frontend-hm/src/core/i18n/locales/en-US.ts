@@ -170,15 +170,15 @@ export const enUS: Translations = {
   artifactDelivery: {
     title: (count) =>
       count === 1
-        ? "1 file was created but not attached to this reply"
-        : `${count} files were created but not attached to this reply`,
-    description:
-      "The answer above may read as if they were already included. Nothing is lost — open or download them here.",
+        ? "1 file wasn't attached to the reply above"
+        : `${count} files weren't attached to the reply above`,
+    description: (count) =>
+      count === 1
+        ? "Open or download it here. The reply above may read as if it was already included."
+        : "Open or download them here. The reply above may read as if they were already included.",
     shownOfTotal: (shown, total) => `Showing the first ${shown} of ${total}.`,
-    toast:
-      "Some files didn't make it into the reply. They're waiting just below the answer.",
     receiptToast:
-      "Your files were created. We couldn't confirm the handover — reload if anything looks missing.",
+      "Your files were created, but we couldn't confirm they were saved to this chat. Reload to check.",
   },
 
   // Input Box

@@ -19,6 +19,7 @@ import { getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import {
   parseArtifactDeliveryFailure,
+  parseArtifactDeliveryUnverified,
   useArtifactDeliveryContext,
 } from "../artifact-delivery";
 import { getBackendBaseURL } from "../config";
@@ -1863,13 +1864,29 @@ export function useThreadStream({
         return;
       }
 
-      // The turn produced files and ended without presenting them. The
-      // ``error`` frame that follows this one raises the toast and reloads
-      // history; this detail frame is what lets the thread offer the files the
-      // run withheld, under the turn that withheld them.
+      // The turn produced files and ended without presenting them. The graph
+      // completed and the answer is checkpointed, so this is a correction, not
+      // a stream failure: the worker publishes a control frame and lets the
+      // stream reach ``end``, which keeps the SDK's ``onSuccess`` settle —
+      // canonical history, the app's ``onFinish``, and the composer's view of
+      // the turn that just finished. The notice anchored under that turn is the
+      // whole signal; there is deliberately no toast, because the notice lands
+      // where the reader already is and, unlike a toast, is still there
+      // tomorrow.
       const deliveryFailure = parseArtifactDeliveryFailure(event);
       if (deliveryFailure) {
         recordDeliveryFailure(deliveryFailure);
+        return;
+      }
+
+      // The sibling verdict: the files were presented, but the durable delivery
+      // receipt could not be written. Nothing can be offered in place — the
+      // files are already attached — and the archive path is unreliable until
+      // someone re-reads durable state, so this one is a toast and it stays
+      // red. The system's own bookkeeping is broken, which is a different fact
+      // from "your file is one click away".
+      if (parseArtifactDeliveryUnverified(event)) {
+        toast.error(t.artifactDelivery.receiptToast);
         return;
       }
 
@@ -1910,18 +1927,7 @@ export function useThreadStream({
       pendingPreparedReplayRef.current = null;
       setPendingSupersededRunIds(new Set());
       setPendingSupersededMessageIds(new Set());
-      // The two delivery failures are the only stream errors a person is meant
-      // to read. Their backend messages are the durable run error operators
-      // read, so branch on the name the SDK preserves rather than reword either
-      // side. Kept red — the run did fail; the words carry the calm.
-      const errorName = error instanceof Error ? error.name : undefined;
-      toast.error(
-        errorName === "ArtifactDeliveryIncompleteError"
-          ? t.artifactDelivery.toast
-          : errorName === "DeliveryReceiptUnverifiedError"
-            ? t.artifactDelivery.receiptToast
-            : getStreamErrorMessage(error),
-      );
+      toast.error(getStreamErrorMessage(error));
       pendingUsageBaselineMessageIdsRef.current = new Set(
         messagesRef.current
           .map(messageIdentity)
