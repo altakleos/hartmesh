@@ -16,7 +16,10 @@ const REPORT_SUFFIX = ".report.json";
 function splitReportPath(reportPath: string) {
   const separator = reportPath.lastIndexOf("/");
   return {
-    directory: separator === -1 ? "" : reportPath.slice(0, separator),
+    // The separator stays with the directory, so a report sitting directly
+    // under the root addresses `/charts/a.png` rather than splicing
+    // `charts/a.png` onto the end of the artifacts route.
+    directory: reportPath.slice(0, separator + 1),
     name: reportPath.slice(
       separator + 1,
       reportPath.length - REPORT_SUFFIX.length,
@@ -26,8 +29,7 @@ function splitReportPath(reportPath: string) {
 
 /** A file in the report's own directory. */
 export function reportSiblingPath(reportPath: string, relative: string) {
-  const { directory } = splitReportPath(reportPath);
-  return directory ? `${directory}/${relative}` : relative;
+  return `${splitReportPath(reportPath).directory}${relative}`;
 }
 
 export function reportRenderPath(reportPath: string, kind: ReportRenderKind) {
@@ -36,11 +38,13 @@ export function reportRenderPath(reportPath: string, kind: ReportRenderKind) {
 }
 
 /**
- * The renders this turn actually handed over.
+ * The renders the thread has presented.
  *
- * `artifacts` is what `present_files` presented, so a button appears only for
- * a file the person can really open; an unrendered format is left out rather
- * than offered as a link that would 404.
+ * `artifacts` is the thread's cumulative `present_files` list, so a format
+ * that was never rendered is left out rather than offered as a link that would
+ * 404. It is not per-turn: a rebuild deletes the previous draft's renders and
+ * their paths stay in the list, so a format that has not been rendered again
+ * yet is still offered until it is.
  */
 export function availableReportRenders(
   reportPath: string,

@@ -135,4 +135,41 @@ describe("parseBusinessReport", () => {
       )?.currency,
     ).toBe("USD");
   });
+  it("refuses a draft number the contract does not allow", () => {
+    // The value is printed as-is, so `Draft Infinity` is a visible defect.
+    for (const draft of [0, -3, 1.5, Number.POSITIVE_INFINITY]) {
+      expect(parseBusinessReport(withMeta({ draft }))).toBeNull();
+    }
+  });
+
+  it("refuses an identifier the contract does not allow", () => {
+    // Section ids reach a DOM id and every id is a React key.
+    const broken = JSON.parse(report) as { sections: { id: string }[] };
+    broken.sections[0]!.id = "Summary; drop";
+
+    expect(parseBusinessReport(JSON.stringify(broken))).toBeNull();
+  });
+
+  it("refuses a document written to be expensive to draw", () => {
+    // Nothing the skill builds comes close to these; `Load full file` clears
+    // the byte cap with one click, so the parse is the only other ceiling.
+    const huge = JSON.parse(report) as {
+      sections: unknown[];
+      charts: unknown[];
+    };
+    huge.sections = Array.from({ length: 200 }, (_, index) => ({
+      id: `s${index}`,
+      heading: "Section",
+    }));
+
+    expect(parseBusinessReport(JSON.stringify(huge))).toBeNull();
+
+    const wide = JSON.parse(report) as {
+      sections: { id: string; table?: { rows: unknown[] } }[];
+    };
+    const section = wide.sections.find((entry) => entry.table)!;
+    section.table!.rows = Array.from({ length: 5000 }, () => ["x", 1, 1, 1]);
+
+    expect(parseBusinessReport(JSON.stringify(wide))).toBeNull();
+  });
 });

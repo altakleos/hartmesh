@@ -189,9 +189,12 @@ export const enUS: Translations = {
     downloadExcel: "Excel",
     checksHeading: "Checks",
     notIncludedHeading: "Not included",
+    noRenders:
+      "No file to download yet — ask for the PDF, Word or Excel version.",
+    downloadRender: (format) => `Download the ${format}`,
     checkStatus: {
-      pass: "checked",
-      warn: "note",
+      pass: "ok",
+      warn: "heads up",
       fail: "problem",
       not_checked: "not checked",
     },

@@ -58,7 +58,7 @@ async function openTheReport(page: Page) {
         thread_id: THREAD_ID,
         title: "August review",
         messages: presentReportMessages(),
-        // What `present_files` presented: the report and two of its three
+        // What the thread has presented: the report and two of its three
         // renders, so the card must offer PDF and Excel and not Word.
         artifacts: [REPORT_PATH, PDF_PATH, XLSX_PATH],
       },
@@ -105,9 +105,15 @@ test.describe("business report card", () => {
     await expect(card.getByTestId("business-report-checks-line")).toContainText(
       "Totals match your file: $74,702.61 across 164 jobs.",
     );
-    await expect(card.getByRole("link", { name: "PDF" })).toBeVisible();
-    await expect(card.getByRole("link", { name: "Excel" })).toBeVisible();
-    await expect(card.getByRole("link", { name: "Word" })).toHaveCount(0);
+    await expect(
+      card.getByRole("link", { name: "Download the PDF" }),
+    ).toBeVisible();
+    await expect(
+      card.getByRole("link", { name: "Download the Excel" }),
+    ).toBeVisible();
+    await expect(
+      card.getByRole("link", { name: "Download the Word" }),
+    ).toHaveCount(0);
 
     // The charts are the report's own pictures, addressed inside its directory.
     const chart = card.getByAltText("Revenue by week");
@@ -131,7 +137,9 @@ test.describe("business report card", () => {
     await expect(card).toBeVisible({ timeout: 15_000 });
     // The downloads are the point of the card on a phone, so they must be
     // reachable without scrolling sideways; only the tables scroll.
-    await expect(card.getByRole("link", { name: "PDF" })).toBeInViewport();
+    await expect(
+      card.getByRole("link", { name: "Download the PDF" }),
+    ).toBeInViewport();
 
     const overflow = await page.evaluate(() => {
       const root = document.documentElement;

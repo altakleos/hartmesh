@@ -157,6 +157,8 @@ export interface Translations {
     downloadExcel: string;
     checksHeading: string;
     notIncludedHeading: string;
+    noRenders: string;
+    downloadRender: (format: string) => string;
     checkStatus: {
       pass: string;
       warn: string;

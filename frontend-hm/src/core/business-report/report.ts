@@ -89,8 +89,26 @@ const CHECK_STATUSES: ReadonlySet<string> = new Set([
   "not_checked",
 ]);
 const CHART_PNG = /^charts\/[a-z0-9_]+\.png$/;
+/** `$defs/identifier` in the contract. */
+const IDENTIFIER = /^[a-z][a-z0-9_]*$/;
 const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 const DEFAULT_PRIMARY = "#1F4E79";
+
+/**
+ * Ceilings on how much document the card will draw.
+ *
+ * A skill-built report is far below all of these — its section tables stop at
+ * `TABLE_ROW_LIMIT` (25) and its charts are a handful — so they only refuse a
+ * file written to be expensive. The artifact preview's 1 MiB cap is not that
+ * bound: one click on *Load full file* removes it.
+ */
+const MAX_SECTIONS = 64;
+const MAX_TABLE_ROWS = 2000;
+const MAX_TABLE_COLUMNS = 64;
+const MAX_CHARTS = 64;
+const MAX_CHART_REFERENCES = 16;
+const MAX_CHECKS = 64;
+const MAX_KPIS = 32;
 
 /** A report artifact is the file the card is selected for. */
 export function isBusinessReportPath(filepath: string) {
@@ -142,7 +160,13 @@ function parseTable(value: unknown): ReportTable | undefined {
   }
   const columns = asStringList(value.columns);
   const formats = asFormats(value.formats);
-  if (!columns?.length || !formats?.length || !Array.isArray(value.rows)) {
+  if (
+    !columns?.length ||
+    !formats?.length ||
+    !Array.isArray(value.rows) ||
+    columns.length > MAX_TABLE_COLUMNS ||
+    value.rows.length > MAX_TABLE_ROWS
+  ) {
     return undefined;
   }
   const rows = value.rows.map(asRow);
@@ -171,7 +195,7 @@ function parseTable(value: unknown): ReportTable | undefined {
 }
 
 function parseKpis(value: unknown) {
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(value) || value.length > MAX_KPIS) {
     return undefined;
   }
   const kpis: ReportKpi[] = [];
@@ -182,7 +206,13 @@ function parseKpis(value: unknown) {
     const id = asString(entry.id);
     const label = asString(entry.label);
     const format = asString(entry.format);
-    if (!id || !label || !format || !FORMATS.has(format)) {
+    if (
+      !id ||
+      !IDENTIFIER.test(id) ||
+      !label ||
+      !format ||
+      !FORMATS.has(format)
+    ) {
       return undefined;
     }
     const raw = entry.value;
@@ -206,7 +236,7 @@ function parseKpis(value: unknown) {
 }
 
 function parseSections(value: unknown) {
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(value) || value.length > MAX_SECTIONS) {
     return undefined;
   }
   const sections: ReportSection[] = [];
@@ -216,12 +246,16 @@ function parseSections(value: unknown) {
     }
     const id = asString(entry.id);
     const heading = asString(entry.heading);
-    if (!id || !heading) {
+    if (!id || !IDENTIFIER.test(id) || !heading) {
       return undefined;
     }
     const table =
       entry.table === undefined ? undefined : parseTable(entry.table);
     if (entry.table !== undefined && !table) {
+      return undefined;
+    }
+    const charts = asStringList(entry.charts);
+    if (charts && charts.length > MAX_CHART_REFERENCES) {
       return undefined;
     }
     sections.push({
@@ -230,7 +264,7 @@ function parseSections(value: unknown) {
       paragraphs: asStringList(entry.paragraphs),
       bullets: asStringList(entry.bullets),
       table,
-      charts: asStringList(entry.charts),
+      charts,
       note: asString(entry.note),
     });
   }
@@ -243,7 +277,7 @@ function parseSections(value: unknown) {
  * whose numbers are intact should still be read when one picture is not.
  */
 function parseCharts(value: unknown) {
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(value) || value.length > MAX_CHARTS) {
     return undefined;
   }
   const charts: ReportChart[] = [];
@@ -253,7 +287,7 @@ function parseCharts(value: unknown) {
     }
     const id = asString(entry.id);
     const png = asString(entry.png);
-    if (!id || !png || !CHART_PNG.test(png)) {
+    if (!id || !IDENTIFIER.test(id) || !png || !CHART_PNG.test(png)) {
       continue;
     }
     const title = isRecord(entry.spec) ? asString(entry.spec.title) : undefined;
@@ -263,7 +297,7 @@ function parseCharts(value: unknown) {
 }
 
 function parseChecks(value: unknown) {
-  if (!Array.isArray(value)) {
+  if (!Array.isArray(value) || value.length > MAX_CHECKS) {
     return undefined;
   }
   const checks: ReportCheck[] = [];
@@ -274,7 +308,13 @@ function parseChecks(value: unknown) {
     const id = asString(entry.id);
     const status = asString(entry.status);
     const text = asString(entry.text);
-    if (!id || !status || !CHECK_STATUSES.has(status) || !text) {
+    if (
+      !id ||
+      !IDENTIFIER.test(id) ||
+      !status ||
+      !CHECK_STATUSES.has(status) ||
+      !text
+    ) {
       return undefined;
     }
     checks.push({ id, status: status as ReportCheckStatus, text });
@@ -319,7 +359,13 @@ export function parseBusinessReport(content: string): BusinessReport | null {
   const period = isRecord(meta.period)
     ? asString(meta.period.label)
     : undefined;
-  const draft = typeof meta.draft === "number" ? meta.draft : undefined;
+  // The contract is `integer, minimum 1`, and the value is printed as-is.
+  const draft =
+    typeof meta.draft === "number" &&
+    Number.isInteger(meta.draft) &&
+    meta.draft >= 1
+      ? meta.draft
+      : undefined;
   if (!title || !period || draft === undefined) {
     return null;
   }

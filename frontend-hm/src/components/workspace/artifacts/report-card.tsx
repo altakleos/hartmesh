@@ -1,6 +1,7 @@
 "use client";
 
 import { DownloadIcon } from "lucide-react";
+import { useMemo } from "react";
 
 import { Button } from "@/components/ui/button";
 import { urlOfArtifact } from "@/core/artifacts/utils";
@@ -12,6 +13,7 @@ import {
   reportRenderPath,
   reportSiblingPath,
   type BusinessReport,
+  type ReportChart,
   type ReportCheckStatus,
   type ReportRenderKind,
   type ReportSection,
@@ -23,6 +25,13 @@ import { cn } from "@/lib/utils";
 
 /** Columns of these units are read down a column, so they line up right. */
 const NUMERIC_FORMATS = new Set(["currency", "integer", "number", "percent"]);
+
+const STATUS_GLYPHS: Record<ReportCheckStatus, string> = {
+  pass: "✓",
+  warn: "!",
+  fail: "✕",
+  not_checked: "–",
+};
 
 const STATUS_CLASSES: Record<ReportCheckStatus, string> = {
   pass: "text-emerald-700 dark:text-emerald-400",
@@ -56,7 +65,10 @@ function DeltaLine({
         direction === "flat" && "text-muted-foreground",
       )}
     >
-      {glyph} {formatValue(Math.abs(delta.pct), "percent")}{" "}
+      {glyph}{" "}
+      {/* `-0.0 >= 0` is true in Python too, so a drop under 0.05% keeps the
+          sign the PDF and the Word file both print. */}
+      {formatValue(delta.pct >= 0 ? delta.pct : -delta.pct, "percent")}{" "}
       {t.businessReport.comparedWith(delta.vs)}
     </div>
   );
@@ -64,18 +76,26 @@ function DeltaLine({
 
 function ReportDataTable({
   table,
+  caption,
   currency,
   accent,
 }: {
   table: ReportTable;
+  caption: string;
   currency: string;
   accent: string;
 }) {
   return (
     // Wide tables scroll inside their own box; the card never scrolls
-    // sideways, which is what makes it usable at 360px.
-    <div className="border-border mt-3 overflow-x-auto rounded-lg border">
+    // sideways, which is what makes it usable at 360px. The box is focusable
+    // so a keyboard-only reader can scroll it at all.
+    <div
+      className="border-border focus-visible:ring-ring mt-3 overflow-x-auto rounded-lg border focus-visible:ring-2 focus-visible:outline-none"
+      role="region"
+      tabIndex={0}
+    >
       <table className="w-full border-collapse text-sm">
+        <caption className="sr-only">{caption}</caption>
         <thead>
           <tr className="bg-muted/50">
             {table.columns.map((column, index) => (
@@ -103,24 +123,33 @@ function ReportDataTable({
             >
               {row.map((cell, columnIndex) => {
                 const format = cellFormat(table, rowIndex, columnIndex);
-                return (
-                  <td
-                    className={cn(
-                      "px-3 py-1.5 whitespace-nowrap",
-                      NUMERIC_FORMATS.has(format)
-                        ? "text-right tabular-nums"
-                        : "text-left",
-                    )}
+                const className = cn(
+                  "px-3 py-1.5 whitespace-nowrap",
+                  NUMERIC_FORMATS.has(format)
+                    ? "text-right tabular-nums"
+                    : "text-left",
+                );
+                const text = formatValue(cell, format, currency);
+                // The leading label names its row, which is how a screen
+                // reader announces the figures that follow it.
+                return columnIndex === 0 && format === "text" ? (
+                  <th
+                    className={cn(className, "font-normal")}
                     key={columnIndex}
+                    scope="row"
                   >
-                    {formatValue(cell, format, currency)}
+                    {text}
+                  </th>
+                ) : (
+                  <td className={className} key={columnIndex}>
+                    {text}
                   </td>
                 );
               })}
             </tr>
           ))}
         </tbody>
-        {table.totals && (
+        {table.totals && table.totals.length > 0 && (
           <tfoot>
             <tr
               className="border-t-2 font-semibold"
@@ -152,21 +181,25 @@ function ReportDataTable({
 
 function ReportSectionBlock({
   section,
-  report,
+  chartsById,
+  currency,
   chartURL,
   accent,
 }: {
   section: ReportSection;
-  report: BusinessReport;
+  chartsById: ReadonlyMap<string, ReportChart>;
+  currency: string;
   chartURL: (png: string) => string;
   accent: string;
 }) {
   const charts = (section.charts ?? [])
-    .map((id) => report.charts.find((chart) => chart.id === id))
+    .map((id) => chartsById.get(id))
     .filter((chart) => chart !== undefined);
 
   return (
-    <section className="mt-6" id={section.id}>
+    // The report's own ids share the document with the app's, so they are
+    // prefixed rather than taken as written.
+    <section className="mt-6" id={`report-${section.id}`}>
       <h3
         className="border-b pb-1 text-base font-semibold"
         style={{ borderBottomColor: accent }}
@@ -188,7 +221,8 @@ function ReportSectionBlock({
       {section.table && (
         <ReportDataTable
           accent={accent}
-          currency={report.currency}
+          caption={section.heading}
+          currency={currency}
           table={section.table}
         />
       )}
@@ -198,6 +232,11 @@ function ReportSectionBlock({
             alt={chart.title ?? chart.id.replaceAll("_", " ")}
             className="border-border w-full rounded-lg border bg-white"
             loading="lazy"
+            onError={(event) => {
+              // A chart the report names but the turn never wrote; the
+              // document simply omits it rather than framing a broken image.
+              event.currentTarget.closest("figure")?.remove();
+            }}
             src={chartURL(chart.png)}
           />
         </figure>
@@ -237,11 +276,22 @@ export function ReportCard({
   const accent = report.primaryColor;
   const renders = availableReportRenders(filepath, artifacts);
   const line = checksLine(report.checks);
-  const worst = report.checks.some((check) => check.status === "fail")
+  // The documents print each check's own status and compute no summary, so
+  // this glyph is the card's own claim and must not outrun the checks: a
+  // report that checked nothing does not earn a tick.
+  const worst: ReportCheckStatus = report.checks.some(
+    (check) => check.status === "fail",
+  )
     ? "fail"
     : report.checks.some((check) => check.status === "warn")
       ? "warn"
-      : "pass";
+      : report.checks.some((check) => check.status === "pass")
+        ? "pass"
+        : "not_checked";
+  const chartsById = useMemo(
+    () => new Map(report.charts.map((chart) => [chart.id, chart])),
+    [report.charts],
+  );
 
   const chartURL = (png: string) =>
     urlOfArtifact({
@@ -263,7 +313,7 @@ export function ReportCard({
     >
       <article className="mx-auto max-w-3xl px-4 py-5 sm:px-6">
         <header className="border-l-4 pl-3" style={{ borderLeftColor: accent }}>
-          <h2 className="text-xl leading-tight font-semibold text-balance">
+          <h2 className="text-xl leading-tight font-semibold text-balance break-words">
             {report.title}
           </h2>
           <p className="text-muted-foreground mt-1 text-sm">
@@ -277,11 +327,19 @@ export function ReportCard({
           </p>
         </header>
 
+        {renders.length === 0 && (
+          <p className="text-muted-foreground mt-4 text-sm">
+            {t.businessReport.noRenders}
+          </p>
+        )}
         {renders.length > 0 && (
           <div className="mt-4 flex flex-wrap gap-2">
             {renders.map((kind) => (
               <Button asChild key={kind} size="sm" variant="outline">
                 <a
+                  aria-label={t.businessReport.downloadRender(
+                    renderLabel[kind],
+                  )}
                   href={urlOfArtifact({
                     filepath: reportRenderPath(filepath, kind),
                     threadId,
@@ -310,7 +368,7 @@ export function ReportCard({
                 key={kpi.id}
                 style={{ borderTopColor: accent }}
               >
-                <div className="text-muted-foreground text-[11px] font-medium tracking-wide uppercase">
+                <div className="text-muted-foreground text-[11px] font-medium tracking-wide break-words uppercase">
                   {kpi.label}
                 </div>
                 <div className="mt-0.5 text-lg font-semibold tabular-nums">
@@ -332,7 +390,8 @@ export function ReportCard({
             data-testid="business-report-checks-line"
           >
             <span className={cn("mr-1.5 font-semibold", STATUS_CLASSES[worst])}>
-              {worst === "pass" ? "✓" : "!"}
+              <span aria-hidden="true">{STATUS_GLYPHS[worst]}</span>
+              <span className="sr-only">{statusLabel(worst, t)}: </span>
             </span>
             {line}
           </p>
@@ -341,49 +400,59 @@ export function ReportCard({
         {report.sections.map((section) => (
           <ReportSectionBlock
             accent={accent}
+            chartsById={chartsById}
             chartURL={chartURL}
+            currency={report.currency}
             key={section.id}
-            report={report}
             section={section}
           />
         ))}
 
-        <section className="mt-6">
-          <h3
-            className="border-b pb-1 text-base font-semibold"
-            style={{ borderBottomColor: accent }}
-          >
-            {t.businessReport.checksHeading}
-          </h3>
-          <ul className="mt-2 space-y-1 text-sm">
-            {report.checks.map((check) => (
-              <li className="flex gap-2" key={check.id}>
-                <span
-                  className={cn(
-                    "shrink-0 text-[11px] tracking-wide uppercase",
-                    STATUS_CLASSES[check.status],
-                    "w-24 pt-0.5",
-                  )}
-                >
-                  {statusLabel(check.status, t)}
-                </span>
-                <span className="min-w-0">{check.text}</span>
-              </li>
-            ))}
-          </ul>
-          {report.notes.length > 0 && (
-            <>
-              <p className="mt-3 text-sm font-semibold">
-                {t.businessReport.notIncludedHeading}
-              </p>
-              <ul className="text-muted-foreground mt-1 space-y-1 text-sm">
-                {report.notes.map((note, index) => (
-                  <li key={index}>{note}</li>
+        {(report.checks.length > 0 || report.notes.length > 0) && (
+          <section className="mt-6">
+            <h3
+              className="border-b pb-1 text-base font-semibold"
+              style={{ borderBottomColor: accent }}
+            >
+              {t.businessReport.checksHeading}
+            </h3>
+            {report.checks.length > 0 && (
+              <ul className="mt-2 space-y-1.5 text-sm">
+                {report.checks.map((check) => (
+                  // The status reads inline rather than in a fixed gutter: a
+                  // 360px screen cannot spare 96px to one word, and the check
+                  // text has to wrap under it, not beside it.
+                  <li key={check.id}>
+                    <span
+                      className={cn(
+                        "mr-1.5 text-[11px] tracking-wide uppercase",
+                        STATUS_CLASSES[check.status],
+                      )}
+                    >
+                      <span aria-hidden="true">
+                        {STATUS_GLYPHS[check.status]}
+                      </span>{" "}
+                      {statusLabel(check.status, t)}
+                    </span>
+                    {check.text}
+                  </li>
                 ))}
               </ul>
-            </>
-          )}
-        </section>
+            )}
+            {report.notes.length > 0 && (
+              <>
+                <h4 className="mt-3 text-sm font-semibold">
+                  {t.businessReport.notIncludedHeading}
+                </h4>
+                <ul className="text-muted-foreground mt-1 space-y-1 text-sm">
+                  {report.notes.map((note, index) => (
+                    <li key={index}>{note}</li>
+                  ))}
+                </ul>
+              </>
+            )}
+          </section>
+        )}
 
         {report.inputs.length > 0 && (
           <footer className="border-border text-muted-foreground mt-6 border-t pt-3 text-xs">

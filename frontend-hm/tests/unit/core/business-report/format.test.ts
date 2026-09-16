@@ -19,6 +19,12 @@ type ParityCase = {
 };
 
 describe("formatValue", () => {
+  it("has a corpus to compare against", () => {
+    // `it.each` over an empty list registers no tests and reports green, so
+    // the corpus itself is asserted before anything is measured against it.
+    expect(parity.cases.length).toBeGreaterThan(100);
+  });
+
   // The design's promise is that a figure reads the same in the card, the
   // PDF, the Word file and the workbook. These expectations are generated
   // from the skill's own `format_value` (see the fixture's description), so
@@ -31,11 +37,19 @@ describe("formatValue", () => {
   );
 
   it("rounds the decimal spelling rather than the binary double", () => {
-    // 8.35 is stored as 8.3499999999999996…, so rounding the double gives
-    // 8.3 while the document says 8.4.
+    // 8.35 is stored as 8.3499999999999996…, so a formatter that rounds the
+    // double — `toFixed` on every engine, `Intl` on one without ECMA-402
+    // NumberFormat v3 — gives 8.3 where the document says 8.4. A current
+    // `Intl` agrees with these; the case pins the rounding rule, not the
+    // choice of implementation.
     expect(formatValue(8.35, "percent")).toBe("8.4%");
     expect(formatValue(2.675, "currency")).toBe("$2.68");
     expect(formatValue(1000000.005, "number")).toBe("1,000,000.01");
+  });
+
+  it("re-groups a number a carry made longer", () => {
+    expect(formatValue(999.995, "currency")).toBe("$1,000.00");
+    expect(formatValue(9999.995, "number")).toBe("10,000.00");
   });
 
   it("names a currency it has no symbol for", () => {

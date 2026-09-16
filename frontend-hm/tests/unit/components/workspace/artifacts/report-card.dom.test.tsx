@@ -14,7 +14,10 @@ const THREAD = "thread-1";
 
 const report = parseBusinessReport(JSON.stringify(fixture))!;
 
-function renderCard(artifacts: string[] = [REPORT]) {
+function renderCard(
+  artifacts: string[] = [REPORT],
+  override: Partial<typeof report> = {},
+) {
   return render(
     <I18nContext.Provider
       value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
@@ -22,7 +25,7 @@ function renderCard(artifacts: string[] = [REPORT]) {
       <ReportCard
         artifacts={artifacts}
         filepath={REPORT}
-        report={report}
+        report={{ ...report, ...override }}
         threadId={THREAD}
       />
     </I18nContext.Provider>,
@@ -61,7 +64,7 @@ describe("ReportCard", () => {
     // `row_formats` makes the revenue row currency and the jobs row a count,
     // in a table whose column format is a plain number: without it both would
     // read as 53,864.48 and 136 with no currency and no thousands agreement.
-    const comparison = within(container.querySelector("#comparison")!);
+    const comparison = within(container.querySelector("#report-comparison")!);
     const revenueRow = comparison.getByText("Revenue").closest("tr")!;
     expect(within(revenueRow).getByText("$53,864.48")).toBeTruthy();
     const jobsRow = comparison.getByText("Jobs").closest("tr")!;
@@ -101,25 +104,29 @@ describe("ReportCard", () => {
     );
   });
 
-  it("offers the renders this turn handed over, and only those", () => {
+  it("offers the renders the thread has presented, and only those", () => {
     renderCard([
       REPORT,
       `${DIRECTORY}/2026-08-business-review.pdf`,
       `${DIRECTORY}/2026-08-business-review.xlsx`,
     ]);
 
-    const pdf = screen.getByRole("link", { name: "PDF" });
+    const pdf = screen.getByRole("link", { name: "Download the PDF" });
     expect(pdf.getAttribute("href")).toBe(
       `/api/threads/${THREAD}/artifacts${DIRECTORY}/2026-08-business-review.pdf?download=true`,
     );
-    expect(screen.getByRole("link", { name: "Excel" })).toBeTruthy();
-    expect(screen.queryByRole("link", { name: "Word" })).toBeNull();
+    expect(
+      screen.getByRole("link", { name: "Download the Excel" }),
+    ).toBeTruthy();
+    expect(
+      screen.queryByRole("link", { name: "Download the Word" }),
+    ).toBeNull();
   });
 
   it("offers no download when nothing was rendered", () => {
     renderCard();
 
-    expect(screen.queryByRole("link", { name: "PDF" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Download the PDF" })).toBeNull();
   });
 
   it("says which file the figures came from", () => {
@@ -130,5 +137,59 @@ describe("ReportCard", () => {
         "Built from example_services_export_small.csv (uploaded 2026-09-15). Checked by the report script.",
       ),
     ).toBeTruthy();
+  });
+  it("keeps the sign on a fall too small to show", () => {
+    // `_pct_change` returns -0.0 for a drop under 0.05%, and the PDF and the
+    // Word file both print -0.0%; `Math.abs` would have lost it.
+    renderCard([REPORT], {
+      kpis: [
+        {
+          id: "revenue",
+          label: "Revenue",
+          value: 74702.61,
+          format: "currency",
+          delta: { vs: "July 2026", pct: -0 },
+        },
+      ],
+    });
+
+    expect(screen.getByTestId("business-report-kpis").textContent).toContain(
+      "-0.0% vs July 2026",
+    );
+  });
+
+  it("does not award a tick no check earned", () => {
+    // The documents print each check's own status and compute no summary, so
+    // the glyph is the card's own claim about the file.
+    renderCard([REPORT], {
+      checks: [
+        {
+          id: "totals_reconcile",
+          status: "not_checked",
+          text: "Totals were not checked against your file.",
+        },
+      ],
+    });
+
+    const line = screen.getByTestId("business-report-checks-line");
+    expect(line.textContent).not.toContain("✓");
+    expect(line.textContent).toContain("not checked");
+  });
+
+  it("says why there is nothing to download", () => {
+    renderCard();
+
+    expect(
+      screen.getByText(
+        "No file to download yet — ask for the PDF, Word or Excel version.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("leaves out a checks section it has nothing to put in", () => {
+    renderCard([REPORT], { checks: [], notes: [] });
+
+    expect(screen.queryByText("Checks")).toBeNull();
+    expect(screen.queryByTestId("business-report-checks-line")).toBeNull();
   });
 });

@@ -179,8 +179,10 @@ export const zhCN: Translations = {
     downloadExcel: "Excel",
     checksHeading: "核对",
     notIncludedHeading: "未包含",
+    noRenders: "暂无可下载的文件 —— 可以让助手生成 PDF、Word 或 Excel 版本。",
+    downloadRender: (format) => `下载 ${format}`,
     checkStatus: {
-      pass: "已核对",
+      pass: "没问题",
       warn: "请注意",
       fail: "有问题",
       not_checked: "未核对",

@@ -4,10 +4,16 @@
  * `business_report_common.format_value` is the one function the PDF, DOCX,
  * XLSX and HTML renders share, so a number reads the same in every download.
  * The card is a fifth render of the same `report.json` and has to agree with
- * them, which rules out `Intl.NumberFormat`: it rounds the *binary* double, so
- * a value the document prints as 8.4 can come out 8.3 here. Python rounds
- * `Decimal(str(value))` — the shortest decimal spelling of the double, ties
- * away from zero — and so does this module, on the string.
+ * them. Python rounds `Decimal(str(value))` — the shortest decimal spelling of
+ * the double, ties away from zero — and so does this module, on the string.
+ *
+ * `Intl.NumberFormat` agrees with that on any engine implementing ECMA-402
+ * NumberFormat v3, which converts a Number through its shortest decimal
+ * spelling and defaults to `halfExpand`: it formats 8.35 as 8.4, as Python
+ * does. Engines without v3 round the binary value instead (Firefox below 116
+ * prints 8.3), and `toFixed` does on every engine. Doing the arithmetic on the
+ * string keeps the figures independent of the viewer's ECMA-402 version, and
+ * Intl supplies none of the four sign rules below in any case.
  *
  * Grouping is a plain comma and the decimal separator a point, because the
  * documents are written that way (`f"{value:,.2f}"`) whatever `meta.lang` says.
@@ -27,6 +33,9 @@ const CURRENCY_SYMBOLS: Readonly<Record<string, string>> = {
 
 /** What a missing number renders as in every render. */
 const MISSING = "—";
+
+/** `MAX_CELL_CHARS` in `business_report_common.py`: the Excel cell limit. */
+const MAX_CELL_CHARS = 32767;
 
 const CONTROL_CHARS = /[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g;
 
@@ -121,7 +130,9 @@ export function toText(value: ReportCell | boolean | undefined) {
   if (typeof value === "number") {
     return String(value);
   }
-  return value.replace(CONTROL_CHARS, "").trim();
+  // `MAX_CELL_CHARS`: the Excel cell limit, which the skill applies to every
+  // render so the formats agree.
+  return value.replace(CONTROL_CHARS, "").trim().slice(0, MAX_CELL_CHARS);
 }
 
 function currencyPrefix(currency: string) {

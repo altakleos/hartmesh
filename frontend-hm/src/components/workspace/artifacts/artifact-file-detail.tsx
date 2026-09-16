@@ -213,8 +213,13 @@ export function ArtifactFileDetail({
     }
     return parseBusinessReport(content);
   }, [content, isReportFile, truncated]);
+  // Previewable from the first render, before the body has arrived: treating a
+  // report as JSON until it parses shows the card's own moment as a flash of
+  // raw JSON. Once the body is here, only a report the app can draw keeps it.
+  const isReportPreview =
+    isReportFile && !truncated && (content === undefined || report !== null);
   const isSupportPreview =
-    language === "html" || language === "markdown" || report !== null;
+    language === "html" || language === "markdown" || isReportPreview;
   const artifactViewState = getArtifactViewState({
     filepath: filepathFromProps,
     isSupportPreview,
@@ -268,9 +273,15 @@ export function ArtifactFileDetail({
   const isLoadingFullContent = fullContentRequested && isLoading;
   const effectiveViewMode =
     truncated && language === "html" ? "code" : viewMode;
+  // Whether this file is previewable now depends on its content, so saving a
+  // repair to a broken report would otherwise eject its editor mid-edit.
+  const restoredViewMode =
+    editingPath === filepath ? null : artifactViewState.initialViewMode;
   useEffect(() => {
-    setViewMode(artifactViewState.initialViewMode);
-  }, [artifactViewState.initialViewMode]);
+    if (restoredViewMode) {
+      setViewMode(restoredViewMode);
+    }
+  }, [restoredViewMode]);
 
   const confirmDiscard = useCallback(() => {
     return !isDirty || window.confirm(t.artifactEditing.discardChanges);
