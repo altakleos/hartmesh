@@ -1567,8 +1567,14 @@ async def get_thread_history(
 ) -> list[HistoryEntry]:
     """Get materialized graph state history for a thread.
 
-    Only the latest (first) checkpoint carries the ``messages`` key to
-    avoid duplicating the complete conversation across every entry.
+    ``values`` is a narrow projection, not the whole channel. Every entry
+    carries ``title`` and ``thread_data``; only the newest returned entry
+    carries ``messages`` and the three whole-thread channels this app renders
+    from state — ``artifacts``, ``todos`` and ``goal`` — because repeating them
+    on every checkpoint would only duplicate them. Each is emitted only when
+    set. This is the one state read a client makes when it merely opens a
+    conversation, so a key the UI renders and this projection omits is blank on
+    every fresh session; ``docs/API.md`` carries the contract.
     """
     checkpointer = get_checkpointer(request)
     try:
@@ -1607,13 +1613,45 @@ async def get_thread_history(
                 # session, and the business-report card, whose downloads are
                 # exactly the renders this list names, says there are none
                 # under a report whose files are sitting in the thread
-                # (hartmesh-tenancy/DF16). Latest checkpoint only: the list is
-                # cumulative, so an older entry would just repeat it.
-                artifacts = materialized_values.get("artifacts")
+                # (hartmesh-tenancy/DF16).
+                #
+                # Newest returned entry only, like ``messages``: the list is
+                # cumulative, so the rest of the page would repeat it. "Newest
+                # returned" is not "newest that exists" — a request carrying
+                # ``before`` starts the page at that checkpoint and gets its
+                # list, which is the same checkpoint whose messages the entry
+                # already carries.
+                #
+                # Serialized through the same helper as ``/state`` rather than
+                # read raw: the accessor exists to preserve extension-contributed
+                # channels, and two surfaces documented as returning one list
+                # should not decode it two ways.
+                artifacts = serialize_channel_values_for_api({"artifacts": materialized_values.get("artifacts")}).get("artifacts")
                 if isinstance(artifacts, list):
                     presented = [path for path in artifacts if isinstance(path, str) and path]
                     if presented:
                         values["artifacts"] = presented
+
+                # The other two channels this app renders from thread state, for
+                # the same reason and on the same rule. ``todos`` comes back with
+                # the statuses it was last written with, completion included:
+                # this restores a record, it does not restart work or infer a
+                # state. ``goal`` matters most of the three — an active goal
+                # drives hidden continuation turns, so a reopened chat was
+                # answering under a standing instruction with nothing on screen
+                # saying so.
+                #
+                # Both are emitted only when set. A literal ``goal: null`` is not
+                # the same as an absent key to the client: it reads as "the
+                # server has spoken" and clears a local override, which is wrong
+                # for every thread that simply has no goal.
+                todos = serialize_channel_values_for_api({"todos": materialized_values.get("todos")}).get("todos")
+                if isinstance(todos, list) and todos:
+                    values["todos"] = todos
+
+                goal = serialize_channel_values_for_api({"goal": materialized_values.get("goal")}).get("goal")
+                if isinstance(goal, dict) and goal:
+                    values["goal"] = goal
 
                 messages = materialized_values.get("messages")
                 if messages:

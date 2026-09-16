@@ -1442,7 +1442,7 @@ def test_thread_history_carries_the_cumulative_presented_files() -> None:
 
     asyncio.run(_seed())
     snapshot = _materialized_snapshot()
-    snapshot.values = {**snapshot.values, "artifacts": artifacts, "todos": [{"title": "unrelated"}]}
+    snapshot.values = {**snapshot.values, "artifacts": artifacts}
     accessor = _FakeStateAccessor(snapshot)
 
     with (
@@ -1457,13 +1457,75 @@ def test_thread_history_carries_the_cumulative_presented_files() -> None:
     assert response.status_code == 200, response.text
     values = response.json()[0]["values"]
     assert values["artifacts"] == artifacts
-    # The projection stays narrow otherwise: this fixes the list the browser
-    # reads, it does not start returning the whole channel on every entry.
-    assert "todos" not in values
+    # The projection stays narrow otherwise: this returns the channels the
+    # browser renders, not the whole state.
+    assert "sandbox" not in values
+    assert "uploaded_files" not in values
 
 
-def test_thread_history_only_carries_presented_files_on_the_latest_checkpoint() -> None:
-    """The list is cumulative, so older entries would only repeat it."""
+def test_thread_history_restores_the_todo_list_with_the_statuses_it_was_left_in() -> None:
+    """A record, not a restart: the statuses come back exactly as written.
+
+    `todos` is rendered only from thread state, so a reopened chat showed no
+    list at all. Restoring it must not re-open finished work, so nothing here
+    re-derives a status.
+    """
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "thread-1"
+    todos = [
+        {"id": "1", "title": "Read the export", "status": "completed"},
+        {"id": "2", "title": "Render the PDF", "status": "completed"},
+        {"id": "3", "title": "Ask about currency", "status": "pending"},
+    ]
+    snapshot = _materialized_snapshot()
+    snapshot.values = {**snapshot.values, "todos": todos}
+
+    with (
+        patch(
+            "app.gateway.routers.threads.build_thread_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(_FakeStateAccessor(snapshot), {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1})
+
+    assert response.status_code == 200, response.text
+    assert response.json()[0]["values"]["todos"] == todos
+
+
+def test_thread_history_restores_an_active_goal_and_stays_silent_without_one() -> None:
+    """An active goal drives hidden continuation turns.
+
+    Without it in this read, a reopened chat answered the next message under a
+    standing instruction with nothing on screen saying so. It is emitted only
+    when there is one: a literal ``null`` reads to the client as an answer from
+    the server and clears a local override, which is wrong for the many threads
+    that simply have no goal.
+    """
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "thread-1"
+    goal = {"objective": "Close the August books", "status": "active", "continuation_count": 1}
+
+    def _history_values(channel_goal):
+        snapshot = _materialized_snapshot()
+        snapshot.values = {**snapshot.values, "goal": channel_goal}
+        with (
+            patch(
+                "app.gateway.routers.threads.build_thread_checkpoint_state_accessor",
+                new=AsyncMock(return_value=(_FakeStateAccessor(snapshot), {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
+            ),
+            TestClient(app) as client,
+        ):
+            response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1})
+        assert response.status_code == 200, response.text
+        return response.json()[0]["values"]
+
+    assert _history_values(goal)["goal"] == goal
+    assert "goal" not in _history_values(None)
+
+
+def test_thread_history_only_carries_presented_files_on_the_newest_returned_entry() -> None:
+    """The list is cumulative, so the rest of the page would only repeat it."""
     app, _store, _checkpointer = _build_thread_app()
     thread_id = "thread-1"
     latest = _materialized_snapshot()

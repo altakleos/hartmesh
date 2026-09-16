@@ -262,6 +262,7 @@ export function ReportCard({
   className,
   filepath,
   isMock,
+  presentedKnown = true,
   report,
   threadId,
 }: {
@@ -269,6 +270,14 @@ export function ReportCard({
   className?: string;
   filepath: string;
   isMock?: boolean;
+  /**
+   * Whether the thread has finished telling us what it presented. Until it
+   * has, an empty `artifacts` means "not known yet", not "never rendered" —
+   * and saying the second while the first is true is how this card spent a
+   * whole release telling people to ask for files they already had
+   * (hartmesh-tenancy/DF16).
+   */
+  presentedKnown?: boolean;
   report: BusinessReport;
   threadId: string;
 }) {
@@ -327,7 +336,7 @@ export function ReportCard({
           </p>
         </header>
 
-        {renders.length === 0 && (
+        {renders.length === 0 && presentedKnown && (
           <p className="text-muted-foreground mt-4 text-sm">
             {t.businessReport.noRenders}
           </p>

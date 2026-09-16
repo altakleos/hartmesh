@@ -256,19 +256,31 @@ Content-Type: application/json
 ```
 
 Returns one entry per checkpoint, newest first. Unlike `/state`, each entry's
-`values` is a **narrow projection**, not the whole channel: every entry carries
-`title` and `thread_data`, and the newest additionally carries `messages` and
-`artifacts` (the thread's cumulative `present_files` list). Both of the latter
-are omitted from older entries because they are whole-thread state that would
-otherwise be repeated on every checkpoint.
+`values` is a **narrow projection**, not the whole channel. Every key below is
+emitted only when it is set:
+
+| Key | Entries |
+| --- | --- |
+| `title`, `thread_data` | every entry |
+| `messages` | newest returned entry |
+| `artifacts` (cumulative `present_files`), `todos`, `goal` | newest returned entry |
+
+The last three are whole-thread state, so repeating them on every checkpoint
+would only duplicate them. "Newest returned" is not "newest that exists": a
+request carrying `before` starts the page at that checkpoint and gets that
+checkpoint's state, which is the same checkpoint whose `messages` the entry
+already carries.
+
+`goal` and `todos` are omitted rather than sent as `null`/`[]` when unset,
+because a client distinguishes "the server answered" from "the server said
+nothing" and the former clears a local override.
 
 This is the read a client makes when it merely *opens* a conversation — it never
 sees a `values` stream frame — so a key the UI renders from thread state must
-appear here or it is blank on every fresh session. `artifacts` was missing until
-hartmesh-tenancy/DF16, which left the artifact panel empty and the
-business-report card offering no downloads under a report whose files were
-present and downloadable. `todos` and `goal` are still not returned; see
-`frontend-hm/src/AGENTS.md`.
+appear here or it is blank on every fresh session. In hartmesh-tenancy/DF16 that
+cost an empty artifact panel, a business-report card offering no downloads under
+a report whose files were present and downloadable, no todo list, and an active
+goal that stayed invisible while it drove hidden continuation turns.
 
 ### Runs
 
