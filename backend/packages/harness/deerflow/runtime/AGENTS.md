@@ -334,20 +334,7 @@ summarizer automatically excludes them from baseline summaries with a warning.
 Storage-size collection relies on saver-specific diagnostic layouts; if those
 layouts change, the timing/correctness row remains successful while storage
 fields become `null` and `storage_stats_error` records the diagnostic failure.
-Example:
-
-```bash
-cd backend
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
-  --backends sqlite --updates 100,500,999,1000,1001 --payload-bytes 128 \
-  --repetitions 7 --output /tmp/checkpoint-bench.jsonl
-TEST_POSTGRES_URI=postgresql://... \
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_channels.py \
-  --backends sqlite,postgres --updates 100 --payload-bytes 128 \
-  --output /tmp/checkpoint-cross-backend.jsonl
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_channels.py \
-  /tmp/checkpoint-bench.jsonl
-```
+Invocations live in the script's own `Examples::` docstring.
 
 The production-shaped layer lives in
 `scripts/benchmark/checkpoint/bench_production.py`: per-case child processes
@@ -386,17 +373,7 @@ large to run blindly):
   `ThreadHistoryRequest.limit`), so `--history-limits` values above 100 are
   measured and reported by their effective (clamped) limit.
 
-Example:
-
-```bash
-cd backend
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/bench_production.py \
-  --turns 10,100,500,1000,2000 --payload-bytes 128 \
-  --snapshot-frequencies 10,50,100,500,1000 \
-  --repetitions 7 --output /tmp/production-bench.jsonl
-PYTHONPATH=. uv run python scripts/benchmark/checkpoint/summarize_production.py \
-  /tmp/production-bench.jsonl
-```
+Invocations live in the script's own `Examples::` docstring.
 
 ## Exact two-Gateway boundary
 
