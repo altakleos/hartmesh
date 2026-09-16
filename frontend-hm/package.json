@@ -1,6 +1,6 @@
 {
   "name": "hartmesh-frontend",
-  "version": "2.1.0+hartmesh.16",
+  "version": "2.1.0+hartmesh.17",
   "private": true,
   "type": "module",
   "scripts": {
