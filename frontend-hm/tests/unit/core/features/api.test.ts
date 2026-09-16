@@ -4,7 +4,10 @@ rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
 
 import { fetch } from "@/core/api/fetcher";
-import { fetchSubagentBatchesCapability } from "@/core/features/api";
+import {
+  fetchSubagentBatchesCapability,
+  fetchWorkspacePresentation,
+} from "@/core/features/api";
 
 const mockedFetch = rs.mocked(fetch);
 
@@ -52,6 +55,65 @@ describe("subagent batch feature capability", () => {
       repositoryAvailable: true,
       workerRunning: true,
       maxRunning: 4,
+    });
+  });
+});
+
+describe("workspace presentation", () => {
+  it("reads the profile and the starters the deployment configured", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        agents_api: { enabled: true },
+        ui: {
+          profile: "business",
+          starters: [
+            { id: "review", title: "Monthly review", prompt: "Build it." },
+          ],
+        },
+      }),
+    );
+
+    await expect(fetchWorkspacePresentation()).resolves.toEqual({
+      profile: "business",
+      starters: [
+        { id: "review", title: "Monthly review", prompt: "Build it." },
+      ],
+    });
+  });
+
+  it("offers every screen when the Gateway predates the setting", async () => {
+    // A rolling upgrade must not take screens away from the people who had
+    // them, so an absent block reads as the profile that shows everything.
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({ agents_api: { enabled: true } }),
+    );
+
+    await expect(fetchWorkspacePresentation()).resolves.toEqual({
+      profile: "developer",
+      starters: [],
+    });
+  });
+
+  it("drops a starter it could not put on a tile", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        agents_api: { enabled: true },
+        ui: {
+          profile: "kiosk",
+          starters: [
+            { id: "ok", title: "Fine", prompt: "Do it." },
+            { id: "blank", title: "   ", prompt: "Do it." },
+            { id: "missing" },
+            "not a starter",
+          ],
+        },
+      }),
+    );
+
+    await expect(fetchWorkspacePresentation()).resolves.toEqual({
+      // An unknown profile is not a third mode; it is the safe one.
+      profile: "developer",
+      starters: [{ id: "ok", title: "Fine", prompt: "Do it." }],
     });
   });
 });

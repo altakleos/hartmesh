@@ -2,13 +2,13 @@
 
 import { useCallback, useSyncExternalStore } from "react";
 
-import type { SettingsSection } from "./settings-dialog";
+import type { SettingsSectionId } from "./settings-sections";
 
 type Listener = () => void;
 
 type SettingsDialogState = {
   open: boolean;
-  section: SettingsSection;
+  section: SettingsSectionId;
 };
 
 const listeners = new Set<Listener>();
@@ -49,7 +49,7 @@ function getServerSnapshot(): SettingsDialogState {
   return SERVER_SNAPSHOT;
 }
 
-export function openSettingsDialog(section: SettingsSection) {
+export function openSettingsDialog(section: SettingsSectionId) {
   setState({ open: true, section });
 }
 
@@ -72,7 +72,7 @@ export function useSettingsDialog() {
     getServerSnapshot,
   );
 
-  const open = useCallback((section: SettingsSection) => {
+  const open = useCallback((section: SettingsSectionId) => {
     openSettingsDialog(section);
   }, []);
 

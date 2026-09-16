@@ -25,6 +25,7 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import { useDeveloperSurfacesVisible } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   useCreateScheduledTask,
@@ -85,6 +86,7 @@ function formatTimestamp(value: string | null, locale: string): string {
 export default function ScheduledTasksPage() {
   const { t, locale } = useI18n();
   const st = t.scheduledTasks;
+  const developerSurfacesVisible = useDeveloperSurfacesVisible();
   const searchParams = useSearchParams();
   const threadId = searchParams.get("thread_id");
   const allTasksQuery = useScheduledTasks();
@@ -237,25 +239,30 @@ export default function ScheduledTasksPage() {
             data-testid="scheduled-task-create-form"
           >
             <div className="font-medium">{st.create.title}</div>
-            <div
-              className="flex flex-wrap items-center gap-1"
-              data-testid="schedule-recipes"
-            >
-              <span className="text-muted-foreground text-sm">
-                {st.recipes.label}:
-              </span>
-              {RECIPES.map((recipe) => (
-                <Button
-                  key={recipe.id}
-                  variant="outline"
-                  size="sm"
-                  onClick={() => applyRecipe(recipe)}
-                >
-                  <span aria-hidden>{recipe.icon}</span>
-                  {st.recipes[recipe.titleKey].title}
-                </Button>
-              ))}
-            </div>
+            {/* The recipes are about repositories, issue triage and trending
+                releases; under `ui.profile: business` they are kept for
+                administrators, and everyone else writes their own prompt. */}
+            {developerSurfacesVisible && (
+              <div
+                className="flex flex-wrap items-center gap-1"
+                data-testid="schedule-recipes"
+              >
+                <span className="text-muted-foreground text-sm">
+                  {st.recipes.label}:
+                </span>
+                {RECIPES.map((recipe) => (
+                  <Button
+                    key={recipe.id}
+                    variant="outline"
+                    size="sm"
+                    onClick={() => applyRecipe(recipe)}
+                  >
+                    <span aria-hidden>{recipe.icon}</span>
+                    {st.recipes[recipe.titleKey].title}
+                  </Button>
+                ))}
+              </div>
+            )}
             <div className="flex gap-2">
               <Button
                 variant={

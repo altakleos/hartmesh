@@ -1,9 +1,12 @@
 import { useQuery } from "@tanstack/react-query";
 
+import { useAuth } from "@/core/auth/AuthProvider";
+
 import {
   fetchBrowserControlEnabled,
   fetchMcpTasksEnabled,
   fetchSubagentBatchesCapability,
+  fetchWorkspacePresentation,
 } from "./api";
 
 export function useBrowserControlEnabled() {
@@ -50,4 +53,43 @@ export function useSubagentBatchesCapability() {
     maxRunning: data?.maxRunning ?? 0,
     isLoading: isPending,
   };
+}
+
+export function useWorkspacePresentation() {
+  const { data, isPending } = useQuery({
+    queryKey: ["features", "ui"],
+    queryFn: () => fetchWorkspacePresentation(),
+    // Matches the sibling feature hooks: a transient failure self-heals on the
+    // next mount instead of leaving the deployment's answer unknown — which,
+    // for the one hook that fails open, means silently reverting to developer.
+    staleTime: 0,
+    refetchOnMount: true,
+  });
+  return {
+    profile: data?.profile,
+    starters: data?.starters,
+    isLoading: isPending,
+  };
+}
+
+/**
+ * Whether to offer the screens that only make sense to someone building the
+ * deployment: skills, tools, subagents, integrations, and the developer
+ * scheduled-task recipes.
+ *
+ * Hiding them is presentation, not authorization — the routes behind them are
+ * unchanged and `authorization` has no permission covering them; `system_role`
+ * is what limits a person.
+ *
+ * A control someone might need stays offered while the deployment's answer is
+ * unknown, which is what every deployment did before this existed.
+ * Deployment-authored copy follows the opposite rule and waits for the answer.
+ */
+export function useDeveloperSurfacesVisible() {
+  const { profile, isLoading } = useWorkspacePresentation();
+  const { user } = useAuth();
+  if (isLoading || profile === undefined) {
+    return true;
+  }
+  return profile !== "business" || user?.system_role === "admin";
 }

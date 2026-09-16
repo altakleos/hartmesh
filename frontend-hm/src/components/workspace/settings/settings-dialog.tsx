@@ -22,8 +22,18 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { ScrollArea } from "@/components/ui/scroll-area";
+import {
+  useDeveloperSurfacesVisible,
+  useWorkspacePresentation,
+} from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
+
+import {
+  resolveActiveSection,
+  visibleSettingsSections,
+  type SettingsSectionId,
+} from "./settings-sections";
 
 function SettingsPageLoading() {
   return (
@@ -98,27 +108,20 @@ const AboutSettingsPage = dynamic(
   { loading: SettingsPageLoading },
 );
 
-export type SettingsSection =
-  | "account"
-  | "appearance"
-  | "channels"
-  | "integrations"
-  | "memory"
-  | "tools"
-  | "subagents"
-  | "skills"
-  | "notification"
-  | "about";
-
 type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
-  defaultSection?: SettingsSection;
+  defaultSection?: SettingsSectionId;
 };
 
 export function SettingsDialog(props: SettingsDialogProps) {
   const { defaultSection = "appearance", ...dialogProps } = props;
   const { t } = useI18n();
+  const developerSurfacesVisible = useDeveloperSurfacesVisible();
+  // The screens stay offered while the deployment's answer is unknown, so a
+  // deep link to a hidden one would otherwise mount it — and fire its
+  // fetches — for the moment before the answer lands.
+  const { isLoading: presentationLoading } = useWorkspacePresentation();
   const [activeSection, setActiveSection] =
-    useState<SettingsSection>(defaultSection);
+    useState<SettingsSectionId>(defaultSection);
 
   useEffect(() => {
     // When opening the dialog, ensure the active section follows the caller's intent.
@@ -182,6 +185,14 @@ export function SettingsDialog(props: SettingsDialogProps) {
       t.settings.sections.about,
     ],
   );
+  const visibleSections = useMemo(
+    () => visibleSettingsSections(sections, developerSurfacesVisible),
+    [developerSurfacesVisible, sections],
+  );
+  const activeVisibleSection = resolveActiveSection(
+    visibleSections,
+    activeSection,
+  );
   return (
     <Dialog
       {...dialogProps}
@@ -200,13 +211,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
         <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[220px_minmax(0,1fr)]">
           <nav className="bg-sidebar min-h-0 overflow-y-auto rounded-lg border p-2">
             <ul className="space-y-1 pr-1">
-              {sections.map(({ id, label, icon: Icon }) => {
-                const active = activeSection === id;
+              {visibleSections.map(({ id, label, icon: Icon }) => {
+                const active = activeVisibleSection === id;
                 return (
                   <li key={id}>
                     <button
                       type="button"
-                      onClick={() => setActiveSection(id as SettingsSection)}
+                      onClick={() => setActiveSection(id as SettingsSectionId)}
                       className={cn(
                         "flex w-full items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                         active
@@ -224,20 +235,37 @@ export function SettingsDialog(props: SettingsDialogProps) {
           </nav>
           <ScrollArea className="h-full min-h-0 rounded-lg border">
             <div className="space-y-8 p-6">
-              {activeSection === "account" && <AccountSettingsPage />}
-              {activeSection === "appearance" && <AppearanceSettingsPage />}
-              {activeSection === "memory" && <MemorySettingsPage />}
-              {activeSection === "tools" && <ToolSettingsPage />}
-              {activeSection === "subagents" && <SubagentSettingsPage />}
-              {activeSection === "skills" && (
-                <SkillSettingsPage
-                  onClose={() => props.onOpenChange?.(false)}
-                />
+              {presentationLoading && <SettingsPageLoading />}
+              {!presentationLoading && (
+                <>
+                  {activeVisibleSection === "account" && (
+                    <AccountSettingsPage />
+                  )}
+                  {activeVisibleSection === "appearance" && (
+                    <AppearanceSettingsPage />
+                  )}
+                  {activeVisibleSection === "memory" && <MemorySettingsPage />}
+                  {activeVisibleSection === "tools" && <ToolSettingsPage />}
+                  {activeVisibleSection === "subagents" && (
+                    <SubagentSettingsPage />
+                  )}
+                  {activeVisibleSection === "skills" && (
+                    <SkillSettingsPage
+                      onClose={() => props.onOpenChange?.(false)}
+                    />
+                  )}
+                  {activeVisibleSection === "notification" && (
+                    <NotificationSettingsPage />
+                  )}
+                  {activeVisibleSection === "channels" && (
+                    <ChannelsSettingsPage />
+                  )}
+                  {activeVisibleSection === "integrations" && (
+                    <IntegrationsSettingsPage />
+                  )}
+                  {activeVisibleSection === "about" && <AboutSettingsPage />}
+                </>
               )}
-              {activeSection === "notification" && <NotificationSettingsPage />}
-              {activeSection === "channels" && <ChannelsSettingsPage />}
-              {activeSection === "integrations" && <IntegrationsSettingsPage />}
-              {activeSection === "about" && <AboutSettingsPage />}
             </div>
           </ScrollArea>
         </div>

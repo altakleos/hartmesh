@@ -208,8 +208,8 @@ make install     # install frontend + backend deps and pre-commit hooks
 make dev         # then start everything
 ```
 
-Without `config.yaml` present, services fail to boot. `config.yaml` / `extensions_config.json`
-may be edited at runtime via the Gateway API but are gitignored, so never commit them.
+Without `config.yaml` present, services fail to boot. `config.yaml` hot-reloads from
+disk; `extensions_config.json` is API-writable. Both are gitignored, never commit them.
 
 ### Run a single test
 

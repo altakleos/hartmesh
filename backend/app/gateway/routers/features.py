@@ -7,12 +7,15 @@ request, while startup-scoped capabilities report the runtime that actually
 started.
 """
 
+from typing import Literal
+
 from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.browser_capability import browser_capability
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.ui_config import MAX_STARTER_PROMPT_CHARS, MAX_STARTER_TITLE_CHARS, MAX_STARTERS, UiConfig
 from deerflow.subagents.capacity import configured_subagent_max_running
 
 router = APIRouter(prefix="/api", tags=["features"])
@@ -45,6 +48,21 @@ class SubagentBatchesFeature(BaseModel):
     max_running: int = Field(..., description="Native subagent execution slots in this Gateway process")
 
 
+class UiStarter(BaseModel):
+    """One thing Home offers before anyone has typed."""
+
+    id: str = Field(..., max_length=64, description="Stable identifier; the grid's key")
+    title: str = Field(..., max_length=MAX_STARTER_TITLE_CHARS, description="The words on the tile")
+    prompt: str = Field(..., max_length=MAX_STARTER_PROMPT_CHARS, description="What choosing the tile puts in the message box; nothing is sent")
+
+
+class UiFeature(BaseModel):
+    """What the deployment says the workspace should show."""
+
+    profile: Literal["business", "developer"] = Field(..., description="'business' keeps the developer screens for administrators; 'developer' offers them to everyone")
+    starters: list[UiStarter] = Field(..., max_length=MAX_STARTERS, description="Home's starter grid, in the order it is shown")
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -52,6 +70,7 @@ class FeaturesResponse(BaseModel):
     browser_control: BrowserControlFeature
     mcp_tasks: McpTasksFeature
     subagent_batches: SubagentBatchesFeature
+    ui: UiFeature
 
 
 @router.get(
@@ -80,4 +99,16 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             worker_running=subagent_batch_worker_running,
             max_running=configured_subagent_max_running(),
         ),
+        # Presentation the frontend cannot decide for itself: the profile is
+        # the deployment's choice and the starters are its words. Read through
+        # `get_config`, so an edit reaches the next page load.
+        ui=_ui_feature(config.ui),
+    )
+
+
+def _ui_feature(ui: UiConfig) -> UiFeature:
+    """The workspace presentation, as `UiConfig` resolved it."""
+    return UiFeature(
+        profile=ui.profile,
+        starters=[UiStarter(id=starter.id, title=starter.title, prompt=starter.prompt) for starter in ui.starters],
     )

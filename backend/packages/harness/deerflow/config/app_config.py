@@ -54,6 +54,7 @@ from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_plane_config import ToolPlaneConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
+from deerflow.config.ui_config import UiConfig
 from deerflow.config.verification_config import VerificationConfig
 from deerflow.extensions.loader import ExtensionSpec
 
@@ -268,6 +269,7 @@ class AppConfig(BaseModel):
     authorization: AuthorizationConfig = Field(default_factory=AuthorizationConfig, description="Fine-grained resource authorization configuration (RBAC and beyond)")
     input_polish: InputPolishConfig = Field(default_factory=InputPolishConfig, description="Pre-send input polishing configuration.")
     suggestions: SuggestionsConfig = Field(default_factory=SuggestionsConfig, description="Follow-up suggestions configuration.")
+    ui: UiConfig = Field(default_factory=UiConfig, description="Workspace presentation: the Home starters and which screens non-administrators are offered.")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
     llm_call: LlmCallConfig = Field(default_factory=LlmCallConfig, description="LLM call execution configuration (concurrency / rate shaping)")
     channel_connections: ChannelConnectionsConfig = Field(

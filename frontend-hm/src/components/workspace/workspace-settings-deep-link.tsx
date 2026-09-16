@@ -5,11 +5,11 @@ import { useEffect, useRef } from "react";
 
 import {
   openSettingsDialog,
-  type SettingsSection,
+  type SettingsSectionId,
   useSettingsDialog,
 } from "./settings";
 
-const SETTINGS_SECTIONS = new Set<SettingsSection>([
+const SETTINGS_SECTIONS = new Set<SettingsSectionId>([
   "account",
   "appearance",
   "channels",
@@ -22,10 +22,10 @@ const SETTINGS_SECTIONS = new Set<SettingsSection>([
   "about",
 ]);
 
-function asSettingsSection(value: string | null): SettingsSection | null {
+function asSettingsSection(value: string | null): SettingsSectionId | null {
   if (!value) return null;
-  return SETTINGS_SECTIONS.has(value as SettingsSection)
-    ? (value as SettingsSection)
+  return SETTINGS_SECTIONS.has(value as SettingsSectionId)
+    ? (value as SettingsSectionId)
     : null;
 }
 

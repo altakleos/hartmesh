@@ -97,6 +97,31 @@ in-period rows). Dropping `rows` before the size check is the real fix and is
 not done. The card's own chrome follows the UI locale while the report body
 follows `meta.lang`, which the skill only ever writes as `en-US`.
 
+The deployment owns two presentation settings, both read from
+`GET /api/features` (`core/features`): `ui.starters` is Home's starter grid —
+choosing one fills the composer through the prompt-input controller, focuses it
+and sends nothing, because the first moment is "pick the thing, drop the file,
+say the month" — and `ui.profile` decides who is offered the developer screens.
+Under `business`, someone who is not an administrator is not offered skills,
+tools, subagents, integrations or the scheduled-task recipe chips, and Home
+drops the product blurb. Channels and memory stay: the phone someone messages
+it from and what the agent remembers about them are theirs, not the
+deployment's. Hiding is presentation, not authorization — the routes are
+unchanged and `authorization` has no permission covering these APIs;
+`system_role` is what limits a person, and the API already checks it.
+
+One rule governs what happens while the answer is unknown: a control someone
+might need stays offered, and copy the deployment authors waits. So the screens
+stay (a Gateway reporting no `ui` block reads as `developer`, and an upgrade
+never takes one away), while the blurb and the grid render only once the
+deployment has answered. Starters default to the profile — `business` opens on
+a small built-in set, `developer` on none — so an untouched deployment gains
+nothing it did not ask for, and when a grid exists the legacy suggestion row
+under the composer steps aside rather than sitting beside it. `InputBox` also
+mounts on the public showcase route, so that gate lives inside
+`SuggestionList`: asking for `/api/features` from `InputBox` would 401 and
+bounce a showcase visitor to the login page.
+
 Skill, MCP, and managed-integration settings are governance-aware. When
 `GET /api/tool-plane/status` succeeds, these existing screens render the safe
 active/history notice and disable their legacy direct mutation controls; they
