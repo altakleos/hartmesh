@@ -5,6 +5,18 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.18] — 2026-09-16
+
+- hartmesh#90 — tell a reopened chat what it has already presented. `.17` found a report card offering no downloads after the chat was reopened, although its three files were presented, persisted and downloadable. A client that merely opens a conversation never sees a `values` stream frame: its one state read is `POST .../history`, whose `values` carried `title`, `thread_data` and `messages` and none of the whole-thread channels. So the cumulative presented-files list was empty and everything drawn from it read as nothing — the artifact panel opened empty, inline relative images broke, the todo list vanished, and an active goal was invisible while it went on driving hidden continuation turns, so the chat answered the next message under a standing instruction with nothing on screen saying so. That response now projects `artifacts`, `todos` and `goal` from the same checkpoint it already reads, todos with the statuses they were last written with and nothing re-deriving one. The card also stops asserting an answer it does not have: messages and state arrive on different requests, so a new tab could show "No file to download yet" before the state read landed. `tests/unit/core/threads/history-contract.test.ts` pins the projection from both sides — every key the app declares it renders must be in it, and the mocked backend may not answer with a key outside it — because the e2e mock had been answering with keys the Gateway never sent, which is how this passed a release.
+
+- hartmesh#91 — make each intention in the business-report skill one run. The `.17` tenant class spent 20 model calls on one report and 13 on a one-sentence revision, and its retained receipts say where: 50.5 s of the revision's 102.8 s tool span went on six Python probes hunting for a summary the `prose` step had written but never printed, and 45.3 s of the report's 178.3 s went on two retries after the three documented render commands were collapsed into one backgrounded line that dropped `$SKILL_DIR`, a separate `show` of figures the build had already computed, an `ls` of the output directory, and two calls to a tool that does not exist. `render --to` takes a list, `build` and `prose` take `--render`, both print the figures `show` prints — `prose` out of the draft it wrote, so a sentence the number check dropped is not echoed back as if it stood — and each run ends with a `Present:` line naming the files to hand over, one absolute path per line, the report first. `prose` now also removes the renders it invalidates, bounded to what the skill recorded writing in `renders.json`: its report path comes from its caller, so a name-based rule would delete a user's own copies out of a re-uploaded bundle. Spreadsheet text reaching the digest has its control characters stripped, because a category cell carrying a newline could open a line at column 0 and forge the handover list. On the 5,000-row fixture the report flow falls from 7 script runs to 3 and the revision from 4 to 1.
+- hartmesh#92 — say where the accepted preparation's own time goes. `.17` measured roughly 5 to 6 s before the first model request on a warm turn — most of the budget for a one-sentence revision — inside a `skill_materialization` phase that reported one figure and named nothing in it. Three spans nest inside it now: `accepted_authorization`, `skill_projection` (which `sandbox_lookup`, and on a cold turn `sandbox_create` and `sandbox_readiness`, nest inside) and `skill_snapshot_bind`. Instrumentation only; the residual between them is the isolation assertions, and a turn where that residual is not small is itself a finding.
+
+Neither change is a tenant-class qualification. What `.17` left open and this
+release does not move: `write_todos` cost 60.3 s across seven calls in that
+report turn — 34% of its tool span, more than everything #91 removes together —
+and the memory budget of a 512 MiB sandbox under a large report.
+
 ## [2.1.0+hartmesh.17] — 2026-09-16
 
 - hartmesh#86 — show a built report as a report card rather than as JSON. A `*.report.json` artifact that parses against the report contract is drawn as the document it describes — KPIs, tables, charts and the checks line — with a download for each render the thread has presented; a file the app cannot draw stays JSON, and the panel's existing code/preview toggle switches between the two. `formatValue` is a port of the skill's own `format_value`, down to rounding the decimal spelling of a number rather than the binary double, so a figure reads the same on the card as in the PDF, Word and Excel renders.
@@ -31,6 +43,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.18]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.18
 [2.1.0+hartmesh.17]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.17
 [2.1.0+hartmesh.16]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.16
 
