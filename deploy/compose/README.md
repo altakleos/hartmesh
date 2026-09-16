@@ -1544,27 +1544,54 @@ Every turn ends with one `turn phase timings` line from
 wrapped here only to fit the page:
 
 ```text
-turn phase timings run=<run id> correlation=<id> total=16624ms outcome=success kind=accepted \
-acquisition=created acquire_reason=accepted_binding snapshot=present/13pkg/mandatory queue=0ms creates=1 \
-phases=admission@0ms assembly@19ms sandbox_lookup@409ms+4ms sandbox_create@417ms+4777ms \
-sandbox_readiness@5201ms+10654ms sandbox_acquire@407ms+15747ms model_request@16176ms \
-first_provider_text@16385ms first_stream_text@16387ms model_completion@16519ms terminal@16624ms \
+turn phase timings run=<run id> correlation=<id> total=9261ms outcome=success kind=accepted \
+acquisition=accepted_warm_reclaim reused=accepted_active acquire_reason=accepted_binding \
+snapshot=present/13pkg/mandatory queue=0ms phases=admission@0ms assembly@6ms sandbox_lookup@22ms+143ms \
+skill_materialization@21ms+5825ms agent_build@5857ms+232ms checkpoint_preflight@6109ms graph_start@6115ms \
+sandbox_binding@6131ms+2677ms sandbox_acquire@6131ms+2677ms model_request@8821ms first_provider_text@9022ms \
+first_stream_text@9025ms model_completion@9156ms terminal@9261ms \
 unobservable=browser_first_text(requires_a_browser_measurement_through_public_ingress)
 ```
 
 `@` is an offset from the turn's start and `+` the phase's own measured
 duration, both in milliseconds, so a phase carrying both **ends** at
 `@ + duration` and the questions are arithmetic on one line. The sandbox is in
-hand at the end of `sandbox_acquire` (`407 + 15747 = 16154ms`), so
-`first_stream_text@16387ms` leaves 233 ms between the sandbox being in hand and
+hand at the end of `sandbox_acquire` (`6131 + 2677 = 8808ms`), so
+`first_stream_text@9025ms` leaves 217 ms between the sandbox being in hand and
 the first assistant text leaving the Gateway. `first_stream_text -
 first_provider_text` is what the Gateway added to the provider's own first
-token (both are instants, so that one is a plain subtraction). `acquisition=`
-says whether the turn created its sandbox or reclaimed a warm one
-(`accepted_warm_reclaim`). What the server cannot see it declares instead of
-inferring: `browser_first_text` is always `unobservable` here, because only a
-browser measuring through the front door can time what the person actually
-waited for.
+token (both are instants, so that one is a plain subtraction). The line above
+is a *warm* turn that still took 9.3 s, and it says where: 5.8 s projecting the
+accepted skill snapshot and 2.7 s binding it, against 143 ms to find the
+container.
+
+`acquisition=` says where this turn's sandbox came from — `created`,
+`accepted_warm_reclaim` for a reclaimed warm container, `accepted_active` or
+`in_process` for one that was already held. A turn acquires in stages (the
+worker projects the accepted skills before the graph runs; the sandbox
+middleware binds later against whatever is now active), so `acquisition=` is
+always the turn's **origin**, and a later stage that merely found the
+container active is reported beside it as `reused=`. `acquisition=created
+reused=accepted_active` is one turn that created its sandbox and bound to it
+again, not two acquisitions — and `acquisition=` agrees with `creates=`
+instead of contradicting it.
+
+Four phases account for the window between admission and the model request,
+which on a warm turn is most of the wait. `skill_materialization` is the
+accepted skill snapshot being projected into the sandbox, and the sandbox
+phases **nest inside it** (`sandbox_lookup@22ms+143ms` sits within
+`skill_materialization@21ms+5825ms`, so the projection cost beyond finding the
+container is the difference). Then `agent_build` (building the graph; with
+`skill_materialization` one of the two here carrying a measured duration),
+`checkpoint_preflight` (the thread's stored state being loaded) and
+`graph_start` (the graph itself beginning — after which `sandbox_binding`,
+`sandbox_acquire` and the model phases take over). `graph_start` is marked per
+attempt, so a resumed or retried stream shows two.
+
+What the server cannot see it declares instead of inferring:
+`browser_first_text` is always `unobservable` here, because only a browser
+measuring through the front door can time what the person actually waited
+for.
 
 ```sh
 docker compose --project-directory /opt/hartmesh --env-file "$ENV" \
@@ -2246,3 +2273,44 @@ the figures below are this host's, not a pinned image's.
   heartbeat-enabled path this change restructures, exercised offline only; and
   a four-turn or concurrent measurement of what the added line costs (it is one
   formatted string per turn, built from the journal already taken).
+
+Where a warm turn's seconds go, and what acquired its sandbox (2026-09-16). The
+tenant-class rerun of v2.1.0+hartmesh.15 passed its report workflow and its
+package-installation tests, and returned two things the line still got wrong.
+Every one of its seven turns read `acquisition=accepted_active` — including the
+cold turn that also carried `creates=1` and a measured `sandbox_create` — and
+between the sandbox lookup ending and the binding starting each turn spent 2.6
+to 3.4 s that no phase accounted for. Both reproduced on the same development
+host on the released profile shape (this directory's `compose.yaml` and
+`config.yaml`, PostgreSQL, Redis, `SANDBOX_RUNTIME=runsc`, the 13-package
+seeded library, the probe model, the previous entry's image with the
+working-tree `turn_phases.py` and `runs/worker.py` mounted over it), and
+repaired.
+
+- A turn acquires in stages: the worker projects the accepted skills before
+  the graph runs, and the sandbox middleware binds later against what is by
+  then active. The journal took the last word, so the middleware's "already
+  active" observation overwrote the create or the reclaim. `acquisition=` is
+  now the turn's origin and the later observation rides beside it as
+  `reused=`. Measured here: a cold chat `acquisition=created
+  reused=accepted_active ... creates=1 sandbox_create@119ms+4302ms`, and the
+  next turn on it `acquisition=accepted_warm_reclaim reused=accepted_active`.
+  Before the repair both lines said `acquisition=accepted_active`.
+- The unaccounted window is now four phases, and the answer is not the
+  container. That warm turn: `sandbox_lookup@22ms+143ms` inside
+  `skill_materialization@21ms+5825ms`, then `agent_build@5857ms+232ms`,
+  `checkpoint_preflight@6109ms`, `graph_start@6115ms`,
+  `sandbox_binding@6131ms+2677ms`, `model_request@8821ms`. Finding the warm
+  container cost 143 ms; projecting the accepted snapshot into it and binding
+  it cost 8.5 s of a 9.3 s turn. The cold turn's projection encloses its create
+  and readiness: `skill_materialization@39ms+20969ms` around
+  `sandbox_create@119ms+4302ms sandbox_readiness@4423ms+10722ms`.
+- Offline: the turn-phase, warm-reuse, rediscovery-provenance, cleanup-outcome
+  and Gateway stream-e2e suites, including a new e2e assertion that admission,
+  assembly, `agent_build`, `checkpoint_preflight`, `graph_start` and
+  `model_request` are present and in order on a real streamed turn.
+- Not proved here: the tenant class itself, whose next Part A reads these
+  fields; the pinned release image; and *why* the projection costs what it
+  does — this entry measures the phase, it does not reduce it. The figures are
+  this host's, with a 13-package library and the probe's ~300 ms of scripted
+  delay inside `model_request` to `first_provider_text`.

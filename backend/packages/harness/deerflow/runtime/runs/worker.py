@@ -99,7 +99,7 @@ from deerflow.runtime.stream_modes import (
     to_langgraph_stream_modes,
 )
 from deerflow.runtime.tenant_identity import TENANT_REFERENCE_CONTEXT_KEY
-from deerflow.runtime.turn_phases import TurnPhase, TurnPhaseCallbackHandler, current_turn_phases
+from deerflow.runtime.turn_phases import TurnPhase, TurnPhaseCallbackHandler, current_turn_phases, mark_phase, phase_span
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id, resolve_trace_id
@@ -2621,12 +2621,15 @@ async def _run_agent(
                     sampled = active
                 return bool(sampled and not record.ownership_lost and not record.abort_event.is_set())
 
-            raw_materialization = await _materialize_accepted_skill_projection(
-                runtime,
-                user_id=skill_binding_user_id,
-                record=record,
-                claim_validator=_validate_pending_material_claim,
-            )
+            # The accepted projection is the largest pre-model phase on a turn
+            # that has one, and the sandbox phases it records nest inside it.
+            with phase_span(TurnPhase.SKILL_MATERIALIZATION):
+                raw_materialization = await _materialize_accepted_skill_projection(
+                    runtime,
+                    user_id=skill_binding_user_id,
+                    record=record,
+                    claim_validator=_validate_pending_material_claim,
+                )
             if isinstance(raw_materialization, _AcceptedMaterializationResult):
                 materialization = raw_materialization
             else:
@@ -2887,7 +2890,10 @@ async def _run_agent(
             agent_factory_kwargs["app_config"] = ctx.app_config
         from deerflow.extensions import bind_agent_build_extensions
 
-        with bind_agent_build_extensions(extensions):
+        # Building the graph is the first of the three pre-model phases: a warm
+        # turn spends seconds between admission and its model request, and
+        # before these an operator could see that only as a gap.
+        with phase_span(TurnPhase.AGENT_BUILD), bind_agent_build_extensions(extensions):
             agent_result = agent_factory(**agent_factory_kwargs)
         agent, assembly_descriptor = _split_agent_factory_result(agent_result)
 
@@ -3053,6 +3059,7 @@ async def _run_agent(
                     thread_id,
                 )
 
+        mark_phase(TurnPhase.CHECKPOINT_PREFLIGHT)
         accessor = CheckpointStateAccessor.bind(
             agent,
             checkpointer,
@@ -3173,6 +3180,10 @@ async def _run_agent(
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message, constraint_start_validated, qualification_graph_start_recorded, execution_dispatch_marked, execution_recovery_resume_counted
+            # Marked per attempt rather than once: a retried or resumed stream
+            # is a second graph start, and a turn that paid for two should say
+            # so rather than report the first.
+            mark_phase(TurnPhase.GRAPH_START)
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):

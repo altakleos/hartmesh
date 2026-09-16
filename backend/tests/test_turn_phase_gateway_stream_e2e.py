@@ -467,6 +467,40 @@ def test_the_emitted_line_carries_the_turn_timing_a_deployment_can_read(gateway:
     print(f"turn-phase e2e (released log line): {message}")
 
 
+def test_the_time_before_the_model_request_is_accounted_for(gateway: _Gateway) -> None:
+    """Admission to model request, with no unnamed gap in between.
+
+    Tenant-class .15 read 2.6 to 3.4 s of every turn between the sandbox
+    lookup ending and the binding starting with no phase to attribute it to.
+    The three pre-model phases have to sit in the window and in order, so the
+    next run can say which of building the graph, loading the thread's state
+    or the graph's own start owns the time.
+    """
+    with httpx.Client() as client:
+        csrf, thread_id = _register_and_create_thread(client, gateway.loopback_url)
+        observed = _observe_stream(client, gateway.loopback_url, thread_id, csrf, "probe:text please")
+
+    wire = gateway.journals.wait_for(observed.run_id)
+    admission = _phase_at(wire, "admission")
+    assembly = _phase_at(wire, "assembly")
+    agent_build = _phase_at(wire, "agent_build")
+    preflight = _phase_at(wire, "checkpoint_preflight")
+    graph_start = _phase_at(wire, "graph_start")
+    model_request = _phase_at(wire, "model_request")
+    assert None not in (admission, assembly, agent_build, preflight, graph_start, model_request), wire
+    assert admission <= assembly <= agent_build <= preflight <= graph_start <= model_request, wire
+    build_ms = next(record["duration_ms"] for record in wire["phases"] if record["phase"] == "agent_build")
+    assert build_ms >= 0
+    message = gateway.journals.message_for(observed.run_id)
+    for phase in ("agent_build@", "checkpoint_preflight@", "graph_start@"):
+        assert phase in message, message
+    print(
+        "turn-phase e2e (pre-model window): "
+        f"admission={admission:.0f}ms assembly={assembly:.0f}ms agent_build={agent_build:.0f}ms(+{build_ms:.0f}ms) "
+        f"checkpoint_preflight={preflight:.0f}ms graph_start={graph_start:.0f}ms model_request={model_request:.0f}ms"
+    )
+
+
 def test_a_silent_turn_manufactures_no_text_timestamps(gateway: _Gateway) -> None:
     with httpx.Client() as client:
         csrf, thread_id = _register_and_create_thread(client, gateway.loopback_url)

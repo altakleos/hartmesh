@@ -732,3 +732,45 @@ def test_dropping_a_dead_parked_container_counts_as_a_teardown(tmp_path, monkeyp
 
     assert journal.snapshot().resource_teardowns == 1
     assert backend.destroyed == [first]
+
+
+# ── The two-stage turn the tenant class actually runs ────────────────────
+#
+# A released turn acquires twice: the worker projects the accepted skills
+# early, and the sandbox middleware binds later against the container it now
+# finds active. Tenant-class .15 therefore reported `accepted_active` for every
+# turn -- including the cold one -- because the second stage's observation
+# overwrote the first stage's origin.
+
+
+def test_a_second_acquisition_in_one_turn_keeps_the_reclaim_as_the_origin(tmp_path, monkeypatch):
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+
+    first = _acquire_accepted(provider, "thread-two-stage")
+    provider.release(first)
+
+    with turn_phases(correlation_id="two-stage", run_id="run-two-stage") as journal:
+        reclaimed = _acquire_accepted(provider, "thread-two-stage", run_id="run-2")
+        bound = _acquire_accepted(provider, "thread-two-stage", run_id="run-2")
+
+    assert reclaimed == bound == first
+    assert backend.created == [first]
+    snapshot = journal.snapshot()
+    assert snapshot.acquisition_source is AcquisitionSource.ACCEPTED_WARM_RECLAIM
+    assert snapshot.acquisition_reuse is AcquisitionSource.ACCEPTED_ACTIVE
+    assert "acquisition=accepted_warm_reclaim" in snapshot.to_log_line()
+
+
+def test_a_cold_turn_that_acquires_twice_still_reports_the_create(tmp_path, monkeypatch):
+    provider, _backend = _make_provider(tmp_path, monkeypatch)
+
+    with turn_phases(correlation_id="cold-two-stage", run_id="run-cold-two") as journal:
+        created = _acquire_accepted(provider, "thread-cold-two")
+        bound = _acquire_accepted(provider, "thread-cold-two")
+
+    assert created == bound
+    snapshot = journal.snapshot()
+    assert snapshot.acquisition_source is AcquisitionSource.CREATED
+    assert snapshot.resource_creates == 1
+    assert snapshot.acquisition_reuse is AcquisitionSource.ACCEPTED_ACTIVE
+    assert snapshot.phase_ms(TurnPhase.SANDBOX_CREATE) is not None

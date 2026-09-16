@@ -586,7 +586,10 @@ def test_the_wire_form_carries_every_counter_separately():
         journal.record_teardown_refusal()
         journal.record_teardown_failure()
     wire = journal.snapshot().to_wire()
-    assert wire["version"] == 3
+    # 4 since the record gained the acquisition-reuse field; the version is the
+    # contract's own stamp, so a consumer can tell the shapes apart.
+    assert wire["version"] == 4
+    assert wire["acquisition_reuse"] is None
     assert wire["teardown_failures"] == 1
     assert wire["create_attempts"] == 1
     assert wire["resource_creates"] == 0
