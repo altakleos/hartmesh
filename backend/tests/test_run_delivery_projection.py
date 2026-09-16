@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from deerflow.runtime.runs.delivery import (
+    DELIVERY_INCOMPLETE_ERROR,
     DELIVERY_INCOMPLETE_STOP_REASON,
     MAX_DISCLOSED_UNDELIVERED_PATHS,
     get_run_delivery_response,
@@ -21,7 +22,7 @@ from deerflow.runtime.runs.delivery import (
 )
 
 UNAVAILABLE = {"available": False, "version": 1}
-ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
+ERROR = DELIVERY_INCOMPLETE_ERROR
 
 
 class _Events:
@@ -40,8 +41,8 @@ def _receipt(produced: list[str], matched: list[str] | None = None) -> dict[str,
     return {"content": {"produced_paths": produced, "matched_paths": matched or []}}
 
 
-async def _project(events: _Events, *, stop_reason: str | None, error: str | None = ERROR) -> dict[str, Any]:
-    return await get_run_delivery_response(events, "thread-1", "run-1", stop_reason=stop_reason, error=error)
+async def _project(events: _Events, *, stop_reason: str | None) -> dict[str, Any]:
+    return await get_run_delivery_response(events, "thread-1", "run-1", stop_reason=stop_reason)
 
 
 @pytest.mark.asyncio
@@ -49,8 +50,8 @@ async def test_a_run_that_delivered_is_answered_without_reading_a_receipt() -> N
     """Almost every run takes this path, so it must not cost an event query."""
     events = _Events([_receipt(["/mnt/user-data/outputs/a.pdf"])])
 
-    assert await _project(events, stop_reason=None, error=None) == UNAVAILABLE
-    assert await _project(events, stop_reason="loop_capped", error="capped") == UNAVAILABLE
+    assert await _project(events, stop_reason=None) == UNAVAILABLE
+    assert await _project(events, stop_reason="loop_capped") == UNAVAILABLE
     assert events.queries == []
 
 
@@ -88,6 +89,25 @@ async def test_the_disclosed_path_list_is_bounded_and_the_count_is_not() -> None
     assert response["undelivered_paths"] == produced[:MAX_DISCLOSED_UNDELIVERED_PATHS]
 
 
+@pytest.mark.asyncio
+async def test_a_malformed_receipt_reports_nothing_rather_than_raising() -> None:
+    """The route is a projection over bytes an earlier process wrote.
+
+    A string where a list belongs would otherwise iterate into characters and
+    offer the reader per-character "files"; an unhashable entry would raise out
+    of the request.
+    """
+    for content, expected in (
+        # A string would iterate into characters.
+        ({"produced_paths": "/mnt/user-data/outputs/a.pdf"}, []),
+        ({"produced_paths": [{"path": "/out/a.pdf"}]}, []),
+        # An unhashable entry in the subtrahend would raise out of ``set()``.
+        ({"produced_paths": ["/out/a.pdf"], "matched_paths": [["/out/a.pdf"]]}, ["/out/a.pdf"]),
+    ):
+        response = await _project(_Events([{"content": content}]), stop_reason=DELIVERY_INCOMPLETE_STOP_REASON)
+        assert response.get("undelivered_paths", []) == expected
+
+
 def test_presented_outputs_are_subtracted_in_scan_order() -> None:
     content = {
         "produced_paths": ["/out/a.pdf", "/out/b.pdf", "/out/c.pdf"],
@@ -96,3 +116,18 @@ def test_presented_outputs_are_subtracted_in_scan_order() -> None:
 
     assert undelivered_paths(content) == ["/out/a.pdf", "/out/c.pdf"]
     assert undelivered_paths({}) == []
+    assert undelivered_paths({"produced_paths": "/out/a.pdf"}) == []
+    assert undelivered_paths({"produced_paths": ["/out/a.pdf", 7, ""]}) == ["/out/a.pdf"]
+
+
+def test_the_projection_and_the_worker_share_one_sentence() -> None:
+    """The frame, the run record and this projection must not drift apart.
+
+    The route emits the constant rather than echoing ``record.error``: the run
+    error is otherwise absent from every ``runs:read`` response, and a verdict
+    that reworded itself on reload would undo the point of reading it durably.
+    """
+    from deerflow.runtime.runs import worker
+
+    assert worker._DELIVERY_INCOMPLETE_ERROR is DELIVERY_INCOMPLETE_ERROR
+    assert worker._delivery_error({"produced_paths": ["/out/a.pdf"]}) == DELIVERY_INCOMPLETE_ERROR

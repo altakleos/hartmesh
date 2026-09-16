@@ -93,6 +93,7 @@ from deerflow.runtime.goal import (
 )
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.runs.delivery import (
+    DELIVERY_INCOMPLETE_ERROR,
     DELIVERY_INCOMPLETE_STOP_REASON,
     MAX_DISCLOSED_UNDELIVERED_PATHS,
     undelivered_paths,
@@ -920,7 +921,7 @@ async def _persist_delivery_receipt(
     return False  # pragma: no cover - loop always returns
 
 
-_DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
+_DELIVERY_INCOMPLETE_ERROR = DELIVERY_INCOMPLETE_ERROR
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
 
 

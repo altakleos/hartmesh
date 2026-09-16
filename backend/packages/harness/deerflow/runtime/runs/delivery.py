@@ -29,6 +29,26 @@ MAX_DISCLOSED_UNDELIVERED_PATHS = 20
 #: The receipt this reads. Terminal, written once per run.
 DELIVERY_EVENT_TYPE = "run.delivery"
 
+#: The sentence the fence commits as the run's terminal error and publishes on
+#: the advisory frame. Owned here so the frame, the record and this projection
+#: say one thing; the projection emits it rather than echoing ``record.error``,
+#: which keeps an unbounded run error off a ``runs:read`` surface that
+#: ``RunResponse`` deliberately omits it from.
+DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
+
+
+def _path_list(value: Any) -> list[str]:
+    """The stored field as a list of paths, or nothing.
+
+    This is a projection over bytes written by an earlier process, so it reads
+    them the way ``_presented_files_from_delivery`` reads the same receipt:
+    types checked, not assumed. A string here would otherwise iterate into
+    characters, and an unhashable element would raise out of the route.
+    """
+    if not isinstance(value, list):
+        return []
+    return [entry for entry in value if isinstance(entry, str) and entry]
+
 
 def undelivered_paths(content: dict[str, Any]) -> list[str]:
     """Produced outputs this run never presented, in scan order.
@@ -37,8 +57,8 @@ def undelivered_paths(content: dict[str, Any]) -> list[str]:
     subtracts an empty set; the subtraction keeps the helper honest if the
     satisfaction rule ever narrows below "any match satisfies".
     """
-    matched = set(content.get("matched_paths") or [])
-    return [path for path in content.get("produced_paths") or [] if path not in matched]
+    matched = set(_path_list(content.get("matched_paths")))
+    return [path for path in _path_list(content.get("produced_paths")) if path not in matched]
 
 
 def unavailable_delivery_response() -> dict[str, Any]:
@@ -57,7 +77,6 @@ async def get_run_delivery_response(
     run_id: str,
     *,
     stop_reason: str | None,
-    error: str | None,
 ) -> dict[str, Any]:
     """Project one run's durable delivery verdict for a client that rejoined.
 
@@ -91,10 +110,9 @@ async def get_run_delivery_response(
         "available": True,
         "version": 1,
         "run_id": run_id,
-        # The same sentence the live frame carried, which is the run's own
-        # terminal error. Reconstructing a second wording here would let the
-        # notice say one thing live and another after a reload.
-        "message": error or "",
+        # The same sentence the live frame carried, from the same constant, so
+        # the notice cannot say one thing live and another after a reload.
+        "message": DELIVERY_INCOMPLETE_ERROR,
         "undelivered_paths": paths[:MAX_DISCLOSED_UNDELIVERED_PATHS],
         "undelivered_count": len(paths),
     }

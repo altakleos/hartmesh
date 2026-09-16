@@ -2470,7 +2470,7 @@ async def list_retrieval_observations(
 
 
 @router.get("/{thread_id}/runs/{run_id}/delivery")
-@require_permission("runs", "read", owner_check=True)
+@require_permission("runs", "read", owner_check=True, require_existing=True)
 async def get_run_delivery(
     thread_id: ThreadId,
     run_id: str,
@@ -2494,7 +2494,6 @@ async def get_run_delivery(
         thread_id,
         run_id,
         stop_reason=record.stop_reason,
-        error=record.error,
     )
 
 

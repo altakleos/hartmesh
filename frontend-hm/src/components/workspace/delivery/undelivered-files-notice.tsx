@@ -80,6 +80,12 @@ export function UndeliveredFilesNotice({
           </p>
         </div>
       </div>
+      {/*
+        No archive button: the run archive is assembled from the delivery
+        receipt's own `present_files` list, and a run that reached this card
+        presented nothing, so the route would refuse it. These are the files
+        that call should have named.
+      */}
       <ArtifactFileList
         archiveDownloadsEnabled={false}
         className="px-3 pb-3"

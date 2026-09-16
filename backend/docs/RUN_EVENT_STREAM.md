@@ -354,6 +354,7 @@ Schema. It is the authoritative field-level reference.
 | Historical subtask cards | Fetch `subagent.step` through the run-events endpoint, filtered and paginated by `task_id`. |
 | Memory audit | Filters run events to `context:memory` to compare the frozen hidden block's `content_sha256`, or to `memory.observation.v1` to audit bounded tenant-bound Honcho operation evidence; full memory text is not duplicated into the event store. |
 | Workspace review | `GET /api/threads/{thread_id}/runs/{run_id}/workspace-changes` projects the latest `workspace_changes` payload. |
+| Undelivered-file verdict | `GET /api/threads/{thread_id}/runs/{run_id}/delivery` projects the terminal `run.delivery` receipt, and only when the run's `stop_reason` is `artifact_delivery_incomplete`. Returns `{available: false, version: 1}` for every other run — the ordinary answer — and otherwise `{available: true, version: 1, run_id, message, undelivered_paths, undelivered_count}`, with the path list bounded at 20 and the count exact. A missing, duplicated or empty receipt reports nothing rather than an empty correction. |
 | Authorized durable receipt page | `GET /api/runtime/v1/invocations/{run_id}?include_tool_receipts=true` pairs starts/outcomes with an independently scoped cursor and a 100-item cap. |
 | Authorized retrieval observations | `GET /api/threads/{thread_id}/runs/{run_id}/retrieval-observations` returns a closed safe projection with a 100-item page cap and `after_seq` cursor. |
 

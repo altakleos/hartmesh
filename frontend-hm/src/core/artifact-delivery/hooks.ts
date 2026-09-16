@@ -1,29 +1,42 @@
 import { useQuery } from "@tanstack/react-query";
 
-import { fetchRunDelivery } from "./api";
+import { fetchRunDelivery, fetchThreadDeliveryFailures } from "./api";
 import { useArtifactDeliveryFailure } from "./context";
 import type { ArtifactDeliveryFailure } from "./types";
+
+export function threadDeliveryQueryKey(threadId: string | undefined) {
+  return ["artifact-delivery", "thread", threadId] as const;
+}
 
 export function runDeliveryQueryKey(
   threadId: string | undefined,
   runId: string | undefined,
 ) {
-  return ["artifact-delivery", threadId, runId] as const;
+  return ["artifact-delivery", "run", threadId, runId] as const;
 }
+
+/** Terminal either way, so both answers cache; see `fetchRunDelivery`. */
+const TERMINAL_VERDICT_STALE_TIME = 5 * 60 * 1000;
 
 /**
  * This run's delivery verdict, from the stream if this client heard it and from
  * the durable receipt otherwise.
+ *
+ * Two reads, and for almost every thread only the first happens. The thread's
+ * runs say which turns the delivery fence failed — one request, shared by every
+ * notice on the page through one query key — and only a named turn asks for the
+ * paths it withheld. A healthy thread therefore costs one read, not one per
+ * turn, which is what asking every turn "did you fail?" would have cost.
  *
  * The live frame wins when both exist. They carry the same fields from the same
  * bytes, so this is not a precedence rule so much as an ordering one: the frame
  * arrives at the end of the turn, the fetch a moment later, and preferring the
  * frame keeps the notice from flickering through a second identical value.
  *
- * Keyed and gated exactly like the workspace-changes card this sits beside, and
- * for the same reason: `runId` is absent on the public showcase's static
- * threads, so the query never fires there, where an authorized call would meet
- * a 401 and send a reader who is not signed in to the login page.
+ * Gated on `runId` exactly like the workspace-changes card this sits beside,
+ * which is what keeps every one of these reads off the public showcase: its
+ * static threads carry no run id, and an authorized call there would meet a 401
+ * and send a reader who is not signed in to the login page.
  */
 export function useRunArtifactDelivery(
   threadId: string | undefined,
@@ -31,6 +44,22 @@ export function useRunArtifactDelivery(
   { enabled = true }: { enabled?: boolean } = {},
 ): ArtifactDeliveryFailure | undefined {
   const live = useArtifactDeliveryFailure(runId);
+  const wanted = enabled && Boolean(threadId) && Boolean(runId) && !live;
+
+  const { data: failedRunIds } = useQuery<Set<string>>({
+    queryKey: threadDeliveryQueryKey(threadId),
+    queryFn: () => {
+      if (!threadId) {
+        throw new Error("threadId is required");
+      }
+      return fetchThreadDeliveryFailures(threadId);
+    },
+    enabled: wanted,
+    retry: false,
+    staleTime: TERMINAL_VERDICT_STALE_TIME,
+    refetchOnWindowFocus: false,
+  });
+
   const { data } = useQuery<ArtifactDeliveryFailure | null>({
     queryKey: runDeliveryQueryKey(threadId, runId),
     queryFn: () => {
@@ -39,15 +68,9 @@ export function useRunArtifactDelivery(
       }
       return fetchRunDelivery({ threadId, runId });
     },
-    enabled: enabled && Boolean(threadId) && Boolean(runId) && !live,
+    enabled: wanted && Boolean(runId && failedRunIds?.has(runId)),
     retry: false,
-    // A verdict is terminal, so once one is in hand it never needs re-reading.
-    // "No verdict" is the answer that can be wrong — a transient failure reads
-    // the same as a run that delivered — and caching it would hide the
-    // correction for the rest of the window, which is the failure this hook
-    // exists to end.
-    staleTime: (query) => (query.state.data ? 5 * 60 * 1000 : 0),
-    refetchOnMount: true,
+    staleTime: TERMINAL_VERDICT_STALE_TIME,
     refetchOnWindowFocus: false,
   });
 

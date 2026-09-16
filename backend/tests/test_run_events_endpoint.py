@@ -347,6 +347,24 @@ def test_memory_observation_metadata_requires_run_owner_access() -> None:
     assert response.status_code == 404
 
 
+def test_delivery_verdict_requires_run_owner_access() -> None:
+    """The withheld-file list is one thread's outputs, not everyone's.
+
+    Pinned because the route's own decorator is what enforces it
+    (hartmesh-tenancy/DF14): a refactor that dropped ``owner_check`` would
+    otherwise ship green.
+    """
+    from app.gateway.routers import thread_runs
+
+    app = make_authed_test_app(owner_check_passes=False)
+    app.include_router(thread_runs.router)
+
+    with TestClient(app) as client:
+        response = client.get("/api/threads/another-users-thread/runs/run-1/delivery")
+
+    assert response.status_code == 404
+
+
 def test_retrieval_observations_require_run_owner_access_and_bound_page_size() -> None:
     from app.gateway.routers import thread_runs
 

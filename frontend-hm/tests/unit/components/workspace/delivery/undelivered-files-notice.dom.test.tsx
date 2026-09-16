@@ -19,8 +19,11 @@ rs.mock("sonner", () => ({
 }));
 
 const fetchRunDelivery = rs.fn();
+const fetchThreadDeliveryFailures = rs.fn();
 rs.mock("@/core/artifact-delivery/api", () => ({
   fetchRunDelivery: (...args: unknown[]) => fetchRunDelivery(...args),
+  fetchThreadDeliveryFailures: (...args: unknown[]) =>
+    fetchThreadDeliveryFailures(...args),
 }));
 
 import { UndeliveredFilesNotice } from "@/components/workspace/delivery";
@@ -44,17 +47,21 @@ function renderNotice(
     failures = { "run-1": failure },
     runId,
     disabled,
+    // Shared across two renders where a test needs the cache to outlive one
+    // mount — which is what the virtualized message list does to every anchor.
+    client,
   }: {
     failures?: Record<string, ArtifactDeliveryFailure>;
     // Absent means the turn's messages do not carry a run id yet, which is
     // distinct from omitting the option (JS defaults cannot tell them apart).
     runId?: string;
     disabled?: boolean;
+    client?: QueryClient;
   } = { runId: "run-1" },
 ) {
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { retry: false } },
-  });
+  const queryClient =
+    client ??
+    new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={queryClient}>
       <I18nContext.Provider
@@ -80,10 +87,12 @@ function renderNotice(
 afterEach(() => {
   cleanup();
   fetchRunDelivery.mockReset();
+  fetchThreadDeliveryFailures.mockReset();
 });
 
 describe("UndeliveredFilesNotice", () => {
   it("offers the file the run produced and never presented", () => {
+    fetchThreadDeliveryFailures.mockResolvedValue(new Set());
     fetchRunDelivery.mockResolvedValue(null);
     renderNotice();
 
@@ -94,6 +103,7 @@ describe("UndeliveredFilesNotice", () => {
   });
 
   it("says how many of the total it is showing when the list was bounded", () => {
+    fetchThreadDeliveryFailures.mockResolvedValue(new Set());
     fetchRunDelivery.mockResolvedValue(null);
     renderNotice({
       failures: {
@@ -106,13 +116,19 @@ describe("UndeliveredFilesNotice", () => {
   });
 
   it("renders nothing for a run that delivered what it produced", async () => {
+    fetchThreadDeliveryFailures.mockResolvedValue(new Set());
     fetchRunDelivery.mockResolvedValue(null);
     const { container } = renderNotice({ failures: {}, runId: "run-1" });
 
-    await waitFor(() => expect(fetchRunDelivery).toHaveBeenCalledTimes(1));
+    await waitFor(() =>
+      expect(fetchThreadDeliveryFailures).toHaveBeenCalledWith("thread-1"),
+    );
     expect(
       container.querySelector("[data-testid='undelivered-files-notice']"),
     ).toBeNull();
+    // The thread said this run delivered, so nothing asks it for paths. That
+    // is the whole request budget for a healthy thread, however long it is.
+    expect(fetchRunDelivery).not.toHaveBeenCalled();
   });
 
   it("renders nothing before the turn's messages carry a run id", () => {
@@ -129,6 +145,7 @@ describe("UndeliveredFilesNotice", () => {
   // hartmesh-tenancy/DF14: the live frame is page-local state, so the reader
   // who reloads is the reader this notice exists for.
   it("restores the correction from durable state after a reload", async () => {
+    fetchThreadDeliveryFailures.mockResolvedValue(new Set(["run-1"]));
     fetchRunDelivery.mockResolvedValue({
       ...failure,
       undeliveredPaths: ["/mnt/user-data/outputs/2026-08-review.pdf"],
@@ -148,6 +165,7 @@ describe("UndeliveredFilesNotice", () => {
   });
 
   it("does not re-read what this page already heard on the stream", async () => {
+    fetchThreadDeliveryFailures.mockResolvedValue(new Set());
     fetchRunDelivery.mockResolvedValue(null);
     renderNotice();
 
@@ -159,7 +177,40 @@ describe("UndeliveredFilesNotice", () => {
     expect(fetchRunDelivery).not.toHaveBeenCalled();
   });
 
-  it("waits for the turn to finish before asking for a terminal verdict", async () => {
+  // A 502 on a refetch must not read as "this run delivered fine": that is the
+  // one way a standing correction could vanish mid-session, into exactly the
+  // silence it exists to end.
+  it("keeps the correction up when a refetch cannot reach an answer", async () => {
+    fetchThreadDeliveryFailures.mockResolvedValue(new Set(["run-1"]));
+    fetchRunDelivery
+      .mockResolvedValueOnce({ ...failure, undeliveredCount: 2 })
+      .mockRejectedValue(new Error("502 Bad Gateway"));
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    });
+    const { unmount } = renderNotice({ failures: {}, runId: "run-1", client });
+
+    expect(
+      await screen.findByText("2 files weren't attached to the reply above"),
+    ).toBeTruthy();
+
+    // The message list virtualizes, so an anchor remounts whenever it scrolls
+    // back into view. The cached verdict is what it renders from.
+    unmount();
+    renderNotice({ failures: {}, runId: "run-1", client });
+    await waitFor(() =>
+      expect(
+        screen.getByText("2 files weren't attached to the reply above"),
+      ).toBeTruthy(),
+    );
+  });
+
+  // `disabled` is the *thread's* loading state, not the last group's: while
+  // any run is in flight its verdict does not exist yet, and caching the
+  // all-clear it would answer with is how a failure that lands a moment later
+  // goes unmentioned.
+  it("waits for the thread to be idle before asking for a terminal verdict", async () => {
+    fetchThreadDeliveryFailures.mockResolvedValue(new Set());
     fetchRunDelivery.mockResolvedValue(null);
     const { container } = renderNotice({
       failures: {},
@@ -172,6 +223,7 @@ describe("UndeliveredFilesNotice", () => {
         container.querySelector("[data-testid='undelivered-files-notice']"),
       ).toBeNull(),
     );
+    expect(fetchThreadDeliveryFailures).not.toHaveBeenCalled();
     expect(fetchRunDelivery).not.toHaveBeenCalled();
   });
 });
