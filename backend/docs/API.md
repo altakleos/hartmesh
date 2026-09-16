@@ -246,6 +246,30 @@ GET /api/langgraph/threads/{thread_id}/state
 }
 ```
 
+#### Get Thread History
+
+```http
+POST /api/langgraph/threads/{thread_id}/history
+Content-Type: application/json
+
+{"limit": 1}
+```
+
+Returns one entry per checkpoint, newest first. Unlike `/state`, each entry's
+`values` is a **narrow projection**, not the whole channel: every entry carries
+`title` and `thread_data`, and the newest additionally carries `messages` and
+`artifacts` (the thread's cumulative `present_files` list). Both of the latter
+are omitted from older entries because they are whole-thread state that would
+otherwise be repeated on every checkpoint.
+
+This is the read a client makes when it merely *opens* a conversation — it never
+sees a `values` stream frame — so a key the UI renders from thread state must
+appear here or it is blank on every fresh session. `artifacts` was missing until
+hartmesh-tenancy/DF16, which left the artifact panel empty and the
+business-report card offering no downloads under a report whose files were
+present and downloadable. `todos` and `goal` are still not returned; see
+`frontend-hm/src/AGENTS.md`.
+
 ### Runs
 
 #### Create Run

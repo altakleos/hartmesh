@@ -1397,6 +1397,103 @@ def test_get_thread_state_returns_iso_for_legacy_checkpoint_metadata() -> None:
     assert _ISO_TIMESTAMP_RE.match(body["checkpoint"]["ts"]), body["checkpoint"]
 
 
+def test_thread_history_carries_the_cumulative_presented_files() -> None:
+    """Opening a chat is the only read that replaces the stream's ``values``.
+
+    A client that merely opens a conversation never sees a ``values`` frame, so
+    ``/history`` is where it learns what the thread has presented. It carried
+    ``title``, ``thread_data`` and ``messages`` and nothing else, which left the
+    browser with an empty cumulative artifact list on every fresh session:
+    the artifact panel had no files, and the business-report card — whose
+    downloads are exactly the renders that list says were presented — said
+    "No file to download yet" under a report whose PDF, Word and Excel were
+    sitting in the thread and downloading fine (hartmesh-tenancy/DF16).
+
+    ``/state`` already returns the whole channel; this is the same list, on the
+    read the browser actually makes.
+    """
+    app, store, checkpointer = _build_thread_app()
+    thread_id = "thread-1"
+    artifacts = [
+        "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json",
+        "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.pdf",
+        "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.docx",
+        "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.xlsx",
+    ]
+
+    async def _seed() -> None:
+        await store.aput(
+            THREADS_NS,
+            thread_id,
+            {
+                "thread_id": thread_id,
+                "status": "idle",
+                "created_at": "2026-09-16T00:00:00+00:00",
+                "updated_at": "2026-09-16T00:00:00+00:00",
+                "metadata": {},
+            },
+        )
+        await checkpointer.aput(
+            {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
+            empty_checkpoint(),
+            {"step": 2, "source": "loop", "writes": {}, "parents": {}},
+            {},
+        )
+
+    asyncio.run(_seed())
+    snapshot = _materialized_snapshot()
+    snapshot.values = {**snapshot.values, "artifacts": artifacts, "todos": [{"title": "unrelated"}]}
+    accessor = _FakeStateAccessor(snapshot)
+
+    with (
+        patch(
+            "app.gateway.routers.threads.build_thread_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(accessor, {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 1})
+
+    assert response.status_code == 200, response.text
+    values = response.json()[0]["values"]
+    assert values["artifacts"] == artifacts
+    # The projection stays narrow otherwise: this fixes the list the browser
+    # reads, it does not start returning the whole channel on every entry.
+    assert "todos" not in values
+
+
+def test_thread_history_only_carries_presented_files_on_the_latest_checkpoint() -> None:
+    """The list is cumulative, so older entries would only repeat it."""
+    app, _store, _checkpointer = _build_thread_app()
+    thread_id = "thread-1"
+    latest = _materialized_snapshot()
+    latest.values = {**latest.values, "artifacts": ["/mnt/user-data/outputs/a.pdf"]}
+    older = _materialized_snapshot()
+    older.values = {"artifacts": ["/mnt/user-data/outputs/a.pdf"]}
+    older.config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": "ckpt-1"}}
+
+    class _TwoEntries:
+        async def aget(self, config):
+            return latest
+
+        async def ahistory(self, config, *, limit=None):
+            return [latest, older][:limit]
+
+    with (
+        patch(
+            "app.gateway.routers.threads.build_thread_checkpoint_state_accessor",
+            new=AsyncMock(return_value=(_TwoEntries(), {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}})),
+        ),
+        TestClient(app) as client,
+    ):
+        response = client.post(f"/api/threads/{thread_id}/history", json={"limit": 10})
+
+    assert response.status_code == 200, response.text
+    entries = response.json()
+    assert entries[0]["values"]["artifacts"] == ["/mnt/user-data/outputs/a.pdf"]
+    assert "artifacts" not in entries[1]["values"]
+
+
 def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None:
     """``/history`` walks ``checkpointer.alist`` and emits one entry per
     checkpoint. Each entry's ``created_at`` must come out as ISO even if

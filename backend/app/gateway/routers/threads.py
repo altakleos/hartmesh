@@ -1600,6 +1600,21 @@ async def get_thread_history(
                 values["thread_data"] = thread_data
 
             if is_latest_checkpoint:
+                # The cumulative ``present_files`` list. A client that only
+                # opens a conversation never sees a ``values`` frame, so this
+                # read is where it learns what the thread has presented —
+                # without it the artifact panel opens empty on every fresh
+                # session, and the business-report card, whose downloads are
+                # exactly the renders this list names, says there are none
+                # under a report whose files are sitting in the thread
+                # (hartmesh-tenancy/DF16). Latest checkpoint only: the list is
+                # cumulative, so an older entry would just repeat it.
+                artifacts = materialized_values.get("artifacts")
+                if isinstance(artifacts, list):
+                    presented = [path for path in artifacts if isinstance(path, str) and path]
+                    if presented:
+                        values["artifacts"] = presented
+
                 messages = materialized_values.get("messages")
                 if messages:
                     serialized_msgs = serialize_channel_values_for_api({"messages": messages}).get("messages", [])
