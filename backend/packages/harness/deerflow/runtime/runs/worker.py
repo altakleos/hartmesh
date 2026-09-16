@@ -479,14 +479,6 @@ async def _materialize_accepted_skill_projection(
             authorize_sandbox_execution_async,
             safe_app_config_async,
         )
-
-        configured_app = context.get("app_config")
-        resolved_app = configured_app if isinstance(configured_app, AppConfig) else await safe_app_config_async()
-        await authorize_sandbox_execution_async(
-            context=context,
-            app_config=resolved_app,
-        )
-        provider = get_sandbox_provider()
         from deerflow.runtime.kubernetes_qualification import (
             accepted_sandbox_qualification_candidate_enabled,
         )
@@ -501,16 +493,27 @@ async def _materialize_accepted_skill_projection(
             validate_accepted_materialization,
         )
 
-        durable_admission = record is not None and _durable_admission_required(resolved_app)
-        selection = await resolve_accepted_materializer(
-            provider,
-            binding=binding,
-            thread_id=thread_id,
-            user_id=user_id,
-            require_durable_one_replica=record is not None,
-            require_exact_two=(record is not None and record.recovery_policy is RecoveryPolicy.exact_two_takeover_v1),
-            allow_qualification_candidate=(record is not None and accepted_sandbox_qualification_candidate_enabled()),
-        )
+        configured_app = context.get("app_config")
+        # One span, not two under this name: a phase is read back by its first
+        # record, so a second span under the same name is measured and then
+        # discarded, and its cost reappears as unexplained residual.
+        with phase_span(TurnPhase.ACCEPTED_AUTHORIZATION):
+            resolved_app = configured_app if isinstance(configured_app, AppConfig) else await safe_app_config_async()
+            await authorize_sandbox_execution_async(
+                context=context,
+                app_config=resolved_app,
+            )
+            provider = get_sandbox_provider()
+            durable_admission = record is not None and _durable_admission_required(resolved_app)
+            selection = await resolve_accepted_materializer(
+                provider,
+                binding=binding,
+                thread_id=thread_id,
+                user_id=user_id,
+                require_durable_one_replica=record is not None,
+                require_exact_two=(record is not None and record.recovery_policy is RecoveryPolicy.exact_two_takeover_v1),
+                allow_qualification_candidate=(record is not None and accepted_sandbox_qualification_candidate_enabled()),
+            )
         if selection is not None:
             from deerflow.runtime.accepted_invocation import (
                 AcceptedInvocation,
@@ -530,12 +533,13 @@ async def _materialize_accepted_skill_projection(
             skill_scopes = getattr(material, "skill_scopes", None)
             if not isinstance(material, ResolvedAgentMaterialV1) or snapshot is None or not isinstance(tenant, TenantReferenceV1) or not isinstance(revision_digest, str) or skill_scopes is None:
                 raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
-            await asyncio.to_thread(material.verify_process_material)
-            file_manifest = await asyncio.to_thread(
-                capture_accepted_file_manifest,
-                snapshot.root,
-            )
-            await asyncio.to_thread(material.verify_process_material)
+            with phase_span(TurnPhase.ACCEPTED_MATERIAL_VERIFY):
+                await asyncio.to_thread(material.verify_process_material)
+                file_manifest = await asyncio.to_thread(
+                    capture_accepted_file_manifest,
+                    snapshot.root,
+                )
+                await asyncio.to_thread(material.verify_process_material)
             request_arguments = dict(
                 run_id=binding.run_id,
                 attempt_id=accepted_scope_reference(
@@ -613,11 +617,12 @@ async def _materialize_accepted_skill_projection(
                     expected_materialization_digest=(expected_materialization_digest),
                 )
             if execution_claim is None:
-                (
-                    sandbox,
-                    materialization_lease,
-                    evidence,
-                ) = await materializer.acquire_and_materialize(request)
+                with phase_span(TurnPhase.SKILL_PROJECTION):
+                    (
+                        sandbox,
+                        materialization_lease,
+                        evidence,
+                    ) = await materializer.acquire_and_materialize(request)
             else:
                 if claim_validator is None:
                     raise AcceptedMaterialError(
@@ -635,14 +640,15 @@ async def _materialize_accepted_skill_projection(
                     raise AcceptedMaterialError(
                         "accepted_material_claim_lost",
                     )
-                (
-                    sandbox,
-                    materialization_lease,
-                    evidence,
-                ) = await materializer.acquire_and_materialize(
-                    request,
-                    execution_claim=execution_claim,
-                )
+                with phase_span(TurnPhase.SKILL_PROJECTION):
+                    (
+                        sandbox,
+                        materialization_lease,
+                        evidence,
+                    ) = await materializer.acquire_and_materialize(
+                        request,
+                        execution_claim=execution_claim,
+                    )
                 try:
                     claim_current = await claim_validator(execution_claim)
                 except asyncio.CancelledError:
@@ -668,11 +674,12 @@ async def _materialize_accepted_skill_projection(
             # mount. This is the released tenant profile's execution path,
             # not a fallback from a durable one it never promised.
             projection = require_accepted_skill_projection(provider)
-            sandbox_id = await projection.provision_accepted_skills_async(
-                thread_id,
-                user_id=user_id,
-                binding=binding,
-            )
+            with phase_span(TurnPhase.SKILL_PROJECTION):
+                sandbox_id = await projection.provision_accepted_skills_async(
+                    thread_id,
+                    user_id=user_id,
+                    binding=binding,
+                )
             evidence = projection.accepted_skill_execution_evidence(sandbox_id)
         else:
             raise AcceptedMaterialError("sandbox_provider_unqualified")
@@ -688,12 +695,18 @@ async def _materialize_accepted_skill_projection(
         )
         if bound is None:
             raise RuntimeError("accepted_skill_snapshot_binding_missing")
-        await require_accepted_skill_projection(provider).bind_accepted_skill_snapshot_async(
-            sandbox_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            binding=bound,
-        )
+        # A provider that binds while it provisions has already published this
+        # snapshot inside SKILL_PROJECTION; for it, this is the idempotent
+        # receipt check, and the staged copy it makes is thrown away. The span
+        # says what it costs either way -- which, on such a provider, is the
+        # second capture of the same tree in one turn.
+        with phase_span(TurnPhase.SKILL_SNAPSHOT_BIND):
+            await require_accepted_skill_projection(provider).bind_accepted_skill_snapshot_async(
+                sandbox_id,
+                thread_id=thread_id,
+                user_id=user_id,
+                binding=bound,
+            )
         context["sandbox_id"] = sandbox_id
         return _AcceptedMaterializationResult(
             sandbox_id=sandbox_id,

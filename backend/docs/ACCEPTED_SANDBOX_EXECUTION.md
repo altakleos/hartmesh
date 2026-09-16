@@ -431,6 +431,33 @@ record. Tests: `backend/tests/test_sandbox_rediscovery_provenance.py`,
 (provenance through the real local control flow),
 `test_remote_sandbox_backend.py` and `test_provisioner_runtime_hardening.py`.
 
+**Attributing the accepted preparation.** Tenant-class `.17` measured 5 to 6 s
+before the first model request on a *warm* turn -- most of the budget for a
+one-sentence revision -- inside a `skill_materialization` phase that reported
+one figure and named nothing in it. Four spans nest inside it now:
+`accepted_authorization` (authorizing, resolving the provider and choosing the
+materializer -- on a durable profile that selection asks the sandbox backend
+for its pinned runtime digest, so it is not local),
+`accepted_material_verify` (durable profiles only: two re-digests of the
+published snapshot and one file-manifest walk, three passes over the same
+tree), `skill_projection` (the provider putting the material in a sandbox;
+`sandbox_lookup`, and on a cold turn `sandbox_create` and `sandbox_readiness`,
+nest inside it) and `skill_snapshot_bind`. On the released projection profile
+what is left over is the binding lookup and the isolation assertions; a durable
+profile also leaves `validate_accepted_materialization` and two execution-fence
+round trips there.
+
+Read `skill_snapshot_bind` knowing what it measures. A provider that binds
+while it provisions -- the AIO backend does -- has already published the
+snapshot inside `skill_projection`, so the worker's later bind is the
+idempotent receipt check: it captures and stages the whole tree again before
+the identity match makes it throw the copy away. On such a provider a warm turn
+walks the snapshot tree six times and writes it twice, and the larger half of
+that is inside `skill_projection`, not inside the span named for binding.
+`test_accepted_skill_snapshots.py` gives each step a cost of its own and
+asserts the span named for it measured that step; what a step costs in a
+sandbox is for a live trace to say.
+
 **Model-to-stream timing, end to end.**
 `backend/tests/test_turn_phase_gateway_stream_e2e.py` runs the real Gateway
 under uvicorn on loopback, registers, creates a thread and drives the

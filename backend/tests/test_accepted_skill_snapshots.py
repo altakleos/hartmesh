@@ -2206,18 +2206,27 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
             assert caught.value is cancellation
             assert provider.destroyed == ["sandbox-neutral"]
             return
-        result = await _materialize_accepted_skill_projection(
-            runtime,
-            user_id="user-1",
-            record=SimpleNamespace(
-                owner_worker_id="worker-pending",
-                state_version=3,
-                execution_takeover=False,
-                execution_evidence_json=None,
-                recovery_policy=None,
-            ),
-            claim_validator=validate_claim,
-        )
+        from deerflow.runtime.turn_phases import TurnPhase, turn_phases
+
+        with turn_phases(correlation_id="trace-durable", run_id="run-neutral") as journal, journal.span(TurnPhase.SKILL_MATERIALIZATION):
+            result = await _materialize_accepted_skill_projection(
+                runtime,
+                user_id="user-1",
+                record=SimpleNamespace(
+                    owner_worker_id="worker-pending",
+                    state_version=3,
+                    execution_takeover=False,
+                    execution_evidence_json=None,
+                    recovery_policy=None,
+                ),
+                claim_validator=validate_claim,
+            )
+        # The durable path is attributed too: it reaches the materializer and
+        # re-digests the snapshot through code the projection path never runs,
+        # so its spans need their own proof rather than the other test's.
+        durable_phases = {record.phase for record in journal.snapshot().phases}
+        for phase in (TurnPhase.ACCEPTED_AUTHORIZATION, TurnPhase.ACCEPTED_MATERIAL_VERIFY, TurnPhase.SKILL_PROJECTION, TurnPhase.SKILL_SNAPSHOT_BIND):
+            assert phase in durable_phases, phase
         assert provider.acquired_scope == ("thread-1", "user-1")
         assert provider.execution_claim is not None
         assert provider.execution_claim.owner_worker_id == "worker-pending"
@@ -2999,3 +3008,134 @@ async def test_worker_materialization_follows_the_deployment_profile(
             run_id=f"run-profile-{profile}",
         )
         material.release_process_material()
+
+
+@pytest.mark.asyncio
+async def test_the_accepted_preparation_says_where_its_own_time_went(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """``skill_materialization`` is attributed, not one unexplained block.
+
+    Tenant-class .17 measured 5 to 6 s before the first model request on a
+    *warm* turn -- most of a one-sentence revision's budget -- with nothing
+    inside that phase named. Each step below is given a cost of its own here,
+    so the assertions can say that the span named for a step measured *that
+    step*: a span recorded around nothing, or a step left outside every span,
+    fails. Absolute figures mean nothing with the provider stubbed; what is
+    asserted is that the attribution lands on the right work and that the
+    residual between the spans is small.
+    """
+
+    from deerflow.runtime.runs.worker import _materialize_accepted_skill_projection
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+    from deerflow.runtime.turn_phases import TurnPhase, turn_phases
+
+    # The finding is about a *warm* turn, and the helper imports its
+    # dependencies lazily: paying for those here would put first-import cost
+    # into a residual that a running Gateway never sees after its first turn.
+    for module in (
+        "deerflow.authz.sandbox_authz",
+        "deerflow.runtime.kubernetes_qualification",
+        "deerflow.sandbox",
+        "deerflow.sandbox.accepted_material",
+        "deerflow.sandbox.accepted_projection",
+    ):
+        importlib.import_module(module)
+
+    skill_file = _write_skill(tmp_path, body="Attributed preparation")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    material = revision.material
+    assert material is not None and material.skill_snapshot is not None
+
+    # Each step costs a different, recognisable amount, so a span cannot be
+    # credited with work that happened somewhere else.
+    AUTHORIZE, PROVISION, BIND = 0.05, 0.12, 0.03
+    bound_snapshots: list[str] = []
+
+    class _Projection(AcceptedSkillProjection):
+        """The released tenant profile's path: a parked per-thread sandbox."""
+
+        async def provision_accepted_skills_async(self, thread_id, *, user_id, binding):
+            await asyncio.sleep(PROVISION)
+            return "sandbox-attributed"
+
+        def accepted_skill_execution_evidence(self, sandbox_id):
+            return None
+
+        async def bind_accepted_skill_snapshot_async(self, sandbox_id, *, thread_id, user_id, binding):
+            await asyncio.sleep(BIND)
+            bound_snapshots.append(sandbox_id)
+
+        def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
+            return sandbox_id == "sandbox-attributed"
+
+    async def authorize(**_kwargs):
+        await asyncio.sleep(AUTHORIZE)
+
+    provider = _Projection()
+    monkeypatch.setattr("deerflow.sandbox.get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution_async", authorize)
+    monkeypatch.setattr(
+        "deerflow.sandbox.accepted_projection.require_runtime_accepted_skill_isolation",
+        lambda *_args, **_kwargs: None,
+    )
+    runtime = SimpleNamespace(
+        context={
+            "thread_id": "thread-attributed",
+            "run_id": "run-attributed",
+            "app_config": AppConfig(sandbox=SandboxConfig(use="test")),
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+            TENANT_REFERENCE_CONTEXT_KEY: _TEST_TENANT,
+            "accepted_agent_revision_digest": revision.digest,
+        },
+    )
+
+    try:
+        with turn_phases(correlation_id="trace-attributed", run_id="run-attributed") as journal, journal.span(TurnPhase.SKILL_MATERIALIZATION):
+            await _materialize_accepted_skill_projection(runtime, user_id="user-1")
+    finally:
+        get_skill_projection_coordinator().release_unactivated_run(
+            user_id="user-1",
+            thread_id="thread-attributed",
+            run_id="run-attributed",
+        )
+        material.release_process_material()
+
+    assert bound_snapshots == ["sandbox-attributed"]
+    snapshot = journal.snapshot()
+    whole = snapshot.phase_ms(TurnPhase.SKILL_MATERIALIZATION)
+    assert whole is not None
+
+    expected = {
+        TurnPhase.ACCEPTED_AUTHORIZATION: AUTHORIZE,
+        TurnPhase.SKILL_PROJECTION: PROVISION,
+        TurnPhase.SKILL_SNAPSHOT_BIND: BIND,
+    }
+    # One record per name: a phase is read back by its first record, so a name
+    # opened twice would hide whichever span it opened second.
+    names = [record.phase for record in snapshot.phases]
+    for phase in expected:
+        assert names.count(phase) == 1, f"{phase} was recorded {names.count(phase)} times"
+
+    measured = {}
+    for phase, cost in expected.items():
+        record = next(record for record in snapshot.phases if record.phase == phase)
+        assert record.duration_ms is not None, f"{phase} is not attributed"
+        measured[phase] = record.duration_ms
+        # The span holds its own step's cost, and only its own.
+        assert cost * 1000 <= record.duration_ms < cost * 1000 + 250, (phase, record.duration_ms)
+        # And it happened inside the phase it explains.
+        parent = next(record for record in snapshot.phases if record.phase == TurnPhase.SKILL_MATERIALIZATION)
+        assert parent.duration_ms is not None
+        assert parent.started_ms <= record.started_ms
+        assert record.started_ms + record.duration_ms <= parent.started_ms + parent.duration_ms + 1
+
+    # The steps account for the phase: what is left is the binding lookup and
+    # the isolation assertions, which do no I/O on this path.
+    assert sum(measured.values()) > whole * 0.8, (measured, whole)
+
+    line = snapshot.to_log_line()
+    for phase in ("accepted_authorization@", "skill_projection@", "skill_snapshot_bind@"):
+        assert phase in line, line

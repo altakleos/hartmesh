@@ -141,7 +141,7 @@ visibility. Parent cancellation cascades to neither MCP tasks nor batches.
 
 ### Turn phase timings
 
-`turn_phases.py`: one in-memory journal per run, monotonic offsets, opened by `run_agent`, found by run id from the SSE consumer; first text means visible assistant text; see its docstring.
+`turn_phases.py`: one in-memory journal per run, monotonic offsets, opened by `run_agent`, found by run id from the SSE consumer; first text means visible assistant text; see its docstring. `skill_materialization` is attributed by the four spans nested inside it (`accepted_authorization`, `accepted_material_verify`, `skill_projection`, `skill_snapshot_bind`), so a warm turn's pre-model wait names the step it was spent in; a provider that binds while it provisions publishes the snapshot inside `skill_projection`, which is where the larger half of the repeated tree walks lives.
 
 ### Stream Bridge Heartbeats
 
