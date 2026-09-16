@@ -1229,6 +1229,61 @@ def test_startup_cleanup_removes_only_abandoned_snapshots(
 
 
 @pytest.mark.asyncio
+async def test_an_accepted_turn_records_the_phase_its_projection_costs(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+    caplog,
+) -> None:
+    """The projection is the largest pre-model phase; the line has to name it.
+
+    Tenant-class .15 spent 2.6 to 3.4 s of every turn between the sandbox
+    lookup ending and the binding starting with no phase to attribute it to.
+    Most of that is this projection, which is measured here rather than in the
+    Gateway stream suite: that suite runs an ordinary turn and never reaches
+    an accepted one.
+    """
+    skill_file = _write_skill(tmp_path, body="Projection phase")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    material = revision.material
+    assert material is not None and material.skill_snapshot is not None
+    manager = RunManager(tenant=_TEST_TENANT)
+    record = await manager.create_or_reject(
+        "thread-materialization-phase",
+        accepted_invocation=_accepted(revision),
+    )
+
+    class _Agent:
+        async def astream(self, *_args, **_kwargs):
+            yield {"messages": []}
+
+    bridge = SimpleNamespace(
+        publish=AsyncMock(),
+        publish_end=AsyncMock(),
+        cleanup=AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._materialize_accepted_skill_projection",
+        AsyncMock(return_value=("sandbox:phase", None)),
+    )
+    with caplog.at_level(logging.INFO, logger="deerflow.runtime.turn_phases"):
+        await run_agent(
+            bridge,
+            manager,
+            record,
+            ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT),
+            agent_factory=lambda *, config: _Agent(),
+            graph_input={},
+            config={},
+        )
+
+    line = next(record.getMessage() for record in caplog.records if record.name == "deerflow.runtime.turn_phases")
+    assert "kind=accepted" in line, line
+    for phase in ("skill_materialization@", "agent_build@", "checkpoint_preflight@", "graph_start@"):
+        assert phase in line, line
+
+
+@pytest.mark.asyncio
 async def test_terminal_worker_releases_snapshot_after_execution(
     monkeypatch,
     tmp_path: Path,

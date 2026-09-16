@@ -34,6 +34,17 @@ relay headers, provider handles and deployment identities are never recorded --
 only that a phase happened and when. Correlation ids live in the record's own
 fields, never in a metric label.
 
+Acquisition
+-----------
+``acquisition_source`` is the turn's own *origin* -- how the container it used
+came to be. A turn acquires in stages, and the later ones can only observe that
+the container is already in hand, so ``IN_PROCESS`` and ``ACCEPTED_ACTIVE`` are
+classified as observations (:attr:`AcquisitionSource.observes_active_reuse`):
+they never replace a recorded origin, riding beside it as ``acquisition_reuse``
+instead. A new source belongs on one side of that line, deliberately. When no
+stage reported an origin, the observation is what the turn observed and is
+reported as the source; nothing is inferred to fill the slot.
+
 Counting
 --------
 The unit of every resource counter is one *resource set*: the sandbox
@@ -93,6 +104,11 @@ MAX_TRACKED_RUNS = 64
 # it is rendered for an operator reading one line per turn and is bounded
 # independently of the record cap above.
 MAX_RENDERED_PHASES = 24
+# Of that budget, how many of the *last* records are always kept. A turn with
+# goal continuations records a graph start and a sandbox binding per attempt,
+# so head-only truncation drops model_completion and terminal -- the end of the
+# arithmetic this line exists for -- before it drops a repeated early span.
+MAX_RENDERED_PHASE_TAIL = 6
 MAX_RENDERED_UNOBSERVABLE = 4
 MAX_RENDERED_REASON = 80
 
@@ -102,6 +118,20 @@ class TurnPhase(StrEnum):
 
     ADMISSION = "admission"
     ASSEMBLY = "assembly"
+    # Projecting the accepted skill snapshot into the sandbox: the whole
+    # accepted preparation, so the sandbox phases *it records* nest inside this
+    # one (``SANDBOX_LOOKUP``, and on a cold turn ``SANDBOX_CREATE`` and
+    # ``SANDBOX_READINESS``). The middleware's later ``SANDBOX_BINDING`` and
+    # ``SANDBOX_ACQUIRE`` run after the graph starts and do not.
+    SKILL_MATERIALIZATION = "skill_materialization"
+    # The window between assembly and the model request is most of a warm
+    # turn's wait. Tenant-class .15 measured 2.6 to 3.4 s of it per turn with
+    # nothing named, so these three say where the rest of it goes: building the
+    # graph, the checkpoint preflight that loads the thread's state, and the
+    # worker entering the stream attempt.
+    AGENT_BUILD = "agent_build"
+    CHECKPOINT_PREFLIGHT = "checkpoint_preflight"
+    GRAPH_START = "graph_start"
     SANDBOX_ACQUIRE = "sandbox_acquire"
     SANDBOX_LOOKUP = "sandbox_lookup"
     SANDBOX_EVICTION = "sandbox_eviction"
@@ -141,6 +171,31 @@ class AcquisitionSource(StrEnum):
     @property
     def reuses_existing_resource(self) -> bool:
         return self in _REUSE_SOURCES
+
+    @property
+    def observes_active_reuse(self) -> bool:
+        """This source says the container was already in hand, not how it came to be.
+
+        A turn acquires in stages: the worker projects the accepted skills
+        before the graph runs, and the sandbox middleware binds later against
+        whatever is now active. The later stage can only observe that the
+        container is there, which is true of a turn that just created it, a
+        turn that reclaimed one, and a turn that did neither -- so it must
+        never be allowed to answer *where the container came from*.
+        """
+        return self in _ACTIVE_REUSE_OBSERVATIONS
+
+
+# Sources that report an already-held container rather than this turn's own
+# acquisition. Distinct from ``_REUSE_SOURCES`` below, which answers the wider
+# "did this turn pay for a container creation" question: a warm reclaim reuses
+# an existing resource *and* is an origin.
+_ACTIVE_REUSE_OBSERVATIONS = frozenset(
+    {
+        AcquisitionSource.IN_PROCESS,
+        AcquisitionSource.ACCEPTED_ACTIVE,
+    },
+)
 
 
 _REUSE_SOURCES = frozenset(
@@ -182,6 +237,7 @@ class TurnPhaseSnapshot:
     total_ms: float
     phases: tuple[PhaseRecord, ...]
     acquisition_source: AcquisitionSource | None
+    acquisition_reuse: AcquisitionSource | None
     acquire_reason: str | None
     session_kind: str | None
     snapshot_present: bool | None
@@ -234,6 +290,8 @@ class TurnPhaseSnapshot:
             parts.append(f"kind={self.session_kind}")
         if self.acquisition_source is not None:
             parts.append(f"acquisition={self.acquisition_source}")
+        if self.acquisition_reuse is not None:
+            parts.append(f"reused={self.acquisition_reuse}")
         if self.acquire_reason:
             parts.append(f"acquire_reason={self.acquire_reason}")
         if self.snapshot_present is not None:
@@ -257,15 +315,22 @@ class TurnPhaseSnapshot:
         ):
             if value:
                 parts.append(f"{label}={value}")
-        rendered: list[str] = []
-        for record in self.phases[:MAX_RENDERED_PHASES]:
+
+        def _entry(record: PhaseRecord) -> str:
             entry = f"{record.phase}@{round(record.started_ms)}ms"
-            if record.duration_ms is not None:
-                entry = f"{entry}+{round(record.duration_ms)}ms"
-            rendered.append(entry)
-        omitted = len(self.phases) - len(rendered)
+            return entry if record.duration_ms is None else f"{entry}+{round(record.duration_ms)}ms"
+
+        records = self.phases
+        if len(records) > MAX_RENDERED_PHASES:
+            head = records[: MAX_RENDERED_PHASES - MAX_RENDERED_PHASE_TAIL]
+            tail = records[-MAX_RENDERED_PHASE_TAIL:]
+        else:
+            head, tail = records, ()
+        rendered = [_entry(record) for record in head]
+        omitted = len(records) - len(head) - len(tail)
         if omitted > 0:
             rendered.append(f"+{omitted} more")
+        rendered.extend(_entry(record) for record in tail)
         if rendered:
             parts.append("phases=" + " ".join(rendered))
         for phase, reason in self.unobservable[:MAX_RENDERED_UNOBSERVABLE]:
@@ -277,11 +342,12 @@ class TurnPhaseSnapshot:
 
     def to_wire(self) -> dict[str, object]:
         return {
-            "version": 3,
+            "version": 4,
             "correlation_id": self.correlation_id,
             "run_id": self.run_id,
             "total_ms": round(self.total_ms, 3),
             "acquisition_source": None if self.acquisition_source is None else str(self.acquisition_source),
+            "acquisition_reuse": None if self.acquisition_reuse is None else str(self.acquisition_reuse),
             "acquire_reason": self.acquire_reason,
             "session_kind": self.session_kind,
             "snapshot_present": self.snapshot_present,
@@ -315,6 +381,7 @@ class TurnPhaseJournal:
 
     __slots__ = (
         "_acquire_reason",
+        "_acquisition_reuse",
         "_acquisition_source",
         "_correlation_id",
         "_create_attempts",
@@ -349,6 +416,7 @@ class TurnPhaseJournal:
         self._records: list[PhaseRecord] = []
         self._dropped = 0
         self._acquisition_source: AcquisitionSource | None = None
+        self._acquisition_reuse: AcquisitionSource | None = None
         self._acquire_reason: str | None = None
         self._session_kind: str | None = None
         self._snapshot_present: bool | None = None
@@ -433,8 +501,24 @@ class TurnPhaseJournal:
     # ── Attributes ───────────────────────────────────────────────────────
 
     def set_acquisition_source(self, source: AcquisitionSource, *, reason: str | None = None) -> None:
+        """Record where this turn's sandbox came from, origin first.
+
+        Order is not precedence. A turn acquires in stages and the later stage
+        sees only that the container is active, so an active-reuse observation
+        is kept beside a recorded origin (``reused=``) rather than replacing
+        it; an origin always wins, whenever it arrives. Without this the cold
+        turn that measured its own ``sandbox_create`` reported
+        ``acquisition=accepted_active``, and so did every warm reclaim.
+        """
         with self._lock:
-            self._acquisition_source = source
+            if source.observes_active_reuse and self._acquisition_source is not None and not self._acquisition_source.observes_active_reuse:
+                self._acquisition_reuse = source
+            else:
+                self._acquisition_source = source
+                if not source.observes_active_reuse:
+                    # A newly known origin describes the whole turn: a reuse
+                    # noted before it was an observation of the same container.
+                    self._acquisition_reuse = None
             if reason is not None:
                 self._acquire_reason = _bounded_label(reason, fallback="unspecified", limit=64)
 
@@ -535,6 +619,7 @@ class TurnPhaseJournal:
                 total_ms=self._elapsed_ms(),
                 phases=tuple(self._records),
                 acquisition_source=self._acquisition_source,
+                acquisition_reuse=self._acquisition_reuse,
                 acquire_reason=self._acquire_reason,
                 session_kind=self._session_kind,
                 snapshot_present=self._snapshot_present,
@@ -720,6 +805,13 @@ def record_failed_attempt() -> None:
     journal = _current_journal.get()
     if journal is not None:
         journal.record_failed_attempt()
+
+
+def mark_phase(phase: TurnPhase, *, detail: str | None = None) -> None:
+    """Record *phase* on the bound journal, or do nothing if none is bound."""
+    journal = _current_journal.get()
+    if journal is not None:
+        journal.mark(phase, detail=detail)
 
 
 @contextmanager

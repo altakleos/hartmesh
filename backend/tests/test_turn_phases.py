@@ -12,6 +12,7 @@ import pytest
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT
 from deerflow.runtime.turn_phases import (
     MAX_PHASE_RECORDS,
+    MAX_RENDERED_PHASES,
     MAX_TRACKED_RUNS,
     AcquisitionSource,
     TurnPhase,
@@ -407,3 +408,168 @@ def test_the_rendered_message_stays_bounded_when_a_turn_records_many_phases(capl
     assert "more" in message
     # Nothing is lost from the structured record the message summarises.
     assert len(caplog.records[0].turn_phases["phases"]) == MAX_PHASE_RECORDS
+
+
+def test_a_truncated_render_keeps_the_end_of_the_turn(caplog):
+    """Truncation takes the middle, not the end.
+
+    A turn with goal continuations records a graph start and a binding per
+    attempt, so a head-only render drops ``model_completion`` and ``terminal``
+    -- where the arithmetic this line exists for finishes -- before it drops a
+    repeated early span.
+    """
+    journal = TurnPhaseJournal(correlation_id="trace-tail", run_id="run-tail")
+    for _ in range(MAX_RENDERED_PHASES + 10):
+        journal.mark(TurnPhase.SANDBOX_BINDING)
+    journal.mark(TurnPhase.MODEL_COMPLETION)
+    journal.mark(TurnPhase.TERMINAL)
+
+    with caplog.at_level(logging.INFO, logger="deerflow.runtime.turn_phases"):
+        journal.emit()
+
+    message = caplog.records[0].getMessage()
+    assert "more" in message
+    assert "model_completion@" in message, message
+    assert "terminal@" in message, message
+    # The record behind the message still has every phase.
+    assert len(caplog.records[0].turn_phases["phases"]) == MAX_RENDERED_PHASES + 12
+
+
+# ── The acquisition label must keep the turn's origin ─────────────────────
+#
+# Tenant-class .15 read `acquisition=accepted_active` on all seven turns,
+# including the cold one that also carried `creates=1` and a measured
+# `sandbox_create` span, and the warm ones whose provider logged a warm-pool
+# reclaim. A turn acquires in stages -- the worker's accepted projection early,
+# the sandbox middleware's binding later -- and the later stage only observes
+# that the container is already in hand. Last-writer-wins therefore threw away
+# the one thing the field exists to disclose.
+
+
+def test_an_active_reuse_observation_does_not_replace_the_recorded_origin():
+    journal = TurnPhaseJournal(correlation_id="trace-origin", run_id="run-origin")
+
+    journal.set_acquisition_source(AcquisitionSource.ACCEPTED_WARM_RECLAIM)
+    journal.set_acquisition_source(AcquisitionSource.ACCEPTED_ACTIVE)
+
+    snapshot = journal.snapshot()
+    assert snapshot.acquisition_source is AcquisitionSource.ACCEPTED_WARM_RECLAIM
+    assert snapshot.acquisition_reuse is AcquisitionSource.ACCEPTED_ACTIVE
+
+
+def test_a_create_survives_the_binding_stage_that_finds_the_container_active():
+    journal = TurnPhaseJournal(correlation_id="trace-cold", run_id="run-cold")
+
+    journal.set_acquisition_source(AcquisitionSource.CREATED)
+    journal.record_resource_create()
+    journal.set_acquisition_source(AcquisitionSource.ACCEPTED_ACTIVE)
+    journal.set_acquisition_source(AcquisitionSource.IN_PROCESS)
+
+    snapshot = journal.snapshot()
+    assert snapshot.acquisition_source is AcquisitionSource.CREATED
+    # The counter and the label agree, which is what the tenant run could not say.
+    assert snapshot.resource_creates == 1
+    assert snapshot.acquisition_reuse is AcquisitionSource.IN_PROCESS
+
+
+def test_a_turn_that_only_observed_reuse_reports_that_reuse():
+    journal = TurnPhaseJournal(correlation_id="trace-active", run_id="run-active")
+
+    journal.set_acquisition_source(AcquisitionSource.ACCEPTED_ACTIVE)
+
+    snapshot = journal.snapshot()
+    assert snapshot.acquisition_source is AcquisitionSource.ACCEPTED_ACTIVE
+    assert snapshot.acquisition_reuse is None
+    assert "reused=" not in snapshot.to_log_line()
+
+
+def test_an_origin_recorded_after_a_reuse_observation_supersedes_it():
+    """Order is not precedence: an origin is the answer whenever one is known."""
+    journal = TurnPhaseJournal(correlation_id="trace-late", run_id="run-late")
+
+    journal.set_acquisition_source(AcquisitionSource.ACCEPTED_ACTIVE)
+    journal.set_acquisition_source(AcquisitionSource.CREATED)
+
+    snapshot = journal.snapshot()
+    assert snapshot.acquisition_source is AcquisitionSource.CREATED
+    assert snapshot.acquisition_reuse is None
+
+
+def test_a_second_origin_replaces_the_first():
+    """A reclaim that failed into a create is described by the create."""
+    journal = TurnPhaseJournal(correlation_id="trace-two", run_id="run-two")
+
+    journal.set_acquisition_source(AcquisitionSource.ACCEPTED_WARM_RECLAIM)
+    journal.set_acquisition_source(AcquisitionSource.CREATED)
+
+    assert journal.snapshot().acquisition_source is AcquisitionSource.CREATED
+
+
+def test_the_line_and_the_record_both_carry_the_origin_and_the_reuse(caplog):
+    journal = TurnPhaseJournal(correlation_id="trace-both", run_id="run-both")
+    journal.set_acquisition_source(AcquisitionSource.ACCEPTED_WARM_RECLAIM)
+    journal.set_acquisition_source(AcquisitionSource.ACCEPTED_ACTIVE)
+
+    with caplog.at_level(logging.INFO, logger="deerflow.runtime.turn_phases"):
+        journal.emit()
+
+    message = caplog.records[0].getMessage()
+    assert "acquisition=accepted_warm_reclaim" in message
+    assert "reused=accepted_active" in message
+    wire = caplog.records[0].turn_phases
+    assert wire["acquisition_source"] == "accepted_warm_reclaim"
+    assert wire["acquisition_reuse"] == "accepted_active"
+
+
+def test_the_pre_model_phases_name_the_work_between_admission_and_the_model():
+    """The .15 run left 2.6 to 3.4 s of every turn unaccounted for.
+
+    Between the sandbox lookup ending and the binding starting no phase said
+    anything, so an operator could see that the time was spent but not on what.
+    """
+    journal = TurnPhaseJournal(correlation_id="trace-pre", run_id="run-pre")
+
+    journal.mark(TurnPhase.ADMISSION)
+    with journal.span(TurnPhase.SKILL_MATERIALIZATION), journal.span(TurnPhase.SANDBOX_LOOKUP):
+        pass
+    with journal.span(TurnPhase.AGENT_BUILD):
+        pass
+    journal.mark(TurnPhase.CHECKPOINT_PREFLIGHT)
+    journal.mark(TurnPhase.GRAPH_START)
+    journal.mark(TurnPhase.MODEL_REQUEST)
+
+    snapshot = journal.snapshot()
+    assert snapshot.phase_ms(TurnPhase.AGENT_BUILD) is not None
+    assert snapshot.phase_at_ms(TurnPhase.SKILL_MATERIALIZATION) is not None
+    for phase in (TurnPhase.CHECKPOINT_PREFLIGHT, TurnPhase.GRAPH_START):
+        assert snapshot.phase_at_ms(phase) is not None
+    line = snapshot.to_log_line()
+    for phase in ("skill_materialization@", "agent_build@", "checkpoint_preflight@", "graph_start@"):
+        assert phase in line, line
+
+
+@pytest.mark.parametrize("source", list(AcquisitionSource))
+def test_every_source_is_classified_as_an_origin_or_an_observation(source):
+    """The partition is the whole repair; a ninth source must not default into it.
+
+    Only the two that say "the container was already in hand" are
+    observations. Everything else names how the container came to be, and a
+    new member silently taking the origin side is the defect this pins.
+    """
+    observation = source in {AcquisitionSource.IN_PROCESS, AcquisitionSource.ACCEPTED_ACTIVE}
+    assert source.observes_active_reuse is observation
+    if observation:
+        # An observation is also a reuse in the wider "paid for no creation"
+        # sense; the two questions stay separate but must agree here.
+        assert source.reuses_existing_resource
+
+
+def test_a_second_graph_start_is_recorded_rather_than_collapsed():
+    """A resumed or retried stream is a second graph start, and the turn paid for both."""
+    journal = TurnPhaseJournal(correlation_id="trace-retry", run_id="run-retry")
+
+    journal.mark(TurnPhase.GRAPH_START)
+    journal.mark(TurnPhase.GRAPH_START)
+
+    line = journal.snapshot().to_log_line()
+    assert line.count("graph_start@") == 2, line
