@@ -37,6 +37,14 @@ DEFAULT_REPORTS_DIR = "/mnt/user-data/outputs/reports"
 LANG = "en-US"
 REPORT_SUFFIX = ".report.json"
 RENDER_TARGETS = ("html", "pdf", "docx", "xlsx")
+# The formats the user is handed, in the order they are offered. HTML is the
+# sheet the PDF is printed from, so it is rendered only when named outright and
+# comes last wherever a run lists files.
+PRESENTED_TARGETS = ("pdf", "docx", "xlsx")
+TARGET_ORDER = PRESENTED_TARGETS + ("html",)
+# What this skill has written beside a report, so a later draft removes its own
+# renders and never a file it did not make.
+RENDERS_MANIFEST = "renders.json"
 CHART_PNG_PATTERN = re.compile(r"^charts/[a-z0-9_]+\.png$")
 PICTURE_SUFFIXES = (".png", ".jpg", ".jpeg")
 
@@ -157,6 +165,21 @@ def plural(count: int, singular: str, plural_form: str | None = None) -> str:
 
 def is_are(count: int) -> str:
     return "is" if count == 1 else "are"
+
+
+CONTROL_CHARACTERS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def one_line(text: str) -> str:
+    """A line of agent-facing output, with anything that could start a new one removed.
+
+    Cell values, column names and profile vocabulary all reach the digest, and
+    the digest is read back by a model that is told to act on whole lines. A
+    value carrying a newline would otherwise write its own line at column 0 and
+    could forge any line the skill documents.
+    """
+
+    return CONTROL_CHARACTERS.sub(" ", text)
 
 
 def slugify(text: str) -> str:

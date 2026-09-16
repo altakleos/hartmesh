@@ -207,9 +207,10 @@ def test_sandbox_smoke_builds_and_renders_a_business_report_on_the_built_image()
     assert '--volume "$PWD/skills/public/business-report:/mnt/smoke/business-report:ro"' in workflow
     assert '--volume "$PWD/backend/tests/skills/business_report/fixtures/example_services_export_small.xls:/mnt/smoke/example_services_export_small.xls:ro"' in workflow
     assert '--volume "$PWD/backend/tests/skills/business_report/check_pdf_on_image.py:/mnt/smoke/check_pdf_on_image.py:ro"' in workflow
-    assert "python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/smoke-report" in workflow
-    for target in ("pdf", "docx", "xlsx"):
-        assert f"python3 $R render /tmp/smoke-report/2026-08-business-review.report.json --to {target}" in workflow
+    # The command SKILL.md asks for, verbatim: one build that renders all three
+    # formats. A smoke test that issues a shape the doc no longer teaches proves
+    # the image agrees with a path the tenant does not take.
+    assert "python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/smoke-report --render pdf,docx,xlsx" in workflow
     assert "python3 /mnt/smoke/check_pdf_on_image.py /tmp/smoke-report/2026-08-business-review.pdf" in workflow
     assert "grep -q 'Checks: Totals match your file'" in workflow
     assert "printf '%s\\n' \"$report_response\"" in workflow
@@ -248,6 +249,8 @@ def test_sandbox_smoke_runs_the_slim_services_profile_at_the_tenant_limits() -> 
     for flag in ("--user 1000:1000", "--cap-drop=ALL", "--security-opt=no-new-privileges"):
         assert flag in slim, flag
     assert "ps -eo comm= | grep -Ei " in slim and "chrom|jupyter|code-server|tigervnc|websocat|openbox" in slim, "the switched-off services must not be running (matched on process names)"
-    assert "python3 $R build /mnt/smoke/example_services_export_small.xls" in slim and "--to pdf" in slim, "the report path renders inside the slim limits"
+    # One run that builds and renders all three formats, which is what the skill
+    # now asks for: one interpreter start inside a 512 MiB slot, not four.
+    assert "python3 $R build /mnt/smoke/example_services_export_small.xls" in slim and "--render pdf,docx,xlsx" in slim, "the report path builds and renders inside the slim limits, in one run"
     assert "docker inspect --format '{{.State.OOMKilled}}'" in slim and 'test "$oom_killed" = false' in slim
     assert "::error::slim sandbox" in slim
