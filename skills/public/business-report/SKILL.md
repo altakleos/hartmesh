@@ -9,13 +9,15 @@ description: Use this skill when the user uploads a tabular business export (CSV
 
 One script turns an export into a report draft: `report.json` plus PNG charts, then renders that one document to HTML, PDF, DOCX and XLSX. Every number in every render comes from `report.json`, so the formats agree by construction. The script runs on the libraries the sandbox image ships, installs nothing, calls no network service (the PDF printer refuses every URL that is not inline data) and never modifies an input file.
 
+**Script paths.** `$SKILL_DIR` is the directory this `SKILL.md` is in — the path you read it from. Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here; `describe_skill` reports the directory as `Location`.
+
 ```
-python /mnt/skills/public/business-report/scripts/report.py inspect <files…>
-python /mnt/skills/public/business-report/scripts/report.py build   <files…> --period 2026-08 --out DIR
-python /mnt/skills/public/business-report/scripts/report.py show    DIR/<name>.report.json
-python /mnt/skills/public/business-report/scripts/report.py prose   DIR/<name>.report.json --from prose.json
-python /mnt/skills/public/business-report/scripts/report.py render  DIR/<name>.report.json --to pdf|docx|xlsx|html
-python /mnt/skills/public/business-report/scripts/report.py checks  DIR/<name>.report.json <files…>
+python "$SKILL_DIR/scripts/report.py" inspect <files…>
+python "$SKILL_DIR/scripts/report.py" build   <files…> --period 2026-08 --out DIR
+python "$SKILL_DIR/scripts/report.py" show    DIR/<name>.report.json
+python "$SKILL_DIR/scripts/report.py" prose   DIR/<name>.report.json --from prose.json
+python "$SKILL_DIR/scripts/report.py" render  DIR/<name>.report.json --to pdf|docx|xlsx|html
+python "$SKILL_DIR/scripts/report.py" checks  DIR/<name>.report.json <files…>
 ```
 
 Exit codes: `0` done; `1` a problem the user must hear about (stderr says what), including a withheld report or a period with no rows; `2` this sandbox is not the image the skill is built for (do not install anything; tell the user); `3` one decision is needed before building (stderr carries the question and the candidates).
@@ -25,7 +27,7 @@ Exit codes: `0` done; `1` a problem the user must hear about (stderr says what),
 ### Step 1: Inspect, and ask at most one question
 
 ```bash
-python /mnt/skills/public/business-report/scripts/report.py inspect /mnt/user-data/uploads/export.xlsx
+python "$SKILL_DIR/scripts/report.py" inspect /mnt/user-data/uploads/export.xlsx
 ```
 
 The JSON output gives, per file and sheet: the columns with their type and samples, the suggested column roles (`date`, `amount`, `id`, `customer`, `category`, `person`, `status`, `source`, `quantity`, `location`) with a confidence, `ambiguous` roles with their candidate columns, `missing` required roles, the months present, a `period_suggestion`, `date_order` (how day and month were read), a `currency` guess and a ready-made `question` that covers every open role at once.
@@ -40,7 +42,7 @@ Tell the user in one sentence what you found: rows, date range, the people or ca
 ### Step 2: Build
 
 ```bash
-python /mnt/skills/public/business-report/scripts/report.py build \
+python "$SKILL_DIR/scripts/report.py" build \
   /mnt/user-data/uploads/export.xlsx \
   --period 2026-08 \
   --out /mnt/user-data/outputs/reports/2026-08-business-review
@@ -57,7 +59,7 @@ The output ends with a `Checks:` line and, when the data cannot support a sectio
 Read the figures with `show` (it prints the KPIs, every table, the checks and the notes; the rows stay in the file):
 
 ```bash
-python /mnt/skills/public/business-report/scripts/report.py show /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json
+python "$SKILL_DIR/scripts/report.py" show /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json
 ```
 
 Write one summary paragraph and up to three actions from those figures only, then hand them to the script:
@@ -67,7 +69,7 @@ cat > /tmp/prose.json <<'JSON'
 {"summary": ["August was the strongest month since March: $52,310.40 across 178 jobs, 6.4% above July."],
  "actions": ["Collect the $4,120.00 still unpaid across 21 jobs.", "Book the two technicians below 20 jobs onto the September installs."]}
 JSON
-python /mnt/skills/public/business-report/scripts/report.py prose /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json --from /tmp/prose.json
+python "$SKILL_DIR/scripts/report.py" prose /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json --from /tmp/prose.json
 ```
 
 This makes the next draft without recomputing anything. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
@@ -75,9 +77,9 @@ This makes the next draft without recomputing anything. The script compares ever
 ### Step 4: Render
 
 ```bash
-python /mnt/skills/public/business-report/scripts/report.py render <report.json> --to pdf
-python /mnt/skills/public/business-report/scripts/report.py render <report.json> --to docx
-python /mnt/skills/public/business-report/scripts/report.py render <report.json> --to xlsx
+python "$SKILL_DIR/scripts/report.py" render <report.json> --to pdf
+python "$SKILL_DIR/scripts/report.py" render <report.json> --to docx
+python "$SKILL_DIR/scripts/report.py" render <report.json> --to xlsx
 ```
 
 Renders land next to the report as `<name>.pdf`, `.docx`, `.xlsx` or `.html`. Rendering reads only `report.json` and the pictures inside the report directory (and the tenant bundle); it never rebuilds. The DOCX has real headings and tables so the user can edit it; the XLSX has a Summary sheet whose revenue, count and average are live formulas over the Rows sheet, one sheet per table with live `SUM` totals and a live ratio for average columns, and the cleaned rows.

@@ -11,6 +11,8 @@ This skill produces a structured **systematic literature review (SLR)** across m
 
 **Distinct from `academic-paper-review`:** that skill does deep peer review of a single paper. This skill does breadth-first synthesis across many papers. If the user hands you one paper URL and asks "review this paper", route to `academic-paper-review` instead.
 
+**Script paths.** `$SKILL_DIR` is the directory this `SKILL.md` is in — the path you read it from. Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here; `describe_skill` reports the directory as `Location`.
+
 ## When to Use This Skill
 
 Use this skill when the user wants any of the following:
@@ -47,7 +49,7 @@ If the user says "50+ papers", politely cap it at 50 and explain that synthesis 
 Call the bundled search script. Do **not** try to scrape arXiv by other means and do **not** write your own HTTP client — this script handles URL encoding, Atom XML parsing, and id normalization correctly.
 
 ```bash
-python /mnt/skills/public/systematic-literature-review/scripts/arxiv_search.py \
+python "$SKILL_DIR/scripts/arxiv_search.py" \
   "<topic>" \
   --max-results <N> \
   [--category <cat>] \

@@ -202,6 +202,71 @@ def _is_skills_path(path: str) -> bool:
 _ACCEPTED_SKILL_ACCESS_DENIED = "Accepted invocation may access only its accepted skill snapshot"
 
 
+class AcceptedSkillPathError(PermissionError):
+    """A skills path refused because it is outside this invocation's snapshot.
+
+    Distinct from the other ``PermissionError``s these tools raise so the
+    path-taking tools can surface this one verbatim. The generic
+    ``Permission denied: <path>`` they fall back to is the right answer for a
+    write to a read-only mount — the model asked for something it may not have.
+    It is the wrong answer here, where the model asked for something it *may*
+    have under a different name, and the message is the only thing that tells
+    it which name.
+    """
+
+
+def _accepted_snapshot_counterpart(path: str, snapshot_root: str) -> str | None:
+    """The same skills path addressed inside *snapshot_root*, when it has one.
+
+    A skills path names a place in the skill tree — ``public/<skill>/…`` — and
+    an accepted invocation mounts exactly one such tree. Re-rooting is therefore
+    a prefix swap, and it is the whole content of the answer the model needs.
+
+    Returns ``None`` when the path is already addressing some ``.accepted``
+    tree: a path under another invocation's snapshot has no counterpart here,
+    and offering one would read as an invitation to keep guessing hashes.
+    """
+    skills_root = _get_skills_container_path()
+    if path == skills_root:
+        return snapshot_root
+    if not path.startswith(f"{skills_root}/"):
+        return None
+    relative = path[len(skills_root) + 1 :]
+    if relative == ".accepted" or relative.startswith(".accepted/"):
+        return None
+    return f"{snapshot_root}/{relative}"
+
+
+def _accepted_skill_snapshot_rule(snapshot_id: str | None) -> str:
+    """State the rule and name the one tree it admits."""
+    skills_root = _get_skills_container_path()
+    if snapshot_id is None:
+        # Accepted with an empty skill set: there is no tree to redirect to,
+        # and saying so is what stops a search for one.
+        return f"{_ACCEPTED_SKILL_ACCESS_DENIED}. This invocation accepted no skills, so nothing under {skills_root} is readable."
+    return f"{_ACCEPTED_SKILL_ACCESS_DENIED} at {skills_root}/.accepted/{snapshot_id}."
+
+
+def _accepted_skill_access_denied(path: str, snapshot_id: str | None) -> AcceptedSkillPathError:
+    """Refuse *path*, and say which path this invocation would have accepted.
+
+    A refusal that names only the rule leaves the model to find the tree
+    itself, and the skills tree is the one place it cannot look: every listing
+    root above the snapshot is refused by this same fence. In the
+    hartmesh-tenancy ``.16`` tenant-class run that dead end cost 341 s of
+    ``find /`` inside a 512 MiB sandbox — 65% of the turn — for a script that
+    was mounted and readable the whole time. So the refusal carries the
+    snapshot root, and the re-rooted path when there is one.
+    """
+    rule = _accepted_skill_snapshot_rule(snapshot_id)
+    if snapshot_id is None:
+        return AcceptedSkillPathError(rule)
+    counterpart = _accepted_snapshot_counterpart(path, f"{_get_skills_container_path()}/.accepted/{snapshot_id}")
+    if counterpart is None:
+        return AcceptedSkillPathError(rule)
+    return AcceptedSkillPathError(f"{rule} Use {counterpart} instead of {path}; describe_skill reports each skill's exact directory.")
+
+
 def _validate_runtime_skill_path(runtime: object, path: str) -> None:
     """Restrict an accepted invocation to its exact immutable ``.accepted`` tree."""
     accepted, snapshot_id = accepted_skill_access_from_runtime(runtime)
@@ -215,17 +280,20 @@ def _validate_runtime_skill_path(runtime: object, path: str) -> None:
         snapshot_root = f"{accepted_root}/{snapshot_id}"
         if path == snapshot_root or path.startswith(f"{snapshot_root}/"):
             return
-    raise PermissionError(_ACCEPTED_SKILL_ACCESS_DENIED)
+    raise _accepted_skill_access_denied(path, snapshot_id)
 
 
 def _validate_runtime_skill_command(runtime: object, command: str) -> None:
     """Apply the accepted-tree restriction before local or remote shell IO."""
-    accepted, _snapshot_id = accepted_skill_access_from_runtime(runtime)
+    accepted, snapshot_id = accepted_skill_access_from_runtime(runtime)
     if not accepted:
         return
     skills_root = _get_skills_container_path()
     if skills_root in command and _DOTDOT_PATH_SEGMENT_PATTERN.search(command):
-        raise PermissionError(_ACCEPTED_SKILL_ACCESS_DENIED)
+        # A traversal segment anywhere alongside a skills path: the command is
+        # refused as written. No re-rooting is offered, because the path the
+        # model wrote is not the path it would have reached.
+        raise AcceptedSkillPathError(_accepted_skill_snapshot_rule(snapshot_id))
     url_spans = _non_file_url_spans(command)
     for match in _ABSOLUTE_PATH_PATTERN.finditer(command):
         if _is_in_spans(match.start(), url_spans):
@@ -2337,6 +2405,8 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: Directory not found: {requested_path}"
+    except AcceptedSkillPathError as e:
+        return f"Error: {e}"
     except PermissionError:
         return f"Error: Permission denied: {requested_path}"
     except Exception as e:
@@ -2405,6 +2475,8 @@ def glob_tool(
         return f"Error: Directory not found: {requested_path}"
     except NotADirectoryError:
         return f"Error: Path is not a directory: {requested_path}"
+    except AcceptedSkillPathError as e:
+        return f"Error: {e}"
     except PermissionError:
         return f"Error: Permission denied: {requested_path}"
     except Exception as e:
@@ -2509,6 +2581,8 @@ def grep_tool(
         return f"Error: Path is not a directory: {requested_path}"
     except re.error as e:
         return f"Error: Invalid regex pattern: {e}"
+    except AcceptedSkillPathError as e:
+        return f"Error: {e}"
     except PermissionError:
         return f"Error: Permission denied: {requested_path}"
     except Exception as e:
@@ -2624,6 +2698,8 @@ def read_file_tool(
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: File not found: {requested_path}"
+    except AcceptedSkillPathError as e:
+        return f"Error: {e}"
     except PermissionError:
         return f"Error: Permission denied reading file: {requested_path}"
     except IsADirectoryError:
@@ -2821,6 +2897,8 @@ def str_replace_tool(
         return f"Error: {e}"
     except FileNotFoundError:
         return f"Error: File not found: {requested_path}"
+    except AcceptedSkillPathError as e:
+        return f"Error: {e}"
     except PermissionError:
         return f"Error: Permission denied accessing file: {requested_path}"
     except Exception as e:

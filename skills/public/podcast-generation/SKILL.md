@@ -9,6 +9,8 @@ description: Use this skill when the user requests to generate, create, or produ
 
 This skill generates high-quality podcast audio from text content. The workflow includes creating a structured JSON script (conversational dialogue) and executing audio generation through text-to-speech synthesis.
 
+**Script paths.** `$SKILL_DIR` is the directory this `SKILL.md` is in — the path you read it from. Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here; `describe_skill` reports the directory as `Location`.
+
 ## Core Capabilities
 
 - Convert any text content (articles, reports, documentation) into podcast scripts
@@ -47,7 +49,7 @@ The JSON structure:
 
 Call the Python script:
 ```bash
-python /mnt/skills/public/podcast-generation/scripts/generate.py \
+python "$SKILL_DIR/scripts/generate.py" \
   --script-file /mnt/user-data/workspace/script-file.json \
   --output-file /mnt/user-data/outputs/generated-podcast.mp3 \
   --transcript-file /mnt/user-data/outputs/generated-podcast-transcript.md
@@ -136,7 +138,7 @@ Step 1: Create script file `/mnt/user-data/workspace/ai-history-script.json`:
 
 Step 2: Execute generation:
 ```bash
-python /mnt/skills/public/podcast-generation/scripts/generate.py \
+python "$SKILL_DIR/scripts/generate.py" \
   --script-file /mnt/user-data/workspace/ai-history-script.json \
   --output-file /mnt/user-data/outputs/ai-history-podcast.mp3 \
   --transcript-file /mnt/user-data/outputs/ai-history-transcript.md

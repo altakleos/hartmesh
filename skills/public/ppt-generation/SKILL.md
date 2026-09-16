@@ -9,6 +9,8 @@ description: Use this skill when the user requests to generate, create, or make 
 
 This skill generates professional PowerPoint presentations by creating AI-generated images for each slide and composing them into a PPTX file. The workflow includes planning the presentation structure with a consistent visual style, generating slide images sequentially (using the previous slide as a reference for style consistency), and assembling them into a final presentation.
 
+**Script paths.** `$SKILL_DIR` is the directory this `SKILL.md` is in — the path you read it from. Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here; `describe_skill` reports the directory as `Location`. This skill also runs the image-generation skill's script: `$IMAGE_SKILL_DIR` is that skill's directory, which `describe_skill("image-generation")` reports the same way.
+
 ## Core Capabilities
 
 - Plan and structure multi-slide presentations with unified visual style
@@ -83,7 +85,7 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
 
 **IMPORTANT**: Generate slides **strictly one by one, in order**. Do NOT parallelize or batch image generation. Each slide depends on the previous slide's output as a reference image. Generating slides in parallel will break visual consistency and is not allowed.
 
-1. Read the image-generation skill: `/mnt/skills/public/image-generation/SKILL.md`
+1. Read the image-generation skill: `describe_skill("image-generation")` reports its directory as `Location`; read the `SKILL.md` there. That directory is `$IMAGE_SKILL_DIR` below.
 
 2. **For the FIRST slide (slide 1)**, create a prompt that establishes the visual style:
 
@@ -98,7 +100,7 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
 ```
 
 ```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
+python "$IMAGE_SKILL_DIR/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/slide-01-prompt.json \
   --output-file /mnt/user-data/outputs/slide-01.jpg \
   --aspect-ratio 16:9
@@ -117,7 +119,7 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 ```
 
 ```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
+python "$IMAGE_SKILL_DIR/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/slide-02-prompt.json \
   --reference-images /mnt/user-data/outputs/slide-01.jpg \
   --output-file /mnt/user-data/outputs/slide-02.jpg \
@@ -128,14 +130,14 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 
 ```bash
 # Slide 3 references slide 2
-python /mnt/skills/public/image-generation/scripts/generate.py \
+python "$IMAGE_SKILL_DIR/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/slide-03-prompt.json \
   --reference-images /mnt/user-data/outputs/slide-02.jpg \
   --output-file /mnt/user-data/outputs/slide-03.jpg \
   --aspect-ratio 16:9
 
 # Slide 4 references slide 3
-python /mnt/skills/public/image-generation/scripts/generate.py \
+python "$IMAGE_SKILL_DIR/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/slide-04-prompt.json \
   --reference-images /mnt/user-data/outputs/slide-03.jpg \
   --output-file /mnt/user-data/outputs/slide-04.jpg \
@@ -147,7 +149,7 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 After all slide images are generated, call the composition script:
 
 ```bash
-python /mnt/skills/public/ppt-generation/scripts/generate.py \
+python "$SKILL_DIR/scripts/generate.py" \
   --plan-file /mnt/user-data/workspace/presentation-plan.json \
   --slide-images /mnt/user-data/outputs/slide-01.jpg /mnt/user-data/outputs/slide-02.jpg /mnt/user-data/outputs/slide-03.jpg \
   --output-file /mnt/user-data/outputs/presentation.pptx
@@ -224,7 +226,7 @@ Create `/mnt/user-data/workspace/ai-product-plan.json`:
 
 ### Step 2: Read image-generation skill
 
-Read `/mnt/skills/public/image-generation/SKILL.md` to understand how to generate images.
+Read the image-generation skill to understand how to generate images: `describe_skill("image-generation")` reports its directory as `Location`. That directory is `$IMAGE_SKILL_DIR` below.
 
 ### Step 3: Generate slide images sequentially with reference chaining
 
@@ -243,7 +245,7 @@ Create `/mnt/user-data/workspace/nova-slide-01.json`:
 ```
 
 ```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
+python "$IMAGE_SKILL_DIR/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/nova-slide-01.json \
   --output-file /mnt/user-data/outputs/nova-slide-01.jpg \
   --aspect-ratio 16:9
@@ -263,7 +265,7 @@ Create `/mnt/user-data/workspace/nova-slide-02.json`:
 ```
 
 ```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
+python "$IMAGE_SKILL_DIR/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/nova-slide-02.json \
   --reference-images /mnt/user-data/outputs/nova-slide-01.jpg \
   --output-file /mnt/user-data/outputs/nova-slide-02.jpg \
@@ -281,7 +283,7 @@ Key consistency rules for subsequent slides:
 ### Step 4: Compose final PPT
 
 ```bash
-python /mnt/skills/public/ppt-generation/scripts/generate.py \
+python "$SKILL_DIR/scripts/generate.py" \
   --plan-file /mnt/user-data/workspace/nova-plan.json \
   --slide-images /mnt/user-data/outputs/nova-slide-01.jpg /mnt/user-data/outputs/nova-slide-02.jpg /mnt/user-data/outputs/nova-slide-03.jpg /mnt/user-data/outputs/nova-slide-04.jpg /mnt/user-data/outputs/nova-slide-05.jpg \
   --output-file /mnt/user-data/outputs/nova-presentation.pptx

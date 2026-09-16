@@ -233,6 +233,19 @@ def _assembled_agent_for_revision(revision: ResolvedAgentRevision, graph: object
     return LeadAgentAssembly(graph=graph, descriptor=descriptor)
 
 
+def _resolve_revision_without_skills(monkeypatch):
+    """Resolve accepted material for an invocation that accepted no skills."""
+    from deerflow.runtime import agent_revision as revision_module
+
+    monkeypatch.setattr(revision_module, "_skills", lambda _app_config, *, user_id: ((), ()))
+    monkeypatch.setattr(revision_module, "load_agent_soul", lambda *_a, **_kw: "")
+    return resolve_agent_revision(
+        {"configurable": {}},
+        app_config=AppConfig(sandbox=SandboxConfig(use="test")),
+        user_id="user-1",
+    )
+
+
 def _runtime_for_revision(revision) -> SimpleNamespace:
     material = revision.material
     assert material is not None
@@ -271,37 +284,64 @@ def test_accepted_execution_rejects_live_skill_reads_before_sandbox_io(
         "read mutable instructions",
     )
 
-    assert result == "Error: Permission denied reading file: /mnt/skills/custom/immutable-skill/SKILL.md"
+    snapshot = revision.material.skill_snapshot
+    assert snapshot is not None
+    assert result == (
+        "Error: Accepted invocation may access only its accepted skill snapshot at "
+        f"/mnt/skills/.accepted/{snapshot.snapshot_id}. "
+        f"Use /mnt/skills/.accepted/{snapshot.snapshot_id}/custom/immutable-skill/SKILL.md "
+        "instead of /mnt/skills/custom/immutable-skill/SKILL.md; "
+        "describe_skill reports each skill's exact directory."
+    )
     assert sandbox_calls == 0
     revision.material.release_process_material()
+
+
+def _rule(snapshot_id: str) -> str:
+    return f"Error: Accepted invocation may access only its accepted skill snapshot at /mnt/skills/.accepted/{snapshot_id}."
+
+
+def _redirect(snapshot_id: str, requested: str, relative: str) -> str:
+    return f"{_rule(snapshot_id)} Use /mnt/skills/.accepted/{snapshot_id}{relative} instead of {requested}; describe_skill reports each skill's exact directory."
 
 
 @pytest.mark.parametrize(
     ("invoke", "expected"),
     [
+        # Every listing root above the snapshot is refused by this same fence,
+        # so a refusal that names only the rule leaves the model with nothing
+        # to look at. Each of these therefore carries the snapshot root, and
+        # the re-rooted path when the request has one.
         (
             lambda runtime: sandbox_tools.ls_tool.func(runtime, "/mnt/skills", "list mutable skills"),
-            "Error: Permission denied: /mnt/skills",
+            lambda snapshot_id: _redirect(snapshot_id, "/mnt/skills", ""),
         ),
         (
             lambda runtime: sandbox_tools.glob_tool.func(runtime, "**/*", "/mnt/skills/custom", "find mutable skills"),
-            "Error: Permission denied: /mnt/skills/custom",
+            lambda snapshot_id: _redirect(snapshot_id, "/mnt/skills/custom", "/custom"),
         ),
         (
             lambda runtime: sandbox_tools.grep_tool.func(runtime, "secret", "/mnt/skills/public", "search mutable skills"),
-            "Error: Permission denied: /mnt/skills/public",
+            lambda snapshot_id: _redirect(snapshot_id, "/mnt/skills/public", "/public"),
         ),
         (
             lambda runtime: sandbox_tools.bash_tool.func(runtime, "bash /mnt/skills/custom/tool/run.sh", "execute mutable script"),
-            "Error: Accepted invocation may access only its accepted skill snapshot",
+            lambda snapshot_id: _redirect(snapshot_id, "/mnt/skills/custom/tool/run.sh", "/custom/tool/run.sh"),
         ),
         (
+            # The path written is not the path that would have been reached, so
+            # this one states the rule and offers no rewrite.
             lambda runtime: sandbox_tools.bash_tool.func(
                 runtime,
                 "cd /mnt/skills/.accepted/" + "a" * 64 + "; cat ../../custom/tool/SKILL.md",
                 "escape accepted tree",
             ),
-            "Error: Accepted invocation may access only its accepted skill snapshot",
+            _rule,
+        ),
+        (
+            # Another invocation's snapshot has no counterpart in this one.
+            lambda runtime: sandbox_tools.ls_tool.func(runtime, "/mnt/skills/.accepted/" + "b" * 64, "list a foreign snapshot"),
+            _rule,
         ),
     ],
 )
@@ -310,11 +350,13 @@ def test_accepted_execution_rejects_all_live_skill_tool_bypasses_before_io(
     tmp_path: Path,
     snapshot_paths: Paths,
     invoke,
-    expected: str,
+    expected,
 ) -> None:
     skill_file = _write_skill(tmp_path, body="ACCEPTED")
     revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
     runtime = _runtime_for_revision(revision)
+    snapshot = revision.material.skill_snapshot
+    assert snapshot is not None
     sandbox_calls = 0
 
     def unexpected_sandbox(_runtime):
@@ -324,8 +366,26 @@ def test_accepted_execution_rejects_all_live_skill_tool_bypasses_before_io(
 
     monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", unexpected_sandbox)
 
-    assert invoke(runtime) == expected
+    assert invoke(runtime) == expected(snapshot.snapshot_id)
     assert sandbox_calls == 0
+    revision.material.release_process_material()
+
+
+def test_accepted_execution_with_no_skills_says_so_rather_than_naming_a_tree(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """An accepted empty skill set has no tree to redirect to, and says that.
+
+    Naming a snapshot root here would be a lie, and offering a rewrite would
+    send the model looking for a directory that does not exist.
+    """
+    revision = _resolve_revision_without_skills(monkeypatch)
+    runtime = _runtime_for_revision(revision)
+    assert revision.material.skill_snapshot is None
+
+    assert sandbox_tools.ls_tool.func(runtime, "/mnt/skills", "list skills") == ("Error: Accepted invocation may access only its accepted skill snapshot. This invocation accepted no skills, so nothing under /mnt/skills is readable.")
     revision.material.release_process_material()
 
 

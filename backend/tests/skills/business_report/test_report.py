@@ -200,11 +200,17 @@ def test_profile_and_skill_doc_stay_in_lockstep_with_the_script(report) -> None:
     assert profile["name"] == report.DEFAULT_PROFILE
     for section in profile["sections"]:
         assert section in report.SECTION_BUILDERS
-    assert "/mnt/skills/public/business-report/scripts/report.py" in doc
+    # The script is addressed relative to the skill's own directory, never to a
+    # mount point the package cannot know. A durable accepted invocation mounts
+    # the snapshot and nothing else, so the absolute form this once pinned was
+    # a path its reader did not have.
+    assert '"$SKILL_DIR/scripts/report.py"' in doc
+    assert "/mnt/skills" not in doc
+    assert "`$SKILL_DIR` is the directory this `SKILL.md` is in" in doc
     assert report.DEFAULT_REPORTS_DIR in doc
     assert "preferences.json" in doc
     for command in ("inspect", "build", "prose", "render", "checks"):
-        assert f"report.py {command}" in doc or f"report.py \\\n  {command}" in doc
+        assert f'report.py" {command}' in doc
     # The lasting-preference rule and the never-modify-inputs rule are the two
     # the agent must follow without being asked.
     assert "from now on" in doc
