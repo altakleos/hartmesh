@@ -875,7 +875,10 @@ You have access to skills that provide optimized workflows for specific tasks. E
 - Follow the activated skill before choosing a general workflow.
 - The runtime injects the activated skill content for explicit slash activations; do not call `read_file` for that SKILL.md again unless the injected skill references supporting resources you need.
 
-**Skills are located at:** {container_base_path}
+**Where a skill is mounted differs between deployments** — a durable
+invocation executes an immutable snapshot rather than the live tree — so do not
+assume a path. Each entry below states its own location; the directory holding
+it is what a skill's instructions mean by its own files.
 {skill_evolution_section}
 {skills_list}
 {disabled_section}

@@ -134,13 +134,19 @@ def _render_skill_metadata(skills: list, container_base_path: str) -> str:
         mutability = "[custom, editable]" if s.category == SkillCategory.CUSTOM else "[built-in]"
         tools_line = ", ".join(s.allowed_tools) if s.allowed_tools else "(all)"
         location = s.get_container_file_path(container_base_path)
+        # The directory, stated separately, because it is what a skill's own
+        # command examples are written against and ``Location`` is the file
+        # inside it. Deriving one from the other is a step a reader can get
+        # wrong, and getting it wrong lands on a path that does not exist.
+        directory = s.get_container_path(container_base_path)
         # name/description/allowed-tools come from untrusted ``.skill`` frontmatter;
         # escape so a value cannot forge a framework tag in the describe_skill output.
         name = html.escape(s.name, quote=False)
         description = html.escape(s.description, quote=False)
         tools = html.escape(tools_line, quote=False)
         loc = html.escape(location, quote=False)
-        blocks.append(f"## Skill: {name}\n- Description: {description} {mutability}\n- Allowed tools: {tools}\n- Location: {loc}")
+        directory = html.escape(directory, quote=False)
+        blocks.append(f"## Skill: {name}\n- Description: {description} {mutability}\n- Allowed tools: {tools}\n- Location: {loc}\n- Directory: {directory}")
     return "\n\n".join(blocks)
 
 
@@ -172,8 +178,8 @@ You have access to skills that provide optimized workflows for specific tasks.
 **Skill Discovery:**
 1. Check <skill_index> for a skill name that matches your task
 2. Call describe_skill(name) to fetch its description and capabilities
-3. If the skill matches, call read_file on the returned location to load full instructions
-4. Follow the skill's instructions precisely
+3. If the skill matches, call read_file on the returned Location to load full instructions
+4. Follow the skill's instructions precisely, using the reported Directory wherever they refer to the skill's own files
 
 **Explicit Slash Skill Activation:**
 - If the user starts a request with `/<skill-name>`, that skill was explicitly requested.
@@ -183,5 +189,7 @@ You have access to skills that provide optimized workflows for specific tasks.
 {names}
 </skill_index>
 
-Skills are located at: {container_base_path}
+Where a skill is mounted differs between deployments — a durable invocation
+executes an immutable snapshot rather than the live tree — so do not assume a
+path. describe_skill reports each skill's exact Location and Directory.
 </skill_system>"""
