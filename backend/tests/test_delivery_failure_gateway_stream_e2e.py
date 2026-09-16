@@ -103,6 +103,40 @@ def test_a_turn_that_never_presented_its_file_reports_the_failure_without_breaki
     assert run["stop_reason"] == "artifact_delivery_incomplete"
 
 
+def test_the_notice_survives_the_connection_that_carried_it(
+    delivery_gateway: e2e._Gateway,
+) -> None:
+    """A reader who reloads gets the same correction, with the same files.
+
+    DF13 published the verdict and stopped: the frame is page-local state, so
+    the tenant-class rerun found both failed turns keeping their stored ``error``
+    and stop reason across a reload while the notice under the turn — and the
+    way to the files it offered — was gone. This is the route that gives it
+    back, and it must agree with the frame path by path (hartmesh-tenancy/DF14).
+    """
+    base = delivery_gateway.loopback_url
+    with httpx.Client() as client:
+        csrf, thread_id = e2e._register_and_create_thread(client, base)
+        on_frame, written = _produce_one_artifact_mid_turn(delivery_gateway.tmp_home, thread_id)
+        observed = e2e._observe_stream(client, base, thread_id, csrf, "probe:text please", on_frame=on_frame)
+        # Exactly the calls a reloaded page makes: the thread's runs, then the
+        # verdict for the one whose stop reason says there is one.
+        runs = client.get(f"{base}/api/threads/{thread_id}/runs").json()
+        flagged = [run for run in runs if run["stop_reason"] == "artifact_delivery_incomplete"]
+        delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/delivery").json()
+
+    assert written["done"], "the turn produced no artifact, so the fence was never exercised"
+    assert [run["run_id"] for run in flagged] == [observed.run_id]
+
+    live = _frames_of(observed, "custom")[-1]
+    assert delivery["available"] is True
+    assert delivery["run_id"] == live["run_id"] == observed.run_id
+    assert delivery["undelivered_paths"] == live["undelivered_paths"]
+    assert delivery["undelivered_count"] == live["undelivered_count"] == 1
+    # The same sentence, so the correction does not change wording on reload.
+    assert delivery["message"] == live["message"]
+
+
 def test_an_ordinary_turn_on_the_same_gateway_still_ends_clean(
     delivery_gateway: e2e._Gateway,
 ) -> None:
@@ -111,7 +145,11 @@ def test_an_ordinary_turn_on_the_same_gateway_still_ends_clean(
     with httpx.Client() as client:
         csrf, thread_id = e2e._register_and_create_thread(client, base)
         observed = e2e._observe_stream(client, base, thread_id, csrf, "probe:text please")
+        delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/delivery").json()
 
     assert observed.events[-1] == "end", observed.events
     assert "error" not in observed.events, observed.events
     assert not _frames_of(observed, "custom"), observed.frames
+    # And the route says so rather than 404ing or inventing an empty notice:
+    # this is the answer for almost every run, so it has to be an ordinary one.
+    assert delivery == {"available": False, "version": 1}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "@rstest/core";
 
 import {
   parseArtifactDeliveryFailure,
+  parseArtifactDeliveryRecord,
   parseArtifactDeliveryUnverified,
 } from "@/core/artifact-delivery";
 
@@ -85,4 +86,52 @@ describe("parseArtifactDeliveryUnverified", () => {
       parseArtifactDeliveryUnverified({ ...unverified, ...override }),
     ).toBeNull();
   });
+});
+
+// hartmesh-tenancy/DF14. The durable record carries the same fields as the live
+// frame, read by the same code, so a reload cannot change what the notice says.
+const validRecord = {
+  available: true,
+  version: 1,
+  run_id: "run-1",
+  message:
+    "Artifact delivery incomplete: no produced output artifact was presented",
+  undelivered_paths: ["/mnt/user-data/outputs/report.md"],
+  undelivered_count: 1,
+};
+
+describe("parseArtifactDeliveryRecord", () => {
+  it("reads the same verdict the stream frame carried", () => {
+    expect(parseArtifactDeliveryRecord(validRecord)).toEqual(
+      parseArtifactDeliveryFailure(validEvent),
+    );
+  });
+
+  it.each([
+    ["a run that delivered what it produced", { available: false, version: 1 }],
+    [
+      "a record with no availability claim",
+      { ...validRecord, available: undefined },
+    ],
+    ["a non-object", "available"],
+    ["null", null],
+  ])("reports nothing for %s", (_label, record) => {
+    expect(parseArtifactDeliveryRecord(record)).toBeNull();
+  });
+
+  it.each([
+    ["no files", { ...validRecord, undelivered_paths: [] }],
+    [
+      "a count below the disclosed list",
+      { ...validRecord, undelivered_count: 0 },
+    ],
+    ["a non-string path", { ...validRecord, undelivered_paths: [1] }],
+    ["no message", { ...validRecord, message: "" }],
+    ["no run", { ...validRecord, run_id: "" }],
+  ])(
+    "refuses a record with %s rather than render a partial notice",
+    (_label, record) => {
+      expect(parseArtifactDeliveryRecord(record)).toBeNull();
+    },
+  );
 });

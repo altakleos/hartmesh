@@ -3,7 +3,7 @@
 import { FileWarningIcon } from "lucide-react";
 import { useId } from "react";
 
-import { useArtifactDeliveryFailure } from "@/core/artifact-delivery";
+import { useRunArtifactDelivery } from "@/core/artifact-delivery";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -17,19 +17,30 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
  * than in a toast that has already gone. The files themselves are offered
  * through the ordinary artifact list, so opening and downloading them works
  * exactly as it would have if the assistant had presented them.
+ *
+ * The verdict comes from the stream while the page that heard it is open, and
+ * from the run's durable receipt afterwards, so the correction is still here
+ * tomorrow — which is the whole claim the notice makes, and the one a reload
+ * used to break (hartmesh-tenancy/DF14).
  */
 export function UndeliveredFilesNotice({
   className,
+  disabled,
   runId,
   threadId,
 }: {
   className?: string;
+  disabled?: boolean;
   runId?: string;
   threadId: string;
 }) {
   const { t } = useI18n();
   const titleId = useId();
-  const failure = useArtifactDeliveryFailure(runId);
+  const failure = useRunArtifactDelivery(threadId, runId, {
+    // While the turn is still streaming there is no terminal verdict to read,
+    // and the live frame is what will deliver it.
+    enabled: !disabled,
+  });
 
   if (!failure) {
     return null;
@@ -69,6 +80,12 @@ export function UndeliveredFilesNotice({
           </p>
         </div>
       </div>
+      {/*
+        No archive button: the run archive is assembled from the delivery
+        receipt's own `present_files` list, and a run that reached this card
+        presented nothing, so the route would refuse it. These are the files
+        that call should have named.
+      */}
       <ArtifactFileList
         archiveDownloadsEnabled={false}
         className="px-3 pb-3"

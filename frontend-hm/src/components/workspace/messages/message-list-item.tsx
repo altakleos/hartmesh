@@ -147,6 +147,7 @@ export function MessageListItem({
   artifactPaths = [],
   showCopyButton = true,
   showWorkspaceChanges = false,
+  threadIsLoading = false,
   canEdit = false,
   isEditPending = false,
   onEditAndRegenerate,
@@ -160,6 +161,13 @@ export function MessageListItem({
   runId?: string;
   showCopyButton?: boolean;
   showWorkspaceChanges?: boolean;
+  /**
+   * Whether *any* turn in this thread is still streaming, as opposed to
+   * `isLoading`, which is only true for the last group. The delivery verdict is
+   * terminal, so reading it while a run is in flight would cache an answer that
+   * run has not given yet.
+   */
+  threadIsLoading?: boolean;
   canEdit?: boolean;
   isEditPending?: boolean;
   onEditAndRegenerate?: (replacementText: string) => void | Promise<boolean>;
@@ -226,6 +234,7 @@ export function MessageListItem({
         artifactPaths={artifactPaths}
         runId={runId}
         showWorkspaceChanges={showWorkspaceChanges}
+        threadIsLoading={threadIsLoading}
         editState={
           isHuman && isEditing
             ? {
@@ -376,6 +385,7 @@ function MessageContent_({
   artifactPaths,
   runId,
   showWorkspaceChanges = false,
+  threadIsLoading = false,
   editState,
 }: {
   className?: string;
@@ -385,6 +395,7 @@ function MessageContent_({
   artifactPaths: readonly string[];
   runId?: string;
   showWorkspaceChanges?: boolean;
+  threadIsLoading?: boolean;
   editState?: {
     draft: string;
     disabled: boolean;
@@ -589,7 +600,11 @@ function MessageContent_({
       />
       <CitationSourcesPanel sources={citationSources} />
       {message.type === "ai" && showWorkspaceChanges && (
-        <UndeliveredFilesNotice threadId={threadId} runId={runId} />
+        <UndeliveredFilesNotice
+          threadId={threadId}
+          runId={runId}
+          disabled={threadIsLoading}
+        />
       )}
       {message.type === "ai" && showWorkspaceChanges && (
         <WorkspaceChangeBadge

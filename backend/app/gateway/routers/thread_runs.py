@@ -103,6 +103,7 @@ from deerflow.runtime.run_evidence import (
     RunEvidenceSnapshotV1,
     public_evidence_reference,
 )
+from deerflow.runtime.runs.delivery import get_run_delivery_response
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.tenant_identity import TenantIdentityV1
 from deerflow.runtime.user_context import get_effective_user_id
@@ -2466,6 +2467,34 @@ async def list_retrieval_observations(
         "next_after_seq": next_after_seq,
         "invalid_event_count": invalid_event_count,
     }
+
+
+@router.get("/{thread_id}/runs/{run_id}/delivery")
+@require_permission("runs", "read", owner_check=True, require_existing=True)
+async def get_run_delivery(
+    thread_id: ThreadId,
+    run_id: str,
+    request: Request,
+) -> dict:
+    """Return the durable artifact-delivery verdict recorded for one run.
+
+    The live ``custom`` frame that carries this verdict is page-local state, so
+    a client that reloads, gaps, or never negotiated ``custom`` has no way back
+    to it. This is that way back, and it is the same verdict from the same
+    receipt (hartmesh-tenancy/DF14).
+    """
+    record = await _observe_run_or_404(
+        request,
+        thread_id=thread_id,
+        run_id=run_id,
+        visibility_prevalidated=True,
+    )
+    return await get_run_delivery_response(
+        get_run_event_store(request),
+        thread_id,
+        run_id,
+        stop_reason=record.stop_reason,
+    )
 
 
 @router.get("/{thread_id}/runs/{run_id}/workspace-changes")

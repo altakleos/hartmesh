@@ -206,60 +206,8 @@ fetch-and-decode of every message row's tool outputs on long threads.
 client input, because a welded-in seq goes stale when a fork re-seeds the feed
 (#4380).
 
-**Run delivery receipts** (`runtime/journal.py` + `runs/worker.py`):
-`RunJournal` records each non-empty artifact update once per tool `Command` for
-the terminal `run.delivery` event. When a command contains multiple messages, a
-unique tool name resolved from matching `ToolMessage` entries supplies
-attribution; additional command messages do not duplicate artifact paths or
-counts. If multiple different tool names resolve for one flat artifact update,
-the paths remain counted but unattributed because the command does not carry a
-per-path mapping. `RunJournal` callbacks set `run_inline=True`: they do only
-in-memory bookkeeping or schedule async writes, and staying on the run's
-event-loop thread serializes parallel tool callbacks before terminal delivery
-recording and flushing. Each worker creates a separate journal per run before
-cancellable/fallible preflight work, so checkpoint compatibility failures and
-cancellation while waiting for prior finalization still emit a zero-delivery
-receipt. The worker flushes ordinary journal events, idempotently persists the
-run-scoped receipt, and only then persists the staged terminal run status. A
-receipt failure is retried on a short bounded schedule while the owning worker
-still knows the real outcome and holds the lease. Delivery candidates are every
-regular file created or modified under `/mnt/user-data/outputs`; internal
-process-feedback files are excluded (the scanner's `EXCLUDED_DIR_NAMES` plus
-the configured `tool_output.storage_subdir`), so a run that only externalized
-oversized tool outputs does not fail delivery. At least one candidate must be
-covered by a path attributed by the journal to `present_files`; presenting
-only an unrelated pre-existing path does not satisfy delivery. Receipts for
-such runs add `produced_paths`, `presented_paths`, `matched_paths`,
-`verification`, `stage`, and `satisfied` to the Slice 1 fact fields. Missing a
-matching presentation becomes a run error; a successful presentation is also
-downgraded to error if its receipt cannot be durably verified. Neither
-publishes an `error` stream frame: the graph completed and the answer is
-checkpointed, so the stream reaches its end marker normally and the verdict
-rides `stop_reason` on the run record (`artifact_delivery_incomplete` /
-`delivery_receipt_failed`, also the `run.terminal.v1` failure code) plus one
-advisory `custom` frame for live clients — `artifact_delivery_incomplete`
-naming the withheld paths (bounded at 20, exact count) or
-`artifact_delivery_unverified` carrying only the run and the message. The
-frame is published outside the negotiated stream modes, which is acceptable
-precisely because it is advisory: a consumer that never requested `custom`
-reads the same verdict from the record, as `/wait` and the IM follow-up
-watcher already do after the end marker. Runs without changed outputs preserve
-ordinary chat behavior and the original receipt shape. Orphan recovery first
-atomically claims an expired lease, then uses the same singleton write to
-backfill a zero-delivery receipt — a stale recovery scan cannot overwrite a
-live run's later detailed receipt, an event-store outage does not undo the
-terminal takeover, and an existing detailed receipt is preserved when a worker
-crashed after writing it. Event stores serialize `put_if_absent` with ordinary
-thread writers: memory and JSONL provide the documented single-process
-guarantee, while the DB store adds per-thread in-process locks and PostgreSQL
-advisory locks for cross-process writers. Moving journal construction ahead of
-preflight is receipt-only on early failure paths: a separate boundary flag
-preserves the previous completion-data semantics, so checkpoint
-incompatibility or cancellation while waiting for an older finalizing run does
-not persist an empty completion snapshot. Worker tests pin one accumulated
-receipt across multiple goal-continuation `_stream_once` calls; journal tests
-drive LangChain's real async callback dispatcher against a single journal to
-pin serialized, deduplicated parallel tool callbacks.
+**Run delivery receipts** live with the code that writes and projects them:
+see [`runs/AGENTS.md`](runs/AGENTS.md).
 
 **Targeted run-event attribution** (`runtime/events/store/`):
 `RunEventStore.find_latest_ai_message_run_ids()` has a complete-or-error

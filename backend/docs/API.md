@@ -128,8 +128,8 @@ IP address. SQL audit retention defaults to 90 days.
   (`GET|POST /api/threads/{thread_id}/runs`, the POST-only `stream`, `wait`,
   `regenerate/prepare`, and `edit-regenerate/prepare` collection endpoints,
   `GET /api/threads/{thread_id}/runs/{run_id}` plus its `cancel` (POST),
-  `join`/`messages`/`events`/`retrieval-observations`/`workspace-changes`
-  (GET), and
+  `join`/`messages`/`events`/`retrieval-observations`/`workspace-changes`/
+  `delivery` (GET), and
   `GET|POST .../runs/{run_id}/stream`, plus
   `GET|POST .../runs/{run_id}/artifacts/archive` and
   `GET|POST .../runs/{run_id}/artifacts/evidence-bundle`), plus `POST /api/runs/stream|wait` and

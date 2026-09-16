@@ -1136,6 +1136,7 @@ export function MessageList({
                           showWorkspaceChanges={workspaceChangeAnchorGroupIndices.has(
                             groupIndex,
                           )}
+                          threadIsLoading={thread.isLoading}
                           canEdit={
                             group.type === "human" &&
                             Boolean(msg.id) &&

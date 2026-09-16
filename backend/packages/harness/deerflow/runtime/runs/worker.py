@@ -92,6 +92,12 @@ from deerflow.runtime.goal import (
     write_thread_goal,
 )
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.runs.delivery import (
+    DELIVERY_INCOMPLETE_ERROR,
+    DELIVERY_INCOMPLETE_STOP_REASON,
+    MAX_DISCLOSED_UNDELIVERED_PATHS,
+    undelivered_paths,
+)
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import (
@@ -915,7 +921,7 @@ async def _persist_delivery_receipt(
     return False  # pragma: no cover - loop always returns
 
 
-_DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
+_DELIVERY_INCOMPLETE_ERROR = DELIVERY_INCOMPLETE_ERROR
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
 
 
@@ -987,24 +993,13 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
 # set acceptable rather than load-bearing.
 _DELIVERY_INCOMPLETE_EVENT_TYPE = "artifact_delivery_incomplete"
 _DELIVERY_UNVERIFIED_EVENT_TYPE = "artifact_delivery_unverified"
-_DELIVERY_INCOMPLETE_STOP_REASON = "artifact_delivery_incomplete"
 _DELIVERY_RECEIPT_STOP_REASON = "delivery_receipt_failed"
 
-# Enough to act on, bounded so one run cannot push an unbounded list through
-# every subscriber's replay buffer. ``undelivered_count`` stays exact, and the
-# full set remains on the durable ``run.delivery`` receipt.
-MAX_DISCLOSED_UNDELIVERED_PATHS = 20
-
-
-def _undelivered_paths(content: dict[str, Any]) -> list[str]:
-    """Produced outputs this run never presented, in scan order.
-
-    The fence only fires when nothing matched, so at today's call sites this
-    subtracts an empty set; the subtraction keeps the helper honest if the
-    satisfaction rule ever narrows below "any match satisfies".
-    """
-    matched = set(content.get("matched_paths") or [])
-    return [path for path in content.get("produced_paths") or [] if path not in matched]
+# The bound, the stop reason and the produced-minus-presented rule are shared
+# with the durable projection a rejoining client reads, so the frame and the
+# receipt cannot describe the same run differently (hartmesh-tenancy/DF14).
+_DELIVERY_INCOMPLETE_STOP_REASON = DELIVERY_INCOMPLETE_STOP_REASON
+_undelivered_paths = undelivered_paths
 
 
 async def _publish_delivery_failure(

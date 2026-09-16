@@ -20,6 +20,7 @@ import { fetch } from "../api/fetcher";
 import {
   parseArtifactDeliveryFailure,
   parseArtifactDeliveryUnverified,
+  threadDeliveryQueryKey,
   useArtifactDeliveryContext,
 } from "../artifact-delivery";
 import { getBackendBaseURL } from "../config";
@@ -1512,6 +1513,13 @@ export function invalidateStoppedThreadCaches(
   });
   void queryClient.invalidateQueries({
     queryKey: threadTokenUsageQueryKey(threadId),
+  });
+  // A replay gap is exactly the case where this client may have missed the
+  // delivery frame for a turn it can no longer hear about, so the durable
+  // verdict has to be re-read rather than served from the answer cached before
+  // that turn ran (hartmesh-tenancy/DF14).
+  void queryClient.invalidateQueries({
+    queryKey: threadDeliveryQueryKey(threadId),
   });
 }
 
