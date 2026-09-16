@@ -1555,7 +1555,12 @@ unobservable=browser_first_text(requires_a_browser_measurement_through_public_in
 
 `@` is an offset from the turn's start and `+` the phase's own measured
 duration, both in milliseconds, so a phase carrying both **ends** at
-`@ + duration` and the questions are arithmetic on one line. The sandbox is in
+`@ + duration` and the questions are arithmetic on one line. A span is printed
+when it *ends*, so an enclosing span appears after the spans it contains and
+its `@` can be earlier than the entry printed before it: `sandbox_lookup@22ms`
+prints ahead of the `skill_materialization@21ms` that encloses it, and
+`sandbox_binding` ahead of the `sandbox_acquire` that encloses it. Sum only
+spans that enclose nothing. The sandbox is in
 hand at the end of `sandbox_acquire` (`6131 + 2677 = 8808ms`), so
 `first_stream_text@9025ms` leaves 217 ms between the sandbox being in hand and
 the first assistant text leaving the Gateway. `first_stream_text -
@@ -1565,28 +1570,40 @@ is a *warm* turn that still took 9.3 s, and it says where: 5.8 s projecting the
 accepted skill snapshot and 2.7 s binding it, against 143 ms to find the
 container.
 
-`acquisition=` says where this turn's sandbox came from — `created`,
-`accepted_warm_reclaim` for a reclaimed warm container, `accepted_active` or
-`in_process` for one that was already held. A turn acquires in stages (the
-worker projects the accepted skills before the graph runs; the sandbox
-middleware binds later against whatever is now active), so `acquisition=` is
-always the turn's **origin**, and a later stage that merely found the
+`acquisition=` says where this turn's sandbox came from. `created`,
+`rediscovered`, `discovered`, `warm_reclaim`, `accepted_warm_reclaim` and
+`unknown_provenance` are **origins** — they name how the container came to be;
+`accepted_active` and `in_process` are **observations** that it was already in
+hand, which any turn can make. A turn acquires in stages (the worker projects
+the accepted skills before the graph runs; the sandbox middleware binds later
+against whatever is now active), so `acquisition=` is the turn's origin
+whenever a stage reported one, and a later stage that merely found the
 container active is reported beside it as `reused=`. `acquisition=created
 reused=accepted_active` is one turn that created its sandbox and bound to it
-again, not two acquisitions — and `acquisition=` agrees with `creates=`
-instead of contradicting it.
+again — one container, not two — so a turn carrying `creates=1` no longer
+reports `acquisition=accepted_active`. A bare `acquisition=accepted_active` or
+`acquisition=in_process` with no `reused=` is a turn that found its container
+already there and no stage said how it got there. (A counter prints only when
+non-zero, so the warm turn above carries no `creates=`.)
 
-Four phases account for the window between admission and the model request,
-which on a warm turn is most of the wait. `skill_materialization` is the
-accepted skill snapshot being projected into the sandbox, and the sandbox
-phases **nest inside it** (`sandbox_lookup@22ms+143ms` sits within
+Four phases name the work that used to sit unattributed between the sandbox
+lookup and the binding, which on a warm turn is most of the wait.
+`skill_materialization` is the accepted skill snapshot being projected into
+the sandbox — authorization, the snapshot's manifest and verification, the
+container acquisition and the projection itself — and the sandbox phases *it
+records* nest inside it (`sandbox_lookup@22ms+143ms` sits within
 `skill_materialization@21ms+5825ms`, so the projection cost beyond finding the
-container is the difference). Then `agent_build` (building the graph; with
+container is the difference; on a cold turn `sandbox_create` and
+`sandbox_readiness` nest there too). The middleware's later `sandbox_binding`
+and `sandbox_acquire` do not: they run after the graph starts and are counted
+separately. Then `agent_build` (building the graph; with
 `skill_materialization` one of the two here carrying a measured duration),
 `checkpoint_preflight` (the thread's stored state being loaded) and
-`graph_start` (the graph itself beginning — after which `sandbox_binding`,
-`sandbox_acquire` and the model phases take over). `graph_start` is marked per
-attempt, so a resumed or retried stream shows two.
+`graph_start` (the worker entering the stream attempt, ahead of the per-thread
+checkpoint lock — so a wait behind a concurrent turn on the same thread falls
+between it and `sandbox_binding`). `graph_start` is marked per attempt, so a
+resumed or retried stream shows two. `skill_materialization` is recorded only
+on `kind=accepted` turns; an ordinary turn has the other three.
 
 What the server cannot see it declares instead of inferring:
 `browser_first_text` is always `unobservable` here, because only a browser
@@ -1600,7 +1617,9 @@ docker compose --project-directory /opt/hartmesh --env-file "$ENV" \
 
 is therefore a complete per-turn latency record. The same fields also ride the
 log record as a structured `turn_phases` field for deployments that enable
-`logging.enhance.format: json`; this profile logs text. The line reports
+`logging.enhance.format: json`; this profile logs text. That record stamps
+`version: 4`, and fields are added rather than repurposed, so a reader that
+tolerates unknown keys needs no change. The line reports
 confirmed resource counts (`creates=`, `teardowns=`), not attempts: the
 structured record keeps `create_attempts` and `unknown_create_results`
 separately, and one confirmed create can stand for several attempts.
@@ -2281,7 +2300,8 @@ Every one of its seven turns read `acquisition=accepted_active` — including th
 cold turn that also carried `creates=1` and a measured `sandbox_create` — and
 between the sandbox lookup ending and the binding starting each turn spent 2.6
 to 3.4 s that no phase accounted for. Both reproduced on the same development
-host on the released profile shape (this directory's `compose.yaml` and
+host — the unaccounted gap measuring about 6.0 s here rather than the tenant's
+2.6 to 3.4 s — on the released profile shape (this directory's `compose.yaml` and
 `config.yaml`, PostgreSQL, Redis, `SANDBOX_RUNTIME=runsc`, the 13-package
 seeded library, the probe model, the previous entry's image with the
 working-tree `turn_phases.py` and `runs/worker.py` mounted over it), and
@@ -2312,5 +2332,6 @@ repaired.
 - Not proved here: the tenant class itself, whose next Part A reads these
   fields; the pinned release image; and *why* the projection costs what it
   does — this entry measures the phase, it does not reduce it. The figures are
-  this host's, with a 13-package library and the probe's ~300 ms of scripted
-  delay inside `model_request` to `first_provider_text`.
+  this host's, with a 13-package library and ~200 ms of the probe's scripted
+  first-text delay between `model_request` and `first_provider_text` (201 ms
+  here), with ~100 ms more in its tail.

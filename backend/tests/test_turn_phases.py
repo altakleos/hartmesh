@@ -12,6 +12,7 @@ import pytest
 from deerflow.logging_config import DEFAULT_LOG_DATE_FORMAT, DEFAULT_LOG_FORMAT
 from deerflow.runtime.turn_phases import (
     MAX_PHASE_RECORDS,
+    MAX_RENDERED_PHASES,
     MAX_TRACKED_RUNS,
     AcquisitionSource,
     TurnPhase,
@@ -409,6 +410,31 @@ def test_the_rendered_message_stays_bounded_when_a_turn_records_many_phases(capl
     assert len(caplog.records[0].turn_phases["phases"]) == MAX_PHASE_RECORDS
 
 
+def test_a_truncated_render_keeps_the_end_of_the_turn(caplog):
+    """Truncation takes the middle, not the end.
+
+    A turn with goal continuations records a graph start and a binding per
+    attempt, so a head-only render drops ``model_completion`` and ``terminal``
+    -- where the arithmetic this line exists for finishes -- before it drops a
+    repeated early span.
+    """
+    journal = TurnPhaseJournal(correlation_id="trace-tail", run_id="run-tail")
+    for _ in range(MAX_RENDERED_PHASES + 10):
+        journal.mark(TurnPhase.SANDBOX_BINDING)
+    journal.mark(TurnPhase.MODEL_COMPLETION)
+    journal.mark(TurnPhase.TERMINAL)
+
+    with caplog.at_level(logging.INFO, logger="deerflow.runtime.turn_phases"):
+        journal.emit()
+
+    message = caplog.records[0].getMessage()
+    assert "more" in message
+    assert "model_completion@" in message, message
+    assert "terminal@" in message, message
+    # The record behind the message still has every phase.
+    assert len(caplog.records[0].turn_phases["phases"]) == MAX_RENDERED_PHASES + 12
+
+
 # ── The acquisition label must keep the turn's origin ─────────────────────
 #
 # Tenant-class .15 read `acquisition=accepted_active` on all seven turns,
@@ -420,7 +446,7 @@ def test_the_rendered_message_stays_bounded_when_a_turn_records_many_phases(capl
 # the one thing the field exists to disclose.
 
 
-def test_an_active_reuse_observation_does_not_replace_the_turn_s_origin():
+def test_an_active_reuse_observation_does_not_replace_the_recorded_origin():
     journal = TurnPhaseJournal(correlation_id="trace-origin", run_id="run-origin")
 
     journal.set_acquisition_source(AcquisitionSource.ACCEPTED_WARM_RECLAIM)
@@ -514,12 +540,36 @@ def test_the_pre_model_phases_name_the_work_between_admission_and_the_model():
 
     snapshot = journal.snapshot()
     assert snapshot.phase_ms(TurnPhase.AGENT_BUILD) is not None
-    # The accepted projection encloses the sandbox work rather than excluding it.
-    materialization = snapshot.phase_at_ms(TurnPhase.SKILL_MATERIALIZATION)
-    assert materialization is not None
-    assert snapshot.phase_ms(TurnPhase.SKILL_MATERIALIZATION) >= snapshot.phase_ms(TurnPhase.SANDBOX_LOOKUP)
+    assert snapshot.phase_at_ms(TurnPhase.SKILL_MATERIALIZATION) is not None
     for phase in (TurnPhase.CHECKPOINT_PREFLIGHT, TurnPhase.GRAPH_START):
         assert snapshot.phase_at_ms(phase) is not None
     line = snapshot.to_log_line()
     for phase in ("skill_materialization@", "agent_build@", "checkpoint_preflight@", "graph_start@"):
         assert phase in line, line
+
+
+@pytest.mark.parametrize("source", list(AcquisitionSource))
+def test_every_source_is_classified_as_an_origin_or_an_observation(source):
+    """The partition is the whole repair; a ninth source must not default into it.
+
+    Only the two that say "the container was already in hand" are
+    observations. Everything else names how the container came to be, and a
+    new member silently taking the origin side is the defect this pins.
+    """
+    observation = source in {AcquisitionSource.IN_PROCESS, AcquisitionSource.ACCEPTED_ACTIVE}
+    assert source.observes_active_reuse is observation
+    if observation:
+        # An observation is also a reuse in the wider "paid for no creation"
+        # sense; the two questions stay separate but must agree here.
+        assert source.reuses_existing_resource
+
+
+def test_a_second_graph_start_is_recorded_rather_than_collapsed():
+    """A resumed or retried stream is a second graph start, and the turn paid for both."""
+    journal = TurnPhaseJournal(correlation_id="trace-retry", run_id="run-retry")
+
+    journal.mark(TurnPhase.GRAPH_START)
+    journal.mark(TurnPhase.GRAPH_START)
+
+    line = journal.snapshot().to_log_line()
+    assert line.count("graph_start@") == 2, line

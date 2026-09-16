@@ -2890,7 +2890,7 @@ async def _run_agent(
             agent_factory_kwargs["app_config"] = ctx.app_config
         from deerflow.extensions import bind_agent_build_extensions
 
-        # Building the graph is the first of the three pre-model phases: a warm
+        # Building the graph is one of the four pre-model phases: a warm
         # turn spends seconds between admission and its model request, and
         # before these an operator could see that only as a gap.
         with phase_span(TurnPhase.AGENT_BUILD), bind_agent_build_extensions(extensions):

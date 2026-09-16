@@ -34,6 +34,17 @@ relay headers, provider handles and deployment identities are never recorded --
 only that a phase happened and when. Correlation ids live in the record's own
 fields, never in a metric label.
 
+Acquisition
+-----------
+``acquisition_source`` is the turn's own *origin* -- how the container it used
+came to be. A turn acquires in stages, and the later ones can only observe that
+the container is already in hand, so ``IN_PROCESS`` and ``ACCEPTED_ACTIVE`` are
+classified as observations (:attr:`AcquisitionSource.observes_active_reuse`):
+they never replace a recorded origin, riding beside it as ``acquisition_reuse``
+instead. A new source belongs on one side of that line, deliberately. When no
+stage reported an origin, the observation is what the turn observed and is
+reported as the source; nothing is inferred to fill the slot.
+
 Counting
 --------
 The unit of every resource counter is one *resource set*: the sandbox
@@ -93,6 +104,11 @@ MAX_TRACKED_RUNS = 64
 # it is rendered for an operator reading one line per turn and is bounded
 # independently of the record cap above.
 MAX_RENDERED_PHASES = 24
+# Of that budget, how many of the *last* records are always kept. A turn with
+# goal continuations records a graph start and a sandbox binding per attempt,
+# so head-only truncation drops model_completion and terminal -- the end of the
+# arithmetic this line exists for -- before it drops a repeated early span.
+MAX_RENDERED_PHASE_TAIL = 6
 MAX_RENDERED_UNOBSERVABLE = 4
 MAX_RENDERED_REASON = 80
 
@@ -102,15 +118,17 @@ class TurnPhase(StrEnum):
 
     ADMISSION = "admission"
     ASSEMBLY = "assembly"
+    # Projecting the accepted skill snapshot into the sandbox: the whole
+    # accepted preparation, so the sandbox phases *it records* nest inside this
+    # one (``SANDBOX_LOOKUP``, and on a cold turn ``SANDBOX_CREATE`` and
+    # ``SANDBOX_READINESS``). The middleware's later ``SANDBOX_BINDING`` and
+    # ``SANDBOX_ACQUIRE`` run after the graph starts and do not.
+    SKILL_MATERIALIZATION = "skill_materialization"
     # The window between assembly and the model request is most of a warm
     # turn's wait. Tenant-class .15 measured 2.6 to 3.4 s of it per turn with
-    # nothing named, so these three say where it goes: building the graph,
-    # the checkpoint preflight that loads the thread's state, and the moment
-    # the graph itself starts (after which the sandbox phases take over).
-    # Projecting the accepted skill snapshot into the sandbox. The sandbox
-    # phases nest inside this one: it is the whole accepted preparation, they
-    # are the container work within it.
-    SKILL_MATERIALIZATION = "skill_materialization"
+    # nothing named, so these three say where the rest of it goes: building the
+    # graph, the checkpoint preflight that loads the thread's state, and the
+    # worker entering the stream attempt.
     AGENT_BUILD = "agent_build"
     CHECKPOINT_PREFLIGHT = "checkpoint_preflight"
     GRAPH_START = "graph_start"
@@ -169,7 +187,7 @@ class AcquisitionSource(StrEnum):
 
 
 # Sources that report an already-held container rather than this turn's own
-# acquisition. Distinct from ``_REUSE_SOURCES`` above, which answers the wider
+# acquisition. Distinct from ``_REUSE_SOURCES`` below, which answers the wider
 # "did this turn pay for a container creation" question: a warm reclaim reuses
 # an existing resource *and* is an origin.
 _ACTIVE_REUSE_OBSERVATIONS = frozenset(
@@ -297,15 +315,22 @@ class TurnPhaseSnapshot:
         ):
             if value:
                 parts.append(f"{label}={value}")
-        rendered: list[str] = []
-        for record in self.phases[:MAX_RENDERED_PHASES]:
+
+        def _entry(record: PhaseRecord) -> str:
             entry = f"{record.phase}@{round(record.started_ms)}ms"
-            if record.duration_ms is not None:
-                entry = f"{entry}+{round(record.duration_ms)}ms"
-            rendered.append(entry)
-        omitted = len(self.phases) - len(rendered)
+            return entry if record.duration_ms is None else f"{entry}+{round(record.duration_ms)}ms"
+
+        records = self.phases
+        if len(records) > MAX_RENDERED_PHASES:
+            head = records[: MAX_RENDERED_PHASES - MAX_RENDERED_PHASE_TAIL]
+            tail = records[-MAX_RENDERED_PHASE_TAIL:]
+        else:
+            head, tail = records, ()
+        rendered = [_entry(record) for record in head]
+        omitted = len(records) - len(head) - len(tail)
         if omitted > 0:
             rendered.append(f"+{omitted} more")
+        rendered.extend(_entry(record) for record in tail)
         if rendered:
             parts.append("phases=" + " ".join(rendered))
         for phase, reason in self.unobservable[:MAX_RENDERED_UNOBSERVABLE]:
