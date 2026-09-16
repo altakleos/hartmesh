@@ -51,6 +51,10 @@ import {
   resolveStoredArtifactLanguage,
 } from "@/core/artifacts/viewer";
 import { useAuth } from "@/core/auth/AuthProvider";
+import {
+  isBusinessReportPath,
+  parseBusinessReport,
+} from "@/core/business-report";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
@@ -73,6 +77,7 @@ import {
   formatArtifactBytes,
 } from "./artifact-file-preview";
 import { useArtifacts } from "./context";
+import { ReportCard } from "./report-card";
 
 const WRITE_FILE_PREVIEW_REFRESH_INTERVAL_MS = 3000;
 
@@ -169,9 +174,9 @@ export function ArtifactFileDetail({
   const canPreviewInBrowser = useMemo(() => {
     return canBrowserPreviewFile(filepath);
   }, [filepath]);
-  const isSupportPreview = useMemo(() => {
-    return language === "html" || language === "markdown";
-  }, [language]);
+  const isReportFile = useMemo(() => {
+    return !isWriteFile && isBusinessReportPath(filepath);
+  }, [filepath, isWriteFile]);
   const toolResult = (() => {
     if (!isWriteFile) {
       return undefined;
@@ -183,11 +188,6 @@ export function ArtifactFileDetail({
     }
     return findToolCallResult(toolCallId, thread.messages);
   })();
-  const artifactViewState = getArtifactViewState({
-    filepath: filepathFromProps,
-    isSupportPreview,
-    toolResult,
-  });
   const {
     content,
     url,
@@ -203,6 +203,22 @@ export function ArtifactFileDetail({
     threadId,
     filepath: filepathFromProps,
     enabled: isCodeFile && !isWriteFile,
+  });
+  // A built report is previewed as the card the downloads were rendered from.
+  // Parsing decides it: a `.report.json` this app cannot draw stays a JSON
+  // file, and a truncated body is not a document at all.
+  const report = useMemo(() => {
+    if (!isReportFile || truncated || content === undefined) {
+      return null;
+    }
+    return parseBusinessReport(content);
+  }, [content, isReportFile, truncated]);
+  const isSupportPreview =
+    language === "html" || language === "markdown" || report !== null;
+  const artifactViewState = getArtifactViewState({
+    filepath: filepathFromProps,
+    isSupportPreview,
+    toolResult,
   });
 
   const displayContent = content ?? "";
@@ -637,6 +653,18 @@ export function ArtifactFileDetail({
               downloadLabel={t.common.download}
             />
           )}
+          {report !== null &&
+            !error &&
+            effectiveViewMode === "preview" &&
+            !isLoading && (
+              <ReportCard
+                artifacts={artifacts}
+                filepath={filepath}
+                isMock={isMock}
+                report={report}
+                threadId={threadId}
+              />
+            )}
           {artifactViewState.canPreview &&
             !error &&
             effectiveViewMode === "preview" &&

@@ -171,6 +171,24 @@ export const zhCN: Translations = {
       "文件已生成，但我们无法确认它们已保存到这条对话。请刷新页面确认。",
   },
 
+  businessReport: {
+    draft: (draft) => `第 ${draft} 稿`,
+    comparedWith: (period) => `相比 ${period}`,
+    downloadPdf: "PDF",
+    downloadWord: "Word",
+    downloadExcel: "Excel",
+    checksHeading: "核对",
+    notIncludedHeading: "未包含",
+    checkStatus: {
+      pass: "已核对",
+      warn: "请注意",
+      fail: "有问题",
+      not_checked: "未核对",
+    },
+    uploadedOn: (name, uploaded) => `${name}（上传于 ${uploaded}）`,
+    builtFrom: (inputs) => `根据 ${inputs.join("、")} 生成，已由报告脚本核对。`,
+  },
+
   // Input Box
   inputBox: {
     placeholder: "今天我能为你做些什么？",

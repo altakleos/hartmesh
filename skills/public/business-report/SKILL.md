@@ -84,7 +84,7 @@ Renders land next to the report as `<name>.pdf`, `.docx`, `.xlsx` or `.html`. Re
 
 ### Step 5: Present
 
-Show the KPI strip, the checks line and the `Not included` items, then offer the files with `present_files`. Say which file the report used and when it was uploaded (both are in `report.json` under `meta.inputs`, and `show` prints them). Then ask one short question about what to change, for example whether any rows should be excluded or a note added.
+Show the KPI strip, the checks line and the `Not included` items, then offer the files with `present_files`. Pass `<name>.report.json` first and the renders after it: the app draws that file as the report itself — the figures, the charts, the checks line and a download button for each render it was handed — so leaving it out turns the whole report into a list of attachments. Do not present `checks.json` or the files under `charts/`; the report carries them. Say which file the report used and when it was uploaded (both are in `report.json` under `meta.inputs`, and `show` prints them). Then ask one short question about what to change, for example whether any rows should be excluded or a note added.
 
 ## Changing a report
 

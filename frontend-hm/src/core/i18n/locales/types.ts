@@ -149,6 +149,24 @@ export interface Translations {
     receiptToast: string;
   };
 
+  businessReport: {
+    draft: (draft: number) => string;
+    comparedWith: (period: string) => string;
+    downloadPdf: string;
+    downloadWord: string;
+    downloadExcel: string;
+    checksHeading: string;
+    notIncludedHeading: string;
+    checkStatus: {
+      pass: string;
+      warn: string;
+      fail: string;
+      not_checked: string;
+    };
+    uploadedOn: (name: string, uploaded: string) => string;
+    builtFrom: (inputs: string[]) => string;
+  };
+
   // Input Box
   inputBox: {
     placeholder: string;
