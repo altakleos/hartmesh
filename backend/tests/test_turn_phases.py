@@ -607,7 +607,7 @@ def test_the_launch_interval_is_carried_from_the_route_into_the_journal(caplog):
     with caplog.at_level(logging.INFO, logger="deerflow.runtime.turn_phases"):
         journal.emit()
     message = caplog.records[0].getMessage()
-    assert "launch=" in message and "seal=2210ms" in message and "persist=11ms" in message and "handoff=" in message, message
+    assert "launch=" in message and "(identify=3ms,seal=2210ms,persist=11ms,handoff=" in message, message
     # The launch reads before the phases: it is what happened before them.
     assert message.index("launch=") < message.index("phases="), message
     wire = caplog.records[0].turn_phases
@@ -626,11 +626,12 @@ def test_a_turn_with_no_launch_timings_says_nothing_about_a_launch(caplog):
     assert caplog.records[0].turn_phases["launch"] is None
 
 
-def test_launch_step_names_are_bounded_labels_and_a_negative_stamp_is_refused():
+def test_launch_step_names_are_bounded_labels_and_a_stamp_behind_the_request_is_clamped():
     from deerflow.runtime.turn_phases import LaunchTimings
 
     now = time.monotonic()
     timings = LaunchTimings(received_at=now, persisted_at=now, steps=(("seal it now!", -5.0),))
     assert timings.steps == (("seal_it_now_", 0.0),)
-    with pytest.raises(ValueError):
-        LaunchTimings(received_at=now + 1, persisted_at=now, steps=())
+    # Diagnostics never fail a run: an impossible ordering is clamped, not raised.
+    clamped = LaunchTimings(received_at=now + 1, persisted_at=now, steps=())
+    assert clamped.persisted_at == clamped.received_at == now + 1

@@ -821,7 +821,9 @@ async def test_a_created_launch_records_its_steps_on_the_record_for_the_worker()
     assert timings is not None
     assert timings.received_at == received_at
     assert timings.persisted_at >= received_at
-    assert [step for step, _ in timings.steps] == ["seal", "authorize", "constrain", "prepare", "persist"]
+    # Consecutive from the stamp: the permit wait is a step of its own, and
+    # this fake normalizer has no identify step to record.
+    assert [step for step, _ in timings.steps] == ["permit", "seal", "authorize", "constrain", "prepare", "persist"]
     assert all(ms >= 0.0 for _, ms in timings.steps)
     await result.record.task
 

@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import socket
+import time
 import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
@@ -400,6 +401,7 @@ class ScheduledTaskService:
             receipt = await self._invocation_runtime.launch(
                 InternalLaunchIntent(
                     thread_id=execution_thread_id,
+                    received_at=time.monotonic(),
                     assistant_id=task.get("assistant_id"),
                     input={"messages": [{"role": "user", "content": task["prompt"]}]},
                     context={

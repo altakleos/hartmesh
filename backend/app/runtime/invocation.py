@@ -639,6 +639,36 @@ def _merge_decision_evidence(
     return replace(accepted, decision_evidence=merged)
 
 
+class _LaunchStopwatch:
+    """The launch's awaited steps, timed consecutively from the request's stamp.
+
+    Consecutive, so the steps account for the whole interval from the stamp
+    to the persisted row: what a step name does not cover is in the step that
+    follows it, never in an unnamed gap.
+    """
+
+    __slots__ = ("_step_started", "received_at", "steps")
+
+    def __init__(self, received_at: float | None) -> None:
+        now = time.monotonic()
+        self.received_at = received_at if received_at is not None else now
+        self.steps: list[tuple[str, float]] = []
+        self._step_started = self.received_at
+
+    def step(self, name: str) -> None:
+        now = time.monotonic()
+        self.steps.append((name, (now - self._step_started) * 1000.0))
+        self._step_started = now
+
+    def timings(self) -> LaunchTimings:
+        """The record's timings, with the last step's end as the persisted stamp."""
+        return LaunchTimings(
+            received_at=self.received_at,
+            persisted_at=self._step_started,
+            steps=tuple(self.steps),
+        )
+
+
 class InvocationRuntime:
     """Deep application module for launch, observation, and cancellation."""
 
@@ -733,30 +763,17 @@ class InvocationRuntime:
         intent: InternalLaunchIntent,
         identity: InternalAdmissionIdentity | None,
         validate_replay: ReplayValidator | None,
+        watch: _LaunchStopwatch,
     ) -> InternalLaunchReceipt | NotFoundOrInvisible | InvocationAuthorizationOutcome:
-        # Every awaited step of the launch is timed against the request's own
-        # stamp (or this launch's start when no route stamped it) and handed to
-        # the worker on the created record, so the turn's journal can report
-        # the interval before its first phase instead of leaving it unnamed.
-        received_at = intent.received_at if intent.received_at is not None else time.monotonic()
-        steps: list[tuple[str, float]] = []
-        step_started = time.monotonic()
-
-        def _step(name: str) -> None:
-            nonlocal step_started
-            now = time.monotonic()
-            steps.append((name, (now - step_started) * 1000.0))
-            step_started = now
-
         launch = await self._normalizer.normalize(intent)
-        _step("seal")
+        watch.step("seal")
         worker_owns_material = False
         created_record: RunRecord | None = None
         worker: WorkerCoroutine | None = None
         candidate_run_id = str(uuid.uuid4())
         try:
             start_decision = await self._authorization.authorize_start(launch)
-            _step("authorize")
+            watch.step("authorize")
             if rejection := self._rejection(start_decision):
                 return rejection
             if start_decision.evidence is not None and launch.accepted_invocation is not None:
@@ -768,7 +785,7 @@ class InvocationRuntime:
                     ),
                 )
             constraint_decision = await self._constraints.project(launch)
-            _step("constrain")
+            watch.step("constrain")
             if constraint_decision.outcome is InvocationConstraintOutcome.denied:
                 return InvocationAuthorizationOutcome.denied
             if constraint_decision.outcome is InvocationConstraintOutcome.indeterminate:
@@ -783,12 +800,12 @@ class InvocationRuntime:
                 )
             async with self._runs.admission_scope(launch.thread_id):
                 await self._runs.prepare_admission(launch)
-                _step("prepare")
+                watch.step("prepare")
                 admitted = await self._runs.admit(
                     launch,
                     candidate_run_id=candidate_run_id,
                 )
-                _step("persist")
+                watch.step("persist")
                 if isinstance(admitted, DurableAdmission):
                     record = admitted.record
                     if admitted.outcome is not AdmissionOutcome.created:
@@ -812,11 +829,7 @@ class InvocationRuntime:
                 created_record = record
                 # Set before the worker is attached: the worker reads it when
                 # it opens the journal, which can be its first step.
-                record.launch_timings = LaunchTimings(
-                    received_at=received_at,
-                    persisted_at=step_started,
-                    steps=tuple(steps),
-                )
+                record.launch_timings = watch.timings()
                 # Real-pod qualification barriers are inert unless the dedicated
                 # test image is started with its explicit environment gate.
                 from deerflow.runtime.kubernetes_qualification import (
@@ -922,6 +935,13 @@ class InvocationRuntime:
         self,
         intent: InternalLaunchIntent,
     ) -> InternalLaunchReceipt | NotFoundOrInvisible | InvocationAuthorizationOutcome:
+        # Every awaited step of the launch is timed against the request's own
+        # stamp (or this launch's start when no entry point stamped it) and
+        # handed to the worker on the created record, so the turn's journal
+        # can report the interval before its first phase instead of leaving
+        # it unnamed. Steps are consecutive from the stamp, so they account
+        # for the whole interval up to the persisted row.
+        watch = _LaunchStopwatch(intent.received_at)
         with self._normalizer.scope(intent):
             identity: InternalAdmissionIdentity | None = None
             identify = getattr(self._normalizer, "identify", None)
@@ -941,11 +961,13 @@ class InvocationRuntime:
                         if callable(validate_replay):
                             await validate_replay(intent, identity, existing)
                         return InternalLaunchReceipt(record=existing, created=False)
+                watch.step("identify")
 
             async with self._admission_permit() as permitted:
+                watch.step("permit")
                 if not permitted:
                     return InvocationAuthorizationOutcome.indeterminate
-                return await self._launch_absent(intent, identity, validate_replay)
+                return await self._launch_absent(intent, identity, validate_replay, watch)
 
     async def observe_run(
         self,

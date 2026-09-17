@@ -1837,6 +1837,7 @@ class ChannelManager:
         receipt = await self._invocation_runtime.launch(
             InternalLaunchIntent(
                 thread_id=thread_id,
+                received_at=time.monotonic(),
                 assistant_id=assistant_id,
                 input=run_input,
                 config=run_config,

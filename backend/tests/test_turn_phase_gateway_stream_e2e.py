@@ -475,7 +475,7 @@ def test_the_emitted_line_carries_the_turn_timing_a_deployment_can_read(gateway:
     assert "launch=" in message and message.index("launch=") < message.index("phases="), message
     launch = wire["launch"]
     assert launch is not None and launch["total_ms"] > 0, wire
-    assert [step["step"] for step in launch["steps"]] == ["seal", "authorize", "constrain", "prepare", "persist"], launch
+    assert [step["step"] for step in launch["steps"]] == ["identify", "permit", "seal", "authorize", "constrain", "prepare", "persist"], launch
     assert launch["handoff_ms"] >= 0, launch
     print(f"turn-phase e2e (released log line): {message}")
 

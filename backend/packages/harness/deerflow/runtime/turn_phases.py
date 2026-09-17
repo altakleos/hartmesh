@@ -271,8 +271,10 @@ class LaunchTimings:
     steps: tuple[tuple[str, float], ...] = ()
 
     def __post_init__(self) -> None:
-        if self.persisted_at < self.received_at:
-            raise ValueError("a launch cannot persist its run before the request that asked for it")
+        # Diagnostics never fail a run: a stamp behind the request (two clocks
+        # that should have been one) is clamped, not refused.
+        object.__setattr__(self, "received_at", float(self.received_at))
+        object.__setattr__(self, "persisted_at", max(float(self.received_at), float(self.persisted_at)))
         object.__setattr__(
             self,
             "steps",
@@ -383,7 +385,9 @@ class TurnPhaseSnapshot:
             if self.launch_handoff_ms is not None:
                 steps.append(f"handoff={round(self.launch_handoff_ms)}ms")
             launch = f"launch={round(self.launch_ms)}ms"
-            parts.append(f"{launch}({' '.join(steps)})" if steps else launch)
+            # Comma-joined so a reader that splits the line on whitespace
+            # keeps the group as one field, unlike the top-level ones.
+            parts.append(f"{launch}({','.join(steps)})" if steps else launch)
         for label, value in (
             ("creates", self.resource_creates),
             ("rediscoveries", self.resource_rediscoveries),
@@ -715,9 +719,19 @@ class TurnPhaseJournal:
             self._failed_attempts += 1
 
     def set_launch(self, timings: LaunchTimings) -> None:
-        """Carry what the route measured before this journal opened."""
+        """Carry what the launch measured before this journal opened.
+
+        Re-bounded here as well as in the record's constructor: the journal
+        trusts no caller to have spelled a label, whatever object it was
+        handed.
+        """
+        bounded = LaunchTimings(
+            received_at=float(timings.received_at),
+            persisted_at=float(timings.persisted_at),
+            steps=tuple(timings.steps),
+        )
         with self._lock:
-            self._launch = timings
+            self._launch = bounded
 
     def set_outcome(self, outcome: str) -> None:
         with self._lock:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 from uuid import uuid4
 
@@ -125,6 +126,7 @@ class InvocationRuntimeAPI(DurableInvocationPort):
             result = await self._runtime.launch(
                 InternalLaunchIntent(
                     thread_id=request.thread_id,
+                    received_at=time.monotonic(),
                     assistant_id=request.agent_hint,
                     input=request.input.value if is_graph_input else None,
                     command=None if is_graph_input else {"resume": request.input.value},

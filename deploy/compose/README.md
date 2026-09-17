@@ -1613,8 +1613,7 @@ wrapped here only to fit the page:
 ```text
 turn phase timings run=<run id> correlation=<id> total=9261ms outcome=success kind=accepted \
 acquisition=accepted_warm_reclaim reused=accepted_active acquire_reason=accepted_binding \
-snapshot=present/13pkg/mandatory queue=0ms launch=2143ms(seal=2088ms authorize=1ms constrain=0ms prepare=9ms persist=11ms handoff=34ms) \
-phases=admission@0ms assembly@6ms sandbox_lookup@22ms+143ms \
+snapshot=present/13pkg/mandatory queue=0ms phases=admission@0ms assembly@6ms sandbox_lookup@22ms+143ms \
 skill_materialization@21ms+5825ms agent_build@5857ms+232ms checkpoint_preflight@6109ms graph_start@6115ms \
 sandbox_binding@6131ms+2677ms sandbox_acquire@6131ms+2677ms model_request@8821ms first_provider_text@9022ms \
 first_stream_text@9025ms model_completion@9156ms terminal@9261ms \
@@ -1673,22 +1672,39 @@ between it and `sandbox_binding`). `graph_start` is marked per attempt, so a
 resumed or retried stream shows two. `skill_materialization` is recorded only
 on `kind=accepted` turns; an ordinary turn has the other three.
 
-`launch=` is what happened *before* the journal opened: the interval from the
-request reaching the application (`POST .../runs/stream` entry, or the
-scheduler's or a channel's launch) to the worker's admission, which is the
-journal's zero. It is the server's half of the person's wait for a first
-word, and until this field existed it was invisible except as a gap between
-the access log and "Run created". The steps in brackets are the launch's own
-awaited work in order — `seal` (the accepted invocation: config, agent
-revision and skill snapshot), `authorize`, `constrain`, `prepare` (the
-admission reservation and checkpoint seed check), `persist` (the run row) —
-and `handoff` is the row being persisted to the journal opening, which the
-worker's own thread-metadata setup occupies. The launch in the example above
-spent 2.1 s sealing, which is the `.19` tenant class staging its skill
-snapshot; a warm turn after that repair reads `launch=` in the low hundreds
-of milliseconds. A replayed run (an idempotent resubmission that found its
-run already admitted) carries no `launch=`, because its worker was already
-running.
+`launch=` is what happened *before* the journal opened, and it is **outside**
+`total=` and every `@` offset: the journal's zero is the worker's admission,
+so `total=` and the phases start there, and `launch=` is the interval from the
+request reaching the application to that zero. It is the server's half of the
+person's wait for a first word — read acknowledgement as `launch=` plus
+`first_stream_text@`, never as the offset alone — and until this field
+existed it was invisible except as the gap between the access log and "Run
+created". Every entry point stamps the intent when it builds it: the HTTP
+routes at `start_run`, the scheduler when it dispatches an occurrence, an IM
+channel when it turns a message into a run, the embedded runtime API at its
+call. The steps in brackets are consecutive from that stamp, so they account
+for the whole interval up to the persisted row: `identify` (the idempotency
+lookup, when the entry point supplied a key), `permit` (the admission fence),
+`seal` (the accepted invocation: config, agent revision and skill snapshot),
+`authorize`, `constrain`, `prepare` (the projection reservation and the
+checkpoint seed check) and `persist` (the run row). `handoff` is the rest:
+the worker being attached, its task being scheduled, and the thread-metadata
+setup it runs before opening the journal. The example line above predates
+the field and is left as it was measured. Measured on the development host on
+2026-09-17 (the Gateway stream suite's ordinary turn against the probe model:
+no skill snapshot, the in-process stores, so `seal` is the cheap case):
+
+```text
+launch=405ms(identify=0ms,permit=16ms,seal=96ms,authorize=0ms,constrain=0ms,prepare=268ms,persist=20ms,handoff=4ms)
+```
+
+Tenant-class `.19`, before this field existed, showed the same interval as
+1.4 to 2.2 s on warm turns and 3.4 s on the session's first, with `seal`
+staging the skill snapshot each time; that is the figure the next
+qualification reads from `launch=` directly. A launch that replays an
+already-admitted run (an idempotent resubmission) starts no worker and prints
+no new line; a run recovered by execution takeover prints a line with no
+`launch=`, because no request in that process launched it.
 
 What the server cannot see it declares instead of inferring:
 `browser_first_text` is always `unobservable` here, because only a browser
