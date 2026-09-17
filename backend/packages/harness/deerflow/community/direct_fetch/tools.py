@@ -147,7 +147,11 @@ async def _fetch_with_evidence(url: str, client: DirectFetchClient) -> tuple[str
     )
     accepted = accepted_retrieval_request_from_active(
         query=url,
-        credential=ResolvedRetrievalCredentialV1(provider_id=PROVIDER_ID, selector_ref="direct-anonymous", secret=None),
+        # An accepted request needs a resolvable credential handle even when
+        # the path is anonymous; ``secret`` is the sentinel that one resolved,
+        # never a value, and it stays out of every projection and digest. The
+        # keyless DuckDuckGo provider declares itself the same way.
+        credential=ResolvedRetrievalCredentialV1(provider_id=PROVIDER_ID, selector_ref="direct-anonymous", secret=True),
         policy=policy,
         requested_constraints=RetrievalRequestConstraintsV1(provider_id=PROVIDER_ID, endpoint=origin, max_results=1, timeout_ms=timeout_ms, allow_redirects=True),
     )

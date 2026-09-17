@@ -1204,8 +1204,8 @@ key-bearing `web_search` / `web_fetch` / `image_search` backends. A fragment is
 included only when its variable is present and non-empty, and it writes
 `api_key: $NAME` (the reference, never the value), so the Gateway still expands
 the secret itself and no secret lands on disk. Fragment tools replace the
-template's keyless defaults (the profile's own SearXNG for search, § "Web
-search"; Jina fetch; DuckDuckGo image search) by name; when several present
+template's keyless defaults (the profile's own SearXNG for search and image
+search, § "Web search"; the Gateway's own fetch, § "Web fetch") by name; when several present
 keys provide the same tool, the first fragment in file order wins, which is
 why the files are numbered.
 
@@ -1357,6 +1357,47 @@ healthy everywhere, and the signal is the Gateway's `web_search (SearXNG)
 failed` line plus SearXNG's own per-query engine errors. Its start prints an
 ownership warning for the root-owned tmpfs and a missing-`limiter.toml`
 notice, both expected.
+
+### Web fetch
+
+`web_fetch` without a fetch-provider key is
+`deerflow.community.direct_fetch.tools:web_fetch_tool` since 2026-09-17: the
+Gateway reads the page itself. It replaced the hosted reader (`r.jina.ai`),
+which answers a tenant's server address with HTTP 401
+`AuthenticationRequiredError` for every page unless a key is sent; on the
+tenant class one research turn made three such calls and a report turn
+thirteen, each to a different address, before answering from search snippets
+alone. Probed from a development host on 2026-09-17, the seventeen exact
+addresses those turns asked for: fourteen answer a plain `GET` with
+`200 text/html`, two refuse with 403 (a reference site and a blog platform
+that gate automated readers, which the profile does not solve, evade or shop
+around), one timed out. The hosted reader answered none without a key.
+
+What the fetch does, in order: the address must be `http` or `https` with a
+host; every address the host resolves to must be public (the same never-allowed
+set as the sandbox egress policy: private, loopback, link-local, carrier NAT,
+multicast, documentation and cloud-metadata ranges); the connection is made to
+the checked address with the name on `Host` and on TLS SNI, so the certificate
+is still verified against the name and a resolver that answers differently the
+second time gains nothing; redirects are followed by hand, each hop checked and
+pinned again, eight at most; only HTML, XHTML and plain text are read, to
+2 MiB; one 10 s budget (`timeout` on the tool entry) covers the chain. No
+cookies, no credentials, no retries. The page is reduced to its article and
+handed to the model as Markdown, 4,096 characters at most, as before.
+
+A refusal is typed by who refused. A page's own 401, 403, 404, 429 or 5xx is
+the *origin's*: the model is told to use another source and nothing else
+changes. A refusal by the fetch path itself, which the direct fetch has no
+way to produce but a keyed provider fragment does (a bad key, a spent quota,
+a rate-limited deployment), is the *provider's*: it holds for every address,
+so the Gateway withdraws `web_fetch` from the model's tools for the rest of
+that turn and tells it once to answer from search results and say that
+sources could not be fetched. The next turn tries once more. This is the
+typed `error_scope` on the tool result, never the wording of it.
+
+`web_fetch` runs from the Gateway's own address, like search: the sandbox
+allowlist (§ "`SANDBOX_EGRESS=allowlist` (the default)") does not govern it, and a site that gates
+that address gates it for every tenant behind it.
 
 ### Operator-managed models
 

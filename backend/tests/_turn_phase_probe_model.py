@@ -15,6 +15,10 @@ exactly as it would interrupt a provider call:
 * ``probe:hang``   -- a hidden reasoning block, then a long pause meant to be
                       cancelled from outside.
 * ``probe:search`` -- one declared retrieval tool call, then the ordinary text
+* ``probe:fetch <url>`` -- one ``web_fetch`` call for that address, then the
+  ordinary text; every ``bind_tools`` call records the tool names it was
+  given in :data:`BOUND_TOOL_NAMES`, so a test can see what the model could
+  call on each request
                       script once the tool result comes back.
 
 Delays are read from the environment when the model is built, so a test sets
@@ -24,6 +28,7 @@ them before the server starts and they apply to every run it serves.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator
 from typing import Any
@@ -40,6 +45,10 @@ HANG_DELAY_ENV = "HARTMESH_PROBE_HANG_DELAY_S"
 TEXT_CHUNKS = ("Hello", " from", " the probe.")
 SEARCH_TOOL_NAME = "web_search"
 SEARCH_QUERY = "what is the capital of france"
+FETCH_TOOL_NAME = "web_fetch"
+#: The tool names bound on every model request, in order. Process-global,
+#: like the model instance the Gateway builds; a test clears it.
+BOUND_TOOL_NAMES: list[list[str]] = []
 _REASONING_BLOCK = [{"type": "reasoning", "reasoning": "hidden deliberation"}]
 
 
@@ -61,8 +70,21 @@ def _script_for(messages: list[BaseMessage]) -> str:
                 return "hang"
             if "probe:search" in text:
                 return "search"
+            if "probe:fetch" in text:
+                return "fetch"
             return "text"
     return "text"
+
+
+def _fetch_url(messages: list[BaseMessage]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            content = message.content
+            text = content if isinstance(content, str) else " ".join(str(block.get("text", "")) for block in content if isinstance(block, dict))
+            marker = "probe:fetch"
+            if marker in text:
+                return text.split(marker, 1)[1].strip().split()[0]
+    return "https://example.org/"
 
 
 class ProbeStreamingChatModel(BaseChatModel):
@@ -87,6 +109,7 @@ class ProbeStreamingChatModel(BaseChatModel):
         return "hartmesh-turn-phase-probe"
 
     def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any) -> Runnable:  # type: ignore[override]
+        BOUND_TOOL_NAMES.append([str(getattr(tool, "name", None) or (tool.get("name") if isinstance(tool, dict) else tool)) for tool in (tools or [])])
         return self
 
     @staticmethod
@@ -100,7 +123,7 @@ class ProbeStreamingChatModel(BaseChatModel):
         # middleware makes with its own trimmed message list. Answering those
         # with a tool call would dispatch a tool nobody asked for, so the
         # retrieval script is scripted only in ``_astream``.
-        if script in ("text", "search"):
+        if script in ("text", "search", "fetch"):
             content.append({"type": "text", "text": "".join(TEXT_CHUNKS)})
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
@@ -125,6 +148,22 @@ class ProbeStreamingChatModel(BaseChatModel):
                             "name": SEARCH_TOOL_NAME,
                             "args": f'{{"query": "{SEARCH_QUERY}", "max_results": 3}}',
                             "id": "probe-search-1",
+                            "index": 0,
+                            "type": "tool_call_chunk",
+                        }
+                    ],
+                )
+            )
+            return
+        if script == "fetch" and not self._already_called_tool(messages):
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content=[],
+                    tool_call_chunks=[
+                        {
+                            "name": FETCH_TOOL_NAME,
+                            "args": json.dumps({"url": _fetch_url(messages)}),
+                            "id": "probe-fetch-1",
                             "index": 0,
                             "type": "tool_call_chunk",
                         }
