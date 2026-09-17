@@ -147,6 +147,8 @@ def test_get_file_answers_404_for_a_missing_file_and_400_for_a_bad_path(paths: P
     client, user = _client()
     _files_of(paths, user)
 
+    (paths.user_files_dir(str(user.id)) / "Reports").mkdir()
+
     with client:
         missing = client.get("/api/files/nope.txt")
         folder = client.get("/api/files/Reports")
@@ -311,3 +313,43 @@ def test_keep_refuses_a_bad_folder(paths: Paths) -> None:
         )
 
     assert response.status_code == 400
+
+
+def test_get_file_never_lets_the_browser_sniff(paths: Paths) -> None:
+    client, user = _client()
+    root = _files_of(paths, user)
+    (root / "notes.txt").write_bytes(b"hello")
+
+    with client:
+        response = client.get("/api/files/notes.txt")
+
+    assert response.headers["x-content-type-options"] == "nosniff"
+
+
+def test_keep_requires_the_thread_to_exist(paths: Paths) -> None:
+    """A durable copy from an untracked or deleted thread is refused, as the destructive routes do."""
+    client, user = _client()
+    _thread_output(paths, user, "august.pdf", b"pdf")
+
+    with client:
+        client.post(f"/api/threads/{THREAD}/files", json={"path": "/mnt/user-data/outputs/august.pdf"})
+
+    check_access = client.app.state.thread_store.check_access
+    assert check_access.await_args is not None
+    assert check_access.await_args.kwargs.get("require_existing") is True
+
+
+def test_keep_refuses_a_link_that_leaves_uploads_and_outputs(paths: Paths, tmp_path: Path) -> None:
+    """A link inside outputs pointing at the workspace passes the prefix; the resolved path does not."""
+    client, user = _client()
+    paths.ensure_thread_dirs(THREAD, user_id=str(user.id))
+    scratch = paths.sandbox_work_dir(THREAD, user_id=str(user.id)) / "scratch.py"
+    scratch.write_bytes(b"print()")
+    outputs = paths.sandbox_outputs_dir(THREAD, user_id=str(user.id))
+    _symlink_to_or_skip(outputs / "scratch.py", scratch)
+
+    with client:
+        response = client.post(f"/api/threads/{THREAD}/files", json={"path": "/mnt/user-data/outputs/scratch.py"})
+
+    assert response.status_code == 400
+    assert not (paths.user_files_dir(str(user.id)) / "scratch.py").exists()

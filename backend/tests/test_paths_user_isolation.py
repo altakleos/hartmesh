@@ -298,6 +298,10 @@ class TestUserFilesDir:
         assert created == paths.user_files_dir("u1")
         # The sandbox writes here as its own uid, like the thread directories.
         assert (created.stat().st_mode & 0o777) == 0o777
+        # A mode somebody tightened on the long-lived directory is left alone.
+        created.chmod(0o750)
+        paths.ensure_user_files_dir("u1")
+        assert (created.stat().st_mode & 0o777) == 0o750
 
     def test_resolve_virtual_files_path_reaches_the_owner_from_any_thread(self, paths: Paths):
         files_dir = paths.ensure_user_files_dir("u1")

@@ -248,9 +248,17 @@ class Paths:
         return self.user_dir(user_id) / _USER_FILES_SEGMENT
 
     def ensure_user_files_dir(self, user_id: str) -> Path:
-        """Create the person's files directory, writable by the sandbox uid like the thread directories."""
+        """Create the person's files directory, writable by the sandbox uid like the thread directories.
+
+        The mode is set when the directory is created, not on every acquire:
+        this directory is long-lived and shared, so a deliberately tightened
+        mode stays, and one owned by another uid does not fail the acquire.
+        """
         files_dir = self.user_files_dir(user_id)
-        files_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            files_dir.mkdir(parents=True)
+        except FileExistsError:
+            return files_dir
         files_dir.chmod(0o777)
         return files_dir
 

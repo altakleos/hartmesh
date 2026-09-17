@@ -1308,7 +1308,8 @@ class AioSandboxProvider(
         if effective_user_id is not None:
             # The person's own files: one directory per user, the same in every
             # sandbox of theirs, so a file kept in one chat is on the next one's
-            # disk. The legacy thread layout has no user bucket and no files.
+            # disk. Only a caller that passes no user at all (the legacy thread
+            # layout) has no user bucket to mount.
             paths.ensure_user_files_dir(effective_user_id)
             mounts.append((paths.host_user_files_dir(effective_user_id), f"{VIRTUAL_PATH_PREFIX}/files", False))
         return mounts + [

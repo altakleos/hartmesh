@@ -915,6 +915,25 @@ def test_pat_policy_does_not_pre_authorize_unimplemented_methods():
 
 
 @pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/api/files"),
+        ("GET", "/api/files/Reports/august.pdf"),
+        ("DELETE", "/api/files/Reports/august.pdf"),
+        ("POST", "/api/threads/t1/files"),
+        ("POST", "/api/threads/t1/files/"),
+        ("GET", "/api/threads/t1/files"),
+    ],
+)
+def test_pat_policy_keeps_the_persons_files_off_limits(method: str, path: str):
+    """The person's own files (durable, cross-conversation) are session-only: no
+    thread rule may grow to admit the ``/files`` suffix, and no files rule exists."""
+    from app.gateway.auth.pat import is_pat_allowed_route
+
+    assert is_pat_allowed_route(method, path) is False
+
+
+@pytest.mark.parametrize(
     ("method", "path", "scope"),
     [
         ("POST", "/api/threads", "threads:write"),

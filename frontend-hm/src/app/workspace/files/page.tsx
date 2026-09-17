@@ -1,7 +1,7 @@
 "use client";
 
 import { DownloadIcon, FolderIcon, Trash2Icon } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -46,6 +46,9 @@ export default function FilesPage() {
   const { data, error, isPending, refetch } = useMyFiles();
   const deleteFile = useDeleteMyFile();
   const [pendingDelete, setPendingDelete] = useState<MyFileInfo | null>(null);
+  // The row's Delete button is gone after a deletion, so focus returns to
+  // the heading rather than falling to the top of the document.
+  const headingRef = useRef<HTMLHeadingElement>(null);
 
   useEffect(() => {
     document.title = `${t.files.title} - ${t.pages.appName}`;
@@ -59,7 +62,13 @@ export default function FilesPage() {
       <WorkspaceBody>
         <div className="mx-auto flex w-full max-w-(--container-width-md) flex-col gap-4 p-6">
           <div>
-            <h1 className="text-2xl font-semibold">{t.files.title}</h1>
+            <h1
+              className="text-2xl font-semibold focus:outline-none"
+              ref={headingRef}
+              tabIndex={-1}
+            >
+              {t.files.title}
+            </h1>
             <p className="text-muted-foreground mt-1 text-sm">
               {t.files.description}
             </p>
@@ -71,7 +80,7 @@ export default function FilesPage() {
               data-testid="my-files-load-error"
             >
               <span className="text-destructive text-sm">
-                {t.files.loadFailed}: {error.message}
+                {t.files.loadFailed}
               </span>
               <Button size="sm" variant="outline" onClick={() => refetch()}>
                 {t.files.retry}
@@ -92,7 +101,13 @@ export default function FilesPage() {
               </EmptyHeader>
             </Empty>
           ) : (
-            <div className="overflow-x-auto rounded-lg border">
+            // Focusable so a keyboard-only reader can scroll a wide table at all.
+            <div
+              aria-label={t.files.title}
+              className="focus-visible:ring-ring overflow-x-auto rounded-lg border focus-visible:ring-2 focus-visible:outline-none"
+              role="region"
+              tabIndex={0}
+            >
               <table className="w-full border-collapse text-sm">
                 <caption className="sr-only">{t.files.title}</caption>
                 <thead>
@@ -100,7 +115,10 @@ export default function FilesPage() {
                     <th className="px-3 py-2 font-medium" scope="col">
                       {t.files.name}
                     </th>
-                    <th className="px-3 py-2 font-medium" scope="col">
+                    <th
+                      className="hidden px-3 py-2 font-medium sm:table-cell"
+                      scope="col"
+                    >
                       {t.files.folder}
                     </th>
                     <th
@@ -110,13 +128,13 @@ export default function FilesPage() {
                       {t.files.size}
                     </th>
                     <th
-                      className="px-3 py-2 font-medium whitespace-nowrap"
+                      className="hidden px-3 py-2 font-medium whitespace-nowrap sm:table-cell"
                       scope="col"
                     >
                       {t.files.modified}
                     </th>
                     <th className="px-3 py-2" scope="col">
-                      <span className="sr-only">{t.common.more}</span>
+                      <span className="sr-only">{t.files.actions}</span>
                     </th>
                   </tr>
                 </thead>
@@ -141,13 +159,16 @@ export default function FilesPage() {
                           {file.name}
                         </a>
                       </th>
-                      <td className="text-muted-foreground max-w-[25vw] truncate px-3 py-2">
+                      <td className="text-muted-foreground hidden max-w-[25vw] truncate px-3 py-2 sm:table-cell">
                         {folderOf(file) || "—"}
                       </td>
                       <td className="px-3 py-2 text-right whitespace-nowrap tabular-nums">
                         {formatArtifactBytes(file.size)}
                       </td>
-                      <td className="text-muted-foreground px-3 py-2 whitespace-nowrap">
+                      <td
+                        className="text-muted-foreground hidden px-3 py-2 whitespace-nowrap sm:table-cell"
+                        title={new Date(file.modified * 1000).toLocaleString()}
+                      >
                         {formatTimeAgo(file.modified * 1000, locale)}
                       </td>
                       <td className="px-2 py-1 text-right whitespace-nowrap">
@@ -192,7 +213,7 @@ export default function FilesPage() {
       >
         <DialogContent>
           <DialogHeader>
-            <DialogTitle>{t.files.delete}</DialogTitle>
+            <DialogTitle>{t.files.deleteTitle}</DialogTitle>
             <DialogDescription>
               {pendingDelete ? t.files.deleteConfirm(pendingDelete.name) : ""}
             </DialogDescription>
@@ -209,23 +230,22 @@ export default function FilesPage() {
               disabled={deleteFile.isPending}
               onClick={() => {
                 if (!pendingDelete) return;
-                deleteFile.mutate(pendingDelete.path, {
+                const { name, path } = pendingDelete;
+                deleteFile.mutate(path, {
                   onSuccess: () => {
                     setPendingDelete(null);
-                    toast.success(t.files.deleted);
+                    toast.success(t.files.deleted(name));
+                    headingRef.current?.focus();
                   },
                   onError: (failure) => {
-                    toast.error(
-                      failure instanceof Error
-                        ? failure.message
-                        : t.files.deleteFailed,
-                    );
+                    console.error("Delete from My files failed:", failure);
+                    toast.error(t.files.deleteFailed);
                   },
                 });
               }}
               variant="destructive"
             >
-              {deleteFile.isPending ? t.common.loading : t.files.delete}
+              {deleteFile.isPending ? t.files.deleting : t.files.delete}
             </Button>
           </DialogFooter>
         </DialogContent>

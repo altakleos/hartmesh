@@ -357,12 +357,13 @@ export const enUS: Translations = {
     agents: "Agents",
     scheduledTasks: "Scheduled tasks",
     agentsDisabledTooltip: "Feature not enabled",
-    files: "Files",
+    files: "My files",
   },
 
   files: {
     title: "My files",
-    description: "What you kept, from every conversation.",
+    description:
+      "What you kept, from every conversation. Your assistant can open these in any chat.",
     empty: "Nothing kept yet",
     emptyHint:
       "Save a report or an upload from a conversation and it will be here next time.",
@@ -372,17 +373,23 @@ export const enUS: Translations = {
     folder: "Folder",
     size: "Size",
     modified: "Modified",
+    actions: "Actions",
     download: "Download",
     delete: "Delete",
+    deleteTitle: "Delete file?",
     deleteConfirm: (name) => `Delete ${name}? This cannot be undone.`,
-    deleted: "Deleted",
-    deleteFailed: "Couldn't delete the file",
-    truncated: (count) => `Showing the first ${count} files.`,
-    saveToMyFiles: "Save to my files",
+    deleting: "Deleting…",
+    deleted: (name) => `Deleted ${name}`,
+    deleteFailed: "Couldn't delete the file. Try again.",
+    truncated: (count) =>
+      `Showing the first ${count.toLocaleString()} files. Delete some to see the rest.`,
+    saveToMyFiles: "Save to My files",
     saving: "Saving…",
     saved: (name) => `Saved ${name} to My files`,
     savedMany: (count) => `Saved ${count} files to My files`,
-    saveFailed: "Couldn't save to My files",
+    savedSome: (kept, total) =>
+      `Saved ${kept} of ${total}. Couldn't save the rest. Try again.`,
+    saveFailed: "Couldn't save to My files. Try again.",
     openMyFiles: "Open My files",
   },
 

@@ -29,7 +29,7 @@ pytestmark = pytest.mark.asyncio
 _list_files = list_files.__wrapped__
 _get_file = get_file.__wrapped__
 _delete_file = delete_file.__wrapped__
-# Two decorators: files:write outside, the thread owner check inside.
+# Two decorators: threads:write outside, the thread owner check inside.
 _keep_thread_file = keep_thread_file.__wrapped__.__wrapped__
 
 USER = "u-blocking"

@@ -337,7 +337,8 @@ export const zhCN: Translations = {
 
   files: {
     title: "我的文件",
-    description: "你在各个对话中保存下来的文件。",
+    description:
+      "你在各个对话中保存下来的文件。在任何对话里，助手都能打开它们。",
     empty: "还没有保存任何文件",
     emptyHint: "在对话中保存一份报告或上传的文件，下次就能在这里找到。",
     loadFailed: "无法加载你的文件",
@@ -346,17 +347,23 @@ export const zhCN: Translations = {
     folder: "文件夹",
     size: "大小",
     modified: "修改时间",
+    actions: "操作",
     download: "下载",
     delete: "删除",
+    deleteTitle: "删除文件？",
     deleteConfirm: (name) => `删除 ${name}？此操作无法撤销。`,
-    deleted: "已删除",
-    deleteFailed: "无法删除该文件",
-    truncated: (count) => `仅显示前 ${count} 个文件。`,
+    deleting: "删除中…",
+    deleted: (name) => `已删除 ${name}`,
+    deleteFailed: "无法删除该文件，请重试。",
+    truncated: (count) =>
+      `仅显示前 ${count.toLocaleString()} 个文件。删除一些后可以看到其余的。`,
     saveToMyFiles: "保存到我的文件",
     saving: "保存中…",
     saved: (name) => `已将 ${name} 保存到我的文件`,
     savedMany: (count) => `已将 ${count} 个文件保存到我的文件`,
-    saveFailed: "无法保存到我的文件",
+    savedSome: (kept, total) =>
+      `已保存 ${kept}/${total} 个，其余保存失败，请重试。`,
+    saveFailed: "无法保存到我的文件，请重试。",
     openMyFiles: "打开我的文件",
   },
 

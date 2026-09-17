@@ -104,10 +104,12 @@ describe("useSaveToMyFiles", () => {
     );
   });
 
-  it("reports a failure by its reason and keeps what already landed", async () => {
+  it("reports a failure in the person's words and keeps what it can", async () => {
+    // The failing render is in the middle: what comes after it is still kept.
     mockedKeep
       .mockResolvedValueOnce(kept("a.pdf"))
-      .mockRejectedValueOnce(new Error("File not found: b.xlsx"));
+      .mockRejectedValueOnce(new Error("File not found: b.xlsx"))
+      .mockResolvedValueOnce(kept("c.docx"));
     const { result } = renderHook(() => useSaveToMyFiles("thread-1"), {
       wrapper: createWrapper(),
     });
@@ -117,11 +119,31 @@ describe("useSaveToMyFiles", () => {
       saved = await result.current.save([
         "/mnt/user-data/outputs/a.pdf",
         "/mnt/user-data/outputs/b.xlsx",
+        "/mnt/user-data/outputs/c.docx",
       ]);
     });
 
-    expect(saved).toHaveLength(1);
-    expect(toast.error).toHaveBeenCalledWith("File not found: b.xlsx");
+    expect(saved).toHaveLength(2);
+    expect(mockedKeep).toHaveBeenCalledTimes(3);
+    // Not the Gateway's reason, which names paths and rules in system words.
+    expect(toast.error).toHaveBeenCalledWith(
+      "Saved 2 of 3. Couldn't save the rest. Try again.",
+    );
     expect(toast.success).not.toHaveBeenCalled();
+  });
+
+  it("says nothing landed when the first keep fails", async () => {
+    mockedKeep.mockRejectedValueOnce(new Error("Path traversal detected"));
+    const { result } = renderHook(() => useSaveToMyFiles("thread-1"), {
+      wrapper: createWrapper(),
+    });
+
+    await act(async () => {
+      await result.current.save(["/mnt/user-data/outputs/a.pdf"]);
+    });
+
+    expect(toast.error).toHaveBeenCalledWith(
+      "Couldn't save to My files. Try again.",
+    );
   });
 });

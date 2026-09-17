@@ -122,7 +122,8 @@ Two directories cross the container boundary:
   deployment mounts one; without it, reports carry no company branding. The Gateway keeps
   uploads and artifacts under `home/users/<user>/threads/<thread>/user-data/`
   and each person's kept files under `home/users/<user>/files/` (mounted into
-  every sandbox of theirs at `/mnt/user-data/files`), so the pre-created
+  every sandbox of theirs at `/mnt/user-data/files`; no quota, nothing reaps
+  it, and it outlives the conversations it came from), so the pre-created
   `uploads/` and `artifacts/` directories are unused by this profile and stay
   empty.
 - `/srv/hartmesh/operator`, mounted **read-only** into the Gateway at the same

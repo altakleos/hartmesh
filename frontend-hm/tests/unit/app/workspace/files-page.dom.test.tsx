@@ -138,7 +138,7 @@ describe("FilesPage", () => {
     ).toBeTruthy();
     expect(files.deleteMutate).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "Delete" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Delete$/ }));
 
     expect(files.deleteMutate).toHaveBeenCalledWith(
       "Reports/august.pdf",
@@ -159,7 +159,11 @@ describe("FilesPage", () => {
     files.data = { files: [AUGUST], count: 1, truncated: true };
     renderPage();
 
-    expect(screen.getByText("Showing the first 1 files.")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Showing the first 1 files. Delete some to see the rest.",
+      ),
+    ).toBeTruthy();
   });
 
   it("offers to try again when the list could not be loaded", () => {

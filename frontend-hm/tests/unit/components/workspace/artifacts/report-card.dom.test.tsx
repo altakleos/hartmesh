@@ -154,7 +154,7 @@ describe("ReportCard", () => {
     expect(screen.queryByRole("link", { name: "Download the PDF" })).toBeNull();
     // Nothing to keep either: the button belongs to the downloads.
     expect(
-      screen.queryByRole("button", { name: "Save to my files" }),
+      screen.queryByRole("button", { name: "Save to My files" }),
     ).toBeNull();
   });
 
@@ -166,7 +166,7 @@ describe("ReportCard", () => {
       `${DIRECTORY}/2026-08-business-review.xlsx`,
     ]);
 
-    fireEvent.click(screen.getByRole("button", { name: "Save to my files" }));
+    fireEvent.click(screen.getByRole("button", { name: "Save to My files" }));
 
     // The documents, not the JSON the card is drawn from.
     expect(myFiles.save).toHaveBeenCalledWith([
@@ -184,7 +184,7 @@ describe("ReportCard", () => {
 
     expect(screen.getByRole("link", { name: "Download the PDF" })).toBeTruthy();
     expect(
-      screen.queryByRole("button", { name: "Save to my files" }),
+      screen.queryByRole("button", { name: "Save to My files" }),
     ).toBeNull();
   });
 

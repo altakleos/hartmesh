@@ -121,6 +121,28 @@ def test_list_user_files_stops_at_the_ceiling(paths: Paths, monkeypatch: pytest.
 
     assert len(listed) == 3
     assert truncated is True
+    assert [entry.path for entry in listed] == sorted(entry.path for entry in listed)
+
+
+def test_list_user_files_skips_a_name_the_address_rules_refuse(paths: Paths) -> None:
+    """The sandbox may write any name; the person is shown only what they can open and remove."""
+    root = paths.ensure_user_files_dir("u1")
+    (root / "fine.txt").write_bytes(b"x")
+    (root / "back\\slash.txt").write_bytes(b"x")
+
+    listed, _ = manager.list_user_files("u1")
+
+    assert [entry.path for entry in listed] == ["fine.txt"]
+
+
+def test_keep_file_refuses_a_folder_that_is_a_file(paths: Paths, tmp_path: Path) -> None:
+    root = paths.ensure_user_files_dir("u1")
+    (root / "Reports").write_bytes(b"not a folder")
+    source = tmp_path / "august.pdf"
+    source.write_bytes(b"pdf")
+
+    with pytest.raises(manager.UserFileError):
+        manager.keep_file("u1", source, name="august.pdf", folder="Reports")
 
 
 # ---------- resolve_user_file ----------
@@ -209,9 +231,14 @@ def test_keep_file_survives_a_race_on_the_chosen_name(paths: Paths, tmp_path: Pa
 
     def open_with_a_rival(path, flags, *args, **kwargs):
         # Somebody else claims the same name between the listing and the create.
-        if not raced and str(path).endswith("august.pdf"):
+        if not raced and str(path).endswith("august.pdf") and flags & os.O_EXCL:
             raced.append(str(path))
-            Path(path).write_bytes(b"rival")
+            if kwargs.get("dir_fd") is not None:
+                rival = real_open(path, os.O_WRONLY | os.O_CREAT, 0o666, dir_fd=kwargs["dir_fd"])
+            else:
+                rival = real_open(path, os.O_WRONLY | os.O_CREAT, 0o666)
+            os.write(rival, b"rival")
+            os.close(rival)
         return real_open(path, flags, *args, **kwargs)
 
     monkeypatch.setattr(manager.os, "open", open_with_a_rival)
@@ -250,3 +277,75 @@ def test_keep_file_leaves_nothing_behind_when_the_copy_fails(paths: Paths, tmp_p
         manager.keep_file("u1", source, name="august.pdf")
 
     assert list(root.iterdir()) == []
+
+
+# ---------- links planted by the sandbox ----------
+
+
+def test_keep_file_refuses_a_folder_that_is_a_link(paths: Paths, tmp_path: Path) -> None:
+    """The sandbox can plant a link inside the person's files; a keep must not write through it."""
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    root = paths.ensure_user_files_dir("u1")
+    _symlink_to_or_skip(root / "pwn", outside)
+    source = tmp_path / "planted.txt"
+    source.write_bytes(b"planted")
+
+    with pytest.raises(manager.UserFileError):
+        manager.keep_file("u1", source, name="planted.txt", folder="pwn")
+    with pytest.raises(manager.UserFileError):
+        manager.keep_file("u1", source, name="planted.txt", folder="pwn/deeper")
+
+    assert list(outside.iterdir()) == []
+    assert stat.S_IMODE(outside.stat().st_mode) == 0o700
+
+
+def test_keep_file_refuses_a_source_that_is_a_link(paths: Paths, tmp_path: Path) -> None:
+    """The copy opens the source itself without following a link, whatever a preflight saw."""
+    secret = tmp_path / "secret.txt"
+    secret.write_bytes(b"secret")
+    link = tmp_path / "out.pdf"
+    _symlink_to_or_skip(link, secret)
+    root = paths.ensure_user_files_dir("u1")
+
+    with pytest.raises(manager.UserFileError):
+        manager.keep_file("u1", link, name="out.pdf")
+
+    assert list(root.iterdir()) == []
+
+
+def test_keep_file_refuses_a_source_that_is_not_a_regular_file(paths: Paths, tmp_path: Path) -> None:
+    with pytest.raises(manager.UserFileError):
+        manager.keep_file("u1", tmp_path, name="dir")
+
+
+def test_delete_user_file_refuses_a_link_and_a_linked_folder(paths: Paths, tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "victim.txt").write_bytes(b"x")
+    root = paths.ensure_user_files_dir("u1")
+    _symlink_to_or_skip(root / "escape", outside)
+    _symlink_to_or_skip(root / "link.txt", outside / "victim.txt")
+
+    with pytest.raises(manager.UserFileError):
+        manager.delete_user_file("u1", "escape/victim.txt")
+    with pytest.raises(manager.UserFileError):
+        manager.delete_user_file("u1", "link.txt")
+
+    assert (outside / "victim.txt").exists()
+    assert (root / "link.txt").is_symlink()
+
+
+def test_list_user_files_shows_only_what_can_be_addressed(paths: Paths) -> None:
+    """A file deeper than the address rule allows is not listed rather than listed and unreachable."""
+    root = paths.ensure_user_files_dir("u1")
+    deep = root.joinpath(*["d"] * manager.MAX_PATH_DEPTH)
+    deep.mkdir(parents=True)
+    (deep / "unreachable.txt").write_bytes(b"x")
+    at_limit = root.joinpath(*["d"] * (manager.MAX_PATH_DEPTH - 1)) / "reachable.txt"
+    at_limit.write_bytes(b"x")
+
+    listed, _ = manager.list_user_files("u1")
+
+    assert [entry.path for entry in listed] == [at_limit.relative_to(root).as_posix()]
+    manager.resolve_user_file("u1", listed[0].path)

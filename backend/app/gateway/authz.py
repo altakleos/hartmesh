@@ -75,11 +75,6 @@ class Permissions:
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
 
-    # The person's own files (``/api/files``): per owner, never another's.
-    FILES_READ = "files:read"
-    FILES_WRITE = "files:write"
-    FILES_DELETE = "files:delete"
-
     # Governed skill and MCP revisions. These deliberately remain outside
     # the PAT v1 scope allowlist.
     TOOL_PLANE_READ = "tool_plane:read"
@@ -230,9 +225,6 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
-    Permissions.FILES_READ,
-    Permissions.FILES_WRITE,
-    Permissions.FILES_DELETE,
     Permissions.TOOL_PLANE_READ,
     Permissions.TOOL_PLANE_MUTATE,
     Permissions.TOOL_PLANE_ADMIN,

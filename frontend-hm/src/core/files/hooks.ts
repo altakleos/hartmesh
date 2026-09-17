@@ -58,13 +58,24 @@ export function useSaveToMyFiles(threadId: string) {
   const save = useCallback(
     async (paths: readonly string[], folder?: string) => {
       const kept: MyFileInfo[] = [];
-      try {
-        for (const path of paths) {
+      let failed = 0;
+      // Every path gets its try: a render a rebuild deleted must not stop
+      // the ones that exist from being kept.
+      for (const path of paths) {
+        try {
           kept.push(await keep.mutateAsync({ path, folder }));
+        } catch (error) {
+          // The Gateway's reason names paths and rules in system words; the
+          // person gets what happened and what to do, the console the rest.
+          console.error("Save to My files failed:", path, error);
+          failed += 1;
         }
-      } catch (error) {
+      }
+      if (failed > 0) {
         toast.error(
-          error instanceof Error ? error.message : t.files.saveFailed,
+          kept.length > 0
+            ? t.files.savedSome(kept.length, paths.length)
+            : t.files.saveFailed,
         );
         return kept;
       }

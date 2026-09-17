@@ -7,7 +7,10 @@ on the disk of their next conversation. ``POST /api/threads/{id}/files`` keeps
 one of a conversation's files (an upload or an output) by copying its exact
 bytes; the artifact stays where it was. The routes are per person: there is no
 way to name another owner, and a trusted internal caller acts for the owner it
-carries, as the memory router does.
+carries, as the memory router does. They carry the same ``threads:*``
+authorities as the person's threads rather than a resource of their own: the
+tool plane's authority universe is capped, and a role list that names threads
+already names what is the person's.
 """
 
 from __future__ import annotations
@@ -27,7 +30,7 @@ from app.gateway.authz import require_permission
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import resolve_thread_virtual_path
 from app.gateway.routers.artifacts import ACTIVE_CONTENT_MIME_TYPES, _build_attachment_headers, _build_content_disposition, is_text_file_by_content
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, make_safe_user_id
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths, make_safe_user_id
 from deerflow.files import UserFile, UserFileError, delete_user_file, keep_file, list_user_files, resolve_user_file
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.thread_id import ThreadId
@@ -39,8 +42,11 @@ router = APIRouter(tags=["files"])
 #: What a conversation may keep: what the person gave it and what it made for
 #: them. The workspace is scratch, and the person's files are already theirs.
 _KEEPABLE_PREFIXES = (f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PREFIX}/outputs/")
+#: Nothing served from this agent-writable directory may be sniffed into a
+#: type the browser would run.
+_NOSNIFF = {"X-Content-Type-Options": "nosniff"}
 
-__all__ = ["get_paths", "router"]
+__all__ = ["router"]
 
 
 class UserFileInfo(BaseModel):
@@ -115,7 +121,7 @@ def _response_plan(actual: Path, download: bool) -> tuple[bool, str | None]:
 
 
 @router.get("/api/files", response_model=UserFileListResponse, summary="List My Files")
-@require_permission("files", "read")
+@require_permission("threads", "read")
 async def list_files(request: Request) -> UserFileListResponse:
     """Every file the caller has kept, across all their conversations."""
     entries, truncated = await asyncio.to_thread(list_user_files, _files_user_id(request))
@@ -123,7 +129,7 @@ async def list_files(request: Request) -> UserFileListResponse:
 
 
 @router.get("/api/files/{path:path}", summary="Get One Of My Files")
-@require_permission("files", "read")
+@require_permission("threads", "read")
 async def get_file(path: str, request: Request, download: bool = False) -> Response:
     """Stream one of the caller's files, inline where the browser can show it.
 
@@ -133,16 +139,16 @@ async def get_file(path: str, request: Request, download: bool = False) -> Respo
     actual = await asyncio.to_thread(_existing_regular_file, _files_user_id(request), path)
     force_download, mime_type = await asyncio.to_thread(_response_plan, actual, download)
     if force_download:
-        return FileResponse(path=actual, filename=actual.name, media_type=mime_type, headers=_build_attachment_headers(actual.name))
+        return FileResponse(path=actual, filename=actual.name, media_type=mime_type, headers=_build_attachment_headers(actual.name, _NOSNIFF))
     return FileResponse(
         path=actual,
         media_type=mime_type,
-        headers={"Content-Disposition": _build_content_disposition("inline", actual.name)},
+        headers={"Content-Disposition": _build_content_disposition("inline", actual.name), **_NOSNIFF},
     )
 
 
 @router.delete("/api/files/{path:path}", response_model=DeleteUserFileResponse, summary="Remove One Of My Files")
-@require_permission("files", "delete")
+@require_permission("threads", "delete")
 async def delete_file(path: str, request: Request) -> DeleteUserFileResponse:
     """Remove one of the caller's files. Folders stay."""
     user_id = _files_user_id(request)
@@ -156,11 +162,21 @@ async def delete_file(path: str, request: Request) -> DeleteUserFileResponse:
 
 
 def _keepable_source(thread_id: str, virtual_path: str, user_id: str) -> Path:
-    """Worker-thread body: the host file a conversation may keep, or the HTTP reason it may not."""
+    """Worker-thread body: the host file a conversation may keep, or the HTTP reason it may not.
+
+    The prefix says what the person asked for; the resolved path says what it
+    is, and a link out of uploads or outputs (into the workspace, say) is
+    refused on the second. This is a preflight for the status code: the copy
+    itself opens the source without following a link and checks it again.
+    """
     normalized = "/" + virtual_path.lstrip("/")
     if not normalized.startswith(_KEEPABLE_PREFIXES):
         raise HTTPException(status_code=400, detail=f"Only files under {' or '.join(prefix.rstrip('/') for prefix in _KEEPABLE_PREFIXES)} can be kept")
     actual = resolve_thread_virtual_path(thread_id, normalized, user_id=user_id)
+    paths: Paths = get_paths()
+    keepable_roots = (paths.sandbox_uploads_dir(thread_id, user_id=user_id).resolve(), paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve())
+    if not any(actual.is_relative_to(root) for root in keepable_roots):
+        raise HTTPException(status_code=400, detail=f"Not a file of this conversation's uploads or outputs: {virtual_path}")
     try:
         metadata = os.lstat(actual)
     except FileNotFoundError:
@@ -171,8 +187,8 @@ def _keepable_source(thread_id: str, virtual_path: str, user_id: str) -> Path:
 
 
 @router.post("/api/threads/{thread_id}/files", response_model=UserFileInfo, status_code=201, summary="Keep A Conversation's File")
-@require_permission("files", "write")
-@require_permission("threads", "read", owner_check=True)
+@require_permission("threads", "write")
+@require_permission("threads", "read", owner_check=True, require_existing=True)
 async def keep_thread_file(thread_id: ThreadId, body: KeepFileRequest, request: Request) -> UserFileInfo:
     """Copy one of this conversation's uploads or outputs into the caller's files.
 
