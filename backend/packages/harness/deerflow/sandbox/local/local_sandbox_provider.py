@@ -368,6 +368,12 @@ class LocalSandboxProvider(SandboxProvider, AcceptedSkillProjection):
                 local_path=str(paths.sandbox_outputs_dir(thread_id, user_id=effective_user_id)),
                 read_only=False,
             ),
+            # The person's own files, the same directory on every thread of theirs.
+            PathMapping(
+                container_path=f"{_USER_DATA_VIRTUAL_PREFIX}/files",
+                local_path=str(paths.ensure_user_files_dir(effective_user_id)),
+                read_only=False,
+            ),
             PathMapping(
                 container_path=_ACP_WORKSPACE_VIRTUAL_PREFIX,
                 local_path=str(paths.acp_workspace_dir(thread_id, user_id=effective_user_id)),

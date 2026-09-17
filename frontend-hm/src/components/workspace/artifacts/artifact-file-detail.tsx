@@ -4,6 +4,7 @@ import {
   CopyIcon,
   DownloadIcon,
   EyeIcon,
+  FolderPlusIcon,
   LoaderIcon,
   PackageIcon,
   PencilIcon,
@@ -56,6 +57,7 @@ import {
   parseBusinessReport,
 } from "@/core/business-report";
 import { writeTextToClipboard } from "@/core/clipboard";
+import { canKeepInMyFiles, useSaveToMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
@@ -386,6 +388,13 @@ export function ArtifactFileDetail({
     threadId,
   ]);
 
+  // Keeping is for what the conversation was given and what it made; the
+  // showcase has nowhere to keep them. A report is kept from its card, which
+  // offers the documents rather than the JSON they were rendered from.
+  const myFiles = useSaveToMyFiles(threadId);
+  const canKeep =
+    !isWriteFile && !isMock && !isReportFile && canKeepInMyFiles(filepath);
+
   const handleInstallSkill = useCallback(async () => {
     if (isInstalling) return;
 
@@ -594,6 +603,15 @@ export function ArtifactFileDetail({
                   });
                 }}
                 tooltip={t.clipboard.copyToClipboard}
+              />
+            )}
+            {!isEditing && canKeep && (
+              <ArtifactAction
+                icon={myFiles.isPending ? LoaderIcon : FolderPlusIcon}
+                label={t.files.saveToMyFiles}
+                tooltip={t.files.saveToMyFiles}
+                disabled={myFiles.isPending}
+                onClick={() => void myFiles.save([filepath])}
               />
             )}
             {!isEditing && !isWriteFile && (

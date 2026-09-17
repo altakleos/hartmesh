@@ -54,7 +54,7 @@ claim. See `../../../../../docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`.
    ordered by application — the last entry produced the final visible bytes — so an
    observer classifies raw→visible transforms from facts rather than by sniffing
    output wording.
-4. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); resolves identity via `resolve_runtime_user_id(runtime)`, including Gateway runtime context and standalone LangGraph Server auth, then falls back to the request ContextVar / `"default"`
+4. **ThreadDataMiddleware** - Creates per-thread directories under the user's isolation scope (`backend/.deer-flow/users/{user_id}/threads/{thread_id}/user-data/{workspace,uploads,outputs}`); the same state also carries `files_path`, the per-user `backend/.deer-flow/users/{user_id}/files` (`/mnt/user-data/files`), present only when the thread has an owner; resolves identity via `resolve_runtime_user_id(runtime)`, including Gateway runtime context and standalone LangGraph Server auth, then falls back to the request ContextVar / `"default"`
 5. **UploadsMiddleware** - Tracks and injects newly uploaded files into conversation (lead agent only); upload existence checks use the same runtime-resolved user bucket as thread-data creation
 6. **SandboxMiddleware** - Acquires sandbox, stores `sandbox_id` in state. The
    lead runtime normally owns the thread's physical Agent-skill projection;

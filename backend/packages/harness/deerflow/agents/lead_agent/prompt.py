@@ -669,7 +669,7 @@ You (new invocation): "Deploying to staging..." [proceed]
 - Historical uploads: `/mnt/user-data/uploads` - Files from earlier turns. Use `list_uploaded_files` to discover which historical files exist. If you know the filename, access it directly with `read_file` or `grep`.
 - User workspace: `/mnt/user-data/workspace` - Working directory for temporary files
 - Output files: `/mnt/user-data/outputs` - Final deliverables must be saved here
-
+{user_files_section}
 **File Management:**
 - Newly uploaded files in this run are listed in the `<current_uploads>` section before your first response
 - Use `read_file` tool to read uploaded files using their paths from the list
@@ -1024,6 +1024,47 @@ def _build_acp_section(*, app_config: AppConfig | None = None) -> str:
     )
 
 
+USER_FILES_PROMPT_LINE = (
+    "- User files: `/mnt/user-data/files` - The user's own files, kept across conversations (`ls` it to see what they have). "
+    "Copy a file here only when they ask you to keep it; deliverables still go to `/mnt/user-data/outputs`. "
+    "To hand over a file that is already here, copy it to `/mnt/user-data/outputs` and name the copy under `present` in that same call\n"
+)
+
+
+def _sandbox_mounts_thread_data(app_config: AppConfig | None) -> bool:
+    """Whether the configured sandbox provider bind-mounts the thread's host directories.
+
+    The person's files are a host directory the local providers mount; a
+    remote provider (a provisioner, E2B, Tenki) syncs uploads on their own
+    and mounts nothing, so there the directory does not exist in the sandbox
+    and the prompt must not name it. Mirrors ``uses_thread_data_mounts``
+    without constructing a provider: unknown configuration reads as mounted,
+    which is the development default.
+    """
+    sandbox = getattr(app_config, "sandbox", None) if app_config is not None else None
+    if sandbox is None:
+        try:
+            from deerflow.config import get_app_config
+
+            sandbox = getattr(get_app_config(), "sandbox", None)
+        except Exception:
+            return True
+    use = getattr(sandbox, "use", None) or ""
+    override = getattr(sandbox, "thread_data_mounts", None)
+    if isinstance(override, bool):
+        return override
+    if "LocalSandboxProvider" in use:
+        return True
+    if "AioSandboxProvider" in use:
+        return not getattr(sandbox, "provisioner_url", None)
+    return not use
+
+
+def _build_user_files_section(*, app_config: AppConfig | None = None) -> str:
+    """The per-user files bullet, only where the sandbox can see that directory."""
+    return USER_FILES_PROMPT_LINE if _sandbox_mounts_thread_data(app_config) else ""
+
+
 def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:
     """Build a prompt section for explicitly configured sandbox mounts."""
     if app_config is None:
@@ -1169,6 +1210,7 @@ def apply_prompt_template(
     # Build ACP agent section only if ACP agents are configured
     acp_section = _build_acp_section(app_config=app_config)
     custom_mounts_section = _build_custom_mounts_section(app_config=app_config)
+    user_files_section = _build_user_files_section(app_config=app_config)
     acp_and_mounts_section = "\n".join(section for section in (acp_section, custom_mounts_section) if section)
 
     # Gate the "Skill First" instruction on the deferred discovery path:
@@ -1198,4 +1240,5 @@ def apply_prompt_template(
         skill_first_reminder=skill_first_reminder,
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
+        user_files_section=user_files_section,
     )

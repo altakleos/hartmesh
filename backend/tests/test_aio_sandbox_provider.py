@@ -2949,3 +2949,22 @@ async def test_cancelling_the_async_wait_leaves_a_peer_owned_container_alone(tmp
 
     provider._backend.destroy.assert_not_called()
     assert provider._starting == set()
+
+
+def test_get_thread_mounts_includes_the_persons_files_read_write(tmp_path, monkeypatch):
+    """Every sandbox of one person mounts the same files directory at /mnt/user-data/files."""
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    paths = Paths(base_dir=tmp_path)
+    monkeypatch.setattr(aio_mod, "get_paths", lambda: paths)
+    monkeypatch.setattr(aio_mod, "get_effective_user_id", lambda: "default")
+
+    first = {container: (host, ro) for host, container, ro in aio_mod.AioSandboxProvider._get_thread_mounts("thread-a", user_id="ou-user")}
+    second = {container: (host, ro) for host, container, ro in aio_mod.AioSandboxProvider._get_thread_mounts("thread-b", user_id="ou-user")}
+    other = {container: (host, ro) for host, container, ro in aio_mod.AioSandboxProvider._get_thread_mounts("thread-a", user_id="someone-else")}
+
+    expected = str(tmp_path / "users" / "ou-user" / "files")
+    assert first["/mnt/user-data/files"] == (expected, False)
+    assert second["/mnt/user-data/files"] == (expected, False)
+    assert other["/mnt/user-data/files"] == (str(tmp_path / "users" / "someone-else" / "files"), False)
+    # Created ahead of the mount, writable by the sandbox uid like the thread directories.
+    assert (tmp_path / "users" / "ou-user" / "files").is_dir()

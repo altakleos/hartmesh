@@ -95,12 +95,22 @@ const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 const DEFAULT_PRIMARY = "#1F4E79";
 
 /**
+ * How much of a `report.json` the panel fetches before calling it truncated.
+ *
+ * The file embeds every cleaned in-period row (about 242 bytes each), which
+ * the card never draws but the renders need, so under the text preview's
+ * 1 MiB budget a report of roughly 4,300 rows stopped being a card and became
+ * JSON. Sixteen MiB is about 69,000 rows — a year of a busy small business —
+ * and still a size a phone parses; past it, *Load full file* remains.
+ */
+export const REPORT_PREVIEW_MAX_BYTES = 16 * 1024 * 1024;
+
+/**
  * Ceilings on how much document the card will draw.
  *
  * A skill-built report is far below all of these — its section tables stop at
  * `TABLE_ROW_LIMIT` (25) and its charts are a handful — so they only refuse a
- * file written to be expensive. The artifact preview's 1 MiB cap is not that
- * bound: one click on *Load full file* removes it.
+ * file written to be expensive.
  */
 const MAX_SECTIONS = 64;
 const MAX_TABLE_ROWS = 2000;

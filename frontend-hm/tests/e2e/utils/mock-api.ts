@@ -57,8 +57,19 @@ export type MockSkill = {
   enabled?: boolean;
 };
 
+export type MockMyFile = {
+  path: string;
+  name: string;
+  size: number;
+  modified: number;
+  virtual_path: string;
+  url: string;
+};
+
 export type MockAPIOptions = {
   threads?: MockThread[];
+  /** The person's own files, as `GET /api/files` lists them. */
+  files?: MockMyFile[];
   createdThreadMessages?: unknown[];
   agents?: MockAgent[];
   skills?: MockSkill[];
@@ -286,6 +297,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       created_at: string;
     }>
   > = {};
+  let myFiles = [...(options?.files ?? [])];
   const uploadLimits = options?.uploadLimits ?? {
     max_files: 10,
     max_file_size: 50 * 1024 * 1024,
@@ -1019,6 +1031,77 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
       });
     }
 
+    return route.fallback();
+  });
+
+  // My files — the Files page lists, opens and removes; a chat keeps.
+  void page.route("**/api/files", (route) => {
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          files: myFiles,
+          count: myFiles.length,
+          truncated: false,
+        }),
+      });
+    }
+    return route.fallback();
+  });
+  void page.route("**/api/files/**", (route) => {
+    const url = new URL(route.request().url());
+    const path = decodeURIComponent(
+      url.pathname.replace(/^.*\/api\/files\//, ""),
+    );
+    if (route.request().method() === "DELETE") {
+      const before = myFiles.length;
+      myFiles = myFiles.filter((file) => file.path !== path);
+      if (myFiles.length === before) {
+        return route.fulfill({
+          status: 404,
+          contentType: "application/json",
+          body: JSON.stringify({ detail: `File not found: ${path}` }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ success: true, message: `Deleted ${path}` }),
+      });
+    }
+    if (route.request().method() === "GET") {
+      return route.fulfill({
+        status: 200,
+        contentType: "text/plain",
+        body: `contents of ${path}`,
+      });
+    }
+    return route.fallback();
+  });
+  void page.route("**/api/threads/*/files", (route) => {
+    if (route.request().method() === "POST") {
+      const payload = route.request().postDataJSON() as {
+        path?: string;
+        folder?: string;
+      };
+      const name = (payload.path ?? "").split("/").pop() ?? "file";
+      const relative = payload.folder ? `${payload.folder}/${name}` : name;
+      const kept: MockMyFile = {
+        path: relative,
+        name,
+        size: 1,
+        modified: Date.now() / 1000,
+        virtual_path: `/mnt/user-data/files/${relative}`,
+        url: `/api/files/${relative}`,
+      };
+      myFiles = [...myFiles, kept];
+      return route.fulfill({
+        status: 201,
+        contentType: "application/json",
+        body: JSON.stringify(kept),
+      });
+    }
     return route.fallback();
   });
 

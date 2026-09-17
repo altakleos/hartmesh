@@ -6,12 +6,9 @@ FastAPI listens on port 8001; health: `GET /health` (liveness), `GET /ready`
 `GATEWAY_ENABLE_DOCS=false` disables `/docs`, `/redoc`, and `/openapi.json`.
 
 `/api/runtime/v1/*` and in-process adapters share one `InvocationRuntime` and
-its accepted identity/material admission. `GracefulShutdownCoordinator` orders
-shutdown; if quiescence is unproven, leave resources for process reclamation.
+its accepted identity/material admission. `GracefulShutdownCoordinator` orders shutdown; unproven quiescence leaves resources to process reclamation.
 
-Durable MCP task notifications run as internal Agents. Keep trusted delivery
-instructions outside user input, frame remote payloads as untrusted, and require
-existing owned threads so late events dead-letter instead of recreating deleted chats.
+Durable MCP task notifications run as internal Agents: keep trusted delivery instructions outside user input, frame remote payloads as untrusted, and require existing owned threads so late events dead-letter rather than recreate deleted chats.
 
 CORS defaults to same-origin through nginx. Split-origin or port-forwarded
 clients must set exact `GATEWAY_CORS_ORIGINS` for CORS/CSRF and expose
@@ -26,17 +23,11 @@ PATs (`Bearer dfp_...`) act as owners, never services; invalid Bearers get 401, 
 
 Localhost persistence deliberately reads the direct request `Host` and ignores `Forwarded` / `X-Forwarded-Host`. Scheme and auth-origin reconstruction still consume forwarding headers. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header, so the outer trusted proxy must replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
-Standalone LangGraph Studio is recognized only by the upstream
-`Auth.types.StudioUser` principal type; older SDKs fall back to normal owner
-scoping. Its assistant reads include genuine registered assistants plus its own,
-while all other resources remain owner-scoped. Create/update makes `user_id` and
+Standalone LangGraph Studio is recognized only by the upstream `Auth.types.StudioUser` principal type; older SDKs fall back to normal owner scoping. Its assistant reads cover registered assistants plus its own; other resources stay owner-scoped. Create/update makes `user_id` and
 `created_by=user` server-owned. Before runtime 0.30.0 loads,
 `langgraph_studio.py` uses the CLI graph registry to recreate genuine system
 assistants and demote all other legacy `created_by=system` active/version rows.
-This file loader does not pre-register the module in `sys.modules`, so keep
-annotations eager and preserve the loader regression test. Missing persistence
-is a no-op; parse/write errors fail startup, and missing expected registered rows
-emit a drift warning.
+The file loader does not pre-register the module in `sys.modules`, so keep annotations eager and preserve the loader regression test. Missing persistence is a no-op; parse/write errors fail startup, and missing registered rows warn of drift.
 
 **Routers**:
 
@@ -44,7 +35,7 @@ emit a drift warning.
 |--------|-----------|
 | **Models** (`/api/models`) | `GET /` - list models; `GET /{name}` - model details |
 | **Features** (`/api/features`) | `GET /` - UI capabilities: hot-reloaded agents, guarded browser, startup MCP tasks, and separate batch repository/worker states so history stays readable without a worker |
-| **Console** (`/api/console`) | Read-only cross-thread observability for the current user (the data layer for an operations dashboard or external monitoring): `GET /stats` - headline counters (runs/threads/agents/tokens/cost); `GET /runs` - paginated run history joined with thread titles (per-run cost); `GET /usage` - zero-filled daily token series + per-model breakdown with spend. Queries `runs`/`threads_meta` directly as a reporting layer (no new `RunStore` methods); requires a SQL database backend — returns 503 on `database.backend: memory`. Real-cost estimation reads optional `models[*].pricing` (`currency`, `input_per_million`, `output_per_million`, `input_cache_hit_per_million`; `ModelConfig` is `extra="allow"`, so no schema change) and prices each run from its `token_usage_by_model` input/output split. Pricing is **cache-aware**: `RunJournal` accumulates prompt-cache hits from `usage_metadata.input_token_details.cache_read` into a sparse `cache_read_tokens` bucket key (also threaded through `SubagentTokenCollector` → `record_external_llm_usage_records`), and cache-hit input tokens are billed at `input_cache_hit_per_million` (omitted → billed at the miss price, a conservative upper bound). All priced models must use one currency; mixed currencies disable cost reporting and leave cost/currency fields null instead of producing invalid aggregates. Legacy rows fall back to run-level totals at `model_name`; unpriced models yield `cost: null` and cost fields are null when no pricing is configured |
+| **Console** (`/api/console`) | Read-only cross-thread observability for the current user: `GET /stats` - headline counters (runs/threads/agents/tokens/cost); `GET /runs` - paginated run history joined with thread titles (per-run cost); `GET /usage` - zero-filled daily token series + per-model breakdown with spend. Queries `runs`/`threads_meta` directly as a reporting layer (no new `RunStore` methods); requires a SQL database backend — returns 503 on `database.backend: memory`. Real-cost estimation reads optional `models[*].pricing` (`currency`, `input_per_million`, `output_per_million`, `input_cache_hit_per_million`; `ModelConfig` is `extra="allow"`, so no schema change) and prices each run from its `token_usage_by_model` input/output split. Pricing is **cache-aware**: `RunJournal` accumulates prompt-cache hits from `usage_metadata.input_token_details.cache_read` into a sparse `cache_read_tokens` bucket key (also threaded through `SubagentTokenCollector` → `record_external_llm_usage_records`), and cache-hit input tokens are billed at `input_cache_hit_per_million` (omitted → billed at the miss price, a conservative upper bound). All priced models must use one currency; mixed currencies disable cost reporting and leave cost/currency fields null instead of producing invalid aggregates. Legacy rows fall back to run-level totals at `model_name`; unpriced models yield `cost: null` and cost fields are null when no pricing is configured |
 | **MCP** (`/api/mcp`) | Read masked config; legacy-only replace/add/delete/toggle routes validate and atomically reload config, then reset the local cache. Mutations return 409 unless `tool_plane.enabled=false`. |
 | **Tool Plane** (`/api/tool-plane`) | Status/history/inspection and stage → validate → promote/rollback for deployment-base/current-user revisions; `/admin/...` explicitly selects another opaque user scope. Exact-two mounts only reads, omitting mutation/bootstrap from routing and OpenAPI. |
 | **MCP Tasks** (`/api/threads/{id}/mcp-tasks`) | `GET /` - current user's durable tasks for one owned thread; `POST /` - standalone submission from authenticated server provenance (client provenance-shaped extras are ignored) with exact replay equality provided by a separate private versioned HMAC commitment; `GET /{task_id}` - bounded result/input/error detail incl. cancellation attempts and independently authorized parent execution/receipt/evidence fields, never remote task IDs, private commitments, or driver configuration; `POST /{task_id}/cancel` - persist the remote-task cancellation fence |
@@ -54,9 +45,10 @@ emit a drift warning.
 | **Integrations** (`/api/integrations`) | `GET /lark/status` - inspect managed Lark/Feishu CLI integration state, including `sandbox_runtime_mode` / `sandbox_runtime_ready` (whether `lark-cli` will actually be present in the sandbox at chat time); `POST /lark/install` - admin-only install of the official `lark-*` managed skill pack, legacy-only and rejected while governed revisions are enabled; `POST /lark/config/start` and `/lark/config/complete` - internal first-time Lark connection setup; `POST /lark/config/credentials` - atomically switch the caller's per-user Lark app after validating the new `app_id`/`app_secret` through the official CLI's live tenant-token probe, revoke/remove the previous OAuth tokens, and restore the prior credential tree if the switch fails; `POST /lark/auth/start` and `/lark/auth/complete` - browser device-flow user authorization without terminal access, with optional `domains` / exact `scope` for incremental permission grants. Config and auth flows carry a server-issued, per-user generation persisted under the credential lock; a rejected direct switch leaves the current generation unchanged, stale completions return 409, and browser re-registration uses the same token-clearing/revocation transaction as direct credential switches. |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); non-mounted sandbox sync uses a non-releasing request lease; `GET /list` - list; `DELETE /{filename}` - delete |
+| **Files** (`/api/files`, `/api/threads/{id}/files`) | The person's own files (`users/{user_id}/files`, mounted rw at `/mnt/user-data/files` in every sandbox of theirs): `GET /` lists (recursive; hidden, symlinked and unaddressable paths skipped; `truncated`), `GET /{path}` streams (active content downloads), `DELETE /{path}` removes a file not a folder, `POST /api/threads/{id}/files` keeps an owned thread's upload or output by copying its bytes into `folder` (keep-both `_N`). The sandbox writes there as its own uid, so paths are walked one segment at a time, never through a link. Per owner under the person's `threads:*` authorities — the tool-plane authority universe is capped, so no new permission; the internal owner header is honoured; no PAT route. |
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; `POST /branches` - branch a completed assistant turn with a replay checkpoint; inherited titles take next-free displayed sibling suffixes, including explicit/renamed ones, while explicit titles stay unchanged. Durable `branch` admission rejects races. Workspace files are not checkpointed, so the branch only best-effort copies the current workspace when branching from the **latest** turn (`workspace_clone_mode="current_thread_best_effort"`); branching from an older/historical turn skips the copy (`workspace_clone_mode="skipped_historical_turn"`) so the branch never inherits files that only exist in a later timeline. Thread-scoped runtime channels (`sandbox`, `thread_data`) are not copied onto the branch: the parent's `sandbox_id` binds path mappings and the release lifecycle to the parent's workspace, so the branch lazily acquires its own sandbox instead. Branch creation also seeds the new thread's run-event feed from the branch checkpoint's visible messages (`history_seed_mode` in the response), because the feed reads run_events, not checkpoints (#4380); seeded rows form one synthetic run per inherited turn (`branch-seed-{thread_id}-{n}`, a turn opening at every persisted human message, including an allowlisted hidden `ask_clarification` reply), because regenerating an inherited answer supersedes its whole `run_id` in `GET /messages/page` and one shared id would delete the entire inherited history (#4458); `GET /goal`, `PUT /goal`, `DELETE /goal` - read, set, and clear the active thread goal; `POST /compact` - manually summarize older active context into `summary_text` and retain the recent message window, blocked while a run is in flight; unexpected failures are logged server-side and return a generic 500 detail |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - stream regular text and binary artifacts with `FileResponse`, including byte-`Range` 206/416 behavior used by bounded text previews and media seeking; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types. `PUT /{path}` atomically replaces an existing UTF-8 text file under `/mnt/user-data/outputs` when its expected SHA-256 still matches; active runs conflict, and non-mounted sandbox providers receive the same update under a request lease. Atomic replacement applies the existing POSIX permission handling when descriptor-based APIs are available and otherwise keeps the platform-native temporary-file permissions (Windows). |
-| **Suggestions** (`/api/suggestions`) | `GET /config` - returns global suggestions config boolean; `POST /threads/{id}/suggestions` - generate follow-up questions; rich list/block model content is normalized and inline reasoning (`<think>...</think>`, including unclosed/truncated blocks from reasoning models like MiniMax-M3) is stripped before JSON parsing |
+| **Suggestions** (`/api/suggestions`) | `GET /config` - returns global suggestions config boolean; `POST /threads/{id}/suggestions` - generate follow-up questions; rich list/block model content is normalized and inline reasoning (`<think>...</think>`, including unclosed/truncated blocks) is stripped before JSON parsing |
 | **Input Polish** (`/api/input-polish`) | `POST /` - rewrite a composer draft before it is sent. This is a short authenticated `runs:create` LLM request using `input_polish` config; it does not create a LangGraph run, persist a message, or modify thread state. Shares the non-graph one-shot LLM path (`deerflow.utils.oneshot_llm.run_oneshot_llm`) with the suggestions route so model build + Langfuse metadata + invoke stay in one place; validates the same stripped view of the draft it sends to the model, and preserves literal `<think>` substrings in the rewrite (`strip_think_blocks(truncate_unclosed=False)`) |
 | **Thread Runs** (`/api/threads/{id}/runs`) | `POST /` - create background run; `POST /stream` - create + SSE stream; `POST /wait` - create + block. Before the first journaled run, seed an empty feed from a checkpoint so legacy history keeps its order and visibility (skip absent checkpoints or populated feeds). `POST /regenerate/prepare` - prepare clean input + checkpoint metadata for regenerating the latest completed or interrupted assistant answer, carrying the latest non-empty thread title so resuming an older checkpoint cannot roll back a later rename (#4457); `POST /edit-regenerate/prepare` - prepare a checkpoint replay from the latest editable human turn with a replacement user message and edit replay metadata; it carries the current title the same way only when the replay base already has one, since an untitled base belongs to a thread the title middleware has not named yet and pinning a title there would keep a name generated from the replaced prompt; `GET /` - list runs; `GET /{rid}` - run details; `POST /{rid}/cancel` - cancel; `GET /{rid}/join` - join SSE; `GET /{rid}/stream` hides action/wait; GET action 405 pre-owner; POST needs `runs:cancel`; `GET /{rid}/messages` - paginated per-run messages `{data, has_more}`; `GET /{rid}/events` - full event stream; `GET /{rid}/workspace-changes` - workspace/output file change summary and optional diffs; `GET/POST /{rid}/artifacts/archive` - receipt manifest / bounded ZIP; `GET /../messages` - legacy thread message array; `GET /../messages/page` - backward thread-global `seq` history page with middleware/subagent-AI/successful-regenerate/edit-replay filtering and page-run-scoped feedback enrichment; subagent AI callbacks remain available through run events while parent `task` ToolMessages stay visible for card restoration; `GET /../token-usage` - aggregate tokens plus an optional `context_usage` percentage. Context usage counts messages from the latest materialized thread state via `build_thread_checkpoint_state_accessor`, so full and delta checkpoint modes expose the same input. The percentage uses the latest run's model and its `context_window`. |
 | **Feedback** (`/api/threads/{id}/runs/{rid}/feedback`) | `PUT /` - upsert feedback; `DELETE /` - delete user feedback; `POST /` - create feedback; `GET /` - list feedback; `GET /stats` - aggregate stats; `DELETE /{fid}` - delete specific |
@@ -71,11 +63,7 @@ the archive binds exact copied bytes. Snapshot coverage follows accepted
 capabilities and terminal attempts; operations cancel on disconnect or the
 60-second deadline. Return stable errors/public refs; bundles are unsigned.
 
-Thread IDs use `deerflow.utils.thread_id` (`^[A-Za-z0-9_-]{1,64}$`); `None`
-generates a UUID and empty strings fail. Creation/state-producing boundaries
-validate before persistence or workspace initialization. Legacy IDs remain
-readable/controllable, but cannot drive new runs or filesystem state; cleanup
-skips their host paths.
+Thread IDs use `deerflow.utils.thread_id` (`^[A-Za-z0-9_-]{1,64}$`); `None` generates a UUID and empty strings fail. Creation/state-producing boundaries validate before persistence or workspace initialization. Legacy IDs stay readable/controllable but cannot drive new runs or filesystem state; cleanup skips their host paths.
 
 **Message feed seq** (#4666): streaming `values` frames, `GET
 /threads/{id}/state`, and `POST /threads/{id}/history` stamp serialized
@@ -101,12 +89,9 @@ configured `tool_output.storage_subdir` through the snapshot capture as an
 extra excluded dir name so custom storage locations stay excluded too.
 
 **Run delivery receipts**: `RunJournal` records each non-empty artifact update
-once per tool `Command` for the terminal `run.delivery` event. When a command
-contains multiple messages, a unique tool name resolved from matching
-`ToolMessage` entries supplies attribution; additional command messages do not
-duplicate artifact paths or counts. If multiple different tool names resolve
-for one flat artifact update, the paths remain counted but unattributed because
-the command does not carry a per-path mapping. `RunJournal` callbacks set
+once per tool `Command` for the terminal `run.delivery` event; a multi-message
+command attributes paths through the one matching `ToolMessage` name without
+duplicating counts, and ambiguous attribution stays counted but unattributed. `RunJournal` callbacks set
 `run_inline=True`: they do only in-memory bookkeeping or schedule async writes,
 and staying on the run's event-loop thread serializes parallel tool callbacks
 before terminal delivery recording and flushing. Each worker creates a separate
@@ -114,8 +99,7 @@ journal per run before cancellable/fallible preflight work, so checkpoint
 compatibility failures and cancellation while waiting for prior finalization
 still emit a zero-delivery receipt. The worker flushes ordinary journal events,
 idempotently persists the run-scoped receipt, and only then persists the staged
-terminal run status. A receipt failure is retried on a short bounded schedule
-while the owning worker still knows the real outcome and holds the lease. The
+terminal run status. A receipt failure is retried on a short bounded schedule while the owner still holds the lease. The
 worker derives delivery requirements from the run's workspace snapshots rather
 than a client request option: every regular file created or modified under
 `/mnt/user-data/outputs` is a candidate produced artifact. Internal
@@ -131,8 +115,7 @@ Receipts for such runs add `produced_paths`, `presented_paths`, `matched_paths`,
 matching presentation becomes a run error; a successful presentation is also
 downgraded to error if its receipt cannot be durably verified. Runs without
 changed outputs preserve ordinary chat behavior and the original receipt shape.
-Orphan recovery first
-atomically claims an expired lease, then uses the same singleton write to
+Orphan recovery first atomically claims an expired lease, then uses the same singleton write to
 backfill a zero-delivery receipt. This ordering prevents a stale recovery scan
 from overwriting a live run's later detailed receipt; an event-store outage
 does not undo the terminal takeover. An existing detailed receipt is preserved
@@ -147,13 +130,7 @@ repairs terminal legacy rows that will never re-enter recovery. Taskless and
 pre-graph compensation retains its exact admission obligation when this write
 is unavailable, leaving the owner-fenced row active until receipt-first
 terminalization can be retried.
-Moving journal construction ahead of preflight is receipt-only on early failure
-paths: a separate boundary flag preserves the previous completion-data
-semantics, so checkpoint incompatibility or cancellation while waiting for an
-older finalizing run does not persist an empty completion snapshot. Worker tests
-pin one accumulated receipt across multiple goal-continuation `_stream_once`
-calls; journal tests drive LangChain's real async callback dispatcher against a
-single journal to pin serialized, deduplicated parallel tool callbacks.
+Moving journal construction ahead of preflight is receipt-only on early failure paths: a separate boundary flag preserves the previous completion-data semantics, so cancellation or checkpoint incompatibility while waiting for an older finalizing run persists no empty completion snapshot.
 Multi-worker deployments therefore require `run_events.backend: db` for shared,
 ordered delivery events; the startup gate rejects process-local memory and
 JSONL event stores when `GATEWAY_WORKERS > 1`.
@@ -184,8 +161,6 @@ JSONL event stores when `GATEWAY_WORKERS > 1`.
 - Thread-scoped run creation accepts `checkpoint` / `checkpoint_id`; Gateway validates the checkpoint belongs to the request thread before writing `checkpoint_id` / `checkpoint_ns` into `config.configurable` for LangGraph branching. In `delta` checkpoint mode the worker rewrites that fork into a linear head write before the graph starts (see "A delta-mode run cannot fork" under Checkpoint Channel Modes), because delta state for a fork replays the abandoned sibling's writes.
 - After each visible turn, `runtime/goal.py` evaluates active `ThreadState.goal` against visible evidence with one reused non-thinking model. Because the graph trace has closed, the evaluator attaches its own callbacks and Langfuse thread/user/trace metadata. Satisfaction clears the goal; other outcomes persist `last_evaluation`, and stopping outcomes add `stand_down_reason`. Only `goal_not_met_yet` streams a hidden continuation, requiring a durable assistant checkpoint, unchanged thread, no abort, and no-progress clearance. The hard cap is 8 (clamped in TUI/tools, 422 in HTTP); two continuations without new visible assistant evidence stop. Shared response-cleanup helpers live in `deerflow.utils.llm_text`.
 - Run event stream changes must keep producer code, `deerflow/constants.py`, `runtime/events/catalog.py`, `contracts/run_event_stream_contract.json`, `backend/docs/RUN_EVENT_STREAM.md`, and `tests/test_run_event_stream_contract.py` in sync. The dependency-free constants module owns the persisted envelope limits (`event_type` 32 characters, `category` 16) and cross-layer workspace event identity; the catalog owns validated runtime definitions and categories. Dynamic middleware tags are limited to 21 characters after the `middleware:` prefix. The JSON contract owns payload schemas, backend-specific storage semantics, legacy aliases, and compatibility rules; conformance tests require both views and all producer groups to agree. `run.end.content` remains opaque and may retain nested Python values in memory while JSONL/database stores stringify non-JSON nested values, so consumers must not assume backend-identical nested output representations.
-
-Proxied through nginx: `/api/langgraph/*` → Gateway LangGraph-compatible runtime, all other `/api/*` → Gateway REST APIs.
 
 **Branch/regenerate checkpoint invariant**: `app/gateway/checkpoint_lineage.py`
 walks `parent_config` rather than globally ordered checkpoint history so replay

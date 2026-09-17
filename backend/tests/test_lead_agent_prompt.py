@@ -103,6 +103,38 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
 
     assert "Treat `/mnt/user-data/workspace` as your default current working directory" in prompt
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
+    # The person's own files, kept across conversations, and how one is handed over from there.
+    assert "- User files: `/mnt/user-data/files`" in prompt
+    assert "deliverables still go to `/mnt/user-data/outputs`" in prompt
+    assert "copy it to `/mnt/user-data/outputs` and name the copy under `present`" in prompt
+
+
+@pytest.mark.parametrize(
+    ("sandbox", "named"),
+    [
+        (SimpleNamespace(mounts=[], use="deerflow.sandbox.local:LocalSandboxProvider"), True),
+        (SimpleNamespace(mounts=[], use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url=None), True),
+        (SimpleNamespace(mounts=[], use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url="http://provisioner:8002"), False),
+        (SimpleNamespace(mounts=[], use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url="http://provisioner:8002", thread_data_mounts=True), True),
+        (SimpleNamespace(mounts=[], use="deerflow.community.e2b_sandbox:E2BSandboxProvider"), False),
+    ],
+)
+def test_apply_prompt_template_names_user_files_only_where_the_sandbox_mounts_them(monkeypatch, sandbox, named):
+    """A remote provider mounts no host directory, so the agent is not sent to ``ls`` one that is not there."""
+    config = SimpleNamespace(
+        sandbox=sandbox,
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template()
+
+    assert ("/mnt/user-data/files" in prompt) is named
 
 
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):

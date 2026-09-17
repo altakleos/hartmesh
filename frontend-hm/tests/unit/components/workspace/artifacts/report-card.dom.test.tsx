@@ -1,5 +1,25 @@
-import { afterEach, describe, expect, it } from "@rstest/core";
-import { cleanup, render, screen, within } from "@testing-library/react";
+import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  within,
+} from "@testing-library/react";
+
+// The card's *Save to my files* goes through the shared hook, which needs a
+// query client and a router the card itself does not; what the card owns is
+// which paths it hands over.
+const myFiles = rs.hoisted(() => ({
+  save: rs.fn<(paths: readonly string[]) => Promise<unknown[]>>(),
+  isPending: false,
+}));
+rs.mock("@/core/files", () => ({
+  useSaveToMyFiles: () => ({
+    save: myFiles.save,
+    isPending: myFiles.isPending,
+  }),
+}));
 
 import { ReportCard } from "@/components/workspace/artifacts/report-card";
 import { parseBusinessReport } from "@/core/business-report";
@@ -17,6 +37,7 @@ const report = parseBusinessReport(JSON.stringify(fixture))!;
 function renderCard(
   artifacts: string[] = [REPORT],
   override: Partial<typeof report> = {},
+  { isMock = false } = {},
 ) {
   return render(
     <I18nContext.Provider
@@ -25,6 +46,7 @@ function renderCard(
       <ReportCard
         artifacts={artifacts}
         filepath={REPORT}
+        isMock={isMock}
         report={{ ...report, ...override }}
         threadId={THREAD}
       />
@@ -32,7 +54,10 @@ function renderCard(
   );
 }
 
-afterEach(cleanup);
+afterEach(() => {
+  cleanup();
+  myFiles.save.mockReset();
+});
 
 describe("ReportCard", () => {
   it("names the report, the company, the period and the draft", () => {
@@ -127,6 +152,40 @@ describe("ReportCard", () => {
     renderCard();
 
     expect(screen.queryByRole("link", { name: "Download the PDF" })).toBeNull();
+    // Nothing to keep either: the button belongs to the downloads.
+    expect(
+      screen.queryByRole("button", { name: "Save to My files" }),
+    ).toBeNull();
+  });
+
+  it("keeps the documents the thread has rendered, and only those", () => {
+    myFiles.save.mockResolvedValue([]);
+    renderCard([
+      REPORT,
+      `${DIRECTORY}/2026-08-business-review.pdf`,
+      `${DIRECTORY}/2026-08-business-review.xlsx`,
+    ]);
+
+    fireEvent.click(screen.getByRole("button", { name: "Save to My files" }));
+
+    // The documents, not the JSON the card is drawn from.
+    expect(myFiles.save).toHaveBeenCalledWith([
+      `${DIRECTORY}/2026-08-business-review.pdf`,
+      `${DIRECTORY}/2026-08-business-review.xlsx`,
+    ]);
+  });
+
+  it("has nowhere to keep a showcase report", () => {
+    renderCard(
+      [REPORT, `${DIRECTORY}/2026-08-business-review.pdf`],
+      {},
+      { isMock: true },
+    );
+
+    expect(screen.getByRole("link", { name: "Download the PDF" })).toBeTruthy();
+    expect(
+      screen.queryByRole("button", { name: "Save to My files" }),
+    ).toBeNull();
   });
 
   it("says which file the figures came from", () => {

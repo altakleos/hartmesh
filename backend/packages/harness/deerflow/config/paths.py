@@ -10,6 +10,10 @@ from deerflow.utils.thread_id import validate_thread_id
 
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
+# The person's own files, kept across conversations: one directory per user,
+# mounted read-write into every sandbox of that user (see ``Paths.user_files_dir``).
+USER_FILES_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/files"
+_USER_FILES_SEGMENT = "files"
 
 _SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _SAFE_INTEGRATION_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
@@ -112,12 +116,16 @@ class Paths:
         │       ├── config.yaml
         │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
         │       └── memory.json
-        └── threads/
-            └── {thread_id}/
-                └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
-                    ├── workspace/     <-- /mnt/user-data/workspace/
-                    ├── uploads/       <-- /mnt/user-data/uploads/
-                    └── outputs/       <-- /mnt/user-data/outputs/
+        ├── threads/
+        │   └── {thread_id}/
+        │       └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
+        │           ├── workspace/     <-- /mnt/user-data/workspace/
+        │           ├── uploads/       <-- /mnt/user-data/uploads/
+        │           └── outputs/       <-- /mnt/user-data/outputs/
+        └── users/
+            └── {user_id}/
+                ├── threads/{thread_id}/...   <-- the same layout, per user
+                └── files/             <-- /mnt/user-data/files/ in every sandbox of that user
 
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
@@ -230,6 +238,29 @@ class Paths:
         except OSError:
             logger.exception("Failed to migrate legacy unsafe-id user directory")
         return safe_user_id
+
+    def user_files_dir(self, user_id: str) -> Path:
+        """The person's own files: `{base_dir}/users/{user_id}/files/`.
+
+        Mounted read-write at ``/mnt/user-data/files`` in every sandbox of that
+        user, so a file kept in one conversation is on the disk of the next.
+        """
+        return self.user_dir(user_id) / _USER_FILES_SEGMENT
+
+    def ensure_user_files_dir(self, user_id: str) -> Path:
+        """Create the person's files directory, writable by the sandbox uid like the thread directories.
+
+        The mode is set when the directory is created, not on every acquire:
+        this directory is long-lived and shared, so a deliberately tightened
+        mode stays, and one owned by another uid does not fail the acquire.
+        """
+        files_dir = self.user_files_dir(user_id)
+        try:
+            files_dir.mkdir(parents=True)
+        except FileExistsError:
+            return files_dir
+        files_dir.chmod(0o777)
+        return files_dir
 
     def user_memory_file(self, user_id: str) -> Path:
         """Per-user memory file: `{base_dir}/users/{user_id}/memory.json`."""
@@ -455,6 +486,10 @@ class Paths:
         """Host path for the ACP workspace mount source."""
         return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "acp-workspace")
 
+    def host_user_files_dir(self, user_id: str) -> str:
+        """Host path for the per-user files mount source."""
+        return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), _USER_FILES_SEGMENT)
+
     def host_user_custom_skills_dir(self, user_id: str) -> str:
         """Host path for a user's custom skills directory, preserving Windows path syntax."""
         return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), "skills", "custom")
@@ -508,7 +543,9 @@ class Paths:
         Args:
             thread_id: The thread ID.
             virtual_path: Virtual path as seen inside the sandbox, e.g.
-                          ``/mnt/user-data/outputs/report.pdf``.
+                          ``/mnt/user-data/outputs/report.pdf``. A path under
+                          ``/mnt/user-data/files`` names the owner's own files
+                          rather than the thread's data.
                           Leading slashes are stripped before matching.
             user_id: Optional user ID for user-scoped path resolution.
 
@@ -528,7 +565,16 @@ class Paths:
             raise ValueError(f"Path must start with /{prefix}")
 
         relative = stripped[len(prefix) :].lstrip("/")
-        base = self.sandbox_user_data_dir(thread_id, user_id=user_id).resolve()
+        if relative == _USER_FILES_SEGMENT or relative.startswith(_USER_FILES_SEGMENT + "/"):
+            # The person's files are not under the thread: they resolve to the
+            # owner's directory from any of that owner's threads, and to nobody
+            # else's. The legacy thread layout has no owner and so no files.
+            if user_id is None:
+                raise ValueError(f"{USER_FILES_VIRTUAL_PREFIX} needs a user")
+            base = self.user_files_dir(user_id).resolve()
+            relative = relative[len(_USER_FILES_SEGMENT) :].lstrip("/")
+        else:
+            base = self.sandbox_user_data_dir(thread_id, user_id=user_id).resolve()
         actual = (base / relative).resolve()
 
         try:
