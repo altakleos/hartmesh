@@ -1613,7 +1613,8 @@ wrapped here only to fit the page:
 ```text
 turn phase timings run=<run id> correlation=<id> total=9261ms outcome=success kind=accepted \
 acquisition=accepted_warm_reclaim reused=accepted_active acquire_reason=accepted_binding \
-snapshot=present/13pkg/mandatory queue=0ms phases=admission@0ms assembly@6ms sandbox_lookup@22ms+143ms \
+snapshot=present/13pkg/mandatory queue=0ms launch=2143ms(seal=2088ms authorize=1ms constrain=0ms prepare=9ms persist=11ms handoff=34ms) \
+phases=admission@0ms assembly@6ms sandbox_lookup@22ms+143ms \
 skill_materialization@21ms+5825ms agent_build@5857ms+232ms checkpoint_preflight@6109ms graph_start@6115ms \
 sandbox_binding@6131ms+2677ms sandbox_acquire@6131ms+2677ms model_request@8821ms first_provider_text@9022ms \
 first_stream_text@9025ms model_completion@9156ms terminal@9261ms \
@@ -1672,6 +1673,23 @@ between it and `sandbox_binding`). `graph_start` is marked per attempt, so a
 resumed or retried stream shows two. `skill_materialization` is recorded only
 on `kind=accepted` turns; an ordinary turn has the other three.
 
+`launch=` is what happened *before* the journal opened: the interval from the
+request reaching the application (`POST .../runs/stream` entry, or the
+scheduler's or a channel's launch) to the worker's admission, which is the
+journal's zero. It is the server's half of the person's wait for a first
+word, and until this field existed it was invisible except as a gap between
+the access log and "Run created". The steps in brackets are the launch's own
+awaited work in order — `seal` (the accepted invocation: config, agent
+revision and skill snapshot), `authorize`, `constrain`, `prepare` (the
+admission reservation and checkpoint seed check), `persist` (the run row) —
+and `handoff` is the row being persisted to the journal opening, which the
+worker's own thread-metadata setup occupies. The launch in the example above
+spent 2.1 s sealing, which is the `.19` tenant class staging its skill
+snapshot; a warm turn after that repair reads `launch=` in the low hundreds
+of milliseconds. A replayed run (an idempotent resubmission that found its
+run already admitted) carries no `launch=`, because its worker was already
+running.
+
 What the server cannot see it declares instead of inferring:
 `browser_first_text` is always `unobservable` here, because only a browser
 measuring through the front door can time what the person actually waited
@@ -1685,7 +1703,7 @@ docker compose --project-directory /opt/hartmesh --env-file "$ENV" \
 is therefore a complete per-turn latency record. The same fields also ride the
 log record as a structured `turn_phases` field for deployments that enable
 `logging.enhance.format: json`; this profile logs text. That record stamps
-`version: 4`, and fields are added rather than repurposed, so a reader that
+`version: 5` (`launch` was added in 5), and fields are added rather than repurposed, so a reader that
 tolerates unknown keys needs no change. The line reports
 confirmed resource counts (`creates=`, `teardowns=`), not attempts: the
 structured record keeps `create_attempts` and `unknown_create_results`

@@ -12,6 +12,7 @@ import json
 import logging
 import re
 import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator, Mapping
 from contextlib import asynccontextmanager, contextmanager
@@ -3836,6 +3837,7 @@ def _launch_intent(
     require_existing_thread: bool = False,
     trusted_notification: bool = False,
     trusted_notification_source: Mapping[str, Any] | None = None,
+    received_at: float | None = None,
 ) -> InternalLaunchIntent:
     return InternalLaunchIntent(
         thread_id=thread_id,
@@ -3858,6 +3860,7 @@ def _launch_intent(
         require_existing_thread=require_existing_thread,
         trusted_notification=trusted_notification,
         trusted_notification_source=trusted_notification_source,
+        received_at=received_at,
     )
 
 
@@ -3881,6 +3884,9 @@ async def start_run(
     trusted_notification_source: Mapping[str, Any] | None = None,
 ) -> RunRecord:
     """FastAPI compatibility adapter for application-owned invocation launch."""
+    # Stamped first: the turn's journal reports everything from here to the
+    # worker's admission as the launch interval.
+    received_at = time.monotonic()
     # Interrupt and rollback terminate an active run, so they require the
     # cancel capability in addition to run creation. Internal/test requests
     # without a stamped auth context retain their existing behavior.
@@ -3915,6 +3921,7 @@ async def start_run(
                 require_existing_thread=require_existing_thread,
                 trusted_notification=trusted_notification,
                 trusted_notification_source=trusted_notification_source,
+                received_at=received_at,
             )
         )
     except ConflictError as exc:

@@ -253,6 +253,34 @@ _REUSE_SOURCES = frozenset(
 
 
 @dataclass(frozen=True, slots=True)
+class LaunchTimings:
+    """What the route did before the worker opened the journal.
+
+    The journal starts at worker admission, so everything the launch does
+    first -- sealing the accepted invocation, authorizing it, persisting the
+    row, handing the record to a worker -- would otherwise be the unnamed
+    interval between the request and the first phase. The launch records its
+    awaited steps against the request's own monotonic stamp; the worker hands
+    the result to the journal, which reports the interval as a whole and the
+    handoff it cannot see from either side alone. Steps are bounded labels in
+    the order they ran, each with its own duration; a name is never free text.
+    """
+
+    received_at: float
+    persisted_at: float
+    steps: tuple[tuple[str, float], ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.persisted_at < self.received_at:
+            raise ValueError("a launch cannot persist its run before the request that asked for it")
+        object.__setattr__(
+            self,
+            "steps",
+            tuple((_bounded_label(name, fallback="unspecified", limit=32), max(0.0, float(ms))) for name, ms in self.steps),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class PhaseRecord:
     """One observed phase: when it started and, if it ended, how long it took."""
 
@@ -299,6 +327,11 @@ class TurnPhaseSnapshot:
     unobservable: tuple[tuple[str, str], ...]
     outcome: str | None
     dropped_records: int
+    #: Request received to the journal's start, when the route stamped it.
+    launch_ms: float | None = None
+    #: Run row persisted to the journal's start: the worker handoff.
+    launch_handoff_ms: float | None = None
+    launch_steps: tuple[tuple[str, float], ...] = ()
 
     def phase_ms(self, phase: TurnPhase) -> float | None:
         """Duration of the first record for *phase*, or ``None`` if unmeasured."""
@@ -345,6 +378,12 @@ class TurnPhaseSnapshot:
             parts.append(f"snapshot={snapshot}")
         if self.queue_ms:
             parts.append(f"queue={round(self.queue_ms)}ms")
+        if self.launch_ms is not None:
+            steps = [f"{name}={round(ms)}ms" for name, ms in self.launch_steps]
+            if self.launch_handoff_ms is not None:
+                steps.append(f"handoff={round(self.launch_handoff_ms)}ms")
+            launch = f"launch={round(self.launch_ms)}ms"
+            parts.append(f"{launch}({' '.join(steps)})" if steps else launch)
         for label, value in (
             ("creates", self.resource_creates),
             ("rediscoveries", self.resource_rediscoveries),
@@ -383,9 +422,17 @@ class TurnPhaseSnapshot:
         return " ".join(parts)
 
     def to_wire(self) -> dict[str, object]:
+        launch = None
+        if self.launch_ms is not None:
+            launch = {
+                "total_ms": round(self.launch_ms, 3),
+                "handoff_ms": None if self.launch_handoff_ms is None else round(self.launch_handoff_ms, 3),
+                "steps": [{"step": name, "ms": round(ms, 3)} for name, ms in self.launch_steps],
+            }
         return {
-            "version": 4,
+            "version": 5,
             "correlation_id": self.correlation_id,
+            "launch": launch,
             "run_id": self.run_id,
             "total_ms": round(self.total_ms, 3),
             "acquisition_source": None if self.acquisition_source is None else str(self.acquisition_source),
@@ -431,6 +478,7 @@ class TurnPhaseJournal:
         "_dropped",
         "_evictions",
         "_failed_attempts",
+        "_launch",
         "_lock",
         "_mandatory_materialization",
         "_outcome",
@@ -478,6 +526,7 @@ class TurnPhaseJournal:
         self._failed_attempts = 0
         self._unobservable: list[tuple[str, str]] = []
         self._outcome: str | None = None
+        self._launch: LaunchTimings | None = None
         self._observers: list[Callable[[TurnPhase, float], None]] = []
 
     # ── Clock ────────────────────────────────────────────────────────────
@@ -665,6 +714,11 @@ class TurnPhaseJournal:
         with self._lock:
             self._failed_attempts += 1
 
+    def set_launch(self, timings: LaunchTimings) -> None:
+        """Carry what the route measured before this journal opened."""
+        with self._lock:
+            self._launch = timings
+
     def set_outcome(self, outcome: str) -> None:
         with self._lock:
             self._outcome = _bounded_label(outcome, fallback="unknown", limit=48)
@@ -681,7 +735,13 @@ class TurnPhaseJournal:
 
     def snapshot(self) -> TurnPhaseSnapshot:
         with self._lock:
+            launch = self._launch
+            launch_ms = None if launch is None else max(0.0, (self._start - launch.received_at) * 1000.0)
+            handoff_ms = None if launch is None else max(0.0, (self._start - launch.persisted_at) * 1000.0)
             return TurnPhaseSnapshot(
+                launch_ms=launch_ms,
+                launch_handoff_ms=handoff_ms,
+                launch_steps=() if launch is None else launch.steps,
                 correlation_id=self._correlation_id,
                 run_id=self._run_id,
                 total_ms=self._elapsed_ms(),

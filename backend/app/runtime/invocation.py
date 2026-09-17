@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine, Mapping
 from contextlib import AbstractAsyncContextManager, AbstractContextManager, asynccontextmanager
@@ -28,6 +29,7 @@ from deerflow.runtime.runs.store.base import (
     CancellationRequestOutcome,
     lifecycle_owner_scope,
 )
+from deerflow.runtime.turn_phases import LaunchTimings
 
 WorkerCoroutine = Coroutine[Any, Any, None]
 WorkerFactory = Callable[[RunRecord], WorkerCoroutine]
@@ -117,6 +119,11 @@ class InternalLaunchIntent:
     require_existing_thread: bool = False
     trusted_notification: bool = False
     trusted_notification_source: Mapping[str, Any] | None = None
+    #: ``time.monotonic()`` when the request reached the application, so the
+    #: launch can be timed from the caller's side rather than its own start.
+    #: A stamp, not identity: two intents are the same request whenever they
+    #: were received.
+    received_at: float | None = field(default=None, compare=False, repr=False)
 
     def __post_init__(self) -> None:
         for name in (
@@ -727,13 +734,29 @@ class InvocationRuntime:
         identity: InternalAdmissionIdentity | None,
         validate_replay: ReplayValidator | None,
     ) -> InternalLaunchReceipt | NotFoundOrInvisible | InvocationAuthorizationOutcome:
+        # Every awaited step of the launch is timed against the request's own
+        # stamp (or this launch's start when no route stamped it) and handed to
+        # the worker on the created record, so the turn's journal can report
+        # the interval before its first phase instead of leaving it unnamed.
+        received_at = intent.received_at if intent.received_at is not None else time.monotonic()
+        steps: list[tuple[str, float]] = []
+        step_started = time.monotonic()
+
+        def _step(name: str) -> None:
+            nonlocal step_started
+            now = time.monotonic()
+            steps.append((name, (now - step_started) * 1000.0))
+            step_started = now
+
         launch = await self._normalizer.normalize(intent)
+        _step("seal")
         worker_owns_material = False
         created_record: RunRecord | None = None
         worker: WorkerCoroutine | None = None
         candidate_run_id = str(uuid.uuid4())
         try:
             start_decision = await self._authorization.authorize_start(launch)
+            _step("authorize")
             if rejection := self._rejection(start_decision):
                 return rejection
             if start_decision.evidence is not None and launch.accepted_invocation is not None:
@@ -745,6 +768,7 @@ class InvocationRuntime:
                     ),
                 )
             constraint_decision = await self._constraints.project(launch)
+            _step("constrain")
             if constraint_decision.outcome is InvocationConstraintOutcome.denied:
                 return InvocationAuthorizationOutcome.denied
             if constraint_decision.outcome is InvocationConstraintOutcome.indeterminate:
@@ -759,10 +783,12 @@ class InvocationRuntime:
                 )
             async with self._runs.admission_scope(launch.thread_id):
                 await self._runs.prepare_admission(launch)
+                _step("prepare")
                 admitted = await self._runs.admit(
                     launch,
                     candidate_run_id=candidate_run_id,
                 )
+                _step("persist")
                 if isinstance(admitted, DurableAdmission):
                     record = admitted.record
                     if admitted.outcome is not AdmissionOutcome.created:
@@ -784,6 +810,13 @@ class InvocationRuntime:
                 else:
                     record = admitted
                 created_record = record
+                # Set before the worker is attached: the worker reads it when
+                # it opens the journal, which can be its first step.
+                record.launch_timings = LaunchTimings(
+                    received_at=received_at,
+                    persisted_at=step_started,
+                    steps=tuple(steps),
+                )
                 # Real-pod qualification barriers are inert unless the dedicated
                 # test image is started with its explicit environment gate.
                 from deerflow.runtime.kubernetes_qualification import (
