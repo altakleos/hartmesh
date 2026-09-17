@@ -10,6 +10,7 @@ import logging
 import os
 import shutil
 import stat
+import subprocess
 import sys
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -3139,3 +3140,397 @@ async def test_the_accepted_preparation_says_where_its_own_time_went(
     line = snapshot.to_log_line()
     for phase in ("accepted_authorization@", "skill_projection@", "skill_snapshot_bind@"):
         assert phase in line, line
+
+
+# ---------------------------------------------------------------------------
+# The verified fast path: a warm bind adopts the published tree it can prove,
+# and re-stages when it cannot. Three binds per warm turn on the released
+# profile each cost a full fsync'd copy before this (1.2-2 s each on the tenant
+# class for a 13-package tree whose capture costs 20 ms).
+# ---------------------------------------------------------------------------
+
+
+def _bound_snapshot(tmp_path: Path, snapshot_paths: Paths, *, user_id: str, thread_id: str, name: str = "fast-skill", body: str = "accepted"):
+    """One snapshot published into ``thread_id``'s view under generation 1; returns (snapshot, evidence, view, a file inside it)."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    skill_file = _write_skill(tmp_path / name, body=body, name=name)
+    support = skill_file.parent / "references" / "guide.txt"
+    support.parent.mkdir()
+    support.write_text("accepted support", encoding="utf-8")
+    snapshot = snapshot_effective_skills((_parsed_skill(skill_file),), user_id=user_id)
+    assert snapshot is not None
+    evidence = SkillProjectionEvidence.from_snapshot(snapshot)
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id=user_id,
+        thread_id=thread_id,
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-1",
+        generation=1,
+        evidence=evidence,
+    )
+    projection = snapshot.projections[0]
+    published_support = view / snapshot.snapshot_id / projection.category / projection.relative_path / "references" / "guide.txt"
+    assert published_support.read_text(encoding="utf-8") == "accepted support"
+    return snapshot, evidence, view, published_support
+
+
+def _refuse_staging(monkeypatch) -> list[str]:
+    """Make any staged write fail loudly; returns the list it would have appended to."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    writes: list[str] = []
+
+    def refuse(path, data, *, executable):
+        writes.append(str(path))
+        raise AssertionError(f"the fast path must not stage a copy: {path}")
+
+    monkeypatch.setattr(snapshot_module, "_write_private_file", refuse)
+    return writes
+
+
+def _count_staging(monkeypatch) -> list[str]:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    original = snapshot_module._write_private_file
+    writes: list[str] = []
+
+    def counting(path, data, *, executable):
+        writes.append(str(path))
+        original(path, data, executable=executable)
+
+    monkeypatch.setattr(snapshot_module, "_write_private_file", counting)
+    return writes
+
+
+def _tamper(published_file: Path, text: str) -> None:
+    published_file.parent.chmod(0o700)
+    published_file.chmod(0o600)
+    published_file.write_text(text, encoding="utf-8")
+    published_file.chmod(0o400)
+    published_file.parent.chmod(0o500)
+
+
+def test_a_warm_bind_adopts_the_verified_view_without_a_second_copy(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, published = _bound_snapshot(tmp_path, snapshot_paths, user_id="fast-user", thread_id="thread-fast")
+    inode_before = published.stat().st_ino
+    _refuse_staging(monkeypatch)
+
+    bound = snapshot_module.bind_skill_snapshot_active_view(
+        user_id="fast-user",
+        thread_id="thread-fast",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-2",
+        generation=2,
+        evidence=evidence,
+    )
+
+    assert bound == view
+    assert published.stat().st_ino == inode_before, "the published tree was adopted, not rewritten"
+    assert snapshot_module._active_view_bindings[view] == ("run-2", 2, snapshot.snapshot_id)
+    assert not any(child.name.startswith(".binding-") for child in view.parent.iterdir())
+    snapshot.release()
+
+
+def test_a_view_left_by_an_earlier_process_is_adopted_once_verified(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    """After a restart no in-process record exists; the bytes on disk still decide."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, published = _bound_snapshot(tmp_path, snapshot_paths, user_id="restart-user", thread_id="thread-restart")
+    snapshot_module._active_view_bindings.pop(view)
+    _refuse_staging(monkeypatch)
+
+    snapshot_module.bind_skill_snapshot_active_view(
+        user_id="restart-user",
+        thread_id="thread-restart",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-after-restart",
+        generation=1,
+        evidence=evidence,
+    )
+
+    assert snapshot_module._active_view_bindings[view] == ("run-after-restart", 1, snapshot.snapshot_id)
+    assert published.read_text(encoding="utf-8") == "accepted support"
+    snapshot.release()
+
+
+def test_a_tampered_byte_in_the_published_view_is_replaced(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, published = _bound_snapshot(tmp_path, snapshot_paths, user_id="tamper-user", thread_id="thread-tamper")
+    _tamper(published, "accepted supporX")  # same length: only the digest can tell
+    writes = _count_staging(monkeypatch)
+
+    snapshot_module.bind_skill_snapshot_active_view(
+        user_id="tamper-user",
+        thread_id="thread-tamper",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-2",
+        generation=2,
+        evidence=evidence,
+    )
+
+    assert writes, "a tree that fails verification is re-staged from the source"
+    assert published.read_text(encoding="utf-8") == "accepted support"
+    assert not published.stat().st_mode & 0o222
+    assert snapshot_module._active_view_bindings[view] == ("run-2", 2, snapshot.snapshot_id)
+    snapshot.release()
+
+
+def test_a_writable_mode_alone_disqualifies_the_published_view(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    """Same bytes, wrong immutability marks: verification is of the immutable tree, not only of its content."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, published = _bound_snapshot(tmp_path, snapshot_paths, user_id="mode-user", thread_id="thread-mode")
+    published.parent.chmod(0o700)
+    published.chmod(0o600)
+    writes = _count_staging(monkeypatch)
+
+    snapshot_module.bind_skill_snapshot_active_view(
+        user_id="mode-user",
+        thread_id="thread-mode",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-2",
+        generation=2,
+        evidence=evidence,
+    )
+
+    assert writes
+    assert published.stat().st_mode & 0o777 == 0o400
+    assert published.parent.stat().st_mode & 0o777 == 0o500
+    snapshot.release()
+
+
+def test_an_extra_file_inside_the_published_view_is_replaced(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    """The file count over the whole tree, not only the digest over the projections, is what catches it."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, published = _bound_snapshot(tmp_path, snapshot_paths, user_id="extra-user", thread_id="thread-extra")
+    published.parent.chmod(0o700)
+    extra = published.parent / "planted.txt"
+    extra.write_text("not in the evidence", encoding="utf-8")
+    extra.chmod(0o400)
+    published.parent.chmod(0o500)
+    writes = _count_staging(monkeypatch)
+
+    snapshot_module.bind_skill_snapshot_active_view(user_id="extra-user", thread_id="thread-extra", snapshot_id=snapshot.snapshot_id, run_id="run-2", generation=2, evidence=evidence)
+
+    assert writes
+    assert not extra.exists()
+    snapshot.release()
+
+
+def test_a_second_entry_in_the_view_is_replaced(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, _published = _bound_snapshot(tmp_path, snapshot_paths, user_id="stray-user", thread_id="thread-stray")
+    stray = view / "stray"
+    stray.mkdir()
+    writes = _count_staging(monkeypatch)
+
+    snapshot_module.bind_skill_snapshot_active_view(user_id="stray-user", thread_id="thread-stray", snapshot_id=snapshot.snapshot_id, run_id="run-2", generation=2, evidence=evidence)
+
+    assert writes
+    assert not stray.exists()
+    assert [child.name for child in view.iterdir()] == [snapshot.snapshot_id]
+    snapshot.release()
+
+
+def test_a_payload_hidden_in_an_unlistable_directory_is_replaced(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    """``os.walk`` swallows a directory it cannot list; the walk's error must count against the tree, or the payload outlives every later bind."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, _published = _bound_snapshot(tmp_path, snapshot_paths, user_id="hidden-user", thread_id="thread-hidden")
+    root = view / snapshot.snapshot_id
+    root.chmod(0o700)
+    hidden = root / ".x"
+    hidden.mkdir()
+    payload = hidden / "payload.sh"
+    payload.write_text("echo owned", encoding="utf-8")
+    payload.chmod(0o500)
+    hidden.chmod(0o100)
+    root.chmod(0o500)
+    writes = _count_staging(monkeypatch)
+    try:
+        snapshot_module.bind_skill_snapshot_active_view(user_id="hidden-user", thread_id="thread-hidden", snapshot_id=snapshot.snapshot_id, run_id="run-2", generation=2, evidence=evidence)
+    finally:
+        if hidden.exists():
+            hidden.chmod(0o700)
+
+    assert writes
+    assert not hidden.exists()
+    snapshot.release()
+
+
+def test_an_empty_directory_disqualifies_the_published_view(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    """A staged tree never holds one; inside a package it is a namespace package that shadows real modules."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, published = _bound_snapshot(tmp_path, snapshot_paths, user_id="empty-user", thread_id="thread-empty")
+    published.parent.chmod(0o700)
+    empty = published.parent / "shadow"
+    empty.mkdir(mode=0o500)
+    published.parent.chmod(0o500)
+    writes = _count_staging(monkeypatch)
+
+    snapshot_module.bind_skill_snapshot_active_view(user_id="empty-user", thread_id="thread-empty", snapshot_id=snapshot.snapshot_id, run_id="run-2", generation=2, evidence=evidence)
+
+    assert writes
+    assert not empty.exists()
+    snapshot.release()
+
+
+@pytest.mark.parametrize("mode", [0o4500, 0o444, 0o440])
+def test_a_mode_other_than_the_published_one_disqualifies_the_view(monkeypatch, tmp_path: Path, snapshot_paths: Paths, mode: int) -> None:
+    """Exact modes, not merely no write bit: a setuid or world-readable variant is a change."""
+    import os
+
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, published = _bound_snapshot(tmp_path, snapshot_paths, user_id=f"mode-{mode:o}", thread_id="thread-mode")
+    published.parent.chmod(0o700)
+    if mode & 0o4000:
+        published.chmod(0o500)
+    os.chmod(published, mode)
+    published.parent.chmod(0o500)
+    writes = _count_staging(monkeypatch)
+
+    snapshot_module.bind_skill_snapshot_active_view(user_id=f"mode-{mode:o}", thread_id="thread-mode", snapshot_id=snapshot.snapshot_id, run_id="run-2", generation=2, evidence=evidence)
+
+    assert writes
+    assert published.stat().st_mode & 0o7777 == 0o400
+    snapshot.release()
+
+
+def test_a_symlink_or_special_file_beneath_the_view_disqualifies_it(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    import os
+
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, published = _bound_snapshot(tmp_path, snapshot_paths, user_id="link-user", thread_id="thread-link")
+    published.parent.chmod(0o700)
+    link = published.parent / "link.txt"
+    link.symlink_to(published)
+    published.parent.chmod(0o500)
+    assert not snapshot_module._published_view_is_verified(view, snapshot.snapshot_id, evidence, snapshot_module.DEFAULT_SKILL_SNAPSHOT_LIMITS)
+    published.parent.chmod(0o700)
+    link.unlink()
+    fifo = published.parent / "pipe"
+    os.mkfifo(fifo)
+    published.parent.chmod(0o500)
+    assert not snapshot_module._published_view_is_verified(view, snapshot.snapshot_id, evidence, snapshot_module.DEFAULT_SKILL_SNAPSHOT_LIMITS)
+    published.parent.chmod(0o700)
+    fifo.unlink()
+    published.parent.chmod(0o500)
+    assert snapshot_module._published_view_is_verified(view, snapshot.snapshot_id, evidence, snapshot_module.DEFAULT_SKILL_SNAPSHOT_LIMITS)
+    snapshot.release()
+
+
+def test_a_verifiable_view_is_adopted_even_after_its_source_is_gone(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    """The bytes in the view are the material; the snapshot lease behind them is not what a warm bind waits on."""
+    import shutil
+
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, published = _bound_snapshot(tmp_path, snapshot_paths, user_id="gone-user", thread_id="thread-gone")
+    source = snapshot.root
+    subprocess.run(["chmod", "-R", "u+rwX", str(source)], check=True)
+    shutil.rmtree(source)
+    _refuse_staging(monkeypatch)
+
+    snapshot_module.bind_skill_snapshot_active_view(user_id="gone-user", thread_id="thread-gone", snapshot_id=snapshot.snapshot_id, run_id="run-2", generation=2, evidence=evidence)
+
+    assert published.read_text(encoding="utf-8") == "accepted support"
+    assert snapshot_module._active_view_bindings[view] == ("run-2", 2, snapshot.snapshot_id)
+
+
+def test_the_exact_identity_repeat_is_verified_not_trusted(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    """The provider binds while provisioning and the worker binds again with the same identity; the second bind used to return without looking."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, published = _bound_snapshot(tmp_path, snapshot_paths, user_id="repeat-user", thread_id="thread-repeat")
+    _tamper(published, "accepted supporX")
+
+    snapshot_module.bind_skill_snapshot_active_view(
+        user_id="repeat-user",
+        thread_id="thread-repeat",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-1",
+        generation=1,
+        evidence=evidence,
+    )
+
+    assert published.read_text(encoding="utf-8") == "accepted support"
+    assert snapshot_module._active_view_bindings[view] == ("run-1", 1, snapshot.snapshot_id)
+    snapshot.release()
+
+
+def test_the_fast_path_keeps_the_generation_rule(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    snapshot, evidence, view, _published = _bound_snapshot(tmp_path, snapshot_paths, user_id="gen-user", thread_id="thread-gen")
+    snapshot_module.bind_skill_snapshot_active_view(user_id="gen-user", thread_id="thread-gen", snapshot_id=snapshot.snapshot_id, run_id="run-2", generation=2, evidence=evidence)
+    _refuse_staging(monkeypatch)
+
+    for run_id, generation in (("run-3", 2), ("run-3", 1), ("run-3", 0)):
+        with pytest.raises(SkillSnapshotError, match="skill_snapshot_binding_conflict"):
+            snapshot_module.bind_skill_snapshot_active_view(user_id="gen-user", thread_id="thread-gen", snapshot_id=snapshot.snapshot_id, run_id=run_id, generation=generation, evidence=evidence)
+    assert snapshot_module._active_view_bindings[view] == ("run-2", 2, snapshot.snapshot_id)
+    snapshot.release()
+
+
+def test_a_different_snapshot_replaces_the_view_through_the_slow_path(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    first, _evidence, view, _published = _bound_snapshot(tmp_path, snapshot_paths, user_id="swap-user", thread_id="thread-swap")
+    second_file = _write_skill(tmp_path / "second", body="another skill", name="second-skill")
+    second = snapshot_effective_skills((_parsed_skill(second_file),), user_id="swap-user")
+    assert second is not None and second.snapshot_id != first.snapshot_id
+    writes = _count_staging(monkeypatch)
+
+    snapshot_module.bind_skill_snapshot_active_view(
+        user_id="swap-user",
+        thread_id="thread-swap",
+        snapshot_id=second.snapshot_id,
+        run_id="run-2",
+        generation=2,
+        evidence=SkillProjectionEvidence.from_snapshot(second),
+    )
+
+    assert writes
+    assert [child.name for child in view.iterdir()] == [second.snapshot_id]
+    assert snapshot_module._active_view_bindings[view] == ("run-2", 2, second.snapshot_id)
+    first.release()
+    second.release()
+
+
+def test_the_fast_path_refuses_evidence_for_another_snapshot(monkeypatch, tmp_path: Path, snapshot_paths: Paths) -> None:
+    """Evidence naming a different id than the view holds cannot adopt that view -- at the bind, not only in the helper."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    snapshot, evidence, view, _published = _bound_snapshot(tmp_path, snapshot_paths, user_id="ev-user", thread_id="thread-ev")
+    assert snapshot_module._published_view_is_verified(view, snapshot.snapshot_id, evidence, snapshot_module.DEFAULT_SKILL_SNAPSHOT_LIMITS)
+    assert not snapshot_module._published_view_is_verified(view, "0" * 64, evidence, snapshot_module.DEFAULT_SKILL_SNAPSHOT_LIMITS)
+    assert not snapshot_module._published_view_is_verified(view, snapshot.snapshot_id, object(), snapshot_module.DEFAULT_SKILL_SNAPSHOT_LIMITS)
+
+    other_file = _write_skill(tmp_path / "other", body="another skill", name="other-skill")
+    other = snapshot_effective_skills((_parsed_skill(other_file),), user_id="ev-user")
+    assert other is not None
+    _refuse_staging(monkeypatch)
+    with pytest.raises(SkillSnapshotError):
+        snapshot_module.bind_skill_snapshot_active_view(
+            user_id="ev-user",
+            thread_id="thread-ev",
+            snapshot_id=snapshot.snapshot_id,
+            run_id="run-2",
+            generation=2,
+            evidence=SkillProjectionEvidence.from_snapshot(other),
+        )
+    assert snapshot_module._active_view_bindings[view] == ("run-1", 1, snapshot.snapshot_id), "a bind that could not verify or stage adopts nothing"
+    other.release()
+    snapshot.release()
