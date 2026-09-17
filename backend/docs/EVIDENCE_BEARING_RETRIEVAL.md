@@ -21,6 +21,12 @@ The durable evidence adapter is currently installed on these built-in tools:
 | Serply | `web_search` | normalized HTTP(S) origins | no portable recency claim | fixed Serply endpoint, configured vertical/domain/size ceilings, resolved API key |
 | Tencent WSA | `web_search` | normalized HTTP(S) origins | unsupported | fixed WSA endpoint, configured domain/size ceilings, resolved service API key |
 
+The tenant Compose profile's keyless default, the SearXNG `web_search`
+(`deerflow.community.searxng.tools:web_search_tool`), has no adapter and is
+absent from this table on purpose: its turns carry tool receipts but no
+retrieval observation, and `deploy/compose/README.md` ("Web search") records
+what it reaches and why. A search key selects one of the adapters below.
+
 These rows describe implemented adapters, not live qualification. A provider is
 qualified for a deployment only after its opt-in live gate passes against that
 deployment. Missing network access, datasets, or credentials is an unpassed

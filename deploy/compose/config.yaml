@@ -198,10 +198,16 @@ tool_groups:
 # Keyless defaults. A providers/tools fragment whose key is present replaces
 # the entry with the same name (first fragment in file order wins), so a
 # tenant with no search key still has web_search, web_fetch and image_search.
+# web_search and image_search are both the profile's own SearXNG
+# (compose.yaml: searxng), reached only over the app network: several engines
+# behind one tool, so one engine refusing automated traffic does not take
+# search away. The DuckDuckGo pages they replaced answer a server with a
+# challenge, not results.
 tools:
   - name: web_search
     group: web
-    use: deerflow.community.ddg_search.tools:web_search_tool
+    use: deerflow.community.searxng.tools:web_search_tool
+    base_url: http://searxng:8080
     max_results: 5
   - name: web_fetch
     group: web
@@ -209,7 +215,8 @@ tools:
     timeout: 10
   - name: image_search
     group: web
-    use: deerflow.community.image_search.tools:image_search_tool
+    use: deerflow.community.searxng.tools:image_search_tool
+    base_url: http://searxng:8080
     max_results: 5
   - name: ls
     group: file:read

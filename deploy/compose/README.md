@@ -141,14 +141,17 @@ Two directories cross the container boundary:
   `install -d -o 1000 -g 1000 -m 0750 /srv/hartmesh/operator`, or let Docker
   create it (root-owned, `0755`) on the next `up`.
 - `/opt/hartmesh`, this directory, mounted read-only into the Gateway
-  (`gateway/`, `config.yaml`, `providers/`, `extensions_config.json`) and into
-  nginx (`nginx/`). Two files the Gateway needs writable are seeded into
+  (`gateway/`, `config.yaml`, `providers/`, `extensions_config.json`), into
+  nginx (`nginx/`) and into the search service (`searxng/`, which its
+  `run.sh` reads as uid 1000, so the files must stay world-readable). Two files the Gateway needs writable are seeded into
   `home/` at start: the rendered `config.yaml` (every start) and
   `extensions_config.json` (once, then the Gateway edits it at runtime).
 
 Named volumes are deliberately absent: they would live on the root disk,
 which is a linked clone of the golden image and is not backed up as tenant
-data.
+data. Anonymous ones count: a service whose image declares a `VOLUME` gets
+one at every `up` unless the profile mounts that path itself, which is why
+the search service has a tmpfs on `/var/cache/searxng`.
 
 ### Directory ownership
 
@@ -337,8 +340,9 @@ shows more listeners than nginx while sandboxes run, all on the bridge address.
 
 Two compose networks:
 
-- `app` (`${HARTMESH_APP_SUBNET:-10.201.26.0/24}`, pinned): the five services.
-  PostgreSQL and Redis are reachable only here and are never published. The
+- `app` (`${HARTMESH_APP_SUBNET:-10.201.26.0/24}`, pinned): the six services.
+  PostgreSQL, Redis and SearXNG are reachable only here and are never
+  published. The
   pinned subnet is also `AUTH_TRUSTED_PROXIES` on the Gateway, whose login path
   honours `X-Real-IP` only from a TCP peer in that list and ignores
   `X-Forwarded-For` entirely; without it every login attempt would carry
@@ -445,8 +449,8 @@ docker info --format '{{json .DefaultAddressPools}}'
 
 If `app`'s range collides, put a free one in that tenant's `.env` as
 `HARTMESH_APP_SUBNET=` and follow § "Moving the `app` subnet on a running
-tenant". A `/24` is the shape the profile assumes; five services and the bridge
-address need six.
+tenant". A `/24` is the shape the profile assumes; six services and the bridge
+address need seven.
 
 ### `SANDBOX_EGRESS=allowlist` (the default)
 
@@ -483,8 +487,9 @@ package-installation set: `pypi.org`, `files.pythonhosted.org`,
 card (`approval: prompt`, temporary grants 300 s); private, loopback,
 link-local, multicast and cloud-metadata destinations are denied, and name
 resolution is the proxy's, so a bare `dig` inside the sandbox failing is by
-design. `web_search` and `web_fetch` run from the Gateway, not the sandbox, so
-the list governs only what the model's own shell and code reach.
+design. `web_search` (through the profile's own SearXNG, § "Web search") and
+`web_fetch` run from the Gateway, not the sandbox, so the list governs only
+what the model's own shell and code reach.
 
 Considered for the standing list and left out, each reachable through the
 approval card when a session needs it: `raw.githubusercontent.com` and
@@ -897,11 +902,12 @@ slim profile has not moved it).
 
 | Service | `mem_limit` = `memswap_limit` |
 | --- | --- |
-| gateway | 1344 MiB |
+| gateway | 1152 MiB |
 | frontend | 384 MiB |
 | nginx | 128 MiB |
 | postgres | 768 MiB |
 | redis | 256 MiB (`maxmemory 128mb`, `volatile-lru`) |
+| searxng | 192 MiB |
 | **services** | **2880 MiB** |
 
 Equal `memswap_limit` is an assertion of intent: with no swap device it
@@ -912,10 +918,11 @@ measurement that chose the Gateway is under "Settling the sandbox figure").
 On 2026-09-15 the sandbox went from two 1 GiB full-profile slots to four
 512 MiB slim ones and the Gateway paid the two extra 96 MiB relays, 1344 to
 1152 MiB. On 2026-09-17 the profile returned to two slots at 1 GiB, slim
-(§ "Two 1 GiB slots"), and the Gateway took those 192 MiB back: 1344 MiB is
-2.3 times the 586 MiB it peaked at under the 2026-09-06 two-turn tenant-load
-runs, and leaves 758 MiB for MCP servers a tenant adds; the datastores were
-left alone for the reason recorded below. Moving the 5.0 GiB line instead is
+(§ "Two 1 GiB slots"), and the Gateway took those 192 MiB back. Later that
+day it gave them up again, to the search service (§ "Web search"): 1152 MiB
+is 2.0 times the 586 MiB it peaked at under the 2026-09-06 two-turn
+tenant-load runs, and leaves 566 MiB for MCP servers a tenant adds; the
+datastores were left alone for the reason recorded below. Moving the 5.0 GiB line instead is
 the operator's call, not this profile's.
 
 **Upgrading a guest that already runs sandboxes.** `docker compose up -d`
@@ -952,6 +959,7 @@ to make room.
 | nginx | 256 | scheduler |
 | postgres | 512 | scheduler |
 | redis | 128 | scheduler |
+| searxng | 128 | scheduler |
 
 Memory is what the budget bounds; these bound availability. Without them a
 runaway MCP server the Gateway spawns in its own container (`npx`, `uvx`) or
@@ -1060,7 +1068,8 @@ from the five services, run one sandbox at 1 GiB, or move the class to
 
 `compose.yaml` then said 1 GiB for the sandbox and **1344 MiB for the Gateway**
 (1536 less the 192 MiB; from 2026-09-15 it said 512 MiB and 1152 MiB, and since
-2026-09-17 it says 1024 MiB and 1344 MiB again, § "Memory budget"). Which limit gave up the memory was decided by
+2026-09-17 it says 1024 MiB and, with the search service added the same day,
+1152 MiB, § "Memory budget"). Which limit gave up the memory was decided by
 measuring the trimmed services the way the sandbox should have been measured
 the first time: the whole profile running under Compose on a host with
 `runsc` (release-20260817.0, systrap; Docker Engine 28.4.0, Compose v2.39.4),
@@ -1105,8 +1114,8 @@ eviction answered `504` from nginx and the upload after it succeeded, a
 latency observation, not a memory one). Its earlier 1536 MiB was headroom for MCP
 servers the Gateway spawns in its own container (`npx`, `uvx`); none is
 configured by default, and 758 MiB of spare remained at the time for those a
-tenant adds (566 MiB between 2026-09-15 and 2026-09-17, 758 MiB again since,
-§ "Memory budget").
+tenant adds (566 MiB since 2026-09-15, briefly 758 MiB on 2026-09-17 before
+the search service took the difference, § "Memory budget").
 The datastores were not touched: the brief's own reasoning, that a Redis or
 PostgreSQL OOM loses work in flight and drags derived figures with it, holds,
 and neither was near its limit. The proxy sidecar keeps 96 MiB: one of the 20
@@ -1177,9 +1186,10 @@ key-bearing `web_search` / `web_fetch` / `image_search` backends. A fragment is
 included only when its variable is present and non-empty, and it writes
 `api_key: $NAME` (the reference, never the value), so the Gateway still expands
 the secret itself and no secret lands on disk. Fragment tools replace the
-template's keyless defaults (DuckDuckGo search, Jina fetch, DuckDuckGo image
-search) by name; when several present keys provide the same tool, the first
-fragment in file order wins, which is why the files are numbered.
+template's keyless defaults (the profile's own SearXNG for search, § "Web
+search"; Jina fetch; DuckDuckGo image search) by name; when several present
+keys provide the same tool, the first fragment in file order wins, which is
+why the files are numbered.
 
 **The keyless search default is best effort, and usually will not work.**
 DuckDuckGo answers an automated search from a server address with a
@@ -1197,6 +1207,138 @@ A tenant with **no** model key starts, logs `provider keys found: none`, and
 serves a frontend that reports no model configured. That is the correct
 failure for the profile; refusing such a tenant belongs in the operator's
 onboarding verb.
+
+### Web search
+
+`web_search` and `image_search` without a search-provider key are the
+profile's own SearXNG: the `searxng` service, one instance per tenant,
+reachable only on `app`, called by the Gateway alone and only for JSON. Both
+replaced DuckDuckGo on 2026-09-17. Its HTML endpoint answers a server
+address with an anomaly challenge on every query (HTTP 202 and an image
+puzzle) and its image endpoint refuses this address outright, so a tenant
+whose model reached for either got an error where an answer should have
+been; this profile does not solve, evade, or endpoint-shop around such
+challenges, so both providers had to change.
+
+`searxng/settings.yml` names exactly three engines and `keep_only` makes
+them the whole registry: a query goes to Google's search element, Bing and
+Yahoo, from the tenant's own address, and nowhere else. They were chosen by measurement rather than
+reputation. Each candidate was isolated behind SearXNG's own parser (the
+engine name stamped on every result checked, since an unregistered engine
+silently falls back to the whole set) and asked six questions of the kind a
+small business asks: a plain fact, a VAT rate, an accounting-software how-to,
+a central-bank rate, a library API, a public grant. A question counts as
+answered when results came back, and as authoritative when the institution,
+the vendor's own help centre or the standards body was in the top three.
+Measured 2026-09-17 from a server-class host, a few dozen queries per engine
+across one afternoon:
+
+| Engine | Answered | Authoritative in top 3 | Median | Why it is or is not here |
+| --- | --- | --- | --- | --- |
+| Google, search element | 18/18, then gated | 18/18 | 0.26 s | best ranking of any keyless engine; leads at weight 2 |
+| Yahoo | 18/18 | 15/18 | 0.6 s | never gated; the ranking fallback, full weight |
+| Bing | 18/18 | 9/18 | 0.15 s | never gated; the availability floor at half weight, see below |
+| Google, results page | 17/18 | 6/18 | 0.33 s | answers a server only with the degraded no-JavaScript page |
+| Yandex | 18/18 | 12/18 | 0.6 s | excluded; a tenant's questions do not leave for it |
+| Qwant | 12/18 | 10/12 while answering | 0.66 s | a challenge on every query after about 24 |
+| Mojeek | 6/6 | 4/6 | 1.4 s | SearXNG ships it inactive; slowest and weakest |
+| Brave | 6/24 | 5/6 while answering | 0.6 s | rate-limited after about 6, still closed 30 min later |
+| Startpage | 6/6 | 6/6 | 0.4 s | answers only by solving its proof-of-work challenge, which SearXNG marks inactive for that reason; excluded on principle |
+| DuckDuckGo, html and lite | 0/12 | none | none | a challenge every time |
+
+Merged as configured: 12/12 answered, 12/12 authoritative while Google
+answers and 10/12 once it gates, seven results per query at 0.7 s.
+
+Google leads and is the first to go. Its ordinary results page answers a
+server only with the degraded no-JavaScript page, so SearXNG's `google cse`
+engine instead calls Google's embedded-element endpoint using a publisher
+engine id that ships in SearXNG's own source rather than any key of ours.
+That is the engine most likely to stop working without warning, either
+because the address gates (about 54 queries here, not lifted by a pause) or
+because Google changes the scheme. Bing and Yahoo are what the tool keeps
+answering with when it does, which is why all three are configured rather
+than the best one alone.
+
+Bing carries half weight because it is the one engine measured returning
+results unrelated to the question: a tree-service directory for the
+central-bank rate, a game forum for the VAT rate. It never gates and it is
+the fastest, so it stays as the floor that keeps search answering, but at
+half weight it cannot outrank Yahoo. With that weighting and Google gated,
+the same twelve questions answer 12/12 with 10/12 authoritative in the top
+three.
+
+`image_search` reaches a separate set of engines in the same instance, and
+the two groups do not mix: a web query reaches only the general engines, an
+image query only the image ones. The image engines were measured the same
+way on six reference-image queries, counting a query as usable when a result
+in the top five carried a direct image address a generator could be handed:
+
+| Engine | Answered | Usable address | Results | Median | Why it is or is not here |
+| --- | --- | --- | --- | --- | --- |
+| Google, element images | 6/6 | 6/6 | 20 | 0.34 s | leads at weight 2, as on the web side |
+| Unsplash | 6/6 | 6/6 | 20 | 0.16 s | a photo library that publishes for this use |
+| Openverse | 5/6 | 5/6 | 17 | 0.11 s | openly licensed images, fastest of the set |
+| Wikimedia Commons | 5/6 | 5/6 | 5 | 0.38 s | fewer and smaller, but covers public-domain subjects the others miss |
+| DuckDuckGo images | 0/6 | none | none | none | refused this address on every query; the endpoint being replaced |
+| Flickr | 6/6 | 0/6 | 25 | 1.16 s | answers, but its results carry no direct image address |
+| Pixabay | 4/6 | 0/6 | 29 | 0.18 s | parsing errors, and no usable address when it answers |
+| Startpage images | 6/6 | 6/6 | 50 | 0.62 s | answers only through a challenge and ships inactive upstream |
+
+Several image engines share an outgoing network with their general-search
+namesake, so naming one in `keep_only` without the other refuses to start:
+Qwant, Mojeek, Brave and Startpage images all failed that way while the set
+was being chosen.
+
+Nothing keyless is both best and reliable. Gating is by address reputation,
+so a tenant may meet different thresholds, and every engine here reads a
+page or endpoint meant for a browser rather than an API with terms. A search
+key (`providers/tools/`: Tavily, Serper, Brave, Exa, Firecrawl, Serply,
+GroundRoute, Tencent WSA, FastCRW) is the supported upgrade; when one is
+present its fragment replaces this tool by name.
+
+The engine set is release content, not a tenant setting: `settings.yml` is
+mounted read-only from the bundle and the next upgrade restores it, and no
+`.env` key changes it. An operator who wants different search buys a key.
+
+When SearXNG is down or answers with an error the tool returns one sentence
+the model can act on (answer from what it already knows, tell the person the
+web was not checked, do not retry this turn) rather than an exception. The
+query stays out of the log at every level: the search is a POST, so the
+question never appears in a request line httpx logs at INFO or in any
+access log, and the status-error path logs the status rather than the
+exception text, which would carry the URL. Four searches
+per Gateway process run at once: a research fan-out that asked dozens of
+questions in a minute is what gets an address gated. Results are bounded
+before the model sees them: web addresses only, and a title, address and
+snippet each capped, because a result page is text somebody else wrote.
+
+Neither tool is evidence-bearing: they have no durable evidence adapter, so
+their turns carry tool receipts but no `retrieval.observation.v1` row
+(`backend/docs/EVIDENCE_BEARING_RETRIEVAL.md`). The keyed durable providers
+keep theirs, and with them the domain allowlists and byte ceilings their
+policy carries. `image_search` returns only results carrying a direct image
+address, bounded the same way, and says so plainly when the service is down
+rather than when a query simply found nothing.
+
+The service: `searxng/searxng`, pinned by digest in `images.txt`; uid 1000; a
+read-only root with `/etc/searxng` a 1 MiB tmpfs, `/tmp` a 16 MiB one and
+`/var/cache/searxng` a 4 MiB one (the image declares that path a volume;
+without the mount, Docker would put an anonymous volume on the root disk at
+every `up`). The image's start script insists on `/etc/searxng/settings.yml`
+and ignores its arguments, so `searxng/run.sh` replaces the entrypoint: it
+copies the bundle's settings into that tmpfs, mints the instance secret from
+`/dev/urandom` (it signs HTML cookies nothing sets, and lands nowhere: no
+`.env` key, and the contract is unchanged) and execs the image's script.
+192 MiB, taken from the Gateway (§ "Memory budget"), against 92 MiB resident
+after a turn; `pids_limit` 128. SearXNG's own limiter is off (it needs a
+Redis this instance does not have and guards an HTML surface nothing
+reaches), as are metrics and the image proxy; `safe_search` is 1. The
+healthcheck is the instance's `/healthz`, which reports the process, not
+whether an engine still answers: a tenant whose engines all gate looks
+healthy everywhere, and the signal is the Gateway's `web_search (SearXNG)
+failed` line plus SearXNG's own per-query engine errors. Its start prints an
+ownership warning for the root-owned tmpfs and a missing-`limiter.toml`
+notice, both expected.
 
 ### Operator-managed models
 
@@ -1548,7 +1690,7 @@ config ConfigMap under the chart README's recommended values, at
 | Key | Chart | Profile | Why |
 | --- | --- | --- | --- |
 | `models` | `[]` | the catalog entries for the keys present, or the operator's own list when `HARTMESH_MODELS_FILE` is set | the chart leaves models to the operator's values; the profile renders them from the tenant's keys, or from the file § "Operator-managed models" describes |
-| `tools[web_search]` | DuckDuckGo | DuckDuckGo without a search key, the keyed provider when one is present (Tavily here) | same ten tools; only the search backend follows the tenant |
+| `tools[web_search]` | DuckDuckGo | the profile's own SearXNG without a search key (§ "Web search"), the keyed provider when one is present (Tavily here) | same ten tools; only the search backend follows the tenant |
 | `sandbox.image` | upstream `latest` | the fork's digest pin | release pinning |
 | `sandbox.replicas` | 3 | 2 | the memory budget |
 | `sandbox.idle_timeout` | absent | 1800 | recorded above |
@@ -2528,3 +2670,57 @@ drives:
   these fields after the repair; the pinned release image; and the disk
   behaviour over a long-lived process with many users, which the bound in
   § "Public skills" states rather than measures.
+
+Keyless web search that answers (2026-09-17). The DuckDuckGo HTML endpoint
+behind the profile's keyless `web_search` answers a server address with an
+anomaly challenge on every query, so a tenant whose model reached for search
+got an error where an answer should have been. § "Web search" records the
+engines measured and the SearXNG service that replaced it. Proved on this
+host, on the profile's own `compose.yaml`, `config.yaml`, `images.txt` and
+`searxng/` bundle, with the Gateway's harness and app source mounted over the
+image and the turn-phase probe as the model:
+
+- `up -d --wait searxng gateway`: both healthy; `docker inspect` of searxng
+  `Memory=MemorySwap=192 MiB`, `PidsLimit=128`, `ReadonlyRootfs=true`,
+  `User=1000:1000`, no port bindings; of the Gateway `1152 MiB`. The
+  instance's `/config` lists exactly the engines `settings.yml` names and
+  `safe_search` 1; `/etc/searxng/settings.yml` is byte-identical to the
+  bundle's; loading that file without the environment yields the template's
+  placeholder secret, so no secret is on disk; 91.95 MiB resident after a
+  turn at 8 processes, with the fallback pair alone answering 12/12 at
+  10/12 authoritative and 0.73 s while Google was gated. On a container created fresh the declared volume path is the
+  profile's tmpfs; Compose carries an existing container's anonymous volume
+  across a recreate, so a service that ever ran without the mount needs
+  `--renew-anon-volumes` once.
+- A `probe:search` turn through the real route: the tool result in the thread
+  history is the SearXNG JSON, Wikipedia's Paris article first; the run's
+  events carry `tool_receipt.started.v1` and `tool_receipt.outcome.v1` and no
+  `retrieval.observation.v1`; the stream ends with `end` and no `error`.
+- The same turn with `docker compose stop searxng`: the tool result is the
+  one unavailable sentence, the model answered after it, the stream ended
+  with `end`, and the Gateway logged `web_search (SearXNG) failed:
+  ConnectError` with no query text. `up -d --wait searxng` returned it to
+  healthy.
+- Offline: the Gateway stream suite's new SearXNG cases (results reach the
+  conversation, a down service ends the turn in words, no retrieval evidence
+  claim), the profile suite (six services on the 2880 MiB line, the search
+  service private and read-only, the settings naming exactly the three
+  engines, the render selecting SearXNG for a keyless tenant), and the
+  SearXNG tool suite.
+- Offline, after the review: the question travels in the POST body and not
+  the URL, the query stays out of the log on the status-error path as well
+  as the connection one, a malformed tool configuration raises instead of
+  claiming the service did not answer, only web addresses with bounded
+  fields reach the model, and four searches per process run at once.
+- Live, after the review: the same two turns on the reviewed bundle. With
+  the service up the tool returned Wikipedia's Paris article first and the
+  Gateway logged only `POST http://searxng:8080/search`, no question; with
+  it stopped, the unavailable sentence and a `ConnectError` line naming no
+  query.
+- Live, `image_search`: the profile's own tool against a live instance of
+  the shipped bundle returned five usable image addresses for a product
+  query, from Unsplash, Openverse and Wikimedia Commons. A general query in
+  the same instance reached only Bing and Yahoo, so the two engine groups do
+  not mix.
+- Not proved here: the pinned Gateway image (the source was mounted over
+  it), and gating thresholds on any address but this host's.

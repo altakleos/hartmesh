@@ -1,11 +1,12 @@
 """The default tenant profile can run its configured search tool.
 
-The released Compose profile selects ``deployment.profile: local_development``,
-enables the governed tool plane, and declares the keyless DuckDuckGo
-``web_search``. A fresh tenant has a tool-plane scope but no promoted base
-revision, which the governed-tool-plane contract calls a supported state: a
-non-durable deployment keeps running on its own configuration, and admission
-makes no governed claim.
+The released Compose profile selects ``deployment.profile: local_development``
+and enables the governed tool plane; through ``2.1.0+hartmesh.20`` its keyless
+``web_search`` was the declared DuckDuckGo retrieval tool, and a keyed tenant
+still runs a declared provider today. A fresh tenant has a tool-plane scope but
+no promoted base revision, which the governed-tool-plane contract calls a
+supported state: a non-durable deployment keeps running on its own
+configuration, and admission makes no governed claim.
 
 Execution disagreed. Admission continued and sealed no ``tool_plane_revision``,
 while every accepted run still carried tool-receipt evidence, so the receipt
