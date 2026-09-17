@@ -1732,6 +1732,12 @@ async def run_agent(
             publish=lambda payload: bridge.publish(record.run_id, "custom", payload),
         )
         journal.observe(progress)
+        # The route's own interval -- request received to this point -- is
+        # measured by the launch and handed over on the record; the journal
+        # cannot see it from here and must not guess it.
+        launch_timings = getattr(record, "launch_timings", None)
+        if launch_timings is not None:
+            journal.set_launch(launch_timings)
         journal.mark(TurnPhase.ADMISSION)
         # Submit-to-first-rendered-text belongs to the browser: it includes
         # ingress, transfer and render, none of which a server timestamp can

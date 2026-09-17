@@ -573,3 +573,65 @@ def test_a_second_graph_start_is_recorded_rather_than_collapsed():
 
     line = journal.snapshot().to_log_line()
     assert line.count("graph_start@") == 2, line
+
+
+def test_the_launch_interval_is_carried_from_the_route_into_the_journal(caplog):
+    """The `.19` run left 1.4 to 3.4 s of every turn before the journal opened.
+
+    The journal starts at worker admission, so the route's own work -- sealing
+    the accepted invocation, persisting the row, handing the record to the
+    worker -- had no phase and no line to attribute it to. The launch records
+    its steps against the request's own monotonic stamp and the worker hands
+    them to the journal, which renders them beside the phases.
+    """
+    from deerflow.runtime.turn_phases import LaunchTimings
+
+    received_at = time.monotonic() - 2.5
+    persisted_at = received_at + 2.4
+    timings = LaunchTimings(
+        received_at=received_at,
+        persisted_at=persisted_at,
+        steps=(("identify", 3.0), ("seal", 2210.4), ("persist", 11.2)),
+    )
+    journal = TurnPhaseJournal(correlation_id="trace-launch", run_id="run-launch")
+    journal.set_launch(timings)
+    journal.mark(TurnPhase.ADMISSION)
+
+    snapshot = journal.snapshot()
+    # From the request's stamp to the journal's own start, not to now.
+    assert snapshot.launch_ms is not None and 2450 <= snapshot.launch_ms <= 2600
+    # From the persisted row to the journal's start: the worker handoff.
+    assert snapshot.launch_handoff_ms is not None and 50 <= snapshot.launch_handoff_ms <= 200
+    assert snapshot.launch_steps == (("identify", 3.0), ("seal", 2210.4), ("persist", 11.2))
+
+    with caplog.at_level(logging.INFO, logger="deerflow.runtime.turn_phases"):
+        journal.emit()
+    message = caplog.records[0].getMessage()
+    assert "launch=" in message and "(identify=3ms,seal=2210ms,persist=11ms,handoff=" in message, message
+    # The launch reads before the phases: it is what happened before them.
+    assert message.index("launch=") < message.index("phases="), message
+    wire = caplog.records[0].turn_phases
+    assert wire["launch"]["total_ms"] == round(snapshot.launch_ms, 3)
+    assert wire["launch"]["steps"] == [{"step": "identify", "ms": 3.0}, {"step": "seal", "ms": 2210.4}, {"step": "persist", "ms": 11.2}]
+
+
+def test_a_turn_with_no_launch_timings_says_nothing_about_a_launch(caplog):
+    journal = TurnPhaseJournal(correlation_id="trace-nolaunch", run_id="run-nolaunch")
+    journal.mark(TurnPhase.ADMISSION)
+    snapshot = journal.snapshot()
+    assert snapshot.launch_ms is None and snapshot.launch_steps == ()
+    with caplog.at_level(logging.INFO, logger="deerflow.runtime.turn_phases"):
+        journal.emit()
+    assert "launch=" not in caplog.records[0].getMessage()
+    assert caplog.records[0].turn_phases["launch"] is None
+
+
+def test_launch_step_names_are_bounded_labels_and_a_stamp_behind_the_request_is_clamped():
+    from deerflow.runtime.turn_phases import LaunchTimings
+
+    now = time.monotonic()
+    timings = LaunchTimings(received_at=now, persisted_at=now, steps=(("seal it now!", -5.0),))
+    assert timings.steps == (("seal_it_now_", 0.0),)
+    # Diagnostics never fail a run: an impossible ordering is clamped, not raised.
+    clamped = LaunchTimings(received_at=now + 1, persisted_at=now, steps=())
+    assert clamped.persisted_at == clamped.received_at == now + 1

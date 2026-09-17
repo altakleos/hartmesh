@@ -469,6 +469,14 @@ def test_the_emitted_line_carries_the_turn_timing_a_deployment_can_read(gateway:
     stream_text_ms = _phase_at(wire, "first_stream_text")
     assert f"first_stream_text@{round(stream_text_ms)}ms" in message
     assert "unobservable=browser_first_text(" in message
+    # The route's own interval -- request received to worker admission -- is
+    # the part of the ≤2 s acknowledgement target a server can measure, and it
+    # reads from the same line, before the phases it precedes.
+    assert "launch=" in message and message.index("launch=") < message.index("phases="), message
+    launch = wire["launch"]
+    assert launch is not None and launch["total_ms"] > 0, wire
+    assert [step["step"] for step in launch["steps"]] == ["identify", "permit", "seal", "authorize", "constrain", "prepare", "persist"], launch
+    assert launch["handoff_ms"] >= 0, launch
     print(f"turn-phase e2e (released log line): {message}")
 
 

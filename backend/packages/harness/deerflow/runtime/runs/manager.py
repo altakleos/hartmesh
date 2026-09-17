@@ -315,6 +315,10 @@ class RunRecord:
     created_at: str = ""
     updated_at: str = ""
     task: asyncio.Task[None] | None = field(default=None, repr=False)
+    # What the launch measured before the worker opens the turn's journal
+    # (``deerflow.runtime.turn_phases.LaunchTimings``). Process-local like
+    # ``task``: never persisted, never set on a replayed record.
+    launch_timings: Any | None = field(default=None, repr=False)
     # True only while the application admission coordinator owns the bounded
     # commit-to-worker handoff for this process-local record.
     attachment_supervised: bool = field(default=False, repr=False)

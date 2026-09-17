@@ -797,3 +797,45 @@ async def test_thread_http_facade_observes_and_cancels_through_runtime(
             thread_id="thread-1",
         )
     )
+
+
+@pytest.mark.anyio
+async def test_a_created_launch_records_its_steps_on_the_record_for_the_worker() -> None:
+    """The journal opens in the worker; what the route did before is recorded here.
+
+    Every awaited step of the launch is timed against the request's own
+    stamp and handed to the worker on the record, transiently -- never
+    persisted, never on a replayed record, whose worker is already running.
+    """
+    import time
+
+    events: list[str] = []
+    runs = _Runs(events)
+    runtime = InvocationRuntime(normalizer=_Normalizer(events), runs=runs)
+    received_at = time.monotonic()
+
+    result = await runtime.launch(InternalLaunchIntent(thread_id="thread-1", received_at=received_at))
+
+    assert result.created is True
+    timings = result.record.launch_timings
+    assert timings is not None
+    assert timings.received_at == received_at
+    assert timings.persisted_at >= received_at
+    # Consecutive from the stamp: the permit wait is a step of its own, and
+    # this fake normalizer has no identify step to record.
+    assert [step for step, _ in timings.steps] == ["permit", "seal", "authorize", "constrain", "prepare", "persist"]
+    assert all(ms >= 0.0 for _, ms in timings.steps)
+    await result.record.task
+
+
+@pytest.mark.anyio
+async def test_a_launch_without_a_stamp_still_records_its_steps_from_its_own_start() -> None:
+    events: list[str] = []
+    runs = _Runs(events)
+    runtime = InvocationRuntime(normalizer=_Normalizer(events), runs=runs)
+
+    result = await runtime.launch(InternalLaunchIntent(thread_id="thread-1"))
+
+    assert result.record.launch_timings is not None
+    assert result.record.launch_timings.persisted_at >= result.record.launch_timings.received_at
+    await result.record.task

@@ -1672,6 +1672,40 @@ between it and `sandbox_binding`). `graph_start` is marked per attempt, so a
 resumed or retried stream shows two. `skill_materialization` is recorded only
 on `kind=accepted` turns; an ordinary turn has the other three.
 
+`launch=` is what happened *before* the journal opened, and it is **outside**
+`total=` and every `@` offset: the journal's zero is the worker's admission,
+so `total=` and the phases start there, and `launch=` is the interval from the
+request reaching the application to that zero. It is the server's half of the
+person's wait for a first word — read acknowledgement as `launch=` plus
+`first_stream_text@`, never as the offset alone — and until this field
+existed it was invisible except as the gap between the access log and "Run
+created". Every entry point stamps the intent when it builds it: the HTTP
+routes at `start_run`, the scheduler when it dispatches an occurrence, an IM
+channel when it turns a message into a run, the embedded runtime API at its
+call. The steps in brackets are consecutive from that stamp, so they account
+for the whole interval up to the persisted row: `identify` (the idempotency
+lookup, when the entry point supplied a key), `permit` (the admission fence),
+`seal` (the accepted invocation: config, agent revision and skill snapshot),
+`authorize`, `constrain`, `prepare` (the projection reservation and the
+checkpoint seed check) and `persist` (the run row). `handoff` is the rest:
+the worker being attached, its task being scheduled, and the thread-metadata
+setup it runs before opening the journal. The example line above predates
+the field and is left as it was measured. Measured on the development host on
+2026-09-17 (the Gateway stream suite's ordinary turn against the probe model:
+no skill snapshot, the in-process stores, so `seal` is the cheap case):
+
+```text
+launch=405ms(identify=0ms,permit=16ms,seal=96ms,authorize=0ms,constrain=0ms,prepare=268ms,persist=20ms,handoff=4ms)
+```
+
+Tenant-class `.19`, before this field existed, showed the same interval as
+1.4 to 2.2 s on warm turns and 3.4 s on the session's first, with `seal`
+staging the skill snapshot each time; that is the figure the next
+qualification reads from `launch=` directly. A launch that replays an
+already-admitted run (an idempotent resubmission) starts no worker and prints
+no new line; a run recovered by execution takeover prints a line with no
+`launch=`, because no request in that process launched it.
+
 What the server cannot see it declares instead of inferring:
 `browser_first_text` is always `unobservable` here, because only a browser
 measuring through the front door can time what the person actually waited
@@ -1685,7 +1719,7 @@ docker compose --project-directory /opt/hartmesh --env-file "$ENV" \
 is therefore a complete per-turn latency record. The same fields also ride the
 log record as a structured `turn_phases` field for deployments that enable
 `logging.enhance.format: json`; this profile logs text. That record stamps
-`version: 4`, and fields are added rather than repurposed, so a reader that
+`version: 5` (`launch` was added in 5), and fields are added rather than repurposed, so a reader that
 tolerates unknown keys needs no change. The line reports
 confirmed resource counts (`creates=`, `teardowns=`), not attempts: the
 structured record keeps `create_attempts` and `unknown_create_results`
