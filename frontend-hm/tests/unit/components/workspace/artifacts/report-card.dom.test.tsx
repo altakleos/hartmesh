@@ -83,6 +83,41 @@ describe("ReportCard", () => {
     expect(kpis.textContent).toContain("▲ 38.7% vs July 2026");
   });
 
+  it("sizes the KPI tiles by the space they have, not by the window", () => {
+    // The side panel is around 480px wide inside a 1440px window, so a
+    // viewport breakpoint put five tiles in it: `$74,702.61` was about 115px
+    // of text in a 61px track, and 53px of it printed across the number next
+    // to it. Nobody reading the panel could tell which figure belonged to
+    // which label.
+    //
+    // `auto-fit` asks the available width instead of the window. What that
+    // actually buys is measured end to end, in
+    // `tests/e2e/business-report-card.spec.ts`; here it is only that no
+    // viewport-keyed column count survives beside it, because the two would
+    // fight and the viewport one wins at exactly the width that breaks.
+    renderCard();
+
+    const kpis = screen.getByTestId("business-report-kpis");
+    expect(kpis.className).toContain("auto-fit");
+    expect(kpis.className).toContain("minmax(");
+    expect(kpis.className).not.toMatch(
+      /(^|[\s:])(sm:|md:|lg:|xl:)?grid-cols-\d/,
+    );
+  });
+
+  it("keeps a figure too wide for its tile inside that tile", () => {
+    // The sizing above is what makes the tiles readable; this is the floor
+    // under it. A long enough figure — a seven-figure revenue, a narrow
+    // window — still has to break inside its own tile rather than print
+    // across its neighbour.
+    renderCard();
+
+    const value = screen
+      .getByTestId("business-report-kpis")
+      .querySelector("[data-testid='business-report-kpi-value']")!;
+    expect(value.className).toContain("break-words");
+  });
+
   it("reads a comparison row in its own units", () => {
     const { container } = renderCard();
 

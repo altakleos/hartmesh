@@ -16,7 +16,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
-from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
+from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError, MemoryWriterActivityV1
 
 from .config import OpenVikingConfig
 from .session import (
@@ -299,6 +299,20 @@ class OpenVikingMemoryManager(MemoryManager):
                 self._lifecycle.wait(remaining)
         self._close_resources()
         return True
+
+    def writer_activity(self) -> MemoryWriterActivityV1:
+        """Report the calls this manager has accepted and not yet finished.
+
+        Nothing is buffered here -- a call is either running or done -- so the
+        outstanding work is exactly what ``shutdown_flush`` waits for. This
+        counter does not separate a read from a write, which is why the record
+        calls the field ``in_flight`` rather than claiming a write is under
+        way: a read counts, ``idle`` stays conservative, and the one-directional
+        guarantee the reader relies on still holds.
+        """
+        with self._lifecycle:
+            active = self._active_operations
+        return MemoryWriterActivityV1(in_flight=max(0, int(active)))
 
     def close(self) -> None:
         """Request idempotent closure after any active operation finishes."""

@@ -346,6 +346,7 @@ def test_portability_only_abc_contract_imports_deerflow():
 _VENDORED_MANAGER_PY = '''
 """Vendored host contract (pydantic BaseModel + three-tier ABC) for the portability demo."""
 from abc import abstractmethod
+from dataclasses import dataclass
 from typing import Any, ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -396,6 +397,8 @@ class MemoryManager(BaseModel):
         raise NotImplementedError
     def shutdown_flush(self, timeout) -> bool:
         return True
+    def writer_activity(self):
+        return MemoryWriterActivityV1(observable=False, reason="backend_does_not_track_writers")
 
     # Tier 3: optional hooks (override if supported).
     def warm(self) -> bool | None:
@@ -415,6 +418,18 @@ class MemoryManager(BaseModel):
 
 class MemoryConflictError(RuntimeError): ...
 class MemoryCorruptionError(RuntimeError): ...
+
+@dataclass(frozen=True, slots=True)
+class MemoryWriterActivityV1:
+    version: int = 1
+    buffered: int = 0
+    in_flight: int = 0
+    observable: bool = True
+    reason: str | None = None
+
+    @property
+    def idle(self) -> bool:
+        return self.observable and self.buffered == 0 and self.in_flight == 0
 '''
 
 

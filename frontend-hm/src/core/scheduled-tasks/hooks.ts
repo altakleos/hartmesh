@@ -8,6 +8,7 @@ import {
   deleteScheduledTask,
   fetchScheduledTaskRuns,
   fetchScheduledTasks,
+  fetchSchedulerState,
   fetchThreadScheduledTasks,
   pauseScheduledTask,
   resumeScheduledTask,
@@ -22,6 +23,20 @@ export function useScheduledTasks() {
     queryFn: fetchScheduledTasks,
     refetchInterval: 15000,
     refetchIntervalInBackground: false,
+  });
+}
+
+export function useSchedulerState() {
+  return useQuery({
+    queryKey: ["scheduler-state"],
+    queryFn: fetchSchedulerState,
+    refetchInterval: 15000,
+    refetchIntervalInBackground: false,
+    // A frontend ahead of its Gateway — a rolling upgrade, a tenant not
+    // upgraded yet — gets 404 here. Retrying it three times every fifteen
+    // seconds for as long as the page is open helps nobody, and the page
+    // already stays quiet without an answer.
+    retry: false,
   });
 }
 

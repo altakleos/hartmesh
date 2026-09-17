@@ -21,6 +21,7 @@ import logging
 import os
 import threading
 from abc import abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Literal
@@ -92,6 +93,65 @@ class MemoryConflictError(MemoryManagerError):
 
 class MemoryCorruptionError(MemoryManagerError):
     """Persisted memory cannot be read safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class MemoryWriterActivityV1:
+    """What background memory work is outstanding right now.
+
+    A turn's memory extraction outlives the turn: the conversation is handed to
+    a debounce buffer, a worker picks it up later, calls a model and writes the
+    document. So "the run finished" says nothing about whether the memory files
+    are still moving, and a tenant-class upgrade proved it -- a byte-exact
+    baseline taken minutes after the last browser turn was invalidated by an
+    extraction that started at 07:14:47 and finished at 07:15:21. Nothing the
+    Gateway published would have warned the operator to wait.
+
+    ``buffered`` counts updates accepted and not yet picked up. ``in_flight``
+    counts work the backend has accepted and not finished; it is deliberately
+    not "writes in progress", because a backend that does not separate its
+    reads from its writes has to count both, and a conservative *not idle* is
+    the safe direction for somebody about to take a snapshot. ``observable`` is
+    the third state and the one that keeps the record honest: a backend that
+    cannot see its own workers answers *unknown*, never idle, because an
+    inferred idle is exactly the mistake this record exists to prevent.
+
+    The guarantee a reader may rely on is one-directional and that is the
+    point: ``idle`` means the document has settled, while not-idle may mean
+    only that the backend cannot promise it has.
+    """
+
+    version: int = 1
+    buffered: int = 0
+    in_flight: int = 0
+    observable: bool = True
+    # Why the backend cannot answer. Required when unobservable and refused
+    # otherwise, so a reader never has to guess which half of the record to
+    # trust.
+    reason: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.observable and self.reason is not None:
+            raise ValueError("an observable writer activity carries no reason")
+        if not self.observable and not self.reason:
+            raise ValueError("an unobservable writer activity must give a reason")
+        if self.buffered < 0 or self.in_flight < 0:
+            raise ValueError("writer activity counts cannot be negative")
+
+    @property
+    def idle(self) -> bool:
+        """True only when the backend can see its workers and none are working."""
+        return self.observable and self.buffered == 0 and self.in_flight == 0
+
+    def to_wire(self) -> dict[str, Any]:
+        return {
+            "version": self.version,
+            "buffered": self.buffered,
+            "in_flight": self.in_flight,
+            "idle": self.idle,
+            "observable": self.observable,
+            "reason": self.reason,
+        }
 
 
 class MemoryManager(BaseModel):
@@ -391,6 +451,32 @@ class MemoryManager(BaseModel):
         queue override to flush within ``timeout``.
         """
         return True
+
+    def writer_activity(self) -> MemoryWriterActivityV1:
+        """What background memory work is still outstanding.
+
+        The drain above answers "finish what is left"; this answers the
+        question that has to come first -- *is there anything left?* An
+        operator about to snapshot a data disk, or an acceptance run about to
+        take a byte-exact baseline, reads this to know the memory files have
+        stopped moving. A turn ending in the browser does not mean that: the
+        extraction runs behind it, and one that finished 34 seconds after the
+        last foreground run invalidated a tenant-class upgrade's baseline.
+
+        Default: *unknown*, and this is the one tier-2 method whose default is
+        deliberately not the convenient answer. ``shutdown_flush`` may default
+        to success because a backend with nothing to drain loses nothing by
+        being asked; an idle answer is the opposite, because a caller acts on
+        it by taking a snapshot. A backend that inherits this default has said
+        nothing about its writers, and saying nothing must not read as "they
+        have finished" -- so every backend that can account for its workers
+        opts in by overriding, and one that cannot is reported honestly.
+        Raising ``NotImplementedError`` is the same answer by another route.
+        """
+        return MemoryWriterActivityV1(
+            observable=False,
+            reason="backend_does_not_track_writers",
+        )
 
     # ── Tier 3: optional hooks ──────────────────────────────────────────
     # A-class: agent-side has real callers (startup warm-up, manual reload, fact

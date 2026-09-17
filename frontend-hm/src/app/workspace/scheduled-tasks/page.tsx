@@ -35,6 +35,7 @@ import {
   useResumeScheduledTask,
   useScheduledTaskRuns,
   useScheduledTasks,
+  useSchedulerState,
   useTriggerScheduledTask,
   useThreadScheduledTasks,
 } from "@/core/scheduled-tasks/hooks";
@@ -42,6 +43,7 @@ import { RECIPES, type Recipe } from "@/core/scheduled-tasks/recipes";
 import type {
   ScheduledTask,
   ScheduledTaskRun,
+  SchedulerState,
 } from "@/core/scheduled-tasks/types";
 import { cn } from "@/lib/utils";
 
@@ -56,6 +58,50 @@ function ReuseThreadNotice({
 }) {
   return (
     <Alert className="border-amber-500/50 bg-amber-500/10">
+      <TriangleAlertIcon className="text-amber-600 dark:text-amber-400" />
+      <AlertTitle>{title}</AlertTitle>
+      <AlertDescription>{description}</AlertDescription>
+    </Alert>
+  );
+}
+
+/**
+ * Why the times on this page are not going to happen.
+ *
+ * A task row says "enabled, next run <date>" and cannot say that no scheduler
+ * is polling for it, which is how a workspace ends up displaying a next run
+ * eight days in the past. This says the missing half, and says who fixes it.
+ * Absent while the state is still loading: a banner that flashes "turned off"
+ * on every page load would be its own lie.
+ */
+function SchedulerOffNotice({
+  state,
+  strings,
+}: {
+  state: SchedulerState;
+  strings: {
+    offTitle: string;
+    offDescription: string;
+    unavailableTitle: string;
+    unavailableDescription: string;
+    stoppedTitle: string;
+    stoppedDescription: string;
+  };
+}) {
+  // Title and body come from the same branch. A page that exists to end one
+  // contradiction must not open with "Scheduling is turned off" over a body
+  // that says it is turned on.
+  const [title, description] =
+    state.state === "unavailable"
+      ? [strings.unavailableTitle, strings.unavailableDescription]
+      : state.state === "not_running"
+        ? [strings.stoppedTitle, strings.stoppedDescription]
+        : [strings.offTitle, strings.offDescription];
+  return (
+    <Alert
+      className="border-amber-500/50 bg-amber-500/10"
+      data-testid="scheduler-off-notice"
+    >
       <TriangleAlertIcon className="text-amber-600 dark:text-amber-400" />
       <AlertTitle>{title}</AlertTitle>
       <AlertDescription>{description}</AlertDescription>
@@ -83,6 +129,20 @@ function formatTimestamp(value: string | null, locale: string): string {
   }).format(date);
 }
 
+/** A scheduled time already behind us. Shown beside the time itself, because
+ * a date alone reads as upcoming and this page renders them absolutely.
+ *
+ * Only ever shown for an enabled task: pausing one leaves `next_run_at` where
+ * it was, so a task somebody paused on Monday would otherwise be flagged
+ * overdue on Thursday for doing exactly what they asked. */
+function isPast(value: string | null): boolean {
+  if (!value) {
+    return false;
+  }
+  const date = new Date(value);
+  return !Number.isNaN(date.getTime()) && date.getTime() < Date.now();
+}
+
 export default function ScheduledTasksPage() {
   const { t, locale } = useI18n();
   const st = t.scheduledTasks;
@@ -90,6 +150,7 @@ export default function ScheduledTasksPage() {
   const searchParams = useSearchParams();
   const threadId = searchParams.get("thread_id");
   const allTasksQuery = useScheduledTasks();
+  const schedulerQuery = useSchedulerState();
   const threadTasksQuery = useThreadScheduledTasks(threadId);
   const data = threadId ? threadTasksQuery.data : allTasksQuery.data;
   const queryError = threadId ? threadTasksQuery.error : allTasksQuery.error;
@@ -233,6 +294,12 @@ export default function ScheduledTasksPage() {
       <WorkspaceBody>
         <div className="mx-auto flex w-full max-w-(--container-width-md) flex-col gap-4 p-6">
           <h1 className="text-2xl font-semibold">{t.sidebar.scheduledTasks}</h1>
+          {schedulerQuery.data && !schedulerQuery.data.running ? (
+            <SchedulerOffNotice
+              state={schedulerQuery.data}
+              strings={st.scheduler}
+            />
+          ) : null}
           <div
             ref={createFormRef}
             className="grid gap-2 rounded-lg border p-4"
@@ -506,6 +573,15 @@ export default function ScheduledTasksPage() {
                   <div className="text-muted-foreground text-sm">
                     {st.detail.nextRun}:{" "}
                     {formatTimestamp(selectedTask.next_run_at, locale)}
+                    {selectedTask.status === "enabled" &&
+                    isPast(selectedTask.next_run_at) ? (
+                      <span
+                        className="ml-2 text-amber-600 dark:text-amber-400"
+                        data-testid="scheduled-task-next-run-overdue"
+                      >
+                        ({st.scheduler.overdue})
+                      </span>
+                    ) : null}
                   </div>
                   <div className="text-muted-foreground text-sm">
                     {st.detail.lastRun}:{" "}

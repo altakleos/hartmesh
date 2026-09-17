@@ -452,6 +452,15 @@ export interface Translations {
       reuseNoticeTitle: string;
       reuseNoticeDescription: string;
     };
+    scheduler: {
+      offTitle: string;
+      offDescription: string;
+      unavailableTitle: string;
+      unavailableDescription: string;
+      stoppedTitle: string;
+      stoppedDescription: string;
+      overdue: string;
+    };
     filters: {
       allStatuses: string;
       enabled: string;

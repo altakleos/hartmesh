@@ -27,7 +27,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import PrivateAttr
 
 # ABC contract -- the ONE allowed `from deerflow` import in this backend folder.
-from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
+from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError, MemoryWriterActivityV1
 
 from .client import HonchoClient
 from .config import HonchoConfig, HonchoIdentityResolver, stable_id
@@ -471,6 +471,10 @@ class HonchoMemoryManager(MemoryManager):
     def shutdown_flush(self, timeout: float) -> bool:
         """Writes are synchronous per-call; nothing is buffered locally."""
         return True
+
+    def writer_activity(self) -> MemoryWriterActivityV1:
+        """Nothing outstanding: every write finishes inside the call that made it."""
+        return MemoryWriterActivityV1()
 
     def close(self) -> None:
         """Release the HTTP client (gateway shutdown hook)."""

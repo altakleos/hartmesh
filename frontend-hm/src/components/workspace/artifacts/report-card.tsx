@@ -387,8 +387,13 @@ export function ReportCard({
         )}
 
         {report.kpis.length > 0 && (
+          // Sized by the container, never by the window: the card's widest
+          // home is a full page and its narrowest is the artifact side panel,
+          // and a viewport breakpoint cannot tell them apart. The 10rem floor
+          // is set by the figures rather than by how many tiles would fit --
+          // see the frontend guide, "KPI tiles".
           <div
-            className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-5"
+            className="mt-4 grid grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))] gap-3"
             data-testid="business-report-kpis"
           >
             {report.kpis.map((kpi) => (
@@ -400,7 +405,13 @@ export function ReportCard({
                 <div className="text-muted-foreground text-[11px] font-medium tracking-wide break-words uppercase">
                   {kpi.label}
                 </div>
-                <div className="mt-0.5 text-lg font-semibold tabular-nums">
+                {/* A figure wider than its tile breaks inside it rather than
+                    across its neighbour. The sizing above is what keeps that
+                    from happening; this is the floor under it. */}
+                <div
+                  className="mt-0.5 text-lg font-semibold break-words tabular-nums"
+                  data-testid="business-report-kpi-value"
+                >
                   {formatValue(kpi.value, kpi.format, report.currency)}
                 </div>
                 {kpi.delta && <DeltaLine delta={kpi.delta} t={t} />}

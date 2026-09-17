@@ -2578,7 +2578,8 @@ def _destroy_probe(monkeypatch, backend, *, containers: set[str], networks: set[
                 else SimpleNamespace(stdout="", stderr=f"Error: No such network: {name} not found", returncode=1)
             )
         if verb == "stop":
-            name = cmd[2]
+            # `docker stop` carries a grace flag before the name; the name is last.
+            name = cmd[-1]
             if faults.get(f"stop:{name}") == "refuse":
                 raise subprocess.CalledProcessError(1, cmd, stderr="synthetic Docker daemon refusal")
             if faults.get(f"stop:{name}") == "timeout":
@@ -2652,7 +2653,7 @@ def test_restricted_destroy_with_the_daemon_down_is_unknown_not_absent(monkeypat
     calls = _destroy_probe(monkeypatch, backend, containers=containers, networks=networks, faults={"daemon": "1"})
 
     assert backend.destroy(_info("blind")) is DestroyOutcome.UNKNOWN
-    assert ["docker", "stop", "sandbox-blind"] in calls and ["docker", "rm", "-f", proxy] in calls, "the commands were attempted"
+    assert ["docker", "stop", "-t", str(backend._STOP_GRACE_SECONDS), "sandbox-blind"] in calls and ["docker", "rm", "-f", proxy] in calls, "the commands were attempted"
     assert len(containers) == 2 and len(networks) == 2
 
 
@@ -2663,7 +2664,7 @@ def test_restricted_destroy_stop_timeout_is_unknown_and_still_attempts_the_rest(
     calls = _destroy_probe(monkeypatch, backend, containers=containers, networks=networks, faults={"stop:sandbox-slow": "timeout"})
 
     assert backend.destroy(_info("slow")) is DestroyOutcome.UNKNOWN
-    assert ["docker", "stop", proxy] in calls, "the sidecar was still stopped"
+    assert ["docker", "stop", "-t", str(backend._STOP_GRACE_SECONDS), proxy] in calls, "the sidecar was still stopped"
     assert "sandbox-slow" in containers
 
 
@@ -2684,3 +2685,54 @@ def test_open_mode_destroy_reports_absent_only_when_the_container_is_gone(monkey
     _destroy_probe(monkeypatch, backend, containers=containers, networks=set(), faults={"stop:sandbox-open": "refuse"})
     assert backend.destroy(_info("open")) is DestroyOutcome.FAILED
     assert containers == {"sandbox-open"}
+
+
+def test_stop_container_asks_for_a_short_grace_period(monkeypatch):
+    """A person waits through this stop, and the grace period buys nothing.
+
+    Capacity eviction stops a parked container in the foreground of somebody's
+    next message: `_evict_oldest_warm` runs inside the acquisition, before the
+    turn's first model request. Both members of the set ignore SIGTERM — the
+    sandbox's init is a bash script with no trap, the sidecar a Python server
+    that installs no handler — so every stop already ends in the runtime's
+    SIGKILL, and the default ten-second grace is ten seconds of waiting that
+    changes nothing about how the container dies. Measured on the released
+    images at the profile's limits: 10.94s + 10.68s with the default grace,
+    1.74s + 1.63s at `-t 1`, both exiting 137 either way.
+
+    The flag is what makes the escalation prompt, so it is asserted on the
+    command rather than inferred from the wall clock.
+    """
+    backend = _backend_for_inspect_tests()
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._stop_container("sandbox-parked")
+
+    assert seen == [["docker", "stop", "-t", str(backend._STOP_GRACE_SECONDS), "sandbox-parked"]]
+    assert backend._STOP_GRACE_SECONDS < backend._STOP_TIMEOUT_SECONDS
+
+
+def test_stop_container_leaves_a_runtime_that_is_not_docker_on_its_own_default(monkeypatch):
+    """Apple Container's `stop` grace flag is not verified here, so it is not sent.
+
+    The tenant profile and CI are Docker, where the flag is measured. The macOS
+    developer runtime keeps the behaviour it has rather than gaining a spelling
+    nobody in this repository has run.
+    """
+    backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._stop_container("sandbox-parked")
+
+    assert seen == [["container", "stop", "sandbox-parked"]]

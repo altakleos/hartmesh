@@ -601,6 +601,18 @@ export const enUS: Translations = {
       reuseNoticeDescription:
         "If this thread has an active run at the scheduled time, DeerFlow queues this occurrence and starts it when the thread is available. It fails if the configured queue wait limit is exceeded.",
     },
+    scheduler: {
+      offTitle: "Scheduling is turned off",
+      offDescription:
+        "Your schedules are saved, but nothing is running them, so the times shown will not arrive on their own. You can still start one yourself with Trigger now. Ask an administrator to turn scheduling back on.",
+      unavailableTitle: "Nothing is running these schedules",
+      unavailableDescription:
+        "Your schedules are saved, but this workspace has no scheduler, so the times shown will not arrive. Ask an administrator to add one.",
+      stoppedTitle: "The scheduler has stopped",
+      stoppedDescription:
+        "Scheduling is turned on, but no scheduler is running here, so the times shown will not arrive on their own. You can still start one yourself with Trigger now. Ask an administrator to restart it.",
+      overdue: "this time has passed",
+    },
     filters: {
       allStatuses: "All statuses",
       enabled: "Enabled",

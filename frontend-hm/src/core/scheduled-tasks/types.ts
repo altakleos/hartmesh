@@ -45,3 +45,24 @@ export type ScheduledTaskRun = {
   finished_at: string | null;
   created_at: string;
 };
+
+/**
+ * Whether anything is actually going to run the schedules.
+ *
+ * A task row carries its own status and its next run time, and neither can say
+ * that no scheduler is polling for it — which is how a workspace ends up
+ * showing "enabled, next run" on a date that has already passed. `running` is
+ * read from the Gateway's running service, `configured` from its configuration,
+ * and they can legitimately disagree.
+ */
+export type SchedulerState = {
+  version: number;
+  running: boolean;
+  configured: boolean;
+  /** The single discriminator to branch on; `running` is it, spelled as a boolean. */
+  state:
+    | "running"
+    | "disabled_by_configuration"
+    | "not_running"
+    | "unavailable";
+};

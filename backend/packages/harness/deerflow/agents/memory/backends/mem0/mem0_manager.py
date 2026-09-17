@@ -15,7 +15,7 @@ from typing import Any, ClassVar, Literal
 from pydantic import PrivateAttr
 
 # ABC contract -- the ONE allowed `from deerflow` import in this backend folder.
-from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError
+from deerflow.agents.memory.manager import MemoryManager, MemoryManagerError, MemoryWriterActivityV1
 
 from .client import Mem0APIError, Mem0Client
 from .config import Mem0Config
@@ -105,6 +105,15 @@ class Mem0Manager(MemoryManager):
     def close(self) -> None:
         """Release the underlying HTTP connection pool."""
         self._client.close()
+
+    def writer_activity(self) -> MemoryWriterActivityV1:
+        """Nothing outstanding here: every call finishes before it returns.
+
+        Extraction and storage happen server-side in mem0, so this answers for
+        the Gateway's own writers, which is what a caller about to snapshot
+        this machine is asking about.
+        """
+        return MemoryWriterActivityV1()
 
     # ── Error policies ───────────────────────────────────────────────────
     def _read_or_fallback(self, fallback: Any, fn: Any) -> Any:

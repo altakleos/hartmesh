@@ -29,7 +29,7 @@ from typing import Any, ClassVar, Literal
 
 from pydantic import PrivateAttr
 
-from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager
+from deerflow.agents.memory.manager import MemoryConflictError, MemoryCorruptionError, MemoryManager, MemoryWriterActivityV1
 
 from .deermem.config import DeerMemConfig
 from .deermem.core.eviction import EVICTION_POLICY_HYBRID_V1
@@ -517,6 +517,20 @@ class DeerMem(MemoryManager):
         drain genuinely finished within ``timeout``.
         """
         return self._queue.flush_sync(timeout)
+
+    def writer_activity(self) -> MemoryWriterActivityV1:
+        """Report the debounce buffer and any worker still mid-update.
+
+        Both halves matter to a reader deciding whether the document has
+        settled: an update sitting in the buffer has not been written yet, and
+        one a worker has already pulled out is mid model call and file write --
+        the state the tenant-class upgrade's baseline was taken in. The queue
+        runs one worker at a time, so ``in_flight`` is zero or one.
+        """
+        return MemoryWriterActivityV1(
+            buffered=self._queue.pending_count,
+            in_flight=1 if self._queue.is_processing else 0,
+        )
 
     def close(self) -> None:
         """Close derived retrieval resources after pending updates drain."""

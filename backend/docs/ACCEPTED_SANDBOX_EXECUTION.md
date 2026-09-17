@@ -290,6 +290,37 @@ entry never triggers this: it is replaced (its slot freed) or the acquisition
 is refused before create is reached. There is no backend probe, no deferred
 eviction and no overshoot window.
 
+**What that wait costs, and why it is short.** The eviction is a person's
+wait: it runs inside the acquisition, ahead of the turn's first model
+request. A tenant-class upgrade measured it at 22.8 s of a cold report turn
+that reached the model at 35.7 s. Almost all of it was the container
+runtime's SIGTERM grace, paid twice. Neither member of the set honours
+SIGTERM -- the sandbox's init is a bash script with no trap, the sidecar a
+Python server that installs no handler -- so both have always died by
+SIGKILL, and the default ten-second grace only decided how long the person
+waited for it. `LocalContainerBackend._STOP_GRACE_SECONDS` asks Docker for one
+second instead. Measured on the released images at the profile's limits:
+10.94 s + 10.68 s by default, 1.74 s + 1.63 s with the flag, exit 137 in
+every case. A second remains long enough for an image that later does handle
+the signal, because `stop` returns as soon as the process exits and the grace
+is only paid when it is ignored.
+
+What the shorter grace does *not* do is make a teardown safe for something
+still writing, because the longer one never did. A sandbox has four writable
+host mounts under `/mnt/user-data` -- `workspace`, `uploads`, `outputs`, and
+the person's own `files`, which is shared across all of their threads -- and
+`destroy` is also the idle reaper's and the shutdown path's, not only
+eviction's. But the ten seconds was never a shutdown window: PID 1 ignores
+SIGTERM and does not forward it, so nothing inside the container is ever told
+to finish, and a process mid-write is killed abruptly at ten seconds exactly
+as it is at one. The window was nine extra seconds of unsignalled runtime --
+a chance that a write happened to complete, not a guarantee that it could.
+Making that teardown genuinely safe needs an image whose init handles the
+signal; until then the honest statement is that neither value protects a
+writer, and the one that does not also cost somebody their wait is the
+shorter. The flag goes to Docker alone; Apple Container's spelling is
+unverified here, so that runtime keeps its default.
+
 ### Destroy means absent
 
 A stop or remove command that fails can still return normally: the local

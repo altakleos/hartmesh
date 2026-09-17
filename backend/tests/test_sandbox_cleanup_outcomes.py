@@ -110,7 +110,8 @@ class _FakeDocker:
         self.commands.append(list(cmd))
         verb = cmd[1]
         if verb == "stop":
-            return self._command(f"stop:{cmd[2]}", cmd, kwargs, remove=("container", cmd[2]))
+            # `docker stop` carries a grace flag before the name; the name is last.
+            return self._command(f"stop:{cmd[-1]}", cmd, kwargs, remove=("container", cmd[-1]))
         if verb == "rm":
             return self._command(f"rm:{cmd[-1]}", cmd, kwargs, remove=("container", cmd[-1]), absent_text="Error: No such container: " + cmd[-1])
         if verb == "network" and cmd[2] == "rm":
@@ -546,7 +547,7 @@ def test_one_idle_pass_attempts_an_expired_pending_set_once(tmp_path, monkeypatc
     with turn_phases(correlation_id="idle-pass-1") as still_failing:
         provider._cleanup_idle_sandboxes(1.0)
     assert _counts(still_failing.snapshot()) == {"attempts": 1, "teardowns": 0, "refusals": 0, "failures": 1, "creates": 0, "rediscoveries": 0}
-    assert [cmd for cmd in docker.commands if cmd[:2] == ["docker", "stop"] and cmd[2] == sandbox] == [["docker", "stop", sandbox]], "one stop per pass"
+    assert [cmd for cmd in docker.commands if cmd[:2] == ["docker", "stop"] and cmd[-1] == sandbox] == [["docker", "stop", "-t", str(LocalContainerBackend._STOP_GRACE_SECONDS), sandbox]], "one stop per pass"
     assert a in provider._cleanup_pending and a in provider._warm_pool
 
     docker.faults.clear()
