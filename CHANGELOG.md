@@ -5,6 +5,26 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.21] — 2026-09-17
+
+- hartmesh#105 — say why a search failed when retrying cannot fix it. A refused provider came back to the model as a bare failure, so it tried the same query again, and again, before giving up with nothing to tell the person. The guidance now distinguishes a fault worth retrying from a provider that has declined, and a declined one ends the turn in a sentence rather than in silence.
+- hartmesh#107 — keyless search that answers, through the profile's own SearXNG. The tenant profile's default `web_search` reached DuckDuckGo, which answers server addresses with an anti-bot challenge, so a tenant without a search key got a failure instead of an answer; `image_search` returned nothing at all. Every keyless engine was measured in isolation from a server-class host, and the default is now the profile's own SearXNG on a sixth service — private to the tenant network, nothing published, pinned by digest, read-only with a minted secret and three tmpfs, in 192 MiB. Web search reaches Google's search element weighted above Yahoo, with Bing at half weight as the availability floor after it returned unrelated results live; image search has its own measured engines. Both tools now degrade into a sentence the model can act on, and the person's question stays out of the logs entirely: the query moved from the URL to a POST body, and a failure records a status code rather than the request it came from.
+- hartmesh#108 — close the four items the `.19` tenant-class upgrade left open. **Eviction**: a parked sandbox took 22.8 s to stop in the foreground of somebody's next message, because the container runtime's ten-second SIGTERM grace was paid twice for containers that never handle the signal — both already died by SIGKILL, and the grace only decided how long the person waited for it. Measured on the released images at the profile's limits, the pair now stops in 3.4 s instead of 21.6 s, so a turn that has to make room reaches the model near 16 s instead of 35.7 s. **Memory writers**: a background extraction that finished 34 s after the last foreground turn invalidated a byte-exact baseline, with nothing published to warn against taking one; `GET /api/memory/writers` now answers whether background memory work has finished, and the operator guide says to check it before snapshotting. Its contract default is *unknown*, not idle, because a caller acts on idle by taking a snapshot. **Schedules**: a task read "enabled, next run September 9" on September 17 on a Gateway whose scheduler had never started; `GET /api/scheduler` reports whether one is actually running, and the page says so above the create form, marks a next run that has already passed, and notes that triggering by hand still works. Nothing starts, resumes or reschedules anything. **Report card**: monetary KPI values printed across the tile beside them in the artifact panel, because the tiles were sized by viewport breakpoints that cannot tell a full page from a 480 px side panel; they size by container now.
+
+This release closes two of the three gaps `.20` named: the synchronous eviction
+on a full warm pool, and the memory-writer drain boundary. The keyless search
+failure `.20` reported is closed too, by replacing the provider rather than by
+working around its refusal.
+
+Cold-start latency is untouched and remains the headline wait: a new thread's
+first message still reaches the model at about 16.5 s, of which 4.8 s is
+creating the container and 9.7 s is the sandbox booting under gVisor. Neither
+is addressed here, and the accepted-material ordering that puts both before the
+first model request is deliberate. A warm turn also spends about 1.8 s
+projecting the accepted skills before its first model request, which nothing
+has yet explained; it is the next thing to look at, because unlike the cold
+start it is paid on every follow-up message.
+
 ## [2.1.0+hartmesh.20] — 2026-09-17
 
 - hartmesh#101 — tell the person what the wait is for on the turn where it is longest. An upload turn spent its first seconds with a stale spinner and a generic "Working…", although the stage frames `.19` added were already on the wire at 1.6 s: the client mints a placeholder message for the upload, and the activity row read that placeholder as model output, so it drew nothing until the first real token at 13.8 s. The placeholder is now identified by what it is rather than by where it sits, so the row shows "Preparing your workspace…" when the workspace is what the turn is waiting on. Resolving an upload also stopped erasing the sidecar context a message carried.
@@ -77,6 +97,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.21]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.21
 [2.1.0+hartmesh.20]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.20
 [2.1.0+hartmesh.19]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.19
 [2.1.0+hartmesh.18]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.18
