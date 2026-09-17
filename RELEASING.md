@@ -191,12 +191,16 @@ Between cuts the tree carries the **previous release's digest pins**: the pin
 commit is the last thing a release changes and nothing restores placeholders.
 The candidate build ignores them (a dispatch never adopts, so all five images
 are built), and `--release` rewrites every fork line to the new release before
-resolving, so the previous pins never reach the next release. Seven lines are
+resolving, so the previous pins never reach the next release. Eight lines are
 pinned: backend, frontend, sandbox, the network proxy, `postgres`, `redis`,
-and `nginx`. To bump a third-party image, replace its digest string with the
-new tag form (`postgres:16`) in all three files and run
+`nginx`, and `searxng/searxng`. To bump a third-party image, replace its
+digest string with the new tag form (`postgres:16`; SearXNG has no stable
+line, so use the dated build tag the registry lists, `searxng/searxng:2026.9.17-274b63b67`
+for the current pin) in all three files and run
 `scripts/pin_compose_images.py` (no `--release`); the script resolves it and
-rewrites the three files in lockstep.
+rewrites the three files in lockstep. After a SearXNG re-pin, confirm the
+instance's `/config` still lists exactly the engines the profile names:
+the engine parsers are upstream code with no contract.
 
 ## Durable runtime qualification evidence
 

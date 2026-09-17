@@ -172,8 +172,8 @@ services:
       DEER_FLOW_SANDBOX_CONTAINER_USER: "1000:1000"
       DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS: "0"
       DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED: "0"
-      NO_PROXY: localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,host.docker.internal
-      no_proxy: localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,host.docker.internal
+      NO_PROXY: localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,searxng,host.docker.internal
+      no_proxy: localhost,127.0.0.1,::1,gateway,frontend,nginx,postgres,redis,searxng,host.docker.internal
     volumes:
       # The one bind mount outside the data directory this design accepts: the
       # Gateway cannot create sandboxes without the host daemon, and the VM
@@ -220,10 +220,11 @@ services:
     # 1536 MiB, less the 192 MiB the move to 1 GiB sandboxes put over the
     # 5.0 GiB line; the further 192 MiB it paid on 2026-09-15 for a third and
     # fourth relay came back on 2026-09-17 when the profile returned to two
-    # slots. The Gateway peaked at 586 MiB under two concurrent turns, so this
-    # is 2.3 times that peak (README: "Memory budget").
-    mem_limit: 1344m
-    memswap_limit: 1344m
+    # slots, and went to the search service the same day. The Gateway peaked
+    # at 586 MiB under two concurrent turns, so this is 2.0 times that peak
+    # (README: "Memory budget").
+    mem_limit: 1152m
+    memswap_limit: 1152m
     # Availability bounds (README: "Process and CPU limits"): the Gateway
     # spawns MCP servers (npx, uvx) in its own container, and the sandboxes
     # are the only other bounded processes on the guest.
@@ -255,6 +256,55 @@ services:
     memswap_limit: 384m
     pids_limit: 512
     cpus: 2
+    networks: [app]
+    restart: unless-stopped
+
+  # ── SearXNG (the keyless web_search behind the Gateway) ──────────────────
+  searxng:
+    image: searxng/searxng@sha256:ba0a344c566ecc6e4429e81d02d93a01fa05c80e9fb6d08f0a1e57a729aa6d87
+    user: "1000:1000"
+    # searxng/run.sh mints the instance secret per start and copies the
+    # bundle's settings into the tmpfs the image's start script insists on,
+    # then execs that script (README: "Web search"). It replaces the image's
+    # entrypoint rather than following it, because that entrypoint ignores
+    # its arguments; invoked through `sh` because the bundle carries no exec
+    # bits.
+    entrypoint: ["sh", "/opt/hartmesh/searxng/run.sh"]
+    # Every query goes to the three engines settings.yml names and nowhere
+    # else, from this container's address; the JSON API is the only thing
+    # the Gateway calls, and nothing is published.
+    read_only: true
+    volumes:
+      - ./searxng:/opt/hartmesh/searxng:ro
+      - type: tmpfs
+        target: /etc/searxng
+        tmpfs:
+          size: 1048576
+          mode: 0o1777
+      - type: tmpfs
+        target: /tmp
+        tmpfs:
+          size: 16777216
+          mode: 0o1777
+      # The image declares this path a volume; without a mount here Docker
+      # would create an anonymous one on the root disk at every `up`. SearXNG
+      # writes nothing to it under this profile (its caches live in /tmp).
+      - type: tmpfs
+        target: /var/cache/searxng
+        tmpfs:
+          size: 4194304
+          mode: 0o1777
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    # 105 MiB peak under a six-query burst on the curated engine set; the
+    # Gateway paid these 192 MiB (README: "Memory budget").
+    mem_limit: 192m
+    memswap_limit: 192m
+    pids_limit: 128
     networks: [app]
     restart: unless-stopped
 
@@ -298,7 +348,7 @@ services:
     restart: unless-stopped
 
 networks:
-  # The five services. Pinned so AUTH_TRUSTED_PROXIES above is stable, and
+  # The six services. Pinned so AUTH_TRUSTED_PROXIES above is stable, and
   # pinned *here* rather than left to Docker because a bridge is a connected
   # route inside the guest: every address in this range stops being reachable
   # through the VM's real default gateway. The default therefore has to clear

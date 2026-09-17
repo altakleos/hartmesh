@@ -24,7 +24,7 @@ line to the new release before anything is resolved. A tag-form fork line
 without ``--release`` is refused: resolving it would pin whatever the tag
 names today and the adopt step on the tag would re-tag that as the new
 release with every check green. Third-party lines (``postgres``, ``redis``,
-``nginx``) are resolved as written; to bump one, put the new tag form in all
+``nginx``, ``searxng/searxng``) are resolved as written; to bump one, put the new tag form in all
 three files in place of the old digest string and run pin. ``--check``
 verifies only. Either mode exits non-zero while any
 reference still carries a tag or the three files disagree, so a release cut

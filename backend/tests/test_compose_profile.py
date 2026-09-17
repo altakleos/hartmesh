@@ -50,7 +50,7 @@ CONTRACT_KEYS = {
     "REDIS_PASSWORD",
     "AUTH_JWT_SECRET",
 }
-SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis"}
+SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis", "searxng"}
 # Optional keys compose.yaml itself interpolates; each must carry its own
 # default so an existing tenant .env that never heard of it still renders.
 OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
@@ -58,7 +58,7 @@ OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
 PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE", "SANDBOX_READY_TIMEOUT"}
-MEMORY_MIB = {"gateway": 1344, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
+MEMORY_MIB = {"gateway": 1152, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256, "searxng": 192}
 # The sandbox image's own service switches (its entrypoint compares each to the
 # string "true"): the profile ships every sandbox with the browser, VNC,
 # Jupyter, code-server and the Node REPL off (README: "Slim services profile").
@@ -201,7 +201,7 @@ def test_resolver_override_is_only_for_open_runsc(render_config: ModuleType, tmp
 # ── compose.yaml ─────────────────────────────────────────────────────────────
 
 
-def test_profile_declares_exactly_the_five_services_and_no_named_volumes(compose: dict) -> None:
+def test_profile_declares_exactly_the_six_services_and_no_named_volumes(compose: dict) -> None:
     assert compose["name"] == "hartmesh"
     assert set(compose["services"]) == SERVICES
     assert "volumes" not in compose, "named volumes would live on the root disk, which is not tenant data"
@@ -225,10 +225,12 @@ def test_memory_limits_sum_to_2880_mib_with_equal_swap(compose: dict) -> None:
         assert _mib(service["mem_limit"]) == expected, name
         assert service["memswap_limit"] == service["mem_limit"], name
         total += expected
-    assert total == 2880, "3072 less the 192 MiB the Gateway gave up for the 1 GiB sandboxes; the further 192 MiB it paid for a third and fourth relay came back with the two-slot profile (README: Memory budget)"
+    assert total == 2880, "3072 less the 192 MiB the Gateway gave up for the 1 GiB sandboxes; the 192 MiB it took back with the two-slot profile now pays for the search service, so the line has not moved (README: Memory budget)"
+    assert MEMORY_MIB["searxng"] == 192, "105 MiB peak under a six-query burst on the curated engines (README: Web search)"
+    assert MEMORY_MIB["gateway"] == 1152, "what it ran at from 2026-09-15 to 2026-09-17, twice its measured 586 MiB peak"
 
 
-PIDS_LIMIT = {"gateway": 2048, "frontend": 512, "nginx": 256, "postgres": 512, "redis": 128}
+PIDS_LIMIT = {"gateway": 2048, "frontend": 512, "nginx": 256, "postgres": 512, "redis": 128, "searxng": 128}
 
 
 def test_every_service_bounds_its_processes_and_the_app_tier_its_cpus(compose: dict) -> None:
@@ -236,7 +238,7 @@ def test_every_service_bounds_its_processes_and_the_app_tier_its_cpus(compose: d
         assert compose["services"][name]["pids_limit"] == expected, name
     for name in ("gateway", "frontend"):
         assert compose["services"][name]["cpus"] == 2, f"{name} shares four vCPUs with two sandboxes at --cpus 2"
-    for name in ("nginx", "postgres", "redis"):
+    for name in ("nginx", "postgres", "redis", "searxng"):
         assert "cpus" not in compose["services"][name], name
 
 
@@ -274,6 +276,119 @@ def test_template_runs_the_slim_services_profile_in_two_slots(compose: dict) -> 
         assert re.search(rf'^\s+{key}: "true"$', TEMPLATE.read_text(encoding="utf-8"), flags=re.MULTILINE), f"{key} must be the quoted string true"
 
 
+def test_search_runs_privately_read_only_and_needs_no_new_contract_key(compose: dict) -> None:
+    """The tenant's web search is its own service and nothing about it leaks.
+
+    No published port, no env_file, no data-disk volume, a read-only root
+    with two small tmpfs mounts, and the same uid as every other service.
+    The secret SearXNG insists on is minted per start by the bundle's own
+    script, so an existing tenant .env renders exactly as before.
+    """
+
+    service = compose["services"]["searxng"]
+    assert "ports" not in service
+    assert "env_file" not in service
+    assert "environment" not in service, "nothing to configure, so nothing to get wrong"
+    assert service["user"] == "1000:1000"
+    assert service["read_only"] is True
+    assert service["entrypoint"] == ["sh", "/opt/hartmesh/searxng/run.sh"], "the image's own entrypoint ignores its arguments, so ours replaces it"
+    assert "command" not in service
+    assert service["networks"] == ["app"]
+    assert "depends_on" not in compose["services"]["gateway"] or "searxng" not in compose["services"]["gateway"].get("depends_on", {}), "a search outage must not stop chat from starting"
+    mounts = service["volumes"]
+    assert "./searxng:/opt/hartmesh/searxng:ro" in mounts
+    tmpfs = {volume["target"]: volume for volume in mounts if isinstance(volume, dict)}
+    # /var/cache/searxng is the image's declared data volume: unmounted, Docker
+    # would give it an anonymous volume on the root disk at every `up`.
+    assert set(tmpfs) == {"/etc/searxng", "/tmp", "/var/cache/searxng"}
+    assert all(volume["type"] == "tmpfs" for volume in tmpfs.values())
+    assert service["healthcheck"]["test"] == ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null"]
+
+
+def test_search_bundle_mints_its_secret_and_copies_settings_into_the_tmpfs() -> None:
+    script = (PROFILE / "searxng" / "run.sh").read_text(encoding="utf-8")
+    assert "SEARXNG_SECRET" in script and "/dev/urandom" in script, "no secret in git, none in .env, none on the data disk"
+    assert 'cp "$BUNDLE/settings.yml" "$CONFIG_DIR/settings.yml"' in script
+    assert script.rstrip().endswith('exec /usr/local/searxng/entrypoint.sh "$@"'), "the image's own start script still runs, after ours"
+    assert not os.access(PROFILE / "searxng" / "run.sh", os.X_OK), "the bundle carries no exec bits; compose invokes it through sh"
+
+
+def test_search_settings_name_exactly_the_engines_a_query_may_reach() -> None:
+    """A tenant's questions go to these three engines and nowhere else.
+
+    Each was measured alone from a server address on six tenant questions.
+    Google's search element ranks best and is the first to gate, so it leads
+    the merged ranking at weight 2 while Bing and Yahoo, which never gated,
+    keep the tool answering when it stops. Three behind one tool is what
+    makes one of them closing survivable. Bing and Yahoo are off in SearXNG's
+    own defaults and on here.
+    """
+
+    settings = yaml.safe_load((PROFILE / "searxng" / "settings.yml").read_text(encoding="utf-8"))
+    web = ["google cse", "bing", "yahoo"]
+    images = ["google cse images", "unsplash", "openverse", "wikicommons.images"]
+    assert settings["use_default_settings"]["engines"]["keep_only"] == web + images
+    entries = {engine["name"]: engine for engine in settings["engines"]}
+    assert set(entries) == set(web + images)
+    assert entries["google cse"] == {"name": "google cse", "weight": 2}
+    assert entries["yahoo"] == {"name": "yahoo", "disabled": False}
+    # Bing never gates and is the availability floor, but it was measured
+    # returning results unrelated to the question, so it must not outrank
+    # Yahoo in the merged ranking.
+    assert entries["bing"] == {"name": "bing", "disabled": False, "weight": 0.5}
+    # image_search reaches the image engines and nothing else; both of the
+    # keyless DuckDuckGo endpoints the profile used to carry are gone.
+    assert entries["google cse images"] == {"name": "google cse images", "weight": 2}
+    for name in ("unsplash", "openverse", "wikicommons.images"):
+        assert entries[name] == {"name": name, "disabled": False, "inactive": False}, name
+    # `keep_only` above is the registry, so the plain `google` engine (which
+    # answers a server only with the degraded no-JavaScript page) is already
+    # out by not being named. These are the ones a future edit might reach for.
+    for excluded, reason in (
+        ("duckduckgo", "both its web and its image endpoints refuse this address"),
+        ("flickr", "answers, but its results carry no direct image address"),
+        ("pixabay", "parsing errors, and no usable image address when it answers"),
+        ("startpage", "answers only through a proof-of-work CAPTCHA, which is not ours to solve"),
+        ("brave", "rate-limits the address after a handful of queries and stays closed"),
+        ("qwant", "challenges the address after a couple of dozen queries"),
+        ("yandex", "a tenant's questions do not leave for it"),
+    ):
+        assert excluded not in yaml.safe_dump(settings), f"{excluded}: {reason}"
+    assert settings["server"]["limiter"] is False, "the limiter needs a Redis this instance does not have"
+    assert settings["server"]["image_proxy"] is False
+    assert "secret_key" not in settings["server"], "minted per start by run.sh, never a committed value"
+    assert settings["search"]["formats"] == ["html", "json"], "the Gateway reads JSON"
+    assert settings["search"]["safe_search"] == 1
+    assert settings["general"]["enable_metrics"] is False
+
+
+def test_image_search_defaults_to_the_profile_s_own_searxng() -> None:
+    """The keyless image tool went the same way as the keyless web tool.
+
+    `image_search` read DuckDuckGo's image endpoint, which refuses this
+    address on every query, so a model looking for a reference picture got
+    nothing back. It now reaches the profile's own instance.
+    """
+
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    tools = {tool["name"]: tool for tool in template["tools"]}
+    images = tools["image_search"]
+    assert images["use"] == "deerflow.community.searxng.tools:image_search_tool"
+    assert images["base_url"] == "http://searxng:8080", "the compose service name on the app network"
+    assert images["group"] == "web"
+    assert "ddg" not in yaml.safe_dump(template["tools"]), "no keyless tool reaches DuckDuckGo any more"
+
+
+def test_web_search_defaults_to_the_profile_s_own_searxng(render_config: ModuleType) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    tools = {tool["name"]: tool for tool in template["tools"]}
+    search = tools["web_search"]
+    assert search["use"] == "deerflow.community.searxng.tools:web_search_tool"
+    assert search["base_url"] == "http://searxng:8080", "the compose service name on the app network"
+    assert search["group"] == "web"
+    assert "ddg_search" not in yaml.safe_dump(search), "the DuckDuckGo page answers a server with a challenge, not results"
+
+
 def test_only_the_gateway_reads_the_env_file_and_the_others_get_explicit_environment(compose: dict) -> None:
     services = compose["services"]
     with_env_file = {name for name, service in services.items() if service.get("env_file")}
@@ -283,7 +398,7 @@ def test_only_the_gateway_reads_the_env_file_and_the_others_get_explicit_environ
     assert set(services["frontend"]["environment"]) == {"NODE_ENV", "DEER_FLOW_INTERNAL_GATEWAY_BASE_URL"}
     assert services["frontend"]["environment"]["DEER_FLOW_INTERNAL_GATEWAY_BASE_URL"] == "http://gateway:8001"
     assert set(services["nginx"]["environment"]) == {"HARTMESH_PUBLIC_HOST", "HARTMESH_TRUSTED_PROXIES"}
-    for name in ("frontend", "nginx", "postgres", "redis"):
+    for name in SERVICES - {"gateway"}:
         assert "AUTH_JWT_SECRET" not in yaml.safe_dump(services[name]), name
 
 
@@ -683,8 +798,8 @@ def test_catalog_fragments_are_derived_from_the_example_and_reference_only_their
 @pytest.mark.parametrize(
     ("label", "keys", "expected_models", "expected_search"),
     [
-        ("none", set(), [], "deerflow.community.ddg_search.tools:web_search_tool"),
-        ("one", {"GEMINI_API_KEY"}, ["gemini-2.5-pro"], "deerflow.community.ddg_search.tools:web_search_tool"),
+        ("none", set(), [], "deerflow.community.searxng.tools:web_search_tool"),
+        ("one", {"GEMINI_API_KEY"}, ["gemini-2.5-pro"], "deerflow.community.searxng.tools:web_search_tool"),
         ("several", {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY"}, ["gpt-4", "gpt-5-responses", "claude-sonnet-4"], "deerflow.community.tavily.tools:web_search_tool"),
     ],
 )
@@ -841,11 +956,12 @@ def test_images_txt_lists_exactly_the_references_the_profile_uses(pin_images: Mo
     references = pin_images.read_references(IMAGES)
     used = pin_images.yaml_references(COMPOSE) + pin_images.yaml_references(TEMPLATE)
     assert sorted(references) == sorted(set(used))
-    assert len(references) == 7
+    assert len(references) == 8
     repositories = {pin_images.repository_of(reference) for reference in references}
     assert repositories == {
         "ghcr.io/altakleos/hartmesh-backend",
         "ghcr.io/altakleos/hartmesh-frontend",
+        "searxng/searxng",
         "ghcr.io/altakleos/hartmesh-sandbox",
         "ghcr.io/altakleos/hartmesh-sandbox-network-proxy",
         "postgres",
@@ -866,7 +982,12 @@ def _fake_resolver(calls: list[str]):
     return resolve
 
 
-PLACEHOLDER_THIRD_PARTY = {"postgres": "postgres:16", "redis": "redis:7-alpine", "nginx": "nginx:alpine"}
+PLACEHOLDER_THIRD_PARTY = {
+    "postgres": "postgres:16",
+    "redis": "redis:7-alpine",
+    "nginx": "nginx:alpine",
+    "searxng/searxng": "searxng/searxng:latest",
+}
 
 
 def _placeholder_profile(pin_images: ModuleType, tmp_path: Path):
@@ -897,7 +1018,7 @@ def test_pin_rewrites_every_reference_to_a_digest_and_check_refuses_tag_form(pin
             pin_images.verify(files)
     calls: list[str] = []
     pinned = pin_images.pin(files, _fake_resolver(calls), release=RELEASE).references
-    assert len(pinned) == 7
+    assert len(pinned) == 8
     assert all(pin_images.PINNED_REFERENCE.fullmatch(reference) for reference in pinned)
     assert files.images.read_text(encoding="utf-8") == "".join(f"{reference}\n" for reference in pinned)
     assert set(pin_images.yaml_references(files.compose)) | set(pin_images.yaml_references(files.config)) == set(pinned)
@@ -928,7 +1049,7 @@ def test_release_rewrites_fork_lines_to_the_release_tag_and_leaves_third_party_l
     before = pin_images.read_references(files.images)
     fork_before = [reference for reference in before if pin_images.is_fork_image(pin_images.repository_of(reference))]
     third_party_before = [reference for reference in before if reference not in fork_before]
-    assert len(fork_before) == 4 and third_party_before == ["postgres:16", "redis:7-alpine", "nginx:alpine"]
+    assert len(fork_before) == 4 and third_party_before == ["searxng/searxng:latest", "postgres:16", "redis:7-alpine", "nginx:alpine"]
     assert all(reference.endswith(f":{RELEASE_IMAGE_TAG}") is False for reference in fork_before), "the tree carries placeholders, not this release"
     calls: list[str] = []
     result = pin_images.pin(files, _fake_resolver(calls), release=RELEASE)
