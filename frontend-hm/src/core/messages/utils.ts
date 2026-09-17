@@ -914,10 +914,14 @@ export function isHiddenFromUIMessage(message: Message) {
  * it is never model output and must not be read as the turn's first answer.
  */
 export const UPLOAD_PLACEHOLDER_ELEMENT = "task";
+/** Client-local ids only; the server never mints one, so it cannot be echoed. */
+export const UPLOAD_PLACEHOLDER_ID_PREFIX = "opt-ai-";
 
 export function isUploadPlaceholderMessage(message: Message): boolean {
   return (
     message.type === "ai" &&
+    typeof message.id === "string" &&
+    message.id.startsWith(UPLOAD_PLACEHOLDER_ID_PREFIX) &&
     message.additional_kwargs?.element === UPLOAD_PLACEHOLDER_ELEMENT
   );
 }

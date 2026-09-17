@@ -3,6 +3,10 @@ import { expect, rs, test } from "@rstest/core";
 import { InfiniteQueryObserver, QueryClient } from "@tanstack/react-query";
 
 import {
+  UPLOAD_PLACEHOLDER_ELEMENT,
+  UPLOAD_PLACEHOLDER_ID_PREFIX,
+} from "@/core/messages/utils";
+import {
   buildThreadMessagesPageUrl,
   buildVisibleHistoryMessages,
   areOptimisticMessagesConfirmed,
@@ -2311,13 +2315,16 @@ test("optimisticMessagesAfterUpload keeps the human message with its uploaded fi
     content: [{ type: "text", text: "Make the report" }],
     additional_kwargs: {
       files: [{ filename: "export.xlsx", size: 0, status: "uploading" }],
+      // A quote from the sidecar travels with the message; the upload
+      // finishing must not erase it.
+      referenced_message_contexts: [{ message_id: "m-1" }],
     },
   } as Message;
   const placeholder = {
-    id: "opt-ai-1",
+    id: `${UPLOAD_PLACEHOLDER_ID_PREFIX}1`,
     type: "ai",
-    content: "Uploading files…",
-    additional_kwargs: { element: "task" },
+    content: "Uploading files, please wait...",
+    additional_kwargs: { element: UPLOAD_PLACEHOLDER_ELEMENT },
   } as Message;
   const uploaded = [
     {
@@ -2333,6 +2340,11 @@ test("optimisticMessagesAfterUpload keeps the human message with its uploaded fi
   expect(after).toHaveLength(1);
   expect(after[0]?.id).toBe("opt-human-1");
   expect(after[0]?.additional_kwargs?.files).toEqual(uploaded);
+  expect(after[0]?.additional_kwargs?.referenced_message_contexts).toEqual([
+    { message_id: "m-1" },
+  ]);
+  // The human message alone (the placeholder already gone) still gets its files.
+  expect(optimisticMessagesAfterUpload([human], uploaded)).toHaveLength(1);
   // Nothing to do without a human message to carry the files.
   expect(optimisticMessagesAfterUpload([], uploaded)).toEqual([]);
 });

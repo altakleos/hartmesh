@@ -2,6 +2,10 @@ import type { Message } from "@langchain/langgraph-sdk";
 import { describe, expect, test } from "@rstest/core";
 
 import { enUS } from "@/core/i18n/locales/en-US";
+import {
+  UPLOAD_PLACEHOLDER_ELEMENT,
+  UPLOAD_PLACEHOLDER_ID_PREFIX,
+} from "@/core/messages/utils";
 import { runActivityLabel } from "@/core/turn-progress";
 import type { TurnProgress } from "@/core/turn-progress";
 
@@ -156,27 +160,31 @@ describe("runActivityLabel", () => {
       }),
     ).toBe("Preparing your workspace…");
   });
-});
 
-test("is not masked by the client's own upload placeholder", () => {
-  // An upload turn shows an optimistic AI message ("Uploading files…") beside
-  // the human message until the server's first update replaces the list; a
-  // cold sandbox makes that 10 s or more. It is not model output.
-  const messages = [
-    { ...human, additional_kwargs: { files: [{ filename: "x.xlsx", size: 1 }] } },
-    {
-      id: "opt-ai-1",
-      type: "ai",
-      content: "Uploading files…",
-      additional_kwargs: { element: "task" },
-    },
-  ] as Message[];
-  expect(
-    runActivityLabel({
-      isLoading: true,
-      messages,
-      progress: stage("workspace_starting"),
-      t: enUS,
-    }),
-  ).toBe("Starting a fresh workspace…");
+  test("is not masked by the client's own upload placeholder", () => {
+    // An upload turn shows an optimistic AI message ("Uploading files, please
+    // wait...") beside the human message until the server's first update
+    // replaces the list; a cold sandbox makes that 10 s or more. It is not
+    // model output.
+    const messages = [
+      {
+        ...human,
+        additional_kwargs: { files: [{ filename: "x.xlsx", size: 1 }] },
+      },
+      {
+        id: `${UPLOAD_PLACEHOLDER_ID_PREFIX}1`,
+        type: "ai",
+        content: enUS.uploads.uploadingFiles,
+        additional_kwargs: { element: UPLOAD_PLACEHOLDER_ELEMENT },
+      },
+    ] as Message[];
+    expect(
+      runActivityLabel({
+        isLoading: true,
+        messages,
+        progress: stage("workspace_starting"),
+        t: enUS,
+      }),
+    ).toBe("Starting a fresh workspace…");
+  });
 });

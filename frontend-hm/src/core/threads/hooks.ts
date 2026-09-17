@@ -32,6 +32,7 @@ import {
   isHiddenFromUIMessage,
   isUploadPlaceholderMessage,
   UPLOAD_PLACEHOLDER_ELEMENT,
+  UPLOAD_PLACEHOLDER_ID_PREFIX,
 } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
@@ -2250,7 +2251,7 @@ export function useThreadStream({
         // Mock AI message while files are being uploaded
         newOptimistic.push({
           type: "ai",
-          id: `opt-ai-${Date.now()}`,
+          id: `${UPLOAD_PLACEHOLDER_ID_PREFIX}${Date.now()}`,
           content: t.uploads.uploadingFiles,
           additional_kwargs: { element: UPLOAD_PLACEHOLDER_ELEMENT },
         });
