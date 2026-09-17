@@ -571,6 +571,18 @@ export const zhCN: Translations = {
       reuseNoticeDescription:
         "如果触发时该线程正在运行，DeerFlow 会将本次执行排队，并在线程空闲后启动；超过配置的最长等待时间后会标记为失败。",
     },
+    scheduler: {
+      offTitle: "定时执行已关闭",
+      offDescription:
+        "你的定时任务仍然保存着，但没有任何程序在执行它们，所显示的时间不会自动触发。你仍可以用“立即触发”手动运行一次。需要管理员重新开启定时执行。",
+      unavailableTitle: "没有任何程序在执行这些定时任务",
+      unavailableDescription:
+        "你的定时任务仍然保存着，但此工作区没有调度程序，所显示的时间不会触发。需要管理员添加调度程序。",
+      stoppedTitle: "调度程序已停止",
+      stoppedDescription:
+        "定时执行已开启，但此处没有调度程序在运行，所显示的时间不会自动触发。你仍可以用“立即触发”手动运行一次。需要管理员将其重新启动。",
+      overdue: "该时间已过去",
+    },
     filters: {
       allStatuses: "全部状态",
       enabled: "已启用",

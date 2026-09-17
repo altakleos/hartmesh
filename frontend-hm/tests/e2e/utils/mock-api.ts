@@ -477,6 +477,22 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
     return route.fallback();
   });
 
+  // A running scheduler, so the scheduled-tasks page renders without its
+  // scheduling-is-off banner. A suite that wants the banner overrides this
+  // route after calling the mock.
+  void page.route("**/api/scheduler", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        version: 1,
+        running: true,
+        configured: true,
+        state: "running",
+      }),
+    }),
+  );
+
   void page.route("**/api/scheduled-tasks", (route) => {
     if (route.request().method() === "GET") {
       return route.fulfill({

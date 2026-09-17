@@ -147,4 +147,67 @@ test.describe("business report card", () => {
     });
     expect(overflow).toBeLessThanOrEqual(0);
   });
+
+  test("keeps every figure on one line inside its own tile in the side panel", async ({
+    page,
+  }) => {
+    // The defect this pins: on a 1440px screen the artifact panel is about
+    // 480px wide, a viewport breakpoint put five KPI tiles in it, and
+    // `$74,702.61` printed 53px of itself across the number in the tile beside
+    // it. Nobody reading the panel could tell which figure went with which
+    // label.
+    //
+    // Layout is the only thing that can catch this, and it has to be measured
+    // twice over. The value's box is clamped to its grid track whether or not
+    // the text fits, so the box proves nothing; and `break-words` alone drives
+    // overflow to zero at any track width, so overflow proves nothing either.
+    // What pins the sizing is the line count: a track too narrow for the
+    // figure wraps it, and a wrapped figure is a track the fix did not widen.
+    await page.setViewportSize({ width: 1440, height: 900 });
+    const card = await openTheReport(page);
+    await expect(card).toBeVisible({ timeout: 15_000 });
+
+    const boxes = await card.getByTestId("business-report-kpis").evaluate(
+      (grid) =>
+        Array.from(grid.children).map((tile) => {
+          const value = tile.querySelector<HTMLElement>(
+            "[data-testid='business-report-kpi-value']",
+          )!;
+          const range = document.createRange();
+          range.selectNodeContents(value);
+          const t = tile.getBoundingClientRect();
+          return {
+            label: value.innerText,
+            // One client rect per line box the text occupies.
+            lines: range.getClientRects().length,
+            overflow: value.scrollWidth - value.clientWidth,
+            tile: {
+              left: t.left,
+              right: t.right,
+              top: t.top,
+              bottom: t.bottom,
+            },
+          };
+        }),
+      { timeout: 15_000 },
+    );
+
+    expect(boxes.length).toBeGreaterThan(1);
+    for (const { label, lines, overflow } of boxes) {
+      expect(
+        `${label}: ${lines} line(s), ${Math.max(0, overflow)}px past its tile`,
+      ).toBe(`${label}: 1 line(s), 0px past its tile`);
+    }
+    for (const a of boxes) {
+      for (const b of boxes) {
+        if (a === b) continue;
+        const overlaps =
+          a.tile.left < b.tile.right - 0.5 &&
+          b.tile.left < a.tile.right - 0.5 &&
+          a.tile.top < b.tile.bottom - 0.5 &&
+          b.tile.top < a.tile.bottom - 0.5;
+        expect(overlaps).toBe(false);
+      }
+    }
+  });
 });

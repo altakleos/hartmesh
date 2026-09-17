@@ -538,6 +538,25 @@ class LocalContainerBackend(SandboxBackend):
     # SIGKILL escalation (10s for docker/podman), so this only fires when the
     # daemon itself is wedged rather than truncating a slow-but-progressing stop.
     _STOP_TIMEOUT_SECONDS = 120.0
+    # How long SIGTERM is given before the runtime escalates to SIGKILL. The
+    # default is ten seconds per container, and somebody waits through it:
+    # `_evict_oldest_warm` stops a parked set in the foreground of their next
+    # message, before the turn's first model request. Neither member honours
+    # SIGTERM -- the sandbox's init is a bash script with no trap, the sidecar a
+    # Python server that installs no handler -- so both already die by SIGKILL,
+    # and the grace only decides how long the person waits for it. Measured on
+    # the released images at the profile's limits: 10.94s + 10.68s by default,
+    # 1.74s + 1.63s here, exit 137 either way. A second is still long enough for
+    # an image that later does handle the signal, since `stop` returns as soon
+    # as the process exits and the grace is paid only when it is ignored.
+    #
+    # It does not make a teardown safe for something still writing -- a sandbox
+    # has four writable host mounts under /mnt/user-data, and this is the idle
+    # reaper's and shutdown's stop as well as eviction's -- but the ten seconds
+    # never did either: nothing inside is told to finish, so a process mid-write
+    # is killed just as abruptly, nine seconds later. See the accepted-execution
+    # guide, "What that wait costs".
+    _STOP_GRACE_SECONDS = 1
 
     def __init__(
         self,
@@ -1981,10 +2000,17 @@ class LocalContainerBackend(SandboxBackend):
         daemon could then outlive it and land on a peer's live container — #4206.
         Bounding the stop caps how long that exposure can last even when the
         store is perfectly healthy.
+
+        The grace period is sent only to Docker, which is what the tenant
+        profile and CI run and where ``_STOP_GRACE_SECONDS`` was measured.
+        Apple Container's spelling of the flag is not verified in this
+        repository, so that runtime keeps its own default rather than gaining
+        an argument nobody here has run.
         """
+        grace = ["-t", str(self._STOP_GRACE_SECONDS)] if self._runtime == "docker" else []
         try:
             subprocess.run(
-                [self._runtime, "stop", container_id],
+                [self._runtime, "stop", *grace, container_id],
                 capture_output=True,
                 text=True,
                 check=True,

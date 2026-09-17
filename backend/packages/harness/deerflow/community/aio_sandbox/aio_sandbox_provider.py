@@ -748,9 +748,9 @@ class AioSandboxProvider(
         rather than assumed to outlast the work it guards. Reachable without an
         abnormal backend — the config schema bounds only ``renewal_interval_seconds``
         (> 0) and ``ttl_multiplier`` (>= 2), so a legal setting puts the TTL below a
-        normal container stop, and ``LocalContainerBackend._stop_container`` passes
-        no ``timeout`` to ``subprocess.run``, so a wedged daemon blocks unbounded
-        even at the default 120s.
+        normal container stop. ``LocalContainerBackend._stop_container`` bounds its
+        ``subprocess.run`` at ``_STOP_TIMEOUT_SECONDS``, which caps that exposure
+        but does not remove it: the lease can still lapse inside those 120s.
 
         The TTL stays finite on purpose: the heartbeat dies with the process, so a
         destroyer that crashes mid-stop still releases the container one TTL later

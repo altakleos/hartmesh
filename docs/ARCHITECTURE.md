@@ -163,7 +163,13 @@ These span both layers and require reading multiple files to understand:
   tasks reuse the *same* Gateway run lifecycle (scheduler decides *when*, not *how*).
 - **Scheduled tasks** — workspace page `/workspace/scheduled-tasks` + a background scheduler
   gated by `config.yaml → scheduler.enabled`; non-interactive runs drop `ask_clarification`
-  and client-supplied `non_interactive`.
+  and client-supplied `non_interactive`. A task row carries its own status and next run time
+  and cannot say whether anything is polling for it, so `GET /api/scheduler` answers that
+  separately: `running` from the live service, `configured` from the (hot-reloadable) file,
+  and a `reason` when they differ. The page shows it as a banner and marks a next run that
+  has already passed. It is a read — an overdue schedule on a stopped scheduler is a
+  resumption and catch-up decision for whoever owns the deployment, never a side effect of
+  opening the page.
 - **Long-running MCP** — a durable `McpTaskService` (leased rows, DB as source of truth)
   keeps remote task IDs/polling out of the agent loop.
 - **Version sources** — a release version must match in `backend/pyproject.toml`,

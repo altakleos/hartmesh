@@ -256,6 +256,30 @@ A failed load uses character estimation for a 600-second cooldown.
 Concurrent callers use character estimation while one load is active.
 Set `memory.token_counting: char` to prevent network access.
 
+#### Writer quiescence
+
+A turn's extraction outlives the turn, so a finished run does not mean the
+memory files have settled.
+`MemoryManager.writer_activity()` reports `buffered`, `in_flight`, and
+`observable`.
+`in_flight` is accepted work that has not finished, not writes specifically.
+A backend that does not separate reads from writes counts both.
+`idle` is one-directional: true means the document has settled, false may mean
+only that the backend cannot promise it has.
+
+`GET /api/memory/writers` publishes it, off the event loop.
+Snapshot or take a byte-exact baseline only while `idle` is true.
+It is a separate route on purpose: `/memory/status` reads the whole document
+first and answers 501 for a backend that exposes none.
+
+The contract default is unobservable, not idle.
+A backend that can account for its workers opts in by overriding.
+DeerMem reports its debounce queue and OpenViking its accepted calls; Honcho,
+mem0, and Noop override to idle because their writes finish inside their own
+call.
+Raising `NotImplementedError` reports the same unknown as an unobservable
+record.
+
 #### Configuration
 
 The schema lives in `deerflow/config/memory_config.py`.

@@ -87,6 +87,29 @@ offered until it is made again. Each chart is addressed inside the report's own
 directory, and the brand colour is spent on rules and borders only, because the
 card renders on whichever ground the viewer's theme paints.
 
+**KPI tiles.** They are sized by the space they have, never by the window: the
+card's widest home is a full page and its narrowest is the artifact side panel,
+and a viewport breakpoint cannot tell those apart. It put five tiles in the
+panel of a 1440px screen and `$74,702.61` printed 53px of itself across the
+number beside it. `grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))]`
+asks the container instead, and the 10rem floor is set by the figures rather
+than by how many tiles would fit — a track narrow enough for three in the panel
+is narrow enough to break a seven-figure revenue across two lines mid-digit,
+which is the same unreadability one layer down. So the panel takes two per row,
+a `max-w-3xl` page takes four, and a phone takes one at full width. That last
+one is a deliberate trade: five monetary figures cannot be two-up and legible
+at 320px, and a figure that reads beats a denser grid. `break-words` on the
+value is the floor under all of it — a figure that still does not fit breaks
+inside its own tile rather than across its neighbour.
+
+Layout is the only thing that can catch this, so the regression is an
+end-to-end measurement (`tests/e2e/business-report-card.spec.ts`), and it has
+to measure the right thing twice over: the value's box is clamped to its grid
+track whether or not the text fits, so the box is not the evidence; and
+`break-words` alone drives `scrollWidth - clientWidth` to zero at any track
+width, so overflow is not the evidence either. What pins the sizing is that
+each figure still renders on **one line** at panel width.
+
 Three things decide whether a card appears at all: the `.report.json` suffix, a
 body that parses as `version: 1`, and — for each picture — the contract's
 `charts/<id>.png` shape. A report is fetched under its own preview budget,

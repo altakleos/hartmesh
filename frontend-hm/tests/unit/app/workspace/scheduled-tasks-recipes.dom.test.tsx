@@ -41,6 +41,12 @@ rs.mock("@/core/scheduled-tasks/hooks", () => {
   const mutation = () => ({ mutate: rs.fn(), isPending: false });
   return {
     useScheduledTasks: query,
+    // A running scheduler, so this test sees the page without its
+    // scheduling-is-off banner.
+    useSchedulerState: () => ({
+      data: { version: 1, running: true, configured: true, state: "running" },
+      error: null,
+    }),
     useThreadScheduledTasks: query,
     useScheduledTaskRuns: query,
     useCreateScheduledTask: mutation,

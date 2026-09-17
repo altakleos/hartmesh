@@ -7,7 +7,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
-from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, get_memory_manager
+from deerflow.agents.memory import MemoryConflictError, MemoryCorruptionError, MemoryManager, MemoryWriterActivityV1, get_memory_manager
 from deerflow.config.memory_config import get_memory_config
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime.user_context import get_effective_user_id
@@ -167,6 +167,24 @@ async def _get_memory_or_501(manager: MemoryManager, user_id: str, label: str) -
         raise _map_memory_manager_error(exc) from exc
 
 
+def _writer_activity(manager: MemoryManager) -> MemoryWriterActivityV1:
+    """Ask the backend what background memory work is still outstanding.
+
+    Runs off the event loop because the answer is taken under the backend's own
+    lock, which a worker holds while it works. A backend that cannot account
+    for its workers is reported unknown rather than idle: a caller reading this
+    is usually about to snapshot a disk or take a byte-exact baseline, and an
+    inferred idle is exactly what invalidated one. Such a backend may say so by
+    returning an unobservable record or by raising ``NotImplementedError``; both
+    arrive here as the same unknown, so a third-party implementation cannot turn
+    the question into a 500.
+    """
+    try:
+        return manager.writer_activity()
+    except NotImplementedError:
+        return MemoryWriterActivityV1(observable=False, reason="backend_does_not_track_writers")
+
+
 class FactCreateRequest(BaseModel):
     """Request model for creating a memory fact."""
 
@@ -192,6 +210,27 @@ class MemoryConfigResponse(BaseModel):
     shutdown_flush_timeout_seconds: float = Field(..., description="Hard budget (s) to drain pending memory updates on Gateway graceful shutdown; must fit inside the pod's K8s terminationGracePeriodSeconds.")
     manager_class: str = Field(..., description="Active memory backend selector (backend name or dotted path).")
     backend_config: dict = Field(..., description="Backend-private config (self-interpreted by the backend).")
+
+
+class MemoryWritersResponse(BaseModel):
+    """Response model for outstanding background memory work."""
+
+    version: int = Field(..., description="Shape version of this record.")
+    buffered: int = Field(..., description="Updates accepted and not yet picked up by a worker.")
+    in_flight: int = Field(
+        ...,
+        description=(
+            "Work the backend has accepted and not finished. Not 'writes in progress': "
+            "a backend that does not separate its reads from its writes counts both, because "
+            "a conservative 'not idle' is the safe direction for a caller about to snapshot."
+        ),
+    )
+    idle: bool = Field(
+        ...,
+        description=("True only when the backend can see its workers and none are working. The guarantee is one-directional: true means the memory document has settled, false may mean only that the backend cannot promise it has."),
+    )
+    observable: bool = Field(..., description="Whether the backend can account for its own workers at all. False is 'unknown', never 'idle'.")
+    reason: str | None = Field(default=None, description="Why the backend cannot answer; present only when observable is false.")
 
 
 class MemoryStatusResponse(BaseModel):
@@ -509,3 +548,28 @@ async def get_memory_status(http_request: Request) -> MemoryStatusResponse:
         ),
         data=MemoryResponse(**memory_data),
     )
+
+
+@router.get(
+    "/memory/writers",
+    response_model=MemoryWritersResponse,
+    summary="Get Background Memory Writer Activity",
+    description=(
+        "Whether background memory work has finished. A turn's extraction outlives the turn, "
+        "so a finished run does not mean the memory files have settled; snapshot or take a "
+        "byte-exact baseline only while `idle` is true. Answered for every backend, including "
+        "one that exposes no memory document."
+    ),
+)
+async def get_memory_writers(http_request: Request) -> MemoryWritersResponse:
+    """Publish writer quiescence on a surface no document read can take down.
+
+    Deliberately not a field on ``/memory/status``: that route reads the full
+    memory document first and answers 501 for a backend that does not expose
+    one, which would hide this fact on exactly the backends whose writers a
+    caller most needs to ask about.
+    """
+    del http_request
+    manager = await asyncio.to_thread(get_memory_manager)
+    activity = await asyncio.to_thread(_writer_activity, manager)
+    return MemoryWritersResponse(**activity.to_wire())

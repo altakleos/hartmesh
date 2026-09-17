@@ -925,6 +925,24 @@ tenant-load runs, and leaves 566 MiB for MCP servers a tenant adds; the
 datastores were left alone for the reason recorded below. Moving the 5.0 GiB line instead is
 the operator's call, not this profile's.
 
+**Before snapshotting the data disk.** A turn's memory extraction runs behind
+the turn: the conversation is handed to a buffer, a worker picks it up later,
+calls a model and writes the document. So "nobody is using it" does not mean
+the files have stopped moving, and a snapshot or byte-exact comparison taken
+in that window catches a document mid-write. Ask first, from the guest:
+
+```sh
+curl -fsS http://127.0.0.1:2026/api/memory/writers
+```
+
+Take the snapshot when `idle` is `true`. Anything else — buffered work, a
+worker still running, or a backend that cannot account for its own writers —
+answers `false`, and the honest reading of `false` is "not yet", not "never".
+Stopping the stack settles it too: the Gateway drains those writers inside its
+shutdown budget, which is why a baseline taken *before* `docker compose down`
+and compared *after* it can differ on `memory.json` with nobody having touched
+it by hand.
+
 **Upgrading a guest that already runs sandboxes.** `docker compose up -d`
 stops the Gateway with SIGTERM and its shutdown destroys every sandbox it
 owns, so the new limits and switches apply from the next acquisition. A

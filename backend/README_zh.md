@@ -127,6 +127,7 @@ FastAPI 应用程序，为前端集成提供 REST 接口：
 | `POST /api/memory/reload` | 强制重新加载记忆 |
 | `GET /api/memory/config` | 获取记忆配置 |
 | `GET /api/memory/status` | 获取组合后的配置和数据状态 |
+| `GET /api/memory/writers` | 后台记忆提取是否已经结束；仅当 `idle` 为真时才进行快照或逐字节基线比对 |
 | `GET /api/threads/{id}/runs/{run_id}/events` | 获取某次运行的调试或审计事件；可使用 `event_types=context:memory` 筛选实际记忆标识 |
 | `POST /api/threads/{id}/uploads` | 上传文件（自动将 PDF、PPT、Excel、Word 转换为 Markdown；拒绝目录路径；自动重命名单次请求中的重复文件名） |
 | `GET /api/threads/{id}/uploads/list` | 列出已上传的文件 |
