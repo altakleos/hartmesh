@@ -141,7 +141,7 @@ visibility. Parent cancellation cascades to neither MCP tasks nor batches.
 
 ### Turn phase timings
 
-`turn_phases.py`: one in-memory journal per run, monotonic offsets, opened by `run_agent`, found by run id from the SSE consumer; first text means visible assistant text; see its docstring. `skill_materialization` is attributed by the four spans nested inside it (`accepted_authorization`, `accepted_material_verify`, `skill_projection`, `skill_snapshot_bind`), so a warm turn's pre-model wait names the step it was spent in; a provider that binds while it provisions publishes the snapshot inside `skill_projection`, which is where the larger half of the repeated tree walks lives.
+`turn_phases.py`: one in-memory journal per run, monotonic offsets, opened by `run_agent`, found by run id from the SSE consumer; first text means visible assistant text; see its docstring. `skill_materialization` is attributed by the four spans nested inside it (`accepted_authorization`, `accepted_material_verify`, `skill_projection`, `skill_snapshot_bind`), so a warm turn's pre-model wait names the step it was spent in. On the released local-Docker profile `skill_snapshot.py`'s `bind_skill_snapshot_active_view` runs three times before a warm turn's first model request (provider, worker, sandbox middleware) and once more per sandbox tool call; it verifies the published view in place -- one entry, exact published modes, no empty or unlistable directory, bytes re-digested against the evidence -- and stages a fresh fsync'd copy only when that fails (`docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Attributing the accepted preparation").
 
 ### Stream Bridge Heartbeats
 

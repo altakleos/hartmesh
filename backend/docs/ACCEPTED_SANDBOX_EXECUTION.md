@@ -447,16 +447,42 @@ what is left over is the binding lookup and the isolation assertions; a durable
 profile also leaves `validate_accepted_materialization` and two execution-fence
 round trips there.
 
-Read `skill_snapshot_bind` knowing what it measures. A provider that binds
-while it provisions -- the AIO backend does -- has already published the
-snapshot inside `skill_projection`, so the worker's later bind is the
-idempotent receipt check: it captures and stages the whole tree again before
-the identity match makes it throw the copy away. On such a provider a warm turn
-walks the snapshot tree six times and writes it twice, and the larger half of
-that is inside `skill_projection`, not inside the span named for binding.
-`test_accepted_skill_snapshots.py` gives each step a cost of its own and
-asserts the span named for it measured that step; what a step costs in a
-sandbox is for a live trace to say.
+Read `skill_snapshot_bind` knowing what it measures. On the released
+local-Docker profile a provider that binds while it provisions -- the AIO
+backend does -- has already published the snapshot inside `skill_projection`
+(which also holds the sandbox lookup), so the worker's later bind and the
+sandbox middleware's `sandbox_binding` are the second and third binds of one
+identity before the first model request; each sandbox tool call binds again.
+Until 2026-09-17 each bind captured the source tree three times and wrote a
+full fsync'd staged copy *before* comparing identities: tenant-class `.18`
+measured 1.2 to 2.1 s in `skill_snapshot_bind` and 1.3 to 1.9 s in
+`sandbox_binding` for the tenant's seeded library (13 packages, 43 files,
+413 kB); on a slow development disk the development checkout's whole
+`skills/public` (24 packages, 112 files, 815 kB) bound in 5.5 to 9.3 s per
+call, against a capture of about 20 ms and a digest of about 19 ms -- the
+copy's per-file `fsync` was the whole cost (no-op'ing it leaves 95 to
+140 ms). `bind_skill_snapshot_active_view` now verifies the view it already
+holds before it captures anything: exactly one entry named for the snapshot;
+no symlink, special file, empty directory or unlistable directory beneath it;
+every directory exactly `0o500` and every file exactly `0o400` or `0o500`,
+the modes it was published with (a setuid or world-readable variant is a
+change); and the bytes re-digested against the evidence's snapshot id,
+content digest, file count and byte count, with the regular-file count over
+the whole tree equal to the evidence's. A tree that passes is adopted under
+the new `(run_id, generation)` identity -- the generation rule is unchanged
+and is checked first, so an identity can still refuse a bind; it never earns
+one -- and a tree that fails for any reason, a tampered byte, a changed mode,
+an extra or hidden file, an empty directory, a second entry or a different
+snapshot, is re-staged from the source and replaced. The fast path is tried
+before the source snapshot is consulted, so a verifiable view is bound even
+when the lease behind it has gone. An exact-identity repeat is verified the
+same way rather than returned unread, which it used to be. Measured on the
+development checkout: the first bind of a turn still publishes at 6.5 to
+8.6 s; the second reads a just-written tree back through a cold cache at
+roughly 40 to 90 ms; the third and every repeat after it about 25 ms.
+`test_accepted_skill_snapshots.py` pins each failure mode, the source-loss
+case, the bind-level refusal of foreign evidence, and that the fast path
+stages nothing; the span figures a live trace reports are the measurement.
 
 **Model-to-stream timing, end to end.**
 `backend/tests/test_turn_phase_gateway_stream_e2e.py` runs the real Gateway

@@ -151,8 +151,7 @@ class TurnPhase(StrEnum):
     #   SKILL_SNAPSHOT_BIND        binding that snapshot as the thread's only
     #                              skills mount. Against a provider that has
     #                              already bound, this is the idempotent
-    #                              receipt check, which still captures and
-    #                              stages the whole tree before discarding it.
+    #                              receipt check, which verifies the published view in place and stages a copy only when that fails.
     #
     # Each span is read back by its *first* record, so one name must not be
     # opened twice in a turn: the second is measured and then dropped, and its

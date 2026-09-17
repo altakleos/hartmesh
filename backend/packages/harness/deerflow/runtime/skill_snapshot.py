@@ -407,7 +407,21 @@ def _digest_published_snapshot(
     file_count = 0
     total_bytes = 0
     for projection in projections:
-        skill_root = root / projection.category / Path(projection.relative_path)
+        # The same bounds and symlink sweep the capture applies: a projection
+        # path is evidence, but evidence is verified, never trusted to stay
+        # inside ``root``.
+        relative_path = _bounded_relative(Path(projection.relative_path), limits=limits)
+        if not projection.category or "/" in projection.category or projection.category in (".", ".."):
+            raise SkillSnapshotError("skill_snapshot_path_invalid")
+        skill_root = root
+        for component in (projection.category, *Path(relative_path).parts):
+            skill_root = skill_root / component
+            try:
+                component_metadata = skill_root.lstat()
+            except OSError as exc:
+                raise SkillSnapshotError("skill_snapshot_unavailable") from exc
+            if stat.S_ISLNK(component_metadata.st_mode):
+                raise SkillSnapshotError("skill_snapshot_symlink")
         files = _walk_skill_files(skill_root, limits=limits)
         skill_bytes = sum(len(captured.data) for captured in files)
         manifest = next(captured.data for captured in files if captured.relative_path.as_posix() == SKILL_MD_FILE)
@@ -817,6 +831,76 @@ def _assemble_snapshot(
     )
 
 
+def _published_view_is_verified(
+    view: Path,
+    snapshot_id: str,
+    evidence: object,
+    limits: SkillSnapshotLimits,
+) -> bool:
+    """Whether *view* already holds exactly the published, immutable tree for *snapshot_id*.
+
+    True only when every one of these holds: the view's sole entry is a real
+    directory named ``snapshot_id``; every entry beneath it is a regular file
+    or a directory (no symlink, no special file -- the same refusals the
+    capture makes) and no directory is empty (a staged tree never holds one;
+    an empty directory inside a package is a namespace package that shadows
+    real modules); every directory is exactly ``0o500`` and every file exactly
+    ``0o400`` or ``0o500``, the modes ``_make_read_only`` publishes and nothing
+    else (a setuid bit or a world-readable mode is a change); every directory
+    could be listed (an unlistable one would hide its files from the count
+    below); and re-digesting the tree from its bytes reproduces the
+    evidence's snapshot id, content digest, file count and byte count, with
+    the number of regular files under the whole tree equal to that count, so
+    no file outside the projections the evidence names can be present.
+    Anything else -- an ``OSError`` or a snapshot error while looking
+    included -- is False, and the caller takes the slow path, which re-stages
+    from the source and raises the precise error if the source itself is
+    wrong.
+    """
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    if not isinstance(evidence, SkillProjectionEvidence) or evidence.snapshot_id != snapshot_id:
+        return False
+    published = view / snapshot_id
+    try:
+        entries = list(view.iterdir())
+        if len(entries) != 1 or entries[0] != published:
+            return False
+        root_metadata = published.lstat()
+        if stat.S_ISLNK(root_metadata.st_mode) or not stat.S_ISDIR(root_metadata.st_mode):
+            return False
+        seen_files = 0
+        walk_errors: list[OSError] = []
+        for current, directories, files in os.walk(published, followlinks=False, onerror=walk_errors.append):
+            if not directories and not files:
+                return False
+            current_path = Path(current)
+            for name in (*directories, *files, "."):
+                entry = current_path if name == "." else current_path / name
+                metadata = entry.lstat()
+                if stat.S_ISLNK(metadata.st_mode):
+                    return False
+                if stat.S_ISDIR(metadata.st_mode):
+                    if stat.S_IMODE(metadata.st_mode) != 0o500:
+                        return False
+                elif stat.S_ISREG(metadata.st_mode):
+                    if stat.S_IMODE(metadata.st_mode) not in (0o400, 0o500):
+                        return False
+                else:
+                    return False
+            seen_files += len(files)
+        if walk_errors:
+            return False
+        digest, file_count, total_bytes = _digest_published_snapshot(
+            published,
+            evidence.projections,
+            limits,
+        )
+    except (OSError, SkillSnapshotError):
+        return False
+    return digest == evidence.snapshot_id and digest == evidence.content_digest and file_count == evidence.file_count == seen_files and total_bytes == evidence.total_bytes
+
+
 def bind_skill_snapshot_active_view(
     *,
     user_id: str | None,
@@ -832,6 +916,25 @@ def bind_skill_snapshot_active_view(
     mounted directory therefore contains a copied, read-only projection of
     only the currently accepted digest instead of the subject-wide snapshot
     cache.  ``snapshot_id=None`` deliberately publishes an empty view.
+
+    A snapshot is bound three times before the first model request of a warm
+    turn on the released local-Docker profile (the provider binds while
+    provisioning, the worker binds, the sandbox middleware binds; each sandbox
+    tool call binds again), and each bind used to capture the source tree
+    three times and write a full fsync'd staged copy before comparing the
+    identity it was given with the one already published -- 1.2 to 2 s per
+    bind on the tenant class, 5.5 to 9.3 s on a slow development disk, for a
+    tree whose capture costs about 20 ms. So before anything is captured or
+    staged, the view that already holds this snapshot is verified in place
+    (:func:`_published_view_is_verified`: one immutable tree, exact published
+    modes, no empty or unlistable directory, bytes re-digested against the
+    evidence) and, if it passes, the new ``(run_id, generation)`` identity is
+    adopted under the same conflict rule as a fresh publication. A tree that
+    fails that check for any reason -- a tampered byte, a changed mode, an
+    extra file, an empty directory, a second entry, a different snapshot --
+    takes the slow path and is replaced. The identity never authorizes a
+    reuse; only the bytes do. It can still refuse one: the generation
+    conflict is checked first.
     """
     if snapshot_id is not None and _SNAPSHOT_ID_PATTERN.fullmatch(snapshot_id) is None:
         raise SkillSnapshotError("skill_snapshot_id_invalid")
@@ -839,17 +942,33 @@ def bind_skill_snapshot_active_view(
     view = paths.skill_snapshot_active_view_dir(user_id, thread_id)
     view.parent.mkdir(parents=True, exist_ok=True)
     view.mkdir(parents=True, exist_ok=True)
+    binding_identity = (run_id, generation, snapshot_id)
 
     stage: Path | None = None
     if snapshot_id is not None:
         source = paths.skill_snapshot_scope_dir(user_id) / snapshot_id
-        if not source.is_dir() or source.is_symlink():
-            raise SkillSnapshotError("skill_snapshot_unavailable")
         if evidence is None:
+            if not source.is_dir() or source.is_symlink():
+                raise SkillSnapshotError("skill_snapshot_unavailable")
             evidence = load_skill_projection_evidence(
                 user_id=user_id,
                 snapshot_id=snapshot_id,
             )
+        # The verified fast path, tried before the source is consulted: a
+        # view that verifies against server-owned evidence is the material,
+        # whether or not the snapshot lease behind it is still held. Held
+        # under the views lock so the tree that was verified is the tree
+        # whose identity is adopted: a concurrent bind for another snapshot
+        # clears this view's children under the same lock.
+        with _active_views_lock:
+            current = _active_view_bindings.get(view)
+            if current is not None and current != binding_identity and (generation <= current[1] or generation == 0):
+                raise SkillSnapshotError("skill_snapshot_binding_conflict")
+            if _published_view_is_verified(view, snapshot_id, evidence, DEFAULT_SKILL_SNAPSHOT_LIMITS):
+                _active_view_bindings[view] = binding_identity
+                return view
+        if not source.is_dir() or source.is_symlink():
+            raise SkillSnapshotError("skill_snapshot_unavailable")
         captured, _, _, _ = _capture_verified_projection(
             source,
             evidence,
@@ -889,15 +1008,17 @@ def bind_skill_snapshot_active_view(
         if not isinstance(evidence, SkillProjectionEvidence) or evidence.snapshot_id is not None:
             raise SkillSnapshotError("skill_snapshot_evidence_invalid")
 
-    binding_identity = (run_id, generation, snapshot_id)
     with _active_views_lock:
         if view in _active_view_bindings:
             current = _active_view_bindings[view]
-            if current == binding_identity:
+            if current == binding_identity and snapshot_id is None:
                 if stage is not None:
                     _remove_tree(stage)
                 return view
-            if generation <= current[1] or generation == 0:
+            # An exact repeat with a snapshot reaches here only because the
+            # published tree failed verification above; it is republished
+            # from the fresh stage rather than returned as it is.
+            if current != binding_identity and (generation <= current[1] or generation == 0):
                 if stage is not None:
                     _remove_tree(stage)
                 raise SkillSnapshotError("skill_snapshot_binding_conflict")

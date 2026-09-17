@@ -697,9 +697,9 @@ async def _materialize_accepted_skill_projection(
             raise RuntimeError("accepted_skill_snapshot_binding_missing")
         # A provider that binds while it provisions has already published this
         # snapshot inside SKILL_PROJECTION; for it, this is the idempotent
-        # receipt check, and the staged copy it makes is thrown away. The span
-        # says what it costs either way -- which, on such a provider, is the
-        # second capture of the same tree in one turn.
+        # receipt check: the published view is verified in place (one digest
+        # pass) and a copy is staged only when that verification fails. The
+        # span says what it costs either way.
         with phase_span(TurnPhase.SKILL_SNAPSHOT_BIND):
             await require_accepted_skill_projection(provider).bind_accepted_skill_snapshot_async(
                 sandbox_id,
