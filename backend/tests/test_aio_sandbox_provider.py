@@ -6,8 +6,10 @@ import hashlib
 import importlib
 import stat
 import threading
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -2968,3 +2970,202 @@ def test_get_thread_mounts_includes_the_persons_files_read_write(tmp_path, monke
     assert other["/mnt/user-data/files"] == (str(tmp_path / "users" / "someone-else" / "files"), False)
     # Created ahead of the mount, writable by the sandbox uid like the thread directories.
     assert (tmp_path / "users" / "ou-user" / "files").is_dir()
+
+
+def test_aio_release_recovery_is_not_wedged_by_a_retained_view(tmp_path, monkeypatch) -> None:
+    """The release fallback must still succeed on a thread that has run before.
+
+    `release_accepted_skill_consumer` calls this when its compare-and-clear
+    finds no owner -- the shape of a bind that failed after the token was
+    taken -- and the coordinator finalizes the release only if it returns
+    True. A thread whose earlier turn left its verified view behind must not
+    be stuck in that state for the life of the process.
+    """
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionClear, SkillProjectionEvidence
+    from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    source = tmp_path / "source" / "retained-skill"
+    source.mkdir(parents=True)
+    skill_file = source / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: retained-skill\ndescription: immutable\n---\nretained bytes\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_file(skill_file, SkillCategory.CUSTOM, relative_path=Path("retained-skill"))
+    assert skill is not None
+    paths = Paths(base_dir=tmp_path / "state")
+    monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
+    snapshot = snapshot_effective_skills((skill,), user_id="retained-owner")
+    assert snapshot is not None
+
+    provider, _sandbox, _aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-retained")
+    identity = ("retained-owner", "retained-thread")
+    provider._thread_sandboxes[identity] = "sandbox-retained"
+    provider._active_sandbox_identity["sandbox-retained"] = identity
+    provider._accepted_only_sandbox_ids = {"sandbox-retained"}
+
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id=identity[0],
+        thread_id=identity[1],
+        snapshot_id=snapshot.snapshot_id,
+        run_id="first-run",
+        generation=1,
+        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+    )
+    assert snapshot_module.clear_skill_snapshot_active_view(
+        user_id=identity[0],
+        thread_id=identity[1],
+        run_id="first-run",
+        generation=1,
+    )
+    assert (view / snapshot.snapshot_id).is_dir()
+
+    # The second run took a token and then failed before publishing anything.
+    failed = SkillProjectionClear(
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-retained",
+        run_id="second-run",
+        generation=2,
+        snapshot_id=None,
+    )
+    try:
+        assert provider.clear_accepted_skill_snapshot(failed) is False
+        assert provider.ensure_accepted_skill_snapshot_absent(failed)
+        assert list(view.iterdir()) == []
+    finally:
+        snapshot.release()
+
+
+def test_warm_pool_teardown_clears_the_thread_accepted_view(tmp_path, monkeypatch) -> None:
+    """Destroying a parked container must take its retained view with it.
+
+    The view outlives a run so the thread's next turn verifies it in place
+    instead of staging an unchanged tree again. An evicted or reaped thread
+    has no next turn to verify it, so the container's destruction is what
+    bounds the material: without this, each idle reap and replica eviction
+    left one accepted tree on the data disk for the life of the process.
+    """
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+    from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    source = tmp_path / "source" / "warm-skill"
+    source.mkdir(parents=True)
+    skill_file = source / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: warm-skill\ndescription: immutable\n---\nparked bytes\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_file(skill_file, SkillCategory.CUSTOM, relative_path=Path("warm-skill"))
+    assert skill is not None
+    paths = Paths(base_dir=tmp_path / "state")
+    monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
+    snapshot = snapshot_effective_skills((skill,), user_id="warm-owner")
+    assert snapshot is not None
+
+    identity = ("warm-owner", "warm-thread")
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id=identity[0],
+        thread_id=identity[1],
+        snapshot_id=snapshot.snapshot_id,
+        run_id="warm-run",
+        generation=1,
+        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+    )
+    assert snapshot_module.clear_skill_snapshot_active_view(
+        user_id=identity[0],
+        thread_id=identity[1],
+        run_id="warm-run",
+        generation=1,
+    )
+    assert (view / snapshot.snapshot_id).is_dir(), "the run ends with its view retained"
+
+    provider, _sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-warm-accepted")
+    info = provider._sandbox_infos["sandbox-warm-accepted"]
+    provider._warm_pool["sandbox-warm-accepted"] = (info, time.time() - 10_000)
+    provider._warm_pool_identity["sandbox-warm-accepted"] = identity
+    provider._ownership.take("sandbox-warm-accepted")
+    monkeypatch.setattr(
+        provider,
+        "_backend_destroy",
+        lambda _entry: (aio_mod.DestroyOutcome.ABSENT, None),
+    )
+
+    try:
+        assert provider._destroy_warm_entry(
+            "sandbox-warm-accepted",
+            info,
+            reason="replica_enforcement",
+            still_reapable=lambda: True,
+        )
+        assert list(view.iterdir()) == [], "the evicted thread's accepted bytes stayed on disk"
+    finally:
+        snapshot.release()
+
+
+def test_warm_pool_teardown_that_fails_keeps_the_view(tmp_path, monkeypatch) -> None:
+    """A container that is still up keeps the view it has mounted."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+    from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    source = tmp_path / "source" / "stuck-skill"
+    source.mkdir(parents=True)
+    skill_file = source / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: stuck-skill\ndescription: immutable\n---\nstill mounted\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_file(skill_file, SkillCategory.CUSTOM, relative_path=Path("stuck-skill"))
+    assert skill is not None
+    paths = Paths(base_dir=tmp_path / "state")
+    monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
+    snapshot = snapshot_effective_skills((skill,), user_id="stuck-owner")
+    assert snapshot is not None
+
+    identity = ("stuck-owner", "stuck-thread")
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id=identity[0],
+        thread_id=identity[1],
+        snapshot_id=snapshot.snapshot_id,
+        run_id="stuck-run",
+        generation=1,
+        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+    )
+    assert snapshot_module.clear_skill_snapshot_active_view(
+        user_id=identity[0],
+        thread_id=identity[1],
+        run_id="stuck-run",
+        generation=1,
+    )
+
+    provider, _sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-stuck-accepted")
+    info = provider._sandbox_infos["sandbox-stuck-accepted"]
+    provider._warm_pool["sandbox-stuck-accepted"] = (info, time.time() - 10_000)
+    provider._warm_pool_identity["sandbox-stuck-accepted"] = identity
+    provider._ownership.take("sandbox-stuck-accepted")
+    monkeypatch.setattr(
+        provider,
+        "_backend_destroy",
+        lambda _entry: (aio_mod.DestroyOutcome.FAILED, RuntimeError("still running")),
+    )
+    monkeypatch.setattr(provider, "_quarantine_after_failed_destroy", lambda *args, **kwargs: None)
+
+    try:
+        assert not provider._destroy_warm_entry(
+            "sandbox-stuck-accepted",
+            info,
+            reason="idle_timeout",
+            still_reapable=lambda: True,
+        )
+        assert (view / snapshot.snapshot_id).is_dir(), "a container that is still up keeps its mount"
+    finally:
+        snapshot.release()

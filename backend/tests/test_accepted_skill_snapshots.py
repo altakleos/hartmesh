@@ -52,6 +52,7 @@ from deerflow.runtime.runs.worker import (
     run_agent,
 )
 from deerflow.runtime.skill_snapshot import (
+    AcceptedSkillSnapshot,
     SkillSnapshotError,
     SkillSnapshotLimits,
     cleanup_abandoned_skill_snapshots,
@@ -110,6 +111,15 @@ def _write_skill(
         encoding="utf-8",
     )
     return skill_file
+
+
+def _tamper_with_published_manifest(snapshot: AcceptedSkillSnapshot) -> Path:
+    """Edit published bytes the way a host-side tamper would."""
+    projection = snapshot.projections[0]
+    manifest = snapshot.root / projection.category / projection.relative_path / "SKILL.md"
+    manifest.chmod(0o600)
+    manifest.write_text(manifest.read_text(encoding="utf-8") + "\ntampered\n", encoding="utf-8")
+    return manifest
 
 
 def _parsed_skill(skill_file: Path) -> Skill:
@@ -952,12 +962,17 @@ def test_live_snapshot_is_leased_again_without_copying(
     first.release()
     assert first.root.exists()
     second.release()
-    assert not first.root.exists()
+    # The last lease leaving keeps the published tree: the next turn of the
+    # same skills verifies it (one digest pass) instead of staging a fsync'd
+    # copy of an unchanged tree, which is what every warm tenant turn paid.
+    assert first.root.exists()
+    assert first.root not in snapshot_module._lease_counts
 
-    # Once every lease is gone the tree is copied again, and a published
-    # tree that no longer matches its digest is drift, never reused.
     third = snapshot_effective_skills((_parsed_skill(skill_file),), user_id="reuse-user")
-    assert third is not None and writes
+    assert third is not None and writes == []
+    assert third.root == first.root
+    # A published tree that no longer matches its digest while a lease holds
+    # it is drift, never reused: live material changed under a run.
     copied_support = third.root / third.projections[0].category / third.projections[0].relative_path / "references" / "guide.txt"
     copied_support.chmod(0o600)
     copied_support.write_text("corrupted", encoding="utf-8")
@@ -1251,6 +1266,8 @@ def test_snapshot_publication_and_shared_cleanup_are_atomic(
     tmp_path: Path,
     snapshot_paths: Paths,
 ) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
     skill_file = _write_skill(tmp_path, body="Shared")
     skill = _parsed_skill(skill_file)
     first = snapshot_effective_skills((skill,), user_id="user-1")
@@ -1263,7 +1280,8 @@ def test_snapshot_publication_and_shared_cleanup_are_atomic(
     first.release()
     assert second.root.is_dir()
     second.release()
-    assert not second.root.exists()
+    assert second.root.is_dir()
+    assert second.root not in snapshot_module._lease_counts
 
 
 def test_subagent_material_lease_outlives_parent_terminal_cleanup(
@@ -1285,7 +1303,10 @@ def test_subagent_material_lease_outlives_parent_terminal_cleanup(
     assert snapshot_root.is_dir()
     child_material.verify_process_material()
     child_material.release_process_material()
-    assert not snapshot_root.exists()
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    assert snapshot_root.is_dir()
+    assert snapshot_root not in snapshot_module._lease_counts
 
 
 def test_startup_cleanup_removes_only_abandoned_snapshots(
@@ -1416,7 +1437,10 @@ async def test_terminal_worker_releases_snapshot_after_execution(
     )
 
     assert record.status is RunStatus.success
-    assert not snapshot_root.exists()
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    assert snapshot_root not in snapshot_module._lease_counts
+    assert snapshot_root.is_dir()
 
 
 @pytest.mark.asyncio
@@ -1815,7 +1839,10 @@ async def test_cancelled_before_start_releases_snapshot(
         config={},
     )
 
-    assert not snapshot_root.exists()
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    assert snapshot_root not in snapshot_module._lease_counts
+    assert snapshot_root.is_dir()
 
 
 @pytest.mark.asyncio
@@ -3534,3 +3561,324 @@ def test_the_fast_path_refuses_evidence_for_another_snapshot(monkeypatch, tmp_pa
     assert snapshot_module._active_view_bindings[view] == ("run-1", 1, snapshot.snapshot_id), "a bind that could not verify or stage adopts nothing"
     other.release()
     snapshot.release()
+
+
+# ── Retention across turns ───────────────────────────────────────────────
+#
+# Tenant-class .19: every warm turn re-staged the same 13-package snapshot
+# (2.2 s, 46 fsyncs on the dev host) because the run's last lease deleted the
+# published digest, and the worker then re-staged the thread view (another
+# 2.1 s) because the run's end had cleared it. Both are immutable,
+# content-addressed, read-only material re-verified before any use.
+
+
+def test_a_scope_keeps_its_newest_two_retained_digests(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    roots: list[Path] = []
+    for index in range(3):
+        skill_file = _write_skill(tmp_path / f"gen-{index}", body=f"generation {index}")
+        snapshot = snapshot_effective_skills((_parsed_skill(skill_file),), user_id="bounded-user")
+        assert snapshot is not None
+        roots.append(snapshot.root)
+        snapshot.release()
+        # Publication order is what retention keeps; make it unambiguous on
+        # filesystems with coarse timestamps.
+        os.utime(snapshot.root, (1_700_000_000 + index, 1_700_000_000 + index))
+        assert snapshot.root.is_dir()
+
+    assert len({root for root in roots}) == 3
+    assert not roots[0].exists(), "the oldest unleased digest is pruned when a third is published"
+    assert roots[1].is_dir() and roots[2].is_dir()
+    assert snapshot_module.MAX_RETAINED_SNAPSHOTS_PER_SCOPE == 2
+
+
+def test_a_leased_digest_is_never_pruned_by_retention(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    held = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "held", body="held")),), user_id="held-user")
+    assert held is not None
+    os.utime(held.root, (1_600_000_000, 1_600_000_000))
+    for index in range(3):
+        later = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / f"later-{index}", body=f"later {index}")),), user_id="held-user")
+        assert later is not None
+        later.release()
+    assert held.root.is_dir()
+    held.release()
+
+
+def test_a_tampered_retained_snapshot_is_replaced_not_trusted(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    skill_file = _write_skill(tmp_path / "retained", body="pristine")
+    first = snapshot_effective_skills((_parsed_skill(skill_file),), user_id="tamper-user")
+    assert first is not None
+    first.release()
+    manifest = first.root / first.projections[0].category / first.projections[0].relative_path / "SKILL.md"
+    manifest.chmod(0o600)
+    manifest.write_text(manifest.read_text(encoding="utf-8").replace("pristine", "tampered"), encoding="utf-8")
+
+    writes: list[Path] = []
+    original_write = snapshot_module._write_private_file
+    monkeypatch.setattr(snapshot_module, "_write_private_file", lambda path, data, **kwargs: writes.append(path) or original_write(path, data, **kwargs))
+    second = snapshot_effective_skills((_parsed_skill(skill_file),), user_id="tamper-user")
+    assert second is not None and writes, "an unleased tree that fails verification is re-staged from the source"
+    assert second.root == first.root
+    assert "pristine" in manifest.read_text(encoding="utf-8")
+    assert not manifest.stat().st_mode & stat.S_IWUSR
+    second.release()
+
+
+def test_the_run_end_release_keeps_the_verified_view_for_the_next_bind(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    snapshot = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "kept", body="kept across runs")),), user_id="user-1")
+    assert snapshot is not None
+    evidence = SkillProjectionEvidence.from_snapshot(snapshot)
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id="user-1",
+        thread_id="thread-1",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-1",
+        generation=1,
+        evidence=evidence,
+    )
+    published = view / snapshot.snapshot_id
+    assert published.is_dir()
+
+    assert snapshot_module.clear_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1", run_id="run-1", generation=1)
+    # The exact fence still holds: a wrong identity clears nothing.
+    assert not snapshot_module.clear_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1", run_id="run-1", generation=1)
+    assert published.is_dir(), "the verified read-only view outlives the run that bound it"
+    assert view not in snapshot_module._active_view_bindings
+
+    writes: list[Path] = []
+    original_write = snapshot_module._write_private_file
+    monkeypatch.setattr(snapshot_module, "_write_private_file", lambda path, data, **kwargs: writes.append(path) or original_write(path, data, **kwargs))
+    snapshot_module.bind_skill_snapshot_active_view(
+        user_id="user-1",
+        thread_id="thread-1",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-2",
+        generation=2,
+        evidence=evidence,
+    )
+    assert writes == [], "the next run of the same digest verifies in place"
+    assert snapshot_module._active_view_bindings[view] == ("run-2", 2, snapshot.snapshot_id)
+    assert snapshot_module.clear_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1", run_id="run-2", generation=2)
+    snapshot.release()
+
+
+def test_a_bind_of_a_different_digest_still_replaces_the_retained_view(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    first = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "one", body="one", name="one")),), user_id="user-1")
+    second = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "two", body="two", name="two")),), user_id="user-1")
+    assert first is not None and second is not None and first.snapshot_id != second.snapshot_id
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id="user-1",
+        thread_id="thread-1",
+        snapshot_id=first.snapshot_id,
+        run_id="run-1",
+        generation=1,
+        evidence=SkillProjectionEvidence.from_snapshot(first),
+    )
+    assert snapshot_module.clear_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1", run_id="run-1", generation=1)
+    assert (view / first.snapshot_id).is_dir()
+
+    snapshot_module.bind_skill_snapshot_active_view(
+        user_id="user-1",
+        thread_id="thread-1",
+        snapshot_id=second.snapshot_id,
+        run_id="run-2",
+        generation=2,
+        evidence=SkillProjectionEvidence.from_snapshot(second),
+    )
+    assert [child.name for child in view.iterdir()] == [second.snapshot_id]
+    assert snapshot_module.clear_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1", run_id="run-2", generation=2)
+    snapshot_module.force_clear_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1")
+    assert list(view.iterdir()) == [], "teardown still removes the bytes"
+    first.release()
+    second.release()
+
+
+def test_a_released_view_is_releasable_again_by_the_recovery_path(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """A retained view must not wedge the release of a later failed bind.
+
+    `release_accepted_skill_consumer` falls back to this call when the
+    compare-and-clear finds no owner, and the coordinator only finalizes when
+    it succeeds. Retaining bytes past the run made the old "is it empty?"
+    proof permanently false for every warm thread, so the next bind that
+    failed left that thread's projection state marked clearing for the life
+    of the process.
+    """
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    snapshot = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "kept", body="kept")),), user_id="user-1")
+    assert snapshot is not None
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id="user-1",
+        thread_id="thread-1",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-1",
+        generation=1,
+        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+    )
+    assert snapshot_module.clear_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1", run_id="run-1", generation=1)
+    assert (view / snapshot.snapshot_id).is_dir()
+
+    assert snapshot_module.release_unowned_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1")
+    assert list(view.iterdir()) == [], "the recovery path says absent, so it must leave it absent"
+    snapshot.release()
+
+
+def test_a_view_another_invocation_owns_is_refused_not_emptied(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+    snapshot = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "owned", body="owned")),), user_id="user-1")
+    assert snapshot is not None
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id="user-1",
+        thread_id="thread-1",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-1",
+        generation=1,
+        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+    )
+    assert not snapshot_module.release_unowned_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1")
+    assert (view / snapshot.snapshot_id).is_dir(), "a bound view stays bound"
+    snapshot.release()
+
+
+def test_a_drift_found_under_a_live_lease_leaves_with_that_lease(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    source = _write_skill(tmp_path / "drifting", body="original")
+    snapshot = snapshot_effective_skills((_parsed_skill(source),), user_id="user-1")
+    assert snapshot is not None
+    root = snapshot.root
+    held = snapshot.retain()
+
+    _tamper_with_published_manifest(snapshot)
+
+    with pytest.raises(SkillSnapshotError, match="skill_snapshot_drift"):
+        snapshot.verify()
+    assert root in snapshot_module._tainted_roots
+    snapshot.release()
+    assert root.is_dir(), "the other lease is still reading it"
+
+    held.release()
+    assert not root.exists(), "a refused tree is never retained"
+    assert root not in snapshot_module._tainted_roots
+
+
+def test_a_drift_found_after_the_last_lease_removes_the_tree_at_once(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """Nothing is left holding a taint nobody would collect.
+
+    A snapshot object outlives its lease -- a cancelled batch keeps one and
+    verifies it later -- so a taint recorded here would sit in the set for
+    the life of the process and delete the *next*, verified publication of
+    the same digest at its first release.
+    """
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    source = _write_skill(tmp_path / "late", body="original")
+    snapshot = snapshot_effective_skills((_parsed_skill(source),), user_id="user-1")
+    assert snapshot is not None
+    root = snapshot.root
+    snapshot.release()
+    assert root.is_dir()
+
+    _tamper_with_published_manifest(snapshot)
+
+    with pytest.raises(SkillSnapshotError, match="skill_snapshot_drift"):
+        snapshot.verify()
+    assert not root.exists(), "a drifted tree with no lease goes now"
+    assert snapshot_module._tainted_roots == set()
+
+    republished = snapshot_effective_skills((_parsed_skill(source),), user_id="user-1")
+    assert republished is not None and republished.root == root
+    republished.release()
+    assert root.is_dir(), "a clean publication of the same digest is retained"
+
+
+def test_a_symlinked_snapshot_root_is_never_adopted(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    source = _write_skill(tmp_path / "linked", body="linked")
+    snapshot = snapshot_effective_skills((_parsed_skill(source),), user_id="user-1")
+    assert snapshot is not None
+    root = snapshot.root
+    snapshot.release()
+
+    elsewhere = tmp_path / "planted-tree"
+    shutil.copytree(root, elsewhere)
+    snapshot_module._remove_tree(root)
+    root.symlink_to(elsewhere, target_is_directory=True)
+
+    replacement = snapshot_effective_skills((_parsed_skill(source),), user_id="user-1")
+    assert replacement is not None
+    assert not root.is_symlink(), "a symlinked root is replaced, not walked through"
+    assert root.is_dir()
+    replacement.release()
+
+
+def test_startup_cleanup_reclaims_every_retained_digest(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """A restart is the reclaim for material no live lease holds.
+
+    Retention has no expiry: a user who chats once keeps their newest two
+    digests until the process that published them is gone. This is the call
+    that makes a restart give the disk back, and the trees it must remove are
+    exactly the ones an ordinary run now leaves behind.
+    """
+    from deerflow.runtime import skill_snapshot as snapshot_module
+
+    first = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "a", body="a", name="a")),), user_id="user-1")
+    second = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "b", body="b", name="b")),), user_id="user-2")
+    assert first is not None and second is not None
+    first.release()
+    second.release()
+    assert first.root.is_dir() and second.root.is_dir()
+    assert first.root.parent != second.root.parent, "one scope per user"
+
+    # A restart has no leases, whatever the previous process held.
+    snapshot_module._lease_counts.clear()
+    assert cleanup_abandoned_skill_snapshots() >= 2
+    assert not first.root.exists() and not second.root.exists()

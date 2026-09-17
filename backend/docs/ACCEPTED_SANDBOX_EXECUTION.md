@@ -130,7 +130,7 @@ deployment profile's decision, not the record's:
 
 | Profile | Nonempty snapshot | Empty snapshot |
 | --- | --- | --- |
-| `local_development` | Accepted-skills projection: the provider's own parked `(user, thread)` sandbox with `.accepted` as its only skills mount, bound before the model is called, cleared at release and re-projected at the next bind | Accepted-skills projection with no snapshot bound: no materialization before the model, the sandbox is provisioned at the first tool call, `.accepted` is empty and every skills path is refused |
+| `local_development` | Accepted-skills projection: the provider's own parked `(user, thread)` sandbox with `.accepted` as its only skills mount, bound before the model is called, released at the run's end with its verified read-only view retained (the next bind of the same digest verifies it in place, a different digest replaces it, teardown clears it) | Accepted-skills projection with no snapshot bound: no materialization before the model, the sandbox is provisioned at the first tool call, `.accepted` is empty and every skills path is refused |
 | `durable_production`, `durable_two_gateway_v1` | A qualified materializer, or `sandbox_provider_unqualified` before any sandbox exists | Accepted-skills projection with no snapshot bound: no materialization before the model, the sandbox is provisioned at the first tool call, `.accepted` is empty and every skills path is refused |
 
 The ordinary thread sandbox, which mounts the Gateway's `skills_view/public`
@@ -484,6 +484,45 @@ roughly 40 to 90 ms; the third and every repeat after it about 25 ms.
 case, the bind-level refusal of foreign evidence, and that the fast path
 stages nothing; the span figures a live trace reports are the measurement.
 
+**Material is retained across turns.** The fast path above was only ever
+taken *within* a turn until 2026-09-17, because two run-end cleanups removed
+what it would have verified: the run's last lease deleted the snapshot's
+published digest from the subject scope, and the last consumer's release
+cleared the thread view. Tenant-class `.19` therefore paid both copies again
+on every warm turn — the launch re-staged the digest before the run row
+existed (1.4 to 2.2 s there; 2.0 to 2.4 s and 45 `fsync`s on a development
+host, for the seeded 13 packages: 43 files, 415,749 bytes) and the provider
+re-staged the view inside `skill_projection` (1.2 to 1.8 s there; 3.2 s and
+43 `fsync`s on that host), for material that verifies in 23 ms and binds in
+13 with no `fsync` at all. The tenant-class figures are that class's own turn
+lines; the repair has not been measured there.
+Both are content-addressed, read-only and re-digested against server-owned
+evidence before any use, so both are now kept: a scope retains its newest
+two unleased digests (`MAX_RETAINED_SNAPSHOTS_PER_SCOPE`; publishing a third
+removes the oldest, and a retained tree that fails verification at the next
+admission is removed and staged again rather than trusted, while one that
+fails under a live lease is still `skill_snapshot_drift`), and the thread
+view's bytes outlive the run that bound them (`clear_skill_snapshot_active_view`
+is compare-and-release: the exact `(run_id, generation)` fence still decides
+it, the binding entry goes, the bytes stay). What removes them: a bind of a
+different digest (under the views lock, as before); the container going away,
+which is what bounds a view — `destroy`, an idle reap, a replica eviction and
+shutdown all clear it (`force_clear_skill_snapshot_active_view`), and a
+teardown that fails leaves the view alone because the container may still
+have it mounted; a live verification that found drift (the tree leaves with
+its last lease, or at once if it has none, and the path is forgotten so the
+next clean publication of that digest is kept); the recovery half of a
+release, which empties an unowned view rather than proving a retained one
+absent (`release_unowned_skill_snapshot_active_view`); and Gateway startup
+(`cleanup_abandoned_skill_snapshots` removes every digest and view a prior
+process left, so the first turn after a restart stages once per user). No
+consumer executes between runs; nothing here authorizes a reuse, only the
+bytes do, at bind. The bound is two *unleased* trees per user — a digest a
+run holds is never evicted, and the bound is re-applied when that user next
+publishes — plus one view per parked thread. Nothing expires on a timer, so
+a tenant holds `2 × snapshot × users admitted since the last Gateway start`
+until a restart reclaims it. The remote `rwx_verified_copy_v2` branch is unchanged.
+
 **Model-to-stream timing, end to end.**
 `backend/tests/test_turn_phase_gateway_stream_e2e.py` runs the real Gateway
 under uvicorn on loopback, registers, creates a thread and drives the
@@ -509,8 +548,8 @@ container backend, for the same deterministic id, tenant and thread are equal
 by construction, the skills root and projection state are already part of the
 id itself, the backend class and skills root are startup constants, the thread
 and active-view mounts are path-deterministic, and the bound snapshot is
-re-projected on every acquisition -- so the only create-time input that can
-differ is the Lark CLI provisioning state. A mismatch there is repaired by the
+re-verified on every acquisition (staged again only when that verification
+fails) -- so the only create-time input that can differ is the Lark CLI provisioning state. A mismatch there is repaired by the
 fenced replacement of our own parked entry described above, or refuses the
 acquisition when the fences refuse the stop; the container is never adopted
 with its old mounts. The label of every create result is the backend's own

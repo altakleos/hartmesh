@@ -2521,15 +2521,32 @@ class AioSandboxProvider(
             # marks it — so a reclaim picks it up and hands out a dead container.
             # The pop stays deferred relative to the *stop* (a refused or failed
             # stop keeps the entry), just no longer relative to the reservation.
+            cleared_identity: tuple[str, str] | None = None
             with self._lock:
                 current = self._warm_pool.get(sandbox_id)
                 if current is not None and current[0] is entry:
                     self._warm_pool.pop(sandbox_id, None)
-                    self._warm_pool_identity.pop(sandbox_id, None)
+                    cleared_identity = self._warm_pool_identity.pop(sandbox_id, None)
                     self._forget_accepted_reuse_fingerprint_locked(sandbox_id)
                 self._clear_cleanup_pending_locked(sandbox_id)
         finally:
             self._finish_local_teardown(sandbox_id)
+
+        # The container this view was mounted into is gone, so nothing will
+        # verify these bytes again: the parked view is what the next turn of
+        # *this* thread would have reused, and an evicted thread has no next
+        # turn to reuse it. Left behind, every idle reap and replica eviction
+        # would add one retained tree to the data disk for the life of the
+        # process. Outside the provider lock: the views lock is the snapshot
+        # module's, and this is the only ordering between the two.
+        try:
+            self._clear_accepted_skill_view_for(cleared_identity)
+        except Exception:
+            logger.error(
+                "Could not clear the accepted skill view of destroyed warm-pool sandbox %s",
+                sandbox_id,
+                exc_info=True,
+            )
 
         # Counted only here, after the backend's destroy returned: an attempt
         # or a refusal above says nothing about whether the container is gone.
@@ -4035,8 +4052,18 @@ class AioSandboxProvider(
     def _clear_bound_accepted_skill_snapshot(self, sandbox_id: str) -> None:
         if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
             return
-        identity = self._identity_for_sandbox(sandbox_id)
-        if identity is None:
+        self._clear_accepted_skill_view_for(self._identity_for_sandbox(sandbox_id))
+
+    def _clear_accepted_skill_view_for(self, identity: tuple[str, str] | None) -> None:
+        """Remove one thread's accepted view, by identity rather than sandbox.
+
+        The view outlives a run on purpose (the next turn verifies it in place
+        instead of staging an unchanged tree again), so the container going
+        away is what bounds it. A teardown that resolves the identity only
+        from the maps it is about to clear cannot ask for it afterwards, so
+        the identity is passed in.
+        """
+        if identity is None or isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
             return
         user_id, thread_id = identity
         from deerflow.runtime.skill_snapshot import force_clear_skill_snapshot_active_view
@@ -4076,7 +4103,7 @@ class AioSandboxProvider(
 
     def ensure_accepted_skill_snapshot_absent(self, clear: "SkillProjectionClear") -> bool:
         from deerflow.runtime.skill_projection import SkillProjectionClear
-        from deerflow.runtime.skill_snapshot import prove_skill_snapshot_active_view_absent
+        from deerflow.runtime.skill_snapshot import release_unowned_skill_snapshot_active_view
 
         if not isinstance(clear, SkillProjectionClear):
             return False
@@ -4089,7 +4116,7 @@ class AioSandboxProvider(
             return False
         if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
             return self.get(clear.sandbox_id) is None
-        return prove_skill_snapshot_active_view_absent(
+        return release_unowned_skill_snapshot_active_view(
             user_id=clear.user_id,
             thread_id=clear.thread_id,
         )
