@@ -58,7 +58,7 @@ OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
 PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE", "SANDBOX_READY_TIMEOUT"}
-MEMORY_MIB = {"gateway": 1152, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256, "searxng": 192}
+MEMORY_MIB = {"gateway": 1088, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256, "searxng": 256}
 # The sandbox image's own service switches (its entrypoint compares each to the
 # string "true"): the profile ships every sandbox with the browser, VNC,
 # Jupyter, code-server and the Node REPL off (README: "Slim services profile").
@@ -225,9 +225,9 @@ def test_memory_limits_sum_to_2880_mib_with_equal_swap(compose: dict) -> None:
         assert _mib(service["mem_limit"]) == expected, name
         assert service["memswap_limit"] == service["mem_limit"], name
         total += expected
-    assert total == 2880, "3072 less the 192 MiB the Gateway gave up for the 1 GiB sandboxes; the 192 MiB it took back with the two-slot profile now pays for the search service, so the line has not moved (README: Memory budget)"
-    assert MEMORY_MIB["searxng"] == 192, "105 MiB peak under a six-query burst on the curated engines (README: Web search)"
-    assert MEMORY_MIB["gateway"] == 1152, "what it ran at from 2026-09-15 to 2026-09-17, twice its measured 586 MiB peak"
+    assert total == 2880, "3072 less the 192 MiB the Gateway gave up for the 1 GiB sandboxes; the 192 MiB it took back with the two-slot profile, and a further 64 MiB, now pay for the search service, so the line has not moved (README: Memory budget)"
+    assert MEMORY_MIB["searxng"] == 256, "clears by 64 MiB the ceiling the tenant class found it sitting on, 170 reclaims and no OOM kill (README: Web search)"
+    assert MEMORY_MIB["gateway"] == 1088, "1.86 times its measured 586 MiB two-turn peak; the donor each time, because its limit is a multiple of a peak rather than a figure set against a failure"
 
 
 PIDS_LIMIT = {"gateway": 2048, "frontend": 512, "nginx": 256, "postgres": 512, "redis": 128, "searxng": 128}
