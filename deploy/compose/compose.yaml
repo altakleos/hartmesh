@@ -75,7 +75,7 @@ services:
 
   # ── Gateway (FastAPI + embedded agent runtime) ───────────────────────────
   gateway:
-    image: ghcr.io/altakleos/hartmesh-backend@sha256:ad8ce3e63016074448c91f0573d69c694473d2dbdec48187cf50732798c72399
+    image: ghcr.io/altakleos/hartmesh-backend@sha256:fedf7628fe7019029caf208e3d150729f09c4172057c29fa4dd49a53c3852474
     # No `user:` on purpose. The container starts as root only long enough for
     # gateway/entrypoint.sh to read the Docker socket's group, then drops to
     # uid/gid 1000 plus that one supplementary group before any application
@@ -236,7 +236,7 @@ services:
 
   # ── Frontend (Next.js) ───────────────────────────────────────────────────
   frontend:
-    image: ghcr.io/altakleos/hartmesh-frontend@sha256:8e75ebb3422981fc591b0d611a4dbfce81728fde041e1df3119720d66a29a488
+    image: ghcr.io/altakleos/hartmesh-frontend@sha256:a599c47beb593bc6481cda7e106824361e168d5bec5f9896e6fb9023dc389330
     user: "1000:1000"
     # Explicit entries only: no env_file, so provider keys never reach it. The
     # frontend's one runtime need is the internal Gateway URL; its browser
