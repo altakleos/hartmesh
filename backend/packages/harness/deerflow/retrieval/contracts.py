@@ -60,10 +60,19 @@ class RetrievalProviderError(RetrievalEvidenceError):
         }
     )
 
-    def __init__(self, status: str) -> None:
+    # A short fixed sentence an adapter may attach for the person and the
+    # model: what to do about a failure whose category alone does not say.
+    # Never provider text, a query, arguments or an exception message, and
+    # bounded so a caller cannot smuggle a payload through it.
+    _MAX_GUIDANCE_BYTES = 240
+
+    def __init__(self, status: str, *, guidance: str | None = None) -> None:
         if status not in self._STATUSES:
             raise ValueError("unsupported retrieval provider failure category")
         self.status = status
+        if guidance is not None and (not isinstance(guidance, str) or len(guidance.encode("utf-8")) > self._MAX_GUIDANCE_BYTES or any(character in guidance for character in "\r\n")):
+            raise ValueError("retrieval provider guidance must be one short line")
+        self.guidance = guidance
         super().__init__(f"retrieval_{status}")
 
 

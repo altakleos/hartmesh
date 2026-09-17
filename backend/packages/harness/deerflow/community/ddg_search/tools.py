@@ -237,7 +237,20 @@ def _search_duckduckgo_evidence(
             if response.status_code == 429:
                 raise RetrievalProviderError("rate_limited")
             if response.status_code != 200:
-                raise RetrievalProviderError("provider_unavailable")
+                # The keyless endpoint answers a served search with 200. Any
+                # other status is it declining to serve this caller -- most
+                # often an automated-traffic challenge, which is an access
+                # control and not something to solve or work around. Retrying
+                # will not change it, so say so once rather than let the model
+                # spend the turn discovering it.
+                logger.error(
+                    "DuckDuckGo declined the evidence request (status %d)",
+                    response.status_code,
+                )
+                raise RetrievalProviderError(
+                    "provider_unavailable",
+                    guidance=_DDG_DECLINED_GUIDANCE,
+                )
             content = response.content
             if not isinstance(content, bytes) or len(content) > max_response_bytes:
                 raise RetrievalProviderError("oversized_response")
@@ -353,6 +366,12 @@ _RECENCY_DAYS = {
     "month": 31,
     "year": 366,
 }
+
+
+# Said to the model, so it stops rather than retrying a tool that cannot work
+# here, and to the person, so the answer names the missing configuration
+# instead of looking like a broken internet connection.
+_DDG_DECLINED_GUIDANCE = "The keyless DuckDuckGo endpoint declined this automated search, which retrying will not change. Web search needs a configured search provider for this deployment."
 
 
 class _DuckDuckGoRetrievalProvider:

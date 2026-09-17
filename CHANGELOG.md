@@ -5,6 +5,27 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.20] — 2026-09-17
+
+- hartmesh#101 — tell the person what the wait is for on the turn where it is longest. An upload turn spent its first seconds with a stale spinner and a generic "Working…", although the stage frames `.19` added were already on the wire at 1.6 s: the client mints a placeholder message for the upload, and the activity row read that placeholder as model output, so it drew nothing until the first real token at 13.8 s. The placeholder is now identified by what it is rather than by where it sits, so the row shows "Preparing your workspace…" when the workspace is what the turn is waiting on. Resolving an upload also stopped erasing the sidecar context a message carried.
+- hartmesh#102 — measure the interval the turn journal could not see. Everything before worker admission — the identity lookup, the admission fence, sealing the accepted invocation, authorization, constraints, preparation and the run row — sat outside `total=` and every `@` offset, so a reader adding up the phases was missing it. `launch=` now reports that interval with a per-step breakdown, stamped at all four entry points (HTTP, scheduler, IM channels, the embedded runtime). It sits *outside* `total=`: acknowledgement is `launch=` plus `first_stream_text@`, which the compose README now states, because reading the offset alone under-reported a warm turn by seconds.
+- hartmesh#103 — stop re-staging material that had not changed. Every warm turn staged the accepted skill snapshot twice, once at launch and once at the bind, with an `fsync` per file, and deleted both copies when the run ended — for a tree that is content-addressed, read-only, and re-verified by digest before any use. Both are now retained and verified in place. On a development host with the 13 seeded packages: the snapshot 2.0–2.4 s and 45 `fsync`s becomes 23 ms, and the view 3.2 s and 43 `fsync`s becomes 13 ms. Nothing new authorizes a reuse — the bytes do, at bind, as before — and what removes the material is unchanged apart from the container going away, which is now what bounds a parked thread's view. The disk this keeps, and the fact that a Gateway restart is the reclaim, are stated beside the tenant's disk sizing.
+- hartmesh#104 — let a deployment that has not adopted governance run its own configured tools. The released tenant profile enables the governed tool plane and has no promoted revision until an administrator adopts one — a supported state both contracts describe. Execution did not agree: admission recorded that state only by *omitting* a revision, and a missing revision also means "the governed material this run needs is missing", which must fail closed. So every turn where the model reached `web_search` failed before the tool ran, the public deep-research skill with it, and the search provider was never contacted. Admission now seals the decision it actually made, and retrieval reads it: a governed run is unchanged, an ungoverned one executes and its observation says so (`tool_plane.mode: "unmanaged"`, no digests substituted), and an admission that made no statement still fails before dispatch. The mode cannot be chosen by anything but admission — the seal refuses a durable profile structurally, is bound into the run's identity, and is not honoured by a process whose own profile is durable. The same change makes every `accepted_*` runtime-context key server-owned by prefix, closing a path by which a caller could have supplied one.
+
+`.19` measured the acknowledgement gap and this release closes the part of it
+that was ours: on the development host a warm turn's `launch=` is 81 to 102 ms
+and its accepted-skill projection 157 to 165 ms, against 9.3 s for the same
+shape before. None of that is measured on the tenant class, whose next Part A
+reads these fields.
+
+What this release does not settle: the keyless DuckDuckGo `web_search` now
+reaches its provider and is refused there — the endpoint answers the adapter's
+request with a challenge page, which the adapter reports as
+`provider_unavailable`. A search turn therefore still fails on the default
+profile, after dispatch, with a receipt and an observation recording why
+instead of nothing at all. Cold-start latency, the synchronous eviction on a
+full warm pool, and the memory-writer drain boundary are untouched.
+
 ## [2.1.0+hartmesh.19] — 2026-09-17
 
 - hartmesh#95 — make the call that produces a file the call that hands it over. `.18` shipped the skill's handover as a `Present:` line the report script printed and the bash tool parsed, which keys a behaviour to a wording: change the phrase and delivery silently regresses, and every new flow has to learn it. The tool now takes a typed `present` argument the model fills, and nothing is read from output. Each named path is checked against the filesystem rather than against text — inside the caller's scope, a regular file, and modified during this call (with a two-second tolerance) — and paths that fail are reported back in the result instead of dropped. What the run produced is then one signal end to end: a tool result tagged `presented_files`. The delivery fence, the archive route and the run's evidence receipt all read that tag, so the registry of tool names they used to consult is gone; a file that reaches the artifact panel as a side effect, such as a browser screenshot, is no longer mistaken for a delivery. A new producing tool adopts delivery by accepting the argument and returning one helper, and a new skill by one documentation line. `present_files` keeps working and now tags its own result, so no flow is asked to call twice. The report script's output name is derived from the directory the caller chose, so the model can name the paths before the run rather than learn them from it.
@@ -56,6 +77,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.20]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.20
 [2.1.0+hartmesh.19]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.19
 [2.1.0+hartmesh.18]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.18
 [2.1.0+hartmesh.17]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.17

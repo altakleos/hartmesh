@@ -26,6 +26,15 @@ qualified for a deployment only after its opt-in live gate passes against that
 deployment. Missing network access, datasets, or credentials is an unpassed
 gate, never evidence of a pass.
 
+The keyless DuckDuckGo row is the one to read carefully: that endpoint answers
+automated searches from server addresses with a human-verification challenge
+rather than results (observed 2026-09-17). A challenge is an access control.
+HartMesh does not solve it, does not imitate a browser to get past it, and does
+not switch endpoints to find one that has not started challenging yet — a
+deployment that needs web search configures a provider key. The adapter reports
+a declined request as `provider_unavailable` with a fixed sentence saying
+retrying will not help, so the model stops rather than spending the turn on it.
+
 Other search tools continue to work normally but do not emit
 `retrieval.observation.v1`. Direct/local tool invocation without an accepted run
 also retains its compatibility behavior and does not claim durable evidence.

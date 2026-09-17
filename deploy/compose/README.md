@@ -1181,6 +1181,18 @@ template's keyless defaults (DuckDuckGo search, Jina fetch, DuckDuckGo image
 search) by name; when several present keys provide the same tool, the first
 fragment in file order wins, which is why the files are numbered.
 
+**The keyless search default is best effort, and usually will not work.**
+DuckDuckGo answers an automated search from a server address with a
+human-verification challenge rather than results — measured on a development
+host on 2026-09-17, and a tenant VM is the same class of address. HartMesh
+treats that as what it is: an access control, which it does not solve, evade
+or route around. A declined search fails the turn with one sentence naming the
+missing configuration, so the model stops instead of retrying a tool that
+cannot work and the person is not told the internet is broken. **A tenant that
+needs web search needs a search-provider key**, which replaces the keyless
+default by name and is the supported path. Everything else in the profile —
+uploaded documents, the sandbox, reports — works without one.
+
 A tenant with **no** model key starts, logs `provider keys found: none`, and
 serves a frontend that reports no model configured. That is the correct
 failure for the profile; refusing such a tenant belongs in the operator's
