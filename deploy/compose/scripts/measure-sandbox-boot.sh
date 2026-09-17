@@ -21,8 +21,9 @@
 #   MEMORY      --memory and --memory-swap for every container. Default: the
 #               profile's DEER_FLOW_SANDBOX_MEMORY in ./compose.yaml for slim
 #               containers and 1024m for full ones, the figure the full
-#               profile was released at (README: "Memory budget"); set MEMORY
-#               to measure both at one limit.
+#               profile was released at (README: "Memory budget"); since
+#               2026-09-17 the slim limit is 1024m too, so a default run
+#               varies only the service switches; set MEMORY to change both.
 #   PIDS        --pids-limit (default: DEER_FLOW_SANDBOX_PIDS_LIMIT in ./compose.yaml)
 #   RUNS        repetitions of every profile x cpus cell      (default 1)
 #   CONCURRENT  containers started at once in every run       (default 1)

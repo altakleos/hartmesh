@@ -56,17 +56,18 @@ sandbox:
   image: ghcr.io/altakleos/hartmesh-sandbox@sha256:4e0a062feafa53c763188c292560d99e32ff1a889f7764e29e8f851154cdbb43
   port: 8080
   # Concurrent-sandbox ceiling from the memory budget (README: "Memory
-  # budget"): four 512 MiB slim sandboxes with their relays sit on the same
-  # 5.0 GiB line the two 1 GiB full ones did. This is a soft maximum with
-  # LRU eviction of warm sandboxes: a fifth acquisition evicts the
-  # least-recently-used idle sandbox instead of failing; with all four in
-  # active use the provider logs a soft-cap breach and creates a fifth, which
-  # the guest's unallocated memory absorbs once (README: "Memory budget").
-  replicas: 4
-  # How long an idle sandbox keeps one of the four slots. The budget reserves
+  # budget"): two 1 GiB slim sandboxes with their relays sit on the 5.0 GiB
+  # line (a 512 MiB slot had no headroom over the sandbox's own idle
+  # footprint; README: "Two 1 GiB slots"). This is a soft maximum with LRU
+  # eviction of warm sandboxes: a third acquisition evicts the
+  # least-recently-used idle sandbox instead of failing; with both in active
+  # use the provider logs a soft-cap breach and creates a third, which the
+  # guest's unallocated memory absorbs once (README: "Memory budget").
+  replicas: 2
+  # How long an idle sandbox keeps one of the two slots. The budget reserves
   # every slot whether or not it is used, and a cold start of the sandbox
   # image under gVisor takes tens of seconds, so idle sandboxes are kept warm
-  # for 30 minutes; a fifth thread still evicts the least recently used one.
+  # for 30 minutes; a third thread still evicts the least recently used one.
   idle_timeout: 1800
   # The sandbox image's own service switches, passed to every sandbox as
   # environment by the local Docker backend. Off: the browser and its MCP
@@ -89,9 +90,11 @@ sandbox:
     DISABLE_NODEJS_REPL: "true"
   # Cold-start readiness budget, in seconds: the provider polls a new
   # sandbox's /v1/sandbox for this long and destroys it when the budget runs
-  # out. At `--cpus 1` under gVisor the released image answered after 80 to
-  # 91 seconds on the tenant VM class, so the harness default of 60 destroyed
-  # every cold start (README: "Sandbox readiness budget"). 120 is the initial
+  # out. At `--cpus 1` under gVisor the released full-profile image answered
+  # after 80 to 91 seconds on the tenant VM class, so the harness default of
+  # 60 destroyed every cold start; the slim profile measured about 15 s there
+  # at one CPU and boots at two since 2026-09-17 (README: "Sandbox readiness
+  # budget"). 120 is the initial
   # candidate the estate is evaluating, not a qualified fleet-wide bound; the
   # optional .env key SANDBOX_READY_TIMEOUT overrides it (60 to 600).
   ready_timeout: 120

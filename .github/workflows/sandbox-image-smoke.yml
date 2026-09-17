@@ -170,7 +170,7 @@ jobs:
       - name: Exercise the slim services profile at the tenant limits
         # The tenant Compose profile ships every sandbox with the image's six
         # DISABLE_* switches (deploy/compose/config.yaml sandbox.environment)
-        # at 512 MiB and the pinned pid limit (deploy/compose/compose.yaml).
+        # at the shipped memory and pid limits (deploy/compose/compose.yaml).
         # The entrypoint that reads the switches lives in the vendor base, so
         # this run is the only proof that the built image still honours them:
         # ready inside the limits, none of the switched-off services running,
@@ -182,7 +182,7 @@ jobs:
             --user 1000:1000 \
             --cap-drop=ALL \
             --security-opt=no-new-privileges \
-            --memory 512m --memory-swap 512m \
+            --memory 1024m --memory-swap 1024m \
             --pids-limit 256 \
             --env DISABLE_BROWSER=true \
             --env DISABLE_JUPYTER=true \
@@ -231,13 +231,21 @@ jobs:
             http://127.0.0.1:18081/v1/bash/exec)"
           if ! printf '%s' "$slim_report_response" | jq -e '.data.exit_code == 0' >/dev/null; then
             printf '%s\n' "$slim_report_response"
-            echo "::error::slim sandbox could not render the report inside 512 MiB"
+            echo "::error::slim sandbox could not render the report inside the shipped memory limit"
             exit 1
           fi
 
           oom_killed="$(docker inspect --format '{{.State.OOMKilled}}' "$container_id")"
           test "$oom_killed" = false || { echo "::error::slim sandbox was OOM-killed"; exit 1; }
-          printf 'slim sandbox: ready, services off, report rendered, processes: %s\n' "$(printf '%s' "$services_response" | jq --raw-output '.data.stdout' | grep -E '^[0-9]+$' | tail -n 1)"
+          # The process count is the check the memory limit no longer makes:
+          # the full profile held at 1 GiB too, so an ignored switch would not
+          # OOM-kill; it shows as ~31 processes against the slim profile's ~11.
+          slim_processes="$(printf '%s' "$services_response" | jq --raw-output '.data.stdout' | grep -E '^[0-9]+$' | tail -n 1)"
+          if [ -z "$slim_processes" ] || [ "$slim_processes" -gt 16 ]; then
+            echo "::error::slim sandbox runs ${slim_processes:-an unknown number of} processes; the slim profile runs about 11 and the full one 31, so a DISABLE_* switch was ignored"
+            exit 1
+          fi
+          printf 'slim sandbox: ready, services off, report rendered, processes: %s\n' "$slim_processes"
           docker rm --force "$container_id" >/dev/null
           trap - EXIT
 

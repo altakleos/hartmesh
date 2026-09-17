@@ -62,9 +62,9 @@ models) and a bad one refuses to render instead of falling back. It also sets
 the optional `SANDBOX_READY_TIMEOUT` overrides it within 60 to 600 or refuses.
 Its sandboxes run the image's slim services profile (`sandbox.environment`
 carries the six `DISABLE_*` switches as quoted strings; browser, VNC, Jupyter,
-code-server and the Node REPL stay off) in four 512 MiB slots (`replicas: 4`,
-256 pids) on the same 5.0 GiB line the earlier two 1 GiB full-profile slots
-sat on; `deploy/compose/scripts/measure-sandbox-boot.sh` measures boot, idle
+code-server and the Node REPL stay off) in two 1 GiB slots at two CPUs
+(`replicas: 2`, 256 pids) on the 5.0 GiB line; four 512 MiB slots had no
+headroom (tenant-class `.18`). `deploy/compose/scripts/measure-sandbox-boot.sh` measures boot, idle
 and a command under exactly those limits, and the compose README's "Slim
 services profile" section holds the figures. The Gateway image carries
 `skills/public`; the profile's `gateway/run.sh` seeds it onto the tenant
