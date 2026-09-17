@@ -3,6 +3,10 @@ import { expect, rs, test } from "@rstest/core";
 import { InfiniteQueryObserver, QueryClient } from "@tanstack/react-query";
 
 import {
+  UPLOAD_PLACEHOLDER_ELEMENT,
+  UPLOAD_PLACEHOLDER_ID_PREFIX,
+} from "@/core/messages/utils";
+import {
   buildThreadMessagesPageUrl,
   buildVisibleHistoryMessages,
   areOptimisticMessagesConfirmed,
@@ -16,6 +20,7 @@ import {
   mergeTransientHistoryBridge,
   mergeTransientHistoryBridgeOrder,
   mergeMessages,
+  optimisticMessagesAfterUpload,
   parseThreadMessagesPageResponse,
   pruneConfirmedTransientMessages,
   reconcileThreadHistoryRows,
@@ -2301,4 +2306,45 @@ test("a checkpoint message earlier than the loaded window is placed by its seq e
     "…new step 1",
     "…new step 2",
   ]);
+});
+
+test("optimisticMessagesAfterUpload keeps the human message with its uploaded files and drops the placeholder", () => {
+  const human = {
+    id: "opt-human-1",
+    type: "human",
+    content: [{ type: "text", text: "Make the report" }],
+    additional_kwargs: {
+      files: [{ filename: "export.xlsx", size: 0, status: "uploading" }],
+      // A quote from the sidecar travels with the message; the upload
+      // finishing must not erase it.
+      referenced_message_contexts: [{ message_id: "m-1" }],
+    },
+  } as Message;
+  const placeholder = {
+    id: `${UPLOAD_PLACEHOLDER_ID_PREFIX}1`,
+    type: "ai",
+    content: "Uploading files, please wait...",
+    additional_kwargs: { element: UPLOAD_PLACEHOLDER_ELEMENT },
+  } as Message;
+  const uploaded = [
+    {
+      filename: "export.xlsx",
+      size: 253854,
+      path: "/mnt/user-data/uploads/export.xlsx",
+      status: "uploaded" as const,
+    },
+  ];
+
+  const after = optimisticMessagesAfterUpload([human, placeholder], uploaded);
+
+  expect(after).toHaveLength(1);
+  expect(after[0]?.id).toBe("opt-human-1");
+  expect(after[0]?.additional_kwargs?.files).toEqual(uploaded);
+  expect(after[0]?.additional_kwargs?.referenced_message_contexts).toEqual([
+    { message_id: "m-1" },
+  ]);
+  // The human message alone (the placeholder already gone) still gets its files.
+  expect(optimisticMessagesAfterUpload([human], uploaded)).toHaveLength(1);
+  // Nothing to do without a human message to carry the files.
+  expect(optimisticMessagesAfterUpload([], uploaded)).toEqual([]);
 });
