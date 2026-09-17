@@ -170,6 +170,100 @@ def test_retrieval_safe_constraints_contract_is_closed() -> None:
     )
 
 
+def _retrieval_draft(**overrides: object):
+    from datetime import UTC, datetime
+
+    from deerflow.retrieval.contracts import RetrievalObservationDraftV1
+
+    started = datetime.now(UTC)
+    fields: dict[str, object] = {
+        "tenant_ref": "tenant-0123456789abcdef",
+        "tenant_digest": "a" * 64,
+        "run_id": "run-contract",
+        "receipt_id": "tr_" + "b" * 64,
+        "attempt": 1,
+        "provider_id": "duckduckgo",
+        "tool_kind": "web_search",
+        "adapter_capability_version": "ddgs-controlled-http-v1",
+        "policy_digest": "c" * 64,
+        "safe_constraints": {
+            "version": 1,
+            "provider_id": "duckduckgo",
+            "policy_status": "not_evaluated",
+        },
+        "started_at": started,
+        "provider_finished_at": started,
+        "provider_status": "empty",
+        "safe_reason": "no_results",
+        "result_count": 0,
+        "source_count": 0,
+        "source_references": (),
+        "truncated": False,
+        "partial": False,
+        "safe_provider_request_ref": None,
+    }
+    fields.update(overrides)
+    return RetrievalObservationDraftV1(**fields)  # type: ignore[arg-type]
+
+
+_GOVERNED_DRAFT_FIELDS = {
+    "tool_plane_base_revision_digest": "d" * 64,
+    "tool_plane_user_overlay_digest": "e" * 64,
+    "tool_plane_projection_digest": "f" * 64,
+    "tool_plane_effective_digest": "0" * 64,
+}
+
+
+def test_the_published_contract_accepts_what_a_retrieval_observation_actually_writes() -> None:
+    """Validate real drafts, not only a sub-schema's shape.
+
+    The observation body is what a consumer reads and what the contract
+    promises; a schema checked only against hand-written fragments can drift
+    from the bytes the runtime emits without anything failing.
+    """
+
+    schema = _contract_events()["retrieval.observation.v1"]["content_schema"]["properties"]["draft"]
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+
+    governed = _retrieval_draft(**_GOVERNED_DRAFT_FIELDS).to_event_projection()
+    unmanaged = _retrieval_draft(tool_plane_mode="unmanaged").to_event_projection()
+
+    assert not list(validator.iter_errors(governed)), list(validator.iter_errors(governed))
+    assert not list(validator.iter_errors(unmanaged)), list(validator.iter_errors(unmanaged))
+
+
+def test_the_contract_refuses_an_ungoverned_claim_carrying_a_governed_digest() -> None:
+    schema = _contract_events()["retrieval.observation.v1"]["content_schema"]["properties"]["draft"]
+    validator = Draft202012Validator(schema, format_checker=FormatChecker())
+
+    forged = _retrieval_draft(**_GOVERNED_DRAFT_FIELDS).to_event_projection()
+    forged["tool_plane"] = {**forged["tool_plane"], "mode": "unmanaged"}  # type: ignore[index]
+    assert list(validator.iter_errors(forged)), "a mode that keeps the digests must not validate"
+
+    hollow = _retrieval_draft(tool_plane_mode="unmanaged").to_event_projection()
+    hollow["tool_plane"] = {name: value for name, value in hollow["tool_plane"].items() if name != "mode"}  # type: ignore[union-attr]
+    assert list(validator.iter_errors(hollow)), "null digests without the mode must not validate"
+
+
+def test_a_governed_observation_serializes_exactly_as_it_did_before_the_mode_existed() -> None:
+    """The projection is the digest's input, so its bytes are a contract.
+
+    Every persisted observation is re-derived and compared on read. A key
+    added to the governed shape would change that digest and make every row
+    written by an earlier release unreadable -- unresumable runs, evidence
+    bundles that stop building, observations dropped as invalid.
+    """
+
+    projection = _retrieval_draft(**_GOVERNED_DRAFT_FIELDS).to_event_projection()
+
+    assert projection["tool_plane"] == {
+        "base_revision_digest": "d" * 64,
+        "user_overlay_digest": "e" * 64,
+        "projection_digest": "f" * 64,
+        "effective_digest": "0" * 64,
+    }
+
+
 def _subagent_batch() -> list[dict]:
     chunks = [
         {"type": "task_started", "task_id": "call-batch", "description": "research"},

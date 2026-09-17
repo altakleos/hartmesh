@@ -826,6 +826,22 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 )
 
+# Every fact admission stamps about what it accepted shares one prefix, and a
+# caller may supply none of them. Enumerating the keys instead would mean a
+# stamp added later is forgeable until someone remembers these two lists --
+# and a forged one is read as an admission decision by whatever trusts it.
+SERVER_OWNED_RUNTIME_CONTEXT_PREFIXES: frozenset[str] = frozenset({"accepted_"})
+
+
+def scrub_server_owned_context(section: dict[str, Any]) -> None:
+    """Remove every server-owned fact a caller may have supplied."""
+
+    for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+        section.pop(key, None)
+    for key in [name for name in section if isinstance(name, str) and name.startswith(tuple(SERVER_OWNED_RUNTIME_CONTEXT_PREFIXES))]:
+        section.pop(key, None)
+
+
 # Keys forwarded from ``body.context`` into ``config['context']`` ONLY (the
 # runtime context that becomes ``ToolRuntime.context`` / ``runtime.context``),
 # never into ``config['configurable']``. These are read by tools and
@@ -955,12 +971,10 @@ def inject_authenticated_user_context(
     runtime_context = config.setdefault("context", {})
     if not isinstance(runtime_context, dict):
         raise TypeError("run context must be a mapping")
-    for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
-        runtime_context.pop(key, None)
+    scrub_server_owned_context(runtime_context)
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
-        for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
-            configurable.pop(key, None)
+        scrub_server_owned_context(configurable)
     auth_source = getattr(getattr(request, "state", None), "auth_source", None)
     # ``user_id`` is server-owned for EXTERNAL callers: it now selects which
     # user's credential user-scoped MCP auth injects, so a client-forged value

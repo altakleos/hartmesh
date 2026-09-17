@@ -279,8 +279,11 @@ performing that same live-absence check.
   retrieval, and the second still fails closed before any tool is dispatched.
   The seal cannot name a durable profile (the record refuses it), cannot
   accompany a governed revision, and is not honoured by a process whose own
-  deployment profile is durable, so a run admitted before a promotion fails
-  closed on recovery rather than executing under the older promise.
+  deployment profile is durable, so a run admitted while the deployment ran a
+  non-durable profile fails closed if it is recovered after that profile
+  changed. The gate is the deployment profile, not the tool plane's state:
+  promoting a base revision does not retroactively govern runs already
+  admitted without one, and each keeps its sealed decision until it ends.
   A retrieval observation from such a run carries `tool_plane.mode:
   "unmanaged"` with no digests, rather than substituting four that would read
   as governed; run evidence bundles remain governed artifacts and are built

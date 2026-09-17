@@ -216,7 +216,7 @@ def _validate_tool_plane_revision(value: object) -> dict[str, Any]:
     return detached
 
 
-def _validate_tool_plane_unmanaged(value: object) -> dict[str, Any]:
+def validate_unmanaged_tool_plane_evidence(value: object) -> dict[str, Any]:
     """Validate the explicit absence of a governed tool-plane revision.
 
     A deployment that enables the tool plane before an administrator has
@@ -717,7 +717,7 @@ class AcceptedInvocation:
         if evidence is None:
             return None
         try:
-            return _validate_tool_plane_unmanaged(evidence)
+            return validate_unmanaged_tool_plane_evidence(evidence)
         except ValueError:
             return None
 
@@ -826,7 +826,7 @@ class AcceptedInvocation:
         if extension_artifact_manifest_digest is not None and extension_manifest_digest is None:
             raise ValueError("extension artifact evidence requires a capability manifest digest")
         validated_tool_plane = None if tool_plane_revision is None else _validate_tool_plane_revision(tool_plane_revision)
-        validated_unmanaged = None if tool_plane_unmanaged is None else _validate_tool_plane_unmanaged(tool_plane_unmanaged)
+        validated_unmanaged = None if tool_plane_unmanaged is None else validate_unmanaged_tool_plane_evidence(tool_plane_unmanaged)
         if validated_tool_plane is not None and validated_unmanaged is not None:
             # One run cannot be both governed and ungoverned. Refusing the pair
             # here is what keeps every later reader's mode decision total.
@@ -1186,7 +1186,7 @@ class AcceptedInvocation:
         tool_plane_evidence = decision_evidence.get("tool_plane_revision")
         validated_tool_plane = None if tool_plane_evidence is None else _validate_tool_plane_revision(tool_plane_evidence)
         unmanaged_evidence = decision_evidence.get("tool_plane_unmanaged")
-        validated_unmanaged = None if unmanaged_evidence is None else _validate_tool_plane_unmanaged(unmanaged_evidence)
+        validated_unmanaged = None if unmanaged_evidence is None else validate_unmanaged_tool_plane_evidence(unmanaged_evidence)
         if validated_tool_plane is not None and validated_unmanaged is not None:
             raise ValueError("a run cannot carry both governed and unmanaged tool-plane evidence")
         execution_budget_evidence = decision_evidence.get("execution_budget")

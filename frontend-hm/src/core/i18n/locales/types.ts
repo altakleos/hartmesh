@@ -914,6 +914,8 @@ export interface Translations {
       managed: string;
       immutable: string;
       bootstrapRequired: string;
+      bootstrapRequiredDurable: string;
+      bootstrapRequiredLocal: string;
       recoveryRequired: string;
       drift: string;
       unmanaged: string;

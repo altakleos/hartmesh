@@ -280,3 +280,44 @@ def test_the_mode_is_not_specific_to_one_provider() -> None:
     assert projection["tool_plane"]["mode"] == "unmanaged"
     assert draft.tool_plane_effective_digest is None
     assert RetrievalObservationDraftV1.from_event_projection(projection).provider_id == "serply"
+
+
+def test_a_forged_seal_is_refused_by_the_resolver() -> None:
+    """A seal the record would refuse cannot be believed because it is in the context.
+
+    The context key is server-owned and stripped from anything a caller
+    supplies, so this is the second lock: a value naming a durable profile,
+    or shaped like a seal without being one, is not a decision.
+    """
+
+    for forged in (
+        {**_UNMANAGED, "deployment_profile": "durable_two_gateway_v1"},
+        {**_UNMANAGED, "deployment_profile": "durable_production"},
+        {**_UNMANAGED, "deployment_profile": "whatever"},
+        {**_UNMANAGED, "extra": "field"},
+    ):
+        with pytest.raises(RetrievalEvidenceError, match="retrieval_tool_plane_context_unavailable"):
+            resolve_tool_plane_provenance({"accepted_tool_plane_unmanaged": forged})
+
+
+def test_no_caller_can_supply_an_accepted_fact() -> None:
+    """Admission's own stamps are server-owned, by prefix rather than by list.
+
+    Every `accepted_*` key is something admission decided. A caller that could
+    put one in `config.context` would be handing the runtime a decision nobody
+    made -- the mode included.
+    """
+
+    from deerflow.runtime.runs.worker import _build_runtime_context
+
+    forged = {
+        "accepted_tool_plane_unmanaged": _UNMANAGED,
+        "accepted_tool_plane_revision": _GOVERNED_DIGESTS,
+        "accepted_agent_revision_digest": "f" * 64,
+        "accepted_execution_budget": {"version": 1},
+        "agent_name": "kept",
+    }
+    built = _build_runtime_context("thread-1", "run-1", forged)
+
+    assert [key for key in built if key.startswith("accepted_")] == []
+    assert built["agent_name"] == "kept", "only the server-owned facts are stripped"

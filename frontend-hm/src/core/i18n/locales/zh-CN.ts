@@ -1070,7 +1070,9 @@ export const zhCN: Translations = {
       managed:
         "技能和 MCP 工具通过不可变修订管理。设置中的直接修改已禁用；请通过治理 API 暂存、验证、检查并提升修订。",
       immutable: "此部署不可变。工具平面材料只能由已批准的部署修订提供。",
-      bootstrapRequired: "必须先完成治理引导，才能修改工具平面或执行持久运行。",
+      bootstrapRequired: "必须先完成治理引导，才能修改工具平面。",
+      bootstrapRequiredDurable: "必须先完成治理引导，才能修改工具平面或执行运行。",
+      bootstrapRequiredLocal: "对话仍会使用此部署自身的技能和工具运行，其证据会记录没有受治理的修订为其授权。",
       recoveryRequired:
         "已准备的修订需要恢复。工具平面修改和持久运行准入仍被阻止。",
       drift:

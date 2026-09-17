@@ -849,7 +849,12 @@ class RetrievalObservationDraftV1:
             "partial": self.partial,
             "safe_provider_request_ref": self.safe_provider_request_ref,
             "tool_plane": {
-                "mode": self.tool_plane_mode,
+                # The projection is the digest's input, so a governed
+                # observation must serialize exactly as it always has: adding
+                # a key here would change the digest of every row written
+                # before this field existed and make each one unreadable.
+                # Only the ungoverned claim is new, and only it is recorded.
+                **({} if self.tool_plane_mode == "governed" else {"mode": self.tool_plane_mode}),
                 "base_revision_digest": self.tool_plane_base_revision_digest,
                 "user_overlay_digest": self.tool_plane_user_overlay_digest,
                 "projection_digest": self.tool_plane_projection_digest,
@@ -911,11 +916,12 @@ class RetrievalObservationDraftV1:
             "projection_digest",
             "effective_digest",
         }
-        # A row written before the mode existed carries the digests alone, and
-        # only a governed retrieval could have written one.
+        # The digests alone are a governed observation -- the only kind that
+        # could be written before the ungoverned state was expressible, and
+        # still the exact shape a governed one is written in today.
         if not isinstance(tool_plane, Mapping) or set(tool_plane) not in (digest_fields, digest_fields | {"mode"}):
             raise RetrievalEvidenceError("retrieval_tool_plane_invalid")
-        if tool_plane.get("mode", "governed") not in {"governed", "unmanaged"}:
+        if tool_plane.get("mode", "governed") != "unmanaged" and "mode" in tool_plane:
             raise RetrievalEvidenceError("retrieval_tool_plane_mode_invalid")
         refs = value.get("source_references")
         if not isinstance(refs, list):
@@ -1099,7 +1105,7 @@ class RetrievalObservationV1:
             "partial": draft.partial,
             "safe_provider_request_ref": draft.safe_provider_request_ref,
             "tool_plane": {
-                "mode": draft.tool_plane_mode,
+                **({} if draft.tool_plane_mode == "governed" else {"mode": draft.tool_plane_mode}),
                 "base_revision_digest": draft.tool_plane_base_revision_digest,
                 "user_overlay_digest": draft.tool_plane_user_overlay_digest,
                 "projection_digest": draft.tool_plane_projection_digest,

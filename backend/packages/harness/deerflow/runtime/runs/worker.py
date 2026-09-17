@@ -1249,6 +1249,17 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 )
 
+# Every fact admission stamps about what it accepted shares one prefix, and no
+# caller may supply one: a forged stamp is read as an admission decision by
+# whatever trusts it. Matching the prefix rather than a list means a stamp
+# added later is covered the day it is added.
+_SERVER_OWNED_RUNTIME_CONTEXT_PREFIXES: Final[tuple[str, ...]] = ("accepted_",)
+
+
+def _is_server_owned_context_key(key: object) -> bool:
+    return isinstance(key, str) and (key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS or key.startswith(_SERVER_OWNED_RUNTIME_CONTEXT_PREFIXES))
+
+
 # Safe current-executor evidence for an exact-two recovery. This never
 # replaces the accepted admission actor stored in TrustedRunContextV1.
 RECOVERY_EXECUTOR_CONTEXT_KEY: Final[str] = "__deerflow_recovery_executor_v1"
@@ -1278,7 +1289,7 @@ def _build_runtime_context(
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
-            if key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+            if _is_server_owned_context_key(key):
                 continue
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
@@ -1449,7 +1460,9 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
         # assigned from the runtime context when present and removed otherwise,
         # so an embedded caller cannot preserve a forged lifecycle identity in
         # ``config['context']`` after it was rejected by _build_runtime_context.
-        for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+        server_owned = set(_SERVER_OWNED_RUNTIME_CONTEXT_KEYS)
+        server_owned.update(key for key in (*existing_context, *runtime_context) if _is_server_owned_context_key(key))
+        for key in server_owned:
             if key in runtime_context:
                 existing_context[key] = runtime_context[key]
             else:

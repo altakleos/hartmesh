@@ -188,6 +188,10 @@ def _policy_counters(state: ExecutionPolicyStateV1) -> dict[str, object]:
     }
 
 
+def _safe_label(value: object) -> str | None:
+    return value if value in {"governed", "unmanaged"} else None
+
+
 def _safe_count(value: object) -> int:
     return value if type(value) is int and 0 <= value <= 1_000_000_000 else 0
 
@@ -254,6 +258,11 @@ def build_evidence_summary_v1(
                 {
                     "fingerprint": _safe_digest((assembly or {}).get("fingerprint")),
                     "tool_plane_digest": _safe_digest((assembly or {}).get("tool_plane_digest")),
+                    # A run with no digest is either ungoverned by decision or
+                    # older than the tool plane. Without this, both render as
+                    # a blank digest and a reader cannot tell which authority
+                    # the run's tools -- retrieval included -- actually had.
+                    "tool_plane_mode": _safe_label((assembly or {}).get("tool_plane_mode")),
                 },
             )
         ),

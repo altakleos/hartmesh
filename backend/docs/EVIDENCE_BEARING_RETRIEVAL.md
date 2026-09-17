@@ -51,9 +51,13 @@ terminal pairing. What differs is only what the observation may claim about the
 material that authorized the tool.
 
 A run whose admission made *no* statement at all still fails before dispatch
-with `retrieval_tool_plane_context_unavailable`, and a durable deployment never
-honours an unmanaged seal — including one recovered from a run admitted before
-the deployment was promoted.
+with `retrieval_tool_plane_context_unavailable`. A durable deployment never
+honours an unmanaged seal: it cannot produce one, and it refuses to execute a
+run that carries one, so a run admitted while the deployment ran a non-durable
+profile fails closed if it is recovered after the profile changed. The gate is
+the deployment profile, not the state of the tool plane: promoting a base
+revision on a non-durable profile does not retroactively govern runs already
+admitted without one.
 
 ## Trust and commit boundary
 
@@ -100,8 +104,10 @@ Portable evidence, ordinary logs, the observation API, and metrics never carry:
 The accepted tool receipt replaces every declared protected argument with one
 fixed marker, so even low-entropy query dictionaries and query lengths cannot
 be tested against receipt fields. The portable policy digest commits only to a
-closed safe projection; exact private configuration remains bound by the
-accepted deployment/user/projection/effective tool-plane digests.
+closed safe projection. On a governed run the exact private configuration
+remains bound by the accepted deployment/user/projection/effective tool-plane
+digests; an unmanaged run has no promoted revision to bind it to, which is
+what its declared mode says.
 
 Web source references lowercase and IDNA-normalize the host, remove user info
 and default ports, and retain only the origin. Paths, query strings, and
@@ -109,8 +115,11 @@ fragments are discarded wholesale because any of them can reflect query or
 tenant data. The adapter enforces the accepted scheme/domain policy before
 this coarse origin is recorded, and decoded events reject non-canonical
 references. Portable safe constraints expose only a `provider_default` or
-`restricted` domain category; literal allow/deny selectors remain private and
-are bound by accepted tool-plane digests.
+`restricted` domain category; the literal allow/deny selectors remain private.
+On a governed run they are bound by the accepted tool-plane digests. On an
+unmanaged run they come from the deployment's own configuration and no digest
+commits them, so `restricted` there names a category without pinning the rules
+behind it -- read the mode before reading the category as a commitment.
 RAGFlow references expose a server-created collection reference and a
 tenant-scoped digest of the private document selector. They do not expose the
 dataset ID, document ID, title, or text.
@@ -167,8 +176,9 @@ Later mutable config or environment changes cannot change that request. Serply
 and Tencent durable runs therefore require an explicit `api_key: $...` entry;
 their environment-only fallback remains available only to legacy direct/local
 calls.
-The observation binds the accepted tool-plane base, user overlay, projection,
-and effective digests; it does not expose the secret selector material.
+A governed observation binds the accepted tool-plane base, user overlay,
+projection and effective digests; an unmanaged one binds none, and declares
+that. Neither exposes the secret selector material.
 
 ## MCP and sandbox linkage
 

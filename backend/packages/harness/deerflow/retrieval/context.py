@@ -119,11 +119,17 @@ def resolve_tool_plane_provenance(
             raise RetrievalEvidenceError("retrieval_tool_plane_context_unavailable")
         return "governed", governed
     if isinstance(unmanaged, Mapping):
-        if unmanaged.get("version") != 1 or unmanaged.get("governance_state") not in {
-            "tool_plane_bootstrap_required",
-            "unmanaged_drift",
-        }:
-            raise RetrievalEvidenceError("retrieval_tool_plane_context_unavailable")
+        # Validated by the same rule that governs the seal itself, including
+        # its refusal of a durable deployment profile. The key is stripped
+        # from caller-supplied context before admission, so this should never
+        # see anything but a seal; a shape that is not one is refused here
+        # rather than believed because it was in the right place.
+        from deerflow.runtime.accepted_invocation import validate_unmanaged_tool_plane_evidence
+
+        try:
+            validate_unmanaged_tool_plane_evidence(unmanaged)
+        except ValueError as exc:
+            raise RetrievalEvidenceError("retrieval_tool_plane_context_unavailable") from exc
         return "unmanaged", None
     raise RetrievalEvidenceError("retrieval_tool_plane_context_unavailable")
 
