@@ -305,10 +305,12 @@ def release_accepted_skill_consumer(token: object) -> bool:
     try:
         provider.release(clear.sandbox_id)
     finally:
-        # A successful compare-and-clear is the material-isolation boundary.
-        # Resource parking/teardown may fail, but it cannot make the removed
-        # accepted bytes reachable again, so stale ownership must not strand
-        # the thread indefinitely.
+        # A successful compare-and-clear is the material-isolation boundary:
+        # it releases the exact binding, and the retained bytes behind it can
+        # only be used again by a bind that re-verifies them. Resource
+        # parking/teardown may fail after that, but it cannot make anything
+        # reachable that the next bind would not have to prove, so stale
+        # ownership must not strand the thread indefinitely.
         finalized = coordinator.finalize_release(clear)
     return finalized
 

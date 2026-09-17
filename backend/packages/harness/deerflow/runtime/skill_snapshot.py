@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import stat
@@ -21,6 +22,8 @@ from typing import TYPE_CHECKING, Any
 from deerflow.config.paths import get_paths
 from deerflow.skills.parser import parse_skill_file
 from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from deerflow.runtime.skill_projection import SkillProjectionEvidence
@@ -84,11 +87,18 @@ _lease_counts: dict[Path, int] = {}
 # costs a fsync per file: on the tenant class that was 1.4 to 2.2 s before the
 # response to every warm turn existed, for the same 13 packages each time.
 # Two, not one, so alternating between two skill sets (a user who toggles one
-# skill) keeps both warm; the bound is two trees per user.
+# skill) keeps both warm. The bound is two *unleased* trees per user: a digest
+# a run still holds is never a candidate, and the bound is re-applied when the
+# scope next publishes, so a scope transiently holds two plus whatever its
+# concurrent runs lease.
 MAX_RETAINED_SNAPSHOTS_PER_SCOPE = 2
-# Published trees a live verification found drifted. Retention is for bytes
-# that verified; a tree a run refused is removed when its last lease leaves,
-# never kept for the next turn to trip over.
+# Published trees a live verification found drifted, while a lease still held
+# them open. Retention is for bytes that verified; a tree a run refused is
+# removed when its last lease leaves, never kept for the next turn to trip
+# over. A drift found with no lease to discharge is removed on the spot, so
+# every entry here has an owner that will collect it, and the path is
+# forgotten whenever the tree goes: a taint outliving its tree would delete
+# the next, verified publication of the same digest.
 _tainted_roots: set[Path] = set()
 _active_views_lock = threading.RLock()
 _active_view_bindings: dict[Path, tuple[str, int, str | None]] = {}
@@ -158,6 +168,18 @@ def _remove_tree(path: Path) -> None:
     path.rmdir()
 
 
+def _forget_snapshot_tree(root: Path) -> None:
+    """Remove one published tree and forget what was recorded against its path.
+
+    Callers hold ``_leases_lock``. The path is content addressed, so the same
+    digest can be published there again; anything remembered about the bytes
+    that just went would then be read as a fact about bytes that were never
+    examined.
+    """
+    _tainted_roots.discard(root)
+    _remove_tree(root)
+
+
 @dataclass(slots=True)
 class _SnapshotLease:
     path: Path
@@ -178,8 +200,7 @@ class _SnapshotLease:
                 return
             _lease_counts.pop(self.path, None)
             if self.path in _tainted_roots:
-                _tainted_roots.discard(self.path)
-                _remove_tree(self.path)
+                _forget_snapshot_tree(self.path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,8 +232,11 @@ class AcceptedSkillSnapshot:
     def verify(self) -> None:
         """Fail closed if process-local snapshot material has drifted.
 
-        A tree that fails here is tainted: it leaves with its last lease
-        instead of being retained for the next turn.
+        A tree that fails here never survives to the next turn: it leaves with
+        its last lease, or immediately if this material outlived every lease
+        on it -- a snapshot object can be verified after its own release (a
+        cancelled batch holds one), and a taint nothing will collect would
+        both accumulate and delete the next clean publication of the digest.
         """
         try:
             digest, file_count, total_bytes = _digest_published_snapshot(
@@ -225,7 +249,10 @@ class AcceptedSkillSnapshot:
             drifted = True
         if drifted:
             with _leases_lock:
-                _tainted_roots.add(self.root)
+                if self.root in _lease_counts:
+                    _tainted_roots.add(self.root)
+                else:
+                    _forget_snapshot_tree(self.root)
             raise SkillSnapshotError("skill_snapshot_drift")
 
 
@@ -718,25 +745,39 @@ def snapshot_effective_skills(
     content_digest = _snapshot_digest(projections)
     final_root = scope_root / content_digest
     with _leases_lock:
-        if final_root.exists():
+        if final_root.exists() or final_root.is_symlink():
             try:
-                published_digest, published_files, published_bytes = _digest_published_snapshot(
-                    final_root,
-                    tuple(projections),
-                    limits,
-                )
-                verified = published_digest == content_digest and published_files == total_files and published_bytes == total_bytes
+                # The digest pass walks what the projections name, so it would
+                # read a symlinked root as the tree it points at. Retention
+                # keeps what passes here for the life of the process, so the
+                # root itself is checked, not only its contents.
+                if final_root.is_symlink() or not final_root.is_dir():
+                    verified = False
+                else:
+                    published_digest, published_files, published_bytes = _digest_published_snapshot(
+                        final_root,
+                        tuple(projections),
+                        limits,
+                    )
+                    verified = published_digest == content_digest and published_files == total_files and published_bytes == total_bytes
             except SkillSnapshotError:
                 verified = False
             if not verified:
                 # Under a live lease this is drift: material changed beneath a
-                # running invocation, and nothing may quietly replace it. A
-                # tree only *retained* since its last lease is evidence of
-                # nothing but its own bytes; failing verification, it is
-                # removed and staged again from the source below.
+                # running invocation, and nothing may quietly replace it. The
+                # taint is what stops the refused tree being retained once
+                # that invocation lets go. A tree only *retained* since its
+                # last lease is evidence of nothing but its own bytes;
+                # failing verification, it is removed and staged again from
+                # the source below, which an operator should see.
                 if final_root in _lease_counts:
+                    _tainted_roots.add(final_root)
                     raise SkillSnapshotError("skill_snapshot_drift")
-                _remove_tree(final_root)
+                logger.warning(
+                    "Replacing a retained accepted skill snapshot that failed verification (digest %s)",
+                    content_digest,
+                )
+                _forget_snapshot_tree(final_root)
             else:
                 parsed_by_identity = _parse_snapshot_manifests(final_root, captured)
                 _lease_counts[final_root] = _lease_counts.get(final_root, 0) + 1
@@ -782,6 +823,10 @@ def snapshot_effective_skills(
                 _remove_tree(stage)
             else:
                 _make_read_only(stage)
+                # Fresh bytes at a path something may have been recorded
+                # against: whatever was known about the tree that used to be
+                # here says nothing about the one being published now.
+                _tainted_roots.discard(final_root)
                 stage.replace(final_root)
                 published_new = True
             published_digest, published_files, published_bytes = _digest_published_snapshot(
@@ -791,11 +836,20 @@ def snapshot_effective_skills(
             )
             if published_digest != content_digest or published_files != total_files or published_bytes != total_bytes:
                 if published_new:
-                    _remove_tree(final_root)
+                    _forget_snapshot_tree(final_root)
                 raise SkillSnapshotError("skill_snapshot_drift")
             _lease_counts[final_root] = _lease_counts.get(final_root, 0) + 1
             if published_new:
-                _prune_retained_snapshots(scope_root, keep=final_root)
+                # Bounding the scope is housekeeping, and the count above is
+                # already recorded: a failure here must not leave a lease no
+                # object was ever handed to release.
+                try:
+                    _prune_retained_snapshots(scope_root, keep=final_root)
+                except OSError:
+                    logger.warning(
+                        "Could not bound retained accepted skill snapshots for this scope",
+                        exc_info=True,
+                    )
         lease = _SnapshotLease(final_root)
     except Exception:
         try:
@@ -821,9 +875,11 @@ def _prune_retained_snapshots(scope_root: Path, *, keep: Path) -> None:
 
     Called under the leases lock. A leased digest is never a candidate; among
     the unleased ones, the newest ``MAX_RETAINED_SNAPSHOTS_PER_SCOPE - 1``
-    beside *keep* stay (publication order by the tree's own timestamp) and the
-    rest go. Anything in the scope that is not a published digest directory
-    is left to startup cleanup, which knows what it is looking at.
+    beside *keep* stay and the rest go. Newest is publication order, not use
+    order: a tree's timestamp is set when it is staged and a reuse does not
+    refresh it, so a digest reused every turn is still evicted by two newer
+    publications. Anything in the scope that is not a published digest
+    directory is left to startup cleanup, which knows what it is looking at.
     """
     candidates: list[tuple[float, Path]] = []
     try:
@@ -842,7 +898,10 @@ def _prune_retained_snapshots(scope_root: Path, *, keep: Path) -> None:
         candidates.append((metadata.st_mtime, entry))
     candidates.sort(key=lambda item: item[0], reverse=True)
     for _mtime, stale in candidates[max(0, MAX_RETAINED_SNAPSHOTS_PER_SCOPE - 1) :]:
-        _remove_tree(stale)
+        try:
+            _forget_snapshot_tree(stale)
+        except OSError:
+            logger.warning("Could not remove a retained accepted skill snapshot", exc_info=True)
 
 
 def _parse_snapshot_manifests(
@@ -1145,12 +1204,22 @@ def clear_skill_snapshot_active_view(
         return True
 
 
-def prove_skill_snapshot_active_view_absent(
+def release_unowned_skill_snapshot_active_view(
     *,
     user_id: str | None,
     thread_id: str,
 ) -> bool:
-    """Prove a failed pre-publication bind left no reachable accepted bytes."""
+    """Leave a failed pre-publication bind with no reachable accepted bytes.
+
+    The recovery half of the release, used only where no exact binding receipt
+    exists. A bind publishes its tree and records its binding in one hold of
+    the views lock, so an unbound view holds nothing the failed bind put
+    there: what it may hold is this thread's own retained material from an
+    earlier run that released cleanly. Emptying it costs that thread one
+    staging on its next turn and is the price of saying "absent" and meaning
+    it. A view another invocation owns is refused, not emptied -- this is the
+    fallback for the case where the compare-and-clear found no owner.
+    """
     view = get_paths().skill_snapshot_active_view_dir(user_id, thread_id)
     with _active_views_lock:
         if view in _active_view_bindings:
@@ -1160,6 +1229,8 @@ def prove_skill_snapshot_active_view_absent(
                 return True
             if view.is_symlink() or not view.is_dir():
                 return False
+            for child in list(view.iterdir()):
+                _remove_tree(child)
             return next(view.iterdir(), None) is None
         except OSError:
             return False
@@ -1234,7 +1305,7 @@ __all__ = [
     "clear_skill_snapshot_active_view",
     "force_clear_skill_snapshot_active_view",
     "load_skill_projection_evidence",
-    "prove_skill_snapshot_active_view_absent",
+    "release_unowned_skill_snapshot_active_view",
     "cleanup_abandoned_skill_snapshots",
     "snapshot_effective_skills",
 ]

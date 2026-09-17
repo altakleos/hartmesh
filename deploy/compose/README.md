@@ -125,7 +125,10 @@ Two directories cross the container boundary:
   every sandbox of theirs at `/mnt/user-data/files`; no quota, nothing reaps
   it, and it outlives the conversations it came from), so the pre-created
   `uploads/` and `artifacts/` directories are unused by this profile and stay
-  empty.
+  empty. `home/runtime/` is the other persistent consumer of this disk: the
+  accepted skill snapshots and thread views a warm turn reuses instead of
+  staging again, sized and bounded in § "Public skills", **Per-turn
+  material**.
 - `/srv/hartmesh/operator`, mounted **read-only** into the Gateway at the same
   path: operator-owned deployment material that is not release content. Today
   that is the one optional model file `HARTMESH_MODELS_FILE` names
@@ -192,8 +195,9 @@ skill the operator adds goes in `home/skills/custom/`, which the seed never
 touches. A chat's sandbox never mounts `public/` itself: every turn is
 admitted with an immutable snapshot of the skills enabled for that user,
 projected read-only at `/mnt/skills/.accepted/<snapshot digest>/public/<name>`
-for the turn and cleared when it ends, and the sandbox tools refuse skill
-paths outside it (`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which
+and re-verified by digest before that turn uses it (**Per-turn material**
+below has what the material costs and how long it is kept), and the sandbox
+tools refuse skill paths outside it (`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which
 population a deployment profile runs"). The Gateway's own projection,
 `home/skills_view/`, is rebuilt from `public/` at startup; the measurement
 script below mounts `home/skills` directly, so its paths carry `public/`.
@@ -246,21 +250,40 @@ Gateway log says how many and which names were excluded.
 **Per-turn material.** A chat never mounts this library directly: each
 admission snapshots the effective skills into a content-addressed, read-only
 tree under `home/runtime/skill-snapshots/<subject>/<digest>/` and binds it
-into the thread's view at `home/runtime/skill-snapshot-active-views/…`, which is what
+into the thread's view at
+`home/runtime/skill-snapshot-active-views/<subject>/<thread>/`, which is what
 the sandbox sees at `/mnt/skills/.accepted/<digest>`. Until 2026-09-17 both
 were deleted when the run ended and staged again, with a `fsync` per file, on
-the next turn: on the `.19` tenant class that was 1.4 to 2.2 s before the
-stream response existed and another 1.2 to 1.8 s inside the worker, every
-warm turn, for the same 13 packages (46 files; 2.2 s and 2.1 s respectively
-on the development host, against 25 ms to verify and 12 ms to bind). Both
-are now retained and re-verified by digest before any use: a user keeps
-their newest two snapshot digests (the third publication evicts the oldest)
-and a parked thread keeps its view until a different digest replaces it, the
-sandbox is destroyed or evicted, or the Gateway restarts. Disk: at most two
-copies of the library per user plus one per parked thread — about 0.75 MB
-each at this release — on the tenant data disk
-(`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Material is retained across
-turns").
+the next turn. Measured on a development host, not the tenant class, with the
+13 seeded packages (43 files, 0.40 MB): staging the snapshot 2.0 to 2.4 s and
+45 `fsync`s against 23 ms to verify a retained one, and staging the view 3.2 s
+and 43 `fsync`s against 13 ms to verify a retained one. Both are now retained
+and re-verified by digest before any use — the bytes authorize the reuse, the
+identity never does — so a warm turn pays the verification, not the staging.
+The snapshot is the user's *effective* skills, so a user's custom and
+integration skills ride in it and their trees are larger than the seeded
+library.
+
+Retention is bounded by what removes it, and nothing here expires on a timer:
+
+- **Per user, two snapshot digests.** The third publication evicts the
+  oldest, so toggling one skill keeps both sets warm. A digest a run still
+  holds is never evicted, and the bound is re-applied when that user next
+  publishes — a scope transiently holds two plus its concurrent runs.
+- **Per parked thread, one view.** It goes when a different digest replaces
+  it, or with the container: `destroy`, an idle reap at `idle_timeout`
+  (1800 s here), or a replica eviction, which on two slots is routine.
+- **Per tenant, `2 × snapshot × users admitted since the last Gateway
+  start`.** That is the number to size for: nothing reclaims a user's trees
+  while the process lives, not even deleting the thread. A Gateway restart is
+  the reclaim — startup removes every snapshot and view no live lease holds,
+  and the first turn of each user after it pays one staging.
+
+At this release that is about 1.3 MB per user of seeded library (0.61 MB
+allocated per tree on a 4 KiB-block filesystem) on the tenant data disk, plus
+whatever their own skills add, against the 32 MiB per-snapshot ceiling
+(`max_total_bytes`). See `backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`,
+"Material is retained across turns".
 
 **Governance.** The profile runs the governed tool plane
 (`tool_plane.enabled: true`) under the `local_development` deployment
@@ -1654,7 +1677,10 @@ first_provider_text` is what the Gateway added to the provider's own first
 token (both are instants, so that one is a plain subtraction). The line above
 is a *warm* turn that still took 9.3 s, and it says where: 5.8 s projecting the
 accepted skill snapshot and 2.7 s binding it, against 143 ms to find the
-container.
+container. That line was measured before 2026-09-17, when both were staged
+again every turn; a warm turn on this release verifies the retained material
+instead (§ "Public skills", **Per-turn material**), so the same shape today
+reads in milliseconds. It stays here because reading the line is the point.
 
 `acquisition=` says where this turn's sandbox came from. `created`,
 `rediscovered`, `discovered`, `warm_reclaim`, `accepted_warm_reclaim` and
@@ -2314,7 +2340,9 @@ by a registered user.
   `/mnt/skills/.accepted/<snapshot digest>/public/` listed the 13 seeded
   packages with `business-report/SKILL.md` intact, while the idle chat's
   container showed an empty `.accepted` (cleared at release, re-projected at
-  the next bind).
+  the next bind; superseded 2026-09-17 — a parked chat now keeps its verified
+  view, so that observation no longer reproduces, and the rest of the entry
+  stands).
 - Offline: `test_worker_materialization_follows_the_deployment_profile`
   (three profiles) and `test_seeded_skill_gateway_stream_e2e.py` (the real
   route, admission and worker with one seeded public skill); the accepted
@@ -2421,3 +2449,36 @@ repaired.
   this host's, with a 13-package library and ~200 ms of the probe's scripted
   first-text delay between `model_request` and `first_provider_text` (201 ms
   here), with ~100 ms more in its tail.
+
+What the projection costs, and what removes it (2026-09-17). The previous
+entry measured the phase without explaining it, and the tenant-class turn
+lines of `.19` showed the same shape: the accepted material was staged twice
+per turn — once at launch, once at the bind — with a `fsync` per file, and
+both copies were deleted when the run ended. Measured on this development
+host, on the released profile's `config.yaml` with the 13-package seeded
+library the image carries (43 files, 415,749 bytes; `HARTMESH_MODELS_FILE`
+unset, a probe key in the environment), driving the same functions a turn
+drives:
+
+- Staging the snapshot at launch: 2,048 ms with the digest pass alone and
+  2,396 ms with the `fsync` counter installed, 45 `fsync`s. Verifying the
+  retained tree instead: 23 ms, no `fsync`, with `resolve_agent_revision`
+  end to end at 34 to 39 ms.
+- Staging the view at the bind: 3,211 ms, 43 `fsync`s. Verifying the
+  retained view instead: 12 to 13 ms, no `fsync` — including the first bind
+  of the *next* run, which is the bind that used to re-stage.
+- The material is retained and re-verified rather than trusted: a tree whose
+  bytes no longer match its digest is replaced (and logged), one that drifts
+  under a live lease is still `skill_snapshot_drift`, and startup removes
+  every tree no live lease holds.
+- Offline: the accepted-snapshot, projection, provider, middleware and
+  lifecycle suites, including new cases for the release path a retained view
+  must not wedge, a drifted tree found with and without a live lease, a
+  symlinked snapshot root, a warm-pool teardown clearing the thread's view,
+  and startup reclaiming every retained digest.
+- Not proved here: the tenant class, where neither the cost nor the repair
+  has been measured — the `.19` figures quoted in the acknowledgement work
+  come from that class's own turn lines, and the next Part A is what reads
+  these fields after the repair; the pinned release image; and the disk
+  behaviour over a long-lived process with many users, which the bound in
+  § "Public skills" states rather than measures.
