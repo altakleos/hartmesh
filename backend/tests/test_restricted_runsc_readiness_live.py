@@ -5,7 +5,7 @@ Docker's default runtime) and drive the relay with a throwaway image. Neither
 exercises what the released Compose profile actually does on a tenant VM: the
 allowlist topology (per-sandbox internal and egress networks, the authenticated
 relay sidecar), the released resource limits and hardening, read from
-``compose.yaml`` (``--cpus 1``, 512 MiB memory, 256 pids, uid 1000,
+``compose.yaml`` (the profile's CPU quota and memory limit, 256 pids, uid 1000,
 ``--cap-drop=ALL``, ``no-new-privileges``, Docker's built-in seccomp), the
 template's ``sandbox.environment`` (the slim service switches), gVisor's
 ``runsc``, and the provider's own readiness budget
@@ -20,7 +20,7 @@ Gateway would enforce, resolved by the same function; no test extends it.
 
 Opt in with ``pytest -m live tests/test_restricted_runsc_readiness_live.py -s``
 on a host whose Docker daemon (28+) registers a ``runsc`` runtime; anywhere else
-the module skips. Each cold start costs about a CPU-minute and 512 MiB, the
+the module skips. Each cold start costs about a CPU-minute and the profile's memory limit, the
 concurrent test starts ``sandbox.replicas`` of them at once, and the
 never-ready controls run the whole budget on purpose. On failure the tests
 print the inner listener state and the python-server/nginx program logs, with
@@ -330,7 +330,7 @@ def _assert_released_hardening(backend: LocalContainerBackend, sandbox_id: str) 
     host = sandbox["HostConfig"]
     released = _released_gateway_environment()
     assert host["Runtime"] == "runsc"
-    assert host["NanoCpus"] == int(float(released["DEER_FLOW_SANDBOX_CPUS"]) * 1_000_000_000), "the released profile caps every sandbox at one CPU"
+    assert host["NanoCpus"] == int(float(released["DEER_FLOW_SANDBOX_CPUS"]) * 1_000_000_000), "the released profile caps every sandbox at its CPU quota"
     assert host["Memory"] == _mib(released["DEER_FLOW_SANDBOX_MEMORY"]) * 1024 * 1024 and host["MemorySwap"] == host["Memory"]
     assert host["PidsLimit"] == int(released["DEER_FLOW_SANDBOX_PIDS_LIMIT"])
     # The slim services profile reached the container as environment, so the
@@ -417,7 +417,7 @@ def _one_healthy_cold_start(monkeypatch: pytest.MonkeyPatch, provider, backend: 
     assert sandbox_id not in provider._sandboxes and provider._local_teardown == set()
 
 
-# ── A full ceiling of cold starts at once, one CPU each ─────────────────────
+# ── A full ceiling of cold starts at once, at the profile's CPU quota ────────
 
 
 def test_concurrent_restricted_runsc_cold_starts_up_to_the_ceiling_each_fit_the_budget(monkeypatch: pytest.MonkeyPatch) -> None:

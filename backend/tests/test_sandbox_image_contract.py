@@ -228,12 +228,12 @@ def test_sandbox_smoke_runs_when_a_public_skill_script_changes() -> None:
 
 def test_sandbox_smoke_runs_the_slim_services_profile_at_the_tenant_limits() -> None:
     """The tenant profile ships every sandbox with the image's DISABLE_* switches
-    and half the memory the full profile needed. Nothing in the tree owns the
-    vendor entrypoint that reads those switches, so the smoke job must prove
-    the built image still honours them at exactly the shipped limits: ready,
-    none of the switched-off services running, the report path rendering, no
-    OOM kill. A base-image bump that ignored one switch would otherwise put
-    the full profile inside a 512 MiB cgroup on every tenant."""
+    at the memory the slim profile is measured to need. Nothing in the tree
+    owns the vendor entrypoint that reads those switches, so the smoke job must
+    prove the built image still honours them at exactly the shipped limits:
+    ready, none of the switched-off services running, the report path
+    rendering, no OOM kill. A base-image bump that ignored one switch would
+    otherwise put the full profile inside a slim slot on every tenant."""
     import yaml
 
     workflow = SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8")
@@ -250,7 +250,10 @@ def test_sandbox_smoke_runs_the_slim_services_profile_at_the_tenant_limits() -> 
         assert flag in slim, flag
     assert "ps -eo comm= | grep -Ei " in slim and "chrom|jupyter|code-server|tigervnc|websocat|openbox" in slim, "the switched-off services must not be running (matched on process names)"
     # One run that builds and renders all three formats, which is what the skill
-    # now asks for: one interpreter start inside a 512 MiB slot, not four.
+    # now asks for: one interpreter start inside the shipped slot, not four.
     assert "python3 $R build /mnt/smoke/example_services_export_small.xls" in slim and "--render pdf,docx,xlsx" in slim, "the report path builds and renders inside the slim limits, in one run"
     assert "docker inspect --format '{{.State.OOMKilled}}'" in slim and 'test "$oom_killed" = false' in slim
+    # At 1 GiB the full profile fits too, so the OOM check alone cannot catch an
+    # ignored switch; the process count can (about 11 slim, 31 full).
+    assert '[ "$slim_processes" -gt 16 ]' in slim and "a DISABLE_* switch was ignored" in slim
     assert "::error::slim sandbox" in slim

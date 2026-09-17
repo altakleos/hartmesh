@@ -58,7 +58,7 @@ OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
 PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE", "SANDBOX_READY_TIMEOUT"}
-MEMORY_MIB = {"gateway": 1152, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
+MEMORY_MIB = {"gateway": 1344, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256}
 # The sandbox image's own service switches (its entrypoint compares each to the
 # string "true"): the profile ships every sandbox with the browser, VNC,
 # Jupyter, code-server and the Node REPL off (README: "Slim services profile").
@@ -70,7 +70,7 @@ SLIM_SANDBOX_SERVICES = {
     "DISABLE_MCP_BROWSER": "true",
     "DISABLE_NODEJS_REPL": "true",
 }
-SANDBOX_SLOTS = 4
+SANDBOX_SLOTS = 2
 NGINX_VARIABLES = {
     "$forwarded_proto",
     "$remote_addr",
@@ -218,14 +218,14 @@ def test_only_nginx_publishes_a_port_and_the_contract_carries_the_bind(compose: 
     assert compose["services"]["nginx"].get("user") == "101:101"
 
 
-def test_memory_limits_sum_to_2688_mib_with_equal_swap(compose: dict) -> None:
+def test_memory_limits_sum_to_2880_mib_with_equal_swap(compose: dict) -> None:
     total = 0
     for name, expected in MEMORY_MIB.items():
         service = compose["services"][name]
         assert _mib(service["mem_limit"]) == expected, name
         assert service["memswap_limit"] == service["mem_limit"], name
         total += expected
-    assert total == 2688, "3072 less 192 MiB for the 1 GiB sandboxes, less 192 MiB more for the third and fourth relays; the Gateway paid both (README: Memory budget)"
+    assert total == 2880, "3072 less the 192 MiB the Gateway gave up for the 1 GiB sandboxes; the further 192 MiB it paid for a third and fourth relay came back with the two-slot profile (README: Memory budget)"
 
 
 PIDS_LIMIT = {"gateway": 2048, "frontend": 512, "nginx": 256, "postgres": 512, "redis": 128}
@@ -235,31 +235,38 @@ def test_every_service_bounds_its_processes_and_the_app_tier_its_cpus(compose: d
     for name, expected in PIDS_LIMIT.items():
         assert compose["services"][name]["pids_limit"] == expected, name
     for name in ("gateway", "frontend"):
-        assert compose["services"][name]["cpus"] == 2, f"{name} shares four vCPUs with four sandboxes at --cpus 1"
+        assert compose["services"][name]["cpus"] == 2, f"{name} shares four vCPUs with two sandboxes at --cpus 2"
     for name in ("nginx", "postgres", "redis"):
         assert "cpus" not in compose["services"][name], name
 
 
-def test_four_slim_sandboxes_with_proxies_fit_the_five_gib_budget(compose: dict) -> None:
+def test_two_slim_sandboxes_at_one_gib_with_proxies_fit_the_five_gib_budget(compose: dict) -> None:
     env = compose["services"]["gateway"]["environment"]
     sandbox = _mib(env["DEER_FLOW_SANDBOX_MEMORY"])
     proxy = _mib(env["DEER_FLOW_SANDBOX_PROXY_MEMORY"])
     services = sum(MEMORY_MIB.values())
-    assert sandbox == 512, "half the 1 GiB the full services profile needed: the slim profile idles at about a quarter of that (README: Slim services profile)"
+    assert sandbox == 1024, "a slim sandbox holds 436 to 484 MiB right after boot and a 5,000-row report peaks at 713 MiB in it; 512 MiB thrashed for 289 s on the tenant class (README: Two 1 GiB slots)"
+    assert env["DEER_FLOW_SANDBOX_CPUS"] == "2", "a render wants about 1.6 CPUs and the cold boot halves at two (README: Two 1 GiB slots)"
     assert int(env["DEER_FLOW_SANDBOX_PIDS_LIMIT"]) == 256, "host-side tasks: 58 idle, 62 rendering, 134 under a forty-way fan-out (README: Slim services profile)"
     assert services + SANDBOX_SLOTS * (sandbox + proxy) == 5120, "exactly on the 5.0 GiB line: raising any limit in compose.yaml must be paid for by lowering another"
     assert 5120 < services + (SANDBOX_SLOTS + 1) * (sandbox + proxy)
-    assert services + SANDBOX_SLOTS * sandbox <= 5120 < services + (SANDBOX_SLOTS + 1) * sandbox, "open mode carries no proxy, fits four and not five"
+    assert services + SANDBOX_SLOTS * sandbox <= 5120 < services + (SANDBOX_SLOTS + 1) * sandbox, "open mode carries no proxy, fits two and not three"
 
 
-def test_template_runs_the_slim_services_profile_in_four_slots(compose: dict) -> None:
+def test_cpu_quotas_are_six_on_the_four_vcpu_guest(compose: dict) -> None:
+    """Two sandboxes at two CPUs plus two relays at one CPU: six quotas, what the README and compose comments say (the four-slot profile had eight)."""
+    env = compose["services"]["gateway"]["environment"]
+    assert SANDBOX_SLOTS * (float(env["DEER_FLOW_SANDBOX_CPUS"]) + 1) == 6
+
+
+def test_template_runs_the_slim_services_profile_in_two_slots(compose: dict) -> None:
     """The ceiling in config.yaml is the one the compose budget pays for, and the
     sandbox image's service switches are exact strings: its entrypoint compares
     each to "true", and the harness types the mapping as str -> str, so a bare
     YAML boolean would refuse to load."""
     template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
     sandbox = template["sandbox"]
-    assert sandbox["replicas"] == SANDBOX_SLOTS, "one slot per 512 MiB sandbox the budget fits (README: Memory budget)"
+    assert sandbox["replicas"] == SANDBOX_SLOTS, "one slot per 1 GiB sandbox the budget fits (README: Memory budget)"
     assert sandbox["idle_timeout"] == 1800, "a follow-up half an hour later still finds its sandbox warm"
     assert sandbox["environment"] == SLIM_SANDBOX_SERVICES
     assert all(value == "true" and isinstance(value, str) for value in sandbox["environment"].values())
@@ -349,13 +356,13 @@ def test_measurement_script_runs_the_profile_flags_and_the_slim_switches(compose
 def test_readme_tells_the_operator_to_remove_orphaned_sandboxes_before_an_upgrade() -> None:
     """The provider adopts a surviving sandbox by its labels and networks, never
     by its image, environment or limits, so a Gateway that was killed rather than
-    stopped brings pre-upgrade 1 GiB full-profile sandboxes into the new budget.
-    Until the backend compares those, the README carries the upgrade step."""
+    stopped brings pre-upgrade sandboxes into the new budget with their old
+    limits. Until the backend compares those, the README carries the upgrade step."""
     readme = (PROFILE / "README.md").read_text(encoding="utf-8")
     note = readme[readme.index("**Upgrading a guest that already runs sandboxes.**") :]
     assert "docker ps --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-" in note
     assert "docker rm -f $(docker ps -q --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-)" in note
-    assert "7168 MiB" in note, "four adopted 1 GiB sandboxes on the 6 GiB guest"
+    assert "6336 MiB" in note, "two surviving 512 MiB sandboxes beside the two new 1 GiB slots on the 6 GiB guest"
 
 
 def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
@@ -375,8 +382,8 @@ def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
     assert env["DEER_FLOW_SANDBOX_HOST"] == "host.docker.internal"
     assert "host.docker.internal:host-gateway" in gateway["extra_hosts"]
     assert env["DEER_FLOW_SANDBOX_NETWORK"] == "hartmesh_sandbox"
-    assert env["DEER_FLOW_SANDBOX_MEMORY"] == "512m"
-    assert env["DEER_FLOW_SANDBOX_CPUS"] == "1"
+    assert env["DEER_FLOW_SANDBOX_MEMORY"] == "1024m"
+    assert env["DEER_FLOW_SANDBOX_CPUS"] == "2"
     assert env["DEER_FLOW_SANDBOX_PIDS_LIMIT"] == "256"
     assert env["DEER_FLOW_SANDBOX_PROXY_MEMORY"].endswith("m")
     assert env["DEER_FLOW_SANDBOX_CONTAINER_USER"] == "1000:1000"
