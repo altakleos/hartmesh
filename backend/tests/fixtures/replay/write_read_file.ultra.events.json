@@ -10,6 +10,15 @@
       ]
     },
     {
+      "event": "custom",
+      "keys": [
+        "at_ms",
+        "run_id",
+        "stage",
+        "type"
+      ]
+    },
+    {
       "event": "values",
       "keys": [
         "artifacts",
@@ -71,6 +80,15 @@
         "thread_data",
         "uploaded_files",
         "viewed_images"
+      ]
+    },
+    {
+      "event": "custom",
+      "keys": [
+        "at_ms",
+        "run_id",
+        "stage",
+        "type"
       ]
     },
     {

@@ -82,7 +82,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -422,6 +422,7 @@ class TurnPhaseJournal:
     """
 
     __slots__ = (
+        "_observers",
         "_acquire_reason",
         "_acquisition_reuse",
         "_acquisition_source",
@@ -477,6 +478,7 @@ class TurnPhaseJournal:
         self._failed_attempts = 0
         self._unobservable: list[tuple[str, str]] = []
         self._outcome: str | None = None
+        self._observers: list[Callable[[TurnPhase, float], None]] = []
 
     # ── Clock ────────────────────────────────────────────────────────────
 
@@ -492,9 +494,30 @@ class TurnPhaseJournal:
                 return
             self._records.append(record)
 
+    def observe(self, callback: Callable[[TurnPhase, float], None]) -> None:
+        """Hear every phase as it begins: ``callback(phase, offset_ms)``.
+
+        Called synchronously from whichever thread opens the phase -- a
+        provider's ``to_thread`` worker included -- so a callback must be
+        cheap and must not block; a callback that raises is dropped for that
+        phase and the journal keeps recording. The live progress a client is
+        shown rides on this (``turn_progress.py``); nothing in the journal
+        depends on an observer being present.
+        """
+        self._observers.append(callback)
+
+    def _notify(self, phase: TurnPhase, at_ms: float) -> None:
+        for callback in self._observers:
+            try:
+                callback(phase, at_ms)
+            except Exception:
+                logger.debug("turn phase observer failed for %s", phase, exc_info=True)
+
     def mark(self, phase: TurnPhase, *, detail: str | None = None) -> None:
         """Record that *phase* happened now, with no duration of its own."""
-        self._append(PhaseRecord(phase=phase, started_ms=self._elapsed_ms(), detail=_detail(detail)))
+        at_ms = self._elapsed_ms()
+        self._append(PhaseRecord(phase=phase, started_ms=at_ms, detail=_detail(detail)))
+        self._notify(phase, at_ms)
 
     def mark_once(self, phase: TurnPhase, *, detail: str | None = None) -> bool:
         """Record *phase* only if it has not been recorded yet.
@@ -509,13 +532,16 @@ class TurnPhaseJournal:
             if len(self._records) >= MAX_PHASE_RECORDS:
                 self._dropped += 1
                 return False
-            self._records.append(PhaseRecord(phase=phase, started_ms=self._elapsed_ms(), detail=_detail(detail)))
-            return True
+            at_ms = self._elapsed_ms()
+            self._records.append(PhaseRecord(phase=phase, started_ms=at_ms, detail=_detail(detail)))
+        self._notify(phase, at_ms)
+        return True
 
     @contextmanager
     def span(self, phase: TurnPhase, *, detail: str | None = None) -> Iterator[None]:
         """Time *phase*, recording it whether the body succeeds or raises."""
         started = self._elapsed_ms()
+        self._notify(phase, started)
         try:
             yield
         finally:

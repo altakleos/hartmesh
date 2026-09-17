@@ -81,6 +81,7 @@ import {
   parseSubtaskResult,
 } from "@/core/tasks/subtask-result";
 import type { AgentThreadState } from "@/core/threads";
+import { runActivityLabel, useTurnProgress } from "@/core/turn-progress";
 import { cn } from "@/lib/utils";
 
 import { ArtifactFileList } from "../artifacts/artifact-file-list";
@@ -344,6 +345,22 @@ export function MessageList({
     useState<SelectionToolbarState | null>(null);
   const messages = thread.messages;
   const groupedMessages = useStableMessageGroups(messages, thread.isLoading);
+  // What the activity row says while the turn runs: the stage this thread's
+  // run reported (preparing, starting a workspace, thinking) until the model
+  // has shown a tool card or answer text, then "Working…" beside the clock.
+  // The stages arrive before any model token, so the first honest word
+  // appears within the run's first moments rather than at its first tool call.
+  const turnProgress = useTurnProgress(threadId);
+  const activityLabel = useMemo(
+    () =>
+      runActivityLabel({
+        isLoading: thread.isLoading,
+        messages,
+        progress: turnProgress,
+        t,
+      }),
+    [thread.isLoading, messages, turnProgress, t],
+  );
   const chapters = useMemo(
     () =>
       buildConversationChapters(
@@ -1444,7 +1461,7 @@ export function MessageList({
           />
           {thread.isLoading && !hasActiveAssistantText && (
             <div className="w-full">
-              <RunActivity startTime={turnStartTime} />
+              <RunActivity startTime={turnStartTime} label={activityLabel} />
             </div>
           )}
           <div style={{ height: `${paddingBottom}px` }} />

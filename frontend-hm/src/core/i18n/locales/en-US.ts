@@ -63,6 +63,12 @@ export const enUS: Translations = {
     showBrowser: "Open browser panel",
   },
 
+  runProgress: {
+    preparing: "Preparing your workspace…",
+    workspaceStarting: "Starting a fresh workspace…",
+    thinking: "Thinking…",
+  },
+
   runDuration: {
     reasoning: "Reasoning",
     working: "Working…",

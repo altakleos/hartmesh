@@ -91,6 +91,10 @@ async function captureThreadStreamOptions() {
     parseArtifactDeliveryUnverified,
     useArtifactDeliveryContext: () => deliveryState,
   }));
+  rs.doMock("@/core/turn-progress", () => ({
+    parseTurnProgress: () => null,
+    useTurnProgressContext: () => ({ record: rs.fn(), clear: rs.fn() }),
+  }));
   rs.doMock("sonner", () => ({ toast: toastState.toast }));
 
   const { useThreadStream } = await import("@/core/threads/hooks");
@@ -114,6 +118,7 @@ afterEach(() => {
   rs.doUnmock("@/core/i18n/hooks");
   rs.doUnmock("@/core/tasks/context");
   rs.doUnmock("@/core/artifact-delivery");
+  rs.doUnmock("@/core/turn-progress");
   rs.doUnmock("sonner");
   rs.resetModules();
   deliveryState.recordFailure.mockClear();

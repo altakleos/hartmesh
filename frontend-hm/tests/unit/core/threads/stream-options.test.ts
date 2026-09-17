@@ -72,6 +72,10 @@ async function captureThreadStreamOptions() {
       recordFailure: rs.fn(),
     }),
   }));
+  rs.doMock("@/core/turn-progress", () => ({
+    parseTurnProgress: () => null,
+    useTurnProgressContext: () => ({ record: rs.fn(), clear: rs.fn() }),
+  }));
 
   const { useThreadStream } = await import("@/core/threads/hooks");
   function ThreadStreamCapture() {
@@ -96,6 +100,7 @@ afterEach(() => {
   rs.doUnmock("@/core/i18n/hooks");
   rs.doUnmock("@/core/tasks/context");
   rs.doUnmock("@/core/artifact-delivery");
+  rs.doUnmock("@/core/turn-progress");
   rs.resetModules();
 });
 

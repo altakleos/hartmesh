@@ -334,6 +334,7 @@ You have access to the `write_todos` tool to help you manage and track complex m
 - Keep EXACTLY ONE task as `in_progress` at any time (unless tasks can run in parallel)
 - Update the todo list in REAL-TIME as you work - this gives users visibility into your progress
 - DO NOT use this tool for simple tasks (< 3 steps) - just complete them directly
+- A skill's documented workflow is already the plan: follow its steps directly and do not mirror them into todos. The person sees each step as it runs.
 
 **When to Use:**
 This tool is designed for complex objectives that require systematic tracking:

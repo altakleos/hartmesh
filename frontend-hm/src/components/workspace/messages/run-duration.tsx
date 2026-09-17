@@ -7,7 +7,14 @@ import { Shimmer } from "@/components/ai-elements/shimmer";
 import { useI18n } from "@/core/i18n/hooks";
 import { formatRunDuration } from "@/core/messages/run-duration";
 
-export function RunActivity({ startTime }: { startTime: number | null }) {
+export function RunActivity({
+  startTime,
+  label,
+}: {
+  startTime: number | null;
+  /** What the run is doing now, when the stream said; "Working…" otherwise. */
+  label?: string | null;
+}) {
   const { t } = useI18n();
   const [elapsed, setElapsed] = useState(0);
 
@@ -33,7 +40,7 @@ export function RunActivity({ startTime }: { startTime: number | null }) {
       data-testid="run-activity"
     >
       <Clock3Icon className="size-4" />
-      <Shimmer duration={1}>{t.runDuration.working}</Shimmer>
+      <Shimmer duration={1}>{label ?? t.runDuration.working}</Shimmer>
       {formatted && <span aria-hidden="true">({formatted})</span>}
     </div>
   );

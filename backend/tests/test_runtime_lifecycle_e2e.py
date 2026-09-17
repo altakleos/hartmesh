@@ -598,6 +598,11 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
             transcript = _drain_stream(response)
 
         events = _parse_sse(transcript)
+        # The run's progress frames ride the same stream after metadata; the
+        # lifecycle shape is asserted without them.
+        progress = [event for event in events if event["event"] == "custom" and event["data"].get("type") == "turn_progress"]
+        assert progress and events[0]["event"] == "metadata"
+        events = [event for event in events if event not in progress]
         assert [event["event"] for event in events] == ["metadata", "values", "end"]
         assert events[0]["data"] == {"run_id": run_id, "thread_id": thread_id}
         assert events[1]["data"]["title"] == "Lifecycle E2E"

@@ -63,6 +63,12 @@ export const zhCN: Translations = {
     showBrowser: "打开浏览器面板",
   },
 
+  runProgress: {
+    preparing: "正在准备工作区…",
+    workspaceStarting: "正在启动新的工作区…",
+    thinking: "思考中…",
+  },
+
   runDuration: {
     reasoning: "思考过程",
     working: "执行中…",

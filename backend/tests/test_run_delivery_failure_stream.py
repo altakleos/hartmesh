@@ -62,6 +62,25 @@ def _frames_of(frames: list[tuple[str, Any]], event: str) -> list[Any]:
     return [data for name, data in frames if name == event]
 
 
+def _is_delivery_verdict(data: Any) -> bool:
+    return isinstance(data, dict) and str(data.get("type", "")).startswith("artifact_delivery_")
+
+
+def _verdicts(frames: list[tuple[str, Any]]) -> list[Any]:
+    """The delivery verdict frames alone.
+
+    The advisory ``custom`` channel also carries ``turn_progress`` frames
+    (``preparing`` at admission, ``thinking`` at the model request), published
+    while the worker still owns the run; these tests are about the verdict,
+    which is the one frame that must never follow an ownership loss.
+    """
+    return [data for name, data in frames if name == "custom" and _is_delivery_verdict(data)]
+
+
+def _verdict_index(frames: list[tuple[str, Any]]) -> int:
+    return next(index for index, (name, data) in enumerate(frames) if name == "custom" and _is_delivery_verdict(data))
+
+
 class _ProseOnlyAgent:
     """Finishes normally with prose and never presents what it produced."""
 
@@ -119,7 +138,7 @@ async def test_an_undelivered_artifact_reaches_the_client_without_failing_the_st
     assert record.error == _DELIVERY_INCOMPLETE_ERROR
     assert record.stop_reason == INCOMPLETE_STOP_REASON
     assert _frames_of(frames, "error") == []
-    assert len(_frames_of(frames, "custom")) == 1
+    assert len(_verdicts(frames)) == 1
 
 
 @pytest.mark.anyio
@@ -139,7 +158,7 @@ async def test_the_frame_names_the_files_the_run_produced_but_never_handed_over(
         config={},
     )
 
-    details = _frames_of(frames, "custom")
+    details = _verdicts(frames)
     assert details == [
         {
             "type": "artifact_delivery_incomplete",
@@ -173,7 +192,7 @@ async def test_the_delivery_frame_precedes_a_clean_end_and_no_error_frame_is_pub
 
     names = [name for name, _ in frames]
     assert "error" not in names
-    assert names.index("custom") < names.index(END_FRAME)
+    assert _verdict_index(frames) < names.index(END_FRAME)
 
 
 @pytest.mark.anyio
@@ -194,7 +213,7 @@ async def test_a_run_that_presented_only_unrelated_paths_discloses_everything_it
     )
 
     assert record.status == RunStatus.error
-    detail = _frames_of(frames, "custom")[0]
+    detail = _verdicts(frames)[0]
     assert detail["undelivered_paths"] == [
         "/mnt/user-data/outputs/report.md",
         "/mnt/user-data/outputs/notes.md",
@@ -220,7 +239,7 @@ async def test_a_delivered_run_publishes_no_failure_frame(monkeypatch):
 
     assert record.status == RunStatus.success
     assert _frames_of(frames, "error") == []
-    assert _frames_of(frames, "custom") == []
+    assert _verdicts(frames) == []
 
 
 @pytest.mark.anyio
@@ -242,7 +261,7 @@ async def test_an_ordinary_chat_turn_publishes_no_failure_frame(monkeypatch):
 
     assert record.status == RunStatus.success
     assert _frames_of(frames, "error") == []
-    assert _frames_of(frames, "custom") == []
+    assert _verdicts(frames) == []
 
 
 @pytest.mark.anyio
@@ -263,7 +282,7 @@ async def test_a_large_undelivered_set_is_bounded_but_still_counted(monkeypatch)
         config={},
     )
 
-    detail = _frames_of(frames, "custom")[0]
+    detail = _verdicts(frames)[0]
     assert detail["undelivered_paths"] == produced[:MAX_DISCLOSED_UNDELIVERED_PATHS]
     assert detail["undelivered_count"] == len(produced)
 
@@ -299,7 +318,7 @@ async def test_an_unverifiable_receipt_also_reaches_the_client(monkeypatch):
     assert record.error == _DELIVERY_RECEIPT_FAILED_ERROR
     assert record.stop_reason == RECEIPT_STOP_REASON
     assert _frames_of(frames, "error") == []
-    assert _frames_of(frames, "custom") == [
+    assert _verdicts(frames) == [
         {
             "type": "artifact_delivery_unverified",
             "run_id": record.run_id,
@@ -307,7 +326,7 @@ async def test_an_unverifiable_receipt_also_reaches_the_client(monkeypatch):
         }
     ]
     names = [name for name, _ in frames]
-    assert names.index("custom") < names.index(END_FRAME)
+    assert _verdict_index(frames) < names.index(END_FRAME)
 
 
 @pytest.mark.anyio
@@ -340,7 +359,7 @@ async def test_a_fenced_worker_narrates_nothing_onto_a_stream_a_peer_owns(monkey
     )
 
     assert _frames_of(frames, "error") == []
-    assert _frames_of(frames, "custom") == []
+    assert _verdicts(frames) == []
     assert record.stop_reason is None
 
 
@@ -376,7 +395,7 @@ async def test_a_verdict_that_cannot_be_published_still_stands_on_the_record(mon
         config={},
     )
 
-    assert not _frames_of(frames, "custom")
+    assert not _verdicts(frames)
     assert record.status == RunStatus.error
     assert record.error == _DELIVERY_INCOMPLETE_ERROR
     assert record.stop_reason == INCOMPLETE_STOP_REASON

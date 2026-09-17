@@ -59,6 +59,8 @@ The agent will skip using the todo list for:
 1. Single, straightforward tasks
 2. Trivial tasks (< 3 steps)
 3. Purely conversational or informational requests
+4. Simple tool calls where the approach is obvious
+5. A skill's documented workflow: its steps are followed directly, not mirrored into todos (the person sees each step as it runs)
 
 ### Task States
 
@@ -194,7 +196,7 @@ DeerFlow uses custom `system_prompt` and `tool_description` for the TodoListMidd
 - Comprehensive best practices section
 - Task completion requirements to prevent premature marking
 
-The custom prompts are defined in `_create_todo_list_middleware()` in `/Users/hetao/workspace/deer-flow/backend/packages/harness/deerflow/agents/lead_agent/agent.py:57`.
+The custom prompts are defined in `_create_todo_list_middleware()` in `backend/packages/harness/deerflow/agents/lead_agent/agent.py` (and, for the minimal SDK factory, `_TODO_SYSTEM_PROMPT` in `backend/packages/harness/deerflow/agents/factory.py`).
 
 ## Notes
 
