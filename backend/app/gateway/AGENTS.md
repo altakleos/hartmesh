@@ -6,12 +6,9 @@ FastAPI listens on port 8001; health: `GET /health` (liveness), `GET /ready`
 `GATEWAY_ENABLE_DOCS=false` disables `/docs`, `/redoc`, and `/openapi.json`.
 
 `/api/runtime/v1/*` and in-process adapters share one `InvocationRuntime` and
-its accepted identity/material admission. `GracefulShutdownCoordinator` orders
-shutdown; if quiescence is unproven, leave resources for process reclamation.
+its accepted identity/material admission. `GracefulShutdownCoordinator` orders shutdown; unproven quiescence leaves resources to process reclamation.
 
-Durable MCP task notifications run as internal Agents. Keep trusted delivery
-instructions outside user input, frame remote payloads as untrusted, and require
-existing owned threads so late events dead-letter instead of recreating deleted chats.
+Durable MCP task notifications run as internal Agents: keep trusted delivery instructions outside user input, frame remote payloads as untrusted, and require existing owned threads so late events dead-letter rather than recreate deleted chats.
 
 CORS defaults to same-origin through nginx. Split-origin or port-forwarded
 clients must set exact `GATEWAY_CORS_ORIGINS` for CORS/CSRF and expose
@@ -26,17 +23,11 @@ PATs (`Bearer dfp_...`) act as owners, never services; invalid Bearers get 401, 
 
 Localhost persistence deliberately reads the direct request `Host` and ignores `Forwarded` / `X-Forwarded-Host`. Scheme and auth-origin reconstruction still consume forwarding headers. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header, so the outer trusted proxy must replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 
-Standalone LangGraph Studio is recognized only by the upstream
-`Auth.types.StudioUser` principal type; older SDKs fall back to normal owner
-scoping. Its assistant reads include genuine registered assistants plus its own,
-while all other resources remain owner-scoped. Create/update makes `user_id` and
+Standalone LangGraph Studio is recognized only by the upstream `Auth.types.StudioUser` principal type; older SDKs fall back to normal owner scoping. Its assistant reads cover registered assistants plus its own; other resources stay owner-scoped. Create/update makes `user_id` and
 `created_by=user` server-owned. Before runtime 0.30.0 loads,
 `langgraph_studio.py` uses the CLI graph registry to recreate genuine system
 assistants and demote all other legacy `created_by=system` active/version rows.
-This file loader does not pre-register the module in `sys.modules`, so keep
-annotations eager and preserve the loader regression test. Missing persistence
-is a no-op; parse/write errors fail startup, and missing expected registered rows
-emit a drift warning.
+The file loader does not pre-register the module in `sys.modules`, so keep annotations eager and preserve the loader regression test. Missing persistence is a no-op; parse/write errors fail startup, and missing registered rows warn of drift.
 
 **Routers**:
 
@@ -54,7 +45,7 @@ emit a drift warning.
 | **Integrations** (`/api/integrations`) | `GET /lark/status` - inspect managed Lark/Feishu CLI integration state, including `sandbox_runtime_mode` / `sandbox_runtime_ready` (whether `lark-cli` will actually be present in the sandbox at chat time); `POST /lark/install` - admin-only install of the official `lark-*` managed skill pack, legacy-only and rejected while governed revisions are enabled; `POST /lark/config/start` and `/lark/config/complete` - internal first-time Lark connection setup; `POST /lark/config/credentials` - atomically switch the caller's per-user Lark app after validating the new `app_id`/`app_secret` through the official CLI's live tenant-token probe, revoke/remove the previous OAuth tokens, and restore the prior credential tree if the switch fails; `POST /lark/auth/start` and `/lark/auth/complete` - browser device-flow user authorization without terminal access, with optional `domains` / exact `scope` for incremental permission grants. Config and auth flows carry a server-issued, per-user generation persisted under the credential lock; a rejected direct switch leaves the current generation unchanged, stale completions return 409, and browser re-registration uses the same token-clearing/revocation transaction as direct credential switches. |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); non-mounted sandbox sync uses a non-releasing request lease; `GET /list` - list; `DELETE /{filename}` - delete |
-| **Files** (`/api/files`, `/api/threads/{id}/files`) | The person's own files (`users/{user_id}/files`, mounted read-write at `/mnt/user-data/files` in every sandbox of theirs): `GET /` - list, recursive, hidden names and symlinks skipped, capped with `truncated`; `GET /{path}` - stream (active content forced to download, as artifacts); `DELETE /{path}` - remove a file, never a folder; `POST /api/threads/{id}/files` - keep one of the owned thread's uploads or outputs by copying its exact bytes into `folder`, keep-both `_N` on a taken name. Per owner only, under the person's own `threads:*` authorities (no new permission: the tool plane's authority universe is capped and role lists already name threads; the trusted internal owner header is honoured); no PAT route. |
+| **Files** (`/api/files`, `/api/threads/{id}/files`) | The person's own files (`users/{user_id}/files`, mounted rw at `/mnt/user-data/files` in every sandbox of theirs): `GET /` lists (recursive; hidden, symlinked and unaddressable paths skipped; `truncated`), `GET /{path}` streams (active content downloads), `DELETE /{path}` removes a file not a folder, `POST /api/threads/{id}/files` keeps an owned thread's upload or output by copying its bytes into `folder` (keep-both `_N`). The sandbox writes there as its own uid, so paths are walked one segment at a time, never through a link. Per owner under the person's `threads:*` authorities — the tool-plane authority universe is capped, so no new permission; the internal owner header is honoured; no PAT route. |
 | **Threads** (`/api/threads/{id}`) | `DELETE /` - remove DeerFlow-managed local thread data after LangGraph thread deletion; `POST /branches` - branch a completed assistant turn with a replay checkpoint; inherited titles take next-free displayed sibling suffixes, including explicit/renamed ones, while explicit titles stay unchanged. Durable `branch` admission rejects races. Workspace files are not checkpointed, so the branch only best-effort copies the current workspace when branching from the **latest** turn (`workspace_clone_mode="current_thread_best_effort"`); branching from an older/historical turn skips the copy (`workspace_clone_mode="skipped_historical_turn"`) so the branch never inherits files that only exist in a later timeline. Thread-scoped runtime channels (`sandbox`, `thread_data`) are not copied onto the branch: the parent's `sandbox_id` binds path mappings and the release lifecycle to the parent's workspace, so the branch lazily acquires its own sandbox instead. Branch creation also seeds the new thread's run-event feed from the branch checkpoint's visible messages (`history_seed_mode` in the response), because the feed reads run_events, not checkpoints (#4380); seeded rows form one synthetic run per inherited turn (`branch-seed-{thread_id}-{n}`, a turn opening at every persisted human message, including an allowlisted hidden `ask_clarification` reply), because regenerating an inherited answer supersedes its whole `run_id` in `GET /messages/page` and one shared id would delete the entire inherited history (#4458); `GET /goal`, `PUT /goal`, `DELETE /goal` - read, set, and clear the active thread goal; `POST /compact` - manually summarize older active context into `summary_text` and retain the recent message window, blocked while a run is in flight; unexpected failures are logged server-side and return a generic 500 detail |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - stream regular text and binary artifacts with `FileResponse`, including byte-`Range` 206/416 behavior used by bounded text previews and media seeking; active content types (`text/html`, `application/xhtml+xml`, `image/svg+xml`) are always forced as download attachments to reduce XSS risk; `?download=true` still forces download for other file types. `PUT /{path}` atomically replaces an existing UTF-8 text file under `/mnt/user-data/outputs` when its expected SHA-256 still matches; active runs conflict, and non-mounted sandbox providers receive the same update under a request lease. Atomic replacement applies the existing POSIX permission handling when descriptor-based APIs are available and otherwise keeps the platform-native temporary-file permissions (Windows). |
 | **Suggestions** (`/api/suggestions`) | `GET /config` - returns global suggestions config boolean; `POST /threads/{id}/suggestions` - generate follow-up questions; rich list/block model content is normalized and inline reasoning (`<think>...</think>`, including unclosed/truncated blocks) is stripped before JSON parsing |
@@ -72,11 +63,7 @@ the archive binds exact copied bytes. Snapshot coverage follows accepted
 capabilities and terminal attempts; operations cancel on disconnect or the
 60-second deadline. Return stable errors/public refs; bundles are unsigned.
 
-Thread IDs use `deerflow.utils.thread_id` (`^[A-Za-z0-9_-]{1,64}$`); `None`
-generates a UUID and empty strings fail. Creation/state-producing boundaries
-validate before persistence or workspace initialization. Legacy IDs remain
-readable/controllable, but cannot drive new runs or filesystem state; cleanup
-skips their host paths.
+Thread IDs use `deerflow.utils.thread_id` (`^[A-Za-z0-9_-]{1,64}$`); `None` generates a UUID and empty strings fail. Creation/state-producing boundaries validate before persistence or workspace initialization. Legacy IDs stay readable/controllable but cannot drive new runs or filesystem state; cleanup skips their host paths.
 
 **Message feed seq** (#4666): streaming `values` frames, `GET
 /threads/{id}/state`, and `POST /threads/{id}/history` stamp serialized
@@ -112,8 +99,7 @@ journal per run before cancellable/fallible preflight work, so checkpoint
 compatibility failures and cancellation while waiting for prior finalization
 still emit a zero-delivery receipt. The worker flushes ordinary journal events,
 idempotently persists the run-scoped receipt, and only then persists the staged
-terminal run status. A receipt failure is retried on a short bounded schedule
-while the owning worker still knows the real outcome and holds the lease. The
+terminal run status. A receipt failure is retried on a short bounded schedule while the owner still holds the lease. The
 worker derives delivery requirements from the run's workspace snapshots rather
 than a client request option: every regular file created or modified under
 `/mnt/user-data/outputs` is a candidate produced artifact. Internal
@@ -144,10 +130,7 @@ repairs terminal legacy rows that will never re-enter recovery. Taskless and
 pre-graph compensation retains its exact admission obligation when this write
 is unavailable, leaving the owner-fenced row active until receipt-first
 terminalization can be retried.
-Moving journal construction ahead of preflight is receipt-only on early failure
-paths: a separate boundary flag preserves the previous completion-data
-semantics, so checkpoint incompatibility or cancellation while waiting for an
-older finalizing run does not persist an empty completion snapshot.
+Moving journal construction ahead of preflight is receipt-only on early failure paths: a separate boundary flag preserves the previous completion-data semantics, so cancellation or checkpoint incompatibility while waiting for an older finalizing run persists no empty completion snapshot.
 Multi-worker deployments therefore require `run_events.backend: db` for shared,
 ordered delivery events; the startup gate rejects process-local memory and
 JSONL event stores when `GATEWAY_WORKERS > 1`.
