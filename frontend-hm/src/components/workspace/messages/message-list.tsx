@@ -1309,13 +1309,17 @@ export function MessageList({
                   group,
                   groupIndex,
                   <div className="w-full">
-                    {group.messages[0] && hasContent(group.messages[0]) && (
-                      <MarkdownContent
-                        content={extractContentFromMessage(group.messages[0])}
-                        isLoading={thread.isLoading}
-                        className="mb-4"
-                      />
-                    )}
+                    {/* A tool result that presented files carries command
+                        output, not prose: only the model's own message is
+                        drawn above the files. */}
+                    {group.messages[0]?.type === "ai" &&
+                      hasContent(group.messages[0]) && (
+                        <MarkdownContent
+                          content={extractContentFromMessage(group.messages[0])}
+                          isLoading={thread.isLoading}
+                          className="mb-4"
+                        />
+                      )}
                     <ArtifactFileList
                       archiveDownloadsEnabled={
                         archiveDownloadsEnabled && !thread.isLoading

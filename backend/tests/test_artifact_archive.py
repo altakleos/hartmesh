@@ -132,6 +132,30 @@ def test_archive_download_contains_only_presented_files(tmp_path, monkeypatch) -
         assert "not-presented.txt" not in archive.namelist()
 
 
+def test_archive_contains_files_a_bash_run_presented_on_the_runs_behalf(tmp_path, monkeypatch) -> None:
+    """The receipt's ``presented_files`` are what was presented; ``by_tool`` may name any tool, here ``bash``."""
+    outputs = tmp_path / "outputs"
+    outputs.mkdir(parents=True)
+    (outputs / "r.pdf").write_bytes(b"pdf")
+    client, _, event_store = _archive_app(monkeypatch, outputs, with_receipt=False)
+    asyncio.run(
+        event_store.put(
+            thread_id=THREAD_ID,
+            run_id=RUN_ID,
+            event_type="run.delivery",
+            category="outputs",
+            content={"presented": 1, "paths": ["/mnt/user-data/outputs/r.pdf"], "by_tool": {"bash": ["/mnt/user-data/outputs/r.pdf"]}, "presented_files": ["/mnt/user-data/outputs/r.pdf"]},
+        )
+    )
+
+    with client:
+        response = client.post(ARCHIVE_URL, json={"paths": ["/mnt/user-data/outputs/r.pdf"]})
+
+    assert response.status_code == 200
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["r.pdf"]
+
+
 def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypatch) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

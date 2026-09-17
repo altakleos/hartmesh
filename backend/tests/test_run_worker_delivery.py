@@ -57,7 +57,7 @@ async def test_delivery_receipt_does_not_retry_after_runtime_ownership_loss() ->
             store,
             thread_id="thread-1",
             run_id="run-1",
-            content={"presented": 0, "paths": [], "by_tool": {}},
+            content={"presented": 0, "paths": [], "by_tool": {}, "presented_files": []},
         )
 
     store.put_if_absent.assert_awaited_once()
@@ -100,7 +100,7 @@ async def test_delivery_event_records_present_files_paths_on_success():
                 Command(
                     update={
                         "artifacts": ["/mnt/user-data/outputs/report.md"],
-                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/report.md"]})],
                     }
                 ),
                 run_id=uuid4(),
@@ -150,7 +150,7 @@ async def test_delivery_event_presented_zero_without_artifact_production():
 
     delivery = await _delivery_events(store, "thread-1", record.run_id)
     assert len(delivery) == 1
-    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}, "presented_files": []}
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.success
 
@@ -174,7 +174,7 @@ async def test_changed_outputs_succeed_when_a_produced_output_is_presented(monke
                 Command(
                     update={
                         "artifacts": ["/mnt/user-data/outputs/report.md"],
-                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/report.md"]})],
                     }
                 ),
                 run_id=uuid4(),
@@ -196,9 +196,10 @@ async def test_changed_outputs_succeed_when_a_produced_output_is_presented(monke
         "presented": 1,
         "paths": ["/mnt/user-data/outputs/report.md"],
         "by_tool": {"present_files": ["/mnt/user-data/outputs/report.md"]},
+        "presented_files": ["/mnt/user-data/outputs/report.md"],
         "verification": {
             "source": "outputs_changed",
-            "requirement": "present_files_matches_produced_output",
+            "requirement": "presentation_matches_produced_output",
         },
         "produced_paths": ["/mnt/user-data/outputs/report.md"],
         "presented_paths": ["/mnt/user-data/outputs/report.md"],
@@ -207,6 +208,98 @@ async def test_changed_outputs_succeed_when_a_produced_output_is_presented(monke
         "satisfied": True,
     }
     assert record.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_changed_outputs_succeed_when_a_bash_run_presented_what_it_declared(monkeypatch):
+    """A ``bash`` call that presented the files it made records under ``bash``; the fence reads every presentation, whatever tool made it (DF17)."""
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]),
+    )
+
+    class DeclaringAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            ai = AIMessage(content="", tool_calls=[{"id": "call_1", "name": "bash", "args": {"command": "python report.py build …"}}])
+            journal._remember_current_run_tool_calls(ai, caller="lead_agent")
+            run_id = uuid4()
+            journal.on_tool_start({"name": "bash"}, "", run_id=run_id)
+            journal.on_tool_end(
+                Command(
+                    update={
+                        "artifacts": ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"],
+                        "messages": [
+                            ToolMessage("Built draft 1\n\nPresented to the user: 2 files", tool_call_id="call_1", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]})
+                        ],
+                    }
+                ),
+                run_id=run_id,
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: DeclaringAgent(),
+        graph_input={},
+        config={},
+    )
+
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    content = delivery[0]["content"]
+    assert content["by_tool"] == {"bash": ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]}
+    assert content["presented_files"] == ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]
+    assert content["presented_paths"] == ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]
+    assert content["matched_paths"] == ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]
+    assert content["stage"] == "presented" and content["satisfied"] is True
+    assert record.status == RunStatus.success
+
+
+@pytest.mark.anyio
+async def test_an_artifact_that_reached_the_panel_as_a_side_effect_does_not_satisfy_delivery(monkeypatch):
+    """A browser screenshot lands in ``artifacts`` untagged; the report the run wrote and never presented still fails the fence."""
+    run_manager = RunManager()
+    record = await run_manager.create("thread-1")
+    store = MemoryRunEventStore()
+    monkeypatch.setattr(
+        "deerflow.runtime.runs.worker._produced_output_paths",
+        AsyncMock(return_value=["/mnt/user-data/outputs/shot.png", "/mnt/user-data/outputs/report.md"]),
+    )
+
+    class ScreenshotAgent:
+        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
+            journal = config["context"]["__run_journal"]
+            ai = AIMessage(content="", tool_calls=[{"id": "call_1", "name": "browser_screenshot", "args": {}}])
+            journal._remember_current_run_tool_calls(ai, caller="lead_agent")
+            run_id = uuid4()
+            journal.on_tool_start({"name": "browser_screenshot"}, "", run_id=run_id)
+            journal.on_tool_end(
+                Command(update={"artifacts": ["/mnt/user-data/outputs/shot.png"], "messages": [ToolMessage("captured", tool_call_id="call_1")]}),
+                run_id=run_id,
+            )
+            yield {"messages": []}
+
+    await run_agent(
+        _make_bridge(),
+        run_manager,
+        record,
+        ctx=RunContext(checkpointer=None, event_store=store),
+        agent_factory=lambda *, config: ScreenshotAgent(),
+        graph_input={},
+        config={},
+    )
+
+    delivery = await _delivery_events(store, "thread-1", record.run_id)
+    content = delivery[0]["content"]
+    assert content["paths"] == ["/mnt/user-data/outputs/shot.png"]
+    assert content["presented_files"] == [] and content["presented_paths"] == []
+    assert content["satisfied"] is False and record.status == RunStatus.error
 
 
 @pytest.mark.anyio
@@ -238,9 +331,10 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
         "presented": 0,
         "paths": [],
         "by_tool": {},
+        "presented_files": [],
         "verification": {
             "source": "outputs_changed",
-            "requirement": "present_files_matches_produced_output",
+            "requirement": "presentation_matches_produced_output",
         },
         "produced_paths": ["/mnt/user-data/outputs/report.md"],
         "presented_paths": [],
@@ -288,7 +382,7 @@ async def test_externalized_tool_results_do_not_trigger_delivery_verification(tm
 
     delivery = await _delivery_events(store, "thread-1", record.run_id)
     assert len(delivery) == 1
-    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}, "presented_files": []}
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.success
 
@@ -351,7 +445,7 @@ async def test_changed_outputs_succeed_when_one_of_multiple_outputs_is_presented
                 Command(
                     update={
                         "artifacts": ["/mnt/user-data/outputs/report.md"],
-                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/report.md"]})],
                     }
                 ),
                 run_id=uuid4(),
@@ -397,7 +491,7 @@ async def test_changed_outputs_fail_when_present_files_only_presents_an_unrelate
                 Command(
                     update={
                         "artifacts": ["/mnt/user-data/outputs/old-report.md"],
-                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/old-report.md"]})],
                     }
                 ),
                 run_id=uuid4(),
@@ -484,7 +578,7 @@ async def test_delivery_event_is_singleton_across_goal_continuations(monkeypatch
                 Command(
                     update={
                         "artifacts": artifacts,
-                        "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id, additional_kwargs={"presented_files": artifacts})],
                     }
                 ),
                 run_id=uuid4(),
@@ -525,6 +619,10 @@ async def test_delivery_event_is_singleton_across_goal_continuations(monkeypatch
                 "/mnt/user-data/outputs/appendix.md",
             ]
         },
+        "presented_files": [
+            "/mnt/user-data/outputs/report.md",
+            "/mnt/user-data/outputs/appendix.md",
+        ],
     }
 
 
@@ -742,7 +840,7 @@ async def test_produced_artifact_delivery_fails_closed_when_receipt_cannot_be_pe
                 Command(
                     update={
                         "artifacts": ["/mnt/user-data/outputs/report.md"],
-                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/report.md"]})],
                     }
                 ),
                 run_id=uuid4(),
@@ -788,7 +886,7 @@ async def test_delivery_event_emitted_when_checkpoint_preflight_fails(monkeypatc
 
     delivery = await _delivery_events(store, "thread-1", record.run_id)
     assert len(delivery) == 1
-    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}, "presented_files": []}
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.error
     run_manager.update_run_completion.assert_not_awaited()
@@ -821,7 +919,7 @@ async def test_delivery_event_emitted_when_cancelled_waiting_for_prior_finalizat
 
     delivery = await _delivery_events(store, "thread-1", record.run_id)
     assert len(delivery) == 1
-    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}, "presented_files": []}
     fetched = await run_manager.get(record.run_id)
     assert fetched.status == RunStatus.interrupted
     run_manager.update_run_completion.assert_not_awaited()
@@ -1370,7 +1468,7 @@ async def test_recovery_delivery_receipt_reconciles_existing_owner_identity(
             run_id=record.run_id,
             event_type="run.delivery",
             category="outputs",
-            content={"presented": 0, "paths": [], "by_tool": {}},
+            content={"presented": 0, "paths": [], "by_tool": {}, "presented_files": []},
             user_id=existing_user_id,
         )
         assert created

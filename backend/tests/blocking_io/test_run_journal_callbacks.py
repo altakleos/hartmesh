@@ -24,7 +24,7 @@ async def test_inline_tool_callback_does_not_block_event_loop() -> None:
     command = Command(
         update={
             "artifacts": ["/mnt/user-data/outputs/report.md"],
-            "messages": [ToolMessage("Successfully presented files", tool_call_id="call-1")],
+            "messages": [ToolMessage("Successfully presented files", tool_call_id="call-1", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/report.md"]})],
         }
     )
 

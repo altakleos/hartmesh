@@ -39,6 +39,7 @@ from deerflow.runtime.run_evidence import (
     RunEvidenceSnapshotV1,
     canonical_json_bytes,
 )
+from deerflow.runtime.runs.delivery import presented_paths
 from deerflow.runtime.runs.lifecycle_query import build_tool_receipt_page
 from deerflow.runtime.subagent_snapshot import SubagentCatalogError
 from deerflow.runtime.tool_evidence import (
@@ -167,13 +168,17 @@ def _presented_artifacts(events: Sequence[Mapping[str, object]]) -> tuple[str, .
     by_tool = content.get("by_tool")
     if type(presented_count) is not int or presented_count < 0 or not isinstance(all_paths, list) or len(all_paths) != presented_count or any(not isinstance(path, str) for path in all_paths) or not isinstance(by_tool, Mapping):
         _error("evidence_cross_link_invalid")
-    raw_presented = by_tool.get("present_files", [])
-    if not isinstance(raw_presented, list) or any(not isinstance(path, str) for path in raw_presented):
+    for raw_presented in by_tool.values():
+        if not isinstance(raw_presented, list) or any(not isinstance(path, str) for path in raw_presented):
+            _error("evidence_cross_link_invalid")
+    attributed = {path for raw_presented in by_tool.values() for path in raw_presented}
+    if any(path not in all_paths for path in attributed):
         _error("evidence_cross_link_invalid")
-    paths = tuple(dict.fromkeys(raw_presented))
-    if any(path not in all_paths for path in paths):
-        _error("evidence_cross_link_invalid")
-    return paths
+    if "presented_files" in content:
+        raw_presented_files = content.get("presented_files")
+        if not isinstance(raw_presented_files, list) or any(not isinstance(path, str) or path not in all_paths for path in raw_presented_files):
+            _error("evidence_cross_link_invalid")
+    return tuple(presented_paths(content))
 
 
 def _lifecycle_counts(events: Sequence[Mapping[str, object]]) -> dict[str, int]:

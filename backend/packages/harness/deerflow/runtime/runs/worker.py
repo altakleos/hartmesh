@@ -96,6 +96,7 @@ from deerflow.runtime.runs.delivery import (
     DELIVERY_INCOMPLETE_ERROR,
     DELIVERY_INCOMPLETE_STOP_REASON,
     MAX_DISCLOSED_UNDELIVERED_PATHS,
+    presented_paths,
     undelivered_paths,
 )
 from deerflow.runtime.serialization import serialize
@@ -940,7 +941,7 @@ _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: termina
 
 
 def _empty_delivery_content() -> dict[str, Any]:
-    return {"presented": 0, "paths": [], "by_tool": {}}
+    return {"presented": 0, "paths": [], "by_tool": {}, "presented_files": []}
 
 
 def _presented_path_covers_output(presented_path: str, produced_path: str) -> bool:
@@ -956,19 +957,19 @@ def _delivery_content_with_outputs(
     if not produced_paths:
         return content
 
-    presented_paths = content.get("by_tool", {}).get("present_files", [])
-    matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented_paths)]
+    presented = presented_paths(content)
+    matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented)]
     satisfied = bool(matched_paths)
     return {
         **content,
         "verification": {
             "source": "outputs_changed",
-            "requirement": "present_files_matches_produced_output",
+            "requirement": "presentation_matches_produced_output",
         },
         "produced_paths": produced_paths,
-        "presented_paths": presented_paths,
+        "presented_paths": presented,
         "matched_paths": matched_paths,
-        "stage": "presented" if satisfied else ("mismatched" if presented_paths else "not_started"),
+        "stage": "presented" if satisfied else ("mismatched" if presented else "not_started"),
         "satisfied": satisfied,
     }
 
@@ -1793,7 +1794,6 @@ async def _run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
-
     from deerflow_extension_api import ExtensionData, TaskInfo
 
     from deerflow.extensions import get_loaded_extensions

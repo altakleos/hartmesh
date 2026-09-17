@@ -733,6 +733,58 @@ async def test_gateway_snapshot_revalidation_detects_rehashed_evidence_rewrite()
 
 
 @pytest.mark.asyncio
+async def test_gateway_snapshot_reads_files_a_bash_run_presented_on_the_runs_behalf() -> None:
+    """A presentation is any ``artifacts`` update, whatever tool made it; the bundle carries them all without a list of tool names."""
+    events = _events()
+    for event in events:
+        if event["event_type"] == "run.delivery":
+            event["content"] = {
+                "presented": 3,
+                "paths": ["/mnt/user-data/outputs/report.txt", "/mnt/user-data/outputs/report.pdf", "/mnt/user-data/outputs/shot.png"],
+                "by_tool": {"bash": ["/mnt/user-data/outputs/report.txt"], "some_future_tool": ["/mnt/user-data/outputs/report.pdf"], "browser_screenshot": ["/mnt/user-data/outputs/shot.png"]},
+                "presented_files": ["/mnt/user-data/outputs/report.txt", "/mnt/user-data/outputs/report.pdf"],
+            }
+    reader = GatewayRunEvidenceSnapshotReader(
+        run_store=_RunStore(_row()),
+        event_store=_EventStore(events),
+    )
+
+    snapshot = await reader.read(_request())
+
+    assert snapshot.artifact_paths == ("/mnt/user-data/outputs/report.txt", "/mnt/user-data/outputs/report.pdf")
+
+
+@pytest.mark.asyncio
+async def test_gateway_snapshot_rejects_a_presented_files_entry_outside_the_paths() -> None:
+    events = _events()
+    for event in events:
+        if event["event_type"] == "run.delivery":
+            event["content"]["presented_files"] = ["/mnt/user-data/outputs/not-in-paths.txt"]
+    reader = GatewayRunEvidenceSnapshotReader(
+        run_store=_RunStore(_row()),
+        event_store=_EventStore(events),
+    )
+
+    with pytest.raises(RunEvidenceBundleError, match="evidence_cross_link_invalid"):
+        await reader.read(_request())
+
+
+@pytest.mark.asyncio
+async def test_gateway_snapshot_rejects_a_presenting_tool_entry_that_is_not_a_path_list() -> None:
+    events = _events()
+    for event in events:
+        if event["event_type"] == "run.delivery":
+            event["content"]["by_tool"]["any_tool"] = "not-a-list"
+    reader = GatewayRunEvidenceSnapshotReader(
+        run_store=_RunStore(_row()),
+        event_store=_EventStore(events),
+    )
+
+    with pytest.raises(RunEvidenceBundleError, match="evidence_cross_link_invalid"):
+        await reader.read(_request())
+
+
+@pytest.mark.asyncio
 async def test_gateway_snapshot_rejects_cross_linked_assembly() -> None:
     row = _row()
     row["assembly_evidence_digest"] = "0" * 64

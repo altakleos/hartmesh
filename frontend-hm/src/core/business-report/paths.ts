@@ -40,7 +40,8 @@ export function reportRenderPath(reportPath: string, kind: ReportRenderKind) {
 /**
  * The renders the thread has presented.
  *
- * `artifacts` is the thread's cumulative `present_files` list, so a format
+ * `artifacts` is the thread's cumulative presented-files list (from
+ * `present_files`, or a tool call that presented the files it made), so a format
  * that was never rendered is left out rather than offered as a link that would
  * 404. It is not per-turn: a rebuild deletes the previous draft's renders and
  * their paths stay in the list, so a format that has not been rendered again

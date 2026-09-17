@@ -1094,7 +1094,7 @@ async def test_reconcile_orphaned_run_backfills_delivery_after_atomic_takeover()
     assert second == []
     delivery = await events.list_events("thread-1", "running-run", event_types=["run.delivery"])
     assert len(delivery) == 1
-    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+    assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}, "presented_files": []}
     assert (await store.get("running-run"))["status"] == "error"
 
 

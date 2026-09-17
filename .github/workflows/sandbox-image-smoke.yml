@@ -147,7 +147,7 @@ jobs:
           # PyMuPDF the image ships. Proves the report path, not only imports.
           report_response="$(curl --fail-with-body --silent --show-error \
             --header 'Content-Type: application/json' \
-            --data '{"command":"set -e; R=/mnt/smoke/business-report/scripts/report.py; python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/smoke-report --render pdf,docx,xlsx; python3 /mnt/smoke/check_pdf_on_image.py /tmp/smoke-report/2026-08-business-review.pdf"}' \
+            --data '{"command":"set -e; R=/mnt/smoke/business-report/scripts/report.py; python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/smoke-report --render pdf,docx,xlsx; python3 /mnt/smoke/check_pdf_on_image.py /tmp/smoke-report/smoke-report.pdf"}' \
             http://127.0.0.1:18080/v1/bash/exec)"
           if ! printf '%s' "$report_response" | jq -e '.data.exit_code == 0' >/dev/null \
             || ! printf '%s' "$report_response" | jq --raw-output '.data.stdout' | grep -q 'Checks: Totals match your file'; then
@@ -227,7 +227,7 @@ jobs:
 
           slim_report_response="$(curl --fail-with-body --silent --show-error \
             --header 'Content-Type: application/json' \
-            --data '{"command":"set -e; R=/mnt/smoke/business-report/scripts/report.py; python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/slim-report --render pdf,docx,xlsx; python3 /mnt/smoke/check_pdf_on_image.py /tmp/slim-report/2026-08-business-review.pdf"}' \
+            --data '{"command":"set -e; R=/mnt/smoke/business-report/scripts/report.py; python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/slim-report --render pdf,docx,xlsx; python3 /mnt/smoke/check_pdf_on_image.py /tmp/slim-report/slim-report.pdf"}' \
             http://127.0.0.1:18081/v1/bash/exec)"
           if ! printf '%s' "$slim_report_response" | jq -e '.data.exit_code == 0' >/dev/null; then
             printf '%s\n' "$slim_report_response"

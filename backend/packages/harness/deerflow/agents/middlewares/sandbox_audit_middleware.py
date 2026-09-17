@@ -420,7 +420,21 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
         )
 
     def _append_warn_to_result(self, result: ToolMessage | Command, command: str) -> ToolMessage | Command:
-        """Append a warning note to the tool result for medium-risk commands."""
+        """Append a warning note to the tool result for medium-risk commands.
+
+        A ``bash`` result is a ``Command`` when the call presented the files it
+        was asked to make (``tools/presentation.py``); the note then goes onto
+        the tool message inside it, with the state update left as it is, so a
+        command that both installs a package and hands over files still says
+        so.
+        """
+        if isinstance(result, Command):
+            update = result.update if isinstance(result.update, dict) else None
+            messages = update.get("messages") if update else None
+            if not isinstance(messages, list) or not messages:
+                return result
+            patched = [self._append_warn_to_result(message, command) if isinstance(message, ToolMessage) else message for message in messages]
+            return Command(update={**update, "messages": patched}, goto=result.goto, graph=result.graph, resume=result.resume)
         if not isinstance(result, ToolMessage):
             return result
         warning = f"\n\n⚠️ Warning: `{command}` is a medium-risk command that may modify the runtime environment."
@@ -433,6 +447,7 @@ class SandboxAuditMiddleware(AgentMiddleware[ThreadState]):
             tool_call_id=result.tool_call_id,
             name=result.name,
             status=result.status,
+            additional_kwargs=dict(result.additional_kwargs),
         )
 
     # ------------------------------------------------------------------

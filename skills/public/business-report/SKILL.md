@@ -13,29 +13,54 @@ One script turns an export into a report draft: `report.json` plus PNG charts, t
 
 ```
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" inspect <files…>
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build   <files…> --period 2026-08 --out DIR [--render pdf,docx,xlsx]
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" show    DIR/<name>.report.json
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" prose   DIR/<name>.report.json --from prose.json [--render pdf,docx,xlsx]
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" render  DIR/<name>.report.json --to pdf,docx,xlsx
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" checks  DIR/<name>.report.json <files…>
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build   <files…> --period 2026-08 --out REPORTDIR [--render pdf,docx,xlsx]
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" show    REPORTDIR/<dirname>.report.json
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" prose   REPORTDIR/<dirname>.report.json --from prose.json [--render pdf,docx,xlsx]
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" render  REPORTDIR/<dirname>.report.json --to pdf,docx,xlsx
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" checks  REPORTDIR/<dirname>.report.json <files…>
 ```
 
-**A whole report is three runs**, and a change to the words is one. Each run
+**A whole report is one run** — `build … --render pdf,docx,xlsx` — and a
+change to the words is one more. Each run
 costs the user a wait, so do not spend one where the previous run already
 answered: `build` and `prose` both print the report's figures, checks and
-notes; `--render pdf,docx,xlsx` (or `--render all`) writes every format in one
-run; and `build`, `prose` and `render` each end with a `Present:` line
-followed by the files to hand over, one absolute path per line, the report
-first. Never call `render` once
-per format, never put renders in the background (`&` drops the shell variables
-the next command needs), and never write your own Python to find out what a run
-did — the run that made the draft already printed it.
+notes, and `--render pdf,docx,xlsx` (or `--render all`) writes every format in
+one run.
+
+**The `present` argument is the handover.** Every run that writes files the
+user should have — `build` or `prose` with `--render`, and `render` — is one
+`bash` call whose `present` argument lists those files: the report first, then
+each render. The names are known before the run, because the report takes its
+name from the last segment of `--out`: `--out …/2026-08-business-review`
+writes `2026-08-business-review.report.json` inside that directory, and
+`--render pdf,docx,xlsx` writes `2026-08-business-review.pdf`, `.docx` and
+`.xlsx` beside it. The tool attaches each listed file the run wrote and
+tells you so ("Presented to the user: …"); do not call `present_files` for
+those files, and do not list the directory to see that they exist. Name only
+the report and its renders: never `checks.json`, `renders.json` or anything
+under `charts/` — the report carries what matters in them, and a file named
+under `present` is delivered whether or not the user wants it. Never call
+`render` once per format, never put renders in the background (`&` drops the
+shell variables the next command needs), and never write your own Python to
+find out what a run did — the run that made the draft already printed it.
 
 Exit codes: `0` done; `1` a problem the user must hear about (stderr says what), including a withheld report or a period with no rows; `2` this sandbox is not the image the skill is built for (do not install anything; tell the user); `3` one decision is needed before building (stderr carries the question and the candidates).
 
 ## Workflow
 
-### Step 1: Inspect, and ask at most one question
+### Step 1 (usually skipped): `inspect`, only when the period or a role is unknown
+
+When the user named the period ("the August report", "Q3", "last year") go
+straight to Step 2: `build` reads the file the same way `inspect` does, picks
+the column roles itself, and stops with exit `3` and the one question on
+stderr when a role is ambiguous or missing — so an `inspect` run first is a
+round trip the user waits through for an answer `build` would have given.
+Run `inspect` only when the period is not known (its `period_suggestion`
+names the latest complete one), when the user asked what the file contains,
+or when a `build` exited `3` saying a role had *no column matched* and you
+need to see the columns the file does have. An exit `3` that names candidate
+columns has already answered itself — ask the user that question, do not
+re-read the file with `inspect`:
 
 ```bash
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" inspect /mnt/user-data/uploads/export.xlsx
@@ -43,7 +68,7 @@ python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" inspec
 
 The JSON output gives, per file and sheet: the columns with their type and samples, the suggested column roles (`date`, `amount`, `id`, `customer`, `category`, `person`, `status`, `source`, `quantity`, `location`) with a confidence, `ambiguous` roles with their candidate columns, `missing` required roles, the months present, a `period_suggestion`, `date_order` (how day and month were read), a `currency` guess and a ready-made `question` that covers every open role at once.
 
-Tell the user in one sentence what you found: rows, date range, the people or categories seen, the currency. Then:
+When you did run it, tell the user in one sentence what you found: rows, date range, the people or categories seen, the currency. Then:
 
 - If `question` is null, do not ask for confirmation; go on to build the suggested period unless the user named a different one.
 - If `question` is set, ask exactly that, once, even when it names two roles. Put every answer in one mapping file, `{"date": "Completed On", "amount": "Invoice Total"}`, and pass `--mapping` to build. A column you name explicitly displaces any role the script had guessed for it; `{"id": null}` clears a role. A workbook sheet is addressed as `export.xlsx::Sheet name`, never by sheet name alone.
@@ -56,16 +81,28 @@ Tell the user in one sentence what you found: rows, date range, the people or ca
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build \
   /mnt/user-data/uploads/export.xlsx \
   --period 2026-08 \
-  --out /mnt/user-data/outputs/reports/2026-08-business-review
+  --out /mnt/user-data/outputs/reports/2026-08-business-review \
+  --render pdf,docx,xlsx
 ```
 
-Builds `<period>-<title>.report.json`, `charts/*.png`, `checks.json` and `renders.json` (which renders belong to this draft) in `--out`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the directory, one directory per report; a second build into the same directory becomes the next draft, removes its own renders of the previous draft (they no longer match) and says so. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`. A period with no rows is an error that names the dates the files do cover; build a period the files have.
+with the `bash` tool's `present` argument naming the four files this run writes:
+
+```json
+{"present": [
+  "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json",
+  "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.pdf",
+  "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.docx",
+  "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.xlsx"
+]}
+```
+
+Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `charts/*.png`, `checks.json` and `renders.json` (which renders belong to this draft) in `--out`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the directory, one directory per report; a second build into the same directory becomes the next draft, removes its own renders of the previous draft (they no longer match) and says so. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`. A period with no rows is an error that names the dates the files do cover; build a period the files have.
 
 Options: `--exclude category=Warranty` (repeatable; a role or an exact column name, matched case-insensitively), `--company "Name"`, `--title "..."`, `--currency EUR`, `--short` for a one-sentence summary, `--prefs preferences.json`, `--profile <name>` (a tenant profile from `/mnt/tenant/report-profiles/` wins over the skill's `profiles/`).
 
 The output then prints the report itself — the KPIs, every table, the `Checks:` line, a `Not included:` line and the `Inputs:` line — which is what `show` prints, so Step 3 needs no second run. Repeat the checks to the user in plain words, and the not-included items when there are any (the line says "nothing" when every section is there; do not read that out). Never claim a check the line does not show. If the build exits `1` with "Report withheld", the totals did not reconcile: say so, show the check text, and do not render anything.
 
-`--render pdf,docx,xlsx` renders in the same run. Use it when you are not writing your own summary; otherwise leave it off here and render from `prose` in Step 3, because the prose step replaces the text and every render made before it.
+`--render pdf,docx,xlsx` renders in the same run and is the normal first report: the build already carries a factual summary and actions computed from the data, so the user has all three files after one run. Leave it off only when you are going to write your own summary in Step 3 in the same turn, because the prose step replaces the text and every render made before it; a build without `--render` still names the report alone under `present`, because the workspace draws the report from it.
 
 ### Step 3: Write the summary and the actions, then verify them
 
@@ -79,13 +116,14 @@ JSON
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" prose /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json --from /tmp/prose.json --render pdf,docx,xlsx
 ```
 
-That one run makes the next draft without recomputing anything, renders all three formats, prints the same figures-checks-inputs digest the build printed — summary and actions included, as the report now carries them — and ends with the `Present:` line. So there is nothing to look up afterwards and Step 4 is already done. Run `show` only for a report built in an earlier turn, whose figures are no longer in front of you. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
+again with `present` naming the report and the three renders. That one run makes the next draft without recomputing anything, renders all three formats and prints the same figures-checks-inputs digest the build printed — summary and actions included, as the report now carries them. So there is nothing to look up afterwards and Step 4 is already done. Run `show` only for a report built in an earlier turn, whose figures are no longer in front of you. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
 
 ### Step 4: Render
 
 Only for a report whose last run did not render — a `build` or `prose` run
 without `--render`, or a draft from an earlier turn. One run makes every
-format:
+format, and re-saves the report beside them, so in a later turn the report
+and its new renders are named together under `present`.
 
 ```bash
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" render <report.json> --to pdf,docx,xlsx
@@ -93,14 +131,14 @@ python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" render
 
 Renders land next to the report as `<name>.pdf`, `.docx` and `.xlsx`; `--to html` also works but HTML is the sheet the PDF is printed from, not a format the user is offered. Rendering reads only `report.json` and the pictures inside the report directory (and the tenant bundle); it never rebuilds. The DOCX has real headings and tables so the user can edit it; the XLSX has a Summary sheet whose revenue, count and average are live formulas over the Rows sheet, one sheet per table with live `SUM` totals and a live ratio for average columns, and the cleaned rows.
 
-### Step 5: Present
+### Step 5: Answer
 
-Show the KPI strip, the checks line and any `Not included` items, then offer the files with `present_files` in one call — exactly the paths listed under the last run's `Present:` line, in that order, one per line, `<name>.report.json` first and the renders after it. A `Not presented:` line means a file beside the report was not written by it; leave it out and say so if it matters. In the web workspace that file is drawn as the report itself — the figures, the charts, the checks line and a download button for the PDF, Word and Excel renders listed with it — so leaving it out reduces the report to a list of attachments; on a chat platform it is simply one more file. Do not present `checks.json`, `renders.json` or anything under `charts/`; the report carries what matters in them. Say which file the report used and when it was uploaded (the `Inputs:` line of the digest `build`, `prose` and `show` print). Then ask one short question about what to change, for example whether any rows should be excluded or a note added.
+The files you named under `present` are already with the user: the tool result names them under "Presented to the user". Do not call `present_files` for those and do not run `ls` to check they exist. A `Not attached:` line from the tool names a file it did not deliver and why (it does not exist, or this run did not write it) — if the run printed an error, say what it printed and do not claim a delivery; a `Note:` line from the script names a file that sits beside the report but was not written by it. A result with no "Presented to the user" line handed nothing over. In the web workspace the `<name>.report.json` is drawn as the report itself — the figures, the charts, the checks line and a download button for the PDF, Word and Excel renders listed with it; on a chat platform it is simply one more file. Show the KPI strip, the checks line and any `Not included` items in your reply. Say which file the report used and when it was uploaded (the `Inputs:` line of the digest `build`, `prose` and `show` print). Then ask one short question about what to change, for example whether any rows should be excluded or a note added.
 
 ## Changing a report
 
 - A change to the data (exclude rows, another period, another mapping) is a new `build` into the same `--out` directory with `--render pdf,docx,xlsx`; it becomes the next draft and replaces the renders of the previous one. Written text from `prose` is replaced by the computed text; run `prose` again if it still applies.
-- A change to the words (shorter summary, different actions) is one run: `prose … --render pdf,docx,xlsx`. Nothing is recomputed, the three formats are rewritten, and the `Present:` line names what to hand over. A `prose` run without `--render` deletes the renders it made earlier, because they still say what the previous draft said; a file it did not write is left alone and reported on a `Not presented:` line instead.
+- A change to the words (shorter summary, different actions) is one run: `prose … --render pdf,docx,xlsx` with `present` naming the report and the three renders again — the same paths as last time are presented again because their contents changed. Nothing is recomputed and the three formats are rewritten. A `prose` run without `--render` deletes the renders it made earlier, because they still say what the previous draft said; name the report alone under `present`, because the workspace draws the report from it. A file it did not write is left alone and reported on a `Note:` line instead.
 - Say what changed and the draft number, for example "Done. Two warranty jobs removed (2 jobs, $0.00). Draft 2."
 - Never modify the uploaded file. Never edit `report.json` by hand; the script owns it.
 

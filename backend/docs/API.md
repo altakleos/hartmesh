@@ -171,7 +171,9 @@ bounded digests and counts.
 
 `POST` returns a no-store ZIP whose final entry is the canonical
 `hartmesh-evidence/manifest.v1.json`. The other entries are exactly the files
-from the run's verified `present_files` delivery receipt. The manifest binds
+from the run's verified delivery receipt (presented by `present_files`, or by
+a tool that presented the files it was asked to make, such as `bash` with a
+`present` argument). The manifest binds
 their copied byte lengths and SHA-256 digests plus safe admission, assembly,
 lifecycle, tool, MCP, batch, sandbox, retrieval, and qualification roots.
 
@@ -263,7 +265,7 @@ emitted only when it is set:
 | --- | --- |
 | `title`, `thread_data` | every entry |
 | `messages` | newest returned entry |
-| `artifacts` (cumulative `present_files`), `todos`, `goal` | newest returned entry |
+| `artifacts` (cumulative presented files, from `present_files` or from a tool call that presented the files it made), `todos`, `goal` | newest returned entry |
 
 The last three are whole-thread state, so repeating them on every checkpoint
 would only duplicate them. "Newest returned" is not "newest that exists": a
@@ -324,7 +326,7 @@ Content-Type: application/json
 - Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
 - With durable run events configured, `rollback` and `interrupt` return `409` without mutation while a predecessor is active. Cancel that run, wait for its terminal `run.delivery`, then retry. Receiptless compatibility deployments retain legacy atomic supersession; the durable path stays fail-closed until a prepared replacement transaction can bind candidate identity, predecessor epoch, and delivery evidence together.
 - Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
-- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
+- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. A presentation — a `present_files` call, or a tool call that presented the files it was asked to make, such as `bash` with a `present` argument — must cover at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
@@ -369,7 +371,7 @@ already-persisted equal key remains a read-only replay and returns its original 
 
 When outputs changed during the run, `run.delivery` events retain the Slice 1
 facts (`presented`, `paths`, and `by_tool`) and add `produced_paths`,
-`presented_paths`, `matched_paths`, plus an explicit verdict: `verification`,
+`presented_files` (the paths tool results presented), `presented_paths`, `matched_paths`, plus an explicit verdict: `verification`,
 `stage` (`presented`, `mismatched`, or `not_started`), and `satisfied`. Receipts
 for runs without changed outputs keep their existing shape.
 

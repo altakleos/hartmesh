@@ -103,7 +103,7 @@ from deerflow.runtime.run_evidence import (
     RunEvidenceSnapshotV1,
     public_evidence_reference,
 )
-from deerflow.runtime.runs.delivery import get_run_delivery_response
+from deerflow.runtime.runs.delivery import get_run_delivery_response, presented_paths
 from deerflow.runtime.secret_context import redact_config_secrets, redact_metadata_secrets
 from deerflow.runtime.tenant_identity import TenantIdentityV1
 from deerflow.runtime.user_context import get_effective_user_id
@@ -1972,9 +1972,8 @@ def _presented_files_from_delivery(events: list[dict]) -> list[str]:
     if len(events) != 1:
         raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
     content = events[0].get("content")
-    by_tool = content.get("by_tool") if isinstance(content, dict) else None
-    presented = by_tool.get("present_files") if isinstance(by_tool, dict) else None
-    if not isinstance(presented, list) or not presented or any(not isinstance(path, str) for path in presented):
+    presented = presented_paths(content) if isinstance(content, dict) else []
+    if not presented:
         raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
     return presented
 

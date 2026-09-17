@@ -61,6 +61,7 @@ from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
 from deerflow.runtime import ConflictError as RuntimeConflictError
 from deerflow.runtime.goal import parse_goal_command
+from deerflow.runtime.presented_files import presented_files_of
 from deerflow.runtime.runs.manager import IdempotencyConflictError
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.skills.slash import parse_slash_skill_reference
@@ -784,7 +785,10 @@ def _extract_artifacts(result: dict | list) -> list[str]:
     Instead of reading the full accumulated ``artifacts`` state (which contains
     all artifacts ever produced in the thread), this inspects the messages after
     the last human message and collects file paths from ``present_files`` tool
-    calls.  This ensures only newly-produced artifacts are returned.
+    calls and from tool results tagged ``presented_files``
+    (``deerflow.runtime.presented_files``; a ``present_files`` result carries
+    the tag too and is deduplicated against its call).  This ensures only
+    newly-produced artifacts are returned.
     """
     if isinstance(result, list):
         messages = result
@@ -810,7 +814,12 @@ def _extract_artifacts(result: dict | list) -> list[str]:
                     paths = args.get("filepaths", [])
                     if isinstance(paths, list):
                         artifacts.extend(p for p in paths if isinstance(p, str))
-    return artifacts
+        # ...and for tool results that presented files.
+        elif msg.get("type") == "tool":
+            artifacts.extend(presented_files_of(msg))
+    # A turn that built and then revised presents the same files twice; the
+    # person gets each once.
+    return list(dict.fromkeys(artifacts))
 
 
 def _is_hidden_human_control_message(msg: Mapping[str, Any]) -> bool:

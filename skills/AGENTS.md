@@ -15,12 +15,24 @@ answers an earlier run had computed but not printed. So:
 - **One intention, one run.** A step must not exist to read back what the
   previous step already knew. `build` prints the figures `show` prints;
   `build` and `prose` take `--render pdf,docx,xlsx` and write every format in
-  one process; `prose` prints the text it just wrote.
-- **A run that produces files names them.** End with a `Present:` line and the
-  paths under it, one per line — a joined line cannot be split back apart when
-  a directory the caller chose has a space in it. The old doc did state the
-  rule in prose and the model still dropped the `report.json` the workspace
-  draws the report from: a rule to apply is not a list to copy.
+  one process; `prose` prints the text it just wrote; `build` asks the one
+  question `inspect` would have surfaced, so the doc sends the model to
+  `build` first when the period is known.
+- **The call that makes the files hands them over.** A run that writes
+  deliverables is one `bash` call whose `present` argument names them; the
+  tool attaches each named file the call wrote (inside this conversation's
+  outputs, a regular file, modified after the call started) and the result
+  says so, so the model has no second call to make and nothing to copy from
+  the output. For that to work the paths must be knowable before the run:
+  name outputs deterministically from what the caller chose (the report skill
+  names the report after its `--out` directory) and document the names in
+  `SKILL.md`. Nothing is parsed from a script's output — a script prints for
+  the reader, and no line of it is a contract. The `.18` tenant-class traces
+  are why: the model dropped `report.json` from its own `present_files` call
+  on both fresh reports, and made no call at all on either revision, having
+  re-run `prose --render pdf,docx,xlsx` over the same paths as the turn
+  before. A rule to apply is not a list to copy, and a list to copy is still
+  a judgement.
 - **Never document a command per output.** Three render lines in a doc become
   three calls, or one backgrounded line whose `&` drops the shell variables the
   next command needs. Both happened.

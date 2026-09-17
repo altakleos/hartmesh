@@ -25,9 +25,23 @@ file created or modified under `/mnt/user-data/outputs`, minus internal
 process-feedback files (the scanner's `EXCLUDED_DIR_NAMES` plus the configured
 `tool_output.storage_subdir`), so a run that only externalized oversized tool
 outputs does not fail delivery. At least one candidate must be covered by a
-path the journal attributes to `present_files`; presenting only an unrelated
-pre-existing path does not satisfy delivery, so a `present_files` call that
-named nothing this run produced is `mismatched`, not satisfied. Such receipts add `produced_paths`,
+path the run presented — a tool result tagged `presented_files`
+(`runtime/presented_files.py`), which `present_files` and any tool that
+presents the files it was asked to make both write (`bash` with a `present`
+argument; `tools/presentation.py` validates each path against the filesystem
+— inside this thread's outputs, a regular file, modified after the call
+started — before recording it; a file a later command in the same run
+deletes stays in `artifacts` and 404s, as it always did after
+`present_files`). The journal records tagged paths as the receipt's
+`presented_files`; `paths` is every `artifacts` update, side effects such as a
+browser screenshot included, and is not a presentation; `by_tool` is
+attribution only. No list of presenting tool names exists:
+`delivery.py`'s `presented_paths()` reads `presented_files` (falling back to
+`by_tool.present_files` only for receipts written before the tag existed). Presenting
+only an unrelated pre-existing path does not satisfy delivery, so a
+presentation that named nothing this run produced is `mismatched`, not
+satisfied. Readers of the receipt (the fence, the archive route, the evidence
+bundle, IM channels) go through `presented_paths()`. Such receipts add `produced_paths`,
 `presented_paths`, `matched_paths`, `verification`, `stage`, and `satisfied`
 to the Slice 1 fact fields. Missing a *matching* presentation is a run
 error, as is a successful one whose receipt cannot be durably verified. Neither

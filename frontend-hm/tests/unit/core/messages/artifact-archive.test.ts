@@ -20,7 +20,54 @@ function presentFiles(id: string, runId: string, filepaths: string[]): Message {
   } as Message;
 }
 
+function presentedByToolResult(
+  id: string,
+  runId: string,
+  filepaths: string[],
+): Message {
+  return {
+    id,
+    type: "tool",
+    name: "bash",
+    tool_call_id: `call-${id}`,
+    content: "Built draft 1",
+    run_id: runId,
+    additional_kwargs: { presented_files: filepaths },
+  } as Message;
+}
+
 describe("artifact archive display placement", () => {
+  test("a tool result that presented its run's files anchors the archive action too", () => {
+    const groups = getMessageGroups([
+      {
+        id: "ai-build",
+        type: "ai",
+        content: "",
+        run_id: "run-1",
+        tool_calls: [
+          {
+            id: "call-declared",
+            name: "bash",
+            args: { command: "python report.py build …" },
+          },
+        ],
+      } as Message,
+      presentedByToolResult("declared", "run-1", [
+        "/mnt/user-data/outputs/r/r.report.json",
+        "/mnt/user-data/outputs/r/r.pdf",
+      ]),
+    ]);
+
+    expect(groups.map((group) => group.type)).toEqual([
+      "assistant:processing",
+      "assistant:present-files",
+    ]);
+    expect(getArtifactArchiveCandidatesByGroupIndex(groups)).toEqual([
+      undefined,
+      { runId: "run-1" },
+    ]);
+  });
+
   test("anchors one archive action after a run's final file presentation", () => {
     const groups = getMessageGroups([
       presentFiles("first", "run-1", ["/mnt/user-data/outputs/a.txt"]),

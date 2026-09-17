@@ -695,6 +695,26 @@ class TestSandboxAuditMiddlewareWrapToolCall:
         assert isinstance(result, ToolMessage)
         assert "warning" in result.content.lower()
 
+    def test_medium_risk_warning_reaches_a_command_result_too(self):
+        """A bash result is a ``Command`` when the call presented the files it
+        made; the warning must land on the tool message inside it and the
+        state update (the presented files) must survive untouched."""
+        from langgraph.types import Command
+
+        request = _make_request("pip install requests && python report.py build …")
+        presented = ToolMessage("Built.\n\nPresented to the user: 1 file", tool_call_id="call-1", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/r.pdf"]})
+        handler = MagicMock(return_value=Command(update={"artifacts": ["/mnt/user-data/outputs/r.pdf"], "messages": [presented]}))
+        with patch.object(self.mw, "_write_audit"):
+            result = self.mw.wrap_tool_call(request, handler)
+
+        assert isinstance(result, Command)
+        assert result.update["artifacts"] == ["/mnt/user-data/outputs/r.pdf"]
+        (message,) = result.update["messages"]
+        assert isinstance(message, ToolMessage)
+        assert "warning" in message.content.lower() and message.content.startswith("Built.")
+        assert message.tool_call_id == "call-1"
+        assert message.additional_kwargs["presented_files"] == ["/mnt/user-data/outputs/r.pdf"]
+
     # --- Safe: handler MUST be called ---
 
     @pytest.mark.parametrize(

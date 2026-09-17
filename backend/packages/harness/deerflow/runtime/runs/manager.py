@@ -3707,7 +3707,7 @@ class RunManager:
                 run_id=record.run_id,
                 event_type="run.delivery",
                 category="outputs",
-                content={"presented": 0, "paths": [], "by_tool": {}},
+                content={"presented": 0, "paths": [], "by_tool": {}, "presented_files": []},
                 user_id=record.user_id,
             )
             return True
@@ -3814,7 +3814,7 @@ class RunManager:
             ).put_if_absent(
                 event_type="run.delivery",
                 category="outputs",
-                content={"presented": 0, "paths": [], "by_tool": {}},
+                content={"presented": 0, "paths": [], "by_tool": {}, "presented_files": []},
             )
             return True
         except Exception as exc:
