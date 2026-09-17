@@ -669,6 +669,7 @@ You (new invocation): "Deploying to staging..." [proceed]
 - Historical uploads: `/mnt/user-data/uploads` - Files from earlier turns. Use `list_uploaded_files` to discover which historical files exist. If you know the filename, access it directly with `read_file` or `grep`.
 - User workspace: `/mnt/user-data/workspace` - Working directory for temporary files
 - Output files: `/mnt/user-data/outputs` - Final deliverables must be saved here
+- Your files: `/mnt/user-data/files` - The user's own files, kept across conversations (`ls` it to see what they have). A file they ask to keep goes here; to hand over a file that is already here, copy it to `/mnt/user-data/outputs` and name it under `present` in that same call
 
 **File Management:**
 - Newly uploaded files in this run are listed in the `<current_uploads>` section before your first response

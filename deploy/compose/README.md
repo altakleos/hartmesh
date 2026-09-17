@@ -120,9 +120,11 @@ Two directories cross the container boundary:
   `business-report` also reads an optional tenant
   bundle at `/mnt/tenant` (`brand.json`, a logo, `report-profiles/`) when a
   deployment mounts one; without it, reports carry no company branding. The Gateway keeps
-  uploads and artifacts under `home/threads/<thread>/user-data/`, so the
-  pre-created `uploads/` and `artifacts/` directories are unused by this
-  profile and stay empty.
+  uploads and artifacts under `home/users/<user>/threads/<thread>/user-data/`
+  and each person's kept files under `home/users/<user>/files/` (mounted into
+  every sandbox of theirs at `/mnt/user-data/files`), so the pre-created
+  `uploads/` and `artifacts/` directories are unused by this profile and stay
+  empty.
 - `/srv/hartmesh/operator`, mounted **read-only** into the Gateway at the same
   path: operator-owned deployment material that is not release content. Today
   that is the one optional model file `HARTMESH_MODELS_FILE` names

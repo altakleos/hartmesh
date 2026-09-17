@@ -1,6 +1,6 @@
 "use client";
 
-import { DownloadIcon } from "lucide-react";
+import { DownloadIcon, FolderPlusIcon, LoaderIcon } from "lucide-react";
 import { useMemo } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -19,6 +19,7 @@ import {
   type ReportSection,
   type ReportTable,
 } from "@/core/business-report";
+import { useSaveToMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
 import { cn } from "@/lib/utils";
@@ -301,6 +302,10 @@ export function ReportCard({
     () => new Map(report.charts.map((chart) => [chart.id, chart])),
     [report.charts],
   );
+  // The downloads are what a person keeps: the documents, not the JSON the
+  // card is drawn from. The showcase has no files to keep them in.
+  const myFiles = useSaveToMyFiles(threadId);
+  const renderPaths = renders.map((kind) => reportRenderPath(filepath, kind));
 
   const chartURL = (png: string) =>
     urlOfArtifact({
@@ -363,6 +368,21 @@ export function ReportCard({
                 </a>
               </Button>
             ))}
+            {!isMock && (
+              <Button
+                disabled={myFiles.isPending}
+                onClick={() => void myFiles.save(renderPaths)}
+                size="sm"
+                variant="outline"
+              >
+                {myFiles.isPending ? (
+                  <LoaderIcon className="size-4 animate-spin" />
+                ) : (
+                  <FolderPlusIcon className="size-4" />
+                )}
+                {myFiles.isPending ? t.files.saving : t.files.saveToMyFiles}
+              </Button>
+            )}
           </div>
         )}
 

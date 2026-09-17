@@ -40,6 +40,8 @@ class ThreadDataState(TypedDict):
     workspace_path: NotRequired[str | None]
     uploads_path: NotRequired[str | None]
     outputs_path: NotRequired[str | None]
+    # The person's own files (``/mnt/user-data/files``): per user, not per thread.
+    files_path: NotRequired[str | None]
 
 
 class BackgroundTaskState(TypedDict):

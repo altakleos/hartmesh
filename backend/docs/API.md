@@ -136,7 +136,7 @@ IP address. SQL audit retention defaults to 90 days.
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
   denied until explicitly added to the policy.
   Every other authenticated route — memory, agents, models, MCP/skills
-  config, integrations, channels, uploads — answers `403` to PAT callers
+  config, integrations, channels, uploads, files — answers `403` to PAT callers
   regardless of scopes. Scope enforcement alone only constrains
   permission-decorated routes, so the allowlist is the outer boundary;
   session-cookie callers are unaffected.
@@ -1118,6 +1118,79 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
   "message": "Deleted document.pdf"
 }
 ```
+
+### My Files
+
+The person's own files, kept across conversations. They live under
+`users/{user_id}/files` and every sandbox of that user mounts the same
+directory read-write at `/mnt/user-data/files`, so a file kept in one
+conversation is on the disk of the next. The routes are per owner: there is no
+way to name another person's files.
+
+#### List My Files
+
+```http
+GET /api/files
+```
+
+**Response:**
+```json
+{
+  "files": [
+    {
+      "path": "Reports/2026-08-business-review.pdf",
+      "name": "2026-08-business-review.pdf",
+      "size": 48213,
+      "modified": 1757980800.0,
+      "virtual_path": "/mnt/user-data/files/Reports/2026-08-business-review.pdf",
+      "url": "/api/files/Reports/2026-08-business-review.pdf"
+    }
+  ],
+  "count": 1,
+  "truncated": false
+}
+```
+
+The listing is recursive and sorted by path; hidden names and symlinks are
+skipped. `truncated` is `true` when it stopped at its ceiling.
+
+#### Get One Of My Files
+
+```http
+GET /api/files/{path}
+```
+
+**Query Parameters:**
+- `download` (boolean): force a download; HTML, XHTML and SVG are always downloads
+
+#### Remove One Of My Files
+
+```http
+DELETE /api/files/{path}
+```
+
+Removes a file; folders stay. `404` for a missing file, `400` for a path that
+cannot name a file (a folder, a hidden name, a link).
+
+#### Keep A Conversation's File
+
+Copy one of a conversation's uploads or outputs into the caller's files. The
+exact bytes are copied and the conversation's own file is untouched; a name
+already taken is kept beside the new one with the next free `_N` suffix.
+
+```http
+POST /api/threads/{thread_id}/files
+Content-Type: application/json
+
+{
+  "path": "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.pdf",
+  "folder": "Reports"
+}
+```
+
+**Response** (`201`): the kept file, in the listing's shape. `400` for a path
+outside uploads/outputs or a bad folder, `404` for a missing source or a thread
+the caller does not own.
 
 ### Thread Cleanup
 

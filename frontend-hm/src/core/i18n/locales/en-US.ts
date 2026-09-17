@@ -357,6 +357,33 @@ export const enUS: Translations = {
     agents: "Agents",
     scheduledTasks: "Scheduled tasks",
     agentsDisabledTooltip: "Feature not enabled",
+    files: "Files",
+  },
+
+  files: {
+    title: "My files",
+    description: "What you kept, from every conversation.",
+    empty: "Nothing kept yet",
+    emptyHint:
+      "Save a report or an upload from a conversation and it will be here next time.",
+    loadFailed: "Couldn't load your files",
+    retry: "Try again",
+    name: "Name",
+    folder: "Folder",
+    size: "Size",
+    modified: "Modified",
+    download: "Download",
+    delete: "Delete",
+    deleteConfirm: (name) => `Delete ${name}? This cannot be undone.`,
+    deleted: "Deleted",
+    deleteFailed: "Couldn't delete the file",
+    truncated: (count) => `Showing the first ${count} files.`,
+    saveToMyFiles: "Save to my files",
+    saving: "Saving…",
+    saved: (name) => `Saved ${name} to My files`,
+    savedMany: (count) => `Saved ${count} files to My files`,
+    saveFailed: "Couldn't save to My files",
+    openMyFiles: "Open My files",
   },
 
   backgroundTasks: {

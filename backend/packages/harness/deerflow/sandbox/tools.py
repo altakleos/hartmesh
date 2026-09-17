@@ -853,6 +853,7 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
         /mnt/user-data/workspace/* -> thread_data['workspace_path']/*
         /mnt/user-data/uploads/* -> thread_data['uploads_path']/*
         /mnt/user-data/outputs/* -> thread_data['outputs_path']/*
+        /mnt/user-data/files/* -> thread_data['files_path']/*  (the person's, not the thread's)
 
     Args:
         path: The path that may contain virtual path prefix.
@@ -889,6 +890,7 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
     workspace = thread_data.get("workspace_path")
     uploads = thread_data.get("uploads_path")
     outputs = thread_data.get("outputs_path")
+    files = thread_data.get("files_path")
 
     if workspace:
         mappings[f"{VIRTUAL_PATH_PREFIX}/workspace"] = workspace
@@ -896,6 +898,10 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
         mappings[f"{VIRTUAL_PATH_PREFIX}/uploads"] = uploads
     if outputs:
         mappings[f"{VIRTUAL_PATH_PREFIX}/outputs"] = outputs
+    if files:
+        # Outside the thread's user-data root, so it takes no part in the
+        # common-parent check below and is never reached through the root.
+        mappings[f"{VIRTUAL_PATH_PREFIX}/files"] = files
 
     # Also map the virtual root when all known dirs share the same parent.
     actual_dirs = [p for p in (workspace, uploads, outputs) if p]
@@ -1092,9 +1098,10 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
 
 
 def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
-    """Verify that a resolved host path stays inside allowed per-thread roots.
+    """Verify that a resolved host path stays inside the roots this thread may touch.
 
-    Raises PermissionError if the path escapes workspace/uploads/outputs.
+    Raises PermissionError if the path escapes workspace/uploads/outputs or
+    the person's own files.
     """
     allowed_roots = [
         Path(p).resolve()
@@ -1102,6 +1109,7 @@ def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataSta
             thread_data.get("workspace_path"),
             thread_data.get("uploads_path"),
             thread_data.get("outputs_path"),
+            thread_data.get("files_path"),
         )
         if p is not None
     ]
@@ -1982,10 +1990,10 @@ def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
     if runtime.state.get("thread_directories_created"):
         return
 
-    # Create the three directories
+    # Create the thread's three directories and the person's files
     import os
 
-    for key in ["workspace_path", "uploads_path", "outputs_path"]:
+    for key in ["workspace_path", "uploads_path", "outputs_path", "files_path"]:
         path = thread_data.get(key)
         if path:
             os.makedirs(path, exist_ok=True)

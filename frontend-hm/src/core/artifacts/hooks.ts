@@ -2,8 +2,23 @@ import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useThread } from "@/components/workspace/messages/context";
+import {
+  REPORT_PREVIEW_MAX_BYTES,
+  isBusinessReportPath,
+} from "@/core/business-report";
 
 import { loadArtifactContent, loadArtifactContentFromToolCall } from "./loader";
+
+/**
+ * A report card is drawn from the whole `report.json`, rows included, so its
+ * preview budget is the report's, not the text preview's (C8: at 1 MiB a
+ * report of about 4,300 rows stopped being a card and became JSON).
+ */
+function previewBudgetOf(filepath: string) {
+  return isBusinessReportPath(filepath)
+    ? { previewMaxBytes: REPORT_PREVIEW_MAX_BYTES }
+    : {};
+}
 
 export function useArtifactContent({
   filepath,
@@ -40,6 +55,7 @@ export function useArtifactContent({
         threadId,
         isMock,
         full: fullContentRequested,
+        ...previewBudgetOf(filepath),
       });
     },
     enabled,
@@ -109,6 +125,7 @@ export function useStandaloneArtifactContent({
         threadId,
         isMock,
         full: fullContentRequested,
+        ...previewBudgetOf(filepath),
       }),
     staleTime: 0,
     refetchOnWindowFocus: true,

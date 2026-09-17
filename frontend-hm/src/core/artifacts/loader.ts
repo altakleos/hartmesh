@@ -52,11 +52,18 @@ export async function loadArtifactContent({
   threadId,
   isMock,
   full = false,
+  previewMaxBytes = ARTIFACT_PREVIEW_MAX_BYTES,
 }: {
   filepath: string;
   threadId: string;
   isMock?: boolean;
   full?: boolean;
+  /**
+   * How much of the file the preview fetches before calling it truncated.
+   * A file whose preview is drawn from the whole body (a report card) asks
+   * for more than a text preview does.
+   */
+  previewMaxBytes?: number;
 }) {
   let enhancedFilepath = filepath;
   if (filepath.endsWith(".skill")) {
@@ -65,9 +72,7 @@ export async function loadArtifactContent({
   const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
   const response = await fetch(url, {
     cache: "no-store",
-    headers: full
-      ? undefined
-      : { Range: `bytes=0-${ARTIFACT_PREVIEW_MAX_BYTES - 1}` },
+    headers: full ? undefined : { Range: `bytes=0-${previewMaxBytes - 1}` },
   });
   const contentRange = parseContentRange(response.headers.get("Content-Range"));
   if (response.status === 416 && contentRange?.total === 0) {

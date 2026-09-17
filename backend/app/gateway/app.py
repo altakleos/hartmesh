@@ -35,6 +35,7 @@ from app.gateway.routers import (
     console,
     features,
     feedback,
+    files,
     github_webhooks,
     input_polish,
     integrations,
@@ -1360,6 +1361,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)
+
+    # The person's own files: /api/files, plus /api/threads/{thread_id}/files to keep one
+    app.include_router(files.router)
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)

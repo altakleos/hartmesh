@@ -72,6 +72,23 @@ describe("loadArtifactContent", () => {
     expect(result.sha256).toBeUndefined();
   });
 
+  it("requests the caller's preview budget when one is given", async () => {
+    const fetchMock = rs.fn(async (_url: string, init?: RequestInit) => {
+      expect(new Headers(init?.headers).get("Range")).toBe("bytes=0-4095");
+      return new Response("{}", { status: 200 });
+    });
+    rs.stubGlobal("fetch", fetchMock);
+
+    const result = await loadArtifactContent({
+      filepath: "/mnt/user-data/outputs/august.report.json",
+      threadId: "thread-1",
+      previewMaxBytes: 4096,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(result.truncated).toBe(false);
+  });
+
   it("loads and revisions the full file only when explicitly requested", async () => {
     const fetchMock = rs.fn(async (_url: string, init?: RequestInit) => {
       expect(new Headers(init?.headers).has("Range")).toBe(false);

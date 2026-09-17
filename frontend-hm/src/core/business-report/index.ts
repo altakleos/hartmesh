@@ -3,6 +3,7 @@ export {
   checksLine,
   isBusinessReportPath,
   parseBusinessReport,
+  REPORT_PREVIEW_MAX_BYTES,
   type BusinessReport,
   type ReportChart,
   type ReportCheck,

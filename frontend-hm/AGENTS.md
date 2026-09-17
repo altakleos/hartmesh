@@ -64,14 +64,14 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/showcase/[thread_id]` (allowlisted public read-only demos), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/artifacts/view` (chrome-free window that renders one markdown artifact with the panel's own renderer), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`app/`** — Next.js App Router. Routes include `/` (landing), `/showcase/[thread_id]` (allowlisted public read-only demos), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/workspace/files` (the person's own files, kept across conversations), `/artifacts/view` (chrome-free window that renders one markdown artifact with the panel's own renderer), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
   - `workspace/` — Chat page components (messages, artifacts, settings)
   - `landing/` — Landing page sections
   - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `artifact-delivery/` (run-scoped undelivered-file verdicts, from the stream while the page that heard them is open and from `GET .../runs/{run_id}/delivery` afterwards, so the correction survives a reload), `business-report/` (the `report.json` contract, its formatting and its companion paths), `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `tool-plane/` (governance status/history client and legacy-mutation ceiling), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `artifact-delivery/` (run-scoped undelivered-file verdicts, from the stream while the page that heard them is open and from `GET .../runs/{run_id}/delivery` afterwards, so the correction survives a reload), `business-report/` (the `report.json` contract, its formatting and its companion paths), `files/` (the person's own files: list, open, remove, and keeping a conversation's file there), `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `tool-plane/` (governance status/history client and legacy-mutation ceiling), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
 
 A `*.report.json` artifact is previewed as a report card rather than as JSON.
 `core/business-report/` parses
@@ -89,13 +89,27 @@ card renders on whichever ground the viewer's theme paints.
 
 Three things decide whether a card appears at all: the `.report.json` suffix, a
 body that parses as `version: 1`, and — for each picture — the contract's
-`charts/<id>.png` shape. A body over `ARTIFACT_PREVIEW_MAX_BYTES` (1 MiB)
-arrives truncated and stays JSON until _Load full file_. `report.json` embeds
-every cleaned row of the period, which the card never draws, so that ceiling is
-around four thousand rows in one period (measured: 121,540 bytes for 502
-in-period rows). Dropping `rows` before the size check is the real fix and is
-not done. The card's own chrome follows the UI locale while the report body
-follows `meta.lang`, which the skill only ever writes as `en-US`.
+`charts/<id>.png` shape. A report is fetched under its own preview budget,
+`REPORT_PREVIEW_MAX_BYTES` (16 MiB, `core/business-report`), not the text
+preview's 1 MiB: `report.json` embeds every cleaned row of the period (about
+242 bytes each), which the card never draws but the renders need, so under the
+text budget a report of some 4,300 rows arrived truncated and stayed JSON. The
+report budget is around 69,000 rows; past it, _Load full file_ remains. The
+card's own chrome follows the UI locale while the report body follows
+`meta.lang`, which the skill only ever writes as `en-US`.
+
+_My files_ (`/workspace/files`, `core/files/`) is what the person kept, from
+every conversation: the Gateway keeps it per user and every sandbox of theirs
+mounts it at `/mnt/user-data/files`, so a report kept in one chat is on the
+next one's disk. Keeping copies exact bytes and never overwrites (a taken name
+gets the next `_N`). Two places offer it: the report card's _Save to my files_
+keeps the renders it is offering — the documents, not the JSON — and the
+artifact panel's action keeps the open file, for anything under uploads or
+outputs (`canKeepInMyFiles`); neither is offered on the showcase, which has no
+files to keep them in. Both go through `useSaveToMyFiles`, which keeps each path
+and then says so once, with a way to the page; a failure part-way names the
+failure and leaves what already landed. Presentation stays an outputs
+contract: a file from _My files_ is handed over by copying it into outputs.
 
 The deployment owns two presentation settings, both read from
 `GET /api/features` (`core/features`): `ui.starters` is Home's starter grid —

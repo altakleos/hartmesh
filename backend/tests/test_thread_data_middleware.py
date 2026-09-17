@@ -34,6 +34,20 @@ class TestThreadDataMiddleware:
 
         assert result is not None
         assert "/users/runtime-user/threads/thread-123/" in _as_posix(result["thread_data"]["workspace_path"])
+        # The person's files sit beside their threads and are the same on every thread.
+        assert _as_posix(result["thread_data"]["files_path"]).endswith("/users/runtime-user/files")
+
+    @pytest.mark.no_auto_user
+    def test_before_agent_names_the_default_buckets_files_without_a_signed_in_user(self, tmp_path):
+        # An unauthenticated path lands in the default bucket, files included,
+        # which is the directory the sandbox providers mount for it.
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+
+        result = middleware.before_agent(state={}, runtime=Runtime(context={"thread_id": "thread-123"}))
+
+        assert result is not None
+        assert "/users/default/threads/thread-123/" in _as_posix(result["thread_data"]["workspace_path"])
+        assert _as_posix(result["thread_data"]["files_path"]).endswith("/users/default/files")
 
     def test_before_agent_uses_thread_id_from_configurable_when_context_is_none(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)

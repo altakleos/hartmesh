@@ -15,6 +15,7 @@ rs.mock("@/core/artifacts/loader", () => ({
 import { useThread } from "@/components/workspace/messages/context";
 import { useArtifactContent } from "@/core/artifacts/hooks";
 import { loadArtifactContent } from "@/core/artifacts/loader";
+import { REPORT_PREVIEW_MAX_BYTES } from "@/core/business-report";
 
 const mockedUseThread = rs.mocked(useThread);
 const mockedLoadArtifactContent = rs.mocked(loadArtifactContent);
@@ -98,5 +99,32 @@ describe("useArtifactContent", () => {
         full: false,
       });
     });
+  });
+
+  it("gives a report the report's preview budget, not the text preview's", async () => {
+    // The card is drawn from the whole body, rows included; under the 1 MiB
+    // text budget a report of some 4,300 rows stopped being a card (C8).
+    const reportPath =
+      "/mnt/user-data/outputs/reports/august/august.report.json";
+    renderHook(
+      () =>
+        useArtifactContent({
+          filepath: reportPath,
+          threadId: "thread-a",
+          enabled: true,
+        }),
+      { wrapper: createWrapper() },
+    );
+
+    await waitFor(() => {
+      expect(mockedLoadArtifactContent).toHaveBeenLastCalledWith({
+        filepath: reportPath,
+        threadId: "thread-a",
+        isMock: false,
+        full: false,
+        previewMaxBytes: REPORT_PREVIEW_MAX_BYTES,
+      });
+    });
+    expect(REPORT_PREVIEW_MAX_BYTES).toBeGreaterThan(1024 * 1024);
   });
 });

@@ -519,6 +519,29 @@ def test_resolve_and_validate_user_data_path_blocks_traversal(tmp_path: Path) ->
         _resolve_and_validate_user_data_path("/mnt/user-data/workspace/../../../etc/passwd", thread_data)
 
 
+def test_resolve_and_validate_user_data_path_reaches_the_persons_files(tmp_path: Path) -> None:
+    """/mnt/user-data/files maps to the per-user files directory, outside the thread."""
+    files = tmp_path / "users" / "u1" / "files"
+    files.mkdir(parents=True)
+    thread_data = {
+        "workspace_path": str(tmp_path / "threads" / "t1" / "user-data" / "workspace"),
+        "uploads_path": str(tmp_path / "threads" / "t1" / "user-data" / "uploads"),
+        "outputs_path": str(tmp_path / "threads" / "t1" / "user-data" / "outputs"),
+        "files_path": str(files),
+    }
+    resolved = _resolve_and_validate_user_data_path("/mnt/user-data/files/Reports/august.pdf", thread_data)
+    assert resolved == str(files / "Reports" / "august.pdf")
+    with pytest.raises(PermissionError):
+        _resolve_and_validate_user_data_path("/mnt/user-data/files/../../u2/files/secret", thread_data)
+
+
+def test_replace_virtual_path_maps_files_only_when_known() -> None:
+    with_files = {**_THREAD_DATA, "files_path": "/tmp/deer-flow/users/u1/files"}
+    assert Path(replace_virtual_path("/mnt/user-data/files/a.txt", with_files)).as_posix() == "/tmp/deer-flow/users/u1/files/a.txt"
+    # Without a files root the path stays under the thread's user-data root, where the fence refuses it.
+    assert Path(replace_virtual_path("/mnt/user-data/files/a.txt", _THREAD_DATA)).as_posix() == "/tmp/deer-flow/threads/t1/user-data/files/a.txt"
+
+
 # ---------- replace_virtual_paths_in_command ----------
 
 

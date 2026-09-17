@@ -271,6 +271,33 @@ export interface Translations {
     scheduledTasks: string;
     agentsDisabledTooltip: string;
     channels: string;
+    files: string;
+  };
+
+  // My files: what the person kept, across conversations
+  files: {
+    title: string;
+    description: string;
+    empty: string;
+    emptyHint: string;
+    loadFailed: string;
+    retry: string;
+    name: string;
+    folder: string;
+    size: string;
+    modified: string;
+    download: string;
+    delete: string;
+    deleteConfirm: (name: string) => string;
+    deleted: string;
+    deleteFailed: string;
+    truncated: (count: number) => string;
+    saveToMyFiles: string;
+    saving: string;
+    saved: (name: string) => string;
+    savedMany: (count: number) => string;
+    saveFailed: string;
+    openMyFiles: string;
   };
 
   // Thread-scoped MCP background tasks

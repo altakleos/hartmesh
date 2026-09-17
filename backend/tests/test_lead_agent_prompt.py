@@ -103,6 +103,9 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
 
     assert "Treat `/mnt/user-data/workspace` as your default current working directory" in prompt
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
+    # The person's own files, kept across conversations, and how one is handed over from there.
+    assert "- Your files: `/mnt/user-data/files`" in prompt
+    assert "copy it to `/mnt/user-data/outputs` and name it under `present`" in prompt
 
 
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):

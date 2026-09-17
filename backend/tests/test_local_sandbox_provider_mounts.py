@@ -1325,3 +1325,35 @@ class TestLocalSandboxProviderResetClearsSingleton:
             assert lsp_module._singleton is None
         finally:
             lsp_module._singleton = None
+
+
+class TestUserFilesMapping:
+    def test_thread_path_mappings_reach_the_persons_files(self, tmp_path):
+        """The local provider maps /mnt/user-data/files to the same per-user directory on every thread."""
+        from deerflow.config.paths import Paths
+
+        paths = Paths(base_dir=tmp_path / "home")
+        skills_dir = tmp_path / "skills"
+        (skills_dir / "public").mkdir(parents=True)
+        (skills_dir / "custom").mkdir()
+        config = SimpleNamespace(
+            skills=SimpleNamespace(
+                container_path="/mnt/skills",
+                get_skills_path=lambda: skills_dir,
+                use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
+            )
+        )
+
+        with (
+            patch("deerflow.config.get_app_config", return_value=config),
+            patch("deerflow.config.paths.get_paths", return_value=paths),
+        ):
+            first = LocalSandboxProvider._build_thread_path_mappings("thread-a", user_id="alice")
+            second = LocalSandboxProvider._build_thread_path_mappings("thread-b", user_id="alice")
+
+        files_a = next(mapping for mapping in first if mapping.container_path == "/mnt/user-data/files")
+        files_b = next(mapping for mapping in second if mapping.container_path == "/mnt/user-data/files")
+        assert files_a.local_path == str(paths.user_files_dir("alice"))
+        assert files_b.local_path == files_a.local_path
+        assert files_a.read_only is False
+        assert paths.user_files_dir("alice").is_dir()

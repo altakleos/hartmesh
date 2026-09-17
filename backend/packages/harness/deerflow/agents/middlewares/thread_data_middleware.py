@@ -57,13 +57,19 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             user_id: Optional user ID for per-user path isolation.
 
         Returns:
-            Dictionary with workspace_path, uploads_path, and outputs_path.
+            Dictionary with workspace_path, uploads_path and outputs_path, plus
+            files_path when the thread has an owner: the first three are the
+            thread's, ``files_path`` is the person's, the same on every thread
+            of theirs. The legacy layout has no user bucket and so no files.
         """
-        return {
+        paths = {
             "workspace_path": str(self._paths.sandbox_work_dir(thread_id, user_id=user_id)),
             "uploads_path": str(self._paths.sandbox_uploads_dir(thread_id, user_id=user_id)),
             "outputs_path": str(self._paths.sandbox_outputs_dir(thread_id, user_id=user_id)),
         }
+        if user_id is not None:
+            paths["files_path"] = str(self._paths.user_files_dir(user_id))
+        return paths
 
     def _create_thread_directories(self, thread_id: str, user_id: str | None = None) -> dict[str, str]:
         """Create the thread data directories.
