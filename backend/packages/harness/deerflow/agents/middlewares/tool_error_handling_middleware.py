@@ -74,6 +74,14 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             detail = detail[:497] + "..."
 
         content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. {_RECOVERY_HINT}"
+        # A failure category says what went wrong; some of them cannot say
+        # what to do about it, and "unavailable" reads as "try again" when
+        # the truth is that this deployment has no working provider. An
+        # adapter that knows better attaches one bounded sentence, and it
+        # replaces the generic retry advice rather than sitting beside it.
+        guidance = getattr(exc, "guidance", None)
+        if isinstance(guidance, str) and guidance.strip():
+            content = f"Error: Tool '{tool_name}' failed: {guidance.strip()}"
         message = ToolMessage(
             content=content,
             tool_call_id=tool_call_id,
