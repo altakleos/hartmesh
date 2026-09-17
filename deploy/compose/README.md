@@ -243,6 +243,25 @@ blocks promotion of a governed base from `custom/` exactly as it would from
 `public/`. 13 skills are seeded at this release; the seed's line in the
 Gateway log says how many and which names were excluded.
 
+**Per-turn material.** A chat never mounts this library directly: each
+admission snapshots the effective skills into a content-addressed, read-only
+tree under `home/runtime/skill-snapshots/<subject>/<digest>/` and binds it
+into the thread's view at `home/runtime/skill-snapshot-active-views/…`, which is what
+the sandbox sees at `/mnt/skills/.accepted/<digest>`. Until 2026-09-17 both
+were deleted when the run ended and staged again, with a `fsync` per file, on
+the next turn: on the `.19` tenant class that was 1.4 to 2.2 s before the
+stream response existed and another 1.2 to 1.8 s inside the worker, every
+warm turn, for the same 13 packages (46 files; 2.2 s and 2.1 s respectively
+on the development host, against 25 ms to verify and 12 ms to bind). Both
+are now retained and re-verified by digest before any use: a user keeps
+their newest two snapshot digests (the third publication evicts the oldest)
+and a parked thread keeps its view until a different digest replaces it, the
+sandbox is destroyed or evicted, or the Gateway restarts. Disk: at most two
+copies of the library per user plus one per parked thread — about 0.75 MB
+each at this release — on the tenant data disk
+(`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Material is retained across
+turns").
+
 **Governance.** The profile runs the governed tool plane
 (`tool_plane.enabled: true`) under the `local_development` deployment
 profile, so governance state never fails readiness: the seeded library is
