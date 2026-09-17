@@ -46,6 +46,7 @@ import {
   extractContentFromMessage,
   extractReasoningContentFromMessage,
   getMessageCopyData,
+  isUploadPlaceholderMessage,
   parseUploadedFiles,
   stripUploadedFilesTag,
   type FileInMessage,
@@ -481,7 +482,7 @@ function MessageContent_({
     ) : null;
 
   // Uploading state: mock AI message shown while files upload
-  if (message.additional_kwargs?.element === "task") {
+  if (isUploadPlaceholderMessage(message)) {
     return (
       <AIElementMessageContent className={className}>
         <Task defaultOpen={false}>

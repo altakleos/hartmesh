@@ -30,6 +30,8 @@ import {
   hasContent,
   hasToolCalls,
   isHiddenFromUIMessage,
+  isUploadPlaceholderMessage,
+  UPLOAD_PLACEHOLDER_ELEMENT,
 } from "../messages/utils";
 import type { FileInMessage } from "../messages/utils";
 import type { LocalSettings } from "../settings";
@@ -1227,6 +1229,32 @@ export function getVisibleOptimisticMessages(
   return optimisticMessages;
 }
 
+/**
+ * The optimistic list once the upload has finished: the person's message now
+ * carries the uploaded files, and the "Uploading files…" placeholder is gone.
+ * The placeholder's job is the upload; keeping it until the server's first
+ * update meant a spinner that lied for as long as a cold sandbox took to
+ * start, and it hid the run's own stage label behind it.
+ */
+export function optimisticMessagesAfterUpload(
+  optimisticMessages: Message[],
+  uploadedFiles: FileInMessage[],
+): Message[] {
+  return optimisticMessages
+    .filter((message) => !isUploadPlaceholderMessage(message))
+    .map((message) =>
+      message.type === "human"
+        ? {
+            ...message,
+            additional_kwargs: {
+              ...message.additional_kwargs,
+              files: uploadedFiles,
+            },
+          }
+        : message,
+    );
+}
+
 export function areOptimisticMessagesConfirmed(
   optimisticMessages: Message[],
   persistedMessages: Message[],
@@ -2224,7 +2252,7 @@ export function useThreadStream({
           type: "ai",
           id: `opt-ai-${Date.now()}`,
           content: t.uploads.uploadingFiles,
-          additional_kwargs: { element: "task" },
+          additional_kwargs: { element: UPLOAD_PLACEHOLDER_ELEMENT },
         });
       }
       setOptimisticThreadId(threadId);
@@ -2264,7 +2292,9 @@ export function useThreadStream({
               const uploadResponse = await uploadFiles(threadId, files);
               uploadedFileInfo = uploadResponse.files;
 
-              // Update optimistic human message with uploaded status + paths
+              // The upload is done: the human message carries the files and
+              // the placeholder leaves, so the activity row can say what the
+              // run is doing from here on.
               const uploadedFiles: FileInMessage[] = uploadedFileInfo.map(
                 (info) => ({
                   filename: info.filename,
@@ -2273,19 +2303,9 @@ export function useThreadStream({
                   status: "uploaded" as const,
                 }),
               );
-              setOptimisticMessages((messages) => {
-                if (messages.length > 1 && messages[0]) {
-                  const humanMessage: Message = messages[0];
-                  return [
-                    {
-                      ...humanMessage,
-                      additional_kwargs: { files: uploadedFiles },
-                    },
-                    ...messages.slice(1),
-                  ];
-                }
-                return messages;
-              });
+              setOptimisticMessages((messages) =>
+                optimisticMessagesAfterUpload(messages, uploadedFiles),
+              );
             }
           } catch (error) {
             const errorMessage =

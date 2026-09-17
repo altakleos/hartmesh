@@ -157,3 +157,26 @@ describe("runActivityLabel", () => {
     ).toBe("Preparing your workspace…");
   });
 });
+
+test("is not masked by the client's own upload placeholder", () => {
+  // An upload turn shows an optimistic AI message ("Uploading files…") beside
+  // the human message until the server's first update replaces the list; a
+  // cold sandbox makes that 10 s or more. It is not model output.
+  const messages = [
+    { ...human, additional_kwargs: { files: [{ filename: "x.xlsx", size: 1 }] } },
+    {
+      id: "opt-ai-1",
+      type: "ai",
+      content: "Uploading files…",
+      additional_kwargs: { element: "task" },
+    },
+  ] as Message[];
+  expect(
+    runActivityLabel({
+      isLoading: true,
+      messages,
+      progress: stage("workspace_starting"),
+      t: enUS,
+    }),
+  ).toBe("Starting a fresh workspace…");
+});

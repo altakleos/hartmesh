@@ -16,6 +16,7 @@ import {
   mergeTransientHistoryBridge,
   mergeTransientHistoryBridgeOrder,
   mergeMessages,
+  optimisticMessagesAfterUpload,
   parseThreadMessagesPageResponse,
   pruneConfirmedTransientMessages,
   reconcileThreadHistoryRows,
@@ -2301,4 +2302,37 @@ test("a checkpoint message earlier than the loaded window is placed by its seq e
     "…new step 1",
     "…new step 2",
   ]);
+});
+
+test("optimisticMessagesAfterUpload keeps the human message with its uploaded files and drops the placeholder", () => {
+  const human = {
+    id: "opt-human-1",
+    type: "human",
+    content: [{ type: "text", text: "Make the report" }],
+    additional_kwargs: {
+      files: [{ filename: "export.xlsx", size: 0, status: "uploading" }],
+    },
+  } as Message;
+  const placeholder = {
+    id: "opt-ai-1",
+    type: "ai",
+    content: "Uploading files…",
+    additional_kwargs: { element: "task" },
+  } as Message;
+  const uploaded = [
+    {
+      filename: "export.xlsx",
+      size: 253854,
+      path: "/mnt/user-data/uploads/export.xlsx",
+      status: "uploaded" as const,
+    },
+  ];
+
+  const after = optimisticMessagesAfterUpload([human, placeholder], uploaded);
+
+  expect(after).toHaveLength(1);
+  expect(after[0]?.id).toBe("opt-human-1");
+  expect(after[0]?.additional_kwargs?.files).toEqual(uploaded);
+  // Nothing to do without a human message to carry the files.
+  expect(optimisticMessagesAfterUpload([], uploaded)).toEqual([]);
 });

@@ -1,7 +1,10 @@
 import type { Message } from "@langchain/langgraph-sdk";
 
 import type { Translations } from "../i18n";
-import { isHiddenFromUIMessage } from "../messages/utils";
+import {
+  isHiddenFromUIMessage,
+  isUploadPlaceholderMessage,
+} from "../messages/utils";
 
 import type { TurnProgress } from "./types";
 
@@ -11,12 +14,15 @@ import type { TurnProgress } from "./types";
  * of the step) or answer text. Either ends the window the stage label is for.
  * Scans back to the turn's human message, hidden or not — a slash-command
  * turn's own message is hidden from the list but still starts the turn.
+ * The upload placeholder the client draws beside its own message is not
+ * the model's: on a cold sandbox it sat there for over ten seconds and hid
+ * every stage the run reported.
  */
 function turnHasModelOutput(messages: Message[]): boolean {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index]!;
     if (message.type === "human") return false;
-    if (message.type !== "ai") continue;
+    if (message.type !== "ai" || isUploadPlaceholderMessage(message)) continue;
     if ((message.tool_calls?.length ?? 0) > 0) return true;
     if (typeof message.content === "string" && message.content.length > 0) {
       return true;

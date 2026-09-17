@@ -909,6 +909,20 @@ export function isHiddenFromUIMessage(message: Message) {
 }
 
 /**
+ * The marker on the optimistic AI message an upload turn shows while its
+ * files are in flight ("Uploading files…"). The client makes that message;
+ * it is never model output and must not be read as the turn's first answer.
+ */
+export const UPLOAD_PLACEHOLDER_ELEMENT = "task";
+
+export function isUploadPlaceholderMessage(message: Message): boolean {
+  return (
+    message.type === "ai" &&
+    message.additional_kwargs?.element === UPLOAD_PLACEHOLDER_ELEMENT
+  );
+}
+
+/**
  * Represents a file stored in message additional_kwargs.files.
  * Used for optimistic UI (uploading state) and structured file metadata.
  */
