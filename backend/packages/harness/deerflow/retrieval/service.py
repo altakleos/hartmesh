@@ -335,6 +335,7 @@ class EvidenceBearingRetrievalService:
             tool_plane_user_overlay_digest=request.tool_plane_user_overlay_digest,
             tool_plane_projection_digest=request.tool_plane_projection_digest,
             tool_plane_effective_digest=request.tool_plane_effective_digest,
+            tool_plane_mode=request.tool_plane_mode,
             accepted_execution_evidence_ref=request.accepted_execution_evidence_ref,
             accepted_sandbox_operation_ref=request.accepted_sandbox_operation_ref,
             mcp_evidence_ref=request.mcp_evidence_ref,

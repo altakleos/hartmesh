@@ -54,6 +54,7 @@ _EFFECTIVE_EXECUTION_FIELDS_V1 = frozenset(
         "extension_artifact_manifest_digest",
         "extension_configuration_digest",
         "tool_plane_revision",
+        "tool_plane_unmanaged",
         "execution_budget",
         "egress_allowance",
         "input",
@@ -213,6 +214,58 @@ def _validate_tool_plane_revision(value: object) -> dict[str, Any]:
         field_name="tool-plane effective digest",
     )
     return detached
+
+
+def validate_unmanaged_tool_plane_evidence(value: object) -> dict[str, Any]:
+    """Validate the explicit absence of a governed tool-plane revision.
+
+    A deployment that enables the tool plane before an administrator has
+    promoted a base revision is a supported state, not a failure: local and
+    other non-durable profiles keep running on the deployment's own
+    configuration. This records *that* fact as an admission decision so
+    execution can be truthful about it, rather than leaving a hole in the
+    evidence that later code reads as "governed material is missing".
+
+    It is deliberately not a revision: it carries no digests, cannot be
+    confused with one, and names the non-durable profile that admitted it, so
+    a durable deployment can neither seal nor honour it.
+    """
+
+    if not isinstance(value, Mapping) or set(value) != {"version", "deployment_profile", "governance_state"} or value.get("version") != 1:
+        raise ValueError("unmanaged tool-plane evidence is malformed")
+    if value.get("governance_state") not in {"tool_plane_bootstrap_required", "unmanaged_drift"}:
+        raise ValueError("unmanaged tool-plane governance state is malformed")
+    profile = value.get("deployment_profile")
+    if not isinstance(profile, str):
+        raise ValueError("unmanaged tool-plane deployment profile is malformed")
+    from deerflow.deployment.topology import DeploymentProfile
+
+    try:
+        resolved = DeploymentProfile(profile)
+    except ValueError as exc:
+        raise ValueError("unmanaged tool-plane deployment profile is malformed") from exc
+    if resolved.is_durable:
+        # The structural guarantee the durable boundary rests on: this shape
+        # cannot exist for a profile that promises durable governed execution,
+        # so no durable run can be admitted with it or recovered into it.
+        raise ValueError("a durable deployment profile cannot run unmanaged")
+    return _deep_thaw(value)
+
+
+def unmanaged_tool_plane_is_honourable(evidence: Mapping[str, Any] | None, *, durable_deployment: bool) -> bool:
+    """Decide whether this process may execute a run admitted ungoverned.
+
+    The seal already names the non-durable profile that produced it, so a
+    durable deployment can never write one. This is the other direction: a run
+    admitted before an operator promoted the deployment to a durable profile
+    must not carry its ungoverned decision into one that promises governance.
+    Recovery then fails closed rather than quietly executing under the older
+    promise.
+    """
+
+    if evidence is None:
+        return False
+    return not durable_deployment
 
 
 def _frozen_json_mapping(value: Mapping[str, Any] | None) -> Mapping[str, Any]:
@@ -657,6 +710,18 @@ class AcceptedInvocation:
             return None
 
     @property
+    def tool_plane_unmanaged(self) -> dict[str, Any] | None:
+        """Sealed statement that this run was admitted with no governed revision."""
+
+        evidence = self.decision_evidence.get("tool_plane_unmanaged")
+        if evidence is None:
+            return None
+        try:
+            return validate_unmanaged_tool_plane_evidence(evidence)
+        except ValueError:
+            return None
+
+    @property
     def execution_budget(self) -> ExecutionBudgetV1 | None:
         """Immutable execution policy accepted for this invocation.
 
@@ -735,6 +800,7 @@ class AcceptedInvocation:
         extension_artifact_manifest_digest: str | None = None,
         extension_configuration_digest: str | None = None,
         tool_plane_revision: Mapping[str, Any] | None = None,
+        tool_plane_unmanaged: Mapping[str, Any] | None = None,
         execution_budget: ExecutionBudgetV1 | None = None,
         egress_allowance: EgressAllowanceV1 | None = None,
         contributor_execution_digest: str,
@@ -760,6 +826,11 @@ class AcceptedInvocation:
         if extension_artifact_manifest_digest is not None and extension_manifest_digest is None:
             raise ValueError("extension artifact evidence requires a capability manifest digest")
         validated_tool_plane = None if tool_plane_revision is None else _validate_tool_plane_revision(tool_plane_revision)
+        validated_unmanaged = None if tool_plane_unmanaged is None else validate_unmanaged_tool_plane_evidence(tool_plane_unmanaged)
+        if validated_tool_plane is not None and validated_unmanaged is not None:
+            # One run cannot be both governed and ungoverned. Refusing the pair
+            # here is what keeps every later reader's mode decision total.
+            raise ValueError("a run cannot carry both governed and unmanaged tool-plane evidence")
         if execution_budget is not None:
             from deerflow.runtime.execution_policy import ExecutionBudgetV1
 
@@ -819,6 +890,7 @@ class AcceptedInvocation:
                     else {}
                 ),
                 **({"tool_plane_revision": validated_tool_plane} if validated_tool_plane is not None else {}),
+                **({"tool_plane_unmanaged": validated_unmanaged} if validated_unmanaged is not None else {}),
                 **({"execution_budget": execution_budget.to_json()} if execution_budget is not None else {}),
                 **({"egress_allowance": egress_allowance.to_json()} if egress_allowance is not None else {}),
                 "accepted_context_digest": accepted_context_digest,
@@ -840,6 +912,8 @@ class AcceptedInvocation:
             }
         if validated_tool_plane is not None:
             decision_evidence["tool_plane_revision"] = validated_tool_plane
+        if validated_unmanaged is not None:
+            decision_evidence["tool_plane_unmanaged"] = validated_unmanaged
         if execution_budget is not None:
             decision_evidence["execution_budget"] = execution_budget.to_json()
         if egress_allowance is not None:
@@ -1111,6 +1185,10 @@ class AcceptedInvocation:
             configuration_digest = artifact_evidence["configuration_digest"]  # type: ignore[assignment]
         tool_plane_evidence = decision_evidence.get("tool_plane_revision")
         validated_tool_plane = None if tool_plane_evidence is None else _validate_tool_plane_revision(tool_plane_evidence)
+        unmanaged_evidence = decision_evidence.get("tool_plane_unmanaged")
+        validated_unmanaged = None if unmanaged_evidence is None else validate_unmanaged_tool_plane_evidence(unmanaged_evidence)
+        if validated_tool_plane is not None and validated_unmanaged is not None:
+            raise ValueError("a run cannot carry both governed and unmanaged tool-plane evidence")
         execution_budget_evidence = decision_evidence.get("execution_budget")
         execution_budget = None
         if execution_budget_evidence is not None:
@@ -1226,6 +1304,8 @@ class AcceptedInvocation:
                 expected_projection_fields.discard("extension_configuration_digest")
             if validated_tool_plane is None:
                 expected_projection_fields.discard("tool_plane_revision")
+            if validated_unmanaged is None:
+                expected_projection_fields.discard("tool_plane_unmanaged")
             if execution_budget is None:
                 expected_projection_fields.discard("execution_budget")
             else:
@@ -1271,6 +1351,8 @@ class AcceptedInvocation:
                 )
             if validated_tool_plane is not None:
                 expected_identities["tool_plane_revision"] = validated_tool_plane
+            if validated_unmanaged is not None:
+                expected_identities["tool_plane_unmanaged"] = validated_unmanaged
             if execution_budget is not None:
                 expected_identities["execution_budget"] = execution_budget.to_json()
             if egress_allowance is not None:
@@ -1354,6 +1436,7 @@ class AcceptedInvocation:
                             else {}
                         ),
                         **({"tool_plane_revision": validated_tool_plane} if validated_tool_plane is not None else {}),
+                        **({"tool_plane_unmanaged": validated_unmanaged} if validated_unmanaged is not None else {}),
                         **({"execution_budget": execution_budget.to_json()} if execution_budget is not None else {}),
                         **({"egress_allowance": egress_allowance.to_json()} if egress_allowance is not None else {}),
                         "accepted_context_digest": persisted_context_digest,

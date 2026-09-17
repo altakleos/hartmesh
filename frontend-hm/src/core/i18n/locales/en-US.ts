@@ -1120,7 +1120,11 @@ export const enUS: Translations = {
       immutable:
         "This deployment is immutable. Tool-plane material is supplied only by its approved deployment revision.",
       bootstrapRequired:
-        "Governance bootstrap is required before tool-plane changes or durable runs can proceed.",
+        "Governance bootstrap is required before tool-plane changes can proceed.",
+      bootstrapRequiredDurable:
+        "Governance bootstrap is required before tool-plane changes or runs can proceed.",
+      bootstrapRequiredLocal:
+        "Chats keep running on this deployment's own skills and tools, and their evidence records that no governed revision authorized them.",
       recoveryRequired:
         "A prepared revision needs recovery. Tool-plane changes and durable admission remain blocked.",
       drift:

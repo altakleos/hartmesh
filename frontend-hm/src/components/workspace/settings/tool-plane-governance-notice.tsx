@@ -51,10 +51,17 @@ export function ToolPlaneGovernanceNotice({
 
   const { status, revisions } = governance;
   const latest = revisions[0];
+  // What bootstrap blocks depends on the deployment. A durable one refuses
+  // admission until a revision is promoted; every other one keeps serving
+  // chats from its own configuration, and saying otherwise would send an
+  // operator hunting for runs that are not blocked.
+  const bootstrapCopy = status.durable
+    ? copy.bootstrapRequiredDurable
+    : `${copy.bootstrapRequired} ${copy.bootstrapRequiredLocal}`;
   const stateCopy = status.drift
     ? copy.drift
     : {
-        bootstrap_required: copy.bootstrapRequired,
+        bootstrap_required: bootstrapCopy,
         governed: copy.managed,
         unmanaged: copy.unmanaged,
         recovery_required: copy.recoveryRequired,

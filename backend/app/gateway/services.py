@@ -826,6 +826,22 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 )
 
+# Every fact admission stamps about what it accepted shares one prefix, and a
+# caller may supply none of them. Enumerating the keys instead would mean a
+# stamp added later is forgeable until someone remembers these two lists --
+# and a forged one is read as an admission decision by whatever trusts it.
+SERVER_OWNED_RUNTIME_CONTEXT_PREFIXES: frozenset[str] = frozenset({"accepted_"})
+
+
+def scrub_server_owned_context(section: dict[str, Any]) -> None:
+    """Remove every server-owned fact a caller may have supplied."""
+
+    for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+        section.pop(key, None)
+    for key in [name for name in section if isinstance(name, str) and name.startswith(tuple(SERVER_OWNED_RUNTIME_CONTEXT_PREFIXES))]:
+        section.pop(key, None)
+
+
 # Keys forwarded from ``body.context`` into ``config['context']`` ONLY (the
 # runtime context that becomes ``ToolRuntime.context`` / ``runtime.context``),
 # never into ``config['configurable']``. These are read by tools and
@@ -955,12 +971,10 @@ def inject_authenticated_user_context(
     runtime_context = config.setdefault("context", {})
     if not isinstance(runtime_context, dict):
         raise TypeError("run context must be a mapping")
-    for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
-        runtime_context.pop(key, None)
+    scrub_server_owned_context(runtime_context)
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
-        for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
-            configurable.pop(key, None)
+        scrub_server_owned_context(configurable)
     auth_source = getattr(getattr(request, "state", None), "auth_source", None)
     # ``user_id`` is server-owned for EXTERNAL callers: it now selects which
     # user's credential user-scoped MCP auth injects, so a client-forged value
@@ -2014,6 +2028,7 @@ def _effective_execution_projection(
                 else {}
             ),
             **({"tool_plane_revision": accepted.tool_plane_revision} if accepted.tool_plane_revision is not None else {}),
+            **({"tool_plane_unmanaged": accepted.tool_plane_unmanaged} if accepted.tool_plane_unmanaged is not None else {}),
             **({"execution_budget": accepted.execution_budget.to_json()} if accepted.execution_budget is not None else {}),
             **({"egress_allowance": accepted.egress_allowance.to_json()} if accepted.egress_allowance is not None else {}),
             "input": input_projection,
@@ -2336,6 +2351,7 @@ async def _seal_accepted_invocation(
     )
 
     tool_plane_revision: dict[str, object] | None = None
+    tool_plane_unmanaged: dict[str, object] | None = None
     tool_plane_service = getattr(app_state, "tool_plane_revision_service", None)
     tool_plane_effective = None
     tool_plane_runtime = None
@@ -2363,6 +2379,17 @@ async def _seal_accepted_invocation(
             local_unmanaged = exc.code in {"tool_plane_bootstrap_required", "unmanaged_drift"} and tool_plane_service.durable is False
             if not local_unmanaged:
                 raise
+            # Continuing is the documented behaviour for a non-durable
+            # deployment whose administrator has not promoted a base
+            # revision. Say so in the acceptance evidence: execution must be
+            # able to tell "this run is ungoverned by decision" from "the
+            # governed material this run needs is missing", and only the
+            # first of those may run a configured retrieval tool.
+            tool_plane_unmanaged = {
+                "version": 1,
+                "deployment_profile": app_config.deployment.profile.value,
+                "governance_state": exc.code,
+            }
         if tool_plane_effective is not None:
             tool_plane_runtime = resolve_tool_plane_runtime(
                 app_config,
@@ -2613,6 +2640,7 @@ async def _seal_accepted_invocation(
         extension_artifact_manifest_digest=extension_artifact_manifest_digest,
         extension_configuration_digest=extension_configuration_digest,
         tool_plane_revision=tool_plane_revision,
+        tool_plane_unmanaged=tool_plane_unmanaged,
         execution_budget=execution_budget,
         egress_allowance=egress_allowance,
         contributor_execution_digest=contributor_execution_digest,
@@ -2670,6 +2698,8 @@ async def _seal_accepted_invocation(
         runtime_context["accepted_extension_configuration_digest"] = extension_configuration_digest
     if accepted.tool_plane_revision is not None:
         runtime_context["accepted_tool_plane_revision"] = accepted.tool_plane_revision
+    if accepted.tool_plane_unmanaged is not None:
+        runtime_context["accepted_tool_plane_unmanaged"] = accepted.tool_plane_unmanaged
     if accepted.execution_budget is not None:
         runtime_context["accepted_execution_budget"] = accepted.execution_budget
         runtime_context["execution_policy_keyring"] = execution_policy_keyring

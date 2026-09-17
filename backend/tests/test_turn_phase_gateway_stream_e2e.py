@@ -316,11 +316,11 @@ def _register_and_create_thread(client: httpx.Client, base: str, *, langgraph_pr
     return csrf, thread_id
 
 
-def _run_body(text: str) -> dict[str, Any]:
+def _run_body(text: str, *, recursion_limit: int = 25) -> dict[str, Any]:
     return {
         "assistant_id": "lead_agent",
         "input": {"messages": [{"role": "user", "content": text}]},
-        "config": {"recursion_limit": 25},
+        "config": {"recursion_limit": recursion_limit},
         "context": {"thinking_enabled": False, "subagent_enabled": False},
         "stream_mode": ["messages-tuple"],
     }
@@ -336,6 +336,7 @@ def _observe_stream(
     langgraph_prefix: str = "/api",
     on_frame: Any = None,
     timeout: float = 60.0,
+    recursion_limit: int = 25,
 ) -> _StreamObservation:
     """POST the run and time what the client can see, frame by frame.
 
@@ -347,7 +348,7 @@ def _observe_stream(
     with client.stream(
         "POST",
         f"{base}{langgraph_prefix}/threads/{thread_id}/runs/stream",
-        json=_run_body(text),
+        json=_run_body(text, recursion_limit=recursion_limit),
         headers={"X-CSRF-Token": csrf, "Accept": "text/event-stream"},
         timeout=timeout,
     ) as response:

@@ -709,12 +709,39 @@
                 "type": "object",
                 "required": ["base_revision_digest", "user_overlay_digest", "projection_digest", "effective_digest"],
                 "properties": {
-                  "base_revision_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                  "user_overlay_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                  "projection_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-                  "effective_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                  "mode": {"const": "unmanaged"},
+                  "base_revision_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+                  "user_overlay_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+                  "projection_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+                  "effective_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
                 },
-                "additionalProperties": false
+                "additionalProperties": false,
+                "allOf": [
+                  {
+                    "comment": "A governed observation is the four digests alone; it carries no mode, so its bytes are unchanged from every release that predates the ungoverned state.",
+                    "if": {"not": {"required": ["mode"]}},
+                    "then": {
+                      "properties": {
+                        "base_revision_digest": {"type": "string"},
+                        "user_overlay_digest": {"type": "string"},
+                        "projection_digest": {"type": "string"},
+                        "effective_digest": {"type": "string"}
+                      }
+                    }
+                  },
+                  {
+                    "comment": "An ungoverned one anchors to no revision and says so; it never substitutes a digest for one that was never promoted.",
+                    "if": {"required": ["mode"]},
+                    "then": {
+                      "properties": {
+                        "base_revision_digest": {"type": "null"},
+                        "user_overlay_digest": {"type": "null"},
+                        "projection_digest": {"type": "null"},
+                        "effective_digest": {"type": "null"}
+                      }
+                    }
+                  }
+                ]
               },
               "accepted_execution_evidence_ref": {"type": ["string", "null"], "maxLength": 256},
               "accepted_sandbox_operation_ref": {"type": ["string", "null"], "maxLength": 256},

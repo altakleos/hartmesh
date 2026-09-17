@@ -271,6 +271,23 @@ performing that same live-absence check.
 - In ordinary local/non-durable mode, bootstrap-required or drifted material
   remains usable for development. Status and the settings notice say
   `bootstrap_required`/`unmanaged`; admission makes no governed-revision claim.
+  It does make a decision, and seals it: `tool_plane_unmanaged` records the
+  non-durable profile that admitted the run and which of the two supported
+  states it was in. Execution reads that seal, so "this run is ungoverned by
+  decision" is distinguishable from "the governed material this run needs is
+  missing" — the first runs the deployment's configured tools, including
+  retrieval, and the second still fails closed before any tool is dispatched.
+  The seal cannot name a durable profile (the record refuses it), cannot
+  accompany a governed revision, and is not honoured by a process whose own
+  deployment profile is durable, so a run admitted while the deployment ran a
+  non-durable profile fails closed if it is recovered after that profile
+  changed. The gate is the deployment profile, not the tool plane's state:
+  promoting a base revision does not retroactively govern runs already
+  admitted without one, and each keeps its sealed decision until it ends.
+  A retrieval observation from such a run carries `tool_plane.mode:
+  "unmanaged"` with no digests, rather than substituting four that would read
+  as governed; run evidence bundles remain governed artifacts and are built
+  only for runs that carry a promoted revision.
 - In durable production, bootstrap, drift, incoherent generations, prepared
   work, or recovery state fail readiness and new admission with a typed code.
   The authenticated management path stays available for repair.

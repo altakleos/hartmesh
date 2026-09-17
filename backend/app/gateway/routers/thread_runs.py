@@ -2078,9 +2078,12 @@ async def get_run_evidence_summary(
         tenant_digest = "0" * 64
     assembly = None
     if isinstance(record.assembly_evidence_json, dict):
+        governed_tool_plane = accepted.tool_plane_revision if accepted is not None else None
+        unmanaged_tool_plane = accepted.tool_plane_unmanaged if accepted is not None else None
         assembly = {
             "fingerprint": record.assembly_evidence_json.get("fingerprint"),
-            "tool_plane_digest": (accepted.tool_plane_revision["effective_digest"] if accepted is not None and accepted.tool_plane_revision is not None else None),
+            "tool_plane_digest": (governed_tool_plane["effective_digest"] if governed_tool_plane is not None else None),
+            "tool_plane_mode": ("governed" if governed_tool_plane is not None else "unmanaged" if unmanaged_tool_plane is not None else None),
         }
     admission = None
     if accepted is not None:
