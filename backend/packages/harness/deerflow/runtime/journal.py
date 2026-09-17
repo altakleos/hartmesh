@@ -44,6 +44,7 @@ from deerflow.runtime.events.catalog import (
     RUN_TERMINAL_EVENT,
 )
 from deerflow.runtime.failure_evidence import RuntimeFailureV1, TerminalSummaryV1, map_runtime_failure
+from deerflow.runtime.presented_files import presented_files_of
 from deerflow.utils.messages import message_to_text, restore_original_human_message
 
 if TYPE_CHECKING:
@@ -298,6 +299,11 @@ class RunJournal(BaseCallbackHandler):
         # (#4272 slice 1). Deduped by (path, tool_name); insertion order kept.
         self._produced_artifacts: list[tuple[str, str | None]] = []
         self._produced_artifact_keys: set[tuple[str, str | None]] = set()
+        # The paths tool results presented (``presented_files`` tag), in order:
+        # what the fence, the archive and the evidence bundle count as handed
+        # to the user, as opposed to a file that reached ``artifacts`` as a
+        # side effect (``deerflow.runtime.presented_files``).
+        self._presented_files: list[str] = []
 
     # -- Lifecycle callbacks --
 
@@ -560,6 +566,10 @@ class RunJournal(BaseCallbackHandler):
                 for message in messages:
                     if isinstance(message, BaseMessage):
                         self._persist_tool_result_message(message)
+                        if isinstance(message, ToolMessage):
+                            for path in presented_files_of(message):
+                                if path not in self._presented_files:
+                                    self._presented_files.append(path)
                         if artifacts and isinstance(message, ToolMessage):
                             tool_call_id = getattr(message, "tool_call_id", None)
                             if isinstance(tool_call_id, str):
@@ -939,7 +949,7 @@ class RunJournal(BaseCallbackHandler):
             paths.append(path)
             if tool_name:
                 by_tool.setdefault(tool_name, []).append(path)
-        return {"presented": len(paths), "paths": paths, "by_tool": by_tool}
+        return {"presented": len(paths), "paths": paths, "by_tool": by_tool, "presented_files": list(self._presented_files)}
 
     def record_delivery(self) -> None:
         """Buffer the terminal ``run.delivery`` event for this run (#4272 slice 1).
@@ -1048,6 +1058,7 @@ class RunJournal(BaseCallbackHandler):
         self._persisted_tool_message_identities.clear()
         self._produced_artifacts.clear()
         self._produced_artifact_keys.clear()
+        self._presented_files.clear()
         self._last_ai_msg = None
         self._first_human_msg = None
         self._llm_error_fallback_message = None

@@ -7,6 +7,7 @@ from langgraph.config import get_config
 from langgraph.types import Command
 
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.runtime.presented_files import PRESENTED_FILES_KEY
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.types import Runtime
 
@@ -30,11 +31,11 @@ def _get_thread_id(runtime: Runtime) -> str | None:
         return None
 
 
-def _normalize_presented_filepath(
+def resolve_presented_filepath(
     runtime: Runtime,
     filepath: str,
-) -> str:
-    """Normalize a presented file path to the `/mnt/user-data/outputs/*` contract.
+) -> tuple[str, Path]:
+    """Resolve a presented file path to its virtual form and its host path.
 
     Accepts either:
     - A virtual sandbox path such as `/mnt/user-data/outputs/report.md`
@@ -42,7 +43,7 @@ def _normalize_presented_filepath(
       `/app/backend/.deer-flow/threads/<thread>/user-data/outputs/report.md`
 
     Returns:
-        The normalized virtual path.
+        The normalized virtual path and the resolved host path it names.
 
     Raises:
         ValueError: If runtime metadata is missing or the path is outside the
@@ -77,7 +78,16 @@ def _normalize_presented_filepath(
     except ValueError as exc:
         raise ValueError(f"Only files in {OUTPUTS_VIRTUAL_PREFIX} can be presented: {filepath}") from exc
 
-    return f"{OUTPUTS_VIRTUAL_PREFIX}/{relative_path.as_posix()}"
+    return f"{OUTPUTS_VIRTUAL_PREFIX}/{relative_path.as_posix()}", actual_path
+
+
+def _normalize_presented_filepath(
+    runtime: Runtime,
+    filepath: str,
+) -> str:
+    """Normalize a presented file path to the `/mnt/user-data/outputs/*` contract."""
+    virtual_path, _actual_path = resolve_presented_filepath(runtime, filepath)
+    return virtual_path
 
 
 @tool("present_files", parse_docstring=True)
@@ -92,14 +102,15 @@ def present_file_tool(
 
     - Making any file available for the user to view, download, or interact with
     - Presenting multiple related files at once
-    - After creating files that should be presented to the user
+    - After creating files that should be presented to the user, when the call that created them did not already present them
 
     When NOT to use the present_files tool:
     - When you only need to read file contents for your own processing
     - For temporary or intermediate files not meant for user viewing
+    - For files a tool result already named under "Presented to the user": they are delivered, and calling this tool would attach them a second time
 
     Notes:
-    - You should call this tool after creating files and moving them to the `/mnt/user-data/outputs` directory.
+    - Call this tool after creating files and moving them to the `/mnt/user-data/outputs` directory, unless the call that wrote them already presented them (the `bash` tool's `present` argument does this in the same call).
     - This tool can be safely called in parallel with other tools. State updates are handled by a reducer to prevent conflicts.
 
     Args:
@@ -112,10 +123,18 @@ def present_file_tool(
             update={"messages": [ToolMessage(f"Error: {exc}", tool_call_id=tool_call_id)]},
         )
 
-    # The merge_artifacts reducer will handle merging and deduplication
+    # The merge_artifacts reducer will handle merging and deduplication. The
+    # tag on the message is what the delivery journal, the IM channels and the
+    # browser read as "this result presented these files".
     return Command(
         update={
             "artifacts": normalized_paths,
-            "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+            "messages": [
+                ToolMessage(
+                    "Successfully presented files",
+                    tool_call_id=tool_call_id,
+                    additional_kwargs={PRESENTED_FILES_KEY: list(dict.fromkeys(normalized_paths))},
+                )
+            ],
         },
     )

@@ -634,7 +634,7 @@ def test_system_prompt_template_requires_virtual_paths_for_output_images():
 
     assert "![Chart](/mnt/user-data/outputs/chart.png)" in template
     assert "Never use a bare or workspace-relative filename" in template
-    assert "Call `present_files` for the image before referencing it" in template
+    assert "Present the image before referencing it (under the writing command's `present`, or with `present_files`)" in template
 
 
 def test_system_prompt_template_preserves_placeholders():

@@ -15,6 +15,7 @@ it. The receipt outlives the page, so the notice can too.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 #: Stamped on the run record by the delivery fence, and the only thing a client
@@ -48,6 +49,27 @@ def _path_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [entry for entry in value if isinstance(entry, str) and entry]
+
+
+def presented_paths(content: Mapping[str, Any]) -> list[str]:
+    """Every path this run presented, first record first, without repeats.
+
+    The receipt's ``presented_files``: the paths tool results carried under
+    the ``presented_files`` tag (``deerflow.runtime.presented_files``), which
+    is what ``present_files`` and any tool that presents the files it made
+    write. ``paths`` is wider -- every ``artifacts`` update, including a
+    browser tool's screenshot that reached the panel as a side effect -- and
+    is not a presentation; ``by_tool`` is attribution, not authority. No list
+    of presenting tool names exists here or anywhere downstream. A receipt
+    written before the tag existed has only ``by_tool``; for those,
+    ``present_files`` was the one presenting tool, and that is the fallback.
+    """
+    if "presented_files" in content:
+        return list(dict.fromkeys(_path_list(content.get("presented_files"))))
+    by_tool = content.get("by_tool")
+    if not isinstance(by_tool, Mapping):
+        return []
+    return list(dict.fromkeys(_path_list(by_tool.get("present_files"))))
 
 
 def undelivered_paths(content: dict[str, Any]) -> list[str]:

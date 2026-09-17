@@ -164,6 +164,7 @@ from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
+from deerflow.runtime.presented_files import PRESENTED_FILES_KEY
 from deerflow.runtime.runs.lifecycle_query import (
     LifecyclePage,
     LifecycleQuery,
@@ -328,6 +329,11 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             SUBAGENT_TOOL_RECEIPTS_KEY,
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
+            # Written by a tool result that presented files
+            # (``deerflow.runtime.presented_files``); the delivery journal,
+            # the IM channels and the browser treat it as a fact about what
+            # the host delivered, so a caller must not be able to supply it.
+            PRESENTED_FILES_KEY,
         }
     )
     | PROVENANCE_KEYS

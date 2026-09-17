@@ -33,6 +33,26 @@ const HIDDEN_CONTROL_MESSAGE_NAMES = new Set([
   "todo_completion_reminder",
 ]);
 
+/**
+ * The present-files group a tool result already opened in the current turn,
+ * if any: search back to the turn's human message.
+ */
+function presentedByToolResultGroupOfTurn(
+  groups: MessageGroup[],
+): MessageGroup | null {
+  for (let index = groups.length - 1; index >= 0; index--) {
+    const group = groups[index]!;
+    if (group.type === "human") return null;
+    if (
+      group.type === "assistant:present-files" &&
+      group.messages[0]?.type === "tool"
+    ) {
+      return group;
+    }
+  }
+  return null;
+}
+
 export function getMessageGroups(
   messages: Message[],
   { isCurrentTurnLoading = false }: { isCurrentTurnLoading?: boolean } = {},
@@ -56,14 +76,24 @@ export function getMessageGroups(
   // Returns the last group if it can still accept tool messages
   // (i.e. it's an in-flight processing group, not a terminal human/assistant group).
   function lastOpenGroup() {
-    const last = groups[groups.length - 1];
-    if (
-      last &&
-      last.type !== "human" &&
-      last.type !== "assistant" &&
-      last.type !== "assistant:clarification"
-    ) {
-      return last;
+    // A present-files group a tool result opened shows chips only, so it is
+    // skipped: a sibling tool result belongs with its step, above the chips.
+    for (let index = groups.length - 1; index >= 0; index--) {
+      const group = groups[index]!;
+      if (
+        group.type === "assistant:present-files" &&
+        group.messages[0]?.type === "tool"
+      ) {
+        continue;
+      }
+      if (
+        group.type !== "human" &&
+        group.type !== "assistant" &&
+        group.type !== "assistant:clarification"
+      ) {
+        return group;
+      }
+      return null;
     }
     return null;
   }
@@ -88,6 +118,25 @@ export function getMessageGroups(
           type: "assistant:clarification",
           messages: [message],
         });
+      } else if (hasPresentFiles(message)) {
+        // A tool result that presented the files it was asked to make. It keeps
+        // its place among the steps, and the files it handed over get the
+        // same group a `present_files` call would have made, so the chips and
+        // the archive action render whichever way the files arrived. A turn
+        // that presents twice (a build, then a revision of its words) joins
+        // the second result to the first group: one row of chips, the union
+        // of both, rather than the same files listed twice.
+        lastOpenGroup()?.messages.push(message);
+        const earlier = presentedByToolResultGroupOfTurn(groups);
+        if (earlier) {
+          earlier.messages.push(message);
+        } else {
+          groups.push({
+            id: message.id,
+            type: "assistant:present-files",
+            messages: [message],
+          });
+        }
       } else {
         const open = lastOpenGroup();
         if (open) {
@@ -759,11 +808,36 @@ export function hasToolCalls(message: Message) {
   );
 }
 
+/**
+ * A file presentation reaches the client two ways: the model's own
+ * `present_files` call (an AI message), or a tool result that presented the
+ * files its call was asked to make (`bash` with a `present` argument) — the
+ * backend validates those paths and tags the `ToolMessage` with
+ * `additional_kwargs.presented_files` (`deerflow.runtime.presented_files`).
+ * Both draw the same file list.
+ */
 export function hasPresentFiles(message: Message) {
+  if (message.type === "ai") {
+    return Boolean(
+      message.tool_calls?.some((toolCall) => toolCall.name === "present_files"),
+    );
+  }
   return (
-    message.type === "ai" &&
-    message.tool_calls?.some((toolCall) => toolCall.name === "present_files")
+    message.type === "tool" && presentedFilesOfToolResult(message).length > 0
   );
+}
+
+function presentedFilesOfToolResult(message: Message): string[] {
+  // A `present_files` result carries the tag too, but its call (the AI
+  // message above it) already draws those files; reading the result as well
+  // would list them twice.
+  if (message.type !== "tool" || message.name === "present_files") {
+    return [];
+  }
+  const presented = message.additional_kwargs?.presented_files;
+  return Array.isArray(presented)
+    ? presented.filter((path): path is string => typeof path === "string")
+    : [];
 }
 
 export function isClarificationToolMessage(message: Message) {
@@ -771,6 +845,9 @@ export function isClarificationToolMessage(message: Message) {
 }
 
 export function extractPresentFilesFromMessage(message: Message) {
+  if (message.type === "tool") {
+    return presentedFilesOfToolResult(message);
+  }
   if (message.type !== "ai" || !hasPresentFiles(message)) {
     return [];
   }

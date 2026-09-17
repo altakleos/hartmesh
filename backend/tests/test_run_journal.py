@@ -1564,7 +1564,7 @@ class TestDeliveryTracking:
                 Command(
                     update={
                         "artifacts": [f"/mnt/user-data/outputs/{path}"],
-                        "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id, additional_kwargs={"presented_files": [f"/mnt/user-data/outputs/{path}"]})],
                     }
                 )
             )
@@ -1608,7 +1608,7 @@ class TestDeliveryTracking:
                 Command(
                     update={
                         "artifacts": [f"/mnt/user-data/outputs/report-{index}.md"],
-                        "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id)],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id=tool_call_id, additional_kwargs={"presented_files": [f"/mnt/user-data/outputs/report-{index}.md"]})],
                     }
                 ),
                 run_id=uuid4(),
@@ -1626,6 +1626,7 @@ class TestDeliveryTracking:
                 "presented": 1,
                 "paths": [f"/mnt/user-data/outputs/report-{index}.md"],
                 "by_tool": {"present_files": [f"/mnt/user-data/outputs/report-{index}.md"]},
+                "presented_files": [f"/mnt/user-data/outputs/report-{index}.md"],
             }
 
     @pytest.mark.anyio
@@ -1638,7 +1639,7 @@ class TestDeliveryTracking:
         cmd = Command(
             update={
                 "artifacts": ["/mnt/user-data/outputs/report.md"],
-                "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/report.md"]})],
             }
         )
         j.on_tool_end(cmd, run_id=uuid4())
@@ -1670,7 +1671,7 @@ class TestDeliveryTracking:
             Command(
                 update={
                     "artifacts": ["/mnt/user-data/outputs/report.md"],
-                    "messages": [ToolMessage("Successfully presented files", tool_call_id="call_missing")],
+                    "messages": [ToolMessage("Successfully presented files", tool_call_id="call_missing", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/report.md"]})],
                 }
             ),
             run_id=tool_run_id,
@@ -1693,7 +1694,7 @@ class TestDeliveryTracking:
             update={
                 "artifacts": ["/mnt/user-data/outputs/report.md"],
                 "messages": [
-                    ToolMessage("Successfully presented files", tool_call_id="call_multi"),
+                    ToolMessage("Successfully presented files", tool_call_id="call_multi", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/report.md"]}),
                     HumanMessage("Additional command message"),
                 ],
             }
@@ -1708,6 +1709,7 @@ class TestDeliveryTracking:
             "presented": 1,
             "paths": ["/mnt/user-data/outputs/report.md"],
             "by_tool": {"present_files": ["/mnt/user-data/outputs/report.md"]},
+            "presented_files": ["/mnt/user-data/outputs/report.md"],
         }
 
     @pytest.mark.anyio
@@ -1725,7 +1727,7 @@ class TestDeliveryTracking:
                     "/mnt/user-data/outputs/shot.png",
                 ],
                 "messages": [
-                    ToolMessage("Successfully presented files", tool_call_id="call_present"),
+                    ToolMessage("Successfully presented files", tool_call_id="call_present", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/report.md"]}),
                     ToolMessage("Saved browser screenshot", tool_call_id="call_browser"),
                 ],
             }
@@ -1743,6 +1745,8 @@ class TestDeliveryTracking:
                 "/mnt/user-data/outputs/shot.png",
             ],
             "by_tool": {},
+            # Only the tagged result is a presentation; the screenshot reached ``artifacts`` as a side effect.
+            "presented_files": ["/mnt/user-data/outputs/report.md"],
         }
 
     @pytest.mark.anyio
@@ -1760,7 +1764,7 @@ class TestDeliveryTracking:
         events = await store.list_events("t1", "r1")
         delivery = [e for e in events if e["event_type"] == "run.delivery"]
         assert len(delivery) == 1
-        assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}}
+        assert delivery[0]["content"] == {"presented": 0, "paths": [], "by_tool": {}, "presented_files": []}
 
     @pytest.mark.anyio
     async def test_browser_tool_artifacts_recorded_under_producing_tool(self, journal_setup):
@@ -1796,7 +1800,7 @@ class TestDeliveryTracking:
                 Command(
                     update={
                         "artifacts": ["/mnt/user-data/outputs/report.md"],
-                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_4")],
+                        "messages": [ToolMessage("Successfully presented files", tool_call_id="call_4", additional_kwargs={"presented_files": ["/mnt/user-data/outputs/report.md"]})],
                     }
                 ),
                 run_id=uuid4(),

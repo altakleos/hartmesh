@@ -102,7 +102,7 @@ class _PresentingAgent:
             Command(
                 update={
                     "artifacts": self._paths,
-                    "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1")],
+                    "messages": [ToolMessage("Successfully presented files", tool_call_id="call_1", additional_kwargs={"presented_files": self._paths})],
                 }
             ),
             run_id=uuid4(),

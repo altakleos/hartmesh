@@ -5477,6 +5477,45 @@ class TestExtractArtifacts:
         # Should only return chart.png (from the last turn)
         assert _extract_artifacts(result) == ["/mnt/user-data/outputs/chart.png"]
 
+    def test_extracts_files_a_tool_result_presented_on_the_runs_behalf(self):
+        """A ``bash`` call that presented the files it made carries them on its result, not on a ``present_files`` call."""
+        from app.channels.manager import _extract_artifacts
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "make the report"},
+                {"type": "ai", "content": "", "tool_calls": [{"name": "bash", "args": {"command": "python report.py build …"}}]},
+                {
+                    "type": "tool",
+                    "name": "bash",
+                    "content": "Built draft 1\n\nPresented to the user: 2 files",
+                    "additional_kwargs": {"presented_files": ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]},
+                },
+                {"type": "ai", "content": "Done."},
+            ]
+        }
+        assert _extract_artifacts(result) == ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]
+
+    def test_a_turn_that_presented_twice_delivers_each_file_once(self):
+        """A build then a revision of its words hand over the same four paths twice."""
+        from app.channels.manager import _extract_artifacts
+
+        tagged = lambda: {"type": "tool", "name": "bash", "content": "…", "additional_kwargs": {"presented_files": ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]}}  # noqa: E731
+        result = {"messages": [{"type": "human", "content": "make it"}, tagged(), tagged(), {"type": "ai", "content": "Done."}]}
+        assert _extract_artifacts(result) == ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]
+
+    def test_a_tool_result_without_the_tag_presents_nothing(self):
+        from app.channels.manager import _extract_artifacts
+
+        result = {
+            "messages": [
+                {"type": "human", "content": "list"},
+                {"type": "tool", "name": "bash", "content": "Wrote /mnt/user-data/outputs/r/r.pdf\n"},
+                {"type": "tool", "name": "bash", "content": "x", "additional_kwargs": {"presented_files": "not-a-list"}},
+            ]
+        }
+        assert _extract_artifacts(result) == []
+
     def test_multiple_files_in_single_call(self):
         from app.channels.manager import _extract_artifacts
 

@@ -679,7 +679,10 @@ You (new invocation): "Deploying to staging..." [proceed]
 - Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
 - Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
-- Final deliverables must be copied to `/mnt/user-data/outputs` and presented using `present_files` tool (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
+- Final deliverables must be copied to `/mnt/user-data/outputs` and presented (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
+- When a `bash` command writes the deliverable, present it in that same call: name the files under `present`. This is the normal way to hand over a file you just made
+- Use `present_files` for a file that already exists: one from an earlier turn, or one no single command wrote
+- Files a tool result reports under "Presented to the user" are delivered; do not present them again, that attaches them a second time
 {acp_section}
 </working_directory>
 
@@ -769,7 +772,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 - Including Images and Mermaid: Images and Mermaid diagrams are welcomed in Markdown.
   - To render an output image in a final response, use its complete virtual artifact path, for example `![Chart](/mnt/user-data/outputs/chart.png)`.
   - Never use a bare or workspace-relative filename.
-  - Call `present_files` for the image before referencing it.
+  - Present the image before referencing it (under the writing command's `present`, or with `present_files`).
   - Use "```mermaid" for Mermaid diagrams.
 - Multi-task: Better utilize parallel tool calling to call multiple tools at one time for better performance
 - Language Consistency: Keep using the same language as user's
@@ -1017,7 +1020,7 @@ def _build_acp_section(*, app_config: AppConfig | None = None) -> str:
         "- ACP agents (e.g. codex, claude_code) run in their own independent workspace — NOT in `/mnt/user-data/`\n"
         "- When writing prompts for ACP agents, describe the task only — do NOT reference `/mnt/user-data` paths\n"
         "- ACP agent results are accessible at `/mnt/acp-workspace/` (read-only) — use `ls`, `read_file`, or `bash cp` to retrieve output files\n"
-        "- To deliver ACP output to the user: copy from `/mnt/acp-workspace/<file>` to `/mnt/user-data/outputs/<file>`, then use `present_files`"
+        "- To deliver ACP output to the user: copy from `/mnt/acp-workspace/<file>` to `/mnt/user-data/outputs/<file>` in one `bash` call that names the destination under `present`"
     )
 
 

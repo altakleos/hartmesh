@@ -27,6 +27,7 @@ import hashlib
 import io
 import json
 import math
+import os
 import re
 import sys
 import warnings
@@ -64,7 +65,6 @@ try:
         InputError,
         LoadedTable,
         Mapping,
-        Period,
         checks_line,
         format_value,
         in_period,
@@ -1098,11 +1098,14 @@ def show_report(report: dict) -> str:
 # --- command line --------------------------------------------------------------
 
 
-def _report_base_name(period: Period, title: str, override: str | None) -> str:
+def _report_base_name(out_dir: Path, override: str | None) -> str:
+    """The report is named after its directory, so every path a run will write
+    is known before the run: the model names them under the bash tool's
+    ``present`` argument in the same call. ``--name`` overrides."""
+
     if override:
         return slugify(override)
-    remainder = title.replace(period.label, "").strip(" -–:")
-    return f"{period.key}-{slugify(remainder or 'report')}"
+    return slugify(out_dir.resolve().name) or "report"
 
 
 def _existing_report(path: Path) -> dict | None:
@@ -1198,13 +1201,6 @@ def write_render_manifest(report_path: Path, names: list[str]) -> None:
     _write_json(directory / RENDERS_MANIFEST, {"version": 1, "base": base, "files": [name for name in (f"{base}.{target}" for target in TARGET_ORDER) if name in set(names)]})
 
 
-def existing_renders(report_path: Path) -> list[Path]:
-    """This skill's own renders beside the report, in the order they are offered."""
-
-    directory, _ = _render_base(report_path)
-    return [directory / name for name in read_render_manifest(report_path) if (directory / name).is_file()]
-
-
 def unowned_renders(report_path: Path) -> list[str]:
     """Files named like renders of this report that this skill did not write."""
 
@@ -1256,18 +1252,11 @@ def publish_renders(report: dict, report_path: Path, targets: list[str], tenant_
         print("Removed stale renders from the previous draft: " + ", ".join(removed) + ". Render again.")
 
 
-def print_present_block(report_path: Path) -> None:
-    """Name the files to hand over, the report first, so none of them is left out.
+def print_unowned_renders(report_path: Path) -> None:
+    """Warn about a file named like one of this report's renders that this skill did not write."""
 
-    One path per line: the directory is chosen by the caller and a space in it
-    would make a single joined line impossible to split back apart.
-    """
-
-    print("Present:")
-    for path in [report_path] + existing_renders(report_path):
-        print(f"  {path.resolve()}")
     for name in unowned_renders(report_path):
-        print(f"Not presented: {name} sits beside this report but was not written by it; it may show a different draft.")
+        print(f"Note: {name} sits beside this report but was not written by it; it may show a different draft.")
 
 
 def command_inspect(args) -> int:
@@ -1301,10 +1290,13 @@ def command_build(args) -> int:
     ctx = prepare(args.files, args.period, options, mapping_override, profile)
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    title = options.title or profile.get("title", "{period} Business Review").replace("{period}", ctx.period.label)
-    base = _report_base_name(ctx.period, title, options.name)
+    base = _report_base_name(out_dir, options.name)
     report_path = out_dir / f"{base}{REPORT_SUFFIX}"
     previous = _existing_report(report_path)
+    if previous and previous["meta"]["period"]["key"] != ctx.period.key:
+        # The report is named after its directory, so a second period built
+        # here would silently replace the first and call itself its next draft.
+        raise InputError(f"{out_dir} holds the {previous['meta']['period']['label']} report; build {ctx.period.label} into its own --out directory.")
     report, charts = build_report(ctx, int(previous["meta"]["draft"]) if previous else 0, compute_checks)
     report["meta"]["preferences_applied"] = applied
     _write_json(out_dir / "checks.json", report["checks"])
@@ -1324,7 +1316,7 @@ def command_build(args) -> int:
     if report["charts"]:
         print("Charts: " + ", ".join(chart["png"] for chart in report["charts"]))
     publish_renders(report, report_path, targets, tenant_dir)
-    print_present_block(report_path)
+    print_unowned_renders(report_path)
     return EXIT_OK
 
 
@@ -1368,7 +1360,7 @@ def command_prose(args) -> int:
     print()
     print(show_report(updated))
     publish_renders(updated, report_path, targets, resolve_tenant_dir(args.tenant))
-    print_present_block(report_path)
+    print_unowned_renders(report_path)
     return EXIT_OK
 
 
@@ -1386,13 +1378,17 @@ def command_render(args) -> int:
         # report, so it is not recorded as one of the report's own renders.
         path = render(report, report_path, targets[0], Path(args.out), tenant_dir)
         print(f"Rendered {targets[0]}: {path}")
-        print("Present:")
-        print(f"  {report_path.resolve()}")
-        print(f"  {path.resolve()}")
+        os.utime(report_path, None)
         return EXIT_OK
     written = render_targets(report, report_path, targets, tenant_dir)
     write_render_manifest(report_path, read_render_manifest(report_path) + [path.name for path in written])
-    print_present_block(report_path)
+    # The report is handed over with its renders, and the bash tool attaches
+    # only files the call wrote: a render in a later turn touches the report
+    # so it can be named under `present` beside the new renders. A touch, not
+    # a rewrite: the renders are already on disk, and nothing that can fail
+    # should follow them.
+    os.utime(report_path, None)
+    print_unowned_renders(report_path)
     return EXIT_OK
 
 
@@ -1433,7 +1429,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser_.add_argument("--title", help="Report title (default from the profile)")
     build_parser_.add_argument("--company", help="Company name shown on the report")
     build_parser_.add_argument("--currency", help="Three-letter code when the file does not say")
-    build_parser_.add_argument("--name", help="Base file name (default: <period>-<title slug>)")
+    build_parser_.add_argument("--name", help="Base file name (default: the name of the --out directory)")
     build_parser_.add_argument("--draft", type=int, help="Draft number (default: previous draft in --out plus one)")
     build_parser_.add_argument("--short", action="store_true", help="One-sentence summary")
     build_parser_.add_argument("--render", action="append", help="Render in the same run: pdf,docx,xlsx or all; repeatable")

@@ -4,6 +4,7 @@ import { describe, expect, test } from "@rstest/core";
 import {
   areStreamMetadataSnapshotsEqual,
   extractContentFromMessage,
+  extractPresentFilesFromMessage,
   extractTextFromMessage,
   extractReasoningContentFromMessage,
   getBranchableAssistantGroupIds,
@@ -15,6 +16,7 @@ import {
   getStreamMetadataSnapshot,
   getStreamingMessageLookup,
   hasContent,
+  hasPresentFiles,
   hasReasoning,
   isAssistantMessageGroupStreaming,
   isHiddenFromUIMessage,
@@ -1424,5 +1426,217 @@ describe("orphan tool messages", () => {
     const t1b = allMessages.find((m) => m.id === "t-1b");
     expect(t1b).toBeDefined();
     expect(t1b?.type).toBe("tool");
+  });
+});
+
+describe("a present_files result carries the tag its call already draws", () => {
+  test("is not read as a second presentation", () => {
+    const messages = [
+      { id: "human-1", type: "human", content: "Make the report" },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "",
+        tool_calls: [
+          {
+            id: "call-1",
+            name: "present_files",
+            args: { filepaths: ["/mnt/user-data/outputs/r.pdf"] },
+          },
+        ],
+      },
+      {
+        id: "tool-1",
+        type: "tool",
+        name: "present_files",
+        tool_call_id: "call-1",
+        content: "Successfully presented files",
+        additional_kwargs: {
+          presented_files: ["/mnt/user-data/outputs/r.pdf"],
+        },
+      },
+    ] as Message[];
+    expect(hasPresentFiles(messages[2]!)).toBe(false);
+    expect(extractPresentFilesFromMessage(messages[2]!)).toEqual([]);
+    const presentGroups = getMessageGroups(messages).filter(
+      (group) => group.type === "assistant:present-files",
+    );
+    expect(presentGroups).toHaveLength(1);
+  });
+});
+
+describe("files a tool result presented on the run's behalf", () => {
+  // A bash call that named files under `present` has its ToolMessage tagged
+  // with `additional_kwargs.presented_files` once the backend validated them;
+  // the client must draw those files exactly as it draws a `present_files`
+  // call's.
+  const messages = [
+    { id: "human-1", type: "human", content: "Make the report" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [
+        {
+          id: "call-1",
+          name: "bash",
+          args: { command: "python report.py build …" },
+        },
+      ],
+    },
+    {
+      id: "tool-1",
+      type: "tool",
+      name: "bash",
+      tool_call_id: "call-1",
+      content: "Built draft 1\n\nPresented to the user: 2 files",
+      additional_kwargs: {
+        presented_files: [
+          "/mnt/user-data/outputs/r/r.report.json",
+          "/mnt/user-data/outputs/r/r.pdf",
+        ],
+      },
+    },
+    { id: "ai-2", type: "ai", content: "Done." },
+  ] as Message[];
+
+  test("the tool result keeps its step and also opens a present-files group", () => {
+    const groups = getMessageGroups(messages);
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+      "assistant:present-files",
+      "assistant",
+    ]);
+    expect(groups[1]?.messages.map((message) => message.id)).toEqual([
+      "ai-1",
+      "tool-1",
+    ]);
+    expect(groups[2]?.messages.map((message) => message.id)).toEqual([
+      "tool-1",
+    ]);
+  });
+
+  test("a second presentation in the same turn joins the first row rather than repeating it", () => {
+    const call = (id: string, name: string, args: Record<string, unknown>) =>
+      ({ id, name, args }) as never;
+    const second = {
+      id: "tool-2",
+      type: "tool",
+      name: "bash",
+      tool_call_id: "call-2",
+      content: "Draft 2\n\nPresented to the user: 1 file",
+      additional_kwargs: {
+        presented_files: [
+          "/mnt/user-data/outputs/r/r.report.json",
+          "/mnt/user-data/outputs/r/r.pdf",
+        ],
+      },
+    } as Message;
+    const secondCall = {
+      id: "ai-1b",
+      type: "ai",
+      content: "",
+      tool_calls: [
+        call("call-2", "bash", { command: "python report.py prose …" }),
+      ],
+    } as Message;
+    const groups = getMessageGroups([
+      ...messages.slice(0, 3),
+      secondCall,
+      second,
+      messages[3]!,
+    ]);
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+      "assistant:present-files",
+      "assistant:processing",
+      "assistant",
+    ]);
+    expect(groups[2]?.messages.map((message) => message.id)).toEqual([
+      "tool-1",
+      "tool-2",
+    ]);
+
+    const nextTurn = getMessageGroups([
+      ...messages,
+      { id: "h-2", type: "human", content: "again" } as Message,
+      secondCall,
+      second,
+    ]);
+    expect(
+      nextTurn.filter((group) => group.type === "assistant:present-files"),
+    ).toHaveLength(2);
+  });
+
+  test("a parallel sibling tool result stays with its step, not under the chips", () => {
+    const parallel = {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [
+        {
+          id: "call-1",
+          name: "bash",
+          args: { command: "python report.py build …" },
+        },
+        { id: "call-x", name: "ls", args: { path: "/mnt/user-data/outputs" } },
+      ],
+    } as Message;
+    const sibling = {
+      id: "tool-x",
+      type: "tool",
+      name: "ls",
+      tool_call_id: "call-x",
+      content: "r.pdf",
+    } as Message;
+    const groups = getMessageGroups([
+      messages[0]!,
+      parallel,
+      messages[2]!,
+      sibling,
+      messages[3]!,
+    ]);
+    expect(groups.map((group) => group.type)).toEqual([
+      "human",
+      "assistant:processing",
+      "assistant:present-files",
+      "assistant",
+    ]);
+    expect(groups[1]?.messages.map((message) => message.id)).toEqual([
+      "ai-1",
+      "tool-1",
+      "tool-x",
+    ]);
+    expect(groups[2]?.messages.map((message) => message.id)).toEqual([
+      "tool-1",
+    ]);
+  });
+
+  test("the presented files are read from the tool result's tag, in order", () => {
+    const tool = messages[2]!;
+    expect(hasPresentFiles(tool)).toBe(true);
+    expect(extractPresentFilesFromMessage(tool)).toEqual([
+      "/mnt/user-data/outputs/r/r.report.json",
+      "/mnt/user-data/outputs/r/r.pdf",
+    ]);
+  });
+
+  test("a tool result without the tag presents nothing, whatever its text says", () => {
+    const untagged = {
+      id: "tool-2",
+      type: "tool",
+      name: "bash",
+      tool_call_id: "call-2",
+      content: "Wrote /mnt/user-data/outputs/r/r.pdf\n",
+    } as Message;
+    expect(hasPresentFiles(untagged)).toBe(false);
+    expect(extractPresentFilesFromMessage(untagged)).toEqual([]);
+    const wrongShape = {
+      ...untagged,
+      additional_kwargs: { presented_files: "not-a-list" },
+    } as Message;
+    expect(hasPresentFiles(wrongShape)).toBe(false);
   });
 });

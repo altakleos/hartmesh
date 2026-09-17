@@ -211,7 +211,7 @@ def test_sandbox_smoke_builds_and_renders_a_business_report_on_the_built_image()
     # formats. A smoke test that issues a shape the doc no longer teaches proves
     # the image agrees with a path the tenant does not take.
     assert "python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/smoke-report --render pdf,docx,xlsx" in workflow
-    assert "python3 /mnt/smoke/check_pdf_on_image.py /tmp/smoke-report/2026-08-business-review.pdf" in workflow
+    assert "python3 /mnt/smoke/check_pdf_on_image.py /tmp/smoke-report/smoke-report.pdf" in workflow
     assert "grep -q 'Checks: Totals match your file'" in workflow
     assert "printf '%s\\n' \"$report_response\"" in workflow
     assert (REPO_ROOT / "backend/tests/skills/business_report/fixtures/example_services_export_small.xls").is_file()

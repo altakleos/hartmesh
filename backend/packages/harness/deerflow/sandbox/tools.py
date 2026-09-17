@@ -6,13 +6,16 @@ import os
 import posixpath
 import re
 import shlex
+import time
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, contextmanager
 from contextvars import ContextVar
 from functools import lru_cache
 from pathlib import Path
+from typing import Annotated
 
-from langchain.tools import tool
+from langchain.tools import InjectedToolCallId, tool
+from langgraph.types import Command
 
 from deerflow.agents.thread_state import ThreadDataState
 from deerflow.authz.sandbox_authz import (
@@ -60,6 +63,7 @@ from deerflow.sandbox.sandbox_provider import (
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.sandbox.session import declared_sandbox
+from deerflow.tools.presentation import with_presentation
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
@@ -2254,10 +2258,22 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
 
 
 @tool("bash", parse_docstring=True)
-def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
+def bash_tool(
+    runtime: Runtime,
+    command: str,
+    description: str = "",
+    present: list[str] | None = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
+) -> str | Command:
     """Execute a bash command in the configured execution environment.
 
-
+    - A command that writes files the user should receive under `/mnt/user-data/outputs` can hand them
+      over in the same call: name them under `present`. Once the command has run, each named file that
+      exists and was written by it is delivered with this turn and named back under "Presented to the
+      user"; one that does not exist afterwards, or that the command did not write, is named on a
+      "Not attached:" line with the reason and is not delivered. Do not call `present_files` for files
+      named under "Presented to the user" (that would attach them a second time), and do not list a
+      directory to check that they exist.
     - Use `python` to run Python code.
     - Prefer a thread-local virtual environment in `/mnt/user-data/workspace/.venv`.
     - Use `python -m pip` (inside the virtual environment) to install Python packages.
@@ -2275,7 +2291,14 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
     Args:
         command: The bash command to execute. Always use absolute paths for files and directories.
         description: Optional short explanation of this command shown in the UI.
+        present: Absolute paths under `/mnt/user-data/outputs` that this command writes and the user should
+            receive, attached once the command has run. Name finished files only, not intermediate ones a
+            later step reads. Leave it out when the command makes nothing for the user, and when you are a
+            delegated task: report the paths to the agent that delegated instead.
     """
+    # A file named under ``present`` counts as this command's only if it was
+    # modified after this moment.
+    started_at = time.time()
     try:
         _validate_runtime_skill_command(runtime, command)
         sandbox = ensure_sandbox_initialized(runtime)
@@ -2319,9 +2342,14 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 env=injected_env,
                 timeout=command_timeout,
             )
-            return _truncate_bash_output(
+            return with_presentation(
+                runtime,
                 mask_secret_values(mask_local_paths_in_output(output, thread_data), injected_env),
-                max_chars,
+                present=present,
+                tool_call_id=tool_call_id,
+                written_after=started_at,
+                max_chars=max_chars,
+                truncate=_truncate_bash_output,
             )
         ensure_thread_directories_exist(runtime)
         command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
@@ -2334,7 +2362,8 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
             max_chars = sandbox_cfg.bash_output_max_chars if sandbox_cfg else 20000
         except Exception:
             max_chars = 20000
-        return _truncate_bash_output(
+        return with_presentation(
+            runtime,
             mask_secret_values(
                 _execute_bash_command(
                     sandbox,
@@ -2344,7 +2373,11 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
                 ),
                 injected_env,
             ),
-            max_chars,
+            present=present,
+            tool_call_id=tool_call_id,
+            written_after=started_at,
+            max_chars=max_chars,
+            truncate=_truncate_bash_output,
         )
     except AcceptedSandboxAuthorityLostError:
         raise
@@ -2356,8 +2389,14 @@ def bash_tool(runtime: Runtime, command: str, description: str = "") -> str:
         return f"Error: Unexpected error executing command: {_sanitize_error(e, runtime)}"
 
 
-async def _bash_tool_async(runtime: Runtime, command: str, description: str = "") -> str:
-    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, command, description)
+async def _bash_tool_async(
+    runtime: Runtime,
+    command: str,
+    description: str = "",
+    present: list[str] | None = None,
+    tool_call_id: Annotated[str, InjectedToolCallId] = "",
+) -> str | Command:
+    return await _run_sync_tool_after_async_sandbox_init(bash_tool.func, runtime, command, description, present, tool_call_id)
 
 
 bash_tool.coroutine = _bash_tool_async
