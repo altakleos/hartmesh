@@ -30,12 +30,37 @@ Other search tools continue to work normally but do not emit
 `retrieval.observation.v1`. Direct/local tool invocation without an accepted run
 also retains its compatibility behavior and does not claim durable evidence.
 
+## Governed and unmanaged runs
+
+Every observation states which authority the run was admitted under, because
+the deployment has two supported answers and they are not interchangeable.
+
+- **Governed.** Admission pinned a promoted tool-plane revision, and the
+  observation carries its four digests, as before. This is the only shape a
+  durable deployment can produce, and the only one a run evidence bundle
+  accepts.
+- **Unmanaged.** A non-durable deployment enabled the tool plane and has no
+  promoted base revision (`tool_plane_bootstrap_required`) or its material
+  drifted (`unmanaged_drift`). Admission seals that decision, and the
+  observation reads `tool_plane.mode: "unmanaged"` with all four digests
+  `null`. Nothing substitutes for a revision nobody promoted.
+
+Everything else is identical: the same receipt reservation before dispatch, the
+same policy intersection, the same protected query projection, the same atomic
+terminal pairing. What differs is only what the observation may claim about the
+material that authorized the tool.
+
+A run whose admission made *no* statement at all still fails before dispatch
+with `retrieval_tool_plane_context_unavailable`, and a durable deployment never
+honours an unmanaged seal — including one recovered from a run admitted before
+the deployment was promoted.
+
 ## Trust and commit boundary
 
 `deerflow.retrieval.EvidenceBearingRetrievalService` is the single normalization
 boundary. It receives an active `DurableToolReceiptV1`, the verified actor and
-tenant, server-resolved credential, accepted tool-plane digests, server policy,
-and caller-requested narrowing. Policy is intersected before the provider port
+tenant, server-resolved credential, the run's sealed tool-plane provenance,
+server policy, and caller-requested narrowing. Policy is intersected before the provider port
 is called. A caller may reduce domains, collections, recency, result count,
 bytes, timeout, redirects, schemes, or partial-result acceptance; it cannot
 widen any of them.

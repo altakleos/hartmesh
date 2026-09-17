@@ -2444,6 +2444,18 @@ async def _run_agent(
                 runtime_ctx["accepted_extension_configuration_digest"] = accepted.extension_configuration_digest
             if accepted.tool_plane_revision is not None:
                 runtime_ctx["accepted_tool_plane_revision"] = accepted.tool_plane_revision
+            if accepted.tool_plane_unmanaged is not None:
+                from deerflow.config.app_config import get_app_config
+                from deerflow.runtime.accepted_invocation import (
+                    unmanaged_tool_plane_is_honourable,
+                )
+
+                if not unmanaged_tool_plane_is_honourable(
+                    accepted.tool_plane_unmanaged,
+                    durable_deployment=get_app_config().deployment.profile.is_durable,
+                ):
+                    raise AssemblyEvidenceError("tool_plane_unmanaged_not_durable")
+                runtime_ctx["accepted_tool_plane_unmanaged"] = accepted.tool_plane_unmanaged
             execution_budget = accepted.execution_budget
             if execution_budget is not None:
                 from deerflow.runtime.events.catalog import (

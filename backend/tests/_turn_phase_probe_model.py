@@ -14,6 +14,8 @@ exactly as it would interrupt a provider call:
 * ``probe:silent`` -- a hidden reasoning block, the pause, and no answer text.
 * ``probe:hang``   -- a hidden reasoning block, then a long pause meant to be
                       cancelled from outside.
+* ``probe:search`` -- one declared retrieval tool call, then the ordinary text
+                      script once the tool result comes back.
 
 Delays are read from the environment when the model is built, so a test sets
 them before the server starts and they apply to every run it serves.
@@ -36,6 +38,8 @@ TAIL_DELAY_ENV = "HARTMESH_PROBE_TAIL_DELAY_S"
 HANG_DELAY_ENV = "HARTMESH_PROBE_HANG_DELAY_S"
 
 TEXT_CHUNKS = ("Hello", " from", " the probe.")
+SEARCH_TOOL_NAME = "web_search"
+SEARCH_QUERY = "what is the capital of france"
 _REASONING_BLOCK = [{"type": "reasoning", "reasoning": "hidden deliberation"}]
 
 
@@ -55,6 +59,8 @@ def _script_for(messages: list[BaseMessage]) -> str:
                 return "silent"
             if "probe:hang" in text:
                 return "hang"
+            if "probe:search" in text:
+                return "search"
             return "text"
     return "text"
 
@@ -83,10 +89,18 @@ class ProbeStreamingChatModel(BaseChatModel):
     def bind_tools(self, tools: Any, *, tool_choice: Any = None, **kwargs: Any) -> Runnable:  # type: ignore[override]
         return self
 
+    @staticmethod
+    def _already_called_tool(messages: list[BaseMessage]) -> bool:
+        return any(getattr(message, "type", "") == "tool" for message in messages)
+
     def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
         script = _script_for(messages)
         content: list[dict[str, Any]] = list(_REASONING_BLOCK)
-        if script == "text":
+        # The agent loop streams; this path is for the side-channel calls a
+        # middleware makes with its own trimmed message list. Answering those
+        # with a tool call would dispatch a tool nobody asked for, so the
+        # retrieval script is scripted only in ``_astream``.
+        if script in ("text", "search"):
             content.append({"type": "text", "text": "".join(TEXT_CHUNKS)})
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
@@ -100,6 +114,24 @@ class ProbeStreamingChatModel(BaseChatModel):
         script = _script_for(messages)
         # Hidden reasoning first: bytes on the wire, but not the answer.
         yield ChatGenerationChunk(message=AIMessageChunk(content=list(_REASONING_BLOCK)))
+        if script == "search" and not self._already_called_tool(messages):
+            # Exactly one declared retrieval call. The graph comes back here
+            # with the tool result, and the second pass answers as usual.
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content=[],
+                    tool_call_chunks=[
+                        {
+                            "name": SEARCH_TOOL_NAME,
+                            "args": f'{{"query": "{SEARCH_QUERY}", "max_results": 3}}',
+                            "id": "probe-search-1",
+                            "index": 0,
+                            "type": "tool_call_chunk",
+                        }
+                    ],
+                )
+            )
+            return
         if script == "hang":
             await asyncio.sleep(self.hang_delay_s)
             return

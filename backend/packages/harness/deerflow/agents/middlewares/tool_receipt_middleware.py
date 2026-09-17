@@ -53,6 +53,7 @@ from deerflow.retrieval import (
     RetrievalProviderError,
     active_retrieval_draft_context,
     protect_retrieval_request_projection,
+    resolve_tool_plane_provenance,
     retrieval_tool_declaration,
 )
 from deerflow.runtime.execution_policy import (
@@ -78,6 +79,23 @@ from deerflow.runtime.tool_evidence import (
 )
 
 logger = logging.getLogger(__name__)
+
+_SAFE_REASON = re.compile(r"^[a-z0-9_.:-]{1,64}$")
+
+
+def _bounded_reason(value: object) -> str:
+    """Return a value safe to log: a known-shaped label, or nothing at all.
+
+    Diagnostics here sit next to queries, tool arguments and provider
+    responses, so anything that is not already a bounded machine label is
+    reported as ``unspecified`` rather than truncated into the log.
+    """
+
+    text = getattr(value, "code", value)
+    if isinstance(text, str) and _SAFE_REASON.fullmatch(text):
+        return text
+    return "unspecified"
+
 
 _RECEIPT_CONTEXT_KEY = "deerflow_tool_receipt_context"
 
@@ -196,17 +214,30 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
         tool_call_id = str(request.tool_call.get("id") or "")
         retrieval_declaration = retrieval_tool_declaration(getattr(request, "tool", None))
         if retrieval_declaration is not None:
-            if not isinstance(sink, RetrievalObservationFinalizer):
-                raise RetrievalEvidenceError("retrieval_finalizer_unavailable")
-            tool_plane = context.get("accepted_tool_plane_revision")
-            required_digests = (
-                "base_revision_digest",
-                "user_overlay_digest",
-                "projection_digest",
-                "effective_digest",
-            )
-            if binding.tenant is None or not isinstance(tool_plane, Mapping) or any(not isinstance(tool_plane.get(name), str) or re.fullmatch(r"[0-9a-f]{64}", tool_plane[name]) is None for name in required_digests):
-                raise RetrievalEvidenceError("retrieval_evidence_context_unavailable")
+            # One refusal reason reaches the operator's log, bounded and free
+            # of queries, arguments, provider payloads and tenant identity:
+            # "retrieval refused" alone cannot tell a deployment missing its
+            # atomic finalizer from one whose admission described no
+            # tool-plane state at all, and those have different repairs.
+            try:
+                if not isinstance(sink, RetrievalObservationFinalizer):
+                    raise RetrievalEvidenceError("retrieval_finalizer_unavailable")
+                if binding.tenant is None:
+                    raise RetrievalEvidenceError("retrieval_tenant_context_unavailable")
+                # Governed or explicitly unmanaged: both are decisions this
+                # run's admission sealed, and the observation records which
+                # one it was. Anything else -- an admission that made no
+                # statement, or one that somehow made both -- still fails
+                # before the tool is called.
+                resolve_tool_plane_provenance(context)
+            except RetrievalEvidenceError as exc:
+                logger.warning(
+                    "Refusing a retrieval tool call before dispatch: reason=%s tool=%s run=%s",
+                    _bounded_reason(exc),
+                    _bounded_reason(request.tool_call.get("name")),
+                    binding.run_id,
+                )
+                raise
         dispatch = self._dispatch_observation(request)
         async with binding.serialize_dispatch(tool_call_id):
             tool_name = str(request.tool_call.get("name") or "")

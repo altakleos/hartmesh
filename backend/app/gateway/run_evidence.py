@@ -314,7 +314,11 @@ def _retrieval_references(
         if observation.draft.run_id != request.run_id or observation.draft.tenant_ref != request.tenant.public_ref or observation.draft.tenant_digest != request.tenant.digest or observation.receipt_id in receipt_ids:
             _error("evidence_cross_link_invalid")
         if (
-            observation.draft.tool_plane_base_revision_digest != tool_plane.get("base_revision_digest")
+            # The bundle is a governed artifact: it is only built for a run
+            # that carries a promoted revision, so an observation that
+            # declared itself ungoverned can never belong to one.
+            observation.draft.tool_plane_mode != "governed"
+            or observation.draft.tool_plane_base_revision_digest != tool_plane.get("base_revision_digest")
             or observation.draft.tool_plane_user_overlay_digest != tool_plane.get("user_overlay_digest")
             or observation.draft.tool_plane_projection_digest != tool_plane.get("projection_digest")
             or observation.draft.tool_plane_effective_digest != tool_plane.get("effective_digest")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -85,6 +86,48 @@ def retrieval_tool_declaration(tool: object) -> RetrievalToolDeclarationV1 | Non
     )
 
 
+_TOOL_PLANE_DIGEST_FIELDS = (
+    "base_revision_digest",
+    "user_overlay_digest",
+    "projection_digest",
+    "effective_digest",
+)
+
+
+def resolve_tool_plane_provenance(
+    runtime_context: Mapping[str, object],
+) -> tuple[str, Mapping[str, object] | None]:
+    """Return how this run's retrieval may describe its tool-plane authority.
+
+    Exactly one of two server-sealed admission facts answers this. A governed
+    revision anchors the observation to the material an administrator
+    promoted. The unmanaged seal is the deployment stating, at admission, that
+    it has no such material and is not promising any -- the supported state of
+    a non-durable profile before adoption.
+
+    Absence of both is not a third mode: it is a run whose admission made no
+    statement at all, and retrieval fails closed, exactly as it did before the
+    unmanaged state was expressible.
+    """
+
+    governed = runtime_context.get("accepted_tool_plane_revision")
+    unmanaged = runtime_context.get("accepted_tool_plane_unmanaged")
+    if isinstance(governed, Mapping) and isinstance(unmanaged, Mapping):
+        raise RetrievalEvidenceError("retrieval_tool_plane_context_ambiguous")
+    if isinstance(governed, Mapping):
+        if any(not isinstance(governed.get(name), str) or re.fullmatch(r"[0-9a-f]{64}", str(governed.get(name))) is None for name in _TOOL_PLANE_DIGEST_FIELDS):
+            raise RetrievalEvidenceError("retrieval_tool_plane_context_unavailable")
+        return "governed", governed
+    if isinstance(unmanaged, Mapping):
+        if unmanaged.get("version") != 1 or unmanaged.get("governance_state") not in {
+            "tool_plane_bootstrap_required",
+            "unmanaged_drift",
+        }:
+            raise RetrievalEvidenceError("retrieval_tool_plane_context_unavailable")
+        return "unmanaged", None
+    raise RetrievalEvidenceError("retrieval_tool_plane_context_unavailable")
+
+
 def protect_retrieval_request_projection(
     projection: Mapping[str, object],
     declaration: RetrievalToolDeclarationV1,
@@ -163,15 +206,7 @@ class RetrievalDraftHandoffV1:
         tenant = self.receipt.context.tenant
         if not isinstance(tenant, TenantReferenceV1):
             raise RetrievalEvidenceError("retrieval_tenant_context_unavailable")
-        tool_plane = self.runtime_context.get("accepted_tool_plane_revision")
-        required_digests = (
-            "base_revision_digest",
-            "user_overlay_digest",
-            "projection_digest",
-            "effective_digest",
-        )
-        if not isinstance(tool_plane, Mapping) or any(not isinstance(tool_plane.get(name), str) for name in required_digests):
-            raise RetrievalEvidenceError("retrieval_tool_plane_context_unavailable")
+        mode, tool_plane = resolve_tool_plane_provenance(self.runtime_context)
         marker_digest = policy_digest or _domain_digest(
             "retrieval-policy-state",
             {
@@ -209,10 +244,11 @@ class RetrievalDraftHandoffV1:
             truncated=False,
             partial=False,
             safe_provider_request_ref=None,
-            tool_plane_base_revision_digest=tool_plane["base_revision_digest"],  # type: ignore[arg-type]
-            tool_plane_user_overlay_digest=tool_plane["user_overlay_digest"],  # type: ignore[arg-type]
-            tool_plane_projection_digest=tool_plane["projection_digest"],  # type: ignore[arg-type]
-            tool_plane_effective_digest=tool_plane["effective_digest"],  # type: ignore[arg-type]
+            tool_plane_base_revision_digest=(None if tool_plane is None else tool_plane["base_revision_digest"]),  # type: ignore[arg-type]
+            tool_plane_user_overlay_digest=(None if tool_plane is None else tool_plane["user_overlay_digest"]),  # type: ignore[arg-type]
+            tool_plane_projection_digest=(None if tool_plane is None else tool_plane["projection_digest"]),  # type: ignore[arg-type]
+            tool_plane_effective_digest=(None if tool_plane is None else tool_plane["effective_digest"]),  # type: ignore[arg-type]
+            tool_plane_mode=mode,  # type: ignore[arg-type]
             accepted_execution_evidence_ref=(sandbox_bridge.execution_evidence_reference if sandbox_bridge is not None else None),
             accepted_sandbox_operation_ref=None,
             mcp_evidence_ref=self.declaration.mcp_evidence_ref,
@@ -318,15 +354,7 @@ def accepted_retrieval_request_from_active(
         raise RetrievalEvidenceError("retrieval_actor_context_unavailable")
     if trusted.run_id != handoff.receipt.context.run_id:
         raise RetrievalEvidenceError("retrieval_run_context_mismatch")
-    tool_plane = handoff.runtime_context.get("accepted_tool_plane_revision")
-    required_digests = {
-        "base_revision_digest",
-        "user_overlay_digest",
-        "projection_digest",
-        "effective_digest",
-    }
-    if not isinstance(tool_plane, Mapping) or any(not isinstance(tool_plane.get(name), str) for name in required_digests):
-        raise RetrievalEvidenceError("retrieval_tool_plane_context_unavailable")
+    mode, tool_plane = resolve_tool_plane_provenance(handoff.runtime_context)
     sandbox_bridge = current_accepted_sandbox_bridge()
     try:
         return AcceptedRetrievalRequest(
@@ -341,10 +369,11 @@ def accepted_retrieval_request_from_active(
             credential=credential,
             policy=policy,
             requested_constraints=requested_constraints,
-            tool_plane_base_revision_digest=tool_plane["base_revision_digest"],  # type: ignore[arg-type]
-            tool_plane_user_overlay_digest=tool_plane["user_overlay_digest"],  # type: ignore[arg-type]
-            tool_plane_projection_digest=tool_plane["projection_digest"],  # type: ignore[arg-type]
-            tool_plane_effective_digest=tool_plane["effective_digest"],  # type: ignore[arg-type]
+            tool_plane_base_revision_digest=(None if tool_plane is None else tool_plane["base_revision_digest"]),  # type: ignore[arg-type]
+            tool_plane_user_overlay_digest=(None if tool_plane is None else tool_plane["user_overlay_digest"]),  # type: ignore[arg-type]
+            tool_plane_projection_digest=(None if tool_plane is None else tool_plane["projection_digest"]),  # type: ignore[arg-type]
+            tool_plane_effective_digest=(None if tool_plane is None else tool_plane["effective_digest"]),  # type: ignore[arg-type]
+            tool_plane_mode=mode,  # type: ignore[arg-type]
             accepted_execution_evidence_ref=(sandbox_bridge.execution_evidence_reference if sandbox_bridge is not None else None),
             accepted_sandbox_operation_ref=accepted_sandbox_operation_ref,
             mcp_evidence_ref=declaration.mcp_evidence_ref,

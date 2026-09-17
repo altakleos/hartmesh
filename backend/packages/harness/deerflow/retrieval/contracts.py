@@ -468,10 +468,11 @@ class AcceptedRetrievalRequest:
     credential: ResolvedRetrievalCredentialV1 = field(repr=False)
     policy: RetrievalPolicyV1
     requested_constraints: RetrievalRequestConstraintsV1
-    tool_plane_base_revision_digest: str
-    tool_plane_user_overlay_digest: str
-    tool_plane_projection_digest: str
-    tool_plane_effective_digest: str
+    tool_plane_base_revision_digest: str | None = None
+    tool_plane_user_overlay_digest: str | None = None
+    tool_plane_projection_digest: str | None = None
+    tool_plane_effective_digest: str | None = None
+    tool_plane_mode: Literal["governed", "unmanaged"] = "governed"
     accepted_execution_evidence_ref: str | None = None
     accepted_sandbox_operation_ref: str | None = None
     mcp_evidence_ref: str | None = None
@@ -507,13 +508,20 @@ class AcceptedRetrievalRequest:
         if not isinstance(self.requested_constraints, RetrievalRequestConstraintsV1) or self.requested_constraints.provider_id != provider_id:
             raise RetrievalEvidenceError("retrieval_constraints_mismatch")
         object.__setattr__(self, "effective_constraints", self.policy.narrow(self.requested_constraints))
-        for name in (
+        tool_plane_digests = (
             "tool_plane_base_revision_digest",
             "tool_plane_user_overlay_digest",
             "tool_plane_projection_digest",
             "tool_plane_effective_digest",
-        ):
-            _digest(getattr(self, name), field_name=name)
+        )
+        if self.tool_plane_mode == "governed":
+            for name in tool_plane_digests:
+                _digest(getattr(self, name), field_name=name)
+        elif self.tool_plane_mode == "unmanaged":
+            if any(getattr(self, name) is not None for name in tool_plane_digests):
+                raise RetrievalEvidenceError("retrieval_tool_plane_mode_invalid")
+        else:
+            raise RetrievalEvidenceError("retrieval_tool_plane_mode_invalid")
         for name in (
             "accepted_execution_evidence_ref",
             "accepted_sandbox_operation_ref",
@@ -707,10 +715,15 @@ class RetrievalObservationDraftV1:
     truncated: bool
     partial: bool
     safe_provider_request_ref: str | None
-    tool_plane_base_revision_digest: str
-    tool_plane_user_overlay_digest: str
-    tool_plane_projection_digest: str
-    tool_plane_effective_digest: str
+    # Governed runs anchor the observation to the revision that authorized the
+    # tool. A run admitted with no promoted revision has nothing to anchor to
+    # and says so: the four digests are absent, not substituted, so no reader
+    # can mistake an ungoverned retrieval for a governed one.
+    tool_plane_base_revision_digest: str | None = None
+    tool_plane_user_overlay_digest: str | None = None
+    tool_plane_projection_digest: str | None = None
+    tool_plane_effective_digest: str | None = None
+    tool_plane_mode: Literal["governed", "unmanaged"] = "governed"
     accepted_execution_evidence_ref: str | None = None
     accepted_sandbox_operation_ref: str | None = None
     mcp_evidence_ref: str | None = None
@@ -719,8 +732,22 @@ class RetrievalObservationDraftV1:
     def __post_init__(self) -> None:
         if type(self.attempt) is not int or self.attempt < 1:
             raise RetrievalEvidenceError("retrieval_attempt_invalid")
-        for name in ("tenant_digest", "policy_digest", "tool_plane_base_revision_digest", "tool_plane_user_overlay_digest", "tool_plane_projection_digest", "tool_plane_effective_digest"):
+        for name in ("tenant_digest", "policy_digest"):
             _digest(getattr(self, name), field_name=name)
+        tool_plane_digests = (
+            "tool_plane_base_revision_digest",
+            "tool_plane_user_overlay_digest",
+            "tool_plane_projection_digest",
+            "tool_plane_effective_digest",
+        )
+        if self.tool_plane_mode == "governed":
+            for name in tool_plane_digests:
+                _digest(getattr(self, name), field_name=name)
+        elif self.tool_plane_mode == "unmanaged":
+            if any(getattr(self, name) is not None for name in tool_plane_digests):
+                raise RetrievalEvidenceError("retrieval_tool_plane_mode_invalid")
+        else:
+            raise RetrievalEvidenceError("retrieval_tool_plane_mode_invalid")
         for name, limit in (
             ("tenant_ref", 64),
             ("run_id", 64),
@@ -822,6 +849,7 @@ class RetrievalObservationDraftV1:
             "partial": self.partial,
             "safe_provider_request_ref": self.safe_provider_request_ref,
             "tool_plane": {
+                "mode": self.tool_plane_mode,
                 "base_revision_digest": self.tool_plane_base_revision_digest,
                 "user_overlay_digest": self.tool_plane_user_overlay_digest,
                 "projection_digest": self.tool_plane_projection_digest,
@@ -877,13 +905,18 @@ class RetrievalObservationDraftV1:
         if not isinstance(value, Mapping) or set(value) != expected or value.get("version") != 1 or value.get("canonicalization") != "hartmesh-retrieval-v1":
             raise RetrievalEvidenceError("retrieval_draft_projection_invalid")
         tool_plane = value.get("tool_plane")
-        if not isinstance(tool_plane, Mapping) or set(tool_plane) != {
+        digest_fields = {
             "base_revision_digest",
             "user_overlay_digest",
             "projection_digest",
             "effective_digest",
-        }:
+        }
+        # A row written before the mode existed carries the digests alone, and
+        # only a governed retrieval could have written one.
+        if not isinstance(tool_plane, Mapping) or set(tool_plane) not in (digest_fields, digest_fields | {"mode"}):
             raise RetrievalEvidenceError("retrieval_tool_plane_invalid")
+        if tool_plane.get("mode", "governed") not in {"governed", "unmanaged"}:
+            raise RetrievalEvidenceError("retrieval_tool_plane_mode_invalid")
         refs = value.get("source_references")
         if not isinstance(refs, list):
             raise RetrievalEvidenceError("retrieval_source_invalid")
@@ -920,6 +953,10 @@ class RetrievalObservationDraftV1:
             tool_plane_user_overlay_digest=tool_plane["user_overlay_digest"],  # type: ignore[arg-type]
             tool_plane_projection_digest=tool_plane["projection_digest"],  # type: ignore[arg-type]
             tool_plane_effective_digest=tool_plane["effective_digest"],  # type: ignore[arg-type]
+            # Rows written before the mode existed are governed by definition:
+            # nothing else could have been written, because an ungoverned
+            # retrieval could not run at all.
+            tool_plane_mode=tool_plane.get("mode", "governed"),  # type: ignore[arg-type]
             accepted_execution_evidence_ref=value["accepted_execution_evidence_ref"],  # type: ignore[arg-type]
             accepted_sandbox_operation_ref=value["accepted_sandbox_operation_ref"],  # type: ignore[arg-type]
             mcp_evidence_ref=value["mcp_evidence_ref"],  # type: ignore[arg-type]
@@ -1062,6 +1099,7 @@ class RetrievalObservationV1:
             "partial": draft.partial,
             "safe_provider_request_ref": draft.safe_provider_request_ref,
             "tool_plane": {
+                "mode": draft.tool_plane_mode,
                 "base_revision_digest": draft.tool_plane_base_revision_digest,
                 "user_overlay_digest": draft.tool_plane_user_overlay_digest,
                 "projection_digest": draft.tool_plane_projection_digest,

@@ -10,6 +10,7 @@ from deerflow.retrieval.context import (
     get_active_retrieval_handoff,
     protect_retrieval_request_projection,
     publish_retrieval_observation_draft,
+    resolve_tool_plane_provenance,
     retrieval_tool_declaration,
 )
 from deerflow.retrieval.contracts import (
@@ -70,6 +71,7 @@ __all__ = [
     "normalize_web_source_reference",
     "publish_retrieval_observation_draft",
     "protect_retrieval_request_projection",
+    "resolve_tool_plane_provenance",
     "retrieval_tool_declaration",
     "retrieval_observation_event_metadata",
     "run_blocking_provider_call",
