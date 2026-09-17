@@ -51,6 +51,12 @@ export interface Translations {
     showBrowser: string;
   };
 
+  runProgress: {
+    preparing: string;
+    workspaceStarting: string;
+    thinking: string;
+  };
+
   runDuration: {
     reasoning: string;
     working: string;

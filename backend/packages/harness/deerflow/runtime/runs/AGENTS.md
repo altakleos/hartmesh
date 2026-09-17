@@ -37,7 +37,13 @@ rides `stop_reason` on the run record (`artifact_delivery_incomplete` /
 `delivery_receipt_failed`, also the `run.terminal.v1` failure code) plus one
 advisory `custom` frame for live clients — `artifact_delivery_incomplete`
 naming the withheld paths (bounded at 20, exact count) or
-`artifact_delivery_unverified` carrying only the run and the message. That
+`artifact_delivery_unverified` carrying only the run and the message. The
+same advisory channel carries `turn_progress` frames (`runtime/turn_progress.py`:
+`preparing` at admission, `workspace_starting` at sandbox create, `thinking`
+at the first model request; each at most once per run and in that order — a
+stage behind one already published is dropped — from a phase-journal observer
+the worker closes when the run ends) so a client can name what the run is
+doing instead of "Working…"; losing one costs a label. That
 frame rides outside the negotiated stream modes, which is acceptable because
 it is advisory: a consumer that never requested `custom` reads the verdict
 from the record after the end marker, as `/wait` and the IM follow-up watcher

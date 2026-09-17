@@ -130,6 +130,7 @@ from .schemas import RunStatus
 from .store.base import BindAssemblyEvidenceOutcome, LifecycleType, RecoveryPolicy
 
 if TYPE_CHECKING:
+    from deerflow.runtime.turn_progress import TurnProgressPublisher
     from deerflow.sandbox.accepted_material import (
         AcceptedExecutionEvidence,
         AcceptedMaterializer,
@@ -1717,8 +1718,19 @@ async def run_agent(
     """
 
     from deerflow.runtime.turn_phases import TurnPhase, turn_phases
+    from deerflow.runtime.turn_progress import TurnProgressPublisher
 
     with turn_phases(correlation_id=resolve_trace_id(), run_id=record.run_id) as journal:
+        # The person waiting hears the phases they can act on as they begin,
+        # from admission onward and before any model token, as one advisory
+        # ``custom`` frame per stage (``turn_progress.py``). Registered before
+        # the first mark so admission itself is announced.
+        progress = TurnProgressPublisher(
+            loop=asyncio.get_running_loop(),
+            run_id=record.run_id,
+            publish=lambda payload: bridge.publish(record.run_id, "custom", payload),
+        )
+        journal.observe(progress)
         journal.mark(TurnPhase.ADMISSION)
         # Submit-to-first-rendered-text belongs to the browser: it includes
         # ingress, transfer and render, none of which a server timestamp can
@@ -1737,8 +1749,10 @@ async def run_agent(
                 stream_subgraphs=stream_subgraphs,
                 interrupt_before=interrupt_before,
                 interrupt_after=interrupt_after,
+                progress=progress,
             )
         finally:
+            progress.close()
             journal.mark(TurnPhase.TERMINAL)
             journal.set_outcome(str(getattr(record, "status", "unknown")))
             # The SSE mark is per-process and live-window only: a join stream
@@ -1765,6 +1779,7 @@ async def _run_agent(
     stream_subgraphs: bool = False,
     interrupt_before: list[str] | Literal["*"] | None = None,
     interrupt_after: list[str] | Literal["*"] | None = None,
+    progress: TurnProgressPublisher | None = None,
 ) -> None:
     """Execute an agent in the background, publishing events to *bridge*."""
 
@@ -2210,6 +2225,10 @@ async def _run_agent(
                 "thread_id": thread_id,
             },
         )
+        # The client can place a progress label only once it has the ids:
+        # the stages held since admission go out now, in order.
+        if progress is not None:
+            await progress.open()
 
         # 3. Build the agent
         from langchain_core.runnables import RunnableConfig

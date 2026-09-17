@@ -37,6 +37,7 @@ import { isSidecarThread, SIDECAR_METADATA_KEY } from "../sidecar/thread";
 import { useSubtaskContext, useUpdateSubtask } from "../tasks/context";
 import { taskEventToSubtaskUpdate } from "../tasks/lifecycle";
 import { messageToStep } from "../tasks/steps";
+import { parseTurnProgress, useTurnProgressContext } from "../turn-progress";
 import type { UploadedFileInfo } from "../uploads";
 import { promptInputFilePartToFile, uploadFiles } from "../uploads";
 
@@ -1723,6 +1724,8 @@ export function useThreadStream({
   const { tasksRef, setTasks } = useSubtaskContext();
   const updateSubtask = useUpdateSubtask();
   const { recordFailure: recordDeliveryFailure } = useArtifactDeliveryContext();
+  const { record: recordTurnProgress, clear: clearTurnProgress } =
+    useTurnProgressContext();
 
   const clearPreparedReplayMasks = useCallback(
     (replay: PendingPreparedReplayMask | null) => {
@@ -1849,6 +1852,7 @@ export function useThreadStream({
           : undefined;
 
       if (eventType === "stream_replay_gap") {
+        if (threadIdRef.current) clearTurnProgress(threadIdRef.current);
         setOptimisticMessages([]);
         setOptimisticThreadId(null);
         setLiveMessagesThreadId(null);
@@ -1884,6 +1888,17 @@ export function useThreadStream({
       const deliveryFailure = parseArtifactDeliveryFailure(event);
       if (deliveryFailure) {
         recordDeliveryFailure(deliveryFailure);
+        return;
+      }
+
+      // What the run is doing while the person waits, from admission on: the
+      // activity row under the turn shows the latest stage in place of the
+      // bare "Working…" until the first tool card or answer text takes over.
+      const progress = parseTurnProgress(event);
+      if (progress) {
+        if (threadIdRef.current) {
+          recordTurnProgress(threadIdRef.current, progress);
+        }
         return;
       }
 
@@ -1929,6 +1944,7 @@ export function useThreadStream({
       }
     },
     onError(error) {
+      if (threadIdRef.current) clearTurnProgress(threadIdRef.current);
       setOptimisticMessages([]);
       setOptimisticThreadId(null);
       setLiveMessagesThreadId(null);
@@ -1951,6 +1967,7 @@ export function useThreadStream({
       }
     },
     onFinish(state) {
+      if (threadIdRef.current) clearTurnProgress(threadIdRef.current);
       listeners.current.onFinish?.(state.values);
       pendingPreparedReplayRef.current = null;
       pendingUsageBaselineMessageIdsRef.current = new Set(
@@ -1965,6 +1982,7 @@ export function useThreadStream({
   const stopThread = useCallback(async () => {
     const stoppedThreadId =
       threadIdRef.current ?? displayThreadId ?? threadId ?? null;
+    if (stoppedThreadId) clearTurnProgress(stoppedThreadId);
     const pendingReplay = pendingPreparedReplayRef.current;
     await stopThreadAndInvalidateCaches(
       queryClient,
@@ -1979,6 +1997,7 @@ export function useThreadStream({
     }
   }, [
     clearPreparedReplayMasks,
+    clearTurnProgress,
     displayThreadId,
     isMock,
     queryClient,

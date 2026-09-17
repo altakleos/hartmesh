@@ -21,7 +21,10 @@ export function explainToolCall(toolCall: ToolCall, t: Translations) {
     return t.toolCalls.presentFiles;
   } else if (toolCall.name === "write_todos") {
     return t.toolCalls.writeTodos;
-  } else if (toolCall.args.description) {
+  } else if (
+    typeof toolCall.args.description === "string" &&
+    toolCall.args.description
+  ) {
     return toolCall.args.description;
   } else {
     return t.toolCalls.useTool(toolCall.name);

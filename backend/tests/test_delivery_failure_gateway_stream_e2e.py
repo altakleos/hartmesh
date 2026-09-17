@@ -75,6 +75,15 @@ def _frames_of(observed: e2e._StreamObservation, event: str) -> list[Any]:
     return [payload for name, payload in observed.frames if name == event]
 
 
+def _verdicts(observed: e2e._StreamObservation) -> list[Any]:
+    """Delivery verdict frames only: the advisory channel also carries ``turn_progress``."""
+    return [payload for name, payload in observed.frames if name == "custom" and isinstance(payload, dict) and str(payload.get("type", "")).startswith("artifact_delivery_")]
+
+
+def _verdict_index(observed: e2e._StreamObservation) -> int:
+    return next(index for index, (name, payload) in enumerate(observed.frames) if name == "custom" and isinstance(payload, dict) and str(payload.get("type", "")).startswith("artifact_delivery_"))
+
+
 def test_a_turn_that_never_presented_its_file_reports_the_failure_without_breaking_the_stream(
     delivery_gateway: e2e._Gateway,
 ) -> None:
@@ -88,9 +97,9 @@ def test_a_turn_that_never_presented_its_file_reports_the_failure_without_breaki
     assert written["done"], "the turn produced no artifact, so the fence was never exercised"
     assert observed.text_frames >= 1, "the turn must have shown prose, or there is no contradiction to correct"
     assert "error" not in observed.events, observed.events
-    assert observed.events.index("custom") < observed.events.index("end"), observed.events
+    assert _verdict_index(observed) < observed.events.index("end"), observed.events
 
-    detail = _frames_of(observed, "custom")[-1]
+    detail = _verdicts(observed)[-1]
     assert detail["type"] == "artifact_delivery_incomplete"
     assert detail["run_id"] == observed.run_id
     assert detail["undelivered_count"] == 1
@@ -128,7 +137,7 @@ def test_the_notice_survives_the_connection_that_carried_it(
     assert written["done"], "the turn produced no artifact, so the fence was never exercised"
     assert [run["run_id"] for run in flagged] == [observed.run_id]
 
-    live = _frames_of(observed, "custom")[-1]
+    live = _verdicts(observed)[-1]
     assert delivery["available"] is True
     assert delivery["run_id"] == live["run_id"] == observed.run_id
     assert delivery["undelivered_paths"] == live["undelivered_paths"]
@@ -149,7 +158,7 @@ def test_an_ordinary_turn_on_the_same_gateway_still_ends_clean(
 
     assert observed.events[-1] == "end", observed.events
     assert "error" not in observed.events, observed.events
-    assert not _frames_of(observed, "custom"), observed.frames
+    assert not _verdicts(observed), observed.frames
     # And the route says so rather than 404ing or inventing an empty notice:
     # this is the answer for almost every run, so it has to be an ordinary one.
     assert delivery == {"available": False, "version": 1}
