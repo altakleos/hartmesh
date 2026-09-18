@@ -114,7 +114,19 @@ class ProbeStreamingChatModel(BaseChatModel):
 
     @staticmethod
     def _already_called_tool(messages: list[BaseMessage]) -> bool:
-        return any(getattr(message, "type", "") == "tool" for message in messages)
+        """Whether this turn has already had its one scripted tool call.
+
+        Scoped to the messages after the latest real user message, not to the
+        whole thread: a second turn in the same chat carries the first turn's
+        tool result in history, and a thread-wide scan would make the probe
+        answer it from nothing -- which is not what the model it stands in for
+        would do, and would leave a same-chat follow-up untestable.
+        """
+        latest_user = -1
+        for index, message in enumerate(messages):
+            if isinstance(message, HumanMessage) and not (getattr(message, "additional_kwargs", None) or {}).get("hide_from_ui"):
+                latest_user = index
+        return any(getattr(message, "type", "") == "tool" for message in messages[latest_user + 1 :])
 
     def _generate(self, messages: list[BaseMessage], stop: list[str] | None = None, run_manager: Any = None, **kwargs: Any) -> ChatResult:
         script = _script_for(messages)
