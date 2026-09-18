@@ -225,6 +225,10 @@ def test_the_muse_turn_refuses_once_delivers_the_pdf_and_ends_success(
             params={"download": "true"},
             headers={"X-CSRF-Token": csrf},
         )
+        # The run archive is built from the receipt's presented set, not from
+        # the message the chip came from. It is the reader that would 409 if
+        # the runtime's handover were recorded anywhere but ``presented_files``.
+        archive = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/artifacts/archive", headers={"X-CSRF-Token": csrf})
     # And nobody else's: a different person asking for the same path is
     # refused, so making delivery automatic widened no authorization.
     with httpx.Client() as stranger:
@@ -259,6 +263,9 @@ def test_the_muse_turn_refuses_once_delivers_the_pdf_and_ends_success(
 
     # And it downloads, from a session that did not watch the turn.
     assert download.status_code == 200, download.text
+    # As does the run archive, which reads the receipt rather than the message.
+    assert archive.status_code == 200, archive.text
+    assert archive.json()["file_count"] == 1, archive.text
     assert download.content == ARTIFACT_BYTES, "the bytes on the wire are the bytes the turn wrote"
     assert forbidden.status_code in (403, 404), forbidden.text
 

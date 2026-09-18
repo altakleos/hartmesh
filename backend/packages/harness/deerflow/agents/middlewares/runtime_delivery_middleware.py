@@ -49,10 +49,13 @@ wrong thing to deliver, the fence is wrong to demand it.
 
 Model curation still wins. When the model names files under ``present`` or
 calls ``present_files``, its selection stands and only files it left out are
-added. The cost, stated plainly: on a turn where the model curates nothing, an
-intermediate left in ``outputs`` (a ``report.md`` beside the ``report.pdf``) is
-handed over too. That is worse than curation and much better than an error for
-a file the person asked for. Nothing under ``workspace`` is ever touched.
+added. A delegated task presents nothing, the same rule the typed tool
+enforces: a subagent reports its paths to the agent that delegated, and that
+agent presents. The cost, stated plainly: on a turn where the model curates
+nothing, an intermediate left in ``outputs`` (a ``report.md`` beside the
+``report.pdf``) is handed over too. That is worse than curation and much
+better than an error for a file the person asked for. Nothing under
+``workspace`` is ever touched.
 
 Known gap
 ---------
@@ -83,6 +86,7 @@ from deerflow.runtime.presented_files import (
     presented_files_of,
 )
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.lease import sandbox_command_scope
 from deerflow.workspace_changes.diff import get_changed_output_paths
 from deerflow.workspace_changes.recorder import capture_workspace_snapshot
 
@@ -164,6 +168,13 @@ class RuntimeDeliveryMiddleware(AgentMiddleware[AgentState]):
     async def _snapshot(self, runtime: Runtime | None) -> Any:
         thread_id = _thread_id(runtime)
         if not thread_id:
+            return None
+        if sandbox_command_scope(getattr(runtime, "context", None)) is not None:
+            # A delegated task reports its paths to the agent that delegated;
+            # it does not present. The typed tool refuses on exactly this
+            # condition (``tools/presentation.py``), and a runtime handover
+            # that ignored it would be a second, quieter way around the same
+            # rule.
             return None
         return await capture_workspace_snapshot(thread_id, user_id=get_effective_user_id(), include_text=False)
 

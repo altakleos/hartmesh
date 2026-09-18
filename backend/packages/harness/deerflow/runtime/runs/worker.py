@@ -963,6 +963,14 @@ def _delivery_content_with_outputs(
     presentations it observes at tool end, and a runtime presentation is a
     state update at the end of the agent, not a tool result. Counting it is
     what keeps the fence from failing a run whose files were just delivered.
+
+    The merged set is written back to ``presented_files`` -- the one field the
+    receipt has always meant by "what this run presented", and the field
+    ``presented_paths()`` and therefore the archive route and the evidence
+    bundle read. A second key holding the same set would leave those readers
+    on the older, narrower one: a run the runtime completed would succeed and
+    then answer 409 to the download of the very file it handed over.
+    ``presented_by`` is attribution, not a second set.
     """
     if not produced_paths:
         return content
@@ -979,7 +987,7 @@ def _delivery_content_with_outputs(
             "requirement": "presentation_matches_produced_output",
         },
         "produced_paths": produced_paths,
-        "presented_paths": presented,
+        "presented_files": presented,
         # Who handed each set over, so a reader of the receipt can tell a
         # turn the model curated from one the runtime completed.
         "presented_by": {"model": model_presented, "runtime": by_runtime},

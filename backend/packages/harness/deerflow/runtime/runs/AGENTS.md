@@ -42,7 +42,7 @@ only an unrelated pre-existing path does not satisfy delivery, so a
 presentation that named nothing this run produced is `mismatched`, not
 satisfied. Readers of the receipt (the fence, the archive route, the evidence
 bundle, IM channels) go through `presented_paths()`. Such receipts add `produced_paths`,
-`presented_paths`, `matched_paths`, `presented_by`, `verification`, `stage`,
+`matched_paths`, `presented_by`, `verification`, `stage`,
 and `satisfied` to the Slice 1 fact fields.
 
 Since hartmesh-tenancy/DF22 the fence is an invariant rather than the common
@@ -55,8 +55,13 @@ so a turn that made a file the person asked for ends `success` instead of
 (`runtime/presented_files.py`) — not the journal, which records only
 presentations it observes at tool end, and a runtime presentation is a state
 update at the end of the agent. `_delivery_content_with_outputs` merges that
-list into the presented set and records both sides under `presented_by`
-(`model` / `runtime`), so a receipt says who handed each file over. The fence
+list into `presented_files` itself — the one field the receipt has always
+meant by "what this run presented", and the field `presented_paths()` reads —
+and records both sides under `presented_by` (`model` / `runtime`), so a
+receipt says who handed each file over without holding the set twice. A
+second key would have left the archive route and the evidence bundle on the
+narrower one: a run the runtime completed would succeed and then answer 409
+to the download of the file it had just handed over. The fence
 still fires when the runtime could not: a failed outputs scan, or a turn that
 interrupts before `after_agent` runs. Missing a *matching* presentation is a run
 error, as is a successful one whose receipt cannot be durably verified. Neither

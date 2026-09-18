@@ -225,6 +225,25 @@ def test_an_interrupted_turn_is_not_covered_and_this_is_the_known_gap(thread_hom
     assert update is None, "the resumed run produced nothing; its own fence passes for the same reason"
 
 
+def test_a_delegated_task_presents_nothing(thread_home: Path) -> None:
+    """The rule the typed tool already enforces, enforced here too.
+
+    A subagent reports the paths it made to the agent that delegated, and that
+    agent presents. This middleware is attached to the subagent stack as well
+    as the lead's, so without the check it would be a second, quieter way
+    around ``validate_presentation``'s refusal.
+    """
+    from deerflow.sandbox.lease import SANDBOX_COMMAND_SCOPE_CONTEXT_KEY
+
+    middleware = RuntimeDeliveryMiddleware()
+    runtime = SimpleNamespace(context={"thread_id": THREAD_ID, "run_id": "run-sub", SANDBOX_COMMAND_SCOPE_CONTEXT_KEY: "scope-1"})
+
+    update = _turn(middleware, runtime, lambda: (thread_home / "draft.pdf").write_bytes(b"%PDF"), _state(HumanMessage("go"), _answer()))
+
+    assert update is None
+    assert RUNTIME_PRESENTED_FILES_CONTEXT_KEY not in runtime.context
+
+
 def test_the_middleware_is_in_the_lead_runtime_stack() -> None:
     from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
     from deerflow.config.app_config import AppConfig
