@@ -18,6 +18,7 @@ observation the receipt ledger already records.
 from __future__ import annotations
 
 import asyncio
+import weakref
 from typing import Annotated, Any
 from urllib.parse import urlsplit
 
@@ -44,9 +45,29 @@ from deerflow.retrieval import (
 )
 from deerflow.utils.readability import ReadabilityExtractor
 
-__all__ = ["PROVIDER_ID", "MAX_RESULT_CHARS", "web_fetch_tool"]
+__all__ = ["PROVIDER_ID", "MAX_RESULT_CHARS", "CONCURRENT_FETCHES", "web_fetch_tool"]
 
 PROVIDER_ID = "direct_http"
+#: How many pages one Gateway process reads at once. Unlike the hosted reader
+#: this replaced, the work now lands on the Gateway itself: up to 2 MiB of
+#: body buffered per fetch and an article extraction that spawns a Node
+#: subprocess, inside the tenant profile's own memory, CPU and pid budget. A
+#: model that issues several fetch calls in one step -- or two tenants' turns
+#: doing so at once -- would otherwise have no ceiling at all. The same bound
+#: the sibling ``web_search`` already applies, for the same reason.
+CONCURRENT_FETCHES = 4
+_slots_by_loop: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = weakref.WeakKeyDictionary()
+
+
+def _fetch_slots() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    slots = _slots_by_loop.get(loop)
+    if slots is None:
+        slots = asyncio.Semaphore(CONCURRENT_FETCHES)
+        _slots_by_loop[loop] = slots
+    return slots
+
+
 #: What the model reads of a page; the same bound the hosted reader had.
 MAX_RESULT_CHARS = 4096
 _readability = ReadabilityExtractor()
@@ -178,15 +199,16 @@ async def web_fetch_tool(url: str, tool_call_id: Annotated[str, InjectedToolCall
     Args:
         url: The URL to fetch the contents of.
     """
-    if get_active_retrieval_handoff() is not None:
-        app_config = accepted_retrieval_app_config_from_active()
-        text, meta = await _fetch_with_evidence(url, _client_from_config(app_config))
-        return stamped_result(text, meta, tool_call_id)
-    client = _client_from_config(get_app_config())
-    outcome = await client.fetch(url)
-    if isinstance(outcome, FetchRefusal):
-        return stamped_result(describe_refusal(url, outcome), refusal_meta(outcome), tool_call_id)
-    return stamped_result(await _extract(outcome), success_meta(), tool_call_id)
+    async with _fetch_slots():
+        if get_active_retrieval_handoff() is not None:
+            app_config = accepted_retrieval_app_config_from_active()
+            text, meta = await _fetch_with_evidence(url, _client_from_config(app_config))
+            return stamped_result(text, meta, tool_call_id)
+        client = _client_from_config(get_app_config())
+        outcome = await client.fetch(url)
+        if isinstance(outcome, FetchRefusal):
+            return stamped_result(describe_refusal(url, outcome), refusal_meta(outcome), tool_call_id)
+        return stamped_result(await _extract(outcome), success_meta(), tool_call_id)
 
 
 web_fetch_tool.metadata = {

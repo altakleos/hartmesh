@@ -1422,6 +1422,13 @@ that turn and tells it once to answer from search results and say that
 sources could not be fetched. The next turn tries once more. This is the
 typed `error_scope` on the tool result, never the wording of it.
 
+Four pages are read at once, no more. The work now lands on the Gateway
+rather than a hosted reader: up to 2 MiB buffered per fetch and an article
+extraction that spawns a Node subprocess, inside the same memory, CPU and pid
+budget this profile gives the Gateway. Search has carried the same bound for
+the same reason; a model that issues several fetch calls in one step would
+otherwise have no ceiling at all.
+
 `web_fetch` runs from the Gateway's own address, like search: the sandbox
 allowlist (§ "`SANDBOX_EGRESS=allowlist` (the default)") does not govern it, and a site that gates
 that address gates it for every tenant behind it.

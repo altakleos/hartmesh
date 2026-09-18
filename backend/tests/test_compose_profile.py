@@ -225,7 +225,9 @@ def test_memory_limits_sum_to_2880_mib_with_equal_swap(compose: dict) -> None:
         assert _mib(service["mem_limit"]) == expected, name
         assert service["memswap_limit"] == service["mem_limit"], name
         total += expected
-    assert total == 2880, "3072 less the 192 MiB the Gateway gave up for the 1 GiB sandboxes; the 192 MiB it took back with the two-slot profile, and a further 64 MiB, now pay for the search service, so the line has not moved (README: Memory budget)"
+    assert total == 2880, (
+        "3072 less the 192 MiB the Gateway gave up for the 1 GiB sandboxes; the 192 MiB it took back with the two-slot profile, and a further 64 MiB, now pay for the search service, so the line has not moved (README: Memory budget)"
+    )
     assert MEMORY_MIB["searxng"] == 256, "clears by 64 MiB the ceiling the tenant class found it sitting on, 170 reclaims and no OOM kill (README: Web search)"
     assert MEMORY_MIB["gateway"] == 1088, "1.86 times its measured 586 MiB two-turn peak; the donor each time, because its limit is a multiple of a peak rather than a figure set against a failure"
 

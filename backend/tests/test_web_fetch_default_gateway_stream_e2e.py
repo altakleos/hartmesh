@@ -78,7 +78,12 @@ class _Wire:
         return httpx.Response(self._status, headers={"content-type": self._content_type}, content=self._body, request=request)
 
     def client(self) -> DirectFetchClient:
-        return DirectFetchClient(resolver=lambda _hostname: [_PUBLIC], transport=httpx.MockTransport(self.handler))
+        # Resolution is awaited, never called: the client resolves off the
+        # event loop so a slow lookup cannot stall the Gateway.
+        async def resolve(_hostname: str) -> list[ipaddress._BaseAddress]:
+            return [_PUBLIC]
+
+        return DirectFetchClient(resolver=resolve, transport=httpx.MockTransport(self.handler))
 
 
 class _RefusingProvider:

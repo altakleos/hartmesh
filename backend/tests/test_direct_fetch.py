@@ -59,7 +59,7 @@ def _resolver(*answers: list[ipaddress._BaseAddress]):
     calls: list[str] = []
     queue = list(answers)
 
-    def resolve(hostname: str) -> list[ipaddress._BaseAddress]:
+    async def resolve(hostname: str) -> list[ipaddress._BaseAddress]:
         calls.append(hostname)
         return list(queue.pop(0) if len(queue) > 1 else queue[0])
 
@@ -230,6 +230,83 @@ def test_the_whole_chain_shares_one_time_budget() -> None:
     client = DirectFetchClient(resolver=_resolver([PUBLIC]), transport=httpx.MockTransport(slow), timeout_seconds=0.1)
     refusal = asyncio.run(client.fetch("https://example.org/"))
     assert isinstance(refusal, FetchRefusal) and refusal.error_type == "transient" and "in time" in refusal.reason
+
+
+def test_resolving_a_name_leaves_the_event_loop_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Gateway is one asyncio process serving every tenant's stream.
+
+    ``socket.getaddrinfo`` is a blocking syscall whose timeout belongs to the
+    platform resolver, not to the fetch budget; called straight from the async
+    path it holds the loop for the length of one slow lookup, and
+    ``asyncio.timeout`` cannot preempt it because nothing awaits. So the
+    property under test is not "a lookup happened" but "other work ran while
+    it did". Blockbuster does not instrument ``getaddrinfo``, so the strict
+    gate cannot see this; this measures it directly.
+    """
+    import socket
+
+    def slow_getaddrinfo(*_args: Any, **_kwargs: Any) -> list[Any]:
+        import time
+
+        time.sleep(0.2)
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (str(PUBLIC), 80))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", slow_getaddrinfo)
+    wire = _Wire()
+
+    async def race() -> tuple[Any, int]:
+        ticks = 0
+
+        async def tick() -> None:
+            nonlocal ticks
+            while True:
+                await asyncio.sleep(0.01)
+                ticks += 1
+
+        ticker = asyncio.create_task(tick())
+        try:
+            outcome = await DirectFetchClient(transport=wire.transport).fetch("http://example.org/")
+        finally:
+            ticker.cancel()
+        return outcome, ticks
+
+    page, ticks = asyncio.run(race())
+    assert isinstance(page, FetchedPage), "the default resolver answered and the fetch completed"
+    assert ticks >= 5, f"the loop was stalled through the lookup; only {ticks} tick(s) ran"
+
+
+def test_only_a_bounded_number_of_pages_are_read_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each fetch buffers up to 2 MiB and extracts in a subprocess, inside the
+    tenant profile's own memory, CPU and pid budget. A model can issue several
+    fetch calls in one step; the ceiling is the tool's, the way it is for
+    ``web_search``."""
+    live = 0
+    peak = 0
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal live, peak
+        live += 1
+        peak = max(peak, live)
+        try:
+            await asyncio.sleep(0.05)
+            return httpx.Response(200, headers={"content-type": "text/plain"}, content=b"hello", request=request)
+        finally:
+            live -= 1
+
+    monkeypatch.setattr(fetch_tools, "get_active_retrieval_handoff", lambda: None)
+    monkeypatch.setattr(fetch_tools, "get_app_config", lambda: object())
+    monkeypatch.setattr(
+        fetch_tools,
+        "_client_from_config",
+        lambda _cfg: DirectFetchClient(resolver=_resolver([PUBLIC]), transport=httpx.MockTransport(handler)),
+    )
+
+    async def burst() -> None:
+        await asyncio.gather(*(fetch_tools.web_fetch_tool.coroutine(f"http://example.org/{index}", tool_call_id=f"c{index}") for index in range(12)))
+
+    asyncio.run(burst())
+    assert peak <= fetch_tools.CONCURRENT_FETCHES, f"{peak} fetches were in flight at once"
+    assert peak > 1, "the bound must not serialize the tool"
 
 
 # ── The tool: what the model reads, and what the runtime reads ──────────────

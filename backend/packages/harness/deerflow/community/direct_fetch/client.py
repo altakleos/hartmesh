@@ -49,14 +49,14 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import logging
-from collections.abc import Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 import httpx
 
-from deerflow.community.url_safety import is_blocked_address, resolve_host_addresses, validate_public_http_url
+from deerflow.community.url_safety import aresolve_host_addresses, is_blocked_address, validate_public_http_url
 from deerflow.community.web_fetch_outcome import FetchRefusal
 from deerflow.sandbox.egress import NEVER_ALLOWED_NETWORKS
 
@@ -91,7 +91,10 @@ _NEVER_ALLOWED = tuple(ipaddress.ip_network(value) for value in NEVER_ALLOWED_NE
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _BODY_CHUNK = 64 * 1024
 
-Resolver = Callable[[str], list[ipaddress._BaseAddress]]
+#: Resolution is awaited, never called: a blocking ``getaddrinfo`` here would
+#: hold the Gateway's event loop for every other tenant, and the fetch budget
+#: could not preempt it.
+Resolver = Callable[[str], Awaitable[list[ipaddress._BaseAddress]]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -108,7 +111,7 @@ def _blocked(address: ipaddress._BaseAddress) -> bool:
     return is_blocked_address(address) or any(address in network for network in _NEVER_ALLOWED)
 
 
-def _pin(url: str, resolver: Resolver) -> tuple[str, str, ipaddress._BaseAddress] | FetchRefusal:
+async def _pin(url: str, resolver: Resolver) -> tuple[str, str, ipaddress._BaseAddress] | FetchRefusal:
     """The validated URL, its host name, and the one address it will be sent to.
 
     One resolution: the addresses the validator judges are the addresses the
@@ -123,7 +126,7 @@ def _pin(url: str, resolver: Resolver) -> tuple[str, str, ipaddress._BaseAddress
         literal = ipaddress.ip_address(hostname.strip("[]"))
     except ValueError:
         literal = None
-    addresses = [literal] if literal is not None else list(resolver(hostname))
+    addresses = [literal] if literal is not None else list(await resolver(hostname))
     error = validate_public_http_url(url, resolver=lambda _name: addresses)
     if error is not None:
         reason = "the address could not be resolved" if "resolved" in error else "the address is private, loopback, or reserved"
@@ -191,7 +194,7 @@ class DirectFetchClient:
         self._max_body_bytes = int(max_body_bytes)
         self._max_redirects = int(max_redirects)
         self._readable = frozenset(_media_type(value) for value in readable_content_types)
-        self._resolver = resolver or resolve_host_addresses
+        self._resolver = resolver or aresolve_host_addresses
         self._trust_env = trust_env
         self._transport = transport
 
@@ -216,7 +219,7 @@ class DirectFetchClient:
     async def _follow(self, client: httpx.AsyncClient, url: str) -> FetchedPage | FetchRefusal:
         current = url
         for _hop in range(self._max_redirects + 1):
-            pinned = _pin(current, self._resolver)
+            pinned = await _pin(current, self._resolver)
             if isinstance(pinned, FetchRefusal):
                 return pinned
             current, hostname, address = pinned
