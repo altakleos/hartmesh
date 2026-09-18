@@ -275,8 +275,7 @@ export function ReportCard({
    * Whether the thread has finished telling us what it presented. Until it
    * has, an empty `artifacts` means "not known yet", not "never rendered" —
    * and saying the second while the first is true is how this card spent a
-   * whole release telling people to ask for files they already had
-   * (hartmesh-tenancy/DF16).
+   * whole release telling people to ask for files they already had.
    */
   presentedKnown?: boolean;
   report: BusinessReport;

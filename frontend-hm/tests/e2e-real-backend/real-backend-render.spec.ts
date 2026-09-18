@@ -89,7 +89,7 @@ test.describe("real backend render (replay, no API key)", () => {
 
     // An aborted follow-up request and an empty one render identically, so the
     // chip locator alone cannot tell a settled turn from a torn one. Pin the
-    // request reaching a response (hartmesh-tenancy/DF13).
+    // request reaching a response.
     const suggestionOutcomes: string[] = [];
     const isSuggestionPost = (request: Request) =>
       request.method() === "POST" && request.url().includes("/suggestions");

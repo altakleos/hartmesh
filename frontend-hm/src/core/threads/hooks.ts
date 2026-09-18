@@ -1547,7 +1547,7 @@ export function invalidateStoppedThreadCaches(
   // A replay gap is exactly the case where this client may have missed the
   // delivery frame for a turn it can no longer hear about, so the durable
   // verdict has to be re-read rather than served from the answer cached before
-  // that turn ran (hartmesh-tenancy/DF14).
+  // that turn ran.
   void queryClient.invalidateQueries({
     queryKey: threadDeliveryQueryKey(threadId),
   });

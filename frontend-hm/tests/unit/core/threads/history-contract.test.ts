@@ -13,7 +13,7 @@ import { HISTORY_VALUE_KEYS } from "../../../e2e/utils/mock-api";
  *
  * For a release the mocked suite answered that read with keys the Gateway did
  * not send, so the e2e asserted a wire contract production did not honour and
- * every reopened chat quietly lost its artifact list (hartmesh-tenancy/DF16).
+ * every reopened chat quietly lost its artifact list.
  * These two checks are what makes that shape a contract instead of a habit: the
  * keys the app depends on have to be in the projection, and the mock is not
  * allowed to invent one outside it.

@@ -1138,7 +1138,7 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
   // narrow projection (`backend/app/gateway/routers/threads.py`), and for a
   // release this mock answered with `artifacts` the Gateway did not send, so
   // every reopened chat lost its artifact list in production while the suite
-  // stayed green (hartmesh-tenancy/DF16). `HISTORY_VALUE_KEYS` is the
+  // stayed green. `HISTORY_VALUE_KEYS` is the
   // projection, and `tests/unit/core/threads/history-contract.test.ts` fails if
   // this handler answers with a key outside it.
   void page.route("**/api/langgraph/threads/*/history", (route) => {

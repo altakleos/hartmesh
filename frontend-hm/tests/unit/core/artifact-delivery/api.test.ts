@@ -60,7 +60,7 @@ describe("fetchRunDelivery", () => {
     ).resolves.toBeNull();
   });
 
-  // hartmesh-tenancy/DF14: `null` is the answer "this run delivered". A
+  // `null` is the answer "this run delivered". A
   // request that never reached an answer must not resolve to it, or one 502 on
   // a refetch drops a standing correction into the silence it exists to end.
   it.each([

@@ -2,7 +2,7 @@
  * A run that produced files and finished without presenting any of them.
  *
  * The backend's delivery fence already failed such a run, but until
- * hartmesh-tenancy/DF13 the browser never heard about it: the stream ended
+ * Until this record existed the browser never heard about it: the stream ended
  * normally and the assistant's prose read as a success. The worker now
  * publishes the verdict as an advisory ``custom`` frame and lets the stream
  * reach ``end`` — deliberately not an ``error`` frame, which the SDK reads as
@@ -80,7 +80,7 @@ export function parseArtifactDeliveryFailure(
  *
  * Same fields, same strictness, deliberately the same reader: the live frame
  * and the receipt describe one run, and a reload must not change what the
- * notice says (hartmesh-tenancy/DF14). `available: false` is the ordinary
+ * notice says. `available: false` is the ordinary
  * answer — almost every run delivered what it produced — so it is `null` here,
  * not a failure to report.
  */

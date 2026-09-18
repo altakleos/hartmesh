@@ -88,7 +88,7 @@ describe("parseArtifactDeliveryUnverified", () => {
   });
 });
 
-// hartmesh-tenancy/DF14. The durable record carries the same fields as the live
+// The durable record carries the same fields as the live
 // frame, read by the same code, so a reload cannot change what the notice says.
 const validRecord = {
   available: true,
