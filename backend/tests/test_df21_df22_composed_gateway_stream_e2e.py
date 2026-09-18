@@ -270,6 +270,70 @@ def test_the_muse_turn_refuses_once_delivers_the_pdf_and_ends_success(
     assert forbidden.status_code in (403, 404), forbidden.text
 
 
+def test_the_next_turn_in_the_same_chat_tries_the_fetch_once_more(
+    composed_gateway: e2e._Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The tenant asks again in the same chat, and the fetch is tried again.
+
+    The scope matters in both directions. Too narrow and the thirteen-call
+    loop comes back inside one turn; too wide and a key added between turns,
+    or a provider that recovers, is never tried again in a conversation the
+    person is still holding. What this adds over the unit tests is the whole
+    second turn: the same thread, the same Gateway, the first turn's answer
+    and artifact already in history, a run of its own that ends ``success``
+    and neither inherits the first turn's delivery nor re-presents its file.
+
+    What it does *not* prove, stated because it reads as though it does: that
+    the withdrawal is keyed by run. The Gateway builds a fresh agent for each
+    run, so the state dies with the middleware instance whatever the key is --
+    keying on the thread alone passes here unchanged. The key is load-bearing
+    only when one instance outlives a run, and
+    ``test_provider_refusal_middleware.py`` is where that is pinned; it fails
+    on exactly that mutation.
+    """
+    provider = _RefusingProvider()
+    monkeypatch.setattr(fetch_tools, "_client_from_config", lambda _config: provider)
+
+    thread_id_box: dict[str, str] = {"id": ""}
+    on_frame, written = _write_artifact_mid_turn(composed_gateway.tmp_home, thread_id_box)
+    base = composed_gateway.loopback_url
+
+    with httpx.Client() as client:
+        csrf, thread_id = e2e._register_and_create_thread(client, base)
+        thread_id_box["id"] = thread_id
+        probe.BOUND_TOOL_NAMES.clear()
+        first = e2e._observe_stream(client, base, thread_id, csrf, f"probe:fetch {MUSE_URL}", on_frame=on_frame, timeout=120.0, recursion_limit=100)
+        first_bound = [list(names) for names in probe.BOUND_TOOL_NAMES]
+
+        probe.BOUND_TOOL_NAMES.clear()
+        second = e2e._observe_stream(client, base, thread_id, csrf, f"probe:fetch {GREAT_LAKES_URL}", timeout=120.0, recursion_limit=100)
+        second_bound = [list(names) for names in probe.BOUND_TOOL_NAMES]
+        second_run = client.get(f"{base}/api/threads/{thread_id}/runs/{second.run_id}").json()
+        second_delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{second.run_id}/delivery").json()
+        history = client.post(f"{base}/api/threads/{thread_id}/history", json={"limit": 40}, headers={"X-CSRF-Token": csrf}).json()
+
+    assert written["done"], "the first turn wrote no artifact, so the follow-up proves nothing"
+    assert first.run_id != second.run_id, "one chat, two runs"
+
+    # Each turn tried exactly once: the withdrawal held within a run and was
+    # gone by the next one.
+    assert provider.urls == [MUSE_URL, GREAT_LAKES_URL], provider.urls
+    assert "web_fetch" in first_bound[0] and all("web_fetch" not in names for names in first_bound[1:]), first_bound
+    assert "web_fetch" in second_bound[0], "the next turn must be able to try again"
+    assert all("web_fetch" not in names for names in second_bound[1:]), second_bound
+
+    # The follow-up is a turn of its own: it ends success, and it neither
+    # inherits the first turn's delivery nor re-presents its file.
+    assert "error" not in second.events and second.events[-1] == "end", second.events
+    assert second_run["status"] == "success" and second_run.get("stop_reason") is None
+    assert second_delivery == {"available": False, "version": 1}, "this turn produced nothing to deliver"
+
+    # The artifact is still reported exactly once, on the turn that made it.
+    presented = [path for message in _tagged(history) for path in message["additional_kwargs"][PRESENTED_FILES_KEY]]
+    assert presented == [ARTIFACT_PATH], presented
+
+
 def test_a_turn_that_needs_no_fetch_is_untouched_by_either_repair(composed_gateway: e2e._Gateway) -> None:
     """The ordinary turn, so neither repair is paid for by every other one."""
     result = _turn(composed_gateway, "probe:text please")
