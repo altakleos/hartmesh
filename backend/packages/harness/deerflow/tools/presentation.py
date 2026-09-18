@@ -98,6 +98,11 @@ class Presentation:
 
     presented: list[str] = field(default_factory=list)
     refused: list[tuple[str, str]] = field(default_factory=list)
+    #: Size in bytes of each presented path, by virtual path. Taken from the
+    #: ``stat`` the validation above already performs, so it costs nothing and
+    #: it is the runtime's own reading rather than the model's belief
+    #: (hartmesh-tenancy/DF10).
+    sizes: dict[str, int] = field(default_factory=dict)
 
     @property
     def requested(self) -> bool:
@@ -143,6 +148,7 @@ def validate_presentation(runtime: Any, paths: Sequence[Any] | None, *, written_
         return Presentation(refused=[(path, "a delegated task cannot present files; report the paths to the agent that delegated") for path in requested] + refused)
 
     presented: list[str] = []
+    sizes: dict[str, int] = {}
     for path in requested:
         try:
             virtual_path, actual_path = resolve_presented_filepath(runtime, path)
@@ -167,7 +173,8 @@ def validate_presentation(runtime: Any, paths: Sequence[Any] | None, *, written_
             continue
         if virtual_path not in presented:
             presented.append(virtual_path)
-    return Presentation(presented=presented, refused=refused)
+            sizes[virtual_path] = metadata.st_size
+    return Presentation(presented=presented, refused=refused, sizes=sizes)
 
 
 def _echo(path: str) -> str:
@@ -187,7 +194,12 @@ def describe_presentation(presentation: Presentation) -> str:
     if presentation.presented:
         count = len(presentation.presented)
         lines.append(f"{PRESENTED_PHRASE}: {count} file{'s' if count != 1 else ''}, delivered with this turn. Do not call present_files for them: that would attach them a second time.")
-        lines.extend(f"  {path}" for path in presentation.presented)
+        # The byte count is the runtime's own stat of the file it just
+        # delivered. On the tenant class the model followed a successful write
+        # with three more shell calls to check the file existed and how big it
+        # was; the answer is free here, and authoritative in a way the model's
+        # own re-reading is not.
+        lines.extend(f"  {path} ({presentation.sizes[path]:,} bytes)" if path in presentation.sizes else f"  {path}" for path in presentation.presented)
     elif presentation.refused:
         lines.append(f"Nothing was presented: the user has not received {'this file' if len(presentation.refused) == 1 else 'these files'}.")
     for path, reason in presentation.refused[:MAX_DESCRIBED_REFUSALS]:
