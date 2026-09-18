@@ -57,14 +57,27 @@ nothing, an intermediate left in ``outputs`` (a ``report.md`` beside the
 better than an error for a file the person asked for. Nothing under
 ``workspace`` is ever touched.
 
+Clarifying questions are covered
+-------------------------------
+A turn that asks the person something is a *completed* run, not a suspended
+one. ``ClarificationMiddleware`` ends the turn with ``Command(goto=END)``, and
+``create_agent`` compiles that jump with ``end_destination=exit_node`` -- the
+last ``after_agent`` node, not raw ``END``. So ``after_agent`` runs, and a file
+the model drafted before asking is handed over rather than left to fail the
+fence. The
+tenant class produces exactly this shape -- the `.21` capture of "Create pdf
+about muse agent" is a 21.6 s turn offering three options followed by a
+152.8 s turn that writes the PDF.
+
 Known gap
 ---------
-``after_agent`` does not run when the graph interrupts, so a turn that writes a
-file and *then* asks a clarifying question is not covered here; the resumed
-turn is a new run whose snapshot is taken after the file already exists, so the
-fence passes and the file is delivered only if the model presents it. That
-shape is exercised in ``tests/test_runtime_delivery_middleware.py`` so the gap
-is recorded rather than implied.
+``after_agent`` does not run when a graph *interrupts*, so a turn suspended
+mid-flight would hand nothing over, and the resumed run's snapshot is taken
+after the file already exists, so its own scan finds nothing produced. No path
+in this product reaches that shape: nothing in the harness or the app calls
+``interrupt()`` or configures ``interrupt_before``/``interrupt_after``. The
+consequence is pinned in ``tests/test_runtime_delivery_middleware.py`` so that
+introducing an interrupt path is a deliberate act with a known cost.
 """
 
 from __future__ import annotations
