@@ -51,7 +51,9 @@ test("asks again when the new thread id changes", () => {
 });
 
 test("asks nothing for an existing thread or a mock page", () => {
-  renderHook(() => usePrewarmWorkspace({ threadId: "thread-old", enabled: false }));
+  renderHook(() =>
+    usePrewarmWorkspace({ threadId: "thread-old", enabled: false }),
+  );
   renderHook(() => usePrewarmWorkspace({ threadId: undefined, enabled: true }));
 
   expect(api.prewarmThreadWorkspace).not.toHaveBeenCalled();
