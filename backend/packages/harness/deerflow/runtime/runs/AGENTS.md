@@ -42,8 +42,23 @@ only an unrelated pre-existing path does not satisfy delivery, so a
 presentation that named nothing this run produced is `mismatched`, not
 satisfied. Readers of the receipt (the fence, the archive route, the evidence
 bundle, IM channels) go through `presented_paths()`. Such receipts add `produced_paths`,
-`presented_paths`, `matched_paths`, `verification`, `stage`, and `satisfied`
-to the Slice 1 fact fields. Missing a *matching* presentation is a run
+`presented_paths`, `matched_paths`, `presented_by`, `verification`, `stage`,
+and `satisfied` to the Slice 1 fact fields.
+
+Since hartmesh-tenancy/DF22 the fence is an invariant rather than the common
+failure path: `RuntimeDeliveryMiddleware` (see
+[`../../agents/middlewares/AGENTS.md`](../../agents/middlewares/AGENTS.md))
+hands over inside the graph whatever the turn produced and nobody presented,
+so a turn that made a file the person asked for ends `success` instead of
+`artifact_delivery_incomplete`. It reaches the worker through
+`runtime.context[RUNTIME_PRESENTED_FILES_CONTEXT_KEY]`
+(`runtime/presented_files.py`) — not the journal, which records only
+presentations it observes at tool end, and a runtime presentation is a state
+update at the end of the agent. `_delivery_content_with_outputs` merges that
+list into the presented set and records both sides under `presented_by`
+(`model` / `runtime`), so a receipt says who handed each file over. The fence
+still fires when the runtime could not: a failed outputs scan, or a turn that
+interrupts before `after_agent` runs. Missing a *matching* presentation is a run
 error, as is a successful one whose receipt cannot be durably verified. Neither
 publishes an `error` stream frame: the graph completed and the answer is
 checkpointed, so the stream reaches its end marker normally and the verdict

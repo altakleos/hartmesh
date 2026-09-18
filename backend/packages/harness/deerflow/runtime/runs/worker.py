@@ -92,6 +92,7 @@ from deerflow.runtime.goal import (
     write_thread_goal,
 )
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
 from deerflow.runtime.runs.delivery import (
     DELIVERY_INCOMPLETE_ERROR,
     DELIVERY_INCOMPLETE_STOP_REASON,
@@ -952,12 +953,23 @@ def _presented_path_covers_output(presented_path: str, produced_path: str) -> bo
 def _delivery_content_with_outputs(
     content: dict[str, Any],
     produced_paths: list[str],
+    runtime_presented: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Attach a delivery verdict when this run created or modified outputs."""
+    """Attach a delivery verdict when this run created or modified outputs.
+
+    ``runtime_presented`` is what ``RuntimeDeliveryMiddleware`` handed over
+    inside the graph (hartmesh-tenancy/DF22). It reaches here through
+    ``runtime.context`` rather than the journal because the journal records
+    presentations it observes at tool end, and a runtime presentation is a
+    state update at the end of the agent, not a tool result. Counting it is
+    what keeps the fence from failing a run whose files were just delivered.
+    """
     if not produced_paths:
         return content
 
-    presented = presented_paths(content)
+    model_presented = presented_paths(content)
+    by_runtime = list(dict.fromkeys(runtime_presented or []))
+    presented = list(dict.fromkeys([*model_presented, *by_runtime]))
     matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented)]
     satisfied = bool(matched_paths)
     return {
@@ -968,10 +980,27 @@ def _delivery_content_with_outputs(
         },
         "produced_paths": produced_paths,
         "presented_paths": presented,
+        # Who handed each set over, so a reader of the receipt can tell a
+        # turn the model curated from one the runtime completed.
+        "presented_by": {"model": model_presented, "runtime": by_runtime},
         "matched_paths": matched_paths,
         "stage": "presented" if satisfied else ("mismatched" if presented else "not_started"),
         "satisfied": satisfied,
     }
+
+
+def _runtime_presented_files(runtime_context: Mapping[str, Any] | None) -> list[str]:
+    """What the runtime handed over inside the graph, read off the run context.
+
+    The same channel the guard middlewares use for ``stop_reason``: a
+    middleware writes a fact the worker needs after the graph has finished.
+    Types are checked here because this value crosses a boundary the worker
+    does not own.
+    """
+    value = runtime_context.get(RUNTIME_PRESENTED_FILES_CONTEXT_KEY) if isinstance(runtime_context, Mapping) else None
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(path for path in value if isinstance(path, str) and path))
 
 
 def _delivery_error(content: dict[str, Any]) -> str | None:
@@ -3587,6 +3616,7 @@ async def _run_agent(
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
                 produced_output_paths,
+                _runtime_presented_files(runtime_context),
             )
             delivery_error = _delivery_error(delivery_content)
             if delivery_error is not None:
@@ -3970,7 +4000,11 @@ async def _run_agent(
                         ),
                         interrupted_result=[],
                     )
-                delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
+                delivery_content = _delivery_content_with_outputs(
+                    journal.get_delivery_content(),
+                    produced_output_paths,
+                    _runtime_presented_files(runtime.context if isinstance(getattr(runtime, "context", None), dict) else None),
+                )
             if not record.ownership_lost:
                 try:
                     receipt_persisted = await _await_terminal_cleanup(

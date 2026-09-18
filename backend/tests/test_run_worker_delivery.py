@@ -204,6 +204,9 @@ async def test_changed_outputs_succeed_when_a_produced_output_is_presented(monke
         "produced_paths": ["/mnt/user-data/outputs/report.md"],
         "presented_paths": ["/mnt/user-data/outputs/report.md"],
         "matched_paths": ["/mnt/user-data/outputs/report.md"],
+        # Who handed each set over (hartmesh-tenancy/DF22): the model curated
+        # here, so the runtime added nothing.
+        "presented_by": {"model": ["/mnt/user-data/outputs/report.md"], "runtime": []},
         "stage": "presented",
         "satisfied": True,
     }
@@ -339,6 +342,9 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
         "produced_paths": ["/mnt/user-data/outputs/report.md"],
         "presented_paths": [],
         "matched_paths": [],
+        # Nobody handed it over: not the model, and not the runtime, whose
+        # middleware is absent from this worker-level harness.
+        "presented_by": {"model": [], "runtime": []},
         "stage": "not_started",
         "satisfied": False,
     }

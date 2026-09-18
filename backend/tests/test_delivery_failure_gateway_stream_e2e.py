@@ -1,4 +1,4 @@
-"""A browser watching a delivery failure sees a failure (hartmesh-tenancy/DF13).
+"""A turn that produced a file and presented none of it delivers it anyway (DF22), and the fence still speaks when it cannot (DF13/DF14).
 
 What runs for real: the same Gateway, route, worker, admission, graph and SSE
 consumer as ``test_turn_phase_gateway_stream_e2e.py``, plus the real delivery
@@ -84,66 +84,114 @@ def _verdict_index(observed: e2e._StreamObservation) -> int:
     return next(index for index, (name, payload) in enumerate(observed.frames) if name == "custom" and isinstance(payload, dict) and str(payload.get("type", "")).startswith("artifact_delivery_"))
 
 
-def test_a_turn_that_never_presented_its_file_reports_the_failure_without_breaking_the_stream(
+ARTIFACT_PATH = f"/mnt/user-data/outputs/{ARTIFACT_NAME}"
+
+
+def _tagged_paths(history: Any) -> list[str]:
+    """Every path the turn's messages report as handed over, in order.
+
+    The tag is the presentation, whichever message carries it: this is the
+    same field the browser reads to draw the chips under an answer.
+    """
+    paths: list[str] = []
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            tagged = (node.get("additional_kwargs") or {}).get("presented_files")
+            if isinstance(tagged, list):
+                paths.extend(path for path in tagged if isinstance(path, str))
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(history)
+    return list(dict.fromkeys(paths))
+
+
+def test_a_turn_that_produced_a_file_and_presented_none_of_it_delivers_it_anyway(
     delivery_gateway: e2e._Gateway,
 ) -> None:
-    base = delivery_gateway.loopback_url
-    with httpx.Client() as client:
-        csrf, thread_id = e2e._register_and_create_thread(client, base)
-        on_frame, written = _produce_one_artifact_mid_turn(delivery_gateway.tmp_home, thread_id)
-        observed = e2e._observe_stream(client, base, thread_id, csrf, "probe:text please", on_frame=on_frame)
-        run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
+    """The DF22 shape, end to end: the run succeeds and the person gets the file.
 
-    assert written["done"], "the turn produced no artifact, so the fence was never exercised"
-    assert observed.text_frames >= 1, "the turn must have shown prose, or there is no contradiction to correct"
-    assert "error" not in observed.events, observed.events
-    assert _verdict_index(observed) < observed.events.index("end"), observed.events
-
-    detail = _verdicts(observed)[-1]
-    assert detail["type"] == "artifact_delivery_incomplete"
-    assert detail["run_id"] == observed.run_id
-    assert detail["undelivered_count"] == 1
-    assert detail["undelivered_paths"] == [f"/mnt/user-data/outputs/{ARTIFACT_NAME}"]
-
-    # The durable half, on the exact call a browser already makes on every
-    # reconnect. This is the assertion that survives a reload, and it is what
-    # infra asked for: the verdict outlives the connection that carried it.
-    assert run["status"] == "error"
-    assert run["stop_reason"] == "artifact_delivery_incomplete"
-
-
-def test_the_notice_survives_the_connection_that_carried_it(
-    delivery_gateway: e2e._Gateway,
-) -> None:
-    """A reader who reloads gets the same correction, with the same files.
-
-    DF13 published the verdict and stopped: the frame is page-local state, so
-    the tenant-class rerun found both failed turns keeping their stored ``error``
-    and stop reason across a reload while the notice under the turn — and the
-    way to the files it offered — was gone. This is the route that gives it
-    back, and it must agree with the frame path by path (hartmesh-tenancy/DF14).
+    Before this, the same turn ended ``error`` with
+    ``artifact_delivery_incomplete`` and the file reached the person only
+    through a recovery notice. The runtime now hands over what the turn
+    produced and nobody presented, so the fence has nothing to fail.
     """
     base = delivery_gateway.loopback_url
     with httpx.Client() as client:
         csrf, thread_id = e2e._register_and_create_thread(client, base)
         on_frame, written = _produce_one_artifact_mid_turn(delivery_gateway.tmp_home, thread_id)
         observed = e2e._observe_stream(client, base, thread_id, csrf, "probe:text please", on_frame=on_frame)
-        # Exactly the calls a reloaded page makes: the thread's runs, then the
-        # verdict for the one whose stop reason says there is one.
+        run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
+        history = client.post(f"{base}/api/threads/{thread_id}/history", json={"limit": 20}, headers={"X-CSRF-Token": csrf}).json()
+        delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/delivery").json()
+
+    assert written["done"], "the turn produced no artifact, so nothing was exercised"
+    assert observed.text_frames >= 1, "the turn answered"
+    assert "error" not in observed.events, observed.events
+    assert observed.events[-1] == "end", observed.events
+
+    assert run["status"] == "success", "a requested artifact that exists is not an error"
+    assert run.get("stop_reason") is None, run.get("stop_reason")
+    assert not _verdicts(observed), "nothing to correct, so no notice"
+    assert delivery == {"available": False, "version": 1}, "and no recovery-only delivery"
+
+    # The file is handed over where the person reads, not only in the panel.
+    assert ARTIFACT_PATH in _tagged_paths(history), "the turn's messages never reported the file as delivered"
+
+
+def test_the_fence_still_speaks_when_the_runtime_cannot_hand_the_file_over(
+    delivery_gateway: e2e._Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DF13's live notice and DF14's durable one, on the path that still needs them.
+
+    Runtime delivery is best effort: it scans the filesystem, and a scan can
+    fail. When it does, the run is exactly the run the tenant class saw, and
+    the verdict has to reach both a live reader and one who reloads, saying
+    the same thing path by path. Failing the scan is how that path is reached
+    here, because with the middleware working there is no other way to reach
+    it.
+    """
+    from deerflow.agents.middlewares import runtime_delivery_middleware as module
+
+    async def unavailable(*_args: Any, **_kwargs: Any) -> Any:
+        raise OSError("outputs scan unavailable")
+
+    monkeypatch.setattr(module, "capture_workspace_snapshot", unavailable)
+
+    base = delivery_gateway.loopback_url
+    with httpx.Client() as client:
+        csrf, thread_id = e2e._register_and_create_thread(client, base)
+        on_frame, written = _produce_one_artifact_mid_turn(delivery_gateway.tmp_home, thread_id)
+        observed = e2e._observe_stream(client, base, thread_id, csrf, "probe:text please", on_frame=on_frame)
+        run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
         runs = client.get(f"{base}/api/threads/{thread_id}/runs").json()
-        flagged = [run for run in runs if run["stop_reason"] == "artifact_delivery_incomplete"]
+        flagged = [row for row in runs if row["stop_reason"] == "artifact_delivery_incomplete"]
         delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/delivery").json()
 
     assert written["done"], "the turn produced no artifact, so the fence was never exercised"
-    assert [run["run_id"] for run in flagged] == [observed.run_id]
+    assert "error" not in observed.events, observed.events
+    assert _verdict_index(observed) < observed.events.index("end"), observed.events
 
     live = _verdicts(observed)[-1]
+    assert live["type"] == "artifact_delivery_incomplete"
+    assert live["run_id"] == observed.run_id
+    assert live["undelivered_count"] == 1
+    assert live["undelivered_paths"] == [ARTIFACT_PATH]
+
+    # The durable half, on the exact calls a reloaded page makes.
+    assert run["status"] == "error"
+    assert run["stop_reason"] == "artifact_delivery_incomplete"
+    assert [row["run_id"] for row in flagged] == [observed.run_id]
     assert delivery["available"] is True
-    assert delivery["run_id"] == live["run_id"] == observed.run_id
+    assert delivery["run_id"] == live["run_id"]
     assert delivery["undelivered_paths"] == live["undelivered_paths"]
     assert delivery["undelivered_count"] == live["undelivered_count"] == 1
-    # The same sentence, so the correction does not change wording on reload.
-    assert delivery["message"] == live["message"]
+    assert delivery["message"] == live["message"], "the correction does not change wording on reload"
 
 
 def test_an_ordinary_turn_on_the_same_gateway_still_ends_clean(

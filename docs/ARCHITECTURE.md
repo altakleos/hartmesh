@@ -158,6 +158,13 @@ These span both layers and require reading multiple files to understand:
   integration packs are global at `.deer-flow/integrations/skills/{provider}/`. Skills are
   discovered/loaded lazily by the harness; `skills/public/skill-reviewer/` is a read-only
   quality reviewer using the harness `review_skill_package` tool.
+- **Artifact delivery** — a turn that created or changed files under a conversation's
+  outputs directory hands them over: the model curates with `present_files` or a
+  producing call's `present` argument, and whatever it leaves out the runtime presents
+  at the end of the turn (`RuntimeDeliveryMiddleware`), tagging the final assistant
+  message so the files appear with the answer. The delivery fence remains as the
+  invariant behind that, failing a run only when the runtime could not hand over — a
+  failed outputs scan, or a turn that interrupts before the hook runs.
 - **Sub-agents** — background delegation via `SubagentExecutor` (server-side `execution_id`)
   correlated to provider `tool_call_id` for `ToolMessage`/SSE/lifecycle/persistence. Scheduled
   tasks reuse the *same* Gateway run lifecycle (scheduler decides *when*, not *how*).

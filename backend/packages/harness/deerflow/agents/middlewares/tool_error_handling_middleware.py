@@ -225,6 +225,13 @@ def _build_runtime_middlewares(
         )
     )
 
+    # A turn that produced files for the user hands them over even when the
+    # model presented none (hartmesh-tenancy/DF22). Always on: the set is the
+    # one the delivery fence already asserts must be delivered.
+    from deerflow.agents.middlewares.runtime_delivery_middleware import RuntimeDeliveryMiddleware
+
+    thread_hooks.append(RuntimeDeliveryMiddleware())
+
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []
     if include_dangling_tool_call_patch:
