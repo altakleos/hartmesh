@@ -53,7 +53,7 @@ auth:
 # ── Sandbox: the Gateway's local Docker backend (no provisioner_url) ────────
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
-  image: ghcr.io/altakleos/hartmesh-sandbox@sha256:6600a6957e066034d785ac7bf0ab28ffbe3c00055b234bb0e6a50d90d4a0d3aa
+  image: ghcr.io/altakleos/hartmesh-sandbox@sha256:9a9a0ea2057728c0a673793ea3d096dfa36640ee109599d8105845a06a88315a
   port: 8080
   # Concurrent-sandbox ceiling from the memory budget (README: "Memory
   # budget"): two 1 GiB slim sandboxes with their relays sit on the 5.0 GiB
@@ -112,7 +112,7 @@ sandbox:
       - files.pythonhosted.org
       - registry.npmjs.org
       - github.com
-    proxy_image: ghcr.io/altakleos/hartmesh-sandbox-network-proxy@sha256:76fabf0ff1720ce6c5c197d0c68e3c0fb62c425f5ac406228b5009396830ab8c
+    proxy_image: ghcr.io/altakleos/hartmesh-sandbox-network-proxy@sha256:b2795650346d29e7c721bf1f349af414cae6028ac0f53bea84a4d21ed460c5fb
 
 skills:
   # Skill library on the tenant data disk: public/ is mirrored from the
