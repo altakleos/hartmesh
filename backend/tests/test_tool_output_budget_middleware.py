@@ -1209,14 +1209,19 @@ class TestMiddlewareChainIntegration:
         app_config = AppConfig(sandbox=SandboxConfig(use="test"))
         middlewares = build_subagent_runtime_middlewares(app_config=app_config, lazy_init=False)
 
-        # Durable receipts own the outer tool boundary. Input sanitization is
-        # the next model wrapper and budgeting sees sanitized tool results.
+        # The unbound-name guard is outermost, because the receipt below it
+        # writes durable start evidence before any inner code runs and a name
+        # it could never record has to be refused before that. Durable receipts
+        # then own the outer tool boundary; input sanitization is the next
+        # model wrapper, and budgeting sees sanitized tool results.
         from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
         from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+        from deerflow.agents.middlewares.unbound_tool_call_middleware import UnboundToolCallMiddleware
 
-        assert isinstance(middlewares[0], ToolReceiptMiddleware)
-        assert isinstance(middlewares[1], InputSanitizationMiddleware)
-        assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
+        assert isinstance(middlewares[0], UnboundToolCallMiddleware)
+        assert isinstance(middlewares[1], ToolReceiptMiddleware)
+        assert isinstance(middlewares[2], InputSanitizationMiddleware)
+        assert isinstance(middlewares[3], ToolOutputBudgetMiddleware)
 
     def test_budget_middleware_in_lead_chain(self):
         from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
@@ -1226,10 +1231,12 @@ class TestMiddlewareChainIntegration:
 
         from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
         from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+        from deerflow.agents.middlewares.unbound_tool_call_middleware import UnboundToolCallMiddleware
 
-        assert isinstance(middlewares[0], ToolReceiptMiddleware)
-        assert isinstance(middlewares[1], InputSanitizationMiddleware)
-        assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
+        assert isinstance(middlewares[0], UnboundToolCallMiddleware)
+        assert isinstance(middlewares[1], ToolReceiptMiddleware)
+        assert isinstance(middlewares[2], InputSanitizationMiddleware)
+        assert isinstance(middlewares[3], ToolOutputBudgetMiddleware)
 
 
 # ===========================================================================

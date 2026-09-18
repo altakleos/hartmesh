@@ -54,10 +54,22 @@ def _anchors() -> dict[Placement, PlacementAnchor]:
             outer_of_last(ClarificationMiddleware),
             innermost(),
         ),
-        # The host-owned durable receipt envelope is the one allowed wrapper
-        # outside TOOL_VISIBLE. Contributions still observe the final
-        # sanitized/bounded content, but cannot short-circuit before a durable
-        # start is acknowledged.
+        # Two host-owned wrappers sit outside TOOL_VISIBLE, and they are the
+        # only ones. The durable receipt envelope is transparent: contributions
+        # still observe the final sanitized/bounded content, but cannot
+        # short-circuit before a durable start is acknowledged. Outside it sits
+        # the unbound-name guard, which refuses a call the runtime cannot
+        # honour -- a name that could never be a receipt identity, or one
+        # nothing is bound under.
+        #
+        # That refusal is invisible here, and deliberately so. It has to be
+        # outside the receipt (the receipt reserving such a name is the failure
+        # it exists to prevent), and the receipt is outside TOOL_VISIBLE, so
+        # there is no placement that shows it to a contribution. The result is
+        # the useful invariant: a refused call produces no receipt and no
+        # TOOL_VISIBLE observation, so the evidence ledger and the extension
+        # both saw the same thing -- nothing, because nothing was dispatched.
+        # A guard placed between them would have made them disagree.
         Placement.TOOL_VISIBLE: PlacementAnchor.of(
             inner_of_last(ToolReceiptMiddleware),
             outermost(),

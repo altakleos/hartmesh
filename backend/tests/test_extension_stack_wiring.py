@@ -135,8 +135,13 @@ def test_lead_system_middlewares_capture_the_explicit_build_snapshot():
 
 
 def test_tool_visible_lands_immediately_inside_the_durable_receipt_boundary():
+    # Still immediately inside the receipt. The unbound-name guard sits outside
+    # the receipt because a name the receipt could never record has to be
+    # refused before it reserves anything, so it is outside this too; a refused
+    # call produces no receipt and no observation, which keeps the ledger and
+    # the extension agreeing on what happened.
     stack = _lead_stack(_extensions(MiddlewarePlacement(_Probe("visible"), Placement.TOOL_VISIBLE)))
-    assert _tags(stack)[:2] == ["ToolReceiptMiddleware", "visible"]
+    assert _tags(stack)[:3] == ["UnboundToolCallMiddleware", "ToolReceiptMiddleware", "visible"]
 
 
 def test_model_logical_lands_outside_the_retry_middleware():
