@@ -47,10 +47,27 @@ def test_the_section_names_every_library_and_says_not_to_probe() -> None:
     assert "Do not run commands to check whether these exist" in section
 
 
-def test_the_section_reaches_the_lead_agent_prompt() -> None:
-    from deerflow.agents.lead_agent.prompt import apply_prompt_template
+def test_the_section_reaches_the_lead_agent_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Built with a stub config: the real loader needs a config.yaml that a
+    # developer has and a CI runner does not, and this test is about the
+    # section reaching the prompt, not about configuration.
+    from pathlib import Path
+    from types import SimpleNamespace
 
-    assert preinstalled_libraries_section() in apply_prompt_template()
+    from deerflow.agents.lead_agent import prompt as prompt_module
+
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+    )
+    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
+    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+
+    assert preinstalled_libraries_section() in prompt_module.apply_prompt_template()
 
 
 def test_it_is_a_statement_about_the_image_not_a_menu() -> None:
