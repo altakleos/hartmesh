@@ -16,11 +16,15 @@ redirect re-validation, private and link-local screening, content type, the
 2 MiB cap and the single timeout — all run before extraction sees any bytes.
 
 Cold-start latency is unchanged and remains the headline wait. On a research
-turn measured at 96 server seconds, about 31 s was first-turn skill projection
-and about 29 s was creating and waiting for the sandbox: roughly 60 of those 96
-seconds arrive before the agent loop is the bottleneck at all. Nothing in this
-release addresses that, and its instrumentation is preserved so the next
-measurement reads the same fields.
+turn measured at 96.4 server seconds, everything before the first model request
+took 31.1 s — and the phase records say what that is made of, because the
+sandbox phases nest inside the projection rather than adding to it:
+`sandbox_create` 19.3 s and `sandbox_readiness` 9.7 s sit inside
+`skill_projection`'s 31.0 s, leaving about 2 s for projection itself. So the
+cold wait is creating and booting the sandbox, not preparing skills. The same
+guest's next cold start took 3.9 s to create and 6.3 s to become ready, a
+spread this release does not explain. Nothing here addresses any of it, and the
+instrumentation is preserved so the next measurement reads the same fields.
 
 ## [2.1.0+hartmesh.22] — 2026-09-18
 
