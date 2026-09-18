@@ -1473,6 +1473,13 @@ sandbox:
 #   # make room for new ones. Use a positive integer here; omit this field to use the default.
 #   # replicas: 3
 #
+#   # Optional: A new chat's sandbox is built the moment the chat opens, ahead
+#   # of the first message, so the first turn does not wait for the cold start.
+#   # One nobody sends a message to is stopped after this many seconds instead
+#   # of holding a replica slot for the whole idle_timeout (default: 300; 0
+#   # keeps unclaimed prewarms until idle_timeout). A prewarm never evicts.
+#   # prewarm_claim_timeout: 300
+#
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
 #

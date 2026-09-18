@@ -10,7 +10,11 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { AgentWelcome } from "@/components/workspace/agent-welcome";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { BrowserTrigger } from "@/components/workspace/browser-view";
-import { ChatBox, useThreadChat } from "@/components/workspace/chats";
+import {
+  ChatBox,
+  usePrewarmWorkspace,
+  useThreadChat,
+} from "@/components/workspace/chats";
 import { ContextUsageBadge } from "@/components/workspace/context-usage-badge";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { GoalStatus } from "@/components/workspace/goal-status";
@@ -73,6 +77,9 @@ export default function AgentChatPage() {
 
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
+  // A new thread's sandbox starts building the moment the page opens, so the
+  // first turn does not pay the cold start while the person watches.
+  usePrewarmWorkspace({ threadId, enabled: isNewThread && !isMock });
   // `isNewThread` gates history/token-usage fetches until the backend creates
   // the thread. `isWelcomeMode` controls only the centered welcome layout, so
   // it can flip immediately on submit without triggering eager history loads.

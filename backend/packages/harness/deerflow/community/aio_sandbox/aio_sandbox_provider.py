@@ -78,6 +78,7 @@ from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.capabilities import (
     AcceptedMaterialization,
     AcceptedSkillProjection,
+    WorkspacePrewarm,
     reject_writable_accepted_skill_aliases,
 )
 from deerflow.sandbox.egress import EgressAllowanceV1
@@ -114,6 +115,11 @@ DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
 # into the warm pool: a crashed accepted run must not turn into an ordinary,
 # reusable thread sandbox.
 ACCEPTED_SANDBOX_ID_SUFFIX = "-accepted"
+# How long a container built ahead of a thread's first turn may sit unclaimed.
+# Shorter than the idle timeout on purpose: a parked sandbox a turn *used* is
+# a fast follow-up waiting to happen, while one nobody asked for yet is a slot
+# on speculation, and the released profile has two.
+DEFAULT_PREWARM_CLAIM_TIMEOUT = 300
 IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 
 
@@ -210,11 +216,20 @@ def _open_lock_file(lock_path):
     return open(lock_path, "a", encoding="utf-8")
 
 
+class SandboxSlotsBusyError(RuntimeError):
+    """Every replica slot is taken and the caller declined to evict for its create."""
+
+    def __init__(self, sandbox_id: str) -> None:
+        super().__init__(f"No free sandbox slot for {sandbox_id} and eviction was not allowed")
+        self.sandbox_id = sandbox_id
+
+
 class AioSandboxProvider(
     WarmPoolLifecycleMixin[SandboxInfo],
     SandboxProvider,
     AcceptedSkillProjection,
     AcceptedMaterialization,
+    WorkspacePrewarm,
 ):
     """Sandbox provider that manages containers running the AIO sandbox.
 
@@ -289,6 +304,12 @@ class AioSandboxProvider(
         # instead of rebuilt (see _accepted_reuse_fingerprint).
         self._accepted_only_sandbox_ids: set[str] = set()
         self._accepted_reuse_fingerprints: dict[str, str] = {}
+        # Containers built ahead of a thread's first turn and not yet claimed
+        # by one: sandbox id -> the parked SandboxInfo object (see the prewarm
+        # section for why the object and not a timestamp). A claim pops the
+        # entry, so the short prewarm reaper never touches a container a turn
+        # has used.
+        self._prewarmed_unclaimed: dict[str, SandboxInfo] = {}
         self._acquire_epoch: dict[str, int] = {}
         self._acquire_epoch_counter = 0
         self._acquire_inflight: dict[str, int] = {}
@@ -297,6 +318,8 @@ class AioSandboxProvider(
         self._idle_checker_thread: threading.Thread | None = None
         self._renewal_stop = threading.Event()
         self._renewal_thread: threading.Thread | None = None
+        self._prewarm_reaper_stop = threading.Event()
+        self._prewarm_reaper_thread: threading.Thread | None = None
         # Per-instance id used for cross-instance sandbox ownership leases (#4206).
         self._owner_id = generate_owner_id()
 
@@ -327,6 +350,11 @@ class AioSandboxProvider(
         # alive even when the idle reaper is disabled, or peers adopt its live
         # containers once the lease lapses (idle_timeout: 0 is a supported config).
         self._start_lease_renewal()
+
+        # The prewarm claim clock is independent of idle cleanup for the same
+        # reason: idle_timeout: 0 disables the idle checker, and an abandoned
+        # prewarm would then hold a slot forever instead of for claim_timeout.
+        self._start_prewarm_reaper()
 
         # Start idle checker if enabled
         if self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT) > 0:
@@ -404,6 +432,7 @@ class AioSandboxProvider(
             "port": sandbox_config.port or DEFAULT_PORT,
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
+            "prewarm_claim_timeout": getattr(sandbox_config, "prewarm_claim_timeout", None),
             "ready_timeout": resolve_ready_timeout(getattr(sandbox_config, "ready_timeout", None)),
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
@@ -2751,7 +2780,7 @@ class AioSandboxProvider(
         thread_id: str,
         *,
         user_id: str,
-        binding: AcceptedSkillSandboxBindingV1,
+        binding: AcceptedSkillSandboxBindingV1 | None,
         execution_claim: AcceptedMaterialExecutionClaimV1 | None,
         egress_allowance: EgressAllowanceV1 | None,
     ) -> str:
@@ -2790,6 +2819,11 @@ class AioSandboxProvider(
             # Only the remote backend consumes these at creation; on a local
             # container backend they shape nothing about the container, and
             # including them would refuse every warm reuse for a new run id.
+            # That is also why a prewarm -- which has no binding -- is only
+            # ever attempted on a local backend: here the binding *is* an
+            # input, so without one there is no container to describe.
+            if binding is None:
+                raise AcceptedSkillSandboxBindingError("accepted_material_binding_required")
             payload["binding"] = {
                 "snapshot_id": binding.snapshot_id,
                 "run_id": binding.run_id,
@@ -2879,10 +2913,205 @@ class AioSandboxProvider(
             )
             return None
 
+        # Read the prewarm fact before the promotion moves the entry out of
+        # the pool: the pool's own timestamp is the only clock it has.
+        with self._lock:
+            parked = self._warm_pool.get(sandbox_id)
+            prewarmed_at = parked[1] if parked is not None and self._is_unclaimed_prewarm_locked(sandbox_id, parked[0]) else None
         reclaimed = self._reclaim_warm_pool_sandbox(identity_thread_id, sandbox_id, user_id=user_id)
         if reclaimed is not None:
             record_acquisition_source(AcquisitionSource.ACCEPTED_WARM_RECLAIM)
+            with self._lock:
+                self._forget_prewarm_unclaimed_locked(reclaimed)
+            if prewarmed_at is not None:
+                logger.info(
+                    "Accepted sandbox %s was built %.1fs ahead of this turn and reclaimed warm",
+                    reclaimed,
+                    time.time() - prewarmed_at,
+                )
         return reclaimed
+
+    # ── Prewarm: the first turn's container, built while the person types ──
+
+    def _prewarm_claim_timeout(self) -> float:
+        configured = self._config.get("prewarm_claim_timeout")
+        return float(DEFAULT_PREWARM_CLAIM_TIMEOUT if configured is None else configured)
+
+    # The mark is the parked ``SandboxInfo`` *object*, never the id: ids are
+    # deterministic per (user, thread) and reused, so a container replaced or
+    # evicted and later rebuilt and parked under the same id would otherwise
+    # inherit an ancient mark and be stopped as "unclaimed". A rebuilt
+    # container is a new object; only a claim re-parks the same one, and the
+    # claim pops the mark. The pool's own release timestamp is the clock.
+
+    def _mark_prewarm_unclaimed_locked(self, sandbox_id: str, info: SandboxInfo) -> None:
+        marks = getattr(self, "_prewarmed_unclaimed", None)
+        if marks is None:
+            marks = self._prewarmed_unclaimed = {}
+        marks[sandbox_id] = info
+
+    def _forget_prewarm_unclaimed_locked(self, sandbox_id: str) -> None:
+        marks = getattr(self, "_prewarmed_unclaimed", None)
+        if marks is not None:
+            marks.pop(sandbox_id, None)
+
+    def _is_unclaimed_prewarm_locked(self, sandbox_id: str, parked: SandboxInfo) -> bool:
+        marks = getattr(self, "_prewarmed_unclaimed", None)
+        return marks is not None and marks.get(sandbox_id) is parked
+
+    async def prewarm_accepted_skills_async(self, thread_id: str, *, user_id: str) -> str | None:
+        return await asyncio.to_thread(self._prewarm_accepted_skills, thread_id, user_id=user_id)
+
+    def _prewarm_accepted_skills(self, thread_id: str, *, user_id: str) -> str | None:
+        """Build and park the container ``thread_id``'s first accepted turn would build.
+
+        The same preflight, name, fingerprint and create as the acquisition,
+        minus the binding -- which the fingerprint says shapes nothing on a
+        local backend -- and then ``release`` instead of hand-out. The turn
+        finds it through ``_reclaim_accepted_warm_sandbox`` with no new
+        equivalence rule: the recorded fingerprint is the one the acquisition
+        computes for itself.
+
+        Answers ``None`` rather than building when the thread already holds
+        a sandbox, one is already parked (matching or not -- a mismatch is
+        the acquisition's to replace under its own fences), no slot is free,
+        or the backend bakes the binding in. A prewarm is never the reason a
+        real turn waits.
+        """
+        if isinstance(self._backend, RemoteSandboxBackend):
+            return None
+        effective_user_id = self._accepted_projection_preflight(thread_id, user_id=user_id)
+        key = self._thread_key(thread_id, effective_user_id)
+        with self._acquire_serializer.hold(key):
+            with self._lock:
+                if self._thread_sandboxes.get(key) is not None:
+                    return None
+            sandbox_id = f"{self._sandbox_id_for_thread(thread_id, effective_user_id)}{ACCEPTED_SANDBOX_ID_SUFFIX}"
+            fingerprint = self._accepted_reuse_fingerprint(
+                thread_id,
+                user_id=effective_user_id,
+                binding=None,
+                execution_claim=None,
+                egress_allowance=None,
+            )
+            with self._lock:
+                if sandbox_id in self._warm_pool:
+                    recorded = getattr(self, "_accepted_reuse_fingerprints", {}).get(sandbox_id)
+                    return sandbox_id if recorded == fingerprint else None
+            try:
+                created = self._create_sandbox(
+                    thread_id,
+                    sandbox_id,
+                    user_id=effective_user_id,
+                    accepted_skills_only=True,
+                    allow_eviction=False,
+                )
+            except SandboxSlotsBusyError:
+                self._forget_create_provenance(sandbox_id)
+                logger.info("Not prewarming a sandbox for thread %s: every slot is taken", thread_id)
+                return None
+            except BaseException:
+                self._forget_create_provenance(sandbox_id)
+                raise
+            provenance = self._take_create_provenance(created)
+            with self._lock:
+                accepted_ids = getattr(self, "_accepted_only_sandbox_ids", None)
+                if accepted_ids is None:
+                    accepted_ids = self._accepted_only_sandbox_ids = set()
+                accepted_ids.add(created)
+                if provenance == PROVENANCE_CREATED:
+                    self._record_accepted_reuse_fingerprint_locked(created, fingerprint)
+            # Park it. ``release`` is the accepted projection's own terminal,
+            # so from here on the container is indistinguishable from one a
+            # turn left behind -- except for the claim clock below.
+            self.release(created)
+            with self._lock:
+                parked = self._warm_pool.get(created)
+                if parked is not None:
+                    self._mark_prewarm_unclaimed_locked(created, parked[0])
+            logger.info("Prewarmed accepted sandbox %s for thread %s", created, thread_id)
+            return created
+
+    #: How often the prewarm reaper looks; short against the claim timeout so
+    #: an abandoned slot is returned close to when it was promised.
+    PREWARM_CHECK_INTERVAL = 30.0
+
+    def _start_prewarm_reaper(self) -> None:
+        """Start the thread that enforces the claim timeout, if there is one.
+
+        Its own thread, not the idle checker's: that one starts only for
+        ``idle_timeout > 0``, and a deployment that keeps warm sandboxes
+        until shutdown still needs an abandoned prewarm to give its slot back.
+        """
+        if self._prewarm_claim_timeout() <= 0:
+            return
+        if getattr(self, "_prewarm_reaper_thread", None) is not None and self._prewarm_reaper_thread.is_alive():
+            return
+        if getattr(self, "_prewarm_reaper_stop", None) is None:
+            self._prewarm_reaper_stop = threading.Event()
+        self._prewarm_reaper_stop.clear()
+        self._prewarm_reaper_thread = threading.Thread(
+            target=self._prewarm_reaper_loop,
+            name="sandbox-prewarm-reaper",
+            daemon=True,
+        )
+        self._prewarm_reaper_thread.start()
+        logger.info("Started sandbox prewarm reaper thread (claim timeout: %.0fs)", self._prewarm_claim_timeout())
+
+    def _stop_prewarm_reaper(self) -> None:
+        # Read through ``getattr``: this runs from ``shutdown``, which must
+        # stop every container it owns even when it is handed an instance
+        # whose ``__init__`` never finished. Raising here would abandon the
+        # stops that come after it -- the same reason the accepted-projection
+        # bookkeeping above is read this way.
+        stop = getattr(self, "_prewarm_reaper_stop", None)
+        if stop is not None:
+            stop.set()
+        thread = getattr(self, "_prewarm_reaper_thread", None)
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5)
+
+    def _prewarm_reaper_loop(self) -> None:
+        while not self._prewarm_reaper_stop.wait(self.PREWARM_CHECK_INTERVAL):
+            try:
+                self._reap_unclaimed_prewarms()
+            except Exception:
+                logger.exception("Error in sandbox prewarm reaper loop")
+
+    def _reap_unclaimed_prewarms(self) -> None:
+        """Stop prewarmed containers no turn claimed within the claim timeout.
+
+        The parked object is the authority: a mark whose container is no
+        longer the one parked under its id (claimed, evicted, replaced,
+        destroyed, and possibly rebuilt since) is dropped without touching
+        anything. Runs from the prewarm reaper thread, under the same fenced
+        destroy as every other reap.
+        """
+        timeout = self._prewarm_claim_timeout()
+        if timeout <= 0:
+            return
+        now = time.time()
+        expired: list[tuple[str, SandboxInfo]] = []
+        with self._lock:
+            marks = getattr(self, "_prewarmed_unclaimed", None) or {}
+            for sandbox_id, info in list(marks.items()):
+                parked = self._warm_pool.get(sandbox_id)
+                if parked is None or parked[0] is not info:
+                    marks.pop(sandbox_id, None)
+                    continue
+                if now - parked[1] > timeout:
+                    expired.append((sandbox_id, info))
+        for sandbox_id, entry in expired:
+            logger.info("Prewarmed sandbox %s was not claimed within %.0fs; stopping it", sandbox_id, timeout)
+            stopped = self._destroy_warm_entry(
+                sandbox_id,
+                entry,
+                reason="prewarm_unclaimed",
+                still_reapable=lambda sid=sandbox_id, info=entry: self._warm_pool.get(sid, (None, 0.0))[0] is info and self._is_unclaimed_prewarm_locked(sid, info),
+            )
+            if stopped:
+                with self._lock:
+                    self._forget_prewarm_unclaimed_locked(sandbox_id)
 
     async def recover_bound_accepted_skills_async(
         self,
@@ -2925,27 +3154,15 @@ class AioSandboxProvider(
         )
         return sandbox_id
 
-    def _acquire_accepted_skills_with_origin(
-        self,
-        thread_id: str,
-        *,
-        user_id: str,
-        binding: AcceptedSkillSandboxBindingV1,
-        execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
-        resource_scope_ref: str | None = None,
-        egress_allowance: EgressAllowanceV1 | None = None,
-    ) -> tuple[str, str]:
-        """Acquire an accepted projection and say how.
+    def _accepted_projection_preflight(self, thread_id: str, *, user_id: str) -> str:
+        """Refuse an accepted projection the configuration cannot isolate.
 
-        The origin is one of ``active``, ``reclaimed``, ``created``,
-        ``rediscovered`` or ``unknown``, and it is what a cancelled caller
-        needs to undo the acquisition correctly. Only ``created`` -- the
-        backend's own word that it started the container for this call -- is
-        rolled back by destroying it. ``reclaimed`` and ``rediscovered`` both
-        name a container that existed before this call and go back to the
-        warm pool; ``unknown`` (a backend that did not say) is parked the same
-        way rather than presumed fresh; ``active`` belongs to whichever
-        holders made it active and is left alone.
+        One statement of the checks, because two callers reach create for
+        the same container: the turn's acquisition and the prewarm ahead of
+        it. A configured mount under the skills root, or a writable alias of
+        the thread's accepted view, refuses here for both -- so a prewarm can
+        never park a container the turn itself would have refused to build.
+        Returns the effective user id the container is scoped to.
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
         try:
@@ -2975,6 +3192,31 @@ class AioSandboxProvider(
             ),
             configured_host_mounts,
         )
+        return effective_user_id
+
+    def _acquire_accepted_skills_with_origin(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        binding: AcceptedSkillSandboxBindingV1,
+        execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
+        resource_scope_ref: str | None = None,
+        egress_allowance: EgressAllowanceV1 | None = None,
+    ) -> tuple[str, str]:
+        """Acquire an accepted projection and say how.
+
+        The origin is one of ``active``, ``reclaimed``, ``created``,
+        ``rediscovered`` or ``unknown``, and it is what a cancelled caller
+        needs to undo the acquisition correctly. Only ``created`` -- the
+        backend's own word that it started the container for this call -- is
+        rolled back by destroying it. ``reclaimed`` and ``rediscovered`` both
+        name a container that existed before this call and go back to the
+        warm pool; ``unknown`` (a backend that did not say) is parked the same
+        way rather than presumed fresh; ``active`` belongs to whichever
+        holders made it active and is left alone.
+        """
+        effective_user_id = self._accepted_projection_preflight(thread_id, user_id=user_id)
         identity_thread_id = self._accepted_resource_thread_id(
             thread_id,
             resource_scope_ref,
@@ -3662,12 +3904,18 @@ class AioSandboxProvider(
         accepted_execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
         identity_thread_id: str | None = None,
         egress_allowance: EgressAllowanceV1 | None = None,
+        allow_eviction: bool = True,
     ) -> str:
         """Create a new sandbox via the backend.
 
         Args:
             thread_id: Optional thread ID.
             sandbox_id: The sandbox ID to use.
+            allow_eviction: Whether a full replica set may evict its oldest
+                warm entry for this create. A turn's acquisition may; a
+                prewarm may not, because stopping a container some thread
+                will reclaim to build one no thread has asked for yet is a
+                trade against the person at the keyboard.
 
         Returns:
             The sandbox_id.
@@ -3698,7 +3946,18 @@ class AioSandboxProvider(
             # Enforce replicas: only warm-pool containers count toward eviction budget.
             # Active sandboxes are in use by live threads and must not be forcibly stopped.
             replicas, total = self._replica_count()
-            if total >= replicas:
+            if not allow_eviction:
+                # A container still in its readiness wait is neither active
+                # nor warm, so the count above cannot see it -- and several
+                # prewarms can start within one page-load's worth of seconds.
+                # Counting the in-flight starts is what keeps concurrent
+                # prewarms inside the slot budget; a turn's own create keeps
+                # the historical count, since it may evict for its slot.
+                with self._lock:
+                    in_flight = len(self._starting - {sandbox_id})
+                if total + in_flight >= replicas:
+                    raise SandboxSlotsBusyError(sandbox_id)
+            elif total >= replicas:
                 evicted = self._evict_oldest_warm(exclude=sandbox_id)
                 self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
 
@@ -4253,6 +4512,7 @@ class AioSandboxProvider(
                 fingerprints.clear()
 
         self._stop_idle_checker()
+        self._stop_prewarm_reaper()
         # Stop renewing before destroying: the destroy paths claim ownership
         # themselves, and a renewal racing them only re-publishes leases we are
         # about to drop.

@@ -210,6 +210,44 @@ unrelated warm entry and waits for it -- that is real work, and hiding it
 behind an overlapping unbudgeted container is the separately tracked capacity
 defect, not this repair.
 
+### Prewarm: the first turn's container, built while the person types
+
+Park-means-reuse makes the *second* turn fast. The first turn still paid the
+container: on the released profile, create plus readiness measured 10 to 29
+seconds of a pre-model block that is otherwise about two seconds, and every
+second of it was spent while the person waited on a message the sandbox had
+no part in. The fingerprint above already says why that wait is avoidable: on
+a local backend the accepted container is shaped by `(user, thread)` and the
+configured mounts, never by the binding, so it can be built before anyone
+knows what the turn will say.
+
+`WorkspacePrewarm` (`sandbox/capabilities.py`) is that contract, and
+`AioSandboxProvider._prewarm_accepted_skills` implements it as the acquisition
+minus the hand-out: the same preflight (`_accepted_projection_preflight`, one
+statement for both callers, so a prewarm can never park what the turn would
+have refused to build), the same deterministic name, the same fingerprint
+recorded with `binding=None`, the same `_create_sandbox`, then `release`. The
+turn's own `_reclaim_accepted_warm_sandbox` finds it; nothing about
+acquisition changes, and no second equivalence rule exists. The Gateway
+exposes it as `POST /api/threads/{id}/workspace/prewarm`, which the web client
+calls the moment it mints a new thread id -- seconds before the first message.
+
+Three rules keep a speculative build from ever slowing a real turn:
+
+| Rule | Where |
+| --- | --- |
+| A prewarm never evicts: it takes a free slot or builds nothing (`SandboxSlotsBusyError`), and containers still in their readiness wait count as taken, so prewarms started within seconds of each other stay inside the slot budget | `_create_sandbox(allow_eviction=False)` |
+| A prewarm never stands in for an active sandbox, and never replaces a parked one -- a mismatch is the acquisition's to resolve under its own fences | `_prewarm_accepted_skills`, under the acquire serializer |
+| An unclaimed prewarm is stopped once it has sat past `sandbox.prewarm_claim_timeout` (default 300 s), not the idle timeout -- the reaper looks every 30 s, so the container goes at up to 330 s; the mark is the parked container *object*, never its reused id, so a container rebuilt under the same id after an eviction or replacement is never mistaken for the prewarm, and the claim pops the mark, so a container a turn used is an ordinary parked sandbox again | `_reap_unclaimed_prewarms`, on its own reaper thread -- independent of `idle_timeout`, as lease renewal is, so `idle_timeout: 0` cannot silently disable it |
+
+The remote backend refuses (`None`): there the binding is baked into the Pod
+at creation, which the fingerprint records, so a container without one is not
+the container the turn needs. The route answers `scheduled: false` for a
+provider without the capability and 202 either way; a build failure is the
+provider's log, never the client's error. The evidence contract is untouched:
+materialization still completes before `try_start`, it just binds into a
+container that is already ready.
+
 ### Rediscovery is not creation
 
 `create` is an attempt, not a result. `LocalContainerBackend.create` can answer

@@ -69,6 +69,12 @@ sandbox:
   # image under gVisor takes tens of seconds, so idle sandboxes are kept warm
   # for 30 minutes; a third thread still evicts the least recently used one.
   idle_timeout: 1800
+  # A new thread's sandbox is built the moment the chat opens, ahead of the
+  # first message (README: "Two 1 GiB slots at two CPUs"). One nobody sends a
+  # message to is stopped after this many seconds so an abandoned "new chat"
+  # does not hold one of the two slots for the full idle timeout. A sandbox a
+  # turn has used follows idle_timeout instead.
+  prewarm_claim_timeout: 300
   # The sandbox image's own service switches, passed to every sandbox as
   # environment by the local Docker backend. Off: the browser and its MCP
   # server, VNC, Jupyter, code-server and the Node REPL (this last one also
