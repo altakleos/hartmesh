@@ -305,8 +305,12 @@ def test_only_a_bounded_number_of_pages_are_read_at_once(monkeypatch: pytest.Mon
         await asyncio.gather(*(fetch_tools.web_fetch_tool.coroutine(f"http://example.org/{index}", tool_call_id=f"c{index}") for index in range(12)))
 
     asyncio.run(burst())
-    assert peak <= fetch_tools.CONCURRENT_FETCHES, f"{peak} fetches were in flight at once"
+    # The number is written out rather than read from the module: an assertion
+    # against the constant it is policing passes however far the bound is
+    # loosened, which is no assertion at all.
+    assert peak <= 4, f"{peak} fetches were in flight at once"
     assert peak > 1, "the bound must not serialize the tool"
+    assert fetch_tools.CONCURRENT_FETCHES == 4, "the same ceiling web_search applies, for the same budget"
 
 
 # ── The tool: what the model reads, and what the runtime reads ──────────────
