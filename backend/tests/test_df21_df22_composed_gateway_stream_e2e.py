@@ -1,0 +1,276 @@
+"""Both tenant-class repairs on one turn, through the real Gateway.
+
+The tenant class ran two turns on `v2.1.0+hartmesh.21`, and each showed both
+defects at once:
+
+* "Research the Great Lakes and give me a concise overview with sources."
+  made three ``web_fetch`` calls to three addresses, each answered by the
+  fetch provider's same deterministic 401, and consumed ten model calls and
+  176,348 tokens before answering from search snippets.
+* "Create pdf about muse agent" made thirteen such calls to thirteen
+  addresses, wrote ``/mnt/user-data/outputs/Muse_Agent_Report.pdf`` through a
+  ``bash`` call that omitted the typed ``present`` argument, never called
+  ``present_files``, and ended durable ``error`` with stop reason
+  ``artifact_delivery_incomplete`` while a valid 14,710-byte PDF sat in the
+  outputs directory.
+
+This drives both prompts through the same Gateway, route, admission, worker,
+receipt middleware, tool dispatch, delivery fence and SSE consumer a tenant
+runs, and asserts the whole shape a person experiences: the refusal stops
+after one call, the run ends ``success``, the artifact is reported as
+delivered in the turn's own messages, it downloads afterwards, and no
+recovery-only notice is involved.
+
+What is synthetic, and deliberately so: the model is the turn-phase probe
+scripted to emit the captured failure shapes rather than a real one, the
+fetch provider is a stand-in that refuses the way the hosted reader did, and
+the PDF is written into the thread's outputs directory mid-turn (the probe
+issues no ``bash`` call, and the worker's scan cannot tell that file from one
+the agent wrote, which is the point). A real-model run of these exact prompts
+on the released profile is the tenant class's to make; this is what can be
+made deterministic and kept.
+"""
+
+from __future__ import annotations
+
+import json
+from collections.abc import Iterator
+from typing import Any
+
+import _turn_phase_probe_model as probe
+import httpx
+import pytest
+import test_turn_phase_gateway_stream_e2e as e2e
+
+from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+from deerflow.community.direct_fetch import tools as fetch_tools
+from deerflow.community.web_fetch_outcome import FetchRefusal
+from deerflow.runtime.presented_files import PRESENTED_BY_KEY, PRESENTED_FILES_KEY
+
+# The exact addresses and artifact the tenant-class turns used.
+GREAT_LAKES_URL = "https://www.epa.gov/greatlakes/great-lakes-facts-and-figures"
+MUSE_URL = "https://about.fb.com/news/2026/09/introducing-muse-personal-ai-agent/"
+ARTIFACT_NAME = "Muse_Agent_Report.pdf"
+ARTIFACT_PATH = f"/mnt/user-data/outputs/{ARTIFACT_NAME}"
+# Valid enough to be a real download: a PDF header, a body, and an EOF marker.
+ARTIFACT_BYTES = b"%PDF-1.7\n1 0 obj\n<< /Type /Catalog >>\nendobj\ntrailer\n<< /Root 1 0 R >>\n%%EOF\n"
+
+
+def _profile_config() -> str:
+    """The tool shape the released profile renders for a keyless tenant."""
+    return (
+        e2e._MINIMAL_CONFIG_YAML
+        + """\
+deployment:
+  profile: local_development
+tool_plane:
+  enabled: true
+  policy_version: deerflow-default-v1
+  validation_requires_skill_review: true
+tool_groups:
+  - name: web
+tools:
+  - name: web_fetch
+    group: web
+    use: deerflow.community.direct_fetch.tools:web_fetch_tool
+    timeout: 10
+"""
+    )
+
+
+class _RefusingProvider:
+    """The hosted reader's behaviour: every address, the same refusal."""
+
+    def __init__(self) -> None:
+        self.urls: list[str] = []
+
+    async def fetch(self, url: str) -> FetchRefusal:
+        self.urls.append(url)
+        return FetchRefusal("provider", "auth", "the fetch provider refuses this deployment's requests without a valid key", 401)
+
+
+@pytest.fixture(scope="module")
+def composed_gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[e2e._Gateway]:
+    with e2e.serve_gateway(tmp_path_factory.mktemp("df21-df22-composed"), config_yaml=_profile_config()) as served:
+        yield served
+
+
+def _walk(node: Any, found: list[dict[str, Any]], match: Any) -> None:
+    if isinstance(node, dict):
+        if match(node):
+            found.append(node)
+        for value in node.values():
+            _walk(value, found, match)
+    elif isinstance(node, list):
+        for value in node:
+            _walk(value, found, match)
+
+
+def _fetch_results(history: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    _walk(history, found, lambda node: node.get("type") == "tool" and node.get("name") == "web_fetch")
+    return found
+
+
+def _tagged(history: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    _walk(history, found, lambda node: isinstance((node.get("additional_kwargs") or {}).get(PRESENTED_FILES_KEY), list))
+    return found
+
+
+def _turn(gateway: e2e._Gateway, prompt: str, *, on_frame: Any = None) -> dict[str, Any]:
+    base = gateway.loopback_url
+    probe.BOUND_TOOL_NAMES.clear()
+    with httpx.Client() as client:
+        csrf, thread_id = e2e._register_and_create_thread(client, base)
+        observed = e2e._observe_stream(client, base, thread_id, csrf, prompt, on_frame=on_frame, timeout=120.0, recursion_limit=100)
+        run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
+        history = client.post(f"{base}/api/threads/{thread_id}/history", json={"limit": 30}, headers={"X-CSRF-Token": csrf}).json()
+        delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/delivery").json()
+        # What a reloaded page does for the file: a request of its own, once
+        # the stream is finished, on the route the chip links to.
+        download = client.get(
+            f"{base}/api/threads/{thread_id}/artifacts/{ARTIFACT_PATH.lstrip('/')}",
+            params={"download": "true"},
+            headers={"X-CSRF-Token": csrf},
+        )
+    return {
+        "observed": observed,
+        "run": run,
+        "history": history,
+        "delivery": delivery,
+        "download": download,
+        "thread_id": thread_id,
+        "bound": [list(names) for names in probe.BOUND_TOOL_NAMES],
+    }
+
+
+def _write_artifact_mid_turn(home: Any, thread_id_box: dict[str, str]) -> Any:
+    """Write the PDF as soon as the turn has laid down its outputs directory.
+
+    The probe issues no ``bash`` call, so this stands in for the producing
+    call that omitted ``present``. It lands after the worker's pre-run
+    snapshot and after the middleware's, which is the window a real producing
+    call writes in.
+    """
+    written = {"done": False}
+
+    def on_frame(observation: e2e._StreamObservation) -> None:
+        if written["done"]:
+            return
+        for candidate in home.rglob(f"threads/{thread_id_box['id']}/user-data/outputs"):
+            if candidate.is_dir():
+                (candidate / ARTIFACT_NAME).write_bytes(ARTIFACT_BYTES)
+                written["done"] = True
+                return
+
+    return on_frame, written
+
+
+def test_the_great_lakes_turn_stops_at_one_refusal_and_still_answers(
+    composed_gateway: e2e._Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _RefusingProvider()
+    monkeypatch.setattr(fetch_tools, "_client_from_config", lambda _config: provider)
+
+    result = _turn(composed_gateway, f"probe:fetch {GREAT_LAKES_URL}")
+    observed = result["observed"]
+
+    assert "error" not in observed.events, observed.events
+    assert observed.events[-1] == "end", observed.events
+    assert composed_gateway.journals.wait_for(observed.run_id)["outcome"] == "success"
+    assert observed.text_frames >= 1, "the turn answered rather than ending on the refusal"
+
+    # One call found the provider out. The tenant-class turn made three.
+    assert provider.urls == [GREAT_LAKES_URL], provider.urls
+    [refusal] = _fetch_results(result["history"])
+    assert refusal["additional_kwargs"][TOOL_META_KEY]["error_scope"] == "provider"
+    assert "unavailable for the rest of this turn" in refusal["content"]
+
+    # And the model could not have made a second call: the tool is gone.
+    bound = result["bound"]
+    assert len(bound) >= 2 and "web_fetch" in bound[0], bound
+    assert all("web_fetch" not in names for names in bound[1:]), bound
+    # The turn produced nothing, so delivery has nothing to say.
+    assert result["run"]["status"] == "success"
+    assert result["delivery"] == {"available": False, "version": 1}
+
+
+def test_the_muse_turn_refuses_once_delivers_the_pdf_and_ends_success(
+    composed_gateway: e2e._Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _RefusingProvider()
+    monkeypatch.setattr(fetch_tools, "_client_from_config", lambda _config: provider)
+
+    thread_id_box: dict[str, str] = {"id": ""}
+    on_frame, written = _write_artifact_mid_turn(composed_gateway.tmp_home, thread_id_box)
+
+    # The thread id is only known once the run has been created, so the frame
+    # callback reads it from the box the turn fills in.
+    base = composed_gateway.loopback_url
+    probe.BOUND_TOOL_NAMES.clear()
+    with httpx.Client() as client:
+        csrf, thread_id = e2e._register_and_create_thread(client, base)
+        thread_id_box["id"] = thread_id
+        observed = e2e._observe_stream(client, base, thread_id, csrf, f"probe:fetch {MUSE_URL}", on_frame=on_frame, timeout=120.0, recursion_limit=100)
+        run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
+        history = client.post(f"{base}/api/threads/{thread_id}/history", json={"limit": 30}, headers={"X-CSRF-Token": csrf}).json()
+        delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/delivery").json()
+        # What a reloaded page does for the file: a request of its own, after
+        # the stream is finished and closed, on the route the chip links to.
+        download = client.get(
+            f"{base}/api/threads/{thread_id}/artifacts/{ARTIFACT_PATH.lstrip('/')}",
+            params={"download": "true"},
+            headers={"X-CSRF-Token": csrf},
+        )
+    # And nobody else's: a different person asking for the same path is
+    # refused, so making delivery automatic widened no authorization.
+    with httpx.Client() as stranger:
+        stranger_csrf, _ = e2e._register_and_create_thread(stranger, base)
+        forbidden = stranger.get(
+            f"{base}/api/threads/{thread_id}/artifacts/{ARTIFACT_PATH.lstrip('/')}",
+            params={"download": "true"},
+            headers={"X-CSRF-Token": stranger_csrf},
+        )
+    bound = [list(names) for names in probe.BOUND_TOOL_NAMES]
+
+    assert written["done"], "the artifact was never written, so nothing was exercised"
+
+    # DF21: one refusal, then the tool is withdrawn. The tenant made thirteen.
+    assert provider.urls == [MUSE_URL], provider.urls
+    assert all("web_fetch" not in names for names in bound[1:]), bound
+
+    # DF22: the run a person asked for ends success, with the file delivered.
+    assert "error" not in observed.events, observed.events
+    assert observed.events[-1] == "end", observed.events
+    assert run["status"] == "success", "a requested artifact that exists is not an error"
+    assert run.get("stop_reason") is None, run.get("stop_reason")
+    assert delivery == {"available": False, "version": 1}, "and not through a recovery notice"
+    assert not [payload for name, payload in observed.frames if name == "custom" and isinstance(payload, dict) and str(payload.get("type", "")).startswith("artifact_delivery_")]
+
+    # The receipt and what the person sees are the same file.
+    tagged = _tagged(history)
+    assert tagged, "the turn's messages never reported the file as delivered"
+    presented = [path for message in tagged for path in message["additional_kwargs"][PRESENTED_FILES_KEY]]
+    assert presented == [ARTIFACT_PATH], presented
+    assert any(message["additional_kwargs"].get(PRESENTED_BY_KEY) == "runtime" for message in tagged)
+
+    # And it downloads, from a session that did not watch the turn.
+    assert download.status_code == 200, download.text
+    assert download.content == ARTIFACT_BYTES, "the bytes on the wire are the bytes the turn wrote"
+    assert forbidden.status_code in (403, 404), forbidden.text
+
+
+def test_a_turn_that_needs_no_fetch_is_untouched_by_either_repair(composed_gateway: e2e._Gateway) -> None:
+    """The ordinary turn, so neither repair is paid for by every other one."""
+    result = _turn(composed_gateway, "probe:text please")
+    observed = result["observed"]
+
+    assert "error" not in observed.events, observed.events
+    assert result["run"]["status"] == "success"
+    assert result["delivery"] == {"available": False, "version": 1}
+    assert not _tagged(result["history"]), "nothing was produced, so nothing is reported as delivered"
+    assert all("web_fetch" in names for names in result["bound"]), "the tool stays available to a turn that never used it"
+    assert json.dumps(result["history"]).count("unavailable for the rest of this turn") == 0
