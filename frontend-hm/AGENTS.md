@@ -121,6 +121,28 @@ track whether or not the text fits, so the box is not the evidence; and
 width, so overflow is not the evidence either. What pins the sizing is that
 each figure still renders on **one line** at panel width.
 
+The card offers a render only when two things hold: the exact sibling path is
+eligible under the presentation contract (`availableReportRenders`), **and**
+that path currently resolves as a regular file through the same authenticated
+artifact route the download link uses (`useLiveReportRenders`,
+`core/business-report/renders.ts`). The cumulative presented-files list is
+history and never shrinks — a rebuild deletes the previous draft's renders
+while their paths stay in the list — so eligibility alone offered downloads
+that 404 after a revision that rendered nothing. The probe is a
+`Range: bytes=0-0` GET whose body is cancelled unread, so proving a large PDF
+is there costs one byte; 200 and 206 are live, and 400/403/404 and a network
+failure are all fail-closed. It never asks about a path presentation did not
+produce: the delivery fence still decides what may be offered at all, and a
+file existing is not permission to offer a format nobody presented, so nothing
+globs the directory or infers the three conventional names. The query key
+carries the report body's own digest and whether a run has settled, because
+every draft rewrites the same filenames while the cumulative list stays
+byte-for-byte identical — keyed on the pathname alone, one draft reads
+another's verdict and a slow probe from the previous draft restores a deleted
+link. While the verdict is unknown the card shows neither links nor the "No
+file to download yet" notice, because a false empty is worse than the stale
+link it replaced. Mock and static mode skip the probe and stay deterministic.
+
 Three things decide whether a card appears at all: the `.report.json` suffix, a
 body that parses as `version: 1`, and — for each picture — the contract's
 `charts/<id>.png` shape. A report is fetched under its own preview budget,

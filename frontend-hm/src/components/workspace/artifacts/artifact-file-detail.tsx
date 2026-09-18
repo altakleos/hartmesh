@@ -692,6 +692,11 @@ export function ArtifactFileDetail({
                 isMock={isMock}
                 presentedKnown={!thread.isThreadLoading}
                 report={report}
+                // The body's own digest: what separates this draft's download
+                // verdict from the previous draft's, since a rebuild reuses
+                // every filename.
+                reportRevision={sha256}
+                runSettled={!thread.isLoading}
                 threadId={threadId}
               />
             )}
