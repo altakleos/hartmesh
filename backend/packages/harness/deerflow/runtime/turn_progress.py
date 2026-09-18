@@ -61,6 +61,14 @@ class TurnProgressStage(StrEnum):
     THINKING = "thinking"
 
 
+#: ``WORKSPACE_STARTING`` no longer covers every cold turn. A new chat's
+#: sandbox is built when the chat opens, so a turn that reclaims it warm
+#: records no ``SANDBOX_CREATE`` and goes straight from ``PREPARING`` to
+#: ``THINKING`` -- and a person who sends while that build is still running
+#: waits for it inside ``SANDBOX_LOOKUP``, which is also not this phase. Both
+#: are shorter waits than before, under the earlier label; mapping the lookup
+#: here instead would put "workspace starting" on every warm follow-up, which
+#: is the common case and would be a lie.
 _STAGE_BY_PHASE: Final[dict[TurnPhase, TurnProgressStage]] = {
     TurnPhase.ADMISSION: TurnProgressStage.PREPARING,
     TurnPhase.SANDBOX_CREATE: TurnProgressStage.WORKSPACE_STARTING,

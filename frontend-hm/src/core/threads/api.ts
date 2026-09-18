@@ -134,6 +134,25 @@ export async function patchThreadMetadata(
   return (await response.json()) as ThreadMetadataPatchResponse;
 }
 
+/**
+ * Ask the Gateway to build this thread's sandbox now, ahead of its first turn.
+ *
+ * Fire-and-forget by contract: the build is an optimisation the person never
+ * sees, so nothing here can reject. A failed request, a refused one, or a
+ * deployment that cannot prewarm all mean the same thing -- the first turn
+ * builds the sandbox itself, as it always did.
+ */
+export async function prewarmThreadWorkspace(threadId: string): Promise<void> {
+  try {
+    await fetchWithAuth(
+      `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}/workspace/prewarm`,
+      { method: "POST" },
+    );
+  } catch {
+    // Deliberately silent: see above.
+  }
+}
+
 export async function compactThreadContext(
   threadId: string,
   options: CompactThreadContextOptions = {},

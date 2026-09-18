@@ -102,6 +102,14 @@ DeerFlow is a LangGraph-based AI super agent system with a full-stack architectu
   Compose limits under runsc, with the template's `sandbox.environment`
   applied and as many concurrent starts as `sandbox.replicas`:
   `tests/test_restricted_runsc_readiness_live.py`.
+- A new thread's accepted sandbox is built ahead of its first turn:
+  `POST /api/threads/{id}/workspace/prewarm` hands the provider's
+  `WorkspacePrewarm` capability to a background task, the AIO provider runs
+  the accepted acquisition minus the hand-out and parks the result, and the
+  turn's own warm reclaim finds it. A prewarm never evicts, never replaces a
+  parked container, and is stopped after `sandbox.prewarm_claim_timeout`
+  (default 300 s) if no turn claims it; the remote backend refuses because the
+  binding shapes its Pod. See `docs/ACCEPTED_SANDBOX_EXECUTION.md` ("Prewarm").
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway
   via `RunManager` + `run_agent()` + `StreamBridge`
   (`packages/harness/deerflow/runtime/`); Nginx exposes it at

@@ -247,9 +247,42 @@ def reject_writable_accepted_skill_aliases(
         ) from exc
 
 
+class WorkspacePrewarm:
+    """Build a thread's accepted-projection sandbox before its first turn.
+
+    The cold turn's pre-model block is the container: create plus readiness
+    measured 10 to 29 seconds on the released profile, paid while the person
+    waits and independent of anything they are about to type. A provider
+    that inherits this contract can build that container from ``(user,
+    thread)`` alone and park it, so the first turn's own reclaim finds it.
+
+    The default refuses by answering ``None``: a prewarm is an optimisation
+    and its absence is never an error, so callers treat ``None`` as "the
+    first turn will build it" and nothing else.
+    """
+
+    async def prewarm_accepted_skills_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+    ) -> str | None:
+        """Park the container ``thread_id``'s first accepted turn would build.
+
+        Returns the parked sandbox id, or ``None`` when nothing was built:
+        the thread already holds a sandbox, one is already parked, no slot
+        is free (a prewarm never evicts), or this backend bakes the binding
+        into the container so a prewarm could not be the same container.
+        Never raises for those; a backend failure does propagate.
+        """
+        del thread_id, user_id
+        return None
+
+
 __all__ = [
     "AcceptedMaterialization",
     "AcceptedSkillProjection",
+    "WorkspacePrewarm",
     "reject_writable_accepted_skill_aliases",
     "sandbox_capability",
 ]

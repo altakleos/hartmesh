@@ -225,6 +225,14 @@ class SandboxConfig(BaseModel):
         default=None,
         description="Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.",
     )
+    prewarm_claim_timeout: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds a sandbox built ahead of a thread's first turn (AioSandboxProvider prewarm) may sit unclaimed before it is stopped "
+            "(default: 300). A claimed one is an ordinary parked sandbox and follows idle_timeout instead. Set to 0 to keep unclaimed prewarms until idle_timeout."
+        ),
+    )
     ready_timeout: float | None = Field(
         default=None,
         gt=0,

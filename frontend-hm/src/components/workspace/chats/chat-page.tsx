@@ -61,6 +61,7 @@ import { cn } from "@/lib/utils";
 
 import { ChatBox } from "./chat-box";
 import { useSpecificChatMode } from "./use-chat-mode";
+import { usePrewarmWorkspace } from "./use-prewarm-workspace";
 import { useThreadChat } from "./use-thread-chat";
 
 export default function ChatPage() {
@@ -68,6 +69,9 @@ export default function ChatPage() {
   const router = useRouter();
   const { threadId, setThreadId, isNewThread, setIsNewThread, isMock } =
     useThreadChat();
+  // A new thread's sandbox starts building the moment the page opens, so the
+  // first turn does not pay the cold start while the person watches.
+  usePrewarmWorkspace({ threadId, enabled: isNewThread && !isMock });
   // `isNewThread` tracks whether the backend has the thread yet — gates the
   // SDK's history fetch (see issue #2746).  `isWelcomeMode` is the visual
   // welcome layout (centered input, hero, quick actions); we flip it to false

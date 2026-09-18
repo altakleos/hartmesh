@@ -757,6 +757,20 @@ the idler of the two, and with both active a third created beyond the cap
 (§ "Memory budget" says what that costs). `DEER_FLOW_SANDBOX_CPUS` goes to 2
 because the render is throttled at one and the slim cold boot halves.
 
+One of the two slots is spent ahead of demand on purpose. A new chat's
+sandbox is built the moment the chat opens, before the first message
+(`sandbox.prewarm_claim_timeout` in `config.yaml`; § "Reading a turn's timing"
+says what a prewarmed first turn looks like), because the tenant-class runs
+measured the container -- 4 to 19 s to create and 5 to 10 s to answer its
+readiness probe -- as the whole of the first turn's pre-model wait, paid while
+the person watched "workspace starting". The prewarm takes a free slot or
+nothing: it never evicts a parked sandbox some thread will reclaim, and one
+nobody sends a message to is stopped about 300 s later rather than holding the
+slot for the 1800 s idle timeout. So with one thread active and one chat freshly
+opened, both slots are in use, and a third thread pays the same eviction it
+paid before; what changes is who pays the cold start -- nobody, when the
+prewarm lands -- not how many containers fit.
+
 Two follow-ups this licenses, neither done here: stopping the API server's
 idle Jupyter kernel in the slim profile (an image change; 85 to 95 MiB of
 RSS nothing uses), and, if density matters, re-measuring the line with that
@@ -1928,6 +1942,25 @@ container. That line was measured before 2026-09-17, when both were staged
 again every turn; a warm turn on this release verifies the retained material
 instead (§ "Public skills", **Per-turn material**), so the same shape today
 reads in milliseconds. It stays here because reading the line is the point.
+
+A *first* turn on a new chat should read the same way. The web client asks
+the Gateway to build the thread's sandbox the moment the chat opens (`POST
+/api/threads/{id}/workspace/prewarm`), seconds before the first message, so
+the turn's `sandbox_lookup` finds it parked: `acquisition=accepted_warm_reclaim`
+with no `sandbox_create` or `sandbox_readiness` span at all, and the Gateway
+log carries `Accepted sandbox <id> was built <n>s ahead of this turn and
+reclaimed warm`. A first turn that still shows `acquisition=created` with
+`sandbox_create@…+4000ms sandbox_readiness@…+6000ms` says the prewarm did not
+happen or was not claimed in time: both slots were taken (a prewarm never evicts;
+`Not prewarming a sandbox … every slot is taken`), or the chat sat idle past
+`sandbox.prewarm_claim_timeout` and the container was stopped
+(`Prewarmed sandbox <id> was not claimed within 300s`; the reaper looks every 30 s, so an abandoned slot comes back at up to 330 s). A person who sends
+within a few seconds of opening the chat, while the build is still running,
+waits for it on that same turn -- the acquisition serialises on the thread --
+and then reclaims it; that wait is inside `sandbox_lookup`, not a
+`sandbox_create` span, so the progress label stays at "preparing" rather than
+"workspace starting" for it. Total wait is what the cold start would have
+been, less the seconds the build had already run.
 
 `acquisition=` says where this turn's sandbox came from. `created`,
 `rediscovered`, `discovered`, `warm_reclaim`, `accepted_warm_reclaim` and
