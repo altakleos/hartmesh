@@ -813,7 +813,7 @@ export function hasToolCalls(message: Message) {
  * `present_files` call (an AI message); a tool result that presented the
  * files its call was asked to make (`bash` with a `present` argument); or the
  * turn's final assistant message, tagged by the runtime when the turn
- * produced files nobody presented (hartmesh-tenancy/DF22). The last two are
+ * produced files nobody presented. The last two are
  * the same field — `additional_kwargs.presented_files`
  * (`deerflow.runtime.presented_files`), server-owned and stripped from any
  * client-supplied message — because the tag *is* the presentation, whichever

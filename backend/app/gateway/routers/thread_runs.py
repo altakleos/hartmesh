@@ -2483,7 +2483,7 @@ async def get_run_delivery(
     The live ``custom`` frame that carries this verdict is page-local state, so
     a client that reloads, gaps, or never negotiated ``custom`` has no way back
     to it. This is that way back, and it is the same verdict from the same
-    receipt (hartmesh-tenancy/DF14).
+    receipt.
     """
     record = await _observe_run_or_404(
         request,

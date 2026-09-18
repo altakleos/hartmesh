@@ -1642,7 +1642,7 @@ describe("files a tool result presented on the run's behalf", () => {
 });
 
 describe("an answer the runtime tagged because the turn presented nothing", () => {
-  // hartmesh-tenancy/DF22: a turn wrote a PDF, named it under no `present`
+  // A turn wrote a PDF, named it under no `present`
   // argument and never called `present_files`, so the runtime handed it over
   // and tagged the turn's final answer. The tag is the presentation whichever
   // message carries it, so the client must draw those files — and must still

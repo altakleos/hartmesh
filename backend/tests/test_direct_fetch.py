@@ -1,4 +1,4 @@
-"""The keyless ``web_fetch`` reads pages itself, pinned to the addresses it checked (hartmesh-tenancy/DF21).
+"""The keyless ``web_fetch`` reads pages itself, pinned to the addresses it checked.
 
 Every control in ``direct_fetch/client.py`` is exercised here against a
 transport that records exactly what would have gone on the wire: which

@@ -11,7 +11,7 @@ _api_key_warned = False
 #: Statuses r.jina.ai answers for the *caller*, not for the page: no key,
 #: a refused key, a refused address, or a spent quota. Every address gets the
 #: same answer, so the tool stamps them provider scope and the run withdraws
-#: the tool (hartmesh-tenancy/DF21: thirteen addresses, thirteen 401s).
+#: the tool (thirteen addresses, thirteen 401s).
 PROVIDER_REFUSAL_STATUSES = frozenset({401, 402, 403, 429})
 
 

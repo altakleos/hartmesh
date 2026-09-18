@@ -78,7 +78,7 @@ A presentation — the chips and archive action under an answer — is drawn fro
 `present_files` tool call. Three producers write that tag: `present_files`, a
 tool that presented what its call was asked to make (`bash` with a `present`
 argument), and the runtime, which tags the turn's final assistant message when
-the turn produced files nobody presented (hartmesh-tenancy/DF22, also stamping
+the turn produced files nobody presented (also stamping
 `presented_by: "runtime"`). `core/messages/utils.ts` reads the tag rather than
 any tool name, so a new producer needs no client change; the present-files
 group renders its first message's prose above the files, which is what keeps a

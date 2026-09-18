@@ -1612,8 +1612,7 @@ async def get_thread_history(
                 # without it the artifact panel opens empty on every fresh
                 # session, and the business-report card, whose downloads are
                 # exactly the renders this list names, says there are none
-                # under a report whose files are sitting in the thread
-                # (hartmesh-tenancy/DF16).
+                # under a report whose files are sitting in the thread.
                 #
                 # Newest returned entry only, like ``messages``: the list is
                 # cumulative, so the rest of the page would repeat it. "Newest

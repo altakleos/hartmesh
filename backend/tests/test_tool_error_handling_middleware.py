@@ -175,14 +175,21 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.token_budget_middleware import TokenBudgetMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.agents.middlewares.unbound_tool_call_middleware import UnboundToolCallMiddleware
 
-    # 19 until hartmesh-tenancy/DF21 and DF22 added ProviderRefusalMiddleware
-    # and RuntimeDeliveryMiddleware to every runtime stack, the subagent's
-    # included.
-    assert len(middlewares) == 21
-    assert isinstance(middlewares[0], ToolReceiptMiddleware)
-    assert isinstance(middlewares[1], FakeMiddleware)  # InputSanitizationMiddleware stub
-    assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
+    # 19 until the provider-withdrawal and runtime-delivery repairs added
+    # ProviderRefusalMiddleware and RuntimeDeliveryMiddleware to every runtime
+    # stack, the subagent's included; 22 since UnboundToolCallMiddleware joined
+    # it as the outermost tool wrapper, which a subagent needs for the same
+    # reason the lead does -- a malformed name reaches its receipt layer too.
+    assert len(middlewares) == 22
+    # The guard is now first and the receipt second: a name that could never be
+    # a receipt identity has to be refused before the receipt reserves anything
+    # under it, which is the ordering the whole repair depends on.
+    assert isinstance(middlewares[0], UnboundToolCallMiddleware)
+    assert isinstance(middlewares[1], ToolReceiptMiddleware)
+    assert isinstance(middlewares[2], FakeMiddleware)  # InputSanitizationMiddleware stub
+    assert isinstance(middlewares[3], ToolOutputBudgetMiddleware)
     assert any(isinstance(m, ToolErrorHandlingMiddleware) for m in middlewares)
     # The receipt layer wraps ToolErrorHandlingMiddleware so receipts read the
     # deerflow_tool_meta status it stamps (guard-enforced, like ToolProgress).

@@ -1407,7 +1407,7 @@ def test_thread_history_carries_the_cumulative_presented_files() -> None:
     the artifact panel had no files, and the business-report card — whose
     downloads are exactly the renders that list says were presented — said
     "No file to download yet" under a report whose PDF, Word and Excel were
-    sitting in the thread and downloading fine (hartmesh-tenancy/DF16).
+    sitting in the thread and downloading fine.
 
     ``/state`` already returns the whole channel; this is the same list, on the
     read the browser actually makes.

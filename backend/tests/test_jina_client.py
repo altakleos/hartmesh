@@ -398,7 +398,7 @@ def test_coerce_proxy(value, expected):
     assert _coerce_proxy(value) == expected
 
 
-# ── A provider refusal is typed as the provider's (hartmesh-tenancy/DF21) ────
+# ── A provider refusal is typed as the provider's ────
 
 
 @pytest.mark.anyio

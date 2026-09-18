@@ -9,7 +9,7 @@
 # turn). Under two ordinary tenant turns the cgroup reached its ceiling 170
 # times (`memory.peak` 201,330,688 bytes, no OOM kill), which is the workload
 # saying the figure was chosen the wrong way round (README: "Web search",
-# "Memory budget"; hartmesh-tenancy/DF21).
+# "Memory budget").
 #
 # Run it uncapped first to find the natural peak, then at each candidate
 # limit, and take the smallest limit that records zero `memory.events max`

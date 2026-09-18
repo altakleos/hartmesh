@@ -958,7 +958,7 @@ def _delivery_content_with_outputs(
     """Attach a delivery verdict when this run created or modified outputs.
 
     ``runtime_presented`` is what ``RuntimeDeliveryMiddleware`` handed over
-    inside the graph (hartmesh-tenancy/DF22). It reaches here through
+    inside the graph. It reaches here through
     ``runtime.context`` rather than the journal because the journal records
     presentations it observes at tool end, and a runtime presentation is a
     state update at the end of the agent, not a tool result. Counting it is
@@ -1023,7 +1023,7 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
 # delivery fence is the exception that mattered: it runs *after* an ordinary
 # graph completion, so a run that produced files and never presented them was
 # ``error`` in SQL and in the journal while the browser showed confident prose
-# followed by a normal end (hartmesh-tenancy/DF13).
+# followed by a normal end.
 #
 # It stays the exception, deliberately. ``event: error`` means "this stream
 # carries no valid assistant turn": the LangGraph SDK stops reading there,
@@ -1049,7 +1049,7 @@ _DELIVERY_RECEIPT_STOP_REASON = "delivery_receipt_failed"
 
 # The bound, the stop reason and the produced-minus-presented rule are shared
 # with the durable projection a rejoining client reads, so the frame and the
-# receipt cannot describe the same run differently (hartmesh-tenancy/DF14).
+# receipt cannot describe the same run differently.
 _DELIVERY_INCOMPLETE_STOP_REASON = DELIVERY_INCOMPLETE_STOP_REASON
 _undelivered_paths = undelivered_paths
 
@@ -3639,7 +3639,7 @@ async def _run_agent(
                 # terminal-error branches in this worker that left
                 # ``stop_reason`` unset, which is what made a fenced run
                 # indistinguishable over HTTP from a generic ``RuntimeFailure``
-                # — the half of hartmesh-tenancy/DF13 that outlives the stream.
+                # — the half of that repair which outlives the stream.
                 stop_reason = _DELIVERY_INCOMPLETE_STOP_REASON
             if accepted_sandbox_session is not None:
                 # Success is not staged from a provider lease that was lost

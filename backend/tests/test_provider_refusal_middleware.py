@@ -1,4 +1,4 @@
-"""A tool whose provider refused this run disappears from the model's tools (hartmesh-tenancy/DF21).
+"""A tool whose provider refused this run disappears from the model's tools.
 
 The tenant-class evidence: thirteen ``web_fetch`` calls to thirteen distinct
 addresses, each answered by the provider's same deterministic 401. The

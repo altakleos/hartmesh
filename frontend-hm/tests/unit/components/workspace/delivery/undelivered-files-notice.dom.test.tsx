@@ -142,7 +142,7 @@ describe("UndeliveredFilesNotice", () => {
     expect(fetchRunDelivery).not.toHaveBeenCalled();
   });
 
-  // hartmesh-tenancy/DF14: the live frame is page-local state, so the reader
+  // The live frame is page-local state, so the reader
   // who reloads is the reader this notice exists for.
   it("restores the correction from durable state after a reload", async () => {
     fetchThreadDeliveryFailures.mockResolvedValue(new Set(["run-1"]));

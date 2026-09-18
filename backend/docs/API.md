@@ -279,7 +279,7 @@ nothing" and the former clears a local override.
 
 This is the read a client makes when it merely *opens* a conversation — it never
 sees a `values` stream frame — so a key the UI renders from thread state must
-appear here or it is blank on every fresh session. In hartmesh-tenancy/DF16 that
+appear here or it is blank on every fresh session. In one qualification run that
 cost an empty artifact panel, a business-report card offering no downloads under
 a report whose files were present and downloadable, no todo list, and an active
 goal that stayed invisible while it drove hidden continuation turns.

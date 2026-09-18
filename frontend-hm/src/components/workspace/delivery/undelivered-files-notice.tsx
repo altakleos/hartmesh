@@ -21,7 +21,7 @@ import { ArtifactFileList } from "../artifacts/artifact-file-list";
  * The verdict comes from the stream while the page that heard it is open, and
  * from the run's durable receipt afterwards, so the correction is still here
  * tomorrow — which is the whole claim the notice makes, and the one a reload
- * used to break (hartmesh-tenancy/DF14).
+ * used to break.
  */
 export function UndeliveredFilesNotice({
   className,

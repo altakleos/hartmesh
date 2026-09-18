@@ -222,6 +222,20 @@ def _require_digest(value: object, code: str) -> str:
     return value
 
 
+def is_safe_tool_name(value: object) -> bool:
+    """Whether this name may become a canonical receipt identity.
+
+    The one owned statement of that rule. The receipt layer enforces it below,
+    and the pre-dispatch guard
+    (``agents/middlewares/unbound_tool_call_middleware.py``) asks the same
+    question *before* anything is reserved -- a second regex there would be a
+    second rule, and the failure it exists to prevent is precisely the two
+    disagreeing: a name one boundary waved through and the other refused, with
+    the refusal arriving too late to be anything but a terminal error.
+    """
+    return isinstance(value, str) and bool(value) and len(value.encode("utf-8")) <= MAX_TOOL_NAME_BYTES and _SAFE_TOOL_NAME_RE.fullmatch(value) is not None
+
+
 def _validate_tool_name(value: object) -> str:
     name = _require_nonempty(value, "tool_name_invalid", max_bytes=MAX_TOOL_NAME_BYTES)
     if _SAFE_TOOL_NAME_RE.fullmatch(name) is None:

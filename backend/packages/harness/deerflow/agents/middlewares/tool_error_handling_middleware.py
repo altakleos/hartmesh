@@ -185,6 +185,7 @@ def _build_runtime_middlewares(
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
     from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
+    from deerflow.agents.middlewares.unbound_tool_call_middleware import UnboundToolCallMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
     # Layer 1 — outermost wrap_model_call wrappers (listed outer→inner).
@@ -197,6 +198,11 @@ def _build_runtime_middlewares(
     # the raw tool output first; the budget wrapper then truncates the already
     # neutralized text.
     outer_wrappers: list[AgentMiddleware] = [
+        # Outermost of all, because the receipt below writes durable start
+        # evidence before any inner code runs: a name that could never be a
+        # receipt identity has to be refused before that, while the model can
+        # still correct it.
+        UnboundToolCallMiddleware(),
         # One outer observation sees the final, sanitized/budgeted model-visible
         # result on return while writing durable start evidence before any inner
         # authorization or tool code. Display stamping is independently gated.
@@ -226,7 +232,7 @@ def _build_runtime_middlewares(
     )
 
     # A turn that produced files for the user hands them over even when the
-    # model presented none (hartmesh-tenancy/DF22). Always on: the set is the
+    # model presented none. Always on: the set is the
     # one the delivery fence already asserts must be delivered.
     from deerflow.agents.middlewares.runtime_delivery_middleware import RuntimeDeliveryMiddleware
 

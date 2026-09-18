@@ -17,6 +17,7 @@ from deerflow.config.subagents_config import (
     effective_subagent_concurrency,
 )
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.sandbox.preinstalled import preinstalled_libraries_section
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.types import Skill, SkillCategory
 from deerflow.subagents import get_available_subagent_names
@@ -676,6 +677,7 @@ You (new invocation): "Deploying to staging..." [proceed]
 - For PDF, PPT, Excel, and Word files, converted Markdown versions (*.md) are available alongside originals
 - Files uploaded in previous turns are NOT automatically listed. Use `list_uploaded_files` to discover them on demand — it returns filenames, sizes, and optionally document outlines
 - All temporary work happens in `/mnt/user-data/workspace`
+{preinstalled_libraries}
 - Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
 - When writing scripts or commands that create/read files from the workspace, prefer relative paths such as `hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`
 - Avoid hardcoding `/mnt/user-data/...` inside generated scripts when a relative path from the workspace is enough
@@ -683,6 +685,7 @@ You (new invocation): "Deploying to staging..." [proceed]
 - When a `bash` command writes the deliverable, present it in that same call: name the files under `present`. This is the normal way to hand over a file you just made
 - Use `present_files` for a file that already exists: one from an earlier turn, or one no single command wrote
 - Files a tool result reports under "Presented to the user" are delivered; do not present them again, that attaches them a second time
+- That line is the runtime's own reading of the file, with its size in bytes. It is what a verification command would tell you, so do not spend a call re-listing, re-reading or re-opening a file you just wrote to confirm it arrived
 {acp_section}
 </working_directory>
 
@@ -1241,4 +1244,5 @@ def apply_prompt_template(
         subagent_thinking=subagent_thinking,
         acp_section=acp_and_mounts_section,
         user_files_section=user_files_section,
+        preinstalled_libraries=preinstalled_libraries_section(),
     )

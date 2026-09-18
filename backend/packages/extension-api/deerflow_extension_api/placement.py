@@ -30,7 +30,12 @@ class Placement(StrEnum):
     TOOL_VISIBLE = "tool_visible"
     """Tool axis, outer end. Guarantee: outer of truncation, sanitization and
     error wrapping. Observes final model-visible content inside any host-owned
-    evidence envelope."""
+    evidence envelope.
+
+    Scope: every tool call the host dispatched. A call the host refused before
+    dispatch -- one whose name could never be recorded as evidence, or that
+    names no bound tool -- is not observed here, and writes no receipt either;
+    it never became a tool call."""
 
     TOOL_RAW = "tool_raw"
     """Tool axis, inner end. Guarantee: adjacent to the real callable

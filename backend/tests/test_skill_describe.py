@@ -212,7 +212,7 @@ def test_skill_index_states_no_root_of_its_own():
     A durable accepted invocation executes an immutable snapshot, so
     ``skills.container_path`` is the one prefix that is refused there. Saying it
     with framework authority above every skill's real location is how a model
-    ends up running a path that does not exist (hartmesh-tenancy/DF15).
+    ends up running a path that does not exist.
     """
     section = get_skill_index_prompt_section(
         skill_names=frozenset({"a"}),

@@ -1,4 +1,4 @@
-"""The client must hear a delivery failure (hartmesh-tenancy/DF13).
+"""The client must hear a delivery failure.
 
 The delivery fence runs after an ordinary graph completion, so until these
 regressions it terminalized the run in SQL and in the journal while the browser

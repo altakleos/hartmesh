@@ -1,6 +1,6 @@
 """A tool that makes files can present them in the same call.
 
-hartmesh-tenancy/DF17: on the tenant class the model executed ``prose --render
+a released-profile qualification run: the model executed ``prose --render
 pdf,docx,xlsx``, read the output, wrote "Done" and never called
 ``present_files`` -- in both runs, at both memory limits. The files existed
 and the delivery fence correctly failed the turn. These tests pin the repair:
@@ -248,7 +248,10 @@ def test_the_result_presents_like_present_files_and_tells_the_model_so(tmp_path:
     assert message.additional_kwargs[PRESENTED_FILES_KEY] == [f"{OUT}/r/r.report.json", f"{OUT}/r/r.pdf"]
     assert message.content.startswith("Built draft 1\n\nPresented to the user: 2 files")
     assert "Do not call present_files for them" in message.content
-    assert f"  {OUT}/r/r.report.json\n  {OUT}/r/r.pdf\n" in message.content
+    # Each delivered path carries the runtime's own byte count, so the model
+    # does not have to spend a shell call asking whether the file it just wrote
+    # is there and how big it is.
+    assert f"  {OUT}/r/r.report.json (1 byte)\n  {OUT}/r/r.pdf (1 byte)\n" in message.content
     assert message.content.endswith(f"Not attached: {OUT}/r/r.docx (does not exist).")
 
 

@@ -1,4 +1,4 @@
-"""A turn that made files for the user hands them over (hartmesh-tenancy/DF22).
+"""A turn that made files for the user hands them over.
 
 The tenant-class shape: "Create pdf about muse agent" produced a valid
 14,710-byte PDF through ``bash`` without the typed ``present`` argument, the

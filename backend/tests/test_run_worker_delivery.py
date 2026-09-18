@@ -226,7 +226,7 @@ async def test_changed_outputs_succeed_when_a_produced_output_is_presented(monke
         },
         "produced_paths": ["/mnt/user-data/outputs/report.md"],
         "matched_paths": ["/mnt/user-data/outputs/report.md"],
-        # Who handed each set over (hartmesh-tenancy/DF22): the model curated
+        # Who handed each set over: the model curated
         # here, so the runtime added nothing.
         "presented_by": {"model": ["/mnt/user-data/outputs/report.md"], "runtime": []},
         "stage": "presented",
@@ -371,7 +371,7 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
     }
     assert record.status == RunStatus.error
     assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
-    # Was ``None`` until hartmesh-tenancy/DF13: the fence was one of the only
+    # Was ``None`` until the runtime handover landed: the fence was one of the only
     # two terminal-error branches that named no reason, which left a fenced run
     # indistinguishable over HTTP from a generic runtime failure.
     assert record.stop_reason == "artifact_delivery_incomplete"
