@@ -1,6 +1,25 @@
+"""Turn a fetched page into readable text, without running a package manager.
+
+``readabilipy`` offers a Readability.js path, and asking for it is not free:
+``have_node()`` shells out to ``node -v`` and, finding no ``node_modules`` beside
+the installed package, calls ``run_npm_install()`` to create one. The released
+Gateway runs non-root on an immutable image, so that write cannot succeed. The
+tenant class measured the result: all 23 successful direct fetches spent two
+subprocesses and logged an EACCES traceback for
+``/app/backend/.venv/.../readabilipy/javascript/node_modules`` before falling
+back to the pure-Python extractor that then did the work
+(hartmesh-tenancy/DF24).
+
+The fallback was doing the extraction, so the JS path was never the behaviour
+-- only its cost. This module now asks for the pure-Python path deliberately:
+no Node probe, no install attempt, no request-time package management, and the
+same output the tenant was already getting. Restoring the JS path is a
+packaging decision (bake the dependency into the image), not something a
+request may attempt.
+"""
+
 import logging
 import re
-import subprocess
 from urllib.parse import urljoin
 
 from markdownify import markdownify as md
@@ -56,21 +75,27 @@ class Article:
 
 
 class ReadabilityExtractor:
+    """Extraction that stays inside the process it runs in."""
+
+    #: Never ``True``. ``use_readability=True`` makes ``readabilipy`` probe for
+    #: Node and try ``npm install`` on a read-only tree; see the module
+    #: docstring. Kept as a named constant so the choice is visible at the call
+    #: site rather than looking like a forgotten default.
+    USE_READABILITY_JS = False
+
     def extract_article(self, html: str) -> Article:
         try:
-            article = simple_json_from_html_string(html, use_readability=True)
-        except (subprocess.CalledProcessError, FileNotFoundError) as exc:
-            stderr = getattr(exc, "stderr", None)
-            if isinstance(stderr, bytes):
-                stderr = stderr.decode(errors="replace")
-            stderr_info = f"; stderr={stderr.strip()}" if isinstance(stderr, str) and stderr.strip() else ""
-            logger.warning(
-                "Readability.js extraction failed with %s%s; falling back to pure-Python extraction",
-                type(exc).__name__,
-                stderr_info,
-                exc_info=True,
-            )
-            article = simple_json_from_html_string(html, use_readability=False)
+            article = simple_json_from_html_string(html, use_readability=self.USE_READABILITY_JS)
+        except Exception:
+            # A page with nothing in it reaches an unguarded index inside the
+            # simplifier's BeautifulSoup pass, and an empty body is an ordinary
+            # thing for a fetch to meet -- a 204, a redirect stub, a wrapper
+            # whose content never arrived. Raising here would fail the whole
+            # fetch for a page that simply had no article in it, so extraction
+            # reports the absence instead. The raw HTML is not salvaged: if the
+            # parser could not read it, this is not the place to guess.
+            logger.warning("Could not extract an article from a %d-character page; reporting it as empty", len(html), exc_info=True)
+            article = {}
 
         html_content = article.get("content")
         if not html_content or not str(html_content).strip():
