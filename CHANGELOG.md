@@ -5,6 +5,23 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.22] — 2026-09-18
+
+- hartmesh#110 — keyless `web_fetch` that answers, a provider refusal that stops, and a turn that hands over what it made. Three failures in one release, all found by a tenant. **Fetch**: the default keyless `web_fetch` was a hosted reader that answers a tenant's server address with HTTP 401 for every page, so a research turn made three refused calls and a report turn thirteen, each to a different address, each refused identically, before answering from search snippets alone. The Gateway now reads the page itself: `http`/`https` only, every resolved address screened against the same never-allowed set as the sandbox egress policy, the connection made to the address it checked with the name on `Host` and TLS SNI so the certificate is still verified and a resolver that answers differently the second time gains nothing, redirects followed by hand with each hop re-screened and re-pinned to eight at most, HTML/XHTML/plain text only, 2 MiB streamed, one budget across the chain, four fetches at once, no cookies, no credentials, no retries. Measured on the seventeen addresses those two turns actually asked for: fourteen answer a plain GET with `200 text/html`, two are gated to automated readers from any address and stay that way, one timed out. Jina remains the keyed upgrade, no shared secret entered the public profile, and source attribution is unchanged. **Repetition**: tool results gained a typed `error_scope`, and a provider-scope refusal withdraws that tool from the model's bound tools for the rest of the run, so thirteen identical refusals become one. There is no counter, no threshold and no tool-name registry — the stamp is the entire contract, and the same sentence without it withdraws nothing. **Delivery**: an ordinary "create a PDF about…" request produced a valid PDF and still ended the run in an error, because the agent never presented the file and the delivery fence correctly refused to call that success. Three releases had already improved the *report* of that failure without removing its cause, which is a model judgement. The runtime already knows the answer at the moment it decides to fail — it computes the exact set of files the turn produced — so it now hands that set over instead. Files the model named still stand and only omissions are added; a delegated task presents nothing; no stdout is parsed, no path authorization is widened, nothing under `workspace` is touched, and a stranger asking for the same file still gets a 404. **Search sizing**: the profile's SearXNG sat at its 192 MiB ceiling with 170 reclaim events and no OOM kill under two ordinary turns. `deploy/compose/scripts/measure-searxng.sh` replays those turns' own queries through the pinned image under the profile's limits; 90 queries peaked at 144–149 MiB and never reached the ceiling, so that pressure is real and was **not** reproduced. The limit is therefore set against the observed ceiling rather than against the replay: 256 MiB, funded by 64 MiB of the Gateway's stated headroom (1152 → 1088 MiB), with the profile line still exactly 5120 MiB and every term of it written out.
+- hartmesh#111 — a same-chat follow-up drives the fetch a second time through the real Gateway stream, with the thread reloaded, the artifact re-fetched and the run archive pulled.
+
+Everything above is proved by source tests and by direct measurement from a
+development host. **No real model has yet run against these repairs**: the
+failures they fix were captured on a tenant-class host, and the fixed behaviour
+has not been. Call counts, token totals, phase timings and the search service's
+own cgroup peaks under a real turn are therefore owed by the next tenant-class
+run, not claimed here. The development-host fetch measurement is the same class
+of address as a tenant's, not the same address.
+
+Cold-start latency is untouched and remains the headline wait, unchanged from
+`.21`: a new thread's first message still reaches the model at about 16.5 s, and
+a warm turn still spends about 1.8 s projecting accepted skills.
+
 ## [2.1.0+hartmesh.21] — 2026-09-17
 
 - hartmesh#105 — say why a search failed when retrying cannot fix it. A refused provider came back to the model as a bare failure, so it tried the same query again, and again, before giving up with nothing to tell the person. The guidance now distinguishes a fault worth retrying from a provider that has declined, and a declined one ends the turn in a sentence rather than in silence.
@@ -97,6 +114,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.22]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.22
 [2.1.0+hartmesh.21]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.21
 [2.1.0+hartmesh.20]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.20
 [2.1.0+hartmesh.19]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.19
