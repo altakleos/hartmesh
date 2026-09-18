@@ -1,8 +1,8 @@
-"""A tool call the runtime cannot honour is answered, not dispatched (hartmesh-tenancy/DF23).
+"""A tool call the runtime cannot honour is answered, not dispatched.
 
 Why
 ---
-On the tenant class, `inclusionai/ling-3.0-flash-vl` emitted a shell command
+In a released-profile qualification run, `the model` emitted a shell command
 where a tool name belongs::
 
     weasyprint --version 2>/dev/null; python3 -c "import weasyprint; ..." || echo "checking..."

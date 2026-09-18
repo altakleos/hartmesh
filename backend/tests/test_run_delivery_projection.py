@@ -1,4 +1,4 @@
-"""The durable delivery verdict a rejoining client reads (hartmesh-tenancy/DF14).
+"""The durable delivery verdict a rejoining client reads.
 
 The e2e counterpart in ``test_delivery_failure_gateway_stream_e2e.py`` proves
 the happy path against a real Gateway, worker and receipt. These cover the

@@ -350,8 +350,7 @@ def test_memory_observation_metadata_requires_run_owner_access() -> None:
 def test_delivery_verdict_requires_run_owner_access() -> None:
     """The withheld-file list is one thread's outputs, not everyone's.
 
-    Pinned because the route's own decorator is what enforces it
-    (hartmesh-tenancy/DF14): a refactor that dropped ``owner_check`` would
+    Pinned because the route's own decorator is what enforces it: a refactor that dropped ``owner_check`` would
     otherwise ship green.
     """
     from app.gateway.routers import thread_runs

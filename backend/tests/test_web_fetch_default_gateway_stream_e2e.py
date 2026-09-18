@@ -1,8 +1,7 @@
 """The tenant profile's keyless ``web_fetch`` reads a page, and a dead provider is withdrawn.
 
 Since 2026-09-17 the released Compose profile's ``web_fetch`` without a
-fetch-provider key is ``deerflow.community.direct_fetch.tools:web_fetch_tool``
-(hartmesh-tenancy/DF21). Three things a person depends on and no unit test
+fetch-provider key is ``deerflow.community.direct_fetch.tools:web_fetch_tool``. Three things a person depends on and no unit test
 can show:
 
 * a turn in which the model reaches for a page gets that page back into the

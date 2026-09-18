@@ -15,6 +15,10 @@ exactly as it would interrupt a provider call:
 * ``probe:hang``   -- a hidden reasoning block, then a long pause meant to be
                       cancelled from outside.
 * ``probe:search`` -- one declared retrieval tool call, then the ordinary text
+* ``probe:malformed <url>`` -- the exact tool call that qualification captured:
+  a shell command where the tool name belongs. Then, once the runtime has
+  answered it, an ordinary ``web_fetch`` for that address and the text script,
+  so one turn shows the refusal and the recovery.
 * ``probe:fetch <url>`` -- one ``web_fetch`` call for that address, then the
   ordinary text; every ``bind_tools`` call records the tool names it was
   given in :data:`BOUND_TOOL_NAMES`, so a test can see what the model could
@@ -46,6 +50,12 @@ TEXT_CHUNKS = ("Hello", " from", " the probe.")
 SEARCH_TOOL_NAME = "web_search"
 SEARCH_QUERY = "what is the capital of france"
 FETCH_TOOL_NAME = "web_fetch"
+#: Verbatim from a released-profile qualification capture
+#: ``the model`` sent this 129-byte shell command as the
+#: tool *name*, carrying only a description in its arguments.
+MALFORMED_TOOL_NAME = 'weasyprint --version 2>/dev/null; python3 -c "import weasyprint; print(weasyprint.__version__)" 2>/dev/null || echo "checking..."'
+MALFORMED_TOOL_CALL_ID = "call_95d8f7f3448a413284e177bb"
+MALFORMED_TOOL_ARGS = {"description": "Check weasyprint and create output dir"}
 #: The tool names bound on every model request, in order. Process-global,
 #: like the model instance the Gateway builds; a test clears it.
 BOUND_TOOL_NAMES: list[list[str]] = []
@@ -70,6 +80,8 @@ def _script_for(messages: list[BaseMessage]) -> str:
                 return "hang"
             if "probe:search" in text:
                 return "search"
+            if "probe:malformed" in text:
+                return "malformed"
             if "probe:fetch" in text:
                 return "fetch"
             return "text"
@@ -81,9 +93,9 @@ def _fetch_url(messages: list[BaseMessage]) -> str:
         if isinstance(message, HumanMessage):
             content = message.content
             text = content if isinstance(content, str) else " ".join(str(block.get("text", "")) for block in content if isinstance(block, dict))
-            marker = "probe:fetch"
-            if marker in text:
-                return text.split(marker, 1)[1].strip().split()[0]
+            for marker in ("probe:malformed", "probe:fetch"):
+                if marker in text:
+                    return text.split(marker, 1)[1].strip().split()[0]
     return "https://example.org/"
 
 
@@ -113,6 +125,15 @@ class ProbeStreamingChatModel(BaseChatModel):
         return self
 
     @staticmethod
+    def _tool_results_this_turn(messages: list[BaseMessage]) -> int:
+        """How many tool results this turn has already collected."""
+        latest_user = -1
+        for index, message in enumerate(messages):
+            if isinstance(message, HumanMessage) and not (getattr(message, "additional_kwargs", None) or {}).get("hide_from_ui"):
+                latest_user = index
+        return sum(1 for message in messages[latest_user + 1 :] if getattr(message, "type", "") == "tool")
+
+    @staticmethod
     def _already_called_tool(messages: list[BaseMessage]) -> bool:
         """Whether this turn has already had its one scripted tool call.
 
@@ -135,7 +156,7 @@ class ProbeStreamingChatModel(BaseChatModel):
         # middleware makes with its own trimmed message list. Answering those
         # with a tool call would dispatch a tool nobody asked for, so the
         # retrieval script is scripted only in ``_astream``.
-        if script in ("text", "search", "fetch"):
+        if script in ("text", "search", "fetch", "malformed"):
             content.append({"type": "text", "text": "".join(TEXT_CHUNKS)})
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
@@ -167,6 +188,19 @@ class ProbeStreamingChatModel(BaseChatModel):
                 )
             )
             return
+        if script == "malformed":
+            # Stage one is the captured shape; stage two is the same model
+            # recovering with a call the runtime can honour. Anything after
+            # that falls through to the ordinary text script.
+            stage = self._tool_results_this_turn(messages)
+            if stage < 2:
+                call = (
+                    {"name": MALFORMED_TOOL_NAME, "args": json.dumps(MALFORMED_TOOL_ARGS), "id": MALFORMED_TOOL_CALL_ID, "index": 0, "type": "tool_call_chunk"}
+                    if stage == 0
+                    else {"name": FETCH_TOOL_NAME, "args": json.dumps({"url": _fetch_url(messages)}), "id": "probe-fetch-after-refusal", "index": 0, "type": "tool_call_chunk"}
+                )
+                yield ChatGenerationChunk(message=AIMessageChunk(content=[], tool_call_chunks=[call]))
+                return
         if script == "fetch" and not self._already_called_tool(messages):
             yield ChatGenerationChunk(
                 message=AIMessageChunk(

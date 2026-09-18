@@ -1,8 +1,8 @@
-"""What the sandbox image guarantees is importable (hartmesh-tenancy/DF10).
+"""What the sandbox image guarantees is importable.
 
 Why this exists
 ---------------
-On the tenant class the model spent tool calls asking the sandbox what it had.
+In a released-profile qualification run the model spent tool calls asking the sandbox what it had.
 The successful "Create pdf about muse agent" run opened with::
 
     python3 -c "import reportlab; ..." ; python3 -c "import fpdf; ..." ;

@@ -45,7 +45,7 @@ go through `presented_paths()`. Such receipts add `produced_paths`,
 `matched_paths`, `presented_by`, `verification`, `stage`, and `satisfied` to
 the Slice 1 fact fields.
 
-Since hartmesh-tenancy/DF22 the fence is an invariant, not the common failure
+Since that repair the fence is an invariant, not the common failure
 path: `RuntimeDeliveryMiddleware` hands over inside the graph whatever the
 turn produced and nobody presented, so a turn that made a file the person
 asked for ends `success`. It reaches the worker through

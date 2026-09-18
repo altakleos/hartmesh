@@ -1,8 +1,7 @@
-"""A tool name the runtime cannot honour is answered, never dispatched (hartmesh-tenancy/DF23).
+"""A tool name the runtime cannot honour is answered, never dispatched.
 
-The tenant-class shape, replayed byte for byte from
-``artifacts/tenant-class-22-20260918/retrieval-060350-muse-agent-pdf.sse``:
-``inclusionai/ling-3.0-flash-vl`` put a 129-byte shell command where a tool name
+The shape a released-profile qualification captured, replayed byte for byte:
+the model put a 129-byte shell command where a tool name
 belongs, with only a ``description`` in its arguments. The receipt layer refused
 the name -- correctly -- and that refusal became
 ``Runtime operation failed (reference: ...)`` for a person who had asked for a

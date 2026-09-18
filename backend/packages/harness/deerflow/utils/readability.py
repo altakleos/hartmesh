@@ -7,8 +7,7 @@ Gateway runs non-root on an immutable image, so that write cannot succeed. The
 tenant class measured the result: all 23 successful direct fetches spent two
 subprocesses and logged an EACCES traceback for
 ``/app/backend/.venv/.../readabilipy/javascript/node_modules`` before falling
-back to the pure-Python extractor that then did the work
-(hartmesh-tenancy/DF24).
+back to the pure-Python extractor that then did the work.
 
 The fallback was doing the extraction, so the JS path was never the behaviour
 -- only its cost. This module now asks for the pure-Python path deliberately:

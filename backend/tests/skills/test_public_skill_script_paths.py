@@ -6,7 +6,7 @@ invocation mounts exactly one immutable snapshot at
 written against ``{skills_root}/public/<skill>/scripts/x.py`` names a path that
 does not exist for the invocation reading it.
 
-That is not a hypothetical. In the hartmesh-tenancy ``.16`` tenant-class run the
+That is not a hypothetical. In a released-profile qualification run the
 model read ``business-report``'s ``SKILL.md`` at its correct snapshot path, ran
 the very first command the file showed it, was refused, and — with every listing
 root above the snapshot refused by the same fence — fell back to

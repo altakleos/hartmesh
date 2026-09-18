@@ -25,7 +25,7 @@ from typing import Any, Final
 PRESENTED_FILES_KEY: Final = "presented_files"
 
 #: Stamped beside the tag when the runtime rather than the model chose to
-#: hand the files over (hartmesh-tenancy/DF22). The tag means the same thing
+#: hand the files over. The tag means the same thing
 #: either way -- these files were delivered -- so only a reader that wants to
 #: tell a curated turn from a completed one looks at this.
 PRESENTED_BY_KEY: Final = "presented_by"

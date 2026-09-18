@@ -1,7 +1,7 @@
-"""The prompt's promise about the sandbox is the image's own promise (hartmesh-tenancy/DF10).
+"""The prompt's promise about the sandbox is the image's own promise.
 
 The model was told nothing about what the sandbox has, so it asked -- with tool
-calls, every turn. The successful tenant-class Muse run opened by importing
+calls, every turn. That qualification's successful repetition opened by importing
 reportlab, fpdf and weasyprint to see which existed; the failed run's first act
 was the same question, and that is the call whose name arrived as a shell
 command and ended the run.

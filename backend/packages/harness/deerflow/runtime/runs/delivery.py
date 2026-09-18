@@ -6,7 +6,7 @@ frame; this module is what everyone else reads, and it is the same verdict from
 the same bytes — the terminal ``run.delivery`` receipt, which carries the full
 produced/presented sets the bounded frame truncates.
 
-Written for hartmesh-tenancy/DF14. DF13 gave the browser the live notice and
+Written for the durable half of that work. An earlier release gave the browser the live notice and
 stopped there: the frame is page-local state, so a reload left the run record
 correctly saying ``error`` with ``stop_reason=artifact_delivery_incomplete``
 while the correction under the turn was gone and the files it offered went with

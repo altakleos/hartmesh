@@ -4,7 +4,7 @@ Why
 ---
 On the tenant class a fetch provider answered every address with the same
 deterministic refusal, and the model called it thirteen more times with
-thirteen different addresses (hartmesh-tenancy/DF21). Nothing in the loop
+thirteen different addresses. Nothing in the loop
 could see that: the repeated-tool policy keys on the arguments, and the
 result the model read was a sentence it could reason past. The fact that
 mattered -- *this path is dead for every address this turn* -- existed in

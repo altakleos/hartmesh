@@ -272,7 +272,7 @@ def _accepted_skill_access_denied(path: str, snapshot_id: str | None) -> Accepte
     A refusal that names only the rule leaves the model to find the tree
     itself, and the skills tree is the one place it cannot look: every listing
     root above the snapshot is refused by this same fence. In the
-    hartmesh-tenancy ``.16`` tenant-class run that dead end cost 341 s of
+    released-profile qualification run that dead end cost 341 s of
     ``find /`` inside a 512 MiB sandbox — 65% of the turn — for a script that
     was mounted and readable the whole time. So the refusal carries the
     snapshot root, and the re-rooted path when there is one.

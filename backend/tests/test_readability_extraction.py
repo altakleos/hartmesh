@@ -1,6 +1,6 @@
-"""Extraction runs in-process, and never reaches for a package manager (hartmesh-tenancy/DF24).
+"""Extraction runs in-process, and never reaches for a package manager.
 
-The tenant class measured the defect: all 23 successful direct fetches called
+A released-profile qualification measured the defect: all 23 successful direct fetches called
 ``readabilipy``'s ``have_node()``, which shells out to ``node -v`` and then, with
 no ``node_modules`` beside the installed package, calls ``run_npm_install()``.
 The released Gateway is non-root on an immutable image, so each fetch logged
@@ -112,7 +112,7 @@ def test_a_js_heavy_page_yields_what_is_actually_in_the_html(no_subprocess: list
     Nothing here executes JavaScript -- that is what the browser tool is for --
     and the simplifier also drops ``<noscript>``, so a page whose body arrives
     by hydration yields little beyond its title. Stated here rather than
-    discovered on a tenant's turn. It is not a regression: the tenant's fetches
+    discovered on a tenant's turn. It is not a regression: the deployment's fetches
     were already taking this path, since the JS extractor never ran there
     either.
     """

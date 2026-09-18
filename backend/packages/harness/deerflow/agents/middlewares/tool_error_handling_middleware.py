@@ -201,7 +201,7 @@ def _build_runtime_middlewares(
         # Outermost of all, because the receipt below writes durable start
         # evidence before any inner code runs: a name that could never be a
         # receipt identity has to be refused before that, while the model can
-        # still correct it (hartmesh-tenancy/DF23).
+        # still correct it.
         UnboundToolCallMiddleware(),
         # One outer observation sees the final, sanitized/budgeted model-visible
         # result on return while writing durable start evidence before any inner
@@ -232,7 +232,7 @@ def _build_runtime_middlewares(
     )
 
     # A turn that produced files for the user hands them over even when the
-    # model presented none (hartmesh-tenancy/DF22). Always on: the set is the
+    # model presented none. Always on: the set is the
     # one the delivery fence already asserts must be delivered.
     from deerflow.agents.middlewares.runtime_delivery_middleware import RuntimeDeliveryMiddleware
 

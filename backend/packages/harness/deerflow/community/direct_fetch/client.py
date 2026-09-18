@@ -4,7 +4,7 @@ Why
 ---
 The tenant profile's keyless ``web_fetch`` sent every page through a hosted
 reader that answered a tenant's server address with a deterministic 401 for
-every URL (hartmesh-tenancy/DF21). A basic capability rested on a third
+every URL. A basic capability rested on a third
 party's anonymous tier, and the profile's comment asserting "keyless fetch"
 was a claim nothing verified. This client makes it true by construction: the
 page is fetched by the Gateway itself, under the address, redirect, size,
