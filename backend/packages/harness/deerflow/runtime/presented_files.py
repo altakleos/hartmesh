@@ -24,6 +24,20 @@ from typing import Any, Final
 #: result presented.
 PRESENTED_FILES_KEY: Final = "presented_files"
 
+#: Stamped beside the tag when the runtime rather than the model chose to
+#: hand the files over (hartmesh-tenancy/DF22). The tag means the same thing
+#: either way -- these files were delivered -- so only a reader that wants to
+#: tell a curated turn from a completed one looks at this.
+PRESENTED_BY_KEY: Final = "presented_by"
+
+#: ``runtime.context`` key through which ``RuntimeDeliveryMiddleware`` tells
+#: the worker what it handed over inside the graph, so the delivery receipt
+#: and the fence count it. The journal cannot: it records presentations it
+#: observes at tool end, and this one is a state update at the end of the
+#: agent. Lives here, with the tag, because both the middleware and the
+#: worker import it and this module is a leaf.
+RUNTIME_PRESENTED_FILES_CONTEXT_KEY: Final = "runtime_presented_files"
+
 
 def presented_files_of(message: Any) -> list[str]:
     """The paths a tool message presented, in order, without repeats; empty when untagged.

@@ -8,7 +8,19 @@ logger = logging.getLogger(__name__)
 _api_key_warned = False
 
 
+#: Statuses r.jina.ai answers for the *caller*, not for the page: no key,
+#: a refused key, a refused address, or a spent quota. Every address gets the
+#: same answer, so the tool stamps them provider scope and the run withdraws
+#: the tool (hartmesh-tenancy/DF21: thirteen addresses, thirteen 401s).
+PROVIDER_REFUSAL_STATUSES = frozenset({401, 402, 403, 429})
+
+
 class JinaClient:
+    #: The HTTP status of the last ``crawl``, or ``None`` before one and after
+    #: a transport failure. Read by the tool to type the refusal; the string
+    #: ``crawl`` returns stays what it was.
+    last_status: int | None = None
+
     async def crawl(self, url: str, return_format: str = "html", timeout: int = 10, proxy: str | None = None, trust_env: bool = True) -> str:
         global _api_key_warned
         headers = {
@@ -26,8 +38,10 @@ class JinaClient:
             client_kwargs: dict[str, object] = {"trust_env": trust_env}
             if proxy:
                 client_kwargs["proxy"] = proxy
+            self.last_status = None
             async with httpx.AsyncClient(**client_kwargs) as client:
                 response = await client.post("https://r.jina.ai/", headers=headers, json=data, timeout=timeout)
+            self.last_status = response.status_code
 
             if response.status_code != 200:
                 error_message = f"Jina API returned status {response.status_code}: {response.text}"

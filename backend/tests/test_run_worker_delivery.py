@@ -85,6 +85,29 @@ def test_delivery_verification_treats_presented_directory_as_covering_produced_f
     assert delivery["satisfied"] is True
 
 
+def test_a_runtime_only_presentation_is_readable_by_every_receipt_reader():
+    """The archive route and the evidence bundle must see the same handover.
+
+    Both go through ``delivery.presented_paths()``, which reads the receipt's
+    ``presented_files``. The journal fills that field from tool ends, and a
+    runtime handover is a state update at the end of the agent, not a tool
+    result -- so if the merged set were written to any other key, the DF22
+    shape this feature exists to fix would succeed and then answer 409 to the
+    download of the very file it handed over.
+    """
+    from deerflow.runtime.runs.delivery import presented_paths as read_presented
+
+    content = _delivery_content_with_outputs(
+        {"presented": 0, "paths": [], "by_tool": {}, "presented_files": []},
+        ["/mnt/user-data/outputs/Muse_Agent_Report.pdf"],
+        ["/mnt/user-data/outputs/Muse_Agent_Report.pdf"],
+    )
+
+    assert content["satisfied"] is True
+    assert read_presented(content) == ["/mnt/user-data/outputs/Muse_Agent_Report.pdf"]
+    assert content["presented_by"] == {"model": [], "runtime": ["/mnt/user-data/outputs/Muse_Agent_Report.pdf"]}
+
+
 @pytest.mark.anyio
 async def test_delivery_event_records_present_files_paths_on_success():
     run_manager = RunManager()
@@ -202,8 +225,10 @@ async def test_changed_outputs_succeed_when_a_produced_output_is_presented(monke
             "requirement": "presentation_matches_produced_output",
         },
         "produced_paths": ["/mnt/user-data/outputs/report.md"],
-        "presented_paths": ["/mnt/user-data/outputs/report.md"],
         "matched_paths": ["/mnt/user-data/outputs/report.md"],
+        # Who handed each set over (hartmesh-tenancy/DF22): the model curated
+        # here, so the runtime added nothing.
+        "presented_by": {"model": ["/mnt/user-data/outputs/report.md"], "runtime": []},
         "stage": "presented",
         "satisfied": True,
     }
@@ -255,7 +280,7 @@ async def test_changed_outputs_succeed_when_a_bash_run_presented_what_it_declare
     content = delivery[0]["content"]
     assert content["by_tool"] == {"bash": ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]}
     assert content["presented_files"] == ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]
-    assert content["presented_paths"] == ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]
+    assert content["presented_files"] == ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]
     assert content["matched_paths"] == ["/mnt/user-data/outputs/r/r.report.json", "/mnt/user-data/outputs/r/r.pdf"]
     assert content["stage"] == "presented" and content["satisfied"] is True
     assert record.status == RunStatus.success
@@ -298,7 +323,7 @@ async def test_an_artifact_that_reached_the_panel_as_a_side_effect_does_not_sati
     delivery = await _delivery_events(store, "thread-1", record.run_id)
     content = delivery[0]["content"]
     assert content["paths"] == ["/mnt/user-data/outputs/shot.png"]
-    assert content["presented_files"] == [] and content["presented_paths"] == []
+    assert content["presented_files"] == []
     assert content["satisfied"] is False and record.status == RunStatus.error
 
 
@@ -337,8 +362,10 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
             "requirement": "presentation_matches_produced_output",
         },
         "produced_paths": ["/mnt/user-data/outputs/report.md"],
-        "presented_paths": [],
         "matched_paths": [],
+        # Nobody handed it over: not the model, and not the runtime, whose
+        # middleware is absent from this worker-level harness.
+        "presented_by": {"model": [], "runtime": []},
         "stage": "not_started",
         "satisfied": False,
     }
@@ -464,7 +491,7 @@ async def test_changed_outputs_succeed_when_one_of_multiple_outputs_is_presented
 
     delivery = (await _delivery_events(store, "thread-1", record.run_id))[0]["content"]
     assert delivery["stage"] == "presented"
-    assert delivery["presented_paths"] == ["/mnt/user-data/outputs/report.md"]
+    assert delivery["presented_files"] == ["/mnt/user-data/outputs/report.md"]
     assert delivery["matched_paths"] == ["/mnt/user-data/outputs/report.md"]
     assert delivery["satisfied"] is True
     assert record.status == RunStatus.success
@@ -510,7 +537,7 @@ async def test_changed_outputs_fail_when_present_files_only_presents_an_unrelate
 
     delivery = (await _delivery_events(store, "thread-1", record.run_id))[0]["content"]
     assert delivery["stage"] == "mismatched"
-    assert delivery["presented_paths"] == ["/mnt/user-data/outputs/old-report.md"]
+    assert delivery["presented_files"] == ["/mnt/user-data/outputs/old-report.md"]
     assert delivery["matched_paths"] == []
     assert delivery["satisfied"] is False
     assert record.status == RunStatus.error

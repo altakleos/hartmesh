@@ -1640,3 +1640,98 @@ describe("files a tool result presented on the run's behalf", () => {
     expect(hasPresentFiles(wrongShape)).toBe(false);
   });
 });
+
+describe("an answer the runtime tagged because the turn presented nothing", () => {
+  // hartmesh-tenancy/DF22: a turn wrote a PDF, named it under no `present`
+  // argument and never called `present_files`, so the runtime handed it over
+  // and tagged the turn's final answer. The tag is the presentation whichever
+  // message carries it, so the client must draw those files — and must still
+  // show the answer, which is the message the tag is on.
+  const messages = [
+    { id: "human-1", type: "human", content: "Create pdf about muse agent" },
+    {
+      id: "ai-1",
+      type: "ai",
+      content: "Here is the report on Meta's Muse agent.",
+      additional_kwargs: {
+        presented_files: ["/mnt/user-data/outputs/Muse_Agent_Report.pdf"],
+        presented_by: "runtime",
+      },
+    },
+  ] as Message[];
+
+  test("is read as a presentation", () => {
+    expect(hasPresentFiles(messages[1]!)).toBe(true);
+    expect(extractPresentFilesFromMessage(messages[1]!)).toEqual([
+      "/mnt/user-data/outputs/Muse_Agent_Report.pdf",
+    ]);
+  });
+
+  test("draws one group carrying both the answer and the file", () => {
+    const groups = getMessageGroups(messages);
+    const presentGroups = groups.filter(
+      (group) => group.type === "assistant:present-files",
+    );
+    expect(presentGroups).toHaveLength(1);
+    const group = presentGroups[0]!;
+    // The renderer draws the group's first message as prose above the chips,
+    // so the answer is not lost by being the message that carries the tag.
+    expect(group.messages[0]!.id).toBe("ai-1");
+    expect(hasContent(group.messages[0]!)).toBe(true);
+    expect(extractContentFromMessage(group.messages[0]!)).toContain(
+      "Here is the report",
+    );
+  });
+
+  test("an untagged answer is still an ordinary answer", () => {
+    const untagged = [
+      { id: "human-1", type: "human", content: "hello" },
+      { id: "ai-1", type: "ai", content: "Hi there." },
+    ] as Message[];
+    expect(hasPresentFiles(untagged[1]!)).toBe(false);
+    expect(
+      getMessageGroups(untagged).filter(
+        (group) => group.type === "assistant:present-files",
+      ),
+    ).toHaveLength(0);
+  });
+
+  test("a malformed tag presents nothing", () => {
+    const malformed = [
+      { id: "human-1", type: "human", content: "hello" },
+      {
+        id: "ai-1",
+        type: "ai",
+        content: "Hi.",
+        additional_kwargs: { presented_files: "/mnt/user-data/outputs/x.pdf" },
+      },
+    ] as Message[];
+    expect(hasPresentFiles(malformed[1]!)).toBe(false);
+    expect(extractPresentFilesFromMessage(malformed[1]!)).toEqual([]);
+  });
+
+  test("a call and a tag on one message list each file once", () => {
+    const both = {
+      id: "ai-1",
+      type: "ai",
+      content: "",
+      tool_calls: [
+        {
+          id: "call-1",
+          name: "present_files",
+          args: { filepaths: ["/mnt/user-data/outputs/a.pdf"] },
+        },
+      ],
+      additional_kwargs: {
+        presented_files: [
+          "/mnt/user-data/outputs/a.pdf",
+          "/mnt/user-data/outputs/b.pdf",
+        ],
+      },
+    } as Message;
+    expect(extractPresentFilesFromMessage(both)).toEqual([
+      "/mnt/user-data/outputs/a.pdf",
+      "/mnt/user-data/outputs/b.pdf",
+    ]);
+  });
+});

@@ -220,11 +220,13 @@ services:
     # 1536 MiB, less the 192 MiB the move to 1 GiB sandboxes put over the
     # 5.0 GiB line; the further 192 MiB it paid on 2026-09-15 for a third and
     # fourth relay came back on 2026-09-17 when the profile returned to two
-    # slots, and went to the search service the same day. The Gateway peaked
-    # at 586 MiB under two concurrent turns, so this is 2.0 times that peak
+    # slots, and went to the search service the same day, which then took a
+    # further 64 MiB after the tenant class found it at its ceiling. The
+    # Gateway peaked at 586 MiB under two concurrent turns and at 572 MiB on
+    # the tenant class, so this is still 1.86 times the larger of the two
     # (README: "Memory budget").
-    mem_limit: 1152m
-    memswap_limit: 1152m
+    mem_limit: 1088m
+    memswap_limit: 1088m
     # Availability bounds (README: "Process and CPU limits"): the Gateway
     # spawns MCP servers (npx, uvx) in its own container, and the sandboxes
     # are the only other bounded processes on the guest.
@@ -300,10 +302,17 @@ services:
       timeout: 3s
       retries: 6
       start_period: 20s
-    # 105 MiB peak under a six-query burst on the curated engine set; the
-    # Gateway paid these 192 MiB (README: "Memory budget").
-    mem_limit: 192m
-    memswap_limit: 192m
+    # 256 MiB, of which the Gateway paid 192 and then a further 64 (README:
+    # "Memory budget"). The 192 was sized against one near-idle sample and the
+    # tenant class then found the cgroup at exactly that ceiling, reclaiming
+    # 170 times with no OOM kill and search still answering. Replaying those
+    # turns' own 22 queries through this container, at the Gateway's
+    # concurrency and this CPU count, peaks at 145 MiB and never reaches the
+    # ceiling, so the tenant's pressure is real but unreproduced: the limit is
+    # set against what the tenant was observed to need, not against that
+    # replay (scripts/measure-searxng.sh).
+    mem_limit: 256m
+    memswap_limit: 256m
     pids_limit: 128
     networks: [app]
     restart: unless-stopped

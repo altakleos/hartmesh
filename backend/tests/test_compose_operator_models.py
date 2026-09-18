@@ -175,7 +175,7 @@ def test_the_operator_list_is_the_whole_model_section_even_with_provider_keys_pr
     # ... while the separate tool-provider behaviour is untouched.
     tools = {tool["name"]: tool for tool in document["tools"]}
     assert tools["web_search"]["use"] == "deerflow.community.tavily.tools:web_search_tool"
-    assert tools["web_fetch"]["use"] == "deerflow.community.jina_ai.tools:web_fetch_tool"
+    assert tools["web_fetch"]["use"] == "deerflow.community.direct_fetch.tools:web_fetch_tool"
     # ... and so is every non-model setting of the profile.
     baseline = _render(render_config, catalog, _base_environ(OPENAI_API_KEY="secret", ANTHROPIC_API_KEY="secret", TAVILY_API_KEY="secret"))
     for section in ("auth", "database", "sandbox", "skills", "tools", "tool_plane", "deployment", "checkpointer"):

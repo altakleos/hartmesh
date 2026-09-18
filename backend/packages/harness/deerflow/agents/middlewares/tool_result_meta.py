@@ -38,6 +38,16 @@ class ToolResultMeta:
     recoverable_by_model: bool
     recommended_next_action: Literal["continue", "rewrite_query", "try_alternative", "summarize", "stop"]
     source: Literal["exception", "tool_return", "content_analysis", "progress_middleware"]
+    #: Who refused. ``origin`` is the destination the call named (one page said
+    #: no: a paywall, a missing page, a slow host) and says nothing about the
+    #: next address. ``provider`` is the path itself (the fetch service refused
+    #: this deployment, a bad key, a proxy demanding credentials) and holds for
+    #: every address this turn; the model cannot route around it by choosing a
+    #: different argument. A keyword rule cannot tell the two apart -- "401"
+    #: reads the same from a paywalled page and from a refusing provider -- so
+    #: only a tool that saw the transport can stamp ``provider``, and the
+    #: default is the claim that needs no such knowledge.
+    error_scope: Literal["origin", "provider"] = "origin"
 
 
 _ERROR_RULES: list[tuple[list[str], dict[str, object]]] = [
@@ -219,13 +229,14 @@ def _as_status_line(title: str) -> str | None:
     return " ".join(words) or None
 
 
-def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue") -> dict[str, object]:
+def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue", error_scope: str = "origin") -> dict[str, object]:
     return {
         "status": status,
         "error_type": error_type,
         "recoverable_by_model": recoverable_by_model,
         "recommended_next_action": recommended_next_action,
         "source": source,
+        "error_scope": error_scope,
     }
 
 

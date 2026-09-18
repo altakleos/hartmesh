@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
 import socket
 from collections.abc import Callable
@@ -21,6 +22,30 @@ def resolve_host_addresses(hostname: str) -> list[ipaddress._BaseAddress]:
         sockaddr = info[4]
         try:
             addresses.append(ipaddress.ip_address(sockaddr[0]))
+        except ValueError:
+            continue
+    return addresses
+
+
+async def aresolve_host_addresses(hostname: str) -> list[ipaddress._BaseAddress]:
+    """The same screening resolution, without stalling the event loop.
+
+    ``socket.getaddrinfo`` is a blocking syscall whose own timeout is the
+    platform resolver's, not ours. Called straight from async fetch code it
+    holds the Gateway's single event loop -- every other tenant's stream
+    included -- for the length of one slow lookup, and ``asyncio.timeout``
+    cannot preempt it because nothing awaits. The loop's own ``getaddrinfo``
+    runs it in the default executor and yields, so the surrounding budget
+    applies and other work continues.
+    """
+    try:
+        infos = await asyncio.get_running_loop().getaddrinfo(hostname, None)
+    except (socket.gaierror, UnicodeError):
+        return []
+    addresses: list[ipaddress._BaseAddress] = []
+    for info in infos:
+        try:
+            addresses.append(ipaddress.ip_address(info[4][0]))
         except ValueError:
             continue
     return addresses

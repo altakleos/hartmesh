@@ -58,7 +58,7 @@ OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
 PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE", "SANDBOX_READY_TIMEOUT"}
-MEMORY_MIB = {"gateway": 1152, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256, "searxng": 192}
+MEMORY_MIB = {"gateway": 1088, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256, "searxng": 256}
 # The sandbox image's own service switches (its entrypoint compares each to the
 # string "true"): the profile ships every sandbox with the browser, VNC,
 # Jupyter, code-server and the Node REPL off (README: "Slim services profile").
@@ -225,9 +225,11 @@ def test_memory_limits_sum_to_2880_mib_with_equal_swap(compose: dict) -> None:
         assert _mib(service["mem_limit"]) == expected, name
         assert service["memswap_limit"] == service["mem_limit"], name
         total += expected
-    assert total == 2880, "3072 less the 192 MiB the Gateway gave up for the 1 GiB sandboxes; the 192 MiB it took back with the two-slot profile now pays for the search service, so the line has not moved (README: Memory budget)"
-    assert MEMORY_MIB["searxng"] == 192, "105 MiB peak under a six-query burst on the curated engines (README: Web search)"
-    assert MEMORY_MIB["gateway"] == 1152, "what it ran at from 2026-09-15 to 2026-09-17, twice its measured 586 MiB peak"
+    assert total == 2880, (
+        "3072 less the 192 MiB the Gateway gave up for the 1 GiB sandboxes; the 192 MiB it took back with the two-slot profile, and a further 64 MiB, now pay for the search service, so the line has not moved (README: Memory budget)"
+    )
+    assert MEMORY_MIB["searxng"] == 256, "clears by 64 MiB the ceiling the tenant class found it sitting on, 170 reclaims and no OOM kill (README: Web search)"
+    assert MEMORY_MIB["gateway"] == 1088, "1.86 times its measured 586 MiB two-turn peak; the donor each time, because its limit is a multiple of a peak rather than a figure set against a failure"
 
 
 PIDS_LIMIT = {"gateway": 2048, "frontend": 512, "nginx": 256, "postgres": 512, "redis": 128, "searxng": 128}
@@ -466,6 +468,77 @@ def test_measurement_script_runs_the_profile_flags_and_the_slim_switches(compose
     rejected = subprocess.run(["bash", str(MEASURE_SCRIPT)], cwd=PROFILE, env={**env, "PROFILES": "Slim"}, capture_output=True, text=True, timeout=60)
     assert rejected.returncode == 2 and "PROFILES accepts full and slim" in rejected.stderr, "a mislabelled row is worse than a refusal"
     assert (PROFILE / "README.md").read_text(encoding="utf-8").count("scripts/measure-sandbox-boot.sh") >= 2, "the README names the script where the figures are recorded"
+
+
+SEARXNG_MEASURE_SCRIPT = PROFILE / "scripts" / "measure-searxng.sh"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("column") is None, reason="the measurement script is bash and prints through column")
+def test_the_search_measurement_script_runs_the_profile_shape_and_the_gateway_workload(compose: dict, tmp_path: Path) -> None:
+    """A figure is only this profile's if it was measured under this profile.
+
+    The released 192 MiB was taken from what the Gateway could spare and
+    checked against one near-idle sample; the tenant class then found the
+    cgroup at its ceiling 170 times. So the script has to reproduce the
+    container the profile actually runs -- its image pin, limits, pids bound,
+    read-only root and the three tmpfs mounts -- and the workload the Gateway
+    actually sends, at its own ``CONCURRENT_SEARCHES``. Stubs for ``docker``
+    and ``curl`` record the invocation without a daemon or a network; the
+    cgroup files are unreadable for a stub container, which is the zeroed
+    row this asserts.
+    """
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    log = tmp_path / "docker.log"
+    queries = tmp_path / "queries.log"
+    (stub / "docker").write_text(
+        f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{log}"\ncase "$1" in port) echo "127.0.0.1:18080";; inspect) echo stubbed-container-id;; esac\nexit 0\n',
+        encoding="utf-8",
+    )
+    (stub / "curl").write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{queries}"\ncase "$*" in *healthz*) exit 0;; esac\necho 200\nexit 0\n', encoding="utf-8")
+    for name in ("docker", "curl"):
+        (stub / name).chmod(0o755)
+    out = tmp_path / "rows.tsv"
+    cgroup = tmp_path / "cgroup"
+    cgroup.mkdir()
+    (cgroup / "memory.peak").write_text("201330688\n", encoding="utf-8")
+    (cgroup / "memory.current").write_text("115007488\n", encoding="utf-8")
+    (cgroup / "memory.events").write_text("low 0\nhigh 0\nmax 170\noom 0\noom_kill 0\n", encoding="utf-8")
+    env = {"PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}", "HOME": str(tmp_path), "TMPDIR": str(tmp_path), "SETTLE": "0", "OUT": str(out), "CGROUP_DIR": str(cgroup)}
+    result = subprocess.run(["bash", str(SEARXNG_MEASURE_SCRIPT)], cwd=PROFILE, env=env, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+
+    searxng = compose["services"]["searxng"]
+    [run] = [line for line in log.read_text(encoding="utf-8").splitlines() if line.startswith("run ")]
+    assert f" {searxng['image']} " in run, "the image is the compose pin, not a floating tag"
+    assert f"--memory {searxng['mem_limit']} --memory-swap {searxng['mem_limit']}" in run, "measured at the limit the profile ships"
+    assert f"--pids-limit {searxng['pids_limit']}" in run
+    for flag in ("--user 1000:1000", "--read-only", "--tmpfs /etc/searxng", "--tmpfs /tmp", "--tmpfs /var/cache/searxng"):
+        assert flag in run, flag
+
+    sent = [line for line in queries.read_text(encoding="utf-8").splitlines() if "/search" in line]
+    assert len(sent) == 22, "the exact queries two tenant-class turns produced, once per round"
+    assert all("format=json" in line and "pageno=1" in line for line in sent)
+    assert any("Great Lakes overview geography facts" in line for line in sent)
+
+    rows = out.read_text(encoding="utf-8").splitlines()
+    assert rows[0].split("\t") == ["limit", "pids", "concurrent", "queries", "answered", "seconds", "memory_peak_bytes", "memory_peak_mib", "memory_current_mib", "memory_max_events", "oom_kills"]
+    row = rows[1].split("\t")
+    assert row[0] == searxng["mem_limit"] and row[2] == "4", "the Gateway's own CONCURRENT_SEARCHES is the default concurrency"
+    assert row[3] == "22" and row[4] == "22"
+    assert row[6] == "201330688" and row[7] == "192.0", "the cgroup's own bytes, and the same figure in MiB"
+    # The stub's counter is the same before and after, so the reported count
+    # is zero: the row carries what this workload did, not what the container
+    # had already done by the time it was ready.
+    assert row[9] == "0"
+
+    # Without the counters there is no measurement, and a row of zeros would
+    # read like one. Before this refusal existed, `set -e` ended the run with
+    # no reason at all on a host whose cgroup layout is neither of the two
+    # the script knows.
+    refused = subprocess.run(["bash", str(SEARXNG_MEASURE_SCRIPT)], cwd=PROFILE, env={**env, "CGROUP_DIR": str(tmp_path / "absent")}, capture_output=True, text=True, timeout=120)
+    assert refused.returncode == 3 and "cannot read this container's cgroup counters" in refused.stderr
+    assert "scripts/measure-searxng.sh" in (PROFILE / "README.md").read_text(encoding="utf-8"), "the README names the script the figures came from"
 
 
 def test_readme_tells_the_operator_to_remove_orphaned_sandboxes_before_an_upgrade() -> None:

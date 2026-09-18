@@ -226,13 +226,18 @@
       ]
     },
     {
-      "event": "custom",
+      "event": "values",
       "keys": [
-        "message",
-        "run_id",
-        "type",
-        "undelivered_count",
-        "undelivered_paths"
+        "artifacts",
+        "background_tasks",
+        "delegations",
+        "messages",
+        "sandbox",
+        "skill_context",
+        "thread_data",
+        "title",
+        "uploaded_files",
+        "viewed_images"
       ]
     },
     {

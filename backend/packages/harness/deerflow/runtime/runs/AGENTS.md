@@ -37,13 +37,26 @@ deletes stays in `artifacts` and 404s, as it always did after
 browser screenshot included, and is not a presentation; `by_tool` is
 attribution only. No list of presenting tool names exists:
 `delivery.py`'s `presented_paths()` reads `presented_files` (falling back to
-`by_tool.present_files` only for receipts written before the tag existed). Presenting
-only an unrelated pre-existing path does not satisfy delivery, so a
-presentation that named nothing this run produced is `mismatched`, not
-satisfied. Readers of the receipt (the fence, the archive route, the evidence
-bundle, IM channels) go through `presented_paths()`. Such receipts add `produced_paths`,
-`presented_paths`, `matched_paths`, `verification`, `stage`, and `satisfied`
-to the Slice 1 fact fields. Missing a *matching* presentation is a run
+`by_tool.present_files` only for receipts written before the tag existed).
+Presenting only an unrelated pre-existing path does not satisfy delivery, so a
+presentation that named nothing this run produced is `mismatched`. Readers of
+the receipt (the fence, the archive route, the evidence bundle, IM channels)
+go through `presented_paths()`. Such receipts add `produced_paths`,
+`matched_paths`, `presented_by`, `verification`, `stage`, and `satisfied` to
+the Slice 1 fact fields.
+
+Since hartmesh-tenancy/DF22 the fence is an invariant, not the common failure
+path: `RuntimeDeliveryMiddleware` hands over inside the graph whatever the
+turn produced and nobody presented, so a turn that made a file the person
+asked for ends `success`. It reaches the worker through
+`runtime.context[RUNTIME_PRESENTED_FILES_CONTEXT_KEY]`, not the journal (which
+records only tool-end presentations).
+`_delivery_content_with_outputs` merges it into `presented_files` itself, the
+field `presented_paths()` reads, splitting attribution under `presented_by`: a
+second key would leave the archive route and evidence bundle on the narrower,
+so a run the runtime completed would 409 on the download of the file it handed
+over. The fence still fires when the runtime could not: a failed outputs scan, or a turn that
+interrupts before `after_agent` runs. Missing a *matching* presentation is a run
 error, as is a successful one whose receipt cannot be durably verified. Neither
 publishes an `error` stream frame: the graph completed and the answer is
 checkpointed, so the stream reaches its end marker normally and the verdict

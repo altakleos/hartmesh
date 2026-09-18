@@ -396,3 +396,48 @@ def test_coerce_timeout(value, default, expected):
 def test_coerce_proxy(value, expected):
     """_coerce_proxy trims strings and treats empty/non-string values as None."""
     assert _coerce_proxy(value) == expected
+
+
+# ── A provider refusal is typed as the provider's (hartmesh-tenancy/DF21) ────
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("status", "error_type"), [(401, "auth"), (402, "config"), (403, "auth"), (429, "rate_limited")])
+async def test_a_status_the_provider_answers_for_the_caller_is_a_provider_scope_refusal(monkeypatch, status, error_type):
+    from langgraph.types import Command
+
+    from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+
+    async def mock_post(self, url, **kwargs):
+        return httpx.Response(status, text='{"name":"AuthenticationRequiredError"}', request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    mock_config = MagicMock()
+    mock_config.get_tool_config.return_value = None
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: mock_config)
+    result = await web_fetch_tool.ainvoke({"args": {"url": "https://example.com"}, "name": "web_fetch", "type": "tool_call", "id": "call-1"})
+    assert isinstance(result, Command)
+    [message] = result.update["messages"]
+    assert message.tool_call_id == "call-1" and message.status == "error"
+    assert "unavailable for the rest of this turn" in message.content and "Do not call it again" in message.content
+    meta = message.additional_kwargs[TOOL_META_KEY]
+    assert (meta["error_scope"], meta["error_type"], meta["recoverable_by_model"], meta["recommended_next_action"]) == ("provider", error_type, False, "stop")
+
+
+@pytest.mark.anyio
+async def test_a_page_status_stays_the_plain_error_string(monkeypatch):
+    from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+
+    # 404 is the page's answer, relayed by the provider; nothing about the
+    # next address, so no provider stamp and the string contract as before.
+    async def mock_post(self, url, **kwargs):
+        return httpx.Response(404, text="Not Found", request=httpx.Request("POST", url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
+    mock_config = MagicMock()
+    mock_config.get_tool_config.return_value = None
+    monkeypatch.setattr("deerflow.community.jina_ai.tools.get_app_config", lambda: mock_config)
+    result = await web_fetch_tool.ainvoke({"args": {"url": "https://example.com"}, "name": "web_fetch", "type": "tool_call", "id": "call-1"})
+    # The tool returned the string; the tool runtime wraps it in an unstamped ToolMessage.
+    assert result.content.startswith("Error:") and "404" in result.content
+    assert TOOL_META_KEY not in result.additional_kwargs

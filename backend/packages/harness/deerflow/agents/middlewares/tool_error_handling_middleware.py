@@ -225,6 +225,13 @@ def _build_runtime_middlewares(
         )
     )
 
+    # A turn that produced files for the user hands them over even when the
+    # model presented none (hartmesh-tenancy/DF22). Always on: the set is the
+    # one the delivery fence already asserts must be delivered.
+    from deerflow.agents.middlewares.runtime_delivery_middleware import RuntimeDeliveryMiddleware
+
+    thread_hooks.append(RuntimeDeliveryMiddleware())
+
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []
     if include_dangling_tool_call_patch:
@@ -314,6 +321,14 @@ def _build_runtime_middlewares(
         from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
 
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
+
+    # ProviderRefusalMiddleware reads deerflow_tool_meta.error_scope, which a
+    # fetch tool stamps on its own result and ToolErrorHandlingMiddleware
+    # leaves in place; it must enclose that step to see it. Always on: it acts
+    # only on a typed provider fact, never on the words of a result.
+    from deerflow.agents.middlewares.provider_refusal_middleware import ProviderRefusalMiddleware
+
+    tail.append(ProviderRefusalMiddleware())
 
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
 

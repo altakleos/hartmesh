@@ -76,6 +76,7 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     reported an empty sequence while iteration yielded the real constraints.
     Deferring the call instead of faking the value keeps one answer.
     """
+    from deerflow.agents.middlewares.provider_refusal_middleware import ProviderRefusalMiddleware
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
@@ -91,6 +92,11 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
             outer=ToolProgressMiddleware,
             inner=ToolErrorHandlingMiddleware,
             reason=("ToolProgressMiddleware reads deerflow_tool_meta in _update_state_from_result, so its wrap_tool_call chain must enclose the ToolErrorHandlingMiddleware step that stamps it"),
+        ),
+        OrderingConstraint(
+            outer=ProviderRefusalMiddleware,
+            inner=ToolErrorHandlingMiddleware,
+            reason=("ProviderRefusalMiddleware reads deerflow_tool_meta.error_scope from the result ToolErrorHandlingMiddleware normalizes, so its wrap_tool_call chain must enclose that step"),
         ),
         OrderingConstraint(
             outer=ToolReceiptMiddleware,
@@ -118,6 +124,7 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
                 SandboxAuditMiddleware,
                 ReadBeforeWriteMiddleware,
                 ToolProgressMiddleware,
+                ProviderRefusalMiddleware,
             )
         ),
         OrderingConstraint(

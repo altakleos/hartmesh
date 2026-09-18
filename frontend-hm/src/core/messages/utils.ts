@@ -809,22 +809,36 @@ export function hasToolCalls(message: Message) {
 }
 
 /**
- * A file presentation reaches the client two ways: the model's own
- * `present_files` call (an AI message), or a tool result that presented the
- * files its call was asked to make (`bash` with a `present` argument) — the
- * backend validates those paths and tags the `ToolMessage` with
- * `additional_kwargs.presented_files` (`deerflow.runtime.presented_files`).
- * Both draw the same file list.
+ * A file presentation reaches the client three ways: the model's own
+ * `present_files` call (an AI message); a tool result that presented the
+ * files its call was asked to make (`bash` with a `present` argument); or the
+ * turn's final assistant message, tagged by the runtime when the turn
+ * produced files nobody presented (hartmesh-tenancy/DF22). The last two are
+ * the same field — `additional_kwargs.presented_files`
+ * (`deerflow.runtime.presented_files`), server-owned and stripped from any
+ * client-supplied message — because the tag *is* the presentation, whichever
+ * message carries it. All three draw the same file list.
  */
 export function hasPresentFiles(message: Message) {
   if (message.type === "ai") {
-    return Boolean(
-      message.tool_calls?.some((toolCall) => toolCall.name === "present_files"),
+    return (
+      Boolean(
+        message.tool_calls?.some(
+          (toolCall) => toolCall.name === "present_files",
+        ),
+      ) || presentedFilesTagOf(message).length > 0
     );
   }
   return (
     message.type === "tool" && presentedFilesOfToolResult(message).length > 0
   );
+}
+
+function presentedFilesTagOf(message: Message): string[] {
+  const presented = message.additional_kwargs?.presented_files;
+  return Array.isArray(presented)
+    ? presented.filter((path): path is string => typeof path === "string")
+    : [];
 }
 
 function presentedFilesOfToolResult(message: Message): string[] {
@@ -834,10 +848,7 @@ function presentedFilesOfToolResult(message: Message): string[] {
   if (message.type !== "tool" || message.name === "present_files") {
     return [];
   }
-  const presented = message.additional_kwargs?.presented_files;
-  return Array.isArray(presented)
-    ? presented.filter((path): path is string => typeof path === "string")
-    : [];
+  return presentedFilesTagOf(message);
 }
 
 export function isClarificationToolMessage(message: Message) {
@@ -860,7 +871,11 @@ export function extractPresentFilesFromMessage(message: Message) {
       files.push(...(toolCall.args.filepaths as string[]));
     }
   }
-  return files;
+  // A runtime-tagged answer carries its files on the message itself rather
+  // than in a call. Both are read, and repeats dropped, so a message that
+  // somehow carried both lists each file once.
+  files.push(...presentedFilesTagOf(message));
+  return [...new Set(files)];
 }
 
 export function hasSubagent(message: AIMessage) {

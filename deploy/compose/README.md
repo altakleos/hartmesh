@@ -902,12 +902,12 @@ slim profile has not moved it).
 
 | Service | `mem_limit` = `memswap_limit` |
 | --- | --- |
-| gateway | 1152 MiB |
+| gateway | 1088 MiB |
 | frontend | 384 MiB |
 | nginx | 128 MiB |
 | postgres | 768 MiB |
 | redis | 256 MiB (`maxmemory 128mb`, `volatile-lru`) |
-| searxng | 192 MiB |
+| searxng | 256 MiB |
 | **services** | **2880 MiB** |
 
 Equal `memswap_limit` is an assertion of intent: with no swap device it
@@ -919,11 +919,22 @@ On 2026-09-15 the sandbox went from two 1 GiB full-profile slots to four
 512 MiB slim ones and the Gateway paid the two extra 96 MiB relays, 1344 to
 1152 MiB. On 2026-09-17 the profile returned to two slots at 1 GiB, slim
 (§ "Two 1 GiB slots"), and the Gateway took those 192 MiB back. Later that
-day it gave them up again, to the search service (§ "Web search"): 1152 MiB
-is 2.0 times the 586 MiB it peaked at under the 2026-09-06 two-turn
-tenant-load runs, and leaves 566 MiB for MCP servers a tenant adds; the
-datastores were left alone for the reason recorded below. Moving the 5.0 GiB line instead is
-the operator's call, not this profile's.
+day it gave them up again, to the search service (§ "Web search"), and on
+2026-09-18 a further 64 MiB to the same service after the tenant class found
+it at its ceiling: 1088 MiB is 1.86 times the 586 MiB the Gateway peaked at
+under the 2026-09-06 two-turn tenant-load runs and 1.90 times the 572 MiB it
+peaked at on the tenant class, and leaves 502 MiB for MCP servers a tenant
+adds; the datastores were left alone for the reason recorded below. The
+Gateway is the donor each time because it is the one service whose limit is
+set as a multiple of a measured peak rather than against an observed failure,
+so what it gives up is stated headroom rather than margin of unknown size.
+Moving the 5.0 GiB line instead is the operator's call, not this profile's.
+
+Every term of that line, so a change to one has to name the other it took
+from: services 2880 MiB (the table above), two 1024 MiB sandbox slots, and
+their two 96 MiB relays is 5120 MiB, exactly 5.0 GiB.
+`backend/tests/test_compose_profile.py` adds them up, so a limit cannot move
+without a counterpart moving with it.
 
 **Before snapshotting the data disk.** A turn's memory extraction runs behind
 the turn: the conversation is handed to a buffer, a worker picks it up later,
@@ -1204,8 +1215,8 @@ key-bearing `web_search` / `web_fetch` / `image_search` backends. A fragment is
 included only when its variable is present and non-empty, and it writes
 `api_key: $NAME` (the reference, never the value), so the Gateway still expands
 the secret itself and no secret lands on disk. Fragment tools replace the
-template's keyless defaults (the profile's own SearXNG for search, § "Web
-search"; Jina fetch; DuckDuckGo image search) by name; when several present
+template's keyless defaults (the profile's own SearXNG for search and image
+search, § "Web search"; the Gateway's own fetch, § "Web fetch") by name; when several present
 keys provide the same tool, the first fragment in file order wins, which is
 why the files are numbered.
 
@@ -1347,8 +1358,24 @@ and ignores its arguments, so `searxng/run.sh` replaces the entrypoint: it
 copies the bundle's settings into that tmpfs, mints the instance secret from
 `/dev/urandom` (it signs HTML cookies nothing sets, and lands nowhere: no
 `.env` key, and the contract is unchanged) and execs the image's script.
-192 MiB, taken from the Gateway (§ "Memory budget"), against 92 MiB resident
-after a turn; `pids_limit` 128. SearXNG's own limiter is off (it needs a
+256 MiB, taken from the Gateway (§ "Memory budget"); `pids_limit` 128. That
+figure was 192 MiB until 2026-09-18, sized against one near-idle sample
+(92 MiB resident after a turn), and the tenant class then found the cgroup at
+exactly that ceiling: `memory.peak` 201,330,688 bytes, `memory.events max`
+170, no OOM kill, search still answering with thirteen linked sources.
+`scripts/measure-searxng.sh` replays those two turns' own 22 queries through
+this container at the Gateway's concurrency of four, with the same image,
+limits, mounts, read-only root, `pids_limit` and CPU count; across 90 queries
+in three shapes (uncapped, capped, and with image queries mixed in) it peaks
+at 145 MiB, holds an anonymous working set near 110 MiB with 9 MiB of file
+cache, answers every query, and never reaches the ceiling. So the tenant's
+pressure is real and unreproduced here, and the limit is set against what the
+tenant was observed to need rather than against that replay: 256 MiB clears
+the observed ceiling by 64 MiB and the measured peak by 111 MiB. Reclaim with
+no OOM kill is the cgroup working, not a failure, but a service sitting on
+its ceiling has no room for the next engine change, and the figure it had was
+chosen from what another service could spare rather than from this one's
+demand. SearXNG's own limiter is off (it needs a
 Redis this instance does not have and guards an HTML surface nothing
 reaches), as are metrics and the image proxy; `safe_search` is 1. The
 healthcheck is the instance's `/healthz`, which reports the process, not
@@ -1357,6 +1384,54 @@ healthy everywhere, and the signal is the Gateway's `web_search (SearXNG)
 failed` line plus SearXNG's own per-query engine errors. Its start prints an
 ownership warning for the root-owned tmpfs and a missing-`limiter.toml`
 notice, both expected.
+
+### Web fetch
+
+`web_fetch` without a fetch-provider key is
+`deerflow.community.direct_fetch.tools:web_fetch_tool` since 2026-09-17: the
+Gateway reads the page itself. It replaced the hosted reader (`r.jina.ai`),
+which answers a tenant's server address with HTTP 401
+`AuthenticationRequiredError` for every page unless a key is sent; on the
+tenant class one research turn made three such calls and a report turn
+thirteen, each to a different address, before answering from search snippets
+alone. Probed from a development host on 2026-09-17, the seventeen exact
+addresses those turns asked for: fourteen answer a plain `GET` with
+`200 text/html`, two refuse with 403 (a reference site and a blog platform
+that gate automated readers, which the profile does not solve, evade or shop
+around), one timed out. The hosted reader answered none without a key.
+
+What the fetch does, in order: the address must be `http` or `https` with a
+host; every address the host resolves to must be public (the same never-allowed
+set as the sandbox egress policy: private, loopback, link-local, carrier NAT,
+multicast, documentation and cloud-metadata ranges); the connection is made to
+the checked address with the name on `Host` and on TLS SNI, so the certificate
+is still verified against the name and a resolver that answers differently the
+second time gains nothing; redirects are followed by hand, each hop checked and
+pinned again, eight at most; only HTML, XHTML and plain text are read, to
+2 MiB; one 10 s budget (`timeout` on the tool entry) covers the chain. No
+cookies, no credentials, no retries. The page is reduced to its article and
+handed to the model as Markdown, 4,096 characters at most, as before.
+
+A refusal is typed by who refused. A page's own 401, 403, 404, 429 or 5xx is
+the *origin's*: the model is told to use another source and nothing else
+changes. A refusal by the fetch path itself, which the direct fetch has no
+way to produce but a keyed provider fragment does (a bad key, a spent quota,
+a rate-limited deployment), is the *provider's*: it holds for every address,
+so the Gateway withdraws `web_fetch` from the model's tools for the rest of
+that turn and tells it once to answer from search results and say that
+sources could not be fetched. The next turn tries once more. This is the
+typed `error_scope` on the tool result, never the wording of it.
+
+Four pages are read at once, no more. The work now lands on the Gateway
+rather than a hosted reader: up to 2 MiB buffered per fetch and an article
+extraction that spawns a Node subprocess, inside the same memory, CPU and pid
+budget this profile gives the Gateway. Search has carried the same bound for
+the same reason; a model that issues several fetch calls in one step would
+otherwise have no ceiling at all.
+
+`web_fetch` runs from the Gateway's own address, like search: the sandbox
+allowlist (§ "`SANDBOX_EGRESS=allowlist` (the default)") does not govern it, and a site that gates
+that address gates it for every tenant behind it.
 
 ### Operator-managed models
 
@@ -2442,7 +2517,7 @@ development-host stand-in, not the tenant-class gate.
   invocations are under "Slim services profile". Also open: package
   installation through the proxy at 512 MiB (the load that decided the full
   profile's figure), the Gateway's peak at four concurrent turns (its
-  1152 MiB is set against a two-turn peak), and the shipped pinned image
+  1088 MiB is set against a two-turn peak), and the shipped pinned image
   under the render load (the render here used the image built from the
   current tree). The readiness budget stays at 120 until the first of the
   tenant-class runs has run.
@@ -2688,6 +2763,37 @@ drives:
   these fields after the repair; the pinned release image; and the disk
   behaviour over a long-lived process with many users, which the bound in
   § "Public skills" states rather than measures.
+
+Keyless web fetch that answers, and a refusal that stops (2026-09-18). The
+profile advertised keyless `web_fetch` through a hosted reader that answers a
+tenant's server address with HTTP 401 for every page, so a research turn made
+three futile calls and a report turn thirteen, each to a different address, and
+both answered from search snippets alone. § "Web fetch" records what replaced
+it. Proved here:
+
+- Probed from this host on 2026-09-17, the seventeen exact addresses those two
+  turns asked for: fourteen answer a plain `GET` with `200 text/html`, two
+  refuse with 403 (a reference site and a blog platform that gate automated
+  readers, which this profile does not solve, evade or shop around), one timed
+  out; the hosted reader answered none of them without a key.
+- `backend/tests/test_direct_fetch.py`, `test_provider_refusal_middleware.py`
+  and `test_web_fetch_default_gateway_stream_e2e.py`: the address checks,
+  per-hop redirect checks, size and content-type caps and the typed
+  origin/provider split as unit tests; the Gateway-stream cases run the real
+  route, admission, worker, receipt middleware and tool dispatch with the wire
+  under the fetch client scripted. Mutation-proved: connecting to the name
+  instead of the pinned address, following redirects with the client, taking
+  provider as the default scope, dropping the caps, or keeping the tool bound
+  after a provider refusal each fail them.
+- `scripts/measure-searxng.sh` against the pinned image with the profile's
+  limits, mounts, read-only root, `pids_limit` and CPU count, replaying the
+  two turns' own 22 queries at the Gateway's concurrency of four: 90 queries
+  across three shapes, `memory.peak` 144 to 149 MiB, anonymous working set
+  near 110 MiB, every query answered, `memory.events max` 0.
+- Not proved here: the tenant's own 170 ceiling events, which this host does
+  not reproduce; the fetch from a tenant's address, where the two 403s and any
+  address-level gating may differ; and the real-model composed turns, which
+  are the tenant class's to run.
 
 Keyless web search that answers (2026-09-17). The DuckDuckGo HTML endpoint
 behind the profile's keyless `web_search` answers a server address with an
