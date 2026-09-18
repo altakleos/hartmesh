@@ -36,6 +36,8 @@
 #               which reaches the separate image engines image_search uses
 #   ROUNDS      times the query list is replayed                 (default 1)
 #   SETTLE      seconds after the last query before the counters are read (default 5)
+#   CGROUP_DIR  directory holding this container's memory.* counters, for a
+#               host whose cgroup layout is neither of the two tried below
 #   OUT         TSV path (default: a file under a private temporary directory)
 #
 # Output is one TSV row per run: the limit, the workload, the counters, and
@@ -136,21 +138,31 @@ curl -fsS "$BASE/healthz" >/dev/null || { echo "searxng never became ready" >&2;
 
 cgroup_value() {
   # The container's own cgroup counters, read from inside the host's
-  # cgroup tree by container id.
+  # cgroup tree by container id. CGROUP_DIR names the directory outright for
+  # a host whose layout is neither of the two below.
   local id file
   id="$(docker inspect -f '{{.Id}}' "$NAME")"
   for file in \
+    "${CGROUP_DIR:+$CGROUP_DIR/$1}" \
     "/sys/fs/cgroup/system.slice/docker-$id.scope/$1" \
     "/sys/fs/cgroup/docker/$id/$1"; do
-    if [ -r "$file" ]; then cat "$file"; return 0; fi
+    if [ -n "$file" ] && [ -r "$file" ]; then cat "$file"; return 0; fi
   done
   return 1
 }
 
+# Without the counters there is no measurement, and a row of zeros would read
+# like one. Refuse here, naming the directory to pass as CGROUP_DIR, rather
+# than let `set -e` end the run with no reason after readiness.
+if ! cgroup_value memory.peak >/dev/null 2>&1; then
+  echo "cannot read this container's cgroup counters (tried ${CGROUP_DIR:-the docker and system.slice layouts}); set CGROUP_DIR to the directory holding memory.peak" >&2
+  exit 3
+fi
+
 # `memory.peak` is deliberately not reset: the limit has to hold the start as
 # well as the workload, so the figure covers both. `memory.events max` is
 # read before and after instead, so the reported count is this workload's.
-started_events="$(cgroup_value memory.events 2>/dev/null | awk '$1=="max"{print $2}')"
+started_events="$(cgroup_value memory.events 2>/dev/null | awk '$1=="max"{print $2}' || true)"
 started_events="${started_events:-0}"
 
 query_one() {
@@ -186,9 +198,9 @@ sleep "$SETTLE"
 
 peak="$(cgroup_value memory.peak 2>/dev/null || echo 0)"
 current="$(cgroup_value memory.current 2>/dev/null || echo 0)"
-events="$(cgroup_value memory.events 2>/dev/null | awk '$1=="max"{print $2}')"
+events="$(cgroup_value memory.events 2>/dev/null | awk '$1=="max"{print $2}' || true)"
 events="${events:-0}"
-oom="$(cgroup_value memory.events 2>/dev/null | awk '$1=="oom_kill"{print $2}')"
+oom="$(cgroup_value memory.events 2>/dev/null | awk '$1=="oom_kill"{print $2}' || true)"
 oom="${oom:-0}"
 hit=$((events - started_events))
 ok="$(grep -c '^200$' "$codes_file" || true)"
