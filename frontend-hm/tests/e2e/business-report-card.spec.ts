@@ -78,6 +78,20 @@ async function openTheReport(page: Page) {
     (route) =>
       route.fulfill({ status: 200, contentType: "image/png", body: PNG }),
   );
+  // The card proves a render is still there before it offers it, so the two
+  // presented renders have to answer the bounded probe as live files.
+  for (const path of [PDF_PATH, XLSX_PATH]) {
+    await page.route(`**/api/threads/${THREAD_ID}/artifacts${path}*`, (route) =>
+      route.fulfill({
+        status: 206,
+        headers: {
+          "Content-Range": "bytes 0-0/1024",
+          "Accept-Ranges": "bytes",
+        },
+        body: "x",
+      }),
+    );
+  }
 
   await page.goto(`/workspace/chats/${THREAD_ID}`);
   await expect(

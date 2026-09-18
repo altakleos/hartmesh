@@ -12,6 +12,7 @@ import {
   formatValue,
   reportRenderPath,
   reportSiblingPath,
+  useLiveReportRenders,
   type BusinessReport,
   type ReportChart,
   type ReportCheckStatus,
@@ -265,6 +266,8 @@ export function ReportCard({
   isMock,
   presentedKnown = true,
   report,
+  reportRevision,
+  runSettled = true,
   threadId,
 }: {
   artifacts: readonly string[];
@@ -279,11 +282,33 @@ export function ReportCard({
    */
   presentedKnown?: boolean;
   report: BusinessReport;
+  /**
+   * The selected report's own content digest. Every draft rewrites the same
+   * filenames, so this is what tells one draft's download verdict from
+   * another's; without it a late probe from the previous draft could restore
+   * a link to a file that draft's rebuild deleted.
+   */
+  reportRevision?: string;
+  /** False while a run is still writing; settling re-asks what is on disk. */
+  runSettled?: boolean;
   threadId: string;
 }) {
   const { t } = useI18n();
   const accent = report.primaryColor;
-  const renders = availableReportRenders(filepath, artifacts);
+  // Two questions, in order. Presentation earns a format the right to be
+  // offered; the probe decides whether the file is still there. A render
+  // whose file a rebuild deleted is eligible and not available, which is the
+  // whole of DF16.
+  const eligible = availableReportRenders(filepath, artifacts);
+  const live = useLiveReportRenders({
+    threadId,
+    filepath,
+    eligible,
+    revision: reportRevision,
+    isMock,
+    runSettled,
+  });
+  const renders = live.kinds;
   const line = checksLine(report.checks);
   // The documents print each check's own status and compute no summary, so
   // this glyph is the card's own claim and must not outrun the checks: a
@@ -340,7 +365,10 @@ export function ReportCard({
           </p>
         </header>
 
-        {renders.length === 0 && presentedKnown && (
+        {/* Only once the verdict is final. "No file to download yet" while a
+            probe is still out is a false statement the person acts on, and
+            it is the one thing worse than the stale link this replaced. */}
+        {renders.length === 0 && presentedKnown && live.isSettled && (
           <p className="text-muted-foreground mt-4 text-sm">
             {t.businessReport.noRenders}
           </p>

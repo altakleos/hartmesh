@@ -38,14 +38,20 @@ export function reportRenderPath(reportPath: string, kind: ReportRenderKind) {
 }
 
 /**
- * The renders the thread has presented.
+ * The renders the thread has presented — eligibility, not availability.
  *
  * `artifacts` is the thread's cumulative presented-files list (from
  * `present_files`, or a tool call that presented the files it made), so a format
  * that was never rendered is left out rather than offered as a link that would
  * 404. It is not per-turn: a rebuild deletes the previous draft's renders and
- * their paths stay in the list, so a format that has not been rendered again
- * yet is still offered until it is.
+ * their paths stay in the list, so this still names a format whose file is
+ * gone.
+ *
+ * That is the delivery fence and it stays: presentation is what earns a
+ * format the right to be offered at all. Whether the file is *there* is the
+ * second question, asked by `useLiveReportRenders` against the same
+ * authenticated artifact route the download link uses. Callers that draw
+ * download links must ask both; this answer alone is history.
  */
 export function availableReportRenders(
   reportPath: string,

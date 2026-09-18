@@ -26,3 +26,10 @@ export {
   reportSiblingPath,
   type ReportRenderKind,
 } from "./paths";
+export {
+  probeReportRenderLive,
+  REPORT_RENDERS_QUERY_PREFIX,
+  reportRendersQueryKey,
+  useLiveReportRenders,
+  type LiveReportRenders,
+} from "./renders";

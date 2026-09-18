@@ -1,9 +1,11 @@
-import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   cleanup,
   fireEvent,
   render,
   screen,
+  waitFor,
   within,
 } from "@testing-library/react";
 
@@ -20,6 +22,13 @@ rs.mock("@/core/files", () => ({
     isPending: myFiles.isPending,
   }),
 }));
+
+// The card proves a render is still there before offering it, so these tests
+// answer every probe as a live file; which renders are *offered* is what they
+// are about, and the proving itself is covered in
+// `report-card-current-renders.dom.test.tsx`.
+const fetchWithAuth = rs.hoisted(() => rs.fn());
+rs.mock("@/core/api/fetcher", () => ({ fetch: fetchWithAuth }));
 
 import { ReportCard } from "@/components/workspace/artifacts/report-card";
 import { parseBusinessReport } from "@/core/business-report";
@@ -40,23 +49,40 @@ function renderCard(
   { isMock = false } = {},
 ) {
   return render(
-    <I18nContext.Provider
-      value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+    <QueryClientProvider
+      client={
+        new QueryClient({
+          defaultOptions: { queries: { retry: false, gcTime: 0 } },
+        })
+      }
     >
-      <ReportCard
-        artifacts={artifacts}
-        filepath={REPORT}
-        isMock={isMock}
-        report={{ ...report, ...override }}
-        threadId={THREAD}
-      />
-    </I18nContext.Provider>,
+      <I18nContext.Provider
+        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      >
+        <ReportCard
+          artifacts={artifacts}
+          filepath={REPORT}
+          isMock={isMock}
+          report={{ ...report, ...override }}
+          reportRevision="sha-fixture"
+          threadId={THREAD}
+        />
+      </I18nContext.Provider>
+    </QueryClientProvider>,
   );
 }
 
 afterEach(() => {
   cleanup();
   myFiles.save.mockReset();
+});
+
+beforeEach(() => {
+  fetchWithAuth.mockReset();
+  fetchWithAuth.mockResolvedValue({
+    status: 206,
+    body: { cancel: async () => undefined },
+  });
 });
 
 describe("ReportCard", () => {
@@ -164,14 +190,16 @@ describe("ReportCard", () => {
     );
   });
 
-  it("offers the renders the thread has presented, and only those", () => {
+  it("offers the renders the thread has presented, and only those", async () => {
     renderCard([
       REPORT,
       `${DIRECTORY}/2026-08-business-review.pdf`,
       `${DIRECTORY}/2026-08-business-review.xlsx`,
     ]);
 
-    const pdf = screen.getByRole("link", { name: "Download the PDF" });
+    // Presented *and* proven to still be there: the link appears once the
+    // probe has answered, not on the strength of the list alone.
+    const pdf = await screen.findByRole("link", { name: "Download the PDF" });
     expect(pdf.getAttribute("href")).toBe(
       `/api/threads/${THREAD}/artifacts${DIRECTORY}/2026-08-business-review.pdf?download=true`,
     );
@@ -193,7 +221,7 @@ describe("ReportCard", () => {
     ).toBeNull();
   });
 
-  it("keeps the documents the thread has rendered, and only those", () => {
+  it("keeps the documents the thread has rendered, and only those", async () => {
     myFiles.save.mockResolvedValue([]);
     renderCard([
       REPORT,
@@ -201,6 +229,11 @@ describe("ReportCard", () => {
       `${DIRECTORY}/2026-08-business-review.xlsx`,
     ]);
 
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Save to My files" }),
+      ).toBeTruthy(),
+    );
     fireEvent.click(screen.getByRole("button", { name: "Save to My files" }));
 
     // The documents, not the JSON the card is drawn from.
