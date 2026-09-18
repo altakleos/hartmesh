@@ -10,16 +10,18 @@ model serves the recorded assistant turns by input hash, so the agent graph
 Fixtures are produced by ``scripts/record_gateway.py`` +
 ``scripts/build_fixture_from_jsonl.py`` (manual, needs a key).
 
-The golden ends in a delivery verdict on purpose. The recorded prompt asks for a
-file at ``/mnt/user-data/outputs/note.txt`` and the recorded turns never call
-``present_files``, so the run trips the artifact-delivery fence exactly as it
-always has — it was simply invisible on the wire until the worker began
-publishing the advisory ``custom`` frame ahead of ``end``
-(hartmesh-tenancy/DF13). The frame in the committed golden is the contract, and
-so is the *absence* of an ``error`` frame after it: the graph completed and the
-answer is checkpointed, so the stream ends cleanly and the terminal verdict
-lives on the run record's ``stop_reason``. A future re-recording that presents
-the file would drop the ``custom`` frame.
+The golden ends in a delivery, and until hartmesh-tenancy/DF22 it ended in a
+delivery *failure*. The recorded prompt asks for a file at
+``/mnt/user-data/outputs/note.txt`` and the recorded turns never call
+``present_files``, so for three releases this scenario tripped the
+artifact-delivery fence and the golden's second-to-last frame was the advisory
+``custom`` notice DF13 added. It is now a ``values`` frame carrying
+``artifacts``: the runtime hands over what the turn produced and nobody
+presented, so a recorded trace that asks for a file and gets one ends
+``success``. That change of shape is the point — this golden is the only place
+in the suite where the repair is visible on a real recorded conversation
+rather than a constructed one, so if a later change quietly restores the
+fence here, this test says so.
 """
 
 from __future__ import annotations

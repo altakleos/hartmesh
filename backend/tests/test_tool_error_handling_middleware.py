@@ -176,7 +176,10 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 
-    assert len(middlewares) == 19
+    # 19 until hartmesh-tenancy/DF21 and DF22 added ProviderRefusalMiddleware
+    # and RuntimeDeliveryMiddleware to every runtime stack, the subagent's
+    # included.
+    assert len(middlewares) == 21
     assert isinstance(middlewares[0], ToolReceiptMiddleware)
     assert isinstance(middlewares[1], FakeMiddleware)  # InputSanitizationMiddleware stub
     assert isinstance(middlewares[2], ToolOutputBudgetMiddleware)
