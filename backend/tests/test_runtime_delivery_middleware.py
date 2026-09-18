@@ -199,15 +199,79 @@ def test_a_run_whose_snapshot_failed_presents_nothing(thread_home: Path, monkeyp
     assert update is None
 
 
-def test_an_interrupted_turn_is_not_covered_and_this_is_the_known_gap(thread_home: Path) -> None:
-    """A turn that writes a file and then asks a clarifying question.
+def _clarification(message_id: str = "ai-clarify") -> AIMessage:
+    """What the model actually sends when it needs one more thing from the person.
 
-    ``after_agent`` does not run when the graph interrupts, so nothing here
-    hands the file over; the resumed turn is a new run whose snapshot is taken
-    after the file exists, so its own scan finds nothing produced and the
-    fence passes. The file reaches the person only if the model presents it.
-    This test exists so the gap is recorded rather than implied -- when the
-    interrupt path grows a hook, it is the test that should change.
+    Not an interrupt: ``ask_clarification`` is a client-side ``return_direct``
+    call, and with the siblings dropped ``create_agent`` routes to END
+    (``clarification_middleware``). The run *completes*, which is why the
+    ``after_agent`` hooks below run at all.
+    """
+    return AIMessage(
+        "Which Muse agent do you mean?",
+        id=message_id,
+        tool_calls=[{"name": "ask_clarification", "args": {"question": "Which Muse agent do you mean?"}, "id": "clarify-1"}],
+    )
+
+
+def test_a_clarifying_question_still_hands_over_a_file_the_turn_already_made(thread_home: Path) -> None:
+    """The shape the tenant class actually produces, and it is covered.
+
+    The `.21` capture of "Create pdf about muse agent" is two runs: a 21.6 s
+    turn offering three options, then a 152.8 s turn that writes the PDF. That
+    first turn ends with ``TerminalResponseMiddleware.after_agent`` and an
+    ``end`` event on the wire -- a completed run, not an interrupt -- so this
+    middleware's own ``after_agent`` runs on it like any other.
+
+    It matters when the model drafts something *before* asking. The fence
+    demands delivery of whatever the turn produced, so without this the
+    clarification turn would end ``artifact_delivery_incomplete`` for a draft
+    the person can see no other way. The draft is handed over, and the
+    clarification's tool call survives the re-tag so the options still render.
+    """
+    middleware, runtime = RuntimeDeliveryMiddleware(), _runtime()
+    clarification = _clarification()
+    update = _turn(
+        middleware,
+        runtime,
+        lambda: (thread_home / "Muse_Agent_Report.pdf").write_bytes(b"%PDF-1.4 draft"),
+        _state(HumanMessage("Create pdf about muse agent"), clarification),
+    )
+
+    assert update is not None, "a completed clarification turn is not exempt from the fence it has to satisfy"
+    assert update["artifacts"] == [f"{OUTPUTS}/Muse_Agent_Report.pdf"]
+    [tagged] = update["messages"]
+    assert tagged.id == clarification.id, "re-emitted by id, so the question is replaced rather than duplicated"
+    assert tagged.additional_kwargs[PRESENTED_FILES_KEY] == [f"{OUTPUTS}/Muse_Agent_Report.pdf"]
+    assert tagged.additional_kwargs[PRESENTED_BY_KEY] == "runtime"
+    assert [call["name"] for call in tagged.tool_calls] == ["ask_clarification"], "tagging must not cost the person the options"
+    assert runtime.context[RUNTIME_PRESENTED_FILES_CONTEXT_KEY] == [f"{OUTPUTS}/Muse_Agent_Report.pdf"]
+
+
+def test_a_clarifying_question_that_drafted_nothing_hands_over_nothing(thread_home: Path) -> None:
+    # The ordinary case: the model asks before it writes, which is what the
+    # `.21` capture shows. Nothing was produced, so nothing is delivered and
+    # the question reaches the person untouched.
+    middleware, runtime = RuntimeDeliveryMiddleware(), _runtime()
+    update = _turn(middleware, runtime, lambda: None, _state(HumanMessage("Create pdf about muse agent"), _clarification()))
+    assert update is None
+    assert RUNTIME_PRESENTED_FILES_CONTEXT_KEY not in runtime.context
+
+
+def test_a_graph_interrupt_would_not_be_covered_if_one_were_ever_introduced(thread_home: Path) -> None:
+    """The gap this middleware has, stated at its real size.
+
+    ``after_agent`` does not run when a graph interrupts, so a turn suspended
+    mid-flight hands nothing over, and the resumed run is a new run whose
+    snapshot is taken after the file already exists -- its own scan finds
+    nothing produced and the fence passes.
+
+    **No path in this product reaches that shape.** Clarification is a
+    completed run (see above), and neither the harness nor the app calls
+    ``interrupt()`` or configures ``interrupt_before``/``interrupt_after``.
+    This test pins the consequence so that introducing an interrupt path
+    anywhere in the agent graph is a deliberate act with a known cost, rather
+    than a silent hole. If one is introduced, this test is the one to change.
     """
     middleware, runtime = RuntimeDeliveryMiddleware(), _runtime()
 

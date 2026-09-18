@@ -53,10 +53,10 @@ asked for ends `success`. It reaches the worker through
 records only tool-end presentations).
 `_delivery_content_with_outputs` merges it into `presented_files` itself, the
 field `presented_paths()` reads, splitting attribution under `presented_by`: a
-second key would leave the archive route and evidence bundle on the narrower,
-so a run the runtime completed would 409 on the download of the file it handed
-over. The fence still fires when the runtime could not: a failed outputs scan, or a turn that
-interrupts before `after_agent` runs. Missing a *matching* presentation is a run
+second key would leave the archive route and evidence bundle on the narrower, so
+a completed run would 409 on the download of the file it handed over. The fence
+still fires when the runtime could not: a failed outputs scan, or a graph
+interrupt before `after_agent` (unreached today). Missing a *matching* presentation is a run
 error, as is a successful one whose receipt cannot be durably verified. Neither
 publishes an `error` stream frame: the graph completed and the answer is
 checkpointed, so the stream reaches its end marker normally and the verdict
