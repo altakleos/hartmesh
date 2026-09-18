@@ -18,6 +18,8 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
+import pytest
+
 from deerflow.sandbox.preinstalled import GUARANTEED_IMPORTS, preinstalled_libraries_section
 
 DOCKERFILE = Path(__file__).resolve().parents[2] / "docker" / "sandbox" / "Dockerfile"
