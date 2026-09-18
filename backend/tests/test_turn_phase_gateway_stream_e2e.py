@@ -713,16 +713,24 @@ def _released_nginx(gateway: _Gateway, tmp_path: Path) -> Iterator[str]:
         if not published or not published[0].startswith("127.0.0.1:"):
             pytest.skip(f"released nginx was not published on loopback ({published}): the released nginx stream path stays untested here")
         base = f"http://{published[0]}"
+        # Ready means the whole path answers, not just nginx. The released
+        # config resolves the ``gateway`` alias at request time through
+        # Docker's DNS, so until the relay container is up the proxy answers
+        # 502 -- an answer, which is why accepting any status here let a
+        # not-yet-ready path through and failed the first request instead.
         deadline = time.monotonic() + 30
+        status: int | None = None
         while True:
             try:
-                httpx.get(f"{base}/api/langgraph/threads", timeout=2.0)
-                break
+                status = httpx.get(f"{base}/api/langgraph/threads", timeout=2.0).status_code
+                if status < 500:
+                    break
             except httpx.HTTPError:
-                if time.monotonic() > deadline:
-                    logs = _docker("logs", nginx_name, timeout=30)
-                    pytest.skip(f"released nginx did not answer on {base} ({logs.stderr[-300:]!r}): the released nginx stream path stays untested here")
-                time.sleep(0.2)
+                status = None
+            if time.monotonic() > deadline:
+                logs = _docker("logs", nginx_name, timeout=30)
+                pytest.skip(f"released nginx did not reach the Gateway on {base} (last status {status}, {logs.stderr[-300:]!r}): the released nginx stream path stays untested here")
+            time.sleep(0.2)
         yield base
     finally:
         for name in started:
