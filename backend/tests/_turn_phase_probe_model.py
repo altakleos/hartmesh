@@ -15,7 +15,8 @@ exactly as it would interrupt a provider call:
 * ``probe:hang``   -- a hidden reasoning block, then a long pause meant to be
                       cancelled from outside.
 * ``probe:search`` -- one declared retrieval tool call, then the ordinary text
-* ``probe:malformed <url>`` -- the exact tool call that qualification captured:
+* ``probe:malformed <url>`` -- the exact tool call a released-profile
+  qualification captured:
   a shell command where the tool name belongs. Then, once the runtime has
   answered it, an ordinary ``web_fetch`` for that address and the text script,
   so one turn shows the refusal and the recovery.

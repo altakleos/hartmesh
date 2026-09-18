@@ -10,7 +10,7 @@ model serves the recorded assistant turns by input hash, so the agent graph
 Fixtures are produced by ``scripts/record_gateway.py`` +
 ``scripts/build_fixture_from_jsonl.py`` (manual, needs a key).
 
-The golden ends in a delivery, and until a qualification run it ended in a
+The golden ends in a delivery, and until that repair it ended in a
 delivery *failure*. The recorded prompt asks for a file at
 ``/mnt/user-data/outputs/note.txt`` and the recorded turns never call
 ``present_files``, so for three releases this scenario tripped the

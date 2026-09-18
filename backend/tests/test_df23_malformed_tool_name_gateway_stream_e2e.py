@@ -1,4 +1,4 @@
-"""The captured malformed tool call, driven through the real Gateway (hartmesh-tenancy/DF23).
+"""The captured malformed tool call, driven through the real Gateway.
 
 In a released-profile qualification, one of two identical "create a PDF about
 X" requests ended after about a minute with the generic

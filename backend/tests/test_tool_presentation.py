@@ -1,6 +1,6 @@
 """A tool that makes files can present them in the same call.
 
-a qualification run: on that qualification the model executed ``prose --render
+a released-profile qualification run: the model executed ``prose --render
 pdf,docx,xlsx``, read the output, wrote "Done" and never called
 ``present_files`` -- in both runs, at both memory limits. The files existed
 and the delivery fence correctly failed the turn. These tests pin the repair:
@@ -251,7 +251,7 @@ def test_the_result_presents_like_present_files_and_tells_the_model_so(tmp_path:
     # Each delivered path carries the runtime's own byte count, so the model
     # does not have to spend a shell call asking whether the file it just wrote
     # is there and how big it is.
-    assert f"  {OUT}/r/r.report.json (1 bytes)\n  {OUT}/r/r.pdf (1 bytes)\n" in message.content
+    assert f"  {OUT}/r/r.report.json (1 byte)\n  {OUT}/r/r.pdf (1 byte)\n" in message.content
     assert message.content.endswith(f"Not attached: {OUT}/r/r.docx (does not exist).")
 
 

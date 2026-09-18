@@ -5,8 +5,8 @@ Why
 Files reach the user only through a presentation: an ``artifacts`` state
 update, which ``present_files`` produces from a separate model call made after
 the files exist. That call is one more model round trip on every deliverable,
-and it is a judgement the model can reason itself out of. On that qualification
-it did: after a revision that rewrote the same four
+and it is a judgement the model can reason itself out of. A released-profile qualification
+run showed it doing exactly that: after a revision that rewrote the same four
 files as the turn before, the model wrote "Done" and presented nothing, and
 the delivery fence correctly failed the run.
 
@@ -199,7 +199,7 @@ def describe_presentation(presentation: Presentation) -> str:
         # with three more shell calls to check the file existed and how big it
         # was; the answer is free here, and authoritative in a way the model's
         # own re-reading is not.
-        lines.extend(f"  {path} ({presentation.sizes[path]:,} bytes)" if path in presentation.sizes else f"  {path}" for path in presentation.presented)
+        lines.extend(f"  {path} ({presentation.sizes[path]:,} byte{'' if presentation.sizes[path] == 1 else 's'})" if path in presentation.sizes else f"  {path}" for path in presentation.presented)
     elif presentation.refused:
         lines.append(f"Nothing was presented: the user has not received {'this file' if len(presentation.refused) == 1 else 'these files'}.")
     for path, reason in presentation.refused[:MAX_DESCRIBED_REFUSALS]:

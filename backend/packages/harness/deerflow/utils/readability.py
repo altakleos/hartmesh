@@ -85,15 +85,22 @@ class ReadabilityExtractor:
     def extract_article(self, html: str) -> Article:
         try:
             article = simple_json_from_html_string(html, use_readability=self.USE_READABILITY_JS)
-        except Exception:
-            # A page with nothing in it reaches an unguarded index inside the
-            # simplifier's BeautifulSoup pass, and an empty body is an ordinary
-            # thing for a fetch to meet -- a 204, a redirect stub, a wrapper
-            # whose content never arrived. Raising here would fail the whole
-            # fetch for a page that simply had no article in it, so extraction
-            # reports the absence instead. The raw HTML is not salvaged: if the
-            # parser could not read it, this is not the place to guess.
-            logger.warning("Could not extract an article from a %d-character page; reporting it as empty", len(html), exc_info=True)
+        except IndexError:
+            # Exactly one failure is absorbed, and only because it is not a
+            # failure: a page with nothing in it reaches an unguarded index
+            # inside the simplifier's BeautifulSoup pass, and an empty body is
+            # an ordinary thing for a fetch to meet -- a 204, a redirect stub,
+            # a wrapper whose content never arrived. Raising would fail the
+            # whole fetch for a page that simply had no article in it.
+            #
+            # Nothing else is caught, deliberately. A MemoryError or a
+            # RecursionError from a pathological page is a resource failure,
+            # and reporting it as "no content" would make it indistinguishable
+            # in the logs from an empty page -- so those still surface, as any
+            # unexpected error always has. The raw HTML is not salvaged
+            # either: if the parser could not read it, this is not the place
+            # to guess.
+            logger.warning("Nothing to extract from a %d-character page; reporting it as empty", len(html), exc_info=True)
             article = {}
 
         html_content = article.get("content")

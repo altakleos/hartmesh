@@ -212,19 +212,29 @@ def test_a_tool_actually_bound_under_an_unusable_name_is_still_refused() -> None
     assert isinstance(result, ToolMessage) and result.name == REFUSED_TOOL_NAME
 
 
-def test_a_call_with_no_usable_id_is_left_to_the_existing_recovery() -> None:
-    """A ToolMessage is addressed by the call it answers.
+def test_a_call_with_no_usable_id_is_still_refused_rather_than_dispatched() -> None:
+    """A missing address is not a reason to run it.
 
-    With no id there is no address, and inventing one would collide with
-    ``DanglingToolCallMiddleware``'s synthetic-id pairing. This guard declines
-    to answer and lets that recovery do its job.
+    An earlier version of this guard let such a call through, reasoning that a
+    ``ToolMessage`` is addressed by the call it answers and the malformed-id
+    recovery would deal with it. That recovery runs on the *next* model
+    request, and the receipt reserves this call's evidence before then -- so
+    the fall-through dispatched exactly the shape this guard exists to stop,
+    and reached the same terminal error by the same route. A degenerate model
+    output is also the case most likely to corrupt the name and the id
+    together.
+
+    The answer goes out with a blank address. The orphan pass drops it and
+    ``DanglingToolCallMiddleware`` patches the unanswered call on the next
+    request, so the model is still told; nothing executes either way.
     """
     middleware, runtime = UnboundToolCallMiddleware(), _runtime()
     _offer_tools(middleware, runtime)
 
-    _, executed = _dispatch(middleware, _tool_request(CAPTURED_NAME, runtime, registered=False, call_id=""))
-
-    assert executed == [CAPTURED_NAME], "declining to answer means passing it on, not swallowing it"
+    for missing in ("", "   ", None, 7):
+        result, executed = _dispatch(middleware, _tool_request(CAPTURED_NAME, runtime, registered=False, call_id=missing))
+        assert executed == [], f"id={missing!r}: dispatching is what produced the terminal error"
+        assert isinstance(result, ToolMessage) and result.name == REFUSED_TOOL_NAME
 
 
 def test_the_async_path_behaves_the_same() -> None:

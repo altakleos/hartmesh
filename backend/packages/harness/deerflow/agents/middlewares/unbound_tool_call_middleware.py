@@ -157,12 +157,18 @@ class UnboundToolCallMiddleware(AgentMiddleware[AgentState]):
         registered = getattr(request, "tool", None) is not None
         if is_safe_tool_name(name) and registered:
             return None
-        tool_call_id = tool_call.get("id")
-        if not isinstance(tool_call_id, str) or not tool_call_id.strip():
-            # Without an id the model cannot be answered at all: a ToolMessage
-            # is addressed by the call it answers. Let it through to the
-            # existing malformed-id recovery rather than invent an address.
-            return None
+        # The id decides how the answer is addressed, never whether to refuse.
+        # An earlier version returned None here so a call with no usable id
+        # fell through to the malformed-id recovery -- but that recovery runs
+        # in ``wrap_model_call``, on the *next* model request, and the receipt
+        # reserves this call's evidence before then. So the fall-through
+        # dispatched exactly the shape this guard exists to stop, and reached
+        # the same terminal ``ToolEvidenceError`` by the same route. A blank
+        # address answered by nobody is a far smaller failure than that: the
+        # orphan pass drops it and ``DanglingToolCallMiddleware`` still patches
+        # the unanswered call on the next request, so the model is told.
+        raw_id = tool_call.get("id")
+        tool_call_id = raw_id if isinstance(raw_id, str) else ""
         logger.warning(
             "Refused a tool call before dispatch: name is %s (%s)",
             "not a registered tool" if is_safe_tool_name(name) else "not a usable tool name",

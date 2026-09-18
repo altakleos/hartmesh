@@ -136,6 +136,46 @@ def test_an_empty_page_says_so_instead_of_returning_nothing(no_subprocess: list[
     assert article.title == "Untitled"
 
 
+def test_only_the_pure_python_path_is_ever_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    """One call, with the JS path off -- not a JS attempt that falls back.
+
+    The old behaviour asked twice: ``use_readability=True``, then ``False``
+    after the first raised. That second call was the one doing the work, and
+    the first was two subprocesses and a traceback. What replaced it has to be
+    a single deliberate call, not a quieter fallback.
+    """
+    calls: list[bool] = []
+
+    def fake(html: str, use_readability: bool = False) -> dict:
+        calls.append(use_readability)
+        return {"title": "T", "content": "<p>C</p>"}
+
+    monkeypatch.setattr("deerflow.utils.readability.simple_json_from_html_string", fake)
+    article = ReadabilityExtractor().extract_article("<html><body>x</body></html>")
+
+    assert calls == [False], "asked once, for the path that does the work"
+    assert article.title == "T"
+
+
+def test_an_unexpected_failure_still_surfaces(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Absorbing the empty-page case must not absorb everything else.
+
+    A resource failure reported as "no content" would be indistinguishable in
+    the logs from a page that genuinely had none, which is how a repeatable
+    memory or recursion failure becomes invisible. This is the contract the
+    module had before -- unexpected errors are surfaced, not swallowed -- and
+    it survives the change.
+    """
+    for error in (RuntimeError("unexpected parser failure"), MemoryError(), RecursionError()):
+
+        def fake(html: str, use_readability: bool = False, _error: BaseException = error) -> dict:
+            raise _error
+
+        monkeypatch.setattr("deerflow.utils.readability.simple_json_from_html_string", fake)
+        with pytest.raises(type(error)):
+            ReadabilityExtractor().extract_article("<html><body>x</body></html>")
+
+
 def test_the_js_path_is_off_by_construction() -> None:
     """The one line that decides it, asserted directly.
 
