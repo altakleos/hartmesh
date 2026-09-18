@@ -43,6 +43,7 @@ import pytest
 import test_turn_phase_gateway_stream_e2e as e2e
 
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
+from deerflow.agents.middlewares.unbound_tool_call_middleware import REFUSED_TOOL_NAME
 from deerflow.community.direct_fetch import tools as fetch_tools
 from deerflow.community.web_fetch_outcome import FetchRefusal
 from deerflow.runtime.presented_files import PRESENTED_BY_KEY, PRESENTED_FILES_KEY
@@ -345,3 +346,76 @@ def test_a_turn_that_needs_no_fetch_is_untouched_by_either_repair(composed_gatew
     assert not _tagged(result["history"]), "nothing was produced, so nothing is reported as delivered"
     assert all("web_fetch" in names for names in result["bound"]), "the tool stays available to a turn that never used it"
     assert json.dumps(result["history"]).count("unavailable for the rest of this turn") == 0
+
+
+def _tool_messages(history: Any) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    _walk(history, found, lambda node: node.get("type") == "tool")
+    return found
+
+
+def test_the_captured_malformed_tool_name_neither_executes_nor_ends_the_run(
+    composed_gateway: e2e._Gateway,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The third shape a released-profile qualification captured, on this same Gateway.
+
+    One of two identical "create a PDF about X" requests ended after about a
+    minute with a generic ``Runtime operation failed (reference: ...)`` and a
+    durable ``error`` carrying ``ToolEvidenceError``. Nothing had executed: the
+    model put a 129-byte shell command where the tool name belongs, the receipt
+    layer refused it as an identity, and that refusal ended the run.
+
+    The probe replays that call verbatim -- name, id and arguments, streamed as
+    the provider streamed them -- and then, once the runtime has answered it,
+    recovers with a call the runtime can honour. It shares this module's
+    Gateway because it needs the same profile: a second one would double a
+    minute of boot on one CI shard to prove nothing extra.
+    """
+    provider = _RefusingProvider()
+    monkeypatch.setattr(fetch_tools, "_client_from_config", lambda _config: provider)
+
+    thread_id_box: dict[str, str] = {"id": ""}
+    write_artifact, _written = _write_artifact_mid_turn(composed_gateway.tmp_home, thread_id_box)
+
+    # The write has to land after the middleware's pre-run snapshot, or the
+    # file is not something "this turn produced" and the fence correctly fails
+    # the run. Writing on the first frame races that snapshot; waiting for the
+    # refusal to appear on the wire does not, because the refusal cannot exist
+    # until the agent has started and taken it.
+    def on_frame(observation: e2e._StreamObservation) -> None:
+        if any(REFUSED_TOOL_NAME in str(payload) for _event, payload in observation.frames):
+            write_artifact(observation)
+
+    base = composed_gateway.loopback_url
+    probe.BOUND_TOOL_NAMES.clear()
+    with httpx.Client() as client:
+        csrf, thread_id = e2e._register_and_create_thread(client, base)
+        thread_id_box["id"] = thread_id
+        observed = e2e._observe_stream(client, base, thread_id, csrf, f"probe:malformed {MUSE_URL}", on_frame=on_frame, timeout=120.0, recursion_limit=100)
+        run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
+        history = client.post(f"{base}/api/threads/{thread_id}/history", json={"limit": 40}, headers={"X-CSRF-Token": csrf}).json()
+        download = client.get(f"{base}/api/threads/{thread_id}/artifacts/{ARTIFACT_PATH.lstrip('/')}", params={"download": "true"}, headers={"X-CSRF-Token": csrf})
+
+    # Not what the deployment got.
+    assert run["status"] == "success", run
+    blob = str(history)
+    assert "ToolEvidenceError" not in blob
+    assert "Runtime operation failed" not in blob, "the generic terminal error is the defect"
+
+    # One actionable result, and the hostile string is not its identity.
+    refusals = [message for message in _tool_messages(history) if message.get("name") == REFUSED_TOOL_NAME]
+    assert len(refusals) == 1, "exactly one synthetic result, not a retry loop"
+    assert "not one of the tools available to you" in str(refusals[0].get("content"))
+    assert "web_fetch" in str(refusals[0].get("content")), "it names what this run can actually call"
+    assert "weasyprint --version" not in str([message.get("name") for message in _tool_messages(history)])
+
+    # Nothing executed the name, and the model's own next call went through.
+    assert provider.urls == [MUSE_URL], "the only fetch is the corrected call, not the refused one"
+    assert len([message for message in _tool_messages(history) if message.get("name") == "web_fetch"]) == 1
+
+    # And the file the turn produced still reaches the person.
+    tagged = _tagged(history)
+    assert [path for message in tagged for path in message["additional_kwargs"][PRESENTED_FILES_KEY]] == [ARTIFACT_PATH]
+    assert tagged[-1]["additional_kwargs"][PRESENTED_BY_KEY] == "runtime"
+    assert download.status_code == 200 and download.content == ARTIFACT_BYTES
