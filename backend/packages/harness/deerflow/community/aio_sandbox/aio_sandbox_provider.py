@@ -3051,9 +3051,35 @@ class AioSandboxProvider(
                 parked = self._warm_pool.get(created)
                 if parked is not None:
                     self._mark_prewarm_unclaimed_locked(created, parked[0])
-            self._publish_prewarmed_skill_view(thread_id, user_id=effective_user_id, resolve=resolve_skill_snapshot)
-            logger.info("Prewarmed accepted sandbox %s for thread %s", created, thread_id)
+        # Logged here, before the publication, so the line that says the
+        # container exists cannot arrive after the turn that reclaimed it.
+        logger.info("Prewarmed accepted sandbox %s for thread %s", created, thread_id)
+        # The container is parked and the serializer is free before the view is
+        # published. Holding the key across the publication put the staging it
+        # exists to remove back in front of the person: the released .26 tenant
+        # queued 3.7 s of every new chat, and 16.3 s of the first after a boot,
+        # waiting here for a head start it was being given. Nothing in the
+        # publication needs this key -- it fences itself under the views lock,
+        # where a generation-0 bind is refused on a view a run owns and the
+        # clear is a compare-and-pop that never touches another run's bytes --
+        # so a turn arriving mid-publication takes its container and goes.
+        #
+        # A turn that already took it gains nothing from a guess, and a guess
+        # published behind one is worse than useless: the turn's own teardown
+        # may have cleared the view, so the bytes would be staged for a thread
+        # with no container, and a publication landing inside that teardown's
+        # release can leave the thread's projection refusing every later turn.
+        # So the guess is dropped the moment its container stops being a guess.
+        if not self._prewarmed_container_is_still_a_guess(key, created):
+            logger.debug("Not publishing a skill view for thread %s: its sandbox is already in use", thread_id)
             return created
+        self._publish_prewarmed_skill_view(thread_id, user_id=effective_user_id, resolve=resolve_skill_snapshot)
+        return created
+
+    def _prewarmed_container_is_still_a_guess(self, key: tuple[str, str], sandbox_id: str) -> bool:
+        """Whether the prewarmed container is still parked and unclaimed by its thread."""
+        with self._lock:
+            return self._thread_sandboxes.get(key) is None and sandbox_id in self._warm_pool
 
     def _publish_prewarmed_skill_view(self, thread_id: str, *, user_id: str, resolve: Callable[[], "AcceptedSkillSnapshot | None"] | None) -> None:
         """Stage the view the likely first turn would stage, and never fail for it.
@@ -3114,13 +3140,18 @@ class AioSandboxProvider(
             # Named, because an operator reading this needs to tell a benign
             # conflict (a run already owns this thread's view) from a disk
             # that is full or read-only, which costs every first turn the
-            # staging this exists to remove.
+            # staging this exists to remove. Losing the race to a real run is
+            # an ordinary outcome now that the publication runs outside the
+            # acquire serializer -- a person who types quickly produces it --
+            # so it is not a warning and carries no traceback.
             reason = getattr(exc, "code", None) or type(exc).__name__
-            logger.warning(
+            lost_the_race = reason == "skill_snapshot_binding_conflict"
+            logger.log(
+                logging.INFO if lost_the_race else logging.WARNING,
                 "Prewarmed sandbox for thread %s without its skill view (%s); its first turn stages one",
                 thread_id,
                 reason,
-                exc_info=True,
+                exc_info=not lost_the_race,
             )
         finally:
             # The lease was taken here, so it is released here; the published

@@ -253,7 +253,14 @@ def build_report(ctx: BuildContext, previous_draft: int, compute_checks) -> tupl
             "preferences_applied": [],
             "lang": LANG,
             "currency": {"code": currency, "source": ctx.currency_source},
-            "build": {"sources": [f"{table.path}::{table.sheet}" if table.sheet else table.path for table in ctx.tables], "mapping": dict(ctx.mappings[0].roles), "exclusions": list(options.exclusions)},
+            "build": {
+                "sources": [f"{table.path}::{table.sheet}" if table.sheet else table.path for table in ctx.tables],
+                "mapping": dict(ctx.mappings[0].roles),
+                "exclusions": list(options.exclusions),
+                # The columns no role claimed, so a reader of the report learns one
+                # exists without opening the input again.
+                "unmapped": list(ctx.unmapped_columns),
+            },
             "brand": {"company": company, "primary": options.brand["primary"], "secondary": options.brand["secondary"], "logo": options.brand.get("logo")},
         },
         "kpis": kpis,

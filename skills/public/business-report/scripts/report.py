@@ -31,7 +31,7 @@ import os
 import re
 import sys
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
@@ -209,7 +209,18 @@ def usable_header(name) -> bool:
     return bool(text) and re.fullmatch(r"Unnamed: \d+", text) is None
 
 
-def _read_csv(path: Path) -> pd.DataFrame:
+def _named_columns(columns: list[str]) -> list[str]:
+    """At most ``MAX_NAMED_COLUMNS`` names, with a count standing for the rest."""
+    if len(columns) <= MAX_NAMED_COLUMNS:
+        return list(columns)
+    return [*columns[:MAX_NAMED_COLUMNS], f"… {len(columns) - MAX_NAMED_COLUMNS} more"]
+
+
+def _read_csv(path: Path, *, headerless: bool = False) -> pd.DataFrame:
+    """The file as a table. ``headerless`` reads every line as data, so a title
+    row above the real header cannot decide the shape of the frame: a header of
+    one field over rows of three leaves pandas a one-column table, and nothing
+    downstream can recover the columns from that."""
     raw = path.read_bytes()
     for encoding in ("utf-8-sig", "cp1252"):
         try:
@@ -223,7 +234,20 @@ def _read_csv(path: Path) -> pd.DataFrame:
         delimiter = csv.Sniffer().sniff(text[:8192], delimiters=",;\t|").delimiter
     except csv.Error:
         delimiter = ","
-    frame = pd.read_csv(io.StringIO(text), sep=delimiter, dtype=str, keep_default_na=False, skip_blank_lines=True)
+    if headerless:
+        # The widest row decides the shape. Without this pandas takes the first
+        # line's field count as the width and refuses the rest of the file,
+        # which is the shape of every export that opens with a title.
+        width = max((len(row) for row in csv.reader(io.StringIO(text), delimiter=delimiter)), default=1)
+        names = list(range(width))
+    frame = pd.read_csv(
+        io.StringIO(text),
+        sep=delimiter,
+        dtype=str,
+        keep_default_na=False,
+        skip_blank_lines=True,
+        **({"header": None, "names": names} if headerless else {}),
+    )
     frame.columns = [str(column) for column in frame.columns]
     return frame
 
@@ -240,13 +264,55 @@ def _read_workbook(path: Path) -> dict[str, pd.DataFrame]:
     return result
 
 
+#: How far down a sheet a real header row may sit. An export that opens with a
+#: company name and a blank line is ordinary; a header below this is not, and
+#: guessing further would start reading data as column names.
+MAX_HEADER_SCAN_ROWS = 10
+
+#: How many unreadable amounts a check quotes back. The count says how much
+#: revenue moved; an example says which cells to go and fix.
+MAX_UNREADABLE_EXAMPLES = 3
+
+#: How many column names a question or a digest line carries. A sheet may hold
+#: thousands; a person answering "which column holds the date" is choosing from
+#: the front of the file, and the rest would only crowd the turn.
+MAX_NAMED_COLUMNS = 40
+
+
+def reheadered(frame: pd.DataFrame, profile: dict) -> pd.DataFrame | None:
+    """The same table read from the header row it actually has, or None.
+
+    An export whose first rows are a title and a blank line reaches pandas with
+    ``Unnamed: N`` columns and its real header sitting in the body. The header
+    is the first row whose cells are all usable, distinct names *and* which
+    resolves the roles the report requires; nothing weaker is accepted, so a
+    file that simply has no amount column is still refused by name rather than
+    rebuilt on a row that happened to look like a header.
+    """
+    limit = min(MAX_HEADER_SCAN_ROWS, int(frame.shape[0]))
+    for index in range(limit):
+        names = [to_text(value) for value in frame.iloc[index]]
+        if len(set(names)) != len(names) or not all(usable_header(name) for name in names):
+            continue
+        candidate = frame.iloc[index + 1 :].reset_index(drop=True)
+        candidate.columns = names
+        if not suggest_mapping(candidate, profile).missing:
+            return candidate
+    return None
+
+
 def read_tables(path: Path, profile: dict) -> tuple[list[tuple[str | None, pd.DataFrame]], list[dict], bool]:
     """Every data table in a file, the sheets skipped and why, and whether it is a workbook."""
 
     if not path.is_file():
         raise InputError(f"No such file: {path}")
     if path.suffix.lower() in (".csv", ".txt", ".tsv"):
-        return [(None, _read_csv(path))], [], False
+        frame = _read_csv(path)
+        if suggest_mapping(frame, profile).missing:
+            repaired = reheadered(_read_csv(path, headerless=True), profile)
+            if repaired is not None:
+                frame = repaired
+        return [(None, frame)], [], False
     if path.suffix.lower() not in (".xlsx", ".xlsm", ".xls"):
         raise InputError(f"{path.name}: only .csv, .xlsx, .xlsm and .xls files are supported.")
     tables: list[tuple[str | None, pd.DataFrame]] = []
@@ -257,8 +323,11 @@ def read_tables(path: Path, profile: dict) -> tuple[list[tuple[str | None, pd.Da
             continue
         mapping = suggest_mapping(frame, profile)
         if mapping.missing:
-            skipped.append({"sheet": sheet, "reason": f"no {' and '.join(mapping.missing)} column"})
-            continue
+            repaired = reheadered(frame, profile)
+            if repaired is None:
+                skipped.append({"sheet": sheet, "reason": f"no {' and '.join(mapping.missing)} column"})
+                continue
+            frame = repaired
         tables.append((sheet, frame))
     return tables, skipped, True
 
@@ -671,6 +740,8 @@ class CleanFrame:
     number_style: str | None
     date_order: str | None
     ambiguous_date_example: str | None
+    #: A few of the amount cells that could not be read, as the file wrote them.
+    unparsed_amount_examples: list[str] = field(default_factory=list)
 
 
 def apply_mapping(frame: pd.DataFrame, roles: dict[str, str | None]) -> CleanFrame:
@@ -708,6 +779,7 @@ def apply_mapping(frame: pd.DataFrame, roles: dict[str, str | None]) -> CleanFra
         number_style=style,
         date_order=date_order,
         ambiguous_date_example=ambiguous_example,
+        unparsed_amount_examples=[to_text(value) for value in frame.loc[amounts.isna() & non_empty, amount_column].map(to_text).drop_duplicates().head(MAX_UNREADABLE_EXAMPLES)],
     )
 
 
@@ -717,8 +789,15 @@ def apply_mapping(frame: pd.DataFrame, roles: dict[str, str | None]) -> CleanFra
 # --- building the report -------------------------------------------------------
 
 
-def prepare(sources: list[str], period_text: str, options: BuildOptions, mapping_override: dict | None, profile: dict) -> BuildContext:
-    """Read, map, clean and filter the inputs; raises DecisionNeeded when a question is due."""
+def prepare(sources: list[str], period_text: str | None, options: BuildOptions, mapping_override: dict | None, profile: dict) -> BuildContext:
+    """Read, map, clean and filter the inputs; raises DecisionNeeded when a question is due.
+
+    ``period_text`` of ``None`` means the caller named no period -- the common
+    "make me a report from this file" -- and the file answers it: the month
+    holding most of its rows. Asking instead would cost the person a round trip
+    for a question the data already answers, and the report says in its checks
+    which period it chose so they can name another.
+    """
 
     if not sources:
         raise InputError("Give at least one CSV, XLSX or XLS file.")
@@ -729,7 +808,21 @@ def prepare(sources: list[str], period_text: str, options: BuildOptions, mapping
         mapping = resolve_mapping(table.frame, profile, mapping_override, table.name)
         question = mapping_question(mapping, table.name, profile)
         if question:
-            raise DecisionNeeded(question, {"file": table.name, "sheet": table.sheet, "ambiguous": mapping.ambiguous, "missing": mapping.missing, "mapping": mapping.roles})
+            # The columns the file does have travel with the question. Without
+            # them a missing role reads as "no column matched" and the only way
+            # to see what the file holds is a second read of it, which is the
+            # round trip this exit exists to avoid.
+            raise DecisionNeeded(
+                question,
+                {
+                    "file": table.name,
+                    "sheet": table.sheet,
+                    "columns": _named_columns([column for column in table.frame.columns if usable_header(column)]),
+                    "ambiguous": mapping.ambiguous,
+                    "missing": mapping.missing,
+                    "mapping": mapping.roles,
+                },
+            )
         mappings.append(mapping)
     for role, column in (mapping_override or {}).items():
         if isinstance(column, str) and role in ("category", "person", "customer", "source", "status"):
@@ -748,7 +841,12 @@ def prepare(sources: list[str], period_text: str, options: BuildOptions, mapping
     for role in TEXT_ROLES:
         if role in all_rows.columns:
             all_rows[role] = all_rows[role].fillna("").astype(str)
-    period = parse_period(period_text)
+    if period_text is None:
+        period = suggest_period(all_rows["date"])
+        if period is None:
+            raise InputError("No period was given and no row has a usable date, so there is nothing to report on.")
+    else:
+        period = parse_period(period_text)
     currency, currency_source = detect_currency(tables[0].frame, mappings[0].roles["amount"])
     if options.currency:
         currency, currency_source = options.currency, "preferences"
@@ -791,7 +889,9 @@ def prepare(sources: list[str], period_text: str, options: BuildOptions, mapping
         ambiguous_date_example=next((clean.ambiguous_date_example for clean in cleaned if clean.ambiguous_date_example), None),
         excluded_rows=excluded_in_period,
         unparsed_dates=sum(clean.unparsed_dates for clean in cleaned),
+        period_was_given=period_text is not None,
         unparsed_amounts=sum(clean.unparsed_amounts for clean in cleaned),
+        unparsed_amount_examples=list(dict.fromkeys(example for clean in cleaned for example in clean.unparsed_amount_examples))[:MAX_UNREADABLE_EXAMPLES],
         parsed_amounts=sum(clean.parsed_amounts for clean in cleaned),
         exclusion_texts=exclusion_texts,
     )
@@ -806,6 +906,11 @@ def prepare(sources: list[str], period_text: str, options: BuildOptions, mapping
 SUM_TOLERANCE_PER_ROW = 0.005  # each rounded table cell may be half a cent off its unrounded value
 
 
+def _like(examples: list[str]) -> str:
+    """`` (like "n/a", "see invoice")``, or nothing when there is no example."""
+    return f" (like {', '.join(chr(34) + example + chr(34) for example in examples)})" if examples else ""
+
+
 def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count: int, sections: list[dict]) -> list[dict]:
     profile, period, currency = ctx.profile, ctx.period, ctx.currency
     records, record = vocab(profile, "records", "rows"), vocab(profile, "record", "row")
@@ -817,6 +922,14 @@ def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count:
     )
     used_text += f", {format_value(ctx.excluded_rows, 'integer')} {'was' if ctx.excluded_rows == 1 else 'were'} excluded." if ctx.excluded_rows else "."
     checks.append({"id": "rows_used", "status": "pass", "text": used_text})
+    if not ctx.period_was_given:
+        checks.append(
+            {
+                "id": "period_choice",
+                "status": "warn",
+                "text": f"No period was asked for, so this report covers {period.label}, where most of the {records} in the file fall. Say another period to change it.",
+            }
+        )
 
     independent = independent_amount_total(rows["amount_raw"].tolist(), ctx.number_style)
     mismatches = []
@@ -872,7 +985,11 @@ def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count:
             {
                 "id": "unparsed_amounts",
                 "status": "warn",
-                "text": f"{format_value(ctx.unparsed_amounts, 'integer')} {plural(ctx.unparsed_amounts, 'row')} had no usable amount and {'counts' if ctx.unparsed_amounts == 1 else 'count'} as {format_value(0, 'currency', currency)}.",
+                "text": (
+                    f"{format_value(ctx.unparsed_amounts, 'integer')} {plural(ctx.unparsed_amounts, 'row')} had no usable amount "
+                    f"and {'counts' if ctx.unparsed_amounts == 1 else 'count'} as {format_value(0, 'currency', currency)}"
+                    f"{_like(ctx.unparsed_amount_examples)}."
+                ),
             }
         )
     else:
@@ -1090,6 +1207,12 @@ def show_report(report: dict) -> str:
     lines.append("Not included: " + (" ".join(report["notes"]) if report["notes"] else "nothing; every section the profile lists is in the report."))
     inputs = ", ".join(f"{entry['name']} (uploaded {entry['uploaded']}, {entry['rows']} rows)" for entry in meta["inputs"])
     lines.append(f"Inputs: {inputs}")
+    # What the report did not read. The rows table carries these columns, but
+    # `show` never prints rows, so without this line the only way to learn that
+    # a `Treatment` column existed is to read the file again.
+    unused = meta.get("build", {}).get("unmapped") or []
+    if unused:
+        lines.append("Unused columns: " + ", ".join(_named_columns(unused)))
     # A cell, a column name or a profile word must not be able to start a line:
     # the model is told to act on whole lines of this digest.
     return "\n".join(one_line(line) for line in lines)
@@ -1419,7 +1542,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     build_parser_ = commands.add_parser("build", help="Compute the report: report.json, charts and checks.")
     build_parser_.add_argument("files", nargs="+", help="CSV, XLSX or XLS files; earlier periods in the same files or extra files feed the comparisons")
-    build_parser_.add_argument("--period", required=True, help="YYYY-MM, YYYY-Qn, YYYY or YYYY-MM-DD..YYYY-MM-DD")
+    build_parser_.add_argument("--period", help="YYYY-MM, YYYY-Qn, YYYY or YYYY-MM-DD..YYYY-MM-DD; omitted, the file's busiest month, named in the checks")
     build_parser_.add_argument("--out", required=True, help="Directory for the report, its charts and checks.json")
     build_parser_.add_argument("--mapping", help="JSON file: {role: column or null} to settle a question from inspect")
     build_parser_.add_argument("--profile", help="Profile name or path (default: services-generic)")

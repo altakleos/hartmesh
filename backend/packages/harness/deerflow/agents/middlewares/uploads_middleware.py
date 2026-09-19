@@ -18,6 +18,7 @@ from langgraph.runtime import Runtime
 from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import resolve_runtime_user_id
+from deerflow.sandbox.search import is_binary_file
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_outline import extract_outline_for_file
 from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, message_content_to_text
@@ -76,6 +77,21 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
         self._paths = Paths(base_dir) if base_dir else get_paths()
         self._max_files_per_context_section = max_files_per_context_section
 
+    @staticmethod
+    def _has_text_form(file: dict) -> bool:
+        """Whether `read_file` and `grep` have anything to read in this upload.
+
+        True when the conversion produced a text projection of it, or when the
+        file's own bytes are text. The second half is the same test `grep`
+        applies before it opens a file (``deerflow.sandbox.search``), so the
+        guidance and the tool agree by construction: a file grep would skip is
+        a file the model is not sent to grep. Unknown means yes -- where the
+        uploads directory is not readable here, nothing is claimed away.
+        """
+        if file.get("outline") or file.get("outline_preview"):
+            return True
+        return bool(file.get("has_text_form", True))
+
     def _format_file_entry(self, file: dict, lines: list[str]) -> None:
         """Append a single file entry (name, size, path, optional outline) to lines.
 
@@ -105,7 +121,12 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 lines.append("  No structural headings detected. Document begins with:")
                 for text in preview:
                     lines.append(f"    > {neutralize_untrusted_tags(text)}")
-            lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
+            if self._has_text_form(file):
+                lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
+            else:
+                # A workbook, an image, an archive: bytes no text tool can read.
+                # Saying so is the difference between one tool call and several.
+                lines.append("  This file is not text: `read_file` and `grep` have nothing to read in it. Use the tool or skill that reads this format, which reads the file itself.")
         lines.append("")
 
     def _select_files_for_context(
@@ -143,16 +164,21 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 lines.append(f"... ({len(omitted_files)} more file(s) from this message omitted from this context.)")
                 lines.append(f"  Omitted file types: {_format_omitted_file_types(omitted_files)}")
                 lines.append("  Use `glob(pattern='**/*', path='/mnt/user-data/uploads/')` to list all uploads.")
-                lines.append("  Use `grep(pattern='keyword', path='/mnt/user-data/uploads/')` to search across uploads.")
+                if any(self._has_text_form(file) for file in omitted_files):
+                    lines.append("  Use `grep(pattern='keyword', path='/mnt/user-data/uploads/')` to search across uploads.")
                 lines.append("")
         else:
             lines.append("(empty)")
             lines.append("")
 
+        # The reading advice belongs only to the files it can be followed on.
+        # A batch of workbooks that is told to read and grep first spends a
+        # round trip proving there is nothing to read.
         lines.append("To work with these files:")
-        lines.append("- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.")
-        lines.append("- Use `grep` to search for keywords when you are not sure which section to look at")
-        lines.append("  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).")
+        if any(self._has_text_form(file) for file in files):
+            lines.append("- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.")
+            lines.append("- Use `grep` to search for keywords when you are not sure which section to look at")
+            lines.append("  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).")
         lines.append("- Use `glob` to find files by name pattern")
         lines.append("  (e.g. `glob(pattern='**/*.md', path='/mnt/user-data/uploads/')`).")
         lines.append("- Only fall back to web search if the file content is clearly insufficient to answer the question.")
@@ -250,6 +276,9 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 outline, preview = extract_outline_for_file(phys_path)
                 file["outline"] = outline
                 file["outline_preview"] = preview
+                # Recorded here, where the bytes are reachable, so the prompt
+                # builder never touches the disk.
+                file["has_text_form"] = bool(outline or preview) or not is_binary_file(phys_path)
 
         logger.debug(f"Current uploads: {[f['filename'] for f in new_files]}")
 

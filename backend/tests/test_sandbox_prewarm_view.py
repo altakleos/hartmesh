@@ -17,6 +17,7 @@ published costs the turn nothing either: the container is parked regardless.
 
 from __future__ import annotations
 
+import threading
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,78 @@ def test_prewarm_publishes_the_view_and_the_first_turn_verifies_it_in_place(prov
 
     assert first == parked
     assert writes == [], "the first turn adopted the published tree without staging a byte"
+
+
+def test_a_turn_does_not_wait_for_the_prewarms_view_publication(provider_and_paths, tmp_path, monkeypatch):
+    """The released .26 tenant queued 3.7 s of every new chat, and 16.3 s of the first one
+    after a boot, on the per-(user, thread) acquire serializer -- which this publication was
+    holding. The container is already parked when it starts, and the publication fences itself
+    under the views lock: a generation-0 bind is refused where a run owns the view, and the
+    clear is a compare-and-pop that never touches another run's bytes. So it runs outside the
+    hold, and a turn that arrives mid-publication takes its container and goes.
+    """
+    provider, backend, paths = provider_and_paths
+    snapshot = _snapshot(tmp_path)
+    publishing, finish = threading.Event(), threading.Event()
+    real_publish = provider._publish_prewarmed_skill_view
+
+    def blocking_publish(*args, **kwargs):
+        publishing.set()
+        assert finish.wait(10), "the turn never got through the serializer"
+        return real_publish(*args, **kwargs)
+
+    monkeypatch.setattr(provider, "_publish_prewarmed_skill_view", blocking_publish)
+    prewarm = threading.Thread(
+        target=provider._prewarm_accepted_skills,
+        args=(THREAD,),
+        kwargs={"user_id": ACCEPTED_USER, "resolve_skill_snapshot": lambda: snapshot},
+    )
+    prewarm.start()
+    try:
+        assert publishing.wait(10), "the prewarm never reached the publication"
+        turn: dict[str, object] = {}
+
+        def take_it() -> None:
+            try:
+                turn["sandbox"] = _acquire_accepted(provider, THREAD)
+            except BaseException as error:  # noqa: BLE001 - reported through the assertion below
+                turn["error"] = error
+
+        arriving = threading.Thread(target=take_it)
+        arriving.start()
+        try:
+            arriving.join(10)
+            assert not arriving.is_alive(), "the turn queued behind the prewarm's view publication"
+        finally:
+            finish.set()
+            arriving.join(10)
+        assert "error" not in turn, turn.get("error")
+        assert turn["sandbox"] is not None
+    finally:
+        finish.set()
+        prewarm.join(10)
+    assert not prewarm.is_alive()
+
+
+def test_a_container_a_turn_already_took_is_no_longer_a_guess(provider_and_paths, tmp_path):
+    """Publishing outside the hold means the guess can finish after the turn it was meant to
+    help. A turn that already holds the container gains nothing from one, and a guess landing
+    behind that turn's own teardown stages bytes for a thread with no container -- or, inside
+    the release, leaves the thread's projection refusing every later turn. So the publication
+    asks whether its container is still a guess, and drops it when it is not."""
+    provider, _backend, _paths = provider_and_paths
+    snapshot = _snapshot(tmp_path)
+    key = provider._thread_key(THREAD, ACCEPTED_USER)
+
+    parked = provider._prewarm_accepted_skills(THREAD, user_id=ACCEPTED_USER, resolve_skill_snapshot=lambda: snapshot)
+
+    assert parked is not None
+    assert provider._prewarmed_container_is_still_a_guess(key, parked) is True, "parked and unclaimed"
+
+    taken = _acquire_accepted(provider, THREAD)
+
+    assert taken == parked
+    assert provider._prewarmed_container_is_still_a_guess(key, parked) is False, "a turn holds it now"
 
 
 def test_a_turn_with_a_different_snapshot_restages_and_is_never_refused(provider_and_paths, tmp_path):

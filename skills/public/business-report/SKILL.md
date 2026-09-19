@@ -13,7 +13,7 @@ One script turns an export into a report draft: `report.json` plus PNG charts, t
 
 ```
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" inspect <files…>
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build   <files…> --period 2026-08 --out REPORTDIR [--render pdf,docx,xlsx]
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build   <files…> [--period 2026-08] --out REPORTDIR [--render pdf,docx,xlsx]
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" show    REPORTDIR/<dirname>.report.json
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" prose   REPORTDIR/<dirname>.report.json --from prose.json [--render pdf,docx,xlsx]
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" render  REPORTDIR/<dirname>.report.json --to pdf,docx,xlsx
@@ -48,34 +48,17 @@ Exit codes: `0` done; `1` a problem the user must hear about (stderr says what),
 
 ## Workflow
 
-### Step 1 (usually skipped): `inspect`, only when the period or a role is unknown
+### Step 1: Build
 
-When the user named the period ("the August report", "Q3", "last year") go
-straight to Step 2: `build` reads the file the same way `inspect` does, picks
-the column roles itself, and stops with exit `3` and the one question on
-stderr when a role is ambiguous or missing — so an `inspect` run first is a
-round trip the user waits through for an answer `build` would have given.
-Run `inspect` only when the period is not known (its `period_suggestion`
-names the latest complete one), when the user asked what the file contains,
-or when a `build` exited `3` saying a role had *no column matched* and you
-need to see the columns the file does have. An exit `3` that names candidate
-columns has already answered itself — ask the user that question, do not
-re-read the file with `inspect`:
-
-```bash
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" inspect /mnt/user-data/uploads/export.xlsx
-```
-
-The JSON output gives, per file and sheet: the columns with their type and samples, the suggested column roles (`date`, `amount`, `id`, `customer`, `category`, `person`, `status`, `source`, `quantity`, `location`) with a confidence, `ambiguous` roles with their candidate columns, `missing` required roles, the months present, a `period_suggestion`, `date_order` (how day and month were read), a `currency` guess and a ready-made `question` that covers every open role at once.
-
-When you did run it, tell the user in one sentence what you found: rows, date range, the people or categories seen, the currency. Then:
-
-- If `question` is null, do not ask for confirmation; go on to build the suggested period unless the user named a different one.
-- If `question` is set, ask exactly that, once, even when it names two roles. Put every answer in one mapping file, `{"date": "Completed On", "amount": "Invoice Total"}`, and pass `--mapping` to build. A column you name explicitly displaces any role the script had guessed for it; `{"id": null}` clears a role. A workbook sheet is addressed as `export.xlsx::Sheet name`, never by sheet name alone.
-- If `inspect` shows a column that clearly holds a role the script did not match (a `Treatment` column when the profile expects `Service`), map it the same way; the section then takes its heading from that column name. Do not ask about it.
-- Ask about the currency only when the check says it is assumed and the user's context makes another currency likely. Ask about the date order only when the `date_order` check appears and the user's context makes day/month likely.
-
-### Step 2: Build
+Build first. The script reads the file, picks the column roles, settles the
+date order and the currency itself, and stops with exit `3` and one question
+on stderr when a role is genuinely ambiguous or missing -- and that question
+carries the file's columns, so it answers itself. Reading the file before
+building buys nothing the build does not print: a run that succeeds prints the
+rows, the period, the currency, every table and the columns no role claimed.
+A period the user did not name is not a reason to read the file either: leave
+`--period` off and the build covers the month holding most of the rows and
+says so in its checks, for the user to correct in one sentence.
 
 ```bash
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build \
@@ -96,15 +79,15 @@ with the `bash` tool's `present` argument naming the four files this run writes:
 ]}
 ```
 
-Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `charts/*.png`, `checks.json` and `renders.json` (which renders belong to this draft) in `--out`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the directory, one directory per report; a second build into the same directory becomes the next draft, removes its own renders of the previous draft (they no longer match) and says so. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`. A period with no rows is an error that names the dates the files do cover; build a period the files have.
+Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `charts/*.png`, `checks.json` and `renders.json` (which renders belong to this draft) in `--out`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the directory, one directory per report; a second build into the same directory becomes the next draft, removes its own renders of the previous draft (they no longer match) and says so. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`; leave `--period` off when the user named none. A period with no rows is an error that names the dates the files do cover; build a period the files have.
 
 Options: `--exclude category=Warranty` (repeatable; a role or an exact column name, matched case-insensitively), `--company "Name"`, `--title "..."`, `--currency EUR`, `--short` for a one-sentence summary, `--prefs preferences.json`, `--profile <name>` (a tenant profile from `/mnt/tenant/report-profiles/` wins over the skill's `profiles/`).
 
-The output then prints the report itself — the KPIs, every table, the `Checks:` line, a `Not included:` line and the `Inputs:` line — which is what `show` prints, so Step 3 needs no second run. Repeat the checks to the user in plain words, and the not-included items when there are any (the line says "nothing" when every section is there; do not read that out). Never claim a check the line does not show. If the build exits `1` with "Report withheld", the totals did not reconcile: say so, show the check text, and do not render anything.
+The output then prints the report itself — the KPIs, every table, the `Checks:` line, a `Not included:` line and the `Inputs:` line — which is what `show` prints, so Step 2 needs no second run. Repeat the checks to the user in plain words, and the not-included items when there are any (the line says "nothing" when every section is there; do not read that out). Never claim a check the line does not show. If the build exits `1` with "Report withheld", the totals did not reconcile: say so, show the check text, and do not render anything.
 
-`--render pdf,docx,xlsx` renders in the same run and is the normal first report: the build already carries a factual summary and actions computed from the data, so the user has all three files after one run. Leave it off only when you are going to write your own summary in Step 3 in the same turn, because the prose step replaces the text and every render made before it; a build without `--render` still names the report alone under `present`, because the workspace draws the report from it.
+`--render pdf,docx,xlsx` renders in the same run and is the normal first report: the build already carries a factual summary and actions computed from the data, so the user has all three files after one run. Leave it off only when you are going to write your own summary in Step 2 in the same turn, because the prose step replaces the text and every render made before it; a build without `--render` still names the report alone under `present`, because the workspace draws the report from it.
 
-### Step 3: Write the summary and the actions, then verify them
+### Step 2: Write the summary and the actions, then verify them
 
 The build already printed the figures. Write one summary paragraph and up to three actions from those figures only, then hand them to the script together with the formats to render:
 
@@ -116,9 +99,9 @@ JSON
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" prose /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json --from /tmp/prose.json --render pdf,docx,xlsx
 ```
 
-again with `present` naming the report and the three renders. That one run makes the next draft without recomputing anything, renders all three formats and prints the same figures-checks-inputs digest the build printed — summary and actions included, as the report now carries them. So there is nothing to look up afterwards and Step 4 is already done. Run `show` only for a report built in an earlier turn, whose figures are no longer in front of you. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
+again with `present` naming the report and the three renders. That one run makes the next draft without recomputing anything, renders all three formats and prints the same figures-checks-inputs digest the build printed — summary and actions included, as the report now carries them. So there is nothing to look up afterwards and Step 3 is already done. Run `show` only for a report built in an earlier turn, whose figures are no longer in front of you. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
 
-### Step 4: Render
+### Step 3: Render
 
 Only for a report whose last run did not render — a `build` or `prose` run
 without `--render`, or a draft from an earlier turn. One run makes every
@@ -131,7 +114,7 @@ python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" render
 
 Renders land next to the report as `<name>.pdf`, `.docx` and `.xlsx`; `--to html` also works but HTML is the sheet the PDF is printed from, not a format the user is offered. Rendering reads only `report.json` and the pictures inside the report directory (and the tenant bundle); it never rebuilds. The DOCX has real headings and tables so the user can edit it; the XLSX has a Summary sheet whose revenue, count and average are live formulas over the Rows sheet, one sheet per table with live `SUM` totals and a live ratio for average columns, and the cleaned rows.
 
-### Step 5: Answer
+### Step 4: Answer
 
 The files you named under `present` are already with the user: the tool result names them under "Presented to the user". Do not call `present_files` for those and do not run `ls` to check they exist. A `Not attached:` line from the tool names a file it did not deliver and why (it does not exist, or this run did not write it) — if the run printed an error, say what it printed and do not claim a delivery; a `Note:` line from the script names a file that sits beside the report but was not written by it. A result with no "Presented to the user" line handed nothing over. In the web workspace the `<name>.report.json` is drawn as the report itself — the figures, the charts, the checks line and a download button for the PDF, Word and Excel renders listed with it; on a chat platform it is simply one more file. Show the KPI strip, the checks line and any `Not included` items in your reply. Say which file the report used and when it was uploaded (the `Inputs:` line of the digest `build`, `prose` and `show` print). Then ask one short question about what to change, for example whether any rows should be excluded or a note added.
 
@@ -167,15 +150,26 @@ When `/mnt/tenant/brand.json` exists the script picks up the company name, logo 
 - `totals_reconcile`: the report total against an independent sum of the amount column and against each table's total. The only check that withholds the report.
 - `rows_used`: rows read, rows outside the period, rows without a usable date, rows excluded.
 - `date_order`: only when day and month could not be told apart (every value has both parts at 12 or below); says which order was assumed.
-- `duplicate_ids`, `unmapped_rows` (blank person or category, listed as Unassigned or Uncategorized), `unparsed_amounts` (unreadable amounts count as zero; an amount column with no readable value at all is called out), `currency` (stated or assumed), `exclusions`, `external_links` (workbook links are not checked), `prose_numbers` after Step 3.
+- `duplicate_ids`, `unmapped_rows` (blank person or category, listed as Unassigned or Uncategorized), `unparsed_amounts` (unreadable amounts count as zero; an amount column with no readable value at all is called out), `currency` (stated or assumed), `exclusions`, `external_links` (workbook links are not checked), `prose_numbers` after Step 2.
 
 Every check is labelled "checked by the report script"; that is what it is.
 
 ## When an export does not load cleanly
 
+`inspect` is the tool for these. It is not a step on the way to a report:
+everything it returns about a file that builds is in what the build prints.
+
+```bash
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" inspect /mnt/user-data/uploads/export.xlsx
+```
+
+Per file and sheet it gives the columns with their type and samples, the suggested roles with a confidence, `ambiguous` roles with their candidates, `missing` required roles, the months present, a `period_suggestion` (the busiest month), `date_order`, a `currency` guess and a ready-made `question` covering every open role at once. When `question` is set, ask exactly that, once, even when it names two roles; put every answer in one mapping file, `{"date": "Completed On", "amount": "Invoice Total"}`, and pass `--mapping` to the build. A column you name explicitly displaces any role the script guessed for it; `{"id": null}` clears a role. A workbook sheet is addressed as `export.xlsx::Sheet name`, never by sheet name alone.
+
 - Exit `3` with a sheet question: pass `file.xlsx::Sheet`.
-- "no date and amount column": the header row is not the first row (`Unnamed: N` columns are the sign). Read the sheet with pandas using `header=<row>`, write a CSV into `/mnt/user-data/workspace/`, and build from that; say so.
-- Amounts in a format the script cannot read count as zero and appear in `unparsed_amounts`; look at the samples in `inspect` and tell the user which values were unreadable. The decimal separator is decided once per column from the values ("1.234,56" reads as European; "1,234.56" as US).
+- Exit `3` for a role: its `columns` list is what the file holds. When one of them clearly carries a role the script did not match (a `Treatment` column where the profile expects a service), map it and build again; the section then takes its heading from that column name. Do not ask the user about it, and do not read the file to see it.
+- A build that succeeded but named columns under `Unused columns:` read the same way: map one when it clearly holds a role the report is missing.
+- A header row that is not the first row needs nothing from you: an export that opens with a company name and a blank line is read from the row that names the columns. "no date and amount column" therefore means the file really has none in the first ten rows -- say what the file does have (`inspect` lists it) and ask which column carries the date and the amount.
+- Amounts in a format the script cannot read count as zero and appear in `unparsed_amounts`, which quotes a few of them as the file wrote them: repeat those to the user, because revenue moved. The decimal separator is decided once per column from the values ("1.234,56" reads as European; "1,234.56" as US).
 - Timestamps that carry a time zone offset are converted to UTC before the period is applied.
 - A `.xls` that is an HTML or CSV export in disguise: save it under the right extension in the workspace first.
 
