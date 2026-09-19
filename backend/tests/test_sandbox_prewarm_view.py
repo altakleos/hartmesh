@@ -17,11 +17,12 @@ published costs the turn nothing either: the container is parked regardless.
 
 from __future__ import annotations
 
+import logging
 import threading
 from pathlib import Path
 
 import pytest
-from test_accepted_skill_snapshots import _parsed_skill, _refuse_staging, _write_skill
+from test_accepted_skill_snapshots import _fenced_release, _parsed_skill, _refuse_staging, _write_skill
 from test_sandbox_warm_reuse_latency import ACCEPTED_USER, _acquire_accepted, _aio_mod, _make_provider
 
 from deerflow.runtime.skill_snapshot import cleanup_abandoned_skill_snapshots, snapshot_effective_skills
@@ -224,31 +225,79 @@ def test_prewarm_never_overrides_a_view_a_real_run_bound(provider_and_paths, tmp
 
 
 def test_a_failed_first_bind_can_still_recover_the_thread(provider_and_paths, tmp_path):
-    """A guess must never be ownership, or a failed bind wedges the thread forever.
+    """A first turn whose own bind raises leaves the thread usable, published guess or not.
 
-    When a turn's own bind raises after it claimed the coordinator -- the
-    tenant's disk filling during staging is the realistic cause, and it is
-    the very bind this prewarm exists to make cheap -- the runtime unwinds by
-    clearing the view. That unwind has two steps and a prewarm that *owned*
-    the view failed both: the compare-and-clear carries the run's
-    ``(run_id, generation)`` and cannot match the guess, and the fallback
-    refuses outright because a recorded view is an owned one. Neither reaches
-    ``finalize_release``, so the coordinator keeps ``clearing`` set and every
-    later turn on that thread is refused -- permanently, since
-    ``fence_committed_owner`` also refuses a clearing state.
+    This is the behaviour the prewarm's compare-and-pop already preserved:
+    after the pop the view is retained-but-unowned, which the old recovery
+    path emptied too. The window test below is the case it did not survive.
 
-    So the prewarm publishes bytes and keeps nothing: the tree stays for the
-    turn to verify, and the view is unowned, which is the state the unwind
-    knows how to finish.
+    The unwind releases the turn's consumer; the exact compare-and-release
+    cannot match a guess, and the recovery half empties the view under the
+    coordinator's fence whatever record it carries. So the prewarm's
+    compare-and-pop is hygiene -- the map's records are the coordinator's
+    identities and a guess is not one -- and no longer what stands between a
+    full disk and a thread refused for the life of the process.
     """
-    from deerflow.runtime.skill_snapshot import release_unowned_skill_snapshot_active_view
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
 
-    provider, _backend, _paths = provider_and_paths
+    provider, _backend, paths = provider_and_paths
     snapshot = _snapshot(tmp_path)
+    parked = provider._prewarm_accepted_skills(THREAD, user_id=ACCEPTED_USER, resolve_skill_snapshot=lambda: snapshot)
+    assert parked is not None
+    first = _acquire_accepted(provider, THREAD)
+    assert first == parked
 
-    assert provider._prewarm_accepted_skills(THREAD, user_id=ACCEPTED_USER, resolve_skill_snapshot=lambda: snapshot) is not None
+    coordinator = get_skill_projection_coordinator()
+    clear = _fenced_release(coordinator, user_id=ACCEPTED_USER, thread_id=THREAD, sandbox_id=first, run_id="run-1")
+    try:
+        assert provider.ensure_accepted_skill_snapshot_absent(clear) is True
+        assert list(paths.skill_snapshot_active_view_dir(ACCEPTED_USER, THREAD).iterdir()) == []
+    finally:
+        assert coordinator.finalize_release(clear)
 
-    assert release_unowned_skill_snapshot_active_view(user_id=ACCEPTED_USER, thread_id=THREAD) is True
+
+def test_a_turn_that_fails_inside_the_prewarms_window_is_not_wedged(provider_and_paths, tmp_path, caplog):
+    """Between the prewarm's publication and its pop, its record is in the map; a failing turn must not care.
+
+    The publication runs outside the acquire serializer since the repair the
+    released .26 measured, so a turn can take the container and fail its own bind while the
+    prewarm's ``(prewarm, 0)`` record is still recorded. That record is not
+    ownership: the coordinator holds the thread under the turn's release.
+    """
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence, get_skill_projection_coordinator
+
+    provider, _backend, paths = provider_and_paths
+    snapshot = _snapshot(tmp_path)
+    parked = provider._prewarm_accepted_skills(THREAD, user_id=ACCEPTED_USER, resolve_skill_snapshot=lambda: None)
+    assert parked is not None
+    snapshot_module.bind_skill_snapshot_active_view(
+        user_id=ACCEPTED_USER,
+        thread_id=THREAD,
+        snapshot_id=snapshot.snapshot_id,
+        run_id=_aio_mod().PREWARM_VIEW_RUN_ID,
+        generation=PREWARM_GENERATION,
+        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+    )
+    first = _acquire_accepted(provider, THREAD)
+    assert first == parked
+
+    coordinator = get_skill_projection_coordinator()
+    clear = _fenced_release(coordinator, user_id=ACCEPTED_USER, thread_id=THREAD, sandbox_id=first, run_id="run-1")
+    view = paths.skill_snapshot_active_view_dir(ACCEPTED_USER, THREAD)
+    try:
+        with caplog.at_level(logging.INFO, logger="deerflow.runtime.skill_snapshot"):
+            assert provider.ensure_accepted_skill_snapshot_absent(clear) is True
+        assert list(view.iterdir()) == []
+        # A guess caught mid-window is an ordinary interleaving, not a warning.
+        [emptied] = [record for record in caplog.records if record.getMessage().startswith("Emptied the accepted skill view")]
+        assert emptied.levelno == logging.INFO
+        assert "recorded to prewarm/0" in emptied.getMessage()
+        # The prewarm's own pop, arriving late, finds nothing of its own and changes nothing.
+        assert snapshot_module.clear_skill_snapshot_active_view(user_id=ACCEPTED_USER, thread_id=THREAD, run_id=_aio_mod().PREWARM_VIEW_RUN_ID, generation=PREWARM_GENERATION) is False
+        assert list(view.iterdir()) == []
+    finally:
+        assert coordinator.finalize_release(clear)
 
 
 def test_a_prewarm_that_builds_nothing_never_resolves_a_guess(provider_and_paths, tmp_path):

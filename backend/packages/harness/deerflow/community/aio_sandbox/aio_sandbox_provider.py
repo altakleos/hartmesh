@@ -3091,15 +3091,13 @@ class AioSandboxProvider(
         without a conflict, and a thread whose view a run already owns keeps
         what that run bound.
 
-        The bytes are published and the ownership record is then dropped, so
-        the view ends in the module's retained-but-unowned state. Keeping the
-        record would make a guess into ownership: a turn whose own bind then
-        raised -- the tenant's disk filling during staging is the realistic
-        cause, and that is the very bind this exists to make cheap -- could
-        neither compare-and-clear it (the run's ``(run_id, generation)``
-        cannot match a guess) nor fall back to clearing an unowned view, so
-        the coordinator would keep ``clearing`` set and refuse every later
-        turn on that thread for the life of the process.
+        The bytes are published and the record is then dropped, so the view
+        ends in the module's retained-but-unowned state. The map's records
+        are the identities the coordinator issued and a guess is not one: a
+        turn's exact compare-and-release only ever matches its own record,
+        and a turn whose own bind raises empties the view under the
+        coordinator's fence whatever the map holds, so the pop is hygiene
+        rather than what keeps a full disk from wedging the thread.
 
         Everything here is best effort. The container is the prewarm's
         deliverable; the view is a head start, and a head start that cannot
@@ -4492,7 +4490,7 @@ class AioSandboxProvider(
 
     def ensure_accepted_skill_snapshot_absent(self, clear: "SkillProjectionClear") -> bool:
         from deerflow.runtime.skill_projection import SkillProjectionClear
-        from deerflow.runtime.skill_snapshot import release_unowned_skill_snapshot_active_view
+        from deerflow.runtime.skill_snapshot import empty_skill_snapshot_active_view
 
         if not isinstance(clear, SkillProjectionClear):
             return False
@@ -4504,11 +4502,11 @@ class AioSandboxProvider(
         ):
             return False
         if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
+            # The material lives inside the sandbox, so absent means the
+            # sandbox is gone; a sandbox that is still there is the honest
+            # unknown and stays refused.
             return self.get(clear.sandbox_id) is None
-        return release_unowned_skill_snapshot_active_view(
-            user_id=clear.user_id,
-            thread_id=clear.thread_id,
-        )
+        return empty_skill_snapshot_active_view(clear=clear)
 
     def destroy(self, sandbox_id: str) -> None:
         """Destroy a sandbox: stop the container and free all resources.

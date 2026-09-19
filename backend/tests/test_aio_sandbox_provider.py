@@ -15,6 +15,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
+from test_accepted_skill_snapshots import _fenced_release
 
 from deerflow.config.paths import Paths, join_host_path
 from deerflow.config.sandbox_config import SandboxConfig
@@ -969,7 +970,7 @@ def test_aio_proves_failed_prepublication_view_is_empty(
     monkeypatch,
 ) -> None:
     from deerflow.config.paths import Paths
-    from deerflow.runtime.skill_projection import SkillProjectionClear
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
 
     paths = Paths(base_dir=tmp_path / "state")
     monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
@@ -981,17 +982,13 @@ def test_aio_proves_failed_prepublication_view_is_empty(
     provider._thread_sandboxes[identity] = "sandbox-aio-unpublished"
     provider._active_sandbox_identity["sandbox-aio-unpublished"] = identity
     provider._accepted_only_sandbox_ids = {"sandbox-aio-unpublished"}
-    clear = SkillProjectionClear(
-        user_id=identity[0],
-        thread_id=identity[1],
-        sandbox_id="sandbox-aio-unpublished",
-        run_id="aio-unpublished-run",
-        generation=1,
-        snapshot_id=None,
-    )
-
-    assert provider.clear_accepted_skill_snapshot(clear) is False
-    assert provider.ensure_accepted_skill_snapshot_absent(clear)
+    coordinator = get_skill_projection_coordinator()
+    clear = _fenced_release(coordinator, user_id=identity[0], thread_id=identity[1], sandbox_id="sandbox-aio-unpublished", run_id="aio-unpublished-run")
+    try:
+        assert provider.clear_accepted_skill_snapshot(clear) is False
+        assert provider.ensure_accepted_skill_snapshot_absent(clear)
+    finally:
+        assert coordinator.finalize_release(clear)
 
 
 def test_thread_skill_projection_mounts_all_categories(
@@ -2976,13 +2973,13 @@ def test_aio_release_recovery_is_not_wedged_by_a_retained_view(tmp_path, monkeyp
     """The release fallback must still succeed on a thread that has run before.
 
     `release_accepted_skill_consumer` calls this when its compare-and-clear
-    finds no owner -- the shape of a bind that failed after the token was
+    finds no record of its own -- the shape of a bind that failed after the token was
     taken -- and the coordinator finalizes the release only if it returns
     True. A thread whose earlier turn left its verified view behind must not
     be stuck in that state for the life of the process.
     """
     from deerflow.runtime import skill_snapshot as snapshot_module
-    from deerflow.runtime.skill_projection import SkillProjectionClear, SkillProjectionEvidence
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence, get_skill_projection_coordinator
     from deerflow.runtime.skill_snapshot import snapshot_effective_skills
     from deerflow.skills.parser import parse_skill_file
     from deerflow.skills.types import SkillCategory
@@ -3024,20 +3021,99 @@ def test_aio_release_recovery_is_not_wedged_by_a_retained_view(tmp_path, monkeyp
     assert (view / snapshot.snapshot_id).is_dir()
 
     # The second run took a token and then failed before publishing anything.
-    failed = SkillProjectionClear(
-        user_id=identity[0],
-        thread_id=identity[1],
-        sandbox_id="sandbox-retained",
-        run_id="second-run",
-        generation=2,
-        snapshot_id=None,
-    )
+    coordinator = get_skill_projection_coordinator()
+    failed = _fenced_release(coordinator, user_id=identity[0], thread_id=identity[1], sandbox_id="sandbox-retained", run_id="second-run")
     try:
         assert provider.clear_accepted_skill_snapshot(failed) is False
         assert provider.ensure_accepted_skill_snapshot_absent(failed)
         assert list(view.iterdir()) == []
     finally:
+        assert coordinator.finalize_release(failed)
         snapshot.release()
+
+
+def test_aio_a_failed_bind_over_a_foreign_record_releases_the_thread_and_parks_the_sandbox(tmp_path, monkeypatch) -> None:
+    """The wedge, end to end: the unwind of a failed bind finishes whatever record the map holds.
+
+    Before this, `release_accepted_skill_consumer` returned False here: the
+    exact compare-and-release could not match ``earlier-run``, the recovery
+    half refused any recorded view, and the runtime returned before
+    `finalize_release` -- so the coordinator stayed clearing, every later
+    turn on the thread was refused (`fence_committed_owner` included, so
+    interrupt and rollback could not rescue it), and the sandbox was never
+    parked, holding one of the tenant's two slots. Only a Gateway restart
+    recovered it, taking every other thread's sandbox with it.
+    """
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence, get_skill_projection_coordinator
+    from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+    from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
+    from deerflow.sandbox.sandbox_provider import reset_sandbox_provider, set_sandbox_provider
+    from deerflow.skills.parser import parse_skill_file
+    from deerflow.skills.types import SkillCategory
+
+    source = tmp_path / "source" / "wedge-skill"
+    source.mkdir(parents=True)
+    skill_file = source / "SKILL.md"
+    skill_file.write_text(
+        "---\nname: wedge-skill\ndescription: immutable\n---\nwedge bytes\n",
+        encoding="utf-8",
+    )
+    skill = parse_skill_file(skill_file, SkillCategory.CUSTOM, relative_path=Path("wedge-skill"))
+    assert skill is not None
+    paths = Paths(base_dir=tmp_path / "state")
+    monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
+    snapshot = snapshot_effective_skills((skill,), user_id="wedge-owner")
+    assert snapshot is not None
+    evidence = SkillProjectionEvidence.from_snapshot(snapshot)
+
+    provider, _sandbox, _aio_mod = _make_provider_with_active_sandbox(tmp_path, "sandbox-wedge")
+    identity = ("wedge-owner", "wedge-thread")
+    provider._thread_sandboxes[identity] = "sandbox-wedge"
+    provider._active_sandbox_identity["sandbox-wedge"] = identity
+    provider._accepted_only_sandbox_ids = {"sandbox-wedge"}
+
+    # A record of an identity no run holds: any earlier turn whose clean
+    # release never ran, or a prewarm's guess caught before its pop.
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id=identity[0],
+        thread_id=identity[1],
+        snapshot_id=snapshot.snapshot_id,
+        run_id="earlier-run",
+        generation=1,
+        evidence=evidence,
+    )
+
+    coordinator = get_skill_projection_coordinator()
+    coordinator.claim_committed_run(user_id=identity[0], thread_id=identity[1], run_id="run-c", snapshot_id=snapshot.snapshot_id, evidence=evidence)
+    token = coordinator.activate(
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-wedge",
+        run_id="run-c",
+        snapshot_id=snapshot.snapshot_id,
+        consumer_id="run:run-c:lead",
+    )
+    # run-c's own bind raised inside staging: the map is exactly as it was.
+    set_sandbox_provider(provider)
+    try:
+        assert release_accepted_skill_consumer(token) is True
+        assert not coordinator.is_busy(user_id=identity[0], thread_id=identity[1])
+        assert list(view.iterdir()) == []
+        assert "sandbox-wedge" in provider._warm_pool, "the slot is back"
+        assert coordinator.try_claim_committed_run(user_id=identity[0], thread_id=identity[1], run_id="next-run", snapshot_id=None)
+    finally:
+        snapshot.release()
+        # On the failure path the coordinator still holds the thread as
+        # clearing under this token; finish that release here, or the
+        # provider teardown below refuses ("projection_in_use"), masks the
+        # real assertion and leaves this fake provider installed for every
+        # later test.
+        pending = coordinator.release(token)
+        if pending is not None:
+            coordinator.finalize_release(pending)
+        coordinator.release_unactivated_run(user_id=identity[0], thread_id=identity[1], run_id="next-run")
+        reset_sandbox_provider()
 
 
 def test_warm_pool_teardown_clears_the_thread_accepted_view(tmp_path, monkeypatch) -> None:

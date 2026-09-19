@@ -278,53 +278,68 @@ view is a head start.
 
 **The record is dropped, the bytes are not.** The publication is immediately
 followed by a compare-and-pop of its own `(run_id, generation)`, leaving the
-view in the module's documented retained-but-unowned state. Keeping the
-record would turn a guess into ownership, and a turn whose own bind then
-raised — the tenant's disk filling during staging is the realistic cause,
-and that is the very bind this removes — could neither compare-and-clear a
-record that is not its own nor fall back to clearing an *unowned* view. The
-runtime would then never reach `finalize_release`, and the coordinator would
-refuse that thread's every later turn for the life of the process, with
-`fence_committed_owner` refusing the interrupt escape too. The pop can only
-ever remove the prewarm's own record: a turn that bound first makes it a
-no-op.
+view in the module's documented retained-but-unowned state. The map's
+records are the identities the coordinator issued, and a guess is not one; a
+turn's exact compare-and-release only ever matches its own record, and a
+turn whose own bind raises empties the view under the coordinator's fence
+whatever the map holds (the rule below), so the pop is hygiene rather than
+what keeps a full disk from wedging the thread. It can only ever remove the
+prewarm's own record: a turn that bound first makes it a no-op.
 
-### Known defect: a failed bind can wedge a thread when the view map holds a foreign identity
+### A release that cannot match its record empties the view under the coordinator's fence
 
-Issues are disabled on this repository, so this is recorded where the code
-is. It is **not** the first-turn case the prewarm's compare-and-pop closes
-above; it is the general shape, which predates it.
+This was recorded here as a known defect; for the providers whose material
+lives on the host it is closed by a rule, not a special case. **What it took.** `_active_view_bindings[view]` held a
+*foreign* `(run_id, generation)` — one that was not the identity being
+unwound — at the moment a bind raised inside staging (ENOSPC or EIO on the
+tenant data disk is the realistic cause): any earlier turn whose clean
+release never ran, or a prewarm's guess caught between its publication and
+its pop, which the publication running outside the acquire serializer makes
+an ordinary interleaving. **What it did.** The exact compare-and-clear could
+not match a foreign identity; the fallback refused any view that carried a
+record at all; `accepted_projection.py` returned before `finalize_release`,
+so `clearing` stayed set with nothing to sweep it. Every later
+`reserve_admission`, `try_claim_committed_run`, `claim_committed_run` and
+`fence_committed_owner` refused the thread — interrupt and rollback
+included — and `provider.release` was never reached, so the sandbox was
+never parked and held one of the tenant's two slots. Only a Gateway restart
+recovered it, taking every other thread's sandbox with it.
 
-**Precondition.** `_active_view_bindings[view]` holds a *foreign*
-`(run_id, generation)` — one that is not the identity being unwound — at the
-moment a bind raises. Reachable through a mid-turn supersession
-(`fence_committed_owner` / `promote_supersession`) that installs a new
-generation and then fails to bind before the swap, or through any earlier
-turn whose clean release never ran.
+**The rule.** Ownership of a thread's projection is the coordinator's, not
+the view map's. The map's records exist for the bind's generation fence and
+for the exact compare-and-release; they are never read as ownership at
+release. While the coordinator holds a thread as clearing under a
+`SkillProjectionClear`, no other run can be admitted to that thread and the
+only sandbox that mounts its view is the one the clear names, so whatever
+record the map carries at that moment is not a live owner: a coordinator
+generation newer than the clearing run's cannot have been issued while it
+holds the thread, an older one had to finalize before it could claim, and
+generation 0 is a prewarm's guess or the field's default, which no run
+executes under. So the recovery half of a release,
+`empty_skill_snapshot_active_view(clear)`, empties the view and drops the
+record on the coordinator's word — `SkillProjectionCoordinator.is_clearing(clear)`
+must hold, checked under the views lock every bind takes, or it empties
+nothing — and the thread's next turn stages once.
+That fence check, not the record, is what keeps a mistaken caller away from
+a view a live container is mounting; the old refusal protected the same
+thing by refusing every recovery, the ones nothing needed protecting from
+included. An emptied view whose record named another identity is logged at
+info with both identities, because a stale record is a symptom worth a line.
 
-**Mechanism.** The bind raises inside staging (ENOSPC or EIO on the tenant
-data disk is the realistic cause), leaving the map unchanged.
-`release_accepted_skill_consumer` sets `state.clearing`; the exact
-compare-and-clear cannot match a foreign identity, and the fallback
-`release_unowned_skill_snapshot_active_view` refuses any view that carries a
-record at all. `accepted_projection.py` then returns before the `finally`
-that calls `finalize_release` — the only caller there is — so `clearing`
-stays set with nothing to sweep it. Every later `reserve_admission`,
-`try_claim_committed_run` and `claim_committed_run` refuses while it is set,
-and `fence_committed_owner` refuses too, so interrupt and rollback cannot
-rescue the thread either. Probed during the prewarm-view review: clearing
-the view map with `force_clear_skill_snapshot_active_view` leaves the thread
-refused, because the coordinator's state is not in that map. Only a Gateway
-restart recovers it, and that takes every other thread's sandbox with it.
-
-**Two things for whoever fixes it.** Do not fix it by ignoring generation 0:
-a real `AcceptedSkillSandboxBindingV1` can legally carry generation 0 (the
-field's default, and `bind_skill_snapshot_active_view`'s), so a
-`release_unowned` that skipped such a record could empty a view a live
-container is mounting — that refusal is the protection. The real design
-question is whether an unwind that cannot prove the view is gone should
-surrender coordinator ownership anyway; that is a question about what
-"absent" must mean, and it deserves its own review.
+**What it does not change.** Generation 0 is still never skipped or
+special-cased: a real `AcceptedSkillSandboxBindingV1` can legally carry it,
+and the release does not consult the generation at all. A provider whose
+material lives inside the sandbox answers for that sandbox, not for a host
+view: E2B clears the material in the live sandbox and quarantines the exact
+sandbox when it cannot, and the AIO remote backend answers only for the
+sandbox being gone, so there a sandbox that is still present is the honest
+unknown, its release stays refused and the exact cleanup proof is retained
+(`release` returns the same clearing proof to the same token) for a retry
+that nothing in this change adds and that cannot succeed while the sandbox
+exists. That remote shape — a bind that raised
+before any receipt was recorded, while the sandbox lives — is the one wedge
+this leaves open, and the unwind now warns when a release answers False so
+it is at least visible. The prewarm's compare-and-pop stays, as hygiene.
 
 ### Rediscovery is not creation
 
@@ -659,8 +674,8 @@ teardown that fails leaves the view alone because the container may still
 have it mounted; a live verification that found drift (the tree leaves with
 its last lease, or at once if it has none, and the path is forgotten so the
 next clean publication of that digest is kept); the recovery half of a
-release, which empties an unowned view rather than proving a retained one
-absent (`release_unowned_skill_snapshot_active_view`); and Gateway startup
+release, which empties the view under the coordinator's fence whatever
+record it carries (`empty_skill_snapshot_active_view`); and Gateway startup
 (`cleanup_abandoned_skill_snapshots` removes every digest and view a prior
 process left, so the first turn after a restart stages once per user). No
 consumer executes between runs; nothing here authorizes a reuse, only the

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
+from test_accepted_skill_snapshots import _fenced_release
 
 from deerflow.sandbox.accepted_material import (
     AcceptedMaterialCapability,
@@ -710,7 +711,7 @@ class TestLocalSandboxProviderMounts:
         from collections import OrderedDict
 
         from deerflow.config.paths import Paths
-        from deerflow.runtime.skill_projection import SkillProjectionClear
+        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
 
         paths = Paths(base_dir=tmp_path / "state")
         skills = tmp_path / "skills"
@@ -752,16 +753,13 @@ class TestLocalSandboxProviderMounts:
                     "/mnt/skills/integrations",
                 }
             )
-            unpublished = SkillProjectionClear(
-                user_id="owner-a",
-                thread_id="thread-a",
-                sandbox_id=sandbox_id,
-                run_id="run-before-publication",
-                generation=1,
-                snapshot_id=None,
-            )
-            assert provider.clear_accepted_skill_snapshot(unpublished) is False
-            assert provider.ensure_accepted_skill_snapshot_absent(unpublished)
+            coordinator = get_skill_projection_coordinator()
+            unpublished = _fenced_release(coordinator, user_id="owner-a", thread_id="thread-a", sandbox_id=sandbox_id, run_id="run-before-publication")
+            try:
+                assert provider.clear_accepted_skill_snapshot(unpublished) is False
+                assert provider.ensure_accepted_skill_snapshot_absent(unpublished)
+            finally:
+                assert coordinator.finalize_release(unpublished)
 
             legacy_id = provider.acquire("thread-a", user_id="owner-a")
             legacy = provider.get(legacy_id)
