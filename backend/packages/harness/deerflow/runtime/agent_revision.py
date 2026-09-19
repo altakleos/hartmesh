@@ -102,6 +102,10 @@ APP_CONFIG_FACTORY_EXCLUDED_FIELDS = frozenset(
         # here reaches the agent: it changes no tool, model, skill or prompt,
         # so an edit must not invalidate an accepted run's assembly.
         "ui",
+        # Where the Gateway reads the tenant bundle for the workspace. The
+        # agent's copy reaches it through `sandbox.mounts`, which is included
+        # above; this path names only the Gateway-side reader.
+        "tenant_bundle",
     }
 )
 
