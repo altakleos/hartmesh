@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import math
+import os
 import re
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
@@ -204,23 +205,34 @@ def cell_format(table: dict, row_index: int | None, column_index: int) -> str:
     return table["formats"][column_index]
 
 
+MAX_COMPANY_NAME_CHARS = 80
+
+
 def load_brand(tenant_dir: str | None) -> dict:
-    """brand.json from the tenant bundle; a missing or unsupported logo degrades to the name alone."""
+    """brand.json from the tenant bundle, under the rules the Gateway reads it by; every field degrades on its own.
+
+    A file that cannot be read or is not an object is the product's brand, not
+    a failed report: the workspace header applies the same rule, so the name a
+    report carries is the name the person sees.
+    """
 
     brand = dict(DEFAULT_BRAND)
     if not tenant_dir:
         return brand
     path = Path(tenant_dir) / "brand.json"
-    if not path.is_file():
-        return brand
     try:
+        if not path.is_file():
+            return brand
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise InputError(f"Could not read {path}: {error}") from error
+    except (OSError, ValueError):
+        return brand
     if not isinstance(data, dict):
-        raise InputError(f"{path} must hold a JSON object with company_name, logo and colors.")
-    if data.get("company_name"):
-        brand["company"] = to_text(data["company_name"])
+        return brand
+    name = data.get("company_name")
+    if isinstance(name, str):
+        name = name.strip()
+        if name and len(name) <= MAX_COMPANY_NAME_CHARS and _one_plain_line(name):
+            brand["company"] = name
     colors = data.get("colors") or {}
     for key in ("primary", "secondary"):
         if is_color(colors.get(key)):
@@ -228,9 +240,18 @@ def load_brand(tenant_dir: str | None) -> dict:
     logo = data.get("logo")
     if isinstance(logo, str) and logo:
         candidate = (Path(tenant_dir) / logo).resolve()
-        if _inside(candidate, Path(tenant_dir).resolve()) and candidate.is_file() and candidate.suffix.lower() in PICTURE_SUFFIXES:
+        if _inside(candidate, Path(tenant_dir).resolve()) and candidate.is_file() and candidate.suffix.lower() in PICTURE_SUFFIXES and os.access(candidate, os.R_OK):
             brand["logo"] = str(candidate)
     return brand
+
+
+#: The Gateway's rule for the header, character for character.
+_REORDERING_CHARS = frozenset("\u202a\u202b\u202c\u202d\u202e\u2066\u2067\u2068\u2069\u200b\u200e\u200f\ufeff")
+
+
+def _one_plain_line(value: str) -> bool:
+    """No control or bidi-reordering characters, so the name reads as what it is."""
+    return not any(ord(char) < 32 or ord(char) == 127 or char in _REORDERING_CHARS for char in value)
 
 
 def _inside(path: Path, root: Path) -> bool:

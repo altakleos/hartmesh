@@ -26,6 +26,7 @@ import {
   useDeveloperSurfacesVisible,
   useWorkspacePresentation,
 } from "@/core/features";
+import { useBranding } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -115,6 +116,7 @@ type SettingsDialogProps = React.ComponentProps<typeof Dialog> & {
 export function SettingsDialog(props: SettingsDialogProps) {
   const { defaultSection = "appearance", ...dialogProps } = props;
   const { t } = useI18n();
+  const { companyName } = useBranding();
   const developerSurfacesVisible = useDeveloperSurfacesVisible();
   // The screens stay offered while the deployment's answer is unknown, so a
   // deep link to a hidden one would otherwise mount it — and fire its
@@ -205,7 +207,9 @@ export function SettingsDialog(props: SettingsDialogProps) {
         <DialogHeader className="gap-1">
           <DialogTitle>{t.settings.title}</DialogTitle>
           <p className="text-muted-foreground text-sm">
-            {t.settings.description}
+            {companyName === null
+              ? t.settings.description
+              : t.settings.descriptionForCompany}
           </p>
         </DialogHeader>
         <div className="grid min-h-0 flex-1 gap-4 md:grid-cols-[220px_minmax(0,1fr)]">

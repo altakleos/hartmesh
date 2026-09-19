@@ -203,6 +203,7 @@ export const zhCN: Translations = {
   inputBox: {
     placeholder: "今天我能为你做些什么？",
     disclaimer: "内容由AI生成，重要信息请务必核查",
+    assistantDisclaimer: "内容由AI生成，重要信息请务必核查",
     createSkillPrompt:
       "我们一起用 skill-creator 技能来创建一个技能吧。先问问我希望这个技能能做什么。",
     addAttachments: "添加附件",
@@ -751,6 +752,7 @@ export const zhCN: Translations = {
     reportIssue: "报告问题",
     contactUs: "联系我们",
     about: "关于 DeerFlow",
+    aboutCompany: (companyName: string) => `关于 ${companyName}`,
     logout: "退出登录",
     gatewayUnavailable: "网关暂时不可用。",
     gatewayUnavailableRetrying: "正在后台重试…",
@@ -975,6 +977,7 @@ export const zhCN: Translations = {
   settings: {
     title: "设置",
     description: "根据你的偏好调整 DeerFlow 的界面和行为。",
+    descriptionForCompany: "根据你的偏好调整工作区的界面和行为。",
     sections: {
       account: "账号",
       appearance: "外观",

@@ -216,6 +216,7 @@ export const enUS: Translations = {
   inputBox: {
     placeholder: "How can I assist you today?",
     disclaimer: "DeerFlow is AI and can make mistakes",
+    assistantDisclaimer: "This assistant is AI and can make mistakes",
     createSkillPrompt:
       "We're going to build a new skill step by step with `skill-creator`. To start, what do you want this skill to do?",
     addAttachments: "Add attachments",
@@ -790,6 +791,7 @@ export const enUS: Translations = {
     reportIssue: "Report an issue",
     contactUs: "Contact us",
     about: "About DeerFlow",
+    aboutCompany: (companyName: string) => `About ${companyName}`,
     logout: "Log out",
     gatewayUnavailable: "Gateway is temporarily unavailable.",
     gatewayUnavailableRetrying: "Retrying in the background…",
@@ -1020,6 +1022,8 @@ export const enUS: Translations = {
   settings: {
     title: "Settings",
     description: "Adjust how DeerFlow looks and behaves for you.",
+    descriptionForCompany:
+      "Adjust how your workspace looks and behaves for you.",
     sections: {
       account: "Account",
       appearance: "Appearance",

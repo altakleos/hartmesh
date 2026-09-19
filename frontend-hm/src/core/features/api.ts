@@ -27,6 +27,23 @@ export interface FeaturesResponse {
     profile?: string;
     starters?: { id?: unknown; title?: unknown; prompt?: unknown }[];
   };
+  branding?: {
+    company_name?: unknown;
+    colors?: { primary?: unknown; secondary?: unknown };
+    has_logo?: unknown;
+  };
+}
+
+/**
+ * Whose workspace this is, as the deployment's tenant bundle says. Every
+ * field is optional; a deployment that names no company is the product's own.
+ */
+export interface Branding {
+  companyName: string | null;
+  primary: string | null;
+  secondary: string | null;
+  /** Whether `logoURL()` serves a picture. */
+  hasLogo: boolean;
 }
 
 export interface SubagentBatchesCapability {
@@ -63,6 +80,35 @@ export async function fetchSubagentBatchesCapability(): Promise<SubagentBatchesC
     workerRunning: feature?.worker_running ?? legacyEnabled,
     maxRunning: feature?.max_running ?? 0,
   };
+}
+
+const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
+
+function color(value: unknown): string | null {
+  return typeof value === "string" && HEX_COLOR.test(value) ? value : null;
+}
+
+/**
+ * The company the workspace shows. A Gateway from before this existed reports
+ * no `branding`, which is the same as a bundle that names nothing.
+ */
+export async function fetchBranding(): Promise<Branding> {
+  const branding = (await fetchFeatures()).branding;
+  const name =
+    typeof branding?.company_name === "string"
+      ? branding.company_name.trim()
+      : "";
+  return {
+    companyName: name.length > 0 ? name : null,
+    primary: color(branding?.colors?.primary),
+    secondary: color(branding?.colors?.secondary),
+    hasLogo: branding?.has_logo === true,
+  };
+}
+
+/** Where the tenant's logo is served from; only meaningful when `hasLogo`. */
+export function logoURL(): string {
+  return `${getBackendBaseURL()}/api/branding/logo`;
 }
 
 /** How many starters Home will draw, mirroring the backend's own cap. */

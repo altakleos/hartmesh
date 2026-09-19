@@ -160,7 +160,7 @@ Write it at `/mnt/user-data/outputs/reports/preferences.json` only when the user
 
 ## Branding
 
-When `/mnt/tenant/brand.json` exists the script picks up the company name, logo and colours by itself (`--tenant DIR` points elsewhere). The file looks like `{"company_name": "Example Services Co.", "logo": "logo.png", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}}`; the logo is a PNG or JPEG next to it, and a missing or unsupported logo degrades to the name alone. `--company` overrides the name for one report.
+When `/mnt/tenant/brand.json` exists the script picks up the company name, logo and colours by itself (`--tenant DIR` points elsewhere). The file looks like `{"company_name": "Example Services Co.", "logo": "logo.png", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}}`; the logo is a PNG or JPEG next to it. The rules are the workspace header's: a missing or unsupported logo degrades to the name alone, and a name that is blank, longer than 80 characters, or not one plain line is no name (the report is still built). `--company` overrides the name for one report.
 
 ## What the checks mean
 

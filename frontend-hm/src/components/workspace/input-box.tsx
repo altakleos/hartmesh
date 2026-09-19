@@ -71,7 +71,7 @@ import {
 import { fetch } from "@/core/api/fetcher";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { getBackendBaseURL } from "@/core/config";
-import { useWorkspacePresentation } from "@/core/features";
+import { useBranding, useWorkspacePresentation } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
@@ -341,6 +341,7 @@ export function InputBox({
   onStop?: () => void;
 }) {
   const { locale, t } = useI18n();
+  const { companyName } = useBranding();
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
@@ -2725,7 +2726,9 @@ export function InputBox({
           !isWelcomeMode && "absolute top-full right-0 left-0",
         )}
       >
-        {t.inputBox.disclaimer}
+        {companyName === null
+          ? t.inputBox.disclaimer
+          : t.inputBox.assistantDisclaimer}
       </p>
 
       <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>

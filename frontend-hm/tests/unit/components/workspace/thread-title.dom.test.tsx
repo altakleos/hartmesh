@@ -1,7 +1,7 @@
 import type { BaseStream } from "@langchain/langgraph-sdk";
 import { afterEach, expect, rs, test } from "@rstest/core";
 import { cleanup, render } from "@testing-library/react";
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 
 import { ThreadTitle } from "@/components/workspace/thread-title";
 import type { AgentThreadState } from "@/core/threads";
@@ -16,6 +16,21 @@ rs.mock("@/core/i18n/hooks", () => ({
       },
     },
   }),
+}));
+
+const branding: { companyName: string | null; isLoading: boolean } = {
+  companyName: null,
+  isLoading: false,
+};
+rs.mock("@/core/features", () => ({
+  useBranding: () => branding,
+  useDocumentTitle: (page: string, productName: string) => {
+    useEffect(() => {
+      document.title = branding.isLoading
+        ? page
+        : `${page} - ${branding.companyName ?? productName}`;
+    }, [page, productName]);
+  },
 }));
 
 rs.mock("@/components/workspace/chats", () => ({

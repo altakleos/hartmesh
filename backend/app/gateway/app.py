@@ -29,6 +29,7 @@ from app.gateway.routers import (
     artifacts,
     assistants_compat,
     auth,
+    branding,
     browser,
     channel_connections,
     channels,
@@ -1327,6 +1328,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Features API is mounted at /api/features
     app.include_router(features.router)
+
+    # Branding API (the tenant bundle's logo) is mounted at /api/branding
+    app.include_router(branding.router)
 
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)

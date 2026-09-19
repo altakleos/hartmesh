@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from app.gateway.browser_capability import browser_capability
 from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
+from deerflow.config.tenant_bundle import MAX_COMPANY_NAME_CHARS, TenantBundle, configured_tenant_bundle
 from deerflow.config.ui_config import MAX_STARTER_PROMPT_CHARS, MAX_STARTER_TITLE_CHARS, MAX_STARTERS, UiConfig
 from deerflow.subagents.capacity import configured_subagent_max_running
 
@@ -63,6 +64,21 @@ class UiFeature(BaseModel):
     starters: list[UiStarter] = Field(..., max_length=MAX_STARTERS, description="Home's starter grid, in the order it is shown")
 
 
+class BrandColors(BaseModel):
+    """The two colours the tenant bundle names, as #rrggbb, or nothing."""
+
+    primary: str | None = Field(..., description="Primary brand colour as #rrggbb, or null")
+    secondary: str | None = Field(..., description="Secondary brand colour as #rrggbb, or null")
+
+
+class BrandingFeature(BaseModel):
+    """Whose workspace this is, as the tenant bundle says; every field is optional."""
+
+    company_name: str | None = Field(..., max_length=MAX_COMPANY_NAME_CHARS, description="The company the workspace shows, or null for the product's own name")
+    colors: BrandColors
+    has_logo: bool = Field(..., description="Whether GET /api/branding/logo serves a picture")
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
@@ -71,6 +87,7 @@ class FeaturesResponse(BaseModel):
     mcp_tasks: McpTasksFeature
     subagent_batches: SubagentBatchesFeature
     ui: UiFeature
+    branding: BrandingFeature
 
 
 @router.get(
@@ -82,6 +99,7 @@ class FeaturesResponse(BaseModel):
 async def list_features(request: Request, config: AppConfig = Depends(get_config)) -> FeaturesResponse:
     """Return availability of optional frontend features."""
     browser = browser_capability(config)
+    bundle = configured_tenant_bundle(config.tenant_bundle.path)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     return FeaturesResponse(
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
@@ -101,14 +119,21 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         ),
         # Presentation the frontend cannot decide for itself: the profile is
         # the deployment's choice and the starters are its words. Read through
-        # `get_config`, so an edit reaches the next page load.
-        ui=_ui_feature(config.ui),
+        # `get_config`, so an edit reaches the next page load; the bundle is
+        # read from disk the same way, so an operator's edit there does too.
+        ui=_ui_feature(config.ui, bundle),
+        branding=BrandingFeature(
+            company_name=bundle.company_name,
+            colors=BrandColors(primary=bundle.primary, secondary=bundle.secondary),
+            has_logo=bundle.logo is not None,
+        ),
     )
 
 
-def _ui_feature(ui: UiConfig) -> UiFeature:
-    """The workspace presentation, as `UiConfig` resolved it."""
+def _ui_feature(ui: UiConfig, bundle: TenantBundle) -> UiFeature:
+    """The workspace presentation: the bundle's starters where it has a usable list, else the config's."""
+    starters = ui.starters if bundle.starters is None else bundle.starters
     return UiFeature(
         profile=ui.profile,
-        starters=[UiStarter(id=starter.id, title=starter.title, prompt=starter.prompt) for starter in ui.starters],
+        starters=[UiStarter(id=starter.id, title=starter.title, prompt=starter.prompt) for starter in starters],
     )

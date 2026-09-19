@@ -32,6 +32,16 @@ _REORDERING_CHARS = frozenset(
 )
 
 
+def first_control_or_reordering_character(value: str, *, allow_newlines: bool) -> str | None:
+    """The first character that would make text read as something other than what it is, or None."""
+    for char in value:
+        if char == "\n" and allow_newlines:
+            continue
+        if ord(char) < 32 or ord(char) == 127 or char in _REORDERING_CHARS:
+            return char
+    return None
+
+
 class StarterConfig(BaseModel):
     """One thing Home offers to someone who has not typed anything yet."""
 
@@ -61,12 +71,9 @@ class StarterConfig(BaseModel):
         # A tile whose glyphs run in a different order than its prompt reads as
         # one action and performs another. A prompt may hold newlines; a title,
         # which is one line on a button, may not.
-        newline_is_text = info.field_name == "prompt"
-        for char in value:
-            if char == "\n" and newline_is_text:
-                continue
-            if ord(char) < 32 or ord(char) == 127 or char in _REORDERING_CHARS:
-                raise ValueError(f"must not contain the control or reordering character {char!r}")
+        char = first_control_or_reordering_character(value, allow_newlines=info.field_name == "prompt")
+        if char is not None:
+            raise ValueError(f"must not contain the control or reordering character {char!r}")
         return value
 
 

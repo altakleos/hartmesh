@@ -5,6 +5,7 @@ rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
 
 import { fetch } from "@/core/api/fetcher";
 import {
+  fetchBranding,
   fetchSubagentBatchesCapability,
   fetchWorkspacePresentation,
 } from "@/core/features/api";
@@ -114,6 +115,67 @@ describe("workspace presentation", () => {
       // An unknown profile is not a third mode; it is the safe one.
       profile: "developer",
       starters: [{ id: "ok", title: "Fine", prompt: "Do it." }],
+    });
+  });
+});
+
+/**
+ * Whose workspace this is comes from the deployment's tenant bundle, after
+ * sign-in. The frontend takes the block as reported and never invents a
+ * company: a blank name is no name, a colour that is not #rrggbb is no colour,
+ * and a Gateway from before the block existed is the product's own.
+ */
+describe("branding", () => {
+  it("reads the company, its colours and whether there is a logo", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        agents_api: { enabled: true },
+        branding: {
+          company_name: "Example Services Co.",
+          colors: { primary: "#0a6b3d", secondary: "#9ccdb4" },
+          has_logo: true,
+        },
+      }),
+    );
+
+    await expect(fetchBranding()).resolves.toEqual({
+      companyName: "Example Services Co.",
+      primary: "#0a6b3d",
+      secondary: "#9ccdb4",
+      hasLogo: true,
+    });
+  });
+
+  it("is the product's own when the Gateway reports no block", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({ agents_api: { enabled: true } }),
+    );
+
+    await expect(fetchBranding()).resolves.toEqual({
+      companyName: null,
+      primary: null,
+      secondary: null,
+      hasLogo: false,
+    });
+  });
+
+  it("takes nothing it cannot show", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        agents_api: { enabled: true },
+        branding: {
+          company_name: "   ",
+          colors: { primary: "green", secondary: 42 },
+          has_logo: "yes",
+        },
+      }),
+    );
+
+    await expect(fetchBranding()).resolves.toEqual({
+      companyName: null,
+      primary: null,
+      secondary: null,
+      hasLogo: false,
     });
   });
 });
