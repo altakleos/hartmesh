@@ -1005,6 +1005,41 @@ def test_one_question_covers_every_ambiguous_role_and_overrides_displace_auto_ro
     assert "amount" in err and "id" in err and "null" in err
 
 
+def test_a_build_that_matched_no_column_names_the_columns_the_file_has(report, tmp_path, capsys) -> None:
+    """The .26 trace probed the workbook before building. The only answer a probe held that
+    the build did not was *which columns exist*, and that belongs in the question the build
+    already asks: exit 3 carries the file's columns, so no round trip buys them."""
+    path = _write_csv(tmp_path / "no_amount.csv", ["Date", "Notes", "Ref"], [["2026-08-01", "a job", "R1"], ["2026-08-02", "another", "R2"]])
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+
+    assert code == report.EXIT_DECISION_NEEDED
+    details = json.loads(err[err.index("{") :])
+    assert details["columns"] == ["Date", "Notes", "Ref"], "the columns the file does have, in file order"
+    assert details["missing"] == ["amount"]
+
+
+def test_the_build_digest_names_the_columns_it_did_not_use(report, tmp_path, capsys) -> None:
+    """A column the profile did not claim is the one fact a build hid and `inspect` revealed:
+    the model could not offer to map `Treatment` without a second read. The digest names it,
+    so every build says it, not only the runs where the model chose to look first."""
+    path = _write_csv(
+        tmp_path / "treatments.csv",
+        ["Date", "Treatment", "Amount", "Room"],
+        [["2026-08-01", "Cleaning", "80", "1"], ["2026-08-02", "Filling", "120", "2"]],
+    )
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+
+    assert code == 0, err
+    assert "Unused columns: Treatment, Room" in out
+    # Nothing to say when every column carries a role.
+    plain = _write_csv(tmp_path / "plain.csv", ["Date", "Amount"], [["2026-08-01", "80"]])
+    code, out, err = _build(report, capsys, tmp_path / "plain", str(plain), "--period", "2026-08")
+    assert code == 0, err
+    assert "Unused columns" not in out
+
+
 def test_an_explicit_mapping_names_the_section_after_the_users_column(report, tmp_path, capsys) -> None:
     path = _write_csv(tmp_path / "treatments.csv", ["Date", "Treatment", "Amount"], [["2026-08-01", "Cleaning", "80"], ["2026-08-02", "Filling", "120"]])
     code, out, err = _build(report, capsys, tmp_path / "plain", str(path), "--period", "2026-08")
@@ -1349,7 +1384,7 @@ def test_prose_prints_the_text_the_report_now_carries(report, tmp_path, capsys) 
     # Nothing to go looking for in the JSON: the run says what it wrote.
     assert "A quiet month." in out
     assert "Chase the unpaid invoices." in out
-    # And the rest of what Step 5 has to relay, from this draft.
+    # And the rest of what Step 4 has to relay, from this draft.
     assert "Checks:" in out and "Not included" in out and "Inputs:" in out
 
 
@@ -1503,7 +1538,7 @@ def test_the_doc_makes_the_present_argument_the_handover(report) -> None:
     # and nothing tells it to read a line of the output as the handover.
     assert "offer the files with `present_files`" not in doc
     assert "Present:" not in doc
-    assert "### Step 5: Answer" in doc
+    assert "### Step 4: Answer" in doc
     # The tool's refusal and the script's note mean different things and are
     # named apart; a result that handed nothing over is not a delivery.
     assert "A `Not attached:` line from the tool" in doc and "a `Note:` line from the script" in doc
@@ -1536,15 +1571,22 @@ def test_render_in_a_later_turn_hands_the_report_over_with_its_renders(report, s
 
 
 def test_the_doc_sends_a_known_period_straight_to_build(report) -> None:
-    """`inspect` before every build cost the tenant a model round trip and a
-    library load for an answer `build` gives itself (exit 3 with the question)."""
+    """`inspect` before every build cost the tenant a model round trip and a library load for
+    an answer `build` gives itself. Saying "usually skipped" at the head of the longest step in
+    the doc did not stop it: the .26 trace still probed twice. So it is not a step at all."""
     doc = SKILL_DOC.read_text(encoding="utf-8")
+    workflow = doc[doc.index("## Workflow") :]
 
-    assert "### Step 1 (usually skipped): `inspect`, only when the period or a role is unknown" in doc
-    assert "go\nstraight to Step 2" in doc or "go straight to Step 2" in doc
-    assert "stops with exit `3` and the one question" in doc
-    # An exit 3 that names candidates has answered itself; `inspect` is not the next step.
-    assert "An exit `3` that names candidate\ncolumns has already answered itself" in doc or "An exit `3` that names candidate columns has already answered itself" in doc
+    # Build is the first thing the workflow asks for.
+    assert "### Step 1: Build" in workflow
+    steps = [line for line in workflow.splitlines() if line.startswith("### Step ")]
+    assert steps[0] == "### Step 1: Build"
+    assert not any("inspect" in step for step in steps), "inspect is a recovery tool, not a step on the way to a report"
+    # The reasons the .26 model could read as licence to probe are gone.
+    assert "when the user asked what the file contains" not in doc
+    assert "read the sheet with pandas" not in doc.lower(), "the script reads the file; the model does not"
+    assert "stops with exit `3` and one question" in doc
+    assert "that question\ncarries the file's columns" in doc or "that question carries the file's columns" in doc
     assert "**A whole report is one run**" in doc and "two runs" not in doc
     assert "`--render pdf,docx,xlsx` renders in the same run and is the normal first report" in doc
 

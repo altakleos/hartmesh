@@ -309,6 +309,14 @@
                 "minProperties": 2,
                 "maxProperties": 2
               }
+            },
+            "unmapped": {
+              "type": "array",
+              "description": "Columns in the inputs that no role claimed. They are in the rows table untouched; naming them here is how a reader learns one exists without reading the input again.",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
             }
           }
         },

@@ -2025,9 +2025,15 @@ happen or was not claimed in time: both slots were taken (a prewarm never evicts
 (`Prewarmed sandbox <id> was not claimed within 300s`; the reaper looks every 30 s, so an abandoned slot comes back at up to 330 s). A person who sends
 within a few seconds of opening the chat, while the build is still running,
 waits for it on that same turn -- the acquisition serialises on the thread --
-and then reclaims it; that wait is inside `sandbox_lookup`, not a
-`sandbox_create` span, so the progress label stays at "preparing" rather than
-"workspace starting" for it. Total wait is what the cold start would have
+and then reclaims it. That wait is the `queued` figure of the
+`skill_projection` phase, not a `sandbox_create` span, so the progress label
+stays at "preparing" rather than "workspace starting" for it, and the phase
+reads as long even though its own work took milliseconds. Until
+`v2.1.0+hartmesh.27` the prewarm also published the thread's skill view under
+that same lock, which added its staging to the wait: the released `.26`
+tenant-class run measured 3.7 s queued on a warm host and 16.3 s on the first
+chat after a boot. The publication now runs after the lock is released, so
+what remains in `queued` is the container build itself. Total wait is what the cold start would have
 been, less the seconds the build had already run.
 
 `acquisition=` says where this turn's sandbox came from. `created`,

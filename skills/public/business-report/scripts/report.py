@@ -729,7 +729,21 @@ def prepare(sources: list[str], period_text: str, options: BuildOptions, mapping
         mapping = resolve_mapping(table.frame, profile, mapping_override, table.name)
         question = mapping_question(mapping, table.name, profile)
         if question:
-            raise DecisionNeeded(question, {"file": table.name, "sheet": table.sheet, "ambiguous": mapping.ambiguous, "missing": mapping.missing, "mapping": mapping.roles})
+            # The columns the file does have travel with the question. Without
+            # them a missing role reads as "no column matched" and the only way
+            # to see what the file holds is a second read of it, which is the
+            # round trip this exit exists to avoid.
+            raise DecisionNeeded(
+                question,
+                {
+                    "file": table.name,
+                    "sheet": table.sheet,
+                    "columns": [column for column in table.frame.columns if usable_header(column)],
+                    "ambiguous": mapping.ambiguous,
+                    "missing": mapping.missing,
+                    "mapping": mapping.roles,
+                },
+            )
         mappings.append(mapping)
     for role, column in (mapping_override or {}).items():
         if isinstance(column, str) and role in ("category", "person", "customer", "source", "status"):
@@ -1090,6 +1104,12 @@ def show_report(report: dict) -> str:
     lines.append("Not included: " + (" ".join(report["notes"]) if report["notes"] else "nothing; every section the profile lists is in the report."))
     inputs = ", ".join(f"{entry['name']} (uploaded {entry['uploaded']}, {entry['rows']} rows)" for entry in meta["inputs"])
     lines.append(f"Inputs: {inputs}")
+    # What the report did not read. The rows table carries these columns, but
+    # `show` never prints rows, so without this line the only way to learn that
+    # a `Treatment` column existed is to read the file again.
+    unused = meta.get("build", {}).get("unmapped") or []
+    if unused:
+        lines.append("Unused columns: " + ", ".join(unused))
     # A cell, a column name or a profile word must not be able to start a line:
     # the model is told to act on whole lines of this digest.
     return "\n".join(one_line(line) for line in lines)

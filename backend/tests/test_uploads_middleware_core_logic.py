@@ -214,8 +214,35 @@ class TestCreateFilesMessage:
 
     def test_read_file_instruction_included(self, tmp_path):
         mw = _middleware(tmp_path)
-        msg = mw._create_files_message([self._new_file()])
+        msg = mw._create_files_message([self._new_file(), {"filename": "n.md", "size": 1, "path": "/p", "outline_preview": ["hello"]}])
         assert "read_file" in msg
+
+    def test_an_upload_with_no_text_form_is_not_offered_read_file_or_grep(self, tmp_path):
+        """A spreadsheet has no sibling markdown, so it has neither an outline nor a preview.
+        Telling the model to read and grep it anyway sent the .26 tenant trace two round trips
+        into a workbook before it ran the skill that reads workbooks."""
+        mw = _middleware(tmp_path)
+
+        msg = mw._create_files_message([self._new_file("export.xlsx", size=900_000)])
+
+        assert "Read from the file first" not in msg
+        assert "Use `grep` to search" not in msg
+        assert "export.xlsx" in msg
+        assert "No text form of this file was extracted" in msg
+
+    def test_a_mixed_batch_keeps_the_text_guidance_and_names_the_rest(self, tmp_path):
+        mw = _middleware(tmp_path)
+
+        msg = mw._create_files_message(
+            [
+                {"filename": "brief.pdf", "size": 10, "path": "/mnt/user-data/uploads/brief.pdf", "outline": [{"title": "Scope", "line": 3}]},
+                self._new_file("export.xlsx"),
+            ]
+        )
+
+        assert "Read from the file first" in msg
+        assert "No text form of this file was extracted" in msg
+        assert "export.xlsx" in msg and "brief.pdf" in msg
 
     def test_empty_files_produces_empty_marker(self, tmp_path):
         mw = _middleware(tmp_path)

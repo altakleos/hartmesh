@@ -105,7 +105,14 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
                 lines.append("  No structural headings detected. Document begins with:")
                 for text in preview:
                     lines.append(f"    > {neutralize_untrusted_tags(text)}")
-            lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
+            if preview:
+                lines.append("  Use `grep` to search for keywords (e.g. `grep(pattern='keyword', path='/mnt/user-data/uploads/')`).")
+            else:
+                # Neither an outline nor a preview means the conversion produced
+                # no text form of this upload: a workbook, an image, an archive.
+                # `read_file` and `grep` have nothing to read, and saying so here
+                # is the difference between one tool call and several.
+                lines.append("  No text form of this file was extracted: `read_file` and `grep` have nothing to read in it. Use the tool or skill that reads this format, which reads the file itself.")
         lines.append("")
 
     def _select_files_for_context(
@@ -149,10 +156,15 @@ class UploadsMiddleware(AgentMiddleware[UploadsMiddlewareState]):
             lines.append("(empty)")
             lines.append("")
 
+        # The reading advice belongs only to the files it can be followed on.
+        # A batch of workbooks that is told to read and grep first spends a
+        # round trip proving there is nothing to read.
+        textual = [file for file in files if file.get("outline") or file.get("outline_preview")]
         lines.append("To work with these files:")
-        lines.append("- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.")
-        lines.append("- Use `grep` to search for keywords when you are not sure which section to look at")
-        lines.append("  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).")
+        if textual:
+            lines.append("- Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.")
+            lines.append("- Use `grep` to search for keywords when you are not sure which section to look at")
+            lines.append("  (e.g. `grep(pattern='revenue', path='/mnt/user-data/uploads/')`).")
         lines.append("- Use `glob` to find files by name pattern")
         lines.append("  (e.g. `glob(pattern='**/*.md', path='/mnt/user-data/uploads/')`).")
         lines.append("- Only fall back to web search if the file content is clearly insufficient to answer the question.")

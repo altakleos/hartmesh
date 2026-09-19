@@ -3051,9 +3051,19 @@ class AioSandboxProvider(
                 parked = self._warm_pool.get(created)
                 if parked is not None:
                     self._mark_prewarm_unclaimed_locked(created, parked[0])
-            self._publish_prewarmed_skill_view(thread_id, user_id=effective_user_id, resolve=resolve_skill_snapshot)
-            logger.info("Prewarmed accepted sandbox %s for thread %s", created, thread_id)
-            return created
+        # The container is parked and the serializer is free before the view is
+        # published. Holding the key across the publication put the staging it
+        # exists to remove back in front of the person: the released .26 tenant
+        # queued 3.7 s of every new chat, and 16.3 s of the first after a boot,
+        # waiting here for a head start it was being given. Nothing in the
+        # publication needs this key -- it fences itself under the views lock,
+        # where a generation-0 bind is refused on a view a run owns and the
+        # clear is a compare-and-pop that never touches another run's bytes --
+        # so a turn arriving mid-publication takes its container and goes. The
+        # worst a lost race costs is the staging .25 paid on every first turn.
+        self._publish_prewarmed_skill_view(thread_id, user_id=effective_user_id, resolve=resolve_skill_snapshot)
+        logger.info("Prewarmed accepted sandbox %s for thread %s", created, thread_id)
+        return created
 
     def _publish_prewarmed_skill_view(self, thread_id: str, *, user_id: str, resolve: Callable[[], "AcceptedSkillSnapshot | None"] | None) -> None:
         """Stage the view the likely first turn would stage, and never fail for it.
