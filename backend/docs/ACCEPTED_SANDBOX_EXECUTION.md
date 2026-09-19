@@ -289,6 +289,43 @@ refuse that thread's every later turn for the life of the process, with
 ever remove the prewarm's own record: a turn that bound first makes it a
 no-op.
 
+### Known defect: a failed bind can wedge a thread when the view map holds a foreign identity
+
+Issues are disabled on this repository, so this is recorded where the code
+is. It is **not** the first-turn case the prewarm's compare-and-pop closes
+above; it is the general shape, which predates it.
+
+**Precondition.** `_active_view_bindings[view]` holds a *foreign*
+`(run_id, generation)` — one that is not the identity being unwound — at the
+moment a bind raises. Reachable through a mid-turn supersession
+(`fence_committed_owner` / `promote_supersession`) that installs a new
+generation and then fails to bind before the swap, or through any earlier
+turn whose clean release never ran.
+
+**Mechanism.** The bind raises inside staging (ENOSPC or EIO on the tenant
+data disk is the realistic cause), leaving the map unchanged.
+`release_accepted_skill_consumer` sets `state.clearing`; the exact
+compare-and-clear cannot match a foreign identity, and the fallback
+`release_unowned_skill_snapshot_active_view` refuses any view that carries a
+record at all. `accepted_projection.py` then returns before the `finally`
+that calls `finalize_release` — the only caller there is — so `clearing`
+stays set with nothing to sweep it. Every later `reserve_admission`,
+`try_claim_committed_run` and `claim_committed_run` refuses while it is set,
+and `fence_committed_owner` refuses too, so interrupt and rollback cannot
+rescue the thread either. Probed during the prewarm-view review: clearing
+the view map with `force_clear_skill_snapshot_active_view` leaves the thread
+refused, because the coordinator's state is not in that map. Only a Gateway
+restart recovers it, and that takes every other thread's sandbox with it.
+
+**Two things for whoever fixes it.** Do not fix it by ignoring generation 0:
+a real `AcceptedSkillSandboxBindingV1` can legally carry generation 0 (the
+field's default, and `bind_skill_snapshot_active_view`'s), so a
+`release_unowned` that skipped such a record could empty a view a live
+container is mounting — that refusal is the protection. The real design
+question is whether an unwind that cannot prove the view is gone should
+surrender coordinator ownership anyway; that is a question about what
+"absent" must mean, and it deserves its own review.
+
 ### Rediscovery is not creation
 
 `create` is an attempt, not a result. `LocalContainerBackend.create` can answer
