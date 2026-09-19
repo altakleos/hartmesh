@@ -69,6 +69,12 @@ import {
   type ThreadStreamOptions,
 } from "@/core/threads/hooks";
 import {
+  offersReasoningMode,
+  reasoningEffortForMode,
+  resolveChatMode,
+  type ModelModeSupport,
+} from "@/core/threads/run-context";
+import {
   formatUploadSize,
   useUploadLimits,
   validateUploadLimits,
@@ -115,29 +121,6 @@ function buildHiddenSidecarContextMessage({
 
 type SidecarInputMode = NonNullable<ThreadStreamOptions["context"]["mode"]>;
 
-function getResolvedMode(
-  mode: ThreadStreamOptions["context"]["mode"],
-  supportsThinking: boolean,
-): SidecarInputMode {
-  if (!supportsThinking && mode !== "flash") {
-    return "flash";
-  }
-  if (mode) {
-    return mode;
-  }
-  return supportsThinking ? "pro" : "flash";
-}
-
-function reasoningEffortForMode(mode: SidecarInputMode) {
-  return mode === "ultra"
-    ? "high"
-    : mode === "pro"
-      ? "medium"
-      : mode === "thinking"
-        ? "low"
-        : "minimal";
-}
-
 function promptMessageFiles(message: PromptInputMessage) {
   return message.files.flatMap((file) =>
     file.file instanceof File ? [file.file] : [],
@@ -172,8 +155,6 @@ export function SidecarPanel({ className }: { className?: string }) {
       models[0]
     );
   }, [models, sidecar.context.model_name]);
-
-  const supportThinking = selectedModel?.supports_thinking ?? false;
 
   const {
     thread,
@@ -230,10 +211,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     );
     const fallbackModel = currentModel ?? models[0]!;
     const nextModelName = fallbackModel.name;
-    const nextMode = getResolvedMode(
-      sidecar.context.mode,
-      fallbackModel.supports_thinking ?? false,
-    );
+    const nextMode = resolveChatMode(sidecar.context.mode, fallbackModel);
     const modeChanged = sidecar.context.mode !== nextMode;
 
     if (sidecar.context.model_name === nextModelName && !modeChanged) {
@@ -283,10 +261,7 @@ export function SidecarPanel({ className }: { className?: string }) {
       if (!model) {
         return;
       }
-      const nextMode = getResolvedMode(
-        sidecar.context.mode,
-        model.supports_thinking ?? false,
-      );
+      const nextMode = resolveChatMode(sidecar.context.mode, model);
       const modeChanged = sidecar.context.mode !== nextMode;
       sidecar.setContext({
         ...sidecar.context,
@@ -303,14 +278,14 @@ export function SidecarPanel({ className }: { className?: string }) {
 
   const handleModeSelect = useCallback(
     (mode: SidecarInputMode) => {
-      const nextMode = getResolvedMode(mode, supportThinking);
+      const nextMode = resolveChatMode(mode, selectedModel);
       sidecar.setContext({
         ...sidecar.context,
         mode: nextMode,
         reasoning_effort: reasoningEffortForMode(nextMode),
       });
     },
-    [sidecar, supportThinking],
+    [sidecar, selectedModel],
   );
 
   const ensureSidecarThread = useCallback(
@@ -635,7 +610,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 <SidecarAddAttachmentsButton uploadLimits={uploadLimits} />
                 <SidecarModeMenu
                   context={sidecar.context}
-                  supportThinking={supportThinking}
+                  model={selectedModel}
                   onModeSelect={handleModeSelect}
                 />
               </PromptInputTools>
@@ -750,15 +725,15 @@ function SidecarAddAttachmentsButton({
 
 function SidecarModeMenu({
   context,
-  supportThinking,
+  model,
   onModeSelect,
 }: {
   context: ThreadStreamOptions["context"];
-  supportThinking: boolean;
+  model: ModelModeSupport | undefined;
   onModeSelect: (mode: SidecarInputMode) => void;
 }) {
   const { t } = useI18n();
-  const mode = getResolvedMode(context.mode, supportThinking);
+  const mode = resolveChatMode(context.mode, model);
 
   return (
     <PromptInputActionMenu>
@@ -818,7 +793,7 @@ function SidecarModeMenu({
               <div className="ml-auto size-4" />
             )}
           </PromptInputActionMenuItem>
-          {supportThinking && (
+          {offersReasoningMode(model) && (
             <PromptInputActionMenuItem
               className={cn(
                 mode === "thinking"
