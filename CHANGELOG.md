@@ -5,6 +5,49 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.27] — 2026-09-19
+
+- hartmesh#119 — a tenant's own name, logo and report profiles come from one directory on its data disk. Everything the operator sets for a company was scattered: the header read one file, the report skill read another under looser rules, the product's name was still under every message and in every browser tab, and a company that wanted its own report styling had nowhere to put it. The bundle is one read-only mount the Gateway and every sandbox see, with `render_config.py --check` reporting what it cannot use and rendering anyway. The rules are now the same wherever the name is shown: the report applies the header's name rules and degrades the same way, so a report never carries a company the workspace refused and a typo never fails a run. Every branded surface waits for the answer rather than showing the product's while the answer is unknown, and a failed fetch is unknown rather than a fallback to ours.
+
+Degradation is the whole of the design here, because the operator writes
+these files by hand on a VM. A missing directory would have refused every
+sandbox — a bind mount will not create its source — so the Gateway's compose
+service names the directory itself and Compose creates it at `up`. A directory
+the Gateway cannot traverse, an unopenable picture, a malformed entry: each is
+one named problem in the start-up journal, not a Gateway that will not start.
+An unknown key's name is operator text and is not journalled.
+
+- hartmesh#120 — the two waits the released `.26` tenant measured are off the turn. The prewarm held the per-thread acquire serializer across the skill-view publication `.26` added, so a first turn arriving while the prewarm ran queued behind it: the tenant measured 3.687 s queued on a warm host and 16.263 s on the first chat after a boot, against 129 ms of projection work and a 15 ms sandbox reclaim. The publication needs no hold — it fences itself under the views lock, where a generation-0 bind is refused on a view a real run owns and the clear is a compare-and-pop that never touches another run's bytes — so it now runs after the lock is released, and a guess is dropped the moment its container stops being a guess. A lost race costs exactly the staging `.25` paid on every first turn, and never a wait.
+
+The other half is the report turn's four model calls, two of which read the
+workbook before building it. The skill already inspects nothing by default;
+what remained was the harness and the doc rewarding a probe. `inspect` was
+Step 1 and the workflow's longest section, headed "usually skipped"; it is now
+a recovery tool and Build is Step 1. An exit-3 for a missing role said no
+column matched without saying what the file holds, so seeing the columns took
+a second read; the question now carries them. A successful build never named
+the columns no role claimed, so they were invisible without inspecting; the
+digest names them. `--period` was required, so "make me a report from this
+file" had to read the file first; the build now covers the month holding most
+of the rows and says so in its checks, for the person to correct in one
+sentence. And the uploads middleware was telling the model to read and grep
+every upload including a workbook, which has neither an outline nor a preview
+and nothing to read; that guidance now follows the upload's own bytes, the
+same check `grep` applies before it opens a file.
+
+The script also stopped needing the recipe it used to hand out: for a workbook
+or a CSV whose header is not the first row, it finds the header row itself,
+within ten rows, and a file that truly has no amount column is still refused
+by name.
+
+Neither change in this release has run on a tenant. The `.26` figures above
+are the measured baseline and nothing here is a claim about what replaces
+them; the queue the prewarm was creating is removed, and what remains in that
+16 s is the cold container build, which is not this release's to fix. The
+report path drops from four model calls to two on the happy path, which is a
+count and not a duration. The next tenant-class run is what has standing to
+say.
+
 ## [2.1.0+hartmesh.26] — 2026-09-19
 
 - hartmesh#116 — a plan is Ultra's alone, and the chat mode is read in one place. On the `.25` tenant a one-command report cost five model calls and two of them were todo bookkeeping: the model wrote a plan, executed it, and revised it, on a skill whose whole job is one command. Nothing had asked for that. `is_plan_mode` binds the `write_todos` tool, Pro sets it, and Pro is what every thinking-capable model resolves to when nobody chooses — so the plan tax was on every ordinary turn, and the todo prompt already telling the model not to bother with trivial tasks did not stop it. A tool a model is given is a tool a model uses. Plan mode now belongs to Ultra, the mode that also divides work between subagents, where a visible plan has something to track. The same change removes the four private spellings of the mode dial — one in the composer, one in the sidecar, one at each of the two places a run starts — and replaces them with a single module that answers the three questions that exist: which modes a model can offer, which mode a stored choice resolves to on it, and what a mode turns on in the agent. A mode can no longer mean one thing in the menu, another on the first message and a third on a follow-up. The third question had been answered wrong for this tenant: Reasoning and Pro are the same request but for `reasoning_effort`, and the model factory drops that field for a model that does not support it, so on `inclusionai/ling-3.0-flash-vl` the two rows sent byte-identical bytes. The menu offered more time for more accuracy and delivered neither. The row is now derived from the model's own capability and a stored Reasoning choice resolves to Pro where the two are the same request.
@@ -226,6 +269,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.27]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.27
 [2.1.0+hartmesh.26]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.26
 [2.1.0+hartmesh.25]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.25
 [2.1.0+hartmesh.24]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.24
