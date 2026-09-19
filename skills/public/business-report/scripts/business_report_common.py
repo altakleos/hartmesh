@@ -356,6 +356,12 @@ class BuildContext:
     unparsed_amounts: int
     parsed_amounts: int
     exclusion_texts: list[str]
+    #: A few of the amount cells that could not be read, as the file wrote them.
+    unparsed_amount_examples: list[str] = field(default_factory=list)
+    #: False when the caller named no period and the script chose one from the
+    #: file. The report says so in its checks, because a period nobody asked
+    #: for is a thing the person must be able to correct.
+    period_was_given: bool = True
 
 
 # --- periods -------------------------------------------------------------------

@@ -123,15 +123,39 @@ def test_a_turn_does_not_wait_for_the_prewarms_view_publication(provider_and_pat
 
         arriving = threading.Thread(target=take_it)
         arriving.start()
-        arriving.join(10)
-
-        assert not arriving.is_alive(), "the turn queued behind the prewarm's view publication"
+        try:
+            arriving.join(10)
+            assert not arriving.is_alive(), "the turn queued behind the prewarm's view publication"
+        finally:
+            finish.set()
+            arriving.join(10)
         assert "error" not in turn, turn.get("error")
         assert turn["sandbox"] is not None
     finally:
         finish.set()
         prewarm.join(10)
     assert not prewarm.is_alive()
+
+
+def test_a_container_a_turn_already_took_is_no_longer_a_guess(provider_and_paths, tmp_path):
+    """Publishing outside the hold means the guess can finish after the turn it was meant to
+    help. A turn that already holds the container gains nothing from one, and a guess landing
+    behind that turn's own teardown stages bytes for a thread with no container -- or, inside
+    the release, leaves the thread's projection refusing every later turn. So the publication
+    asks whether its container is still a guess, and drops it when it is not."""
+    provider, _backend, _paths = provider_and_paths
+    snapshot = _snapshot(tmp_path)
+    key = provider._thread_key(THREAD, ACCEPTED_USER)
+
+    parked = provider._prewarm_accepted_skills(THREAD, user_id=ACCEPTED_USER, resolve_skill_snapshot=lambda: snapshot)
+
+    assert parked is not None
+    assert provider._prewarmed_container_is_still_a_guess(key, parked) is True, "parked and unclaimed"
+
+    taken = _acquire_accepted(provider, THREAD)
+
+    assert taken == parked
+    assert provider._prewarmed_container_is_still_a_guess(key, parked) is False, "a turn holds it now"
 
 
 def test_a_turn_with_a_different_snapshot_restages_and_is_never_refused(provider_and_paths, tmp_path):

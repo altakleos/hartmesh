@@ -126,8 +126,13 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 <current_uploads>
 The following files were uploaded in this message:
 
-- document.pdf (1.2 MB)
-  Path: /mnt/user-data/uploads/document.pdf
+- notes.md (1.2 MB)
+  Path: /mnt/user-data/uploads/notes.md
+  Use `grep` to search for keywords (…).
+
+- export.xlsx (900.0 KB)
+  Path: /mnt/user-data/uploads/export.xlsx
+  This file is not text: `read_file` and `grep` have nothing to read in it. …
 
 To work with these files:
 - Read from the file first — use the outline line numbers and `read_file` to locate relevant sections.
@@ -135,6 +140,14 @@ To work with these files:
 - Use `glob` to find files by name pattern.
 </current_uploads>
 ```
+
+读写建议按每个文件自身的事实给出，而不是按扩展名或转换开关：当上传本身是文本，
+或转换已产出文本投影时，才提示 `read_file` 与 `grep`；其余文件（表格、图片、压缩包）
+明确说明没有可读文本，交给能读该格式的工具或技能。判定与 `grep` 自身跳过文件时
+使用的是同一个检查（`deerflow.sandbox.search.is_binary_file`），二者因此永远一致。
+无法读取上传目录时按“可读”处理，不凭空否定。整批文件都不是文本时，
+`To work with these files:` 中的前两条不会出现。上面的片段为示意，实际文本以
+`UploadsMiddleware` 为准。
 
 以前轮次上传的文件不会在每次请求中重复注入。Agent 可按需调用
 `list_uploaded_files` 查询历史上传；如果已知文件名，也可直接使用

@@ -1005,6 +1005,101 @@ def test_one_question_covers_every_ambiguous_role_and_overrides_displace_auto_ro
     assert "amount" in err and "id" in err and "null" in err
 
 
+def test_amounts_the_script_cannot_read_are_quoted_back(report, tmp_path, capsys) -> None:
+    """The count says how much revenue moved; it never said which cells to go and fix, and the
+    only way to see one was to read the file. Revenue falling because two cells say "see
+    invoice" is the kind of thing a person must be shown, not told the size of."""
+    path = _write_csv(
+        tmp_path / "unreadable.csv",
+        ["Date", "Amount"],
+        [["2026-08-01", "100"], ["2026-08-02", "see invoice"], ["2026-08-03", "n/a"], ["2026-08-04", "see invoice"]],
+    )
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+
+    assert code == 0, err
+    check = next(check for check in _read_report(tmp_path / "out")["checks"] if check["id"] == "unparsed_amounts")
+    assert check["status"] == "warn"
+    assert '"see invoice"' in check["text"] and '"n/a"' in check["text"]
+    assert check["text"].count("see invoice") == 1, "each distinct value once"
+
+
+def test_a_request_that_names_no_period_still_builds_and_says_which_it_chose(report, tmp_path, capsys) -> None:
+    """ "Make me a report from this file" was the one opening that still forced a read of the
+    file before the build, because `--period` was required. The file answers it, and the report
+    says in its checks which period it chose so the person can name another."""
+    code, out, err = _build(report, capsys, tmp_path / "out", str(LARGE_CSV))
+
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    assert built["meta"]["period"]["key"] == "2026-08"
+    choice = next(check for check in built["checks"] if check["id"] == "period_choice")
+    assert choice["status"] == "warn"
+    assert "August 2026" in choice["text"] and "Say another period" in choice["text"]
+    assert choice["text"] in out, "the person hears it, so they can correct it"
+
+
+def test_a_named_period_says_nothing_about_choosing_one(report, tmp_path, capsys) -> None:
+    code, out, err = _build(report, capsys, tmp_path / "out", str(LARGE_CSV), "--period", "2026-08")
+
+    assert code == 0, err
+    assert [check for check in _read_report(tmp_path / "out")["checks"] if check["id"] == "period_choice"] == []
+
+
+def test_a_file_with_no_usable_date_says_so_rather_than_choosing(report, tmp_path, capsys) -> None:
+    path = _write_csv(tmp_path / "undated.csv", ["Date", "Amount"], [["not a date", "10"], ["nor this", "20"]])
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path))
+
+    assert code == 1
+    assert "no row has a usable date" in err
+
+
+def test_an_export_whose_header_is_not_the_first_row_is_read_from_the_row_it_is(report, tmp_path, capsys) -> None:
+    """The ordinary accounting export opens with a company name and a blank line. That reaches
+    pandas as `Unnamed: N` columns, and the report used to refuse a file that plainly has a date
+    and an amount -- while telling the model to re-cut the sheet with its own pandas. The script
+    finds the header row instead: it is the first row that names the roles, and nothing below it
+    is guessed."""
+    import pandas as pd
+
+    path = tmp_path / "shifted.xlsx"
+    rows = [["Example Services Co. monthly export", None, None], [None, None, None], ["Date", "Amount", "Technician"]]
+    rows += [[f"2026-08-{day:02d}", 100 + day, "Sam"] for day in range(1, 11)]
+    pd.DataFrame(rows).to_excel(path, index=False, header=False)
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+
+    assert code == 0, err
+    built = _read_report(tmp_path / "out")
+    assert built["meta"]["inputs"][0]["rows"] == 10, "the title and blank rows are not data"
+    assert built["meta"]["build"]["mapping"]["date"] == "Date"
+    assert built["meta"]["build"]["mapping"]["amount"] == "Amount"
+
+
+def test_a_csv_whose_header_is_not_the_first_row_is_read_the_same_way(report, tmp_path, capsys) -> None:
+    path = tmp_path / "shifted.csv"
+    body = "Example Services Co. monthly export\n\nDate,Amount,Technician\n"
+    body += "".join(f"2026-08-{day:02d},{100 + day},Sam\n" for day in range(1, 11))
+    path.write_text(body, encoding="utf-8")
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+
+    assert code == 0, err
+    assert _read_report(tmp_path / "out")["meta"]["inputs"][0]["rows"] == 10
+
+
+def test_a_sheet_that_really_has_no_amount_is_still_refused_by_name(report, tmp_path, capsys) -> None:
+    """The search for a header row never invents one: a file with no amount anywhere is still
+    the error that names what is missing, not a report built on a guess."""
+    path = _write_csv(tmp_path / "no_amount.csv", ["Date", "Notes"], [["2026-08-01", "a job"], ["2026-08-02", "another"]])
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+
+    assert code == report.EXIT_DECISION_NEEDED
+    assert "amount" in err
+
+
 def test_a_build_that_matched_no_column_names_the_columns_the_file_has(report, tmp_path, capsys) -> None:
     """The .26 trace probed the workbook before building. The only answer a probe held that
     the build did not was *which columns exist*, and that belongs in the question the build
@@ -1017,6 +1112,20 @@ def test_a_build_that_matched_no_column_names_the_columns_the_file_has(report, t
     details = json.loads(err[err.index("{") :])
     assert details["columns"] == ["Date", "Notes", "Ref"], "the columns the file does have, in file order"
     assert details["missing"] == ["amount"]
+
+
+def test_a_very_wide_sheet_does_not_flood_the_turn_with_column_names(report, tmp_path, capsys) -> None:
+    """A spreadsheet may carry thousands of columns. The person answering "which column holds
+    the date" is choosing from the front of the file; the rest would only crowd the turn."""
+    columns = ["Date", "Amount"] + [f"Extra {index}" for index in range(120)]
+    path = _write_csv(tmp_path / "wide.csv", columns, [["2026-08-01", "10", *["x"] * 120]])
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
+
+    assert code == 0, err
+    line = next(line for line in out.splitlines() if line.startswith("Unused columns:"))
+    assert "Extra 0" in line and "Extra 119" not in line
+    assert f"… {120 - report.MAX_NAMED_COLUMNS} more" in line
 
 
 def test_the_build_digest_names_the_columns_it_did_not_use(report, tmp_path, capsys) -> None:

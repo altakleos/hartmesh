@@ -13,7 +13,7 @@ One script turns an export into a report draft: `report.json` plus PNG charts, t
 
 ```
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" inspect <files…>
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build   <files…> --period 2026-08 --out REPORTDIR [--render pdf,docx,xlsx]
+python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build   <files…> [--period 2026-08] --out REPORTDIR [--render pdf,docx,xlsx]
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" show    REPORTDIR/<dirname>.report.json
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" prose   REPORTDIR/<dirname>.report.json --from prose.json [--render pdf,docx,xlsx]
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" render  REPORTDIR/<dirname>.report.json --to pdf,docx,xlsx
@@ -56,8 +56,9 @@ on stderr when a role is genuinely ambiguous or missing -- and that question
 carries the file's columns, so it answers itself. Reading the file before
 building buys nothing the build does not print: a run that succeeds prints the
 rows, the period, the currency, every table and the columns no role claimed.
-The one thing the build cannot guess is a period the user did not name; when
-they named none, `inspect` (below) suggests the latest complete one.
+A period the user did not name is not a reason to read the file either: leave
+`--period` off and the build covers the month holding most of the rows and
+says so in its checks, for the user to correct in one sentence.
 
 ```bash
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build \
@@ -78,7 +79,7 @@ with the `bash` tool's `present` argument naming the four files this run writes:
 ]}
 ```
 
-Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `charts/*.png`, `checks.json` and `renders.json` (which renders belong to this draft) in `--out`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the directory, one directory per report; a second build into the same directory becomes the next draft, removes its own renders of the previous draft (they no longer match) and says so. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`. A period with no rows is an error that names the dates the files do cover; build a period the files have.
+Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `charts/*.png`, `checks.json` and `renders.json` (which renders belong to this draft) in `--out`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the directory, one directory per report; a second build into the same directory becomes the next draft, removes its own renders of the previous draft (they no longer match) and says so. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`; leave `--period` off when the user named none. A period with no rows is an error that names the dates the files do cover; build a period the files have.
 
 Options: `--exclude category=Warranty` (repeatable; a role or an exact column name, matched case-insensitively), `--company "Name"`, `--title "..."`, `--currency EUR`, `--short` for a one-sentence summary, `--prefs preferences.json`, `--profile <name>` (a tenant profile from `/mnt/tenant/report-profiles/` wins over the skill's `profiles/`).
 
@@ -155,21 +156,20 @@ Every check is labelled "checked by the report script"; that is what it is.
 
 ## When an export does not load cleanly
 
-`inspect` is the tool for these, and for a user who named no period. It is not
-a step on the way to a report: everything it returns about a file that builds
-is in what the build prints.
+`inspect` is the tool for these. It is not a step on the way to a report:
+everything it returns about a file that builds is in what the build prints.
 
 ```bash
 python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" inspect /mnt/user-data/uploads/export.xlsx
 ```
 
-Per file and sheet it gives the columns with their type and samples, the suggested roles with a confidence, `ambiguous` roles with their candidates, `missing` required roles, the months present, a `period_suggestion` (the latest complete period), `date_order`, a `currency` guess and a ready-made `question` covering every open role at once. When `question` is set, ask exactly that, once, even when it names two roles; put every answer in one mapping file, `{"date": "Completed On", "amount": "Invoice Total"}`, and pass `--mapping` to the build. A column you name explicitly displaces any role the script guessed for it; `{"id": null}` clears a role. A workbook sheet is addressed as `export.xlsx::Sheet name`, never by sheet name alone.
+Per file and sheet it gives the columns with their type and samples, the suggested roles with a confidence, `ambiguous` roles with their candidates, `missing` required roles, the months present, a `period_suggestion` (the busiest month), `date_order`, a `currency` guess and a ready-made `question` covering every open role at once. When `question` is set, ask exactly that, once, even when it names two roles; put every answer in one mapping file, `{"date": "Completed On", "amount": "Invoice Total"}`, and pass `--mapping` to the build. A column you name explicitly displaces any role the script guessed for it; `{"id": null}` clears a role. A workbook sheet is addressed as `export.xlsx::Sheet name`, never by sheet name alone.
 
 - Exit `3` with a sheet question: pass `file.xlsx::Sheet`.
 - Exit `3` for a role: its `columns` list is what the file holds. When one of them clearly carries a role the script did not match (a `Treatment` column where the profile expects a service), map it and build again; the section then takes its heading from that column name. Do not ask the user about it, and do not read the file to see it.
 - A build that succeeded but named columns under `Unused columns:` read the same way: map one when it clearly holds a role the report is missing.
-- "no date and amount column": the header row is not the first row (`Unnamed: N` columns are the sign). `inspect` names the columns as the file has them; save the sheet from the right header row into `/mnt/user-data/workspace/` as CSV and build from that, and say so.
-- Amounts in a format the script cannot read count as zero and appear in `unparsed_amounts`. The decimal separator is decided once per column from the values ("1.234,56" reads as European; "1,234.56" as US).
+- A header row that is not the first row needs nothing from you: an export that opens with a company name and a blank line is read from the row that names the columns. "no date and amount column" therefore means the file really has none in the first ten rows -- say what the file does have (`inspect` lists it) and ask which column carries the date and the amount.
+- Amounts in a format the script cannot read count as zero and appear in `unparsed_amounts`, which quotes a few of them as the file wrote them: repeat those to the user, because revenue moved. The decimal separator is decided once per column from the values ("1.234,56" reads as European; "1,234.56" as US).
 - Timestamps that carry a time zone offset are converted to UTC before the period is applied.
 - A `.xls` that is an HTML or CSV export in disguise: save it under the right extension in the workspace first.
 

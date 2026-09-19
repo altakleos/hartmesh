@@ -214,21 +214,36 @@ class TestCreateFilesMessage:
 
     def test_read_file_instruction_included(self, tmp_path):
         mw = _middleware(tmp_path)
-        msg = mw._create_files_message([self._new_file(), {"filename": "n.md", "size": 1, "path": "/p", "outline_preview": ["hello"]}])
+        msg = mw._create_files_message([self._new_file()])
         assert "read_file" in msg
 
-    def test_an_upload_with_no_text_form_is_not_offered_read_file_or_grep(self, tmp_path):
-        """A spreadsheet has no sibling markdown, so it has neither an outline nor a preview.
-        Telling the model to read and grep it anyway sent the .26 tenant trace two round trips
-        into a workbook before it ran the skill that reads workbooks."""
+    def _binary(self, filename="export.xlsx", size=900_000):
+        return {"filename": filename, "size": size, "path": f"/mnt/user-data/uploads/{filename}", "has_text_form": False}
+
+    def test_an_upload_that_is_not_text_is_not_offered_read_file_or_grep(self, tmp_path):
+        """A workbook holds bytes no text tool can read. Telling the model to read and grep it
+        anyway sent the .26 tenant trace round trips into a spreadsheet before it reached the
+        skill that reads spreadsheets."""
         mw = _middleware(tmp_path)
 
-        msg = mw._create_files_message([self._new_file("export.xlsx", size=900_000)])
+        msg = mw._create_files_message([self._binary()])
 
         assert "Read from the file first" not in msg
         assert "Use `grep` to search" not in msg
         assert "export.xlsx" in msg
-        assert "No text form of this file was extracted" in msg
+        assert "This file is not text" in msg
+
+    def test_a_plain_text_upload_keeps_every_word_of_the_reading_guidance(self, tmp_path):
+        """Nothing about a spreadsheet may take `read_file` away from a .txt or a .csv: on the
+        released profile no upload is converted, so a rule keyed to a converted sibling would
+        have told every owner their notes file could not be read."""
+        mw = _middleware(tmp_path)
+
+        msg = mw._create_files_message([self._new_file("notes.txt"), self._new_file("sales.csv")])
+
+        assert "Read from the file first" in msg
+        assert "Use `grep` to search" in msg
+        assert "This file is not text" not in msg
 
     def test_a_mixed_batch_keeps_the_text_guidance_and_names_the_rest(self, tmp_path):
         mw = _middleware(tmp_path)
@@ -236,13 +251,22 @@ class TestCreateFilesMessage:
         msg = mw._create_files_message(
             [
                 {"filename": "brief.pdf", "size": 10, "path": "/mnt/user-data/uploads/brief.pdf", "outline": [{"title": "Scope", "line": 3}]},
-                self._new_file("export.xlsx"),
+                self._binary(),
             ]
         )
 
         assert "Read from the file first" in msg
-        assert "No text form of this file was extracted" in msg
+        assert "This file is not text" in msg
         assert "export.xlsx" in msg and "brief.pdf" in msg
+
+    def test_an_upload_the_uploads_directory_could_not_answer_for_keeps_the_guidance(self, tmp_path):
+        """Unknown is not "unreadable": where the bytes were never consulted, nothing is claimed away."""
+        mw = _middleware(tmp_path)
+
+        msg = mw._create_files_message([self._new_file("mystery.bin")])
+
+        assert "Read from the file first" in msg
+        assert "This file is not text" not in msg
 
     def test_empty_files_produces_empty_marker(self, tmp_path):
         mw = _middleware(tmp_path)
@@ -752,4 +776,32 @@ class TestBeforeAgent:
         assert result is not None
         content = result["messages"][-1].content
         assert "Document outline" not in content
-        assert "grep" in content
+        # The hint itself, not the word: a refusal that mentions `grep` while taking it
+        # away reads the same to a substring test and the opposite to the model.
+        assert "Use `grep` to search for keywords" in content
+        assert "This file is not text" not in content
+
+    def test_whether_an_upload_is_text_is_read_off_the_upload(self, tmp_path):
+        """No deployment setting decides this. On the released profile nothing is converted,
+        so a rule keyed to a converted sibling calls a plain .txt unreadable; the bytes are the
+        fact, and they are the same fact `grep` itself applies before it opens a file."""
+        mw = _middleware(tmp_path)
+        uploads_dir = _uploads_dir(tmp_path)
+        (uploads_dir / "notes.txt").write_bytes(b"the quarterly numbers look fine\n")
+        (uploads_dir / "export.xlsx").write_bytes(b"PK\x03\x04\x00\x00rows and \x00 bytes")
+
+        msg = _human(
+            "look at these",
+            files=[
+                {"filename": "notes.txt", "size": 31, "path": "/mnt/user-data/uploads/notes.txt"},
+                {"filename": "export.xlsx", "size": 25, "path": "/mnt/user-data/uploads/export.xlsx"},
+            ],
+        )
+        result = mw.before_agent(self._state(msg), _runtime())
+
+        assert result is not None
+        content = message_content_to_text(result["messages"][-1].content)
+        text_entry, binary_entry = content.index("notes.txt"), content.index("export.xlsx")
+        refusal = content.index("This file is not text")
+        assert text_entry < binary_entry < refusal, "the refusal belongs to the workbook, not the note"
+        assert "Use `grep` to search for keywords" in content, "the note is still readable"
