@@ -5,6 +5,57 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.26] — 2026-09-19
+
+- hartmesh#116 — a plan is Ultra's alone, and the chat mode is read in one place. On the `.25` tenant a one-command report cost five model calls and two of them were todo bookkeeping: the model wrote a plan, executed it, and revised it, on a skill whose whole job is one command. Nothing had asked for that. `is_plan_mode` binds the `write_todos` tool, Pro sets it, and Pro is what every thinking-capable model resolves to when nobody chooses — so the plan tax was on every ordinary turn, and the todo prompt already telling the model not to bother with trivial tasks did not stop it. A tool a model is given is a tool a model uses. Plan mode now belongs to Ultra, the mode that also divides work between subagents, where a visible plan has something to track. The same change removes the four private spellings of the mode dial — one in the composer, one in the sidecar, one at each of the two places a run starts — and replaces them with a single module that answers the three questions that exist: which modes a model can offer, which mode a stored choice resolves to on it, and what a mode turns on in the agent. A mode can no longer mean one thing in the menu, another on the first message and a third on a follow-up. The third question had been answered wrong for this tenant: Reasoning and Pro are the same request but for `reasoning_effort`, and the model factory drops that field for a model that does not support it, so on `inclusionai/ling-3.0-flash-vl` the two rows sent byte-identical bytes. The menu offered more time for more accuracy and delivered neither. The row is now derived from the model's own capability and a stored Reasoning choice resolves to Pro where the two are the same request.
+
+This one is visible in the product, not only in the timing. On a model that
+ignores effort the Reasoning row is gone from the picker, and Pro no longer
+produces a plan. The mode copy and both locales moved with it.
+
+- hartmesh#117 — the prewarmed container now arrives with its skill view already published. `.24` built the sandbox while the person typed and `.25` proved it on a tenant: the new chat's container was ready 3.5 s ahead and reclaimed in 14 ms. The first turn still spent 2.2 s in skill projection, because the container was parked and the *view* it mounts was not. Binding a thread's accepted view stages an fsync'd copy of the snapshot the first time that thread sees it — capture, write, two re-captures — and verifies the published tree in place on every bind after. So the prewarm publishes the view for the snapshot the first turn is most likely to bring: the default agent, no subagents, every enabled skill, which is the whole of what the default turn's snapshot depends on and all anyone can know before a word is typed.
+
+The identity never authorizes the reuse; the bytes do. A turn that brings a
+different snapshot fails the in-place verification and takes exactly today's
+slow path, which is the entire cost of guessing wrong, and a view that cannot
+be published costs the turn nothing either — the container is parked
+regardless. The prewarm is handed a *resolver* rather than a snapshot, so the
+ordinary "built nothing" answers on a two-slot tenant spend no tree passes,
+and the lease is taken and released by the same party.
+
+What the prewarm deliberately does not take is ownership. It publishes the
+tree and immediately compare-and-pops its own record, leaving bytes and no
+claim, because a guess recorded as an owner wedges the thread: when a turn's
+own bind fails after it has claimed the coordinator — a tenant disk filling
+during staging is the realistic cause, and staging is the very cost this
+change exists to remove — the unwind's compare-and-clear carries the run's own
+identity and cannot match a guess, and its fallback refuses any recorded view
+outright. Neither path reaches the release that clears the coordinator, so
+every later turn on that thread is refused, permanently. Publishing bytes and
+keeping nothing leaves precisely the state the unwind knows how to finish.
+
+- hartmesh#118 — that wedge is recorded as a known defect where the code is. It is older than the prewarm and reachable without it: any failed first bind on a thread whose view map holds an identity the unwind cannot match leaves the coordinator clearing and the thread refused. The note carries the mechanism, the in-process probe showing that emptying the view map does not recover the thread, and one rejected repair that will otherwise be proposed again — ignoring generation 0 in the unowned release, which a real binding can legally carry, and which would therefore empty a view a live container is mounting.
+
+Both timings in this release were taken on the released `.25` profile, and
+neither change has run on a tenant. The arithmetic says the 39.793 s report
+turn should lose two model calls and the 2.2 s of staging, which subtracts to
+about 27 s; that is a subtraction and not a measurement, and it is offered as
+one. The two calls that disappear were short-output calls and were plausibly
+cheaper than the five-call average the subtraction uses, while the three that
+remain now run on a shorter history and should be faster than they were —
+both effects are unmeasured and they point opposite ways. The next
+tenant-class run is what has standing to say.
+
+Nothing in this release touches what every model call carries before any
+content: about 12.4k tokens of system prompt and tool schemas, with the
+report skill's own instructions re-sent on each later call. That is the
+remaining measured lever and it is untouched on purpose. Nor is the first
+container after a guest boot explained — it still costs more than a later one
+(19.3 s, against 11.6 s once the image is present) with no attribution
+between image unpack, the sandbox runtime's first start, a cold daemon and
+plain boot contention. Prewarm hides it wherever it has lead time; the first
+chat after a boot is where it is still paid.
+
 ## [2.1.0+hartmesh.25] — 2026-09-18
 
 - hartmesh#115 — a report offers a download only while its file is still there. A tenant built a report with PDF, Word and Excel, revised it in the same chat with a prose change that rendered nothing, and reopened on a fresh login: the card advertised all three formats and all three returned 404. The revision had deleted those renders and written a manifest with an empty file list, and the durable presentation for that turn names only the report JSON — the dead links were entirely UI state. What the card read is the thread's cumulative presented-files list, and that list is *history*: it appends and dedupes, `/history` restores it correctly on a fresh browser, and both the artifact panel and the file chips on earlier messages need it. Its own source comment already recorded the consequence — a rebuild deletes the previous draft's renders and their paths stay in the list. So the card now asks two questions and needs both. Presentation still decides **eligibility**: the delivery fence is unchanged, a format nobody presented is never offered however live its file is, and nothing globs the report directory or infers the three conventional names. A bounded probe then decides **availability**, asking for one byte (`Range: bytes=0-0`) over the same authenticated, owner-checked artifact route the download link itself uses, with the body dropped unread; 200 and 206 are live, and 400, 403, 404 and a network failure are all fail-closed. Proving a 40 MiB PDF is still there costs a byte on the wire and nothing on the Gateway, which skips its content hash above 2 MiB and caches it below. Two races are closed by identity rather than guarded against: every draft rewrites the same filenames while the cumulative list stays byte-for-byte identical, so the report body's own digest is part of the question being asked and a slow probe from the previous draft cannot resolve into this draft's view and restore a link to a file that draft deleted; and a run settling is deliberately *not* part of that identity — it is an event that makes the answer worth re-asking, so settling re-asks the same question and the confirmed links stay on screen instead of blinking out whenever an unrelated turn in the thread ends. While the verdict is unknown the card shows neither links nor the "No file to download yet" notice, because a false empty is worse than the stale link it replaces.
@@ -175,6 +226,9 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.26]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.26
+[2.1.0+hartmesh.25]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.25
+[2.1.0+hartmesh.24]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.24
 [2.1.0+hartmesh.23]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.23
 [2.1.0+hartmesh.22]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.22
 [2.1.0+hartmesh.21]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.21
