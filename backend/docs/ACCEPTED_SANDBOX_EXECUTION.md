@@ -232,12 +232,14 @@ acquisition changes, and no second equivalence rule exists. The Gateway
 exposes it as `POST /api/threads/{id}/workspace/prewarm`, which the web client
 calls the moment it mints a new thread id -- seconds before the first message.
 
-Three rules keep a speculative build from ever slowing a real turn:
+Four rules keep a speculative build from ever slowing a real turn, and the
+fourth is the honest exception:
 
 | Rule | Where |
 | --- | --- |
 | A prewarm never evicts: it takes a free slot or builds nothing (`SandboxSlotsBusyError`), and containers still in their readiness wait count as taken, so prewarms started within seconds of each other stay inside the slot budget | `_create_sandbox(allow_eviction=False)` |
 | A prewarm never stands in for an active sandbox, and never replaces a parked one -- a mismatch is the acquisition's to resolve under its own fences | `_prewarm_accepted_skills`, under the acquire serializer |
+| The view publication is the one place a wrong guess can cost a turn: it runs under the same per-`(user, thread)` acquire serializer a real acquisition takes, so a first turn arriving mid-build waits for the staging. A right guess repays that exactly (it then verifies in tens of ms instead of staging ~2 s); a wrong one costs the tenant that staging **and** their own — roughly twice today's. The payoff accrues to a turn arriving after the prewarm completes, which is the case the feature targets | `_publish_prewarmed_skill_view`, inside `_acquire_serializer.hold` — deliberately, because it is what makes publish-then-release atomic against a turn's bind |
 | An unclaimed prewarm is stopped once it has sat past `sandbox.prewarm_claim_timeout` (default 300 s), not the idle timeout -- the reaper looks every 30 s, so the container goes at up to 330 s; the mark is the parked container *object*, never its reused id, so a container rebuilt under the same id after an eviction or replacement is never mistaken for the prewarm, and the claim pops the mark, so a container a turn used is an ordinary parked sandbox again | `_reap_unclaimed_prewarms`, on its own reaper thread -- independent of `idle_timeout`, as lease renewal is, so `idle_timeout: 0` cannot silently disable it |
 
 The remote backend refuses (`None`): there the binding is baked into the Pod
@@ -247,6 +249,45 @@ provider without the capability and 202 either way; a build failure is the
 provider's log, never the client's error. The evidence contract is untouched:
 materialization still completes before `try_start`, it just binds into a
 container that is already ready.
+
+**The view, not only the container.** On the released `.25` profile a tenant's
+prewarmed container was reclaimed in 14 ms and the first turn still spent
+2.251 s in `skill_materialization`: the container was parked, the accepted
+*view* it mounts was not, so the first `bind_skill_snapshot_active_view`
+staged a full fsync'd copy while every later bind verified in place. The
+prewarm now publishes that view too. The route resolves
+`likely_first_turn_skill_snapshot` (`runtime/agent_revision.py`) — the same
+`snapshot_effective_skills` call the turn makes, over the enabled skills,
+which is exactly what an ordinary default-agent turn with no subagents
+brings — and hands it to the provider, which binds it under
+`run_id="prewarm"` and **generation 0**, the provisional identity every real
+run supersedes without a conflict.
+
+It is a guess, and only the bytes ever authorize its reuse: the turn adopts
+the published view when its own snapshot id matches and the tree re-digests
+to the evidence, and otherwise re-stages exactly as it does today. The guess
+is exact more often than "guess" suggests — an unnamed run's transitive set
+is already every enabled skill, so a subagent-enabled run agrees, and a
+named agent whose `AgentConfig.skills` is `None` takes the same branch. It
+differs only for an agent carrying an explicit `skills:` list, a bootstrap
+run (IM-only; the prewarm hook is browser-only), and a skill toggled between
+opening the chat and sending. A view that cannot be published — a read-only
+volume, a thread a run already bound — leaves the container parked and warns
+with the reason, because the container is the prewarm's deliverable and the
+view is a head start.
+
+**The record is dropped, the bytes are not.** The publication is immediately
+followed by a compare-and-pop of its own `(run_id, generation)`, leaving the
+view in the module's documented retained-but-unowned state. Keeping the
+record would turn a guess into ownership, and a turn whose own bind then
+raised — the tenant's disk filling during staging is the realistic cause,
+and that is the very bind this removes — could neither compare-and-clear a
+record that is not its own nor fall back to clearing an *unowned* view. The
+runtime would then never reach `finalize_release`, and the coordinator would
+refuse that thread's every later turn for the life of the process, with
+`fence_committed_owner` refusing the interrupt escape too. The pop can only
+ever remove the prewarm's own record: a turn that bound first makes it a
+no-op.
 
 ### Rediscovery is not creation
 

@@ -1319,10 +1319,34 @@ class ThreadWorkspacePrewarmResponse(BaseModel):
     reason: str | None = None
 
 
+def _likely_first_turn_skill_snapshot(user_id: str):
+    """The snapshot an ordinary first turn on this deployment would bring."""
+    from deerflow.config import get_app_config
+    from deerflow.runtime.agent_revision import likely_first_turn_skill_snapshot
+
+    return likely_first_turn_skill_snapshot(get_app_config(), user_id=user_id)
+
+
 async def _prewarm_thread_workspace(prewarm: WorkspacePrewarm, thread_id: str, user_id: str) -> None:
     """Background half of the route: a prewarm is never a surfaced failure."""
+
+    def resolve() -> object | None:
+        """Called by the provider once it has a container, on its own thread."""
+        try:
+            return _likely_first_turn_skill_snapshot(user_id)
+        except Exception:
+            # The container is the prewarm's deliverable and does not depend
+            # on this; without a guess the first turn stages its own view,
+            # exactly as it does today.
+            logger.info(
+                "No likely skill snapshot for thread %s; prewarming the container alone",
+                sanitize_log_param(thread_id),
+                exc_info=True,
+            )
+            return None
+
     try:
-        parked = await prewarm.prewarm_accepted_skills_async(thread_id, user_id=user_id)
+        parked = await prewarm.prewarm_accepted_skills_async(thread_id, user_id=user_id, resolve_skill_snapshot=resolve)
     except Exception:
         logger.warning(
             "Prewarm for thread %s failed; its first turn builds the sandbox instead",

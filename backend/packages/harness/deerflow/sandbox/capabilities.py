@@ -35,6 +35,7 @@ candidates for this negotiation once upstream adopts it.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -47,6 +48,7 @@ from deerflow.sandbox.accepted_material import (
 
 if TYPE_CHECKING:
     from deerflow.runtime.skill_projection import SkillProjectionClear
+    from deerflow.runtime.skill_snapshot import AcceptedSkillSnapshot
     from deerflow.sandbox.accepted_material import AcceptedMaterializerSelection
 
 _PROJECTION_UNSUPPORTED = "accepted_skill_snapshot_projection_unsupported"
@@ -266,6 +268,7 @@ class WorkspacePrewarm:
         thread_id: str,
         *,
         user_id: str,
+        resolve_skill_snapshot: Callable[[], AcceptedSkillSnapshot | None] | None = None,
     ) -> str | None:
         """Park the container ``thread_id``'s first accepted turn would build.
 
@@ -274,8 +277,19 @@ class WorkspacePrewarm:
         is free (a prewarm never evicts), or this backend bakes the binding
         into the container so a prewarm could not be the same container.
         Never raises for those; a backend failure does propagate.
+
+        ``resolve_skill_snapshot`` answers with the snapshot an ordinary
+        first turn is expected to bring; publishing its view is the other
+        half of that turn's projection cost. It is a callable rather than a
+        value because every "built nothing" answer above should cost nothing:
+        an implementation calls it only once it has a container, and releases
+        the lease it thereby took. The guess is advisory in the strongest
+        sense -- the turn adopts a published view only when its own snapshot
+        id matches and the bytes re-digest to it, so a wrong guess costs the
+        turn what it pays today, and a view that cannot be published costs it
+        nothing.
         """
-        del thread_id, user_id
+        del thread_id, user_id, resolve_skill_snapshot
         return None
 
 
