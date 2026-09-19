@@ -725,8 +725,9 @@ async def _materialize_accepted_skill_projection(
         invalidate_runtime_skill_projection_token(runtime, token)
         if token is not None:
             try:
-                await asyncio.to_thread(release_accepted_skill_consumer, token)
+                released = await asyncio.to_thread(release_accepted_skill_consumer, token)
             except Exception:
+                released = True
                 logger.warning(
                     "Failed to release rejected accepted skill consumer",
                     exc_info=True,
@@ -737,6 +738,11 @@ async def _materialize_accepted_skill_projection(
                 logger.warning(
                     "Rejected accepted skill consumer cleanup interrupted",
                 )
+            else:
+                if not released:
+                    from deerflow.sandbox.accepted_projection import _warn_release_unfinished
+
+                    _warn_release_unfinished(token)
         elif materializer is None and sandbox_id is not None and provider is not None:
             try:
                 await asyncio.to_thread(provider.release, sandbox_id)

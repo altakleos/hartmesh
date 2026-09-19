@@ -169,9 +169,14 @@ class AcceptedSkillProjection:
     def ensure_accepted_skill_snapshot_absent(self, clear: SkillProjectionClear) -> bool:
         """Prove an exact failed or unpublished projection cannot be reached.
 
-        Deliberately separate from compare-and-clear: it may be used only when
-        no exact binding receipt exists, and it fails closed until the provider
-        can prove an empty namespace or quarantine the exact sandbox.
+        Deliberately separate from compare-and-clear: it is used only where no
+        exact binding record was there to compare, and the coordinator holds
+        the thread as clearing under ``clear`` for the whole call. That fence
+        is the authority. A provider whose material lives on the host empties
+        the thread's view on it, whatever record the view map carries; one
+        whose material lives inside the sandbox clears it there, quarantines
+        the exact sandbox, or answers only for the sandbox being gone. It
+        fails closed until one of those is true.
         """
         del clear
         return False

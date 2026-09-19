@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from typing import get_type_hints
 
 import pytest
@@ -532,7 +533,7 @@ async def test_bind_failure_before_publication_releases_after_absence_proof() ->
 
 
 @pytest.mark.anyio
-async def test_bind_failure_without_absence_proof_does_not_release_sandbox() -> None:
+async def test_bind_failure_without_absence_proof_does_not_release_sandbox(caplog) -> None:
     from deerflow.runtime.skill_projection import get_skill_projection_coordinator
 
     provider = _UnprovenPrepublicationFailureProvider()
@@ -555,7 +556,7 @@ async def test_bind_failure_without_absence_proof_does_not_release_sandbox() -> 
     )
     coordinator = get_skill_projection_coordinator()
     try:
-        with pytest.raises(RuntimeError, match="unproven bind failure"):
+        with caplog.at_level(logging.WARNING, logger="deerflow.sandbox.accepted_projection"), pytest.raises(RuntimeError, match="unproven bind failure"):
             await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
 
         assert provider.released_ids == []
@@ -563,6 +564,8 @@ async def test_bind_failure_without_absence_proof_does_not_release_sandbox() -> 
             user_id="owner-unproven-failure",
             thread_id="thread-unproven-failure",
         )
+        # The fence that stays is no longer silent.
+        assert any("could not release its accepted-skill projection" in record.getMessage() for record in caplog.records)
     finally:
         token = coordinator.token_for_consumer(
             user_id="owner-unproven-failure",

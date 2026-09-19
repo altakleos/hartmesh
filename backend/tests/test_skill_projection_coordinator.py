@@ -180,3 +180,36 @@ def test_released_consumer_token_is_not_live_coordinator_membership() -> None:
     assert clear is not None
     assert not coordinator.owns(token)
     assert coordinator.finalize_release(clear)
+
+
+def test_is_clearing_names_only_the_exact_fenced_release() -> None:
+    """A provider empties a thread's view on the coordinator's word, so the word must be exact.
+
+    Not a live consumer (that is a run still executing), not a different run
+    or generation, and not a release that has already finalized -- only the
+    ``SkillProjectionClear`` the thread is held under right now.
+    """
+    from deerflow.runtime.skill_projection import SkillProjectionClear
+
+    coordinator = _coordinator()
+    token = _activate(coordinator, run_id="run-a")
+    live = SkillProjectionClear(
+        user_id=token.user_id,
+        thread_id=token.thread_id,
+        sandbox_id=token.sandbox_id,
+        run_id=token.run_id,
+        generation=token.generation,
+        snapshot_id=token.snapshot_id,
+        evidence=token.evidence,
+    )
+    assert not coordinator.is_clearing(live), "a consumer still executing is not a release"
+
+    clear = coordinator.release(token)
+    assert clear == live
+    assert coordinator.is_clearing(clear)
+    assert not coordinator.is_clearing(replace(clear, run_id="run-b"))
+    assert not coordinator.is_clearing(replace(clear, generation=clear.generation + 1))
+    assert not coordinator.is_clearing(replace(clear, thread_id="thread-2"))
+
+    assert coordinator.finalize_release(clear)
+    assert not coordinator.is_clearing(clear), "a finished release fences nothing"

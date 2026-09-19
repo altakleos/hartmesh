@@ -490,6 +490,18 @@ class SkillProjectionCoordinator:
             self._states.pop(key, None)
             return True
 
+    def is_clearing(self, clear: SkillProjectionClear) -> bool:
+        """Whether ``clear`` is the fenced release the thread is held under right now.
+
+        The word a provider empties a thread's view on, so it is exact: a
+        consumer still executing is not a release, another run or generation
+        is not this one, and a release that has finalized fences nothing.
+        """
+        key = self._key(clear.user_id, clear.thread_id)
+        with self._lock:
+            state = self._states.get(key)
+            return state is not None and state.clearing == clear
+
     def release_unactivated_run(self, *, user_id: str, thread_id: str, run_id: str) -> bool:
         """Release a committed owner only when no sandbox consumer ever activated."""
         key = self._key(user_id, thread_id)

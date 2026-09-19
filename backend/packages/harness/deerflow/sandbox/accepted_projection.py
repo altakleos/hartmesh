@@ -307,7 +307,9 @@ def release_accepted_skill_consumer(token: object) -> bool:
     finally:
         # A successful compare-and-clear is the material-isolation boundary:
         # it releases the exact binding, and the retained bytes behind it can
-        # only be used again by a bind that re-verifies them. Resource
+        # only be used again by a bind that re-verifies them. Where there was
+        # no exact record to compare, the provider emptied the view under this
+        # same fence, the stronger form of the same boundary. Resource
         # parking/teardown may fail after that, but it cannot make anything
         # reachable that the next bind would not have to prove, so stale
         # ownership must not strand the thread indefinitely.
@@ -338,12 +340,24 @@ def _unwind_failed_binding(
     invalidate_runtime_skill_projection_token(runtime, token)
     if token is not None:
         try:
-            release_accepted_skill_consumer(token)
+            released = release_accepted_skill_consumer(token)
         except Exception:
             logger.warning("Failed to clear a rejected accepted-skill projection", exc_info=True)
+            return
+        if not released:
+            _warn_release_unfinished(token)
         return
     if release_unbound is not None:
         release_unbound()
+
+
+def _warn_release_unfinished(token: object) -> None:
+    """Say so when a failed bind's release could not finish: the thread stays fenced until it is retried."""
+    logger.warning(
+        "Failed bind for run %s on thread %s could not release its accepted-skill projection; the thread stays fenced until that release is retried",
+        getattr(token, "run_id", None),
+        getattr(token, "thread_id", None),
+    )
 
 
 def _bind_runtime(

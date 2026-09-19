@@ -26,7 +26,7 @@ from deerflow.skills.types import SKILL_MD_FILE, Skill, SkillCategory
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+    from deerflow.runtime.skill_projection import SkillProjectionClear, SkillProjectionEvidence
 
 SNAPSHOT_CONTAINER_NAMESPACE = ".accepted"
 
@@ -1204,36 +1204,81 @@ def clear_skill_snapshot_active_view(
         return True
 
 
-def release_unowned_skill_snapshot_active_view(
-    *,
-    user_id: str | None,
-    thread_id: str,
-) -> bool:
-    """Leave a failed pre-publication bind with no reachable accepted bytes.
+def empty_skill_snapshot_active_view(*, clear: SkillProjectionClear) -> bool:
+    """Leave a thread's view with no reachable accepted bytes, under the coordinator's fence.
 
-    The recovery half of the release, used only where no exact binding receipt
-    exists. A bind publishes its tree and records its binding in one hold of
-    the views lock, so an unbound view holds nothing the failed bind put
-    there: what it may hold is this thread's own retained material from an
-    earlier run that released cleanly. Emptying it costs that thread one
-    staging on its next turn and is the price of saying "absent" and meaning
-    it. A view another invocation owns is refused, not emptied -- this is the
-    fallback for the case where the compare-and-clear found no owner.
+    The recovery half of a release, used where the exact compare-and-release
+    (:func:`clear_skill_snapshot_active_view`) found no record of its own: the
+    shape of a bind that raised inside staging, over whatever the map held.
+    Ownership of a thread's projection is the coordinator's, not this map's.
+    While the coordinator holds the thread as clearing under ``clear`` no
+    other run can be admitted to it, and the only sandbox that mounts the
+    view is the one ``clear`` names, so whatever record the map carries is
+    not a live owner: an earlier turn's that never released, a prewarm's
+    guess caught between its publication and its pop, or none at all. The
+    view is emptied and the record dropped. The thread's next turn stages
+    once; that is the price of saying "absent" and meaning it.
+
+    A ``clear`` the coordinator has not fenced empties nothing. That check,
+    not the record, is what keeps a mistaken caller away from a view a live
+    container is mounting -- and it is made under the views lock, the lock
+    every bind takes, so it is structural: two releasers can hold the same
+    proof (the agent loop's release and the worker's terminal cleanup), and
+    once the first has finalized, a later run can be admitted and bind
+    before the second reaches the lock. Checked outside it, the second would
+    empty that run's live view; checked under it, the fence has ended and
+    the second empties nothing.
     """
-    view = get_paths().skill_snapshot_active_view_dir(user_id, thread_id)
+    from deerflow.runtime.skill_projection import SkillProjectionClear, get_skill_projection_coordinator
+
+    if not isinstance(clear, SkillProjectionClear):
+        return False
+    view = get_paths().skill_snapshot_active_view_dir(clear.user_id, clear.thread_id)
     with _active_views_lock:
-        if view in _active_view_bindings:
+        # Views lock, then the coordinator's: the coordinator never calls
+        # into this module, so the order cannot invert.
+        if not get_skill_projection_coordinator().is_clearing(clear):
             return False
+        record = _active_view_bindings.get(view)
         try:
-            if not view.exists():
-                return True
-            if view.is_symlink() or not view.is_dir():
-                return False
-            for child in list(view.iterdir()):
-                _remove_tree(child)
-            return next(view.iterdir(), None) is None
+            if view.exists():
+                if view.is_symlink() or not view.is_dir():
+                    logger.warning(
+                        "Accepted skill view for thread %s is not a directory; run %s/%s cannot release it and the thread stays fenced",
+                        clear.thread_id,
+                        clear.run_id,
+                        clear.generation,
+                    )
+                    return False
+                for child in list(view.iterdir()):
+                    _remove_tree(child)
+                if next(view.iterdir(), None) is not None:
+                    return False
         except OSError:
+            logger.warning(
+                "Accepted skill view for thread %s could not be emptied; run %s/%s cannot release it and the thread stays fenced",
+                clear.thread_id,
+                clear.run_id,
+                clear.generation,
+                exc_info=True,
+            )
             return False
+        _active_view_bindings.pop(view, None)
+    if record is not None and record[:2] != (clear.run_id, clear.generation):
+        # Generation 0 is a prewarm's guess caught between its publication
+        # and its pop, an ordinary interleaving. Any other identity is an
+        # earlier release that never ran its compare-and-release, which is
+        # the class of defect this path absorbs and an operator should see.
+        logger.log(
+            logging.INFO if record[1] == 0 else logging.WARNING,
+            "Emptied the accepted skill view for thread %s under run %s/%s: it was recorded to %s/%s, which no run holds",
+            clear.thread_id,
+            clear.run_id,
+            clear.generation,
+            record[0],
+            record[1],
+        )
+    return True
 
 
 def force_clear_skill_snapshot_active_view(
@@ -1303,9 +1348,9 @@ __all__ = [
     "SkillSnapshotProjection",
     "bind_skill_snapshot_active_view",
     "clear_skill_snapshot_active_view",
+    "empty_skill_snapshot_active_view",
     "force_clear_skill_snapshot_active_view",
     "load_skill_projection_evidence",
-    "release_unowned_skill_snapshot_active_view",
     "cleanup_abandoned_skill_snapshots",
     "snapshot_effective_skills",
 ]

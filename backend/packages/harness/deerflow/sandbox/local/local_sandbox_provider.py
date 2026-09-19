@@ -693,7 +693,7 @@ class LocalSandboxProvider(SandboxProvider, AcceptedSkillProjection):
 
     def ensure_accepted_skill_snapshot_absent(self, clear: "SkillProjectionClear") -> bool:
         from deerflow.runtime.skill_projection import SkillProjectionClear
-        from deerflow.runtime.skill_snapshot import release_unowned_skill_snapshot_active_view
+        from deerflow.runtime.skill_snapshot import empty_skill_snapshot_active_view
 
         if not isinstance(clear, SkillProjectionClear):
             return False
@@ -704,10 +704,7 @@ class LocalSandboxProvider(SandboxProvider, AcceptedSkillProjection):
             clear.thread_id,
         ):
             return False
-        return release_unowned_skill_snapshot_active_view(
-            user_id=clear.user_id,
-            thread_id=clear.thread_id,
-        )
+        return empty_skill_snapshot_active_view(clear=clear)
 
     def bind_accepted_skill_snapshot(
         self,

@@ -3719,60 +3719,284 @@ def test_a_bind_of_a_different_digest_still_replaces_the_retained_view(
     second.release()
 
 
-def test_a_released_view_is_releasable_again_by_the_recovery_path(
+def _fenced_release(
+    coordinator,
+    *,
+    user_id: str,
+    thread_id: str,
+    sandbox_id: str,
+    run_id: str,
+    snapshot_id: str | None = None,
+    evidence=None,
+):
+    """Claim, activate and release ``run_id`` on ``coordinator``; return the fenced clear.
+
+    The shape ``release_accepted_skill_consumer`` is in when it reaches the
+    recovery half: the run's last consumer is gone and the coordinator holds
+    the thread as clearing under exactly this proof. The caller finalizes.
+    """
+    coordinator.claim_committed_run(
+        user_id=user_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        snapshot_id=snapshot_id,
+        evidence=evidence,
+    )
+    token = coordinator.activate(
+        user_id=user_id,
+        thread_id=thread_id,
+        sandbox_id=sandbox_id,
+        run_id=run_id,
+        snapshot_id=snapshot_id,
+        consumer_id=f"run:{run_id}:lead",
+    )
+    clear = coordinator.release(token)
+    assert clear is not None
+    return clear
+
+
+def test_a_fenced_release_empties_the_view_whatever_record_it_carries(
     tmp_path: Path,
     snapshot_paths: Paths,
+    caplog,
 ) -> None:
-    """A retained view must not wedge the release of a later failed bind.
+    """Ownership is the coordinator's; a record the map still carries is not a live owner.
 
-    `release_accepted_skill_consumer` falls back to this call when the
-    compare-and-clear finds no owner, and the coordinator only finalizes when
-    it succeeds. Retaining bytes past the run made the old "is it empty?"
-    proof permanently false for every warm thread, so the next bind that
-    failed left that thread's projection state marked clearing for the life
-    of the process.
+    `release_accepted_skill_consumer` reaches this after its exact
+    compare-and-release found no record of its own -- the shape of a bind
+    that raised inside staging, over whatever the map held. While the
+    coordinator holds the thread under this release no other run can be
+    admitted to it and the only sandbox that mounts the view is the one the
+    release names, so the record is stale by construction: an earlier turn's
+    that never released, or a prewarm's guess. Refusing it left the
+    coordinator clearing for the life of the process and the thread refused.
     """
     from deerflow.runtime import skill_snapshot as snapshot_module
-    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence, get_skill_projection_coordinator
 
-    snapshot = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "kept", body="kept")),), user_id="user-1")
+    snapshot = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "stale", body="stale")),), user_id="user-fence")
     assert snapshot is not None
     view = snapshot_module.bind_skill_snapshot_active_view(
-        user_id="user-1",
-        thread_id="thread-1",
+        user_id="user-fence",
+        thread_id="thread-fence",
         snapshot_id=snapshot.snapshot_id,
-        run_id="run-1",
+        run_id="earlier-run",
         generation=1,
         evidence=SkillProjectionEvidence.from_snapshot(snapshot),
     )
-    assert snapshot_module.clear_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1", run_id="run-1", generation=1)
-    assert (view / snapshot.snapshot_id).is_dir()
+    coordinator = get_skill_projection_coordinator()
+    clear = _fenced_release(coordinator, user_id="user-fence", thread_id="thread-fence", sandbox_id="sandbox-1", run_id="run-2")
+    try:
+        with caplog.at_level(logging.INFO, logger="deerflow.runtime.skill_snapshot"):
+            assert snapshot_module.empty_skill_snapshot_active_view(clear=clear) is True
+        assert list(view.iterdir()) == [], "absent means absent"
+        assert view not in snapshot_module._active_view_bindings, "the stale record goes with the bytes"
+        # A record no run holds under a real generation is an earlier release
+        # that never ran, which an operator should see; a prewarm's guess is
+        # the info-level case, tested with the prewarm.
+        [emptied] = [record for record in caplog.records if record.getMessage().startswith("Emptied the accepted skill view")]
+        assert emptied.levelno == logging.WARNING
+        assert "recorded to earlier-run/1" in emptied.getMessage()
+    finally:
+        assert coordinator.finalize_release(clear)
+        snapshot.release()
 
-    assert snapshot_module.release_unowned_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1")
-    assert list(view.iterdir()) == [], "the recovery path says absent, so it must leave it absent"
-    snapshot.release()
 
-
-def test_a_view_another_invocation_owns_is_refused_not_emptied(
+def test_a_retained_view_is_emptied_by_a_fenced_release(
     tmp_path: Path,
     snapshot_paths: Paths,
 ) -> None:
-    from deerflow.runtime import skill_snapshot as snapshot_module
-    from deerflow.runtime.skill_projection import SkillProjectionEvidence
+    """The bytes a clean release keeps for the next turn are nobody's to keep at recovery.
 
-    snapshot = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "owned", body="owned")),), user_id="user-1")
+    Retaining bytes past the run made the old "is it empty?" proof permanently
+    false for every warm thread, so the next bind that failed left that
+    thread's projection state marked clearing for the life of the process.
+    """
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence, get_skill_projection_coordinator
+
+    snapshot = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "kept", body="kept")),), user_id="user-fence")
     assert snapshot is not None
     view = snapshot_module.bind_skill_snapshot_active_view(
-        user_id="user-1",
-        thread_id="thread-1",
+        user_id="user-fence",
+        thread_id="thread-fence",
         snapshot_id=snapshot.snapshot_id,
         run_id="run-1",
         generation=1,
         evidence=SkillProjectionEvidence.from_snapshot(snapshot),
     )
-    assert not snapshot_module.release_unowned_skill_snapshot_active_view(user_id="user-1", thread_id="thread-1")
-    assert (view / snapshot.snapshot_id).is_dir(), "a bound view stays bound"
-    snapshot.release()
+    assert snapshot_module.clear_skill_snapshot_active_view(user_id="user-fence", thread_id="thread-fence", run_id="run-1", generation=1)
+    assert (view / snapshot.snapshot_id).is_dir()
+
+    coordinator = get_skill_projection_coordinator()
+    clear = _fenced_release(coordinator, user_id="user-fence", thread_id="thread-fence", sandbox_id="sandbox-1", run_id="run-2")
+    try:
+        assert snapshot_module.empty_skill_snapshot_active_view(clear=clear) is True
+        assert list(view.iterdir()) == [], "the recovery path says absent, so it must leave it absent"
+    finally:
+        assert coordinator.finalize_release(clear)
+        snapshot.release()
+
+
+def test_a_second_releaser_holding_the_same_proof_cannot_empty_the_next_runs_view(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """The fence is checked under the views lock, so a releaser that arrives late empties nothing.
+
+    Two callers can hold one release proof: the agent loop's after-agent
+    release and the worker's terminal cleanup. The first empties, parks and
+    finalizes; a later run is then admitted and binds; the second, which
+    passed nothing yet because it was waiting on the lock every bind takes,
+    must find the fence gone and leave that run's live view exactly as bound.
+    """
+    import threading
+
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionEvidence, get_skill_projection_coordinator
+
+    snapshot = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "next", body="next")),), user_id="user-fence")
+    assert snapshot is not None
+    evidence = SkillProjectionEvidence.from_snapshot(snapshot)
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id="user-fence",
+        thread_id="thread-fence",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="earlier-run",
+        generation=1,
+        evidence=evidence,
+    )
+    coordinator = get_skill_projection_coordinator()
+    clear = _fenced_release(coordinator, user_id="user-fence", thread_id="thread-fence", sandbox_id="sandbox-1", run_id="run-2")
+    second: list[bool] = []
+    late = threading.Thread(target=lambda: second.append(snapshot_module.empty_skill_snapshot_active_view(clear=clear)))
+    next_token = None
+    try:
+        # Hold the lock the late releaser must take; it is re-entrant, so
+        # everything the first releaser and the next run do happens here,
+        # before the late one can observe anything.
+        with snapshot_module._active_views_lock:
+            late.start()
+            assert snapshot_module.empty_skill_snapshot_active_view(clear=clear) is True
+            assert coordinator.finalize_release(clear)
+            # run-3 is admitted, activated and executing against its bound view.
+            coordinator.claim_committed_run(user_id="user-fence", thread_id="thread-fence", run_id="run-3", snapshot_id=snapshot.snapshot_id, evidence=evidence)
+            next_token = coordinator.activate(
+                user_id="user-fence",
+                thread_id="thread-fence",
+                sandbox_id="sandbox-1",
+                run_id="run-3",
+                snapshot_id=snapshot.snapshot_id,
+                consumer_id="run:run-3:lead",
+            )
+            snapshot_module.bind_skill_snapshot_active_view(
+                user_id="user-fence",
+                thread_id="thread-fence",
+                snapshot_id=snapshot.snapshot_id,
+                run_id="run-3",
+                generation=next_token.generation,
+                evidence=evidence,
+            )
+        late.join(timeout=10)
+        assert not late.is_alive()
+        assert second == [False], "the late releaser found the fence gone"
+        assert [child.name for child in view.iterdir()] == [snapshot.snapshot_id], "run-3's view is exactly as bound"
+        assert snapshot_module._active_view_bindings[view][:2] == ("run-3", next_token.generation)
+    finally:
+        if next_token is not None:
+            next_clear = coordinator.release(next_token)
+            assert next_clear is not None and coordinator.finalize_release(next_clear)
+        snapshot.release()
+
+
+def test_a_view_that_is_not_a_directory_is_refused_and_the_thread_stays_fenced(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+    caplog,
+) -> None:
+    """A view the module cannot vouch for is not emptied; the fence stays, and the log says why."""
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    view = snapshot_paths.skill_snapshot_active_view_dir("user-fence", "thread-fence")
+    view.parent.mkdir(parents=True, exist_ok=True)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "kept").write_text("not ours", encoding="utf-8")
+    view.symlink_to(elsewhere, target_is_directory=True)
+
+    coordinator = get_skill_projection_coordinator()
+    clear = _fenced_release(coordinator, user_id="user-fence", thread_id="thread-fence", sandbox_id="sandbox-1", run_id="run-2")
+    try:
+        with caplog.at_level(logging.WARNING, logger="deerflow.runtime.skill_snapshot"):
+            assert snapshot_module.empty_skill_snapshot_active_view(clear=clear) is False
+        assert (elsewhere / "kept").read_text(encoding="utf-8") == "not ours", "nothing behind a symlink is touched"
+        assert coordinator.is_clearing(clear), "the release did not finish, so the fence stays"
+        assert any("is not a directory" in record.getMessage() for record in caplog.records)
+    finally:
+        view.unlink()
+        assert coordinator.finalize_release(clear)
+
+
+def test_a_release_the_coordinator_has_not_fenced_empties_nothing(
+    tmp_path: Path,
+    snapshot_paths: Paths,
+) -> None:
+    """The fence is the whole authority: without it a view a run is using stays exactly as it is.
+
+    This is what stands between a mistaken caller and a live container's
+    mounted view now that a record in the map no longer refuses the release.
+    """
+    from deerflow.runtime import skill_snapshot as snapshot_module
+    from deerflow.runtime.skill_projection import SkillProjectionClear, SkillProjectionEvidence, get_skill_projection_coordinator
+
+    snapshot = snapshot_effective_skills((_parsed_skill(_write_skill(tmp_path / "owned", body="owned")),), user_id="user-fence")
+    assert snapshot is not None
+    view = snapshot_module.bind_skill_snapshot_active_view(
+        user_id="user-fence",
+        thread_id="thread-fence",
+        snapshot_id=snapshot.snapshot_id,
+        run_id="run-1",
+        generation=1,
+        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+    )
+    unfenced = SkillProjectionClear(
+        user_id="user-fence",
+        thread_id="thread-fence",
+        sandbox_id="sandbox-1",
+        run_id="run-2",
+        generation=2,
+        snapshot_id=None,
+    )
+    assert snapshot_module.empty_skill_snapshot_active_view(clear=unfenced) is False
+
+    # A consumer still executing is not a release either.
+    coordinator = get_skill_projection_coordinator()
+    coordinator.claim_committed_run(user_id="user-fence", thread_id="thread-fence", run_id="run-3", snapshot_id=None)
+    token = coordinator.activate(
+        user_id="user-fence",
+        thread_id="thread-fence",
+        sandbox_id="sandbox-1",
+        run_id="run-3",
+        snapshot_id=None,
+        consumer_id="run:run-3:lead",
+    )
+    live = SkillProjectionClear(
+        user_id="user-fence",
+        thread_id="thread-fence",
+        sandbox_id="sandbox-1",
+        run_id="run-3",
+        generation=token.generation,
+        snapshot_id=None,
+    )
+    try:
+        assert snapshot_module.empty_skill_snapshot_active_view(clear=live) is False
+        assert (view / snapshot.snapshot_id).is_dir(), "a bound view stays bound"
+        assert snapshot_module._active_view_bindings[view][:2] == ("run-1", 1)
+    finally:
+        clear = coordinator.release(token)
+        assert clear is not None and coordinator.finalize_release(clear)
+        snapshot.release()
 
 
 def test_a_drift_found_under_a_live_lease_leaves_with_that_lease(
