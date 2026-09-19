@@ -609,6 +609,8 @@ export interface Translations {
     reportIssue: string;
     contactUs: string;
     about: string;
+    /** About, for a workspace that carries a company's name. */
+    aboutCompany: (companyName: string) => string;
     logout: string;
     gatewayUnavailable: string;
     gatewayUnavailableRetrying: string;

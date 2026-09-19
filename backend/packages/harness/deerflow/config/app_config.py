@@ -46,6 +46,7 @@ from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
 from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_config_from_dict
 from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
+from deerflow.config.tenant_bundle import TenantBundleConfig
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.config.token_usage_config import TokenUsageConfig
@@ -270,6 +271,7 @@ class AppConfig(BaseModel):
     input_polish: InputPolishConfig = Field(default_factory=InputPolishConfig, description="Pre-send input polishing configuration.")
     suggestions: SuggestionsConfig = Field(default_factory=SuggestionsConfig, description="Follow-up suggestions configuration.")
     ui: UiConfig = Field(default_factory=UiConfig, description="Workspace presentation: the Home starters and which screens non-administrators are offered.")
+    tenant_bundle: TenantBundleConfig = Field(default_factory=TenantBundleConfig, description="Where the deployment's brand, starter list and report profiles are read from; the same directory sandboxes mount at /mnt/tenant.")
     circuit_breaker: CircuitBreakerConfig = Field(default_factory=CircuitBreakerConfig, description="LLM circuit breaker configuration")
     llm_call: LlmCallConfig = Field(default_factory=LlmCallConfig, description="LLM call execution configuration (concurrency / rate shaping)")
     channel_connections: ChannelConnectionsConfig = Field(

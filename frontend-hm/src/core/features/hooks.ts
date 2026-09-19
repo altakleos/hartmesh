@@ -3,11 +3,36 @@ import { useQuery } from "@tanstack/react-query";
 import { useAuth } from "@/core/auth/AuthProvider";
 
 import {
+  fetchBranding,
   fetchBrowserControlEnabled,
   fetchMcpTasksEnabled,
   fetchSubagentBatchesCapability,
   fetchWorkspacePresentation,
 } from "./api";
+
+/**
+ * Whose workspace this is. A named company replaces the product's name in the
+ * sidebar header and on the About page and takes the product's own links out
+ * of the menu; until the answer is known, neither name is shown, because a
+ * tenant's header flashing the product's name on every load is the wrong
+ * first thing to see.
+ */
+export function useBranding() {
+  const { data, isPending } = useQuery({
+    queryKey: ["features", "branding"],
+    queryFn: () => fetchBranding(),
+    staleTime: 0,
+    refetchOnMount: true,
+    retry: false,
+  });
+  return {
+    companyName: data?.companyName ?? null,
+    primary: data?.primary ?? null,
+    secondary: data?.secondary ?? null,
+    hasLogo: data?.hasLogo ?? false,
+    isLoading: isPending,
+  };
+}
 
 export function useBrowserControlEnabled() {
   const { data, isPending } = useQuery({

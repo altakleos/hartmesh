@@ -32,6 +32,14 @@ and nothing else, and that list becomes the whole rendered ``models:``
 section: fragment models are no longer appended, whichever provider keys the
 tenant carries.
 
+The rendered ``tenant_bundle.path`` names the directory the operator writes
+the company's brand, starter list and report profiles into. The render reads
+it through the Gateway's own loader and reports one summary line -- whether a
+company name and a logo are set, how many starters and report profiles there
+are -- plus one ``warning:`` line per problem the loader names. A problem
+never refuses the render: a brand typo is not a reason to deny the tenant a
+Gateway, and the summary is how an operator sees it first.
+
 Everything is validated before anything is written: the documented shape, the
 Gateway's own ``ModelConfig`` on every rendered entry (its schema, not a second
 copy of it, so what renders is what loads), an installed ``BaseChatModel``
@@ -536,6 +544,26 @@ def render(
     return document, included
 
 
+def bundle_report(document: Mapping[str, Any]) -> tuple[str, tuple[str, ...]]:
+    """One summary line for the tenant bundle the rendered config names, and the problems the loader found.
+
+    Counts and states only: what the operator wrote is theirs, and this line is
+    journalled at every start.
+    """
+
+    section = document.get("tenant_bundle")
+    path = section.get("path") if isinstance(section, Mapping) else None
+    if not path:
+        return "tenant bundle: none configured", ()
+    # The Gateway's own loader, so what --check reports is what the Gateway reads.
+    bundle = import_module("deerflow.config.tenant_bundle").load_tenant_bundle(path)
+    if not Path(path).is_dir():
+        return f"tenant bundle at {path}: absent", bundle.problems
+    starters = "none" if bundle.starters is None else str(len(bundle.starters))
+    summary = f"tenant bundle at {path}: company_name {'set' if bundle.company_name else 'unset'}; logo {'present' if bundle.logo else 'absent'}; starters {starters}; report profiles {len(bundle.report_profiles)}"
+    return summary, bundle.problems
+
+
 def render_text(template_text: str, fragments: tuple[Fragment, ...], environ: Mapping[str, str]) -> tuple[str, tuple[Fragment, ...]]:
     """Render from template text to YAML text."""
 
@@ -562,8 +590,12 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     providers = ", ".join(sorted({fragment.env for fragment in included})) or "none"
     source = f"operator file {os.environ[MODELS_ENV].strip()}" if os.environ.get(MODELS_ENV, "").strip() else "bundled catalog"
-    budget = yaml.safe_load(rendered)["sandbox"]["ready_timeout"]
-    summary = f"models from {source}; egress={select_egress(os.environ)}; provider keys found: {providers}; sandbox ready_timeout={budget}s"
+    document = yaml.safe_load(rendered)
+    budget = document["sandbox"]["ready_timeout"]
+    bundle_line, bundle_problems = bundle_report(document)
+    for problem in bundle_problems:
+        print(f"render_config: warning: tenant bundle: {problem}", file=sys.stderr)
+    summary = f"models from {source}; egress={select_egress(os.environ)}; provider keys found: {providers}; sandbox ready_timeout={budget}s; {bundle_line}"
     if args.check:
         print(f"render_config: {args.template} renders ({summary})")
         return 0

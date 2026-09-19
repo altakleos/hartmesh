@@ -190,6 +190,12 @@ it from and what the agent remembers about them are theirs, not the
 deployment's. Hiding is presentation, not authorization — the routes are
 unchanged and `authorization` has no permission covering these APIs;
 `system_role` is what limits a person, and the API already checks it.
+`branding` (`useBranding`) is the tenant bundle's company name, colours and
+whether `/api/branding/logo` has a picture: a named company replaces the
+product's name in the sidebar header and on About and takes the product's own
+links out of the menu; until the answer is known the header shows neither
+name. The login page stays the product's own — the brand is delivered after
+sign-in.
 
 One rule governs what happens while the answer is unknown: a control someone
 might need stays offered, and copy the deployment authors waits. So the screens

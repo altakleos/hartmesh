@@ -75,6 +75,15 @@ sandbox:
   # does not hold one of the two slots for the full idle timeout. A sandbox a
   # turn has used follows idle_timeout instead.
   prewarm_claim_timeout: 300
+  # The tenant bundle, read-only in every sandbox at the path the
+  # business-report skill reads by default: the company name, logo and
+  # colours a report carries, and the report profiles it loads by name ahead
+  # of its own. The same directory is `tenant_bundle.path` below, which is
+  # where the Gateway reads it for the workspace (README: "Tenant bundle").
+  mounts:
+    - host_path: /srv/hartmesh/operator/tenant
+      container_path: /mnt/tenant
+      read_only: true
   # The sandbox image's own service switches, passed to every sandbox as
   # environment by the local Docker backend. Off: the browser and its MCP
   # server, VNC, Jupyter, code-server and the Node REPL (this last one also
@@ -128,6 +137,23 @@ skills:
   # "Public skills").
   path: /srv/hartmesh/home/skills
   container_path: /mnt/skills
+
+# Someone who is not an administrator is not offered the developer screens
+# (skills, tools, subagents, integrations, the scheduled-task recipes) and
+# Home shows a starter grid. Presentation only; `system_role` limits a person.
+ui:
+  profile: business
+
+# Where the Gateway reads the company's brand, starter list and report
+# profiles: brand.json, an optional PNG or JPEG logo, starters.json and
+# report-profiles/ under /srv/hartmesh/operator/tenant, the operator's own
+# directory on the tenant data disk. Sandboxes mount the same directory
+# read-only at /mnt/tenant (sandbox.mounts above), so the workspace header
+# and the report carry the one name the operator wrote. Every file is
+# optional; a malformed one degrades its own field and is named in the log
+# and by `render_config.py --check` (README: "Tenant bundle").
+tenant_bundle:
+  path: /srv/hartmesh/operator/tenant
 
 database:
   backend: postgres

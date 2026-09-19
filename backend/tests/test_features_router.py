@@ -1,3 +1,5 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -18,6 +20,7 @@ def _app_with_config(
     subagent_batches_available: bool = False,
     subagent_batch_repo_available: bool | None = None,
     ui: UiConfig | None = None,
+    tenant_bundle_path: str | None = None,
 ) -> FastAPI:
     app = FastAPI()
     app.state.mcp_tasks_available = mcp_tasks_available
@@ -38,9 +41,13 @@ def _app_with_config(
         tools=tools,
         subagent_runtime=SimpleNamespace(max_running=3),
         ui=ui if ui is not None else UiConfig(),
+        tenant_bundle=SimpleNamespace(path=tenant_bundle_path),
     )
     app.dependency_overrides[get_config] = lambda: fake_config
     return app
+
+
+NO_BRANDING = {"company_name": None, "colors": {"primary": None, "secondary": None}, "logo": False}
 
 
 def _default_ui_payload() -> dict:
@@ -66,6 +73,7 @@ def test_features_reports_agents_api_enabled() -> None:
             "max_running": 3,
         },
         "ui": _default_ui_payload(),
+        "branding": NO_BRANDING,
     }
 
 
@@ -84,6 +92,7 @@ def test_features_reports_agents_api_disabled() -> None:
             "max_running": 3,
         },
         "ui": _default_ui_payload(),
+        "branding": NO_BRANDING,
     }
 
 
@@ -196,3 +205,62 @@ def test_an_operator_can_clear_the_starter_grid() -> None:
         payload = client.get("/api/features").json()
 
     assert payload["ui"]["starters"] == []
+
+
+def _bundle(tmp_path: Path, brand: dict, *, starters: list | str | None = None, logo: bool = True) -> str:
+    root = tmp_path / "tenant"
+    root.mkdir()
+    if logo:
+        (root / "logo.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\0" * 16)
+    (root / "brand.json").write_text(json.dumps(brand), encoding="utf-8")
+    if starters is not None:
+        (root / "starters.json").write_text(starters if isinstance(starters, str) else json.dumps(starters), encoding="utf-8")
+    return str(root)
+
+
+BRAND = {"company_name": "Example Services Co.", "logo": "logo.png", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}}
+
+
+def test_features_reports_the_tenant_bundle_s_brand(tmp_path: Path) -> None:
+    """The header and the About page take the company from here; the report skill reads the same file."""
+    with TestClient(_app_with_config(agents_api_enabled=True, tenant_bundle_path=_bundle(tmp_path, BRAND))) as client:
+        payload = client.get("/api/features").json()
+
+    assert payload["branding"] == {"company_name": "Example Services Co.", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}, "logo": True}
+
+
+def test_a_bundle_without_a_picture_still_names_the_company(tmp_path: Path) -> None:
+    with TestClient(_app_with_config(agents_api_enabled=True, tenant_bundle_path=_bundle(tmp_path, BRAND, logo=False))) as client:
+        payload = client.get("/api/features").json()
+
+    assert payload["branding"]["company_name"] == "Example Services Co."
+    assert payload["branding"]["logo"] is False
+
+
+def test_the_bundle_s_starters_replace_the_config_s_when_it_has_a_usable_list(tmp_path: Path) -> None:
+    ui = UiConfig(profile="business", starters=[StarterConfig(id="config", title="From config", prompt="Config prompt.")])
+    starters = [{"id": "bundle", "title": "From the bundle", "prompt": "Bundle prompt."}]
+
+    with TestClient(_app_with_config(agents_api_enabled=True, ui=ui, tenant_bundle_path=_bundle(tmp_path, BRAND, starters=starters))) as client:
+        payload = client.get("/api/features").json()
+
+    assert payload["ui"]["profile"] == "business"
+    assert payload["ui"]["starters"] == starters
+
+
+def test_a_bundle_starter_list_that_breaks_the_rules_leaves_the_config_s_grid(tmp_path: Path) -> None:
+    """A typo in the operator's file never empties Home; the problem is journalled and --check names it."""
+    ui = UiConfig(profile="business", starters=[StarterConfig(id="config", title="From config", prompt="Config prompt.")])
+
+    with TestClient(_app_with_config(agents_api_enabled=True, ui=ui, tenant_bundle_path=_bundle(tmp_path, BRAND, starters="{not a list"))) as client:
+        payload = client.get("/api/features").json()
+
+    assert payload["ui"]["starters"] == [{"id": "config", "title": "From config", "prompt": "Config prompt."}]
+    assert payload["branding"]["company_name"] == "Example Services Co.", "one bad file degrades its own field alone"
+
+
+def test_a_deployment_that_names_no_bundle_reports_no_brand() -> None:
+    with TestClient(_app_with_config(agents_api_enabled=True)) as client:
+        payload = client.get("/api/features").json()
+
+    assert payload["branding"] == NO_BRANDING

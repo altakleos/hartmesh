@@ -1547,3 +1547,51 @@ def test_the_doc_sends_a_known_period_straight_to_build(report) -> None:
     assert "An exit `3` that names candidate\ncolumns has already answered itself" in doc or "An exit `3` that names candidate columns has already answered itself" in doc
     assert "**A whole report is one run**" in doc and "two runs" not in doc
     assert "`--render pdf,docx,xlsx` renders in the same run and is the normal first report" in doc
+
+
+# ── The tenant bundle (family 10): the skill's half ──────────────────────────
+
+
+def _tenant_bundle(tmp_path: Path, brand: dict | None = None, *, profile: dict | None = None) -> Path:
+    tenant = tmp_path / "tenant"
+    tenant.mkdir()
+    if brand is not None:
+        (tenant / "brand.json").write_text(json.dumps(brand), encoding="utf-8")
+    if profile is not None:
+        (tenant / "report-profiles").mkdir()
+        (tenant / "report-profiles" / "services-generic.json").write_text(json.dumps(profile), encoding="utf-8")
+    return tenant
+
+
+def test_a_bundle_whose_logo_is_missing_still_brands_the_report_with_the_name(report, capsys, tmp_path) -> None:
+    """The picture is a bonus; the company is the brand. A bundle written before the logo arrives renders."""
+    tenant = _tenant_bundle(tmp_path, {"company_name": "Example Services Co.", "logo": "logo.png", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}})
+    out_dir = tmp_path / "out"
+
+    code, _out, err = _build(report, capsys, out_dir, str(SMALL_CSV), "--period", "2026-08", "--tenant", str(tenant))
+
+    assert code == 0, err
+    built = _read_report(out_dir)
+    assert built["meta"]["brand"] == {"company": "Example Services Co.", "primary": "#0a6b3d", "secondary": "#9ccdb4", "logo": None}
+    code, _out, err = _run(report, capsys, "render", str(_report_path(out_dir)), "--to", "html", "--tenant", str(tenant))
+    assert code == 0, err
+    html = _report_path(out_dir).with_name(_report_path(out_dir).name.replace(".report.json", ".html")).read_text(encoding="utf-8")
+    assert "Example Services Co." in html
+    assert '<img class="logo"' not in html, "no picture, no broken picture"
+
+
+def test_a_bundled_profile_replaces_the_skill_s_own_by_name(report, capsys, tmp_path, small_report) -> None:
+    """A tenant's `report-profiles/services-generic.json` is the profile; the built-in one is what a tenant without it gets."""
+    profile = json.loads(PROFILE.read_text(encoding="utf-8"))
+    profile["title"] = "{period} Tenant Review"
+    tenant = _tenant_bundle(tmp_path, profile=profile)
+    out_dir = tmp_path / "out"
+
+    code, _out, err = _build(report, capsys, out_dir, str(SMALL_CSV), "--period", "2026-08", "--tenant", str(tenant))
+
+    assert code == 0, err
+    built = _read_report(out_dir)
+    assert "Tenant Review" in json.dumps(built)
+    assert built["meta"]["profile"] == "services-generic", "same name, the tenant's file"
+    _default_dir, default = small_report
+    assert "Tenant Review" not in json.dumps(default) and "Business Review" in json.dumps(default)

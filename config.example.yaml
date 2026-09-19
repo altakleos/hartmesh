@@ -1229,6 +1229,21 @@ ui:
 
 
 # ============================================================================
+# Tenant Bundle
+# ============================================================================
+# One directory the operator writes: brand.json (company_name, logo, colors),
+# an optional PNG or JPEG logo next to it, starters.json (the same shape and
+# rules as ui.starters; present, it is the grid) and report-profiles/*.json.
+# The Gateway reads it for the workspace header, the About page and Home's
+# starters, after sign-in. Mount the same directory read-only at /mnt/tenant
+# through sandbox.mounts so the business-report skill reads the same files.
+# Every file is optional; a malformed one degrades its own field and is named
+# in the log. Unset means no bundle: the workspace shows the product's name.
+tenant_bundle:
+  # path: /srv/hartmesh/operator/tenant
+
+
+# ============================================================================
 # Input Polish Configuration
 # ============================================================================
 # Configure whether the composer can rewrite draft input before sending.

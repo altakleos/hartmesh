@@ -32,3 +32,20 @@ test("aboutMarkdown heading reflects the package version when env is unset", asy
   // `About DeerFlow undefined]`), not just removal of the old literal.
   expect(aboutMarkdown).toContain(`[About DeerFlow ${APP_VERSION}]`);
 });
+
+test("a company's About is that company and the version, and none of the product's story", async () => {
+  const { brandedAboutMarkdown } =
+    await import("@/components/workspace/settings/about-content");
+  const markdown = brandedAboutMarkdown("Example Services Co.", "9.9.9-test");
+  expect(markdown).toContain("# Example Services Co.");
+  expect(markdown).toContain("9.9.9-test");
+  expect(markdown).not.toContain("DeerFlow");
+  expect(markdown).not.toContain("github.com");
+});
+
+test("a company's About carries the resolved version by default", async () => {
+  const { APP_VERSION } = await import("@/version");
+  const { brandedAboutMarkdown } =
+    await import("@/components/workspace/settings/about-content");
+  expect(brandedAboutMarkdown("Example Services Co.")).toContain(APP_VERSION);
+});

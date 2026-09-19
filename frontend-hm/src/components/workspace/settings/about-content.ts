@@ -4,6 +4,18 @@
  */
 import { APP_VERSION } from "@/version";
 
+/**
+ * What About says in a workspace that carries a company's name: that
+ * company, and the version someone supporting them will ask for. None of the
+ * product's own story; the deployment is theirs.
+ */
+export function brandedAboutMarkdown(
+  companyName: string,
+  version: string = APP_VERSION,
+): string {
+  return `# ${companyName}\n\nWorkspace version ${version}.\n`;
+}
+
 export const aboutMarkdown = `# 🦌 [About DeerFlow ${APP_VERSION}](https://github.com/bytedance/deer-flow)
 
 > **From Open Source, Back to Open Source**

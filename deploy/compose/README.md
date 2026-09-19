@@ -117,9 +117,10 @@ Two directories cross the container boundary:
   `business-report` imports `python-docx` from the image (both shipped from
   the first release with the skill-library layer, see RELEASING.md) and each
   exits with a message naming the image rather than installing anything.
-  `business-report` also reads an optional tenant
-  bundle at `/mnt/tenant` (`brand.json`, a logo, `report-profiles/`) when a
-  deployment mounts one; without it, reports carry no company branding. The Gateway keeps
+  The profile mounts the tenant bundle (§ "Tenant bundle") read-only at
+  `/mnt/tenant` in every sandbox, which is where `business-report` reads the
+  company name, logo, colours and report profiles; without one, reports carry
+  no company branding. The Gateway keeps
   uploads and artifacts under `home/users/<user>/threads/<thread>/user-data/`
   and each person's kept files under `home/users/<user>/files/` (mounted into
   every sandbox of theirs at `/mnt/user-data/files`; no quota, nothing reaps
@@ -130,9 +131,10 @@ Two directories cross the container boundary:
   staging again, sized and bounded in § "Public skills", **Per-turn
   material**.
 - `/srv/hartmesh/operator`, mounted **read-only** into the Gateway at the same
-  path: operator-owned deployment material that is not release content. Today
-  that is the one optional model file `HARTMESH_MODELS_FILE` names
-  (§ "Operator-managed models"). It sits beside `home/` rather than inside it
+  path: operator-owned deployment material that is not release content: the
+  optional model file `HARTMESH_MODELS_FILE` names (§ "Operator-managed
+  models") and the tenant bundle at `operator/tenant/` (§ "Tenant bundle").
+  It sits beside `home/` rather than inside it
   on purpose -- `home/` is `DEER_FLOW_HOME`, whose `threads/` and `skills/`
   subtrees are what sandboxes bind-mount -- so nothing a chat user or an agent
   can write chooses a model client class or a provider endpoint, and the
@@ -181,6 +183,56 @@ here, so the probe performs the same `setpriv` drop before its Python runs.
 Proved on the published image: with those two capabilities the drop succeeds,
 the process reports `CapEff 0` and `NoNewPrivs 1`, and the docker CLI reaches
 the daemon from uid 1000.
+
+### Tenant bundle
+
+`/srv/hartmesh/operator/tenant/` is where the operator writes what the
+workspace says about the company it serves. Two readers, one directory, no
+copy: every sandbox mounts it read-only at `/mnt/tenant` (a `sandbox.mounts`
+entry in `config.yaml`), which is where the `business-report` skill picks up
+the company name, logo and colours by itself, and the Gateway reads the same
+path (`tenant_bundle.path`) for the workspace header, the About page and
+Home's starter grid. A person sees the company after signing in; the login
+page stays the product's own.
+
+The layout is the skill's contract, and every file is optional:
+
+```
+/srv/hartmesh/operator/tenant/
+├── brand.json          {"company_name": "Example Services Co.",
+│                        "logo": "logo.png",
+│                        "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}}
+├── logo.png            PNG or JPEG, next to brand.json (an SVG is refused:
+│                       it can carry a stylesheet or an image reference that
+│                       reaches out)
+├── starters.json       [{"id": "business-review", "title": "...", "prompt": "..."}]
+│                       -- the same shape and rules as `ui.starters`: at most
+│                       six, distinct ids, plain text; present, it *is* the grid
+└── report-profiles/    <name>.json, loaded by the skill by name ahead of its
+                        own `profiles/` (a `services-generic.json` here replaces
+                        the built-in one)
+```
+
+Create it before the first `up` that carries this profile, owned by the
+Gateway and sandbox user:
+`install -d -o 1000 -g 1000 -m 0750 /srv/hartmesh/operator/tenant`.
+Left absent, Docker creates it root-owned
+(`0755`) the first time a sandbox starts; the profile still works, but the
+operator then needs root to write into it. Edits are live: the Gateway reads
+the files on each request and the sandbox mount is a bind, so a new
+`brand.json` reaches the next page load and the next report, no restart.
+
+A missing file is not a problem. A malformed one -- a logo that is not a PNG
+or JPEG inside the directory, a colour that is not `#rrggbb`, a company name
+that is blank or spans lines, a starter list that breaks the `ui.starters`
+rules -- degrades that field alone (the name still shows without its picture;
+Home keeps the grid `config.yaml` would have shown) and is named in the
+Gateway log as `tenant bundle: <file>: <rule>`, never with the value.
+`gateway/render_config.py --check` (§ "Operator-managed models" gives the
+invocation) prints the same problems and one summary line -- whether a name
+and a logo are set, how many starters and report profiles there are -- and
+still renders. Report profiles are listed, not validated: the skill validates
+a profile when it loads one and says what is missing.
 
 ### Public skills
 
