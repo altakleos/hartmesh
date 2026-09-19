@@ -19,11 +19,13 @@ from deerflow.sandbox.capabilities import WorkspacePrewarm
 class _PrewarmingProvider(WorkspacePrewarm):
     def __init__(self, *, fail: bool = False, park: bool = True) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.snapshots: list[object | None] = []
         self.fail = fail
         self.park = park
 
-    async def prewarm_accepted_skills_async(self, thread_id: str, *, user_id: str) -> str | None:
+    async def prewarm_accepted_skills_async(self, thread_id: str, *, user_id: str, resolve_skill_snapshot=None) -> str | None:
         self.calls.append((thread_id, user_id))
+        self.snapshots.append(None if resolve_skill_snapshot is None else resolve_skill_snapshot())
         if self.fail:
             raise RuntimeError("daemon refused")
         return f"sandbox-{thread_id}" if self.park else None

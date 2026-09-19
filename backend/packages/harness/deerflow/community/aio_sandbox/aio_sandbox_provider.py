@@ -104,6 +104,7 @@ from .sandbox_info import PROVENANCE_CREATED, PROVENANCE_REDISCOVERED, AcceptedS
 
 if TYPE_CHECKING:
     from deerflow.runtime.skill_projection import SkillProjectionClear
+    from deerflow.runtime.skill_snapshot import AcceptedSkillSnapshot
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +121,10 @@ ACCEPTED_SANDBOX_ID_SUFFIX = "-accepted"
 # a fast follow-up waiting to happen, while one nobody asked for yet is a slot
 # on speculation, and the released profile has two.
 DEFAULT_PREWARM_CLAIM_TIMEOUT = 300
+
+# The run id a prewarm publishes its guessed view under. Generation 0 is the
+# provisional identity: any real run supersedes it without a conflict.
+PREWARM_VIEW_RUN_ID = "prewarm"
 IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 
 
@@ -2959,10 +2964,27 @@ class AioSandboxProvider(
         marks = getattr(self, "_prewarmed_unclaimed", None)
         return marks is not None and marks.get(sandbox_id) is parked
 
-    async def prewarm_accepted_skills_async(self, thread_id: str, *, user_id: str) -> str | None:
-        return await asyncio.to_thread(self._prewarm_accepted_skills, thread_id, user_id=user_id)
+    async def prewarm_accepted_skills_async(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        resolve_skill_snapshot: Callable[[], "AcceptedSkillSnapshot | None"] | None = None,
+    ) -> str | None:
+        return await asyncio.to_thread(
+            self._prewarm_accepted_skills,
+            thread_id,
+            user_id=user_id,
+            resolve_skill_snapshot=resolve_skill_snapshot,
+        )
 
-    def _prewarm_accepted_skills(self, thread_id: str, *, user_id: str) -> str | None:
+    def _prewarm_accepted_skills(
+        self,
+        thread_id: str,
+        *,
+        user_id: str,
+        resolve_skill_snapshot: Callable[[], "AcceptedSkillSnapshot | None"] | None = None,
+    ) -> str | None:
         """Build and park the container ``thread_id``'s first accepted turn would build.
 
         The same preflight, name, fingerprint and create as the acquisition,
@@ -3029,8 +3051,85 @@ class AioSandboxProvider(
                 parked = self._warm_pool.get(created)
                 if parked is not None:
                     self._mark_prewarm_unclaimed_locked(created, parked[0])
+            self._publish_prewarmed_skill_view(thread_id, user_id=effective_user_id, resolve=resolve_skill_snapshot)
             logger.info("Prewarmed accepted sandbox %s for thread %s", created, thread_id)
             return created
+
+    def _publish_prewarmed_skill_view(self, thread_id: str, *, user_id: str, resolve: Callable[[], "AcceptedSkillSnapshot | None"] | None) -> None:
+        """Stage the view the likely first turn would stage, and never fail for it.
+
+        Publishing here is what turns the first turn's bind from a full
+        fsync'd copy (1.2 to 2 s on the tenant class) into a verification in
+        place. It is published under generation 0, the provisional identity:
+        any real run arrives with a higher generation and supersedes it
+        without a conflict, and a thread whose view a run already owns keeps
+        what that run bound.
+
+        The bytes are published and the ownership record is then dropped, so
+        the view ends in the module's retained-but-unowned state. Keeping the
+        record would make a guess into ownership: a turn whose own bind then
+        raised -- the tenant's disk filling during staging is the realistic
+        cause, and that is the very bind this exists to make cheap -- could
+        neither compare-and-clear it (the run's ``(run_id, generation)``
+        cannot match a guess) nor fall back to clearing an unowned view, so
+        the coordinator would keep ``clearing`` set and refuse every later
+        turn on that thread for the life of the process.
+
+        Everything here is best effort. The container is the prewarm's
+        deliverable; the view is a head start, and a head start that cannot
+        be taken must never destroy the container or surface an error.
+        """
+        if resolve is None:
+            return
+        from deerflow.runtime import skill_snapshot as snapshot_module
+        from deerflow.runtime.skill_projection import SkillProjectionEvidence
+
+        skill_snapshot = None
+        try:
+            # Resolved here, not by the caller: every early return above
+            # leaves without a container, and reading and digesting the skill
+            # tree for a guess nothing can use costs the tenant two full tree
+            # passes under the snapshot lease lock that live turns also take.
+            skill_snapshot = resolve()
+            if skill_snapshot is None:
+                return
+            snapshot_id = getattr(skill_snapshot, "snapshot_id", None)
+            if not isinstance(snapshot_id, str):
+                return
+            snapshot_module.bind_skill_snapshot_active_view(
+                user_id=user_id,
+                thread_id=thread_id,
+                snapshot_id=snapshot_id,
+                run_id=PREWARM_VIEW_RUN_ID,
+                generation=0,
+                evidence=SkillProjectionEvidence.from_snapshot(skill_snapshot),
+            )
+            snapshot_module.clear_skill_snapshot_active_view(
+                user_id=user_id,
+                thread_id=thread_id,
+                run_id=PREWARM_VIEW_RUN_ID,
+                generation=0,
+            )
+        except BaseException as exc:
+            # Named, because an operator reading this needs to tell a benign
+            # conflict (a run already owns this thread's view) from a disk
+            # that is full or read-only, which costs every first turn the
+            # staging this exists to remove.
+            reason = getattr(exc, "code", None) or type(exc).__name__
+            logger.warning(
+                "Prewarmed sandbox for thread %s without its skill view (%s); its first turn stages one",
+                thread_id,
+                reason,
+                exc_info=True,
+            )
+        finally:
+            # The lease was taken here, so it is released here; the published
+            # tree outlives it for the turn to verify in place.
+            if skill_snapshot is not None:
+                try:
+                    skill_snapshot.release()
+                except BaseException:
+                    logger.warning("Could not release the prewarm's skill snapshot lease", exc_info=True)
 
     #: How often the prewarm reaper looks; short against the claim timeout so
     #: an abandoned slot is returned close to when it was promised.

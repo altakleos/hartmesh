@@ -17,7 +17,7 @@ from deerflow.runtime.accepted_invocation import (
     canonical_digest,
     mcp_tool_projection,
 )
-from deerflow.runtime.skill_snapshot import snapshot_effective_skills
+from deerflow.runtime.skill_snapshot import AcceptedSkillSnapshot, snapshot_effective_skills
 from deerflow.runtime.subagent_snapshot import (
     ResolvedSkillScopesV1,
     ResolvedSubagentCatalogV1,
@@ -250,6 +250,35 @@ def _capture_governed_mcp_tools(
             continue
         result.append(tool)
     return tuple(result)
+
+
+def likely_first_turn_skill_snapshot(app_config: AppConfig, *, user_id: str | None) -> AcceptedSkillSnapshot | None:
+    """Publish the snapshot an ordinary first turn on this thread would bring.
+
+    A prewarm runs before the person has typed, so it cannot know the run's
+    config. It does not have to: the ordinary first turn is the default agent
+    with no subagents, whose transitive skills are exactly the enabled ones,
+    and that is what this publishes -- the same call
+    :func:`resolve_agent_revision` makes, on the same inputs, so the digest
+    is the turn's own rather than a second rule that could drift from it.
+
+    It is exact for far more than the name suggests. An unnamed run leaves
+    ``lead_skill_names`` unset, so the turn's own transitive set is already
+    every enabled skill, and subagents can only draw from that same set --
+    so a subagent-enabled run agrees, and so does a named agent, whose
+    ``AgentConfig.skills`` defaults to ``None`` and takes the same branch. It
+    differs only for an agent carrying an explicit ``skills:`` list, a
+    bootstrap run (which reaches the agent through IM, never through the
+    browser-only prewarm), and a skill toggled between opening the chat and
+    sending. Those simply fail the turn's verification and stage as today.
+
+    Returns a leased snapshot the caller must ``release``; the published tree
+    survives the release for the turn to verify in place.
+    """
+    if not isinstance(app_config, AppConfig):
+        raise TypeError("app_config must be AppConfig")
+    enabled_skills, _ = _skills(app_config, user_id=user_id)
+    return snapshot_effective_skills(tuple(enabled_skills), user_id=user_id)
 
 
 def resolve_agent_revision(
