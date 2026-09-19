@@ -232,10 +232,10 @@ export const zhCN: Translations = {
     reasoningMode: "思考",
     reasoningModeDescription: "思考后再行动，在时间与准确性之间取得平衡",
     proMode: "Pro",
-    proModeDescription: "思考、计划再执行，获得更精准的结果，可能需要更多时间",
+    proModeDescription: "思考后再执行，获得更精准的结果，可能需要更多时间",
     ultraMode: "Ultra",
     ultraModeDescription:
-      "继承自 Pro 模式，可调用子代理分工协作，适合复杂多步骤任务，能力最强",
+      "继承自 Pro 模式，展示可见的任务计划，并可调用子代理分工协作，适合复杂多步骤任务，能力最强",
     reasoningEffort: "推理深度",
     reasoningEffortMinimal: "最低",
     reasoningEffortMinimalDescription: "检索 + 直接输出",

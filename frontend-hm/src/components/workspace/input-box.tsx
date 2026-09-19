@@ -94,6 +94,11 @@ import {
   type ComposerDraft,
   writeComposerDraft,
 } from "@/core/threads/composer-draft";
+import {
+  offersReasoningMode,
+  reasoningEffortForMode,
+  resolveChatMode,
+} from "@/core/threads/run-context";
 import { threadTokenUsageQueryKey } from "@/core/threads/token-usage";
 import { textOfMessage } from "@/core/threads/utils";
 import {
@@ -202,19 +207,6 @@ function insertPlainTextAtSelection(container: HTMLElement, text: string) {
   selection.removeAllRanges();
   selection.addRange(range);
   return true;
-}
-
-function getResolvedMode(
-  mode: InputMode | undefined,
-  supportsThinking: boolean,
-): InputMode {
-  if (!supportsThinking && mode !== "flash") {
-    return "flash";
-  }
-  if (mode) {
-    return mode;
-  }
-  return supportsThinking ? "pro" : "flash";
 }
 
 function escapeXmlAttribute(value: string) {
@@ -568,9 +560,8 @@ export function InputBox({
       ? models.find((m) => m.name === defaultModelName)
       : undefined;
     const fallbackModel = currentModel ?? agentDefaultModel ?? models[0]!;
-    const supportsThinking = fallbackModel.supports_thinking ?? false;
     const nextModelName = fallbackModel.name;
-    const nextMode = getResolvedMode(context.mode, supportsThinking);
+    const nextMode = resolveChatMode(context.mode, fallbackModel);
 
     if (context.model_name === nextModelName && context.mode === nextMode) {
       return;
@@ -591,11 +582,6 @@ export function InputBox({
   }, [context.model_name, models]);
 
   const resolvedModelName = selectedModel?.name;
-
-  const supportThinking = useMemo(
-    () => selectedModel?.supports_thinking ?? false,
-    [selectedModel],
-  );
 
   const supportReasoningEffort = useMemo(
     () => selectedModel?.supports_reasoning_effort ?? false,
@@ -836,7 +822,7 @@ export function InputBox({
       onContextChange?.({
         ...context,
         model_name,
-        mode: getResolvedMode(context.mode, model.supports_thinking ?? false),
+        mode: resolveChatMode(context.mode, model),
         reasoning_effort: context.reasoning_effort,
       });
       setModelDialogOpen(false);
@@ -849,20 +835,14 @@ export function InputBox({
       if (disabled || polishingInput) {
         return;
       }
+      const nextMode = resolveChatMode(mode, selectedModel);
       onContextChange?.({
         ...context,
-        mode: getResolvedMode(mode, supportThinking),
-        reasoning_effort:
-          mode === "ultra"
-            ? "high"
-            : mode === "pro"
-              ? "medium"
-              : mode === "thinking"
-                ? "low"
-                : "minimal",
+        mode: nextMode,
+        reasoning_effort: reasoningEffortForMode(nextMode),
       });
     },
-    [disabled, onContextChange, context, polishingInput, supportThinking],
+    [disabled, onContextChange, context, polishingInput, selectedModel],
   );
 
   const handleReasoningEffortSelect = useCallback(
@@ -1124,10 +1104,7 @@ export function InputBox({
         onContextChange?.({
           ...context,
           model_name: resolvedModelName,
-          mode: getResolvedMode(
-            context.mode,
-            selectedModel?.supports_thinking ?? false,
-          ),
+          mode: resolveChatMode(context.mode, selectedModel),
         });
         return new Promise<void>((resolve, reject) => {
           setTimeout(() => {
@@ -1146,7 +1123,7 @@ export function InputBox({
       onSubmit,
       reportUploadLimitViolations,
       resolvedModelName,
-      selectedModel?.supports_thinking,
+      selectedModel,
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
       uploadLimits,
@@ -2435,7 +2412,7 @@ export function InputBox({
                         <div className="ml-auto size-4" />
                       )}
                     </PromptInputActionMenuItem>
-                    {supportThinking && (
+                    {offersReasoningMode(selectedModel) && (
                       <PromptInputActionMenuItem
                         className={cn(
                           context.mode === "thinking"

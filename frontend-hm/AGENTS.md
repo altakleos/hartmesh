@@ -84,6 +84,17 @@ any tool name, so a new producer needs no client change; the present-files
 group renders its first message's prose above the files, which is what keeps a
 tagged answer readable rather than replaced by its own chips.
 
+The chat mode is one dial, read in one place: `core/threads/run-context.ts`
+answers which modes a model can offer (`offersReasoningMode`), which mode a
+stored choice resolves to on it (`resolveChatMode`), the effort a picked mode
+writes (`reasoningEffortForMode`) and what a run sends (`runFlagsForMode`).
+Both pickers and both places that start a run derive from it; nothing else
+reads the mode to decide behaviour. Plan mode is Ultra's alone and Reasoning
+is offered only where the model honours `reasoning_effort` — the measurements
+behind both are in the module comment. The unit test pins the table row by
+row. The Pro and Ultra descriptions in both locales say what each mode does;
+that is a convention, not a check, so change them with the table.
+
 A `*.report.json` artifact is previewed as a report card rather than as JSON.
 `core/business-report/` parses
 [the contract](../contracts/business_report/report.schema.json) and decides it:
