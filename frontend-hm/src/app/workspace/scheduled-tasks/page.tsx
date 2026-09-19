@@ -26,6 +26,7 @@ import {
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
 import { useDeveloperSurfacesVisible } from "@/core/features";
+import { useDocumentTitle } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   useCreateScheduledTask,
@@ -247,9 +248,7 @@ export default function ScheduledTasksPage() {
     createTitleRef.current?.focus();
   };
 
-  useEffect(() => {
-    document.title = `${t.sidebar.scheduledTasks} - ${t.pages.appName}`;
-  }, [t.pages.appName, t.sidebar.scheduledTasks]);
+  useDocumentTitle(t.sidebar.scheduledTasks, t.pages.appName);
 
   useEffect(() => {
     if (!selectedTaskId) {

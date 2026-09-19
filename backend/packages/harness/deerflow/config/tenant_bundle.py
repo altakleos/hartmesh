@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -68,6 +69,8 @@ class TenantBundle:
     """What the bundle directory said, field by field, with every problem named."""
 
     path: Path | None
+    #: Whether the directory is there and readable; False is one named problem and nothing else.
+    present: bool
     company_name: str | None
     primary: str | None
     secondary: str | None
@@ -79,7 +82,11 @@ class TenantBundle:
     problems: tuple[str, ...]
 
 
-EMPTY_BUNDLE = TenantBundle(path=None, company_name=None, primary=None, secondary=None, logo=None, starters=None, report_profiles=(), problems=())
+EMPTY_BUNDLE = TenantBundle(path=None, present=False, company_name=None, primary=None, secondary=None, logo=None, starters=None, report_profiles=(), problems=())
+
+
+def _unusable(root: Path, problem: str) -> TenantBundle:
+    return TenantBundle(path=root, present=False, company_name=None, primary=None, secondary=None, logo=None, starters=None, report_profiles=(), problems=(problem,))
 
 
 def load_tenant_bundle(path: str | Path | None) -> TenantBundle:
@@ -88,16 +95,22 @@ def load_tenant_bundle(path: str | Path | None) -> TenantBundle:
     if path is None:
         return EMPTY_BUNDLE
     root = Path(path)
-    if not root.is_dir():
-        return TenantBundle(path=root, company_name=None, primary=None, secondary=None, logo=None, starters=None, report_profiles=(), problems=("tenant bundle directory does not exist",))
-
     problems: list[str] = []
-    company_name, primary, secondary, logo = _read_brand(root, problems)
-    starters = _read_starters(root, problems)
-    profiles_dir = root / "report-profiles"
-    report_profiles = tuple(sorted(entry.stem for entry in profiles_dir.glob("*.json") if entry.is_file())) if profiles_dir.is_dir() else ()
+    # Every stat, glob and read below is inside this guard: a directory the
+    # Gateway's user cannot traverse (created as root without `-o 1000`) is a
+    # named problem, not a traceback that takes the Gateway down at start.
+    try:
+        if not root.is_dir():
+            return _unusable(root, "tenant bundle directory does not exist")
+        company_name, primary, secondary, logo = _read_brand(root, problems)
+        starters = _read_starters(root, problems)
+        profiles_dir = root / "report-profiles"
+        report_profiles = tuple(sorted(entry.stem for entry in profiles_dir.glob("*.json") if entry.is_file())) if profiles_dir.is_dir() else ()
+    except OSError:
+        return _unusable(root, "tenant bundle directory cannot be read")
     return TenantBundle(
         path=root,
+        present=True,
         company_name=company_name,
         primary=primary,
         secondary=secondary,
@@ -175,7 +188,10 @@ def _logo(root: Path, value: object, problems: list[str]) -> Path | None:
     if isinstance(value, str):
         candidate = (root / value).resolve()
         if _inside(candidate, root.resolve()) and candidate.is_file() and candidate.suffix.lower() in LOGO_SUFFIXES:
-            return candidate
+            if os.access(candidate, os.R_OK):
+                return candidate
+            problems.append("brand.json: logo cannot be read")
+            return None
     problems.append("brand.json: logo is not a PNG or JPEG file inside the bundle")
     return None
 
@@ -200,25 +216,35 @@ def _read_starters(root: Path, problems: list[str]) -> tuple[StarterConfig, ...]
         # ids -- applied to the same list from a different file.
         resolved = UiConfig.model_validate({"starters": data}).starters
     except ValidationError as error:
-        # Location and rule only; pydantic's `input` is the operator's text.
-        rules = "; ".join(f"{'.'.join(str(part) for part in item['loc'])}: {item['msg']}" for item in error.errors(include_input=False, include_url=False))
-        problems.append(f"starters.json: {rules}")
+        # Entry index, field and rule type only. Pydantic's `input` is the
+        # operator's text, and so is an unknown key's name in `loc`, which is
+        # why the location keeps only the index and a field the schema knows.
+        problems.append(f"starters.json: {_starter_rules(error)}")
         return None
     return tuple(resolved)
+
+
+def _starter_rules(error: ValidationError) -> str:
+    """``<index>.<field>: <rule>`` per error, or ``<rule>`` for the list as a whole."""
+    known = set(StarterConfig.model_fields)
+    rules = []
+    for item in error.errors(include_input=False, include_url=False):
+        loc = ".".join(str(part) for part in item["loc"] if isinstance(part, int) or part in known)
+        rules.append(f"{loc}: {item['type']}" if loc else item["type"])
+    return "; ".join(rules)
 
 
 _last_reported_problems: tuple[str, ...] | None = None
 
 
-def configured_tenant_bundle(config: object) -> TenantBundle:
-    """The bundle ``config.tenant_bundle.path`` names, its problems journalled once per change rather than per request.
+def configured_tenant_bundle(path: str | None) -> TenantBundle:
+    """The bundle ``tenant_bundle.path`` names, its problems journalled once per change rather than per request.
 
     Both readers on the Gateway -- the features report and the logo route --
     go through here, so an operator's edit is read the same way by both.
     """
     global _last_reported_problems
-    section = getattr(config, "tenant_bundle", None)
-    bundle = load_tenant_bundle(getattr(section, "path", None))
+    bundle = load_tenant_bundle(path)
     if bundle.problems != _last_reported_problems:
         _last_reported_problems = bundle.problems
         for problem in bundle.problems:

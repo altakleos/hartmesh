@@ -19,6 +19,7 @@ is the same list arriving from a different file.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -55,7 +56,35 @@ def test_a_directory_that_is_not_there_yet_is_named_and_nothing_else_breaks(tmp_
     bundle = load_tenant_bundle(tmp_path / "absent")
     assert bundle.path == tmp_path / "absent"
     assert bundle.company_name is None and bundle.starters is None
+    assert bundle.present is False
     assert bundle.problems == ("tenant bundle directory does not exist",)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root traverses anything")
+def test_a_directory_the_gateway_cannot_traverse_is_one_named_problem_not_a_traceback(tmp_path: Path) -> None:
+    """`install -d -m 0750` without `-o 1000` leaves root's directory; the Gateway must start and say so, not exit."""
+    root = _bundle(tmp_path, FULL_BRAND)
+    root.chmod(0)
+    try:
+        bundle = load_tenant_bundle(root)
+    finally:
+        root.chmod(0o750)
+    assert bundle.present is False
+    assert bundle.company_name is None and bundle.starters is None and bundle.report_profiles == ()
+    assert bundle.problems == ("tenant bundle directory cannot be read",)
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads anything")
+def test_a_logo_the_gateway_cannot_read_is_named_and_the_name_still_shows(tmp_path: Path) -> None:
+    """`sudo cp` under umask 077 leaves a root-only picture; naming it beats a 500 when the header asks for it."""
+    root = _bundle(tmp_path, FULL_BRAND)
+    (root / "logo.png").chmod(0)
+    try:
+        bundle = load_tenant_bundle(root)
+    finally:
+        (root / "logo.png").chmod(0o640)
+    assert bundle.company_name == "Example Services Co." and bundle.logo is None
+    assert bundle.problems == ("brand.json: logo cannot be read",)
 
 
 def test_a_full_brand_is_read_as_the_skill_reads_it(tmp_path: Path) -> None:
@@ -160,23 +189,27 @@ def test_an_empty_starter_list_is_a_deployment_that_wants_no_grid(tmp_path: Path
 @pytest.mark.parametrize(
     ("body", "rule"),
     [
-        ("{not json", "not a JSON list"),
-        ('{"id": "x"}', "not a JSON list"),
-        (json.dumps([{"id": "a", "title": "A", "prompt": "p"}, {"id": "a", "title": "B", "prompt": "q"}]), "every starter needs its own id"),
-        (json.dumps([{"id": "Bad Id", "title": "A", "prompt": "p"}]), "id"),
-        (json.dumps([{"id": f"s{i}", "title": "A", "prompt": "p"} for i in range(7)]), "at most 6"),
-        (json.dumps([{"id": "a", "title": "", "prompt": "p"}]), "title"),
-        (json.dumps([{"id": "a", "title": "A", "prompt": "p", "extra": 1}]), "extra"),
+        ("{not json", "starters.json: not a JSON list"),
+        ('{"id": "x"}', "starters.json: not a JSON list"),
+        (json.dumps([{"id": "a", "title": "A", "prompt": "p"}, {"id": "a", "title": "B", "prompt": "q"}]), "starters.json: value_error"),
+        (json.dumps([{"id": "Bad Id", "title": "A", "prompt": "p"}]), "starters.json: 0.id: string_pattern_mismatch"),
+        (json.dumps([{"id": f"s{i}", "title": "A", "prompt": "p"} for i in range(7)]), "starters.json: too_long"),
+        (json.dumps([{"id": "a", "title": "", "prompt": "p"}]), "starters.json: 0.title: value_error"),
+        (json.dumps([{"id": "a", "title": "A", "prompt": "p", "SECRET\nKEY\x1b[31m": 1}]), "starters.json: 0: extra_forbidden"),
     ],
 )
 def test_a_starter_list_that_breaks_the_rules_is_a_named_problem_and_no_list(tmp_path: Path, body: str, rule: str) -> None:
-    """The grid falls back to what the config says; a typo in the bundle never empties Home."""
+    """The grid falls back to what the config says; a typo in the bundle never empties Home.
+
+    The problem names the entry, the field and the rule. It never carries what
+    the operator typed, and an unknown key's *name* is operator text too: it is
+    journalled, so the location keeps only fields the schema knows.
+    """
     root = _bundle(tmp_path, FULL_BRAND)
     (root / "starters.json").write_text(body, encoding="utf-8")
     bundle = load_tenant_bundle(root)
     assert bundle.starters is None
-    assert len(bundle.problems) == 1 and bundle.problems[0].startswith("starters.json: ")
-    assert rule in bundle.problems[0], bundle.problems[0]
+    assert bundle.problems == (rule,)
 
 
 def test_report_profiles_are_listed_by_name_and_left_to_the_skill(tmp_path: Path) -> None:
@@ -184,10 +217,10 @@ def test_report_profiles_are_listed_by_name_and_left_to_the_skill(tmp_path: Path
     profiles = root / "report-profiles"
     profiles.mkdir()
     (profiles / "services-generic.json").write_text("{}", encoding="utf-8")
-    (profiles / "clinic.json").write_text("not even json", encoding="utf-8")
+    (profiles / "example.json").write_text("not even json", encoding="utf-8")
     (profiles / "notes.txt").write_text("", encoding="utf-8")
     bundle = load_tenant_bundle(root)
-    assert bundle.report_profiles == ("clinic", "services-generic"), "names only, sorted; the skill validates a profile when it loads one"
+    assert bundle.report_profiles == ("example", "services-generic"), "names only, sorted; the skill validates a profile when it loads one"
     assert bundle.problems == ()
 
 

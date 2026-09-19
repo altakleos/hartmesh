@@ -1,6 +1,6 @@
 import type { BaseStream } from "@langchain/langgraph-sdk";
-import { useEffect } from "react";
 
+import { useDocumentTitle } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import type { AgentThreadState } from "@/core/threads";
 
@@ -23,27 +23,10 @@ export function ThreadTitle({
   const { isNewThread } = useThreadChat();
   const title = canonicalTitle?.length ? canonicalTitle : thread.values?.title;
 
-  useEffect(() => {
-    let _title = t.pages.untitled;
-
-    if (title) {
-      _title = title;
-    } else if (isNewThread) {
-      _title = t.pages.newChat;
-    }
-    if (thread.isThreadLoading) {
-      document.title = `Loading... - ${t.pages.appName}`;
-    } else {
-      document.title = `${_title} - ${t.pages.appName}`;
-    }
-  }, [
-    isNewThread,
-    t.pages.newChat,
-    t.pages.untitled,
-    t.pages.appName,
-    thread.isThreadLoading,
-    title,
-  ]);
+  const page = thread.isThreadLoading
+    ? "Loading..."
+    : (title ?? (isNewThread ? t.pages.newChat : t.pages.untitled));
+  useDocumentTitle(page, t.pages.appName);
 
   if (!title) {
     return null;

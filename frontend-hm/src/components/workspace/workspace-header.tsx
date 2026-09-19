@@ -25,7 +25,7 @@ export function companyMark(companyName: string): string {
     .split(/\s+/)
     .filter((word) => word.length > 0)
     .slice(0, 2)
-    .map((word) => word[0]!.toUpperCase())
+    .map((word) => Array.from(word)[0]!.toUpperCase())
     .join("");
 }
 

@@ -5,7 +5,7 @@ comes from. It is the file the bundle loader already resolved -- a PNG or JPEG
 inside the bundle directory, the same rule the report skill applies -- so
 nothing here takes a path from the request or opens anything the loader did
 not name. It sits behind the ordinary auth middleware on purpose: a
-customer's brand is delivered after sign-in, and the login page stays the
+tenant's brand is delivered after sign-in, and the login page stays the
 product's own.
 """
 
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/api/branding", tags=["branding"])
     response_class=FileResponse,
 )
 async def get_logo(config: AppConfig = Depends(get_config)) -> FileResponse:
-    logo = configured_tenant_bundle(config).logo
+    logo = configured_tenant_bundle(config.tenant_bundle.path).logo
     if logo is None:
         raise HTTPException(status_code=404, detail="no logo")
     media_type, _ = mimetypes.guess_type(logo.name)

@@ -24,6 +24,7 @@ rs.mock("next/navigation", () => ({
 }));
 rs.mock("@/core/features", () => ({
   useDeveloperSurfacesVisible: () => surfaces.developerSurfacesVisible,
+  useDocumentTitle: () => undefined,
 }));
 // The page's chrome (sidebar, header) is not what this is about, and it
 // needs providers the recipe row does not.

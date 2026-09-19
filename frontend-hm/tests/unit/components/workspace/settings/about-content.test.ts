@@ -43,6 +43,14 @@ test("a company's About is that company and the version, and none of the product
   expect(markdown).not.toContain("github.com");
 });
 
+test("a company's name is shown as typed, not read as markup", async () => {
+  const { brandedAboutMarkdown } =
+    await import("@/components/workspace/settings/about-content");
+  expect(brandedAboutMarkdown("C# Solutions [Bracket] Co.", "1")).toContain(
+    "# C\\# Solutions \\[Bracket\\] Co.",
+  );
+});
+
 test("a company's About carries the resolved version by default", async () => {
   const { APP_VERSION } = await import("@/version");
   const { brandedAboutMarkdown } =

@@ -192,10 +192,13 @@ unchanged and `authorization` has no permission covering these APIs;
 `system_role` is what limits a person, and the API already checks it.
 `branding` (`useBranding`) is the tenant bundle's company name, colours and
 whether `/api/branding/logo` has a picture: a named company replaces the
-product's name in the sidebar header and on About and takes the product's own
-links out of the menu; until the answer is known the header shows neither
-name. The login page stays the product's own — the brand is delivered after
-sign-in.
+product's name in the sidebar header, the tab title (`useDocumentTitle`) and
+About, takes the product's own links and GitHub icon out of the menu and page
+header, and turns the composer disclaimer and the Settings blurb neutral.
+"Unknown" (still loading, or the fetch failed and will retry) is
+`isLoading`, and every one of those surfaces shows neither name nor the
+product's links until it is false. The login page stays the product's own —
+the brand is delivered after sign-in.
 
 One rule governs what happens while the answer is unknown: a control someone
 might need stays offered, and copy the deployment authors waits. So the screens

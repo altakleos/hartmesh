@@ -63,6 +63,6 @@ def test_a_logo_the_loader_refuses_is_404_here(tmp_path: Path) -> None:
 
 
 def test_the_brand_is_delivered_after_sign_in() -> None:
-    """The login page stays the product's own; a customer's name and picture are for the people it signed in."""
+    """The login page stays the product's own; a tenant's name and picture are for the people it signed in."""
     assert not _is_public("/api/branding/logo")
     assert not _is_public("/api/features")

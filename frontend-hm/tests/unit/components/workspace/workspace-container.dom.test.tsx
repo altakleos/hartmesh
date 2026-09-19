@@ -31,6 +31,7 @@ function renderHeader() {
 afterEach(() => {
   cleanup();
   branding.companyName = null;
+  branding.isLoading = false;
 });
 
 /**
@@ -47,6 +48,18 @@ describe("workspace page header", () => {
     expect(link.getAttribute("href")).toBe(
       "https://github.com/bytedance/deer-flow",
     );
+  });
+
+  it("offers it only once the deployment has answered", () => {
+    branding.isLoading = true;
+
+    renderHeader();
+
+    expect(
+      screen
+        .queryAllByRole("link")
+        .some((link) => link.getAttribute("href")?.includes("github.com")),
+    ).toBe(false);
   });
 
   it("drops it in a company's workspace", () => {

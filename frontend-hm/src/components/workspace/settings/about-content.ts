@@ -13,7 +13,12 @@ export function brandedAboutMarkdown(
   companyName: string,
   version: string = APP_VERSION,
 ): string {
-  return `# ${companyName}\n\nWorkspace version ${version}.\n`;
+  return `# ${escapeMarkdown(companyName)}\n\nWorkspace version ${version}.\n`;
+}
+
+/** The name as typed: a `#`, `*`, `_` or `[` in it is part of the name, not markup. */
+function escapeMarkdown(text: string): string {
+  return text.replace(/[\\`*_[\]#<>|~]/g, "\\$&");
 }
 
 export const aboutMarkdown = `# 🦌 [About DeerFlow ${APP_VERSION}](https://github.com/bytedance/deer-flow)

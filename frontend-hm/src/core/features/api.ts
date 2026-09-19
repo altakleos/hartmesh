@@ -30,7 +30,7 @@ export interface FeaturesResponse {
   branding?: {
     company_name?: unknown;
     colors?: { primary?: unknown; secondary?: unknown };
-    logo?: unknown;
+    has_logo?: unknown;
   };
 }
 
@@ -102,7 +102,7 @@ export async function fetchBranding(): Promise<Branding> {
     companyName: name.length > 0 ? name : null,
     primary: color(branding?.colors?.primary),
     secondary: color(branding?.colors?.secondary),
-    hasLogo: branding?.logo === true,
+    hasLogo: branding?.has_logo === true,
   };
 }
 

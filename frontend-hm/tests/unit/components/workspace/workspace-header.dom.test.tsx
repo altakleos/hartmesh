@@ -125,5 +125,6 @@ describe("companyMark", () => {
     expect(companyMark("Example Services Co.")).toBe("ES");
     expect(companyMark("Acme")).toBe("A");
     expect(companyMark("  two   words here ")).toBe("TW");
+    expect(companyMark("🦊 Foxes")).toBe("🦊F");
   });
 });

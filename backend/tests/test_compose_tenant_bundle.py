@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 from collections.abc import Iterator
 from pathlib import Path
@@ -78,6 +79,16 @@ def test_the_bundle_sits_under_the_operator_mount_and_outside_home(template: dic
     assert template["skills"]["path"].startswith("/srv/hartmesh/home/"), "the literal that fixes HARTMESH_DATA_DIR to /srv/hartmesh (README: Mount points)"
 
 
+def test_compose_creates_the_directory_before_any_sandbox_binds_it() -> None:
+    """The sandbox backend binds it with `--mount type=bind`, which refuses a missing source: without this
+    entry an existing tenant that upgrades without `install -d` gets no sandbox at all. Compose's short
+    volume syntax creates the host path at `up`, before the Gateway starts, so the bind always has a source."""
+    compose = yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+    volumes = compose["services"]["gateway"]["volumes"]
+    tenant = OPERATOR_MOUNT + "/tenant"
+    assert f"{tenant}:{tenant}:ro" in volumes, "a short-syntax bind of the bundle directory itself, so Docker creates it"
+
+
 def test_the_tenant_profile_is_the_business_profile(template: dict) -> None:
     """Someone who is not an administrator is not offered the developer screens; the bundle's starters land on a Home that shows a grid."""
     assert template["ui"] == {"profile": "business"}
@@ -139,24 +150,41 @@ def test_check_names_what_is_wrong_and_still_renders(render_config: ModuleType, 
     assert code == 0
     assert f"tenant bundle at {bundle}: company_name unset; logo absent; starters none; report profiles 0" in out
     assert "render_config: warning: tenant bundle: brand.json: not a JSON object" in err
-    assert "render_config: warning: tenant bundle: starters.json: " in err and "every starter needs its own id" in err
+    assert "render_config: warning: tenant bundle: starters.json: value_error" in err
 
 
-def test_check_says_when_the_directory_is_not_there_yet(render_config: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
-    """An existing tenant's disk has no such directory; the profile starts, and the operator is told once per start."""
+def test_check_says_when_the_directory_is_not_there(render_config: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """Compose creates it at `up`, so this is a Gateway run outside the profile; the render still goes through."""
     bundle = tmp_path / "tenant"
 
     code, out, err = _check(render_config, _template_pointing_at(tmp_path, bundle), capsys, monkeypatch)
 
     assert code == 0
-    assert f"tenant bundle at {bundle}: absent" in out
+    assert f"tenant bundle at {bundle}: unusable" in out
     assert "render_config: warning: tenant bundle: tenant bundle directory does not exist" in err
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root traverses anything")
+def test_check_says_when_the_directory_is_root_s_and_still_renders(render_config: ModuleType, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    """`install -d` without `-o 1000`: the Gateway starts (run.sh is `set -e`) and the operator reads why the brand is missing."""
+    bundle = tmp_path / "tenant"
+    bundle.mkdir()
+    (bundle / "brand.json").write_text(json.dumps({"company_name": "Example Services Co."}), encoding="utf-8")
+    bundle.chmod(0)
+    try:
+        code, out, err = _check(render_config, _template_pointing_at(tmp_path, bundle), capsys, monkeypatch)
+    finally:
+        bundle.chmod(0o750)
+
+    assert code == 0
+    assert f"tenant bundle at {bundle}: unusable" in out
+    assert "render_config: warning: tenant bundle: tenant bundle directory cannot be read" in err
 
 
 def test_the_operator_docs_describe_the_bundle() -> None:
     readme = README.read_text(encoding="utf-8")
     assert "### Tenant bundle" in readme
-    for needle in (BUNDLE_HOST_PATH, "brand.json", "starters.json", "report-profiles/", "install -d -o 1000 -g 1000 -m 0750 /srv/hartmesh/operator/tenant", "--check"):
+    for needle in (BUNDLE_HOST_PATH, "brand.json", "starters.json", "report-profiles/", "install -d -o 1000 -g 1000 -m 0750 /srv/hartmesh/operator/tenant", "--check", "readable by uid 1000", "business profile"):
         assert needle in readme, needle
     example = EXAMPLE.read_text(encoding="utf-8")
     assert "\ntenant_bundle:\n" in example and "# path: /srv/hartmesh/operator/tenant" in example

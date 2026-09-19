@@ -47,7 +47,7 @@ def _app_with_config(
     return app
 
 
-NO_BRANDING = {"company_name": None, "colors": {"primary": None, "secondary": None}, "logo": False}
+NO_BRANDING = {"company_name": None, "colors": {"primary": None, "secondary": None}, "has_logo": False}
 
 
 def _default_ui_payload() -> dict:
@@ -226,7 +226,7 @@ def test_features_reports_the_tenant_bundle_s_brand(tmp_path: Path) -> None:
     with TestClient(_app_with_config(agents_api_enabled=True, tenant_bundle_path=_bundle(tmp_path, BRAND))) as client:
         payload = client.get("/api/features").json()
 
-    assert payload["branding"] == {"company_name": "Example Services Co.", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}, "logo": True}
+    assert payload["branding"] == {"company_name": "Example Services Co.", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}, "has_logo": True}
 
 
 def test_a_bundle_without_a_picture_still_names_the_company(tmp_path: Path) -> None:
@@ -234,7 +234,7 @@ def test_a_bundle_without_a_picture_still_names_the_company(tmp_path: Path) -> N
         payload = client.get("/api/features").json()
 
     assert payload["branding"]["company_name"] == "Example Services Co."
-    assert payload["branding"]["logo"] is False
+    assert payload["branding"]["has_logo"] is False
 
 
 def test_the_bundle_s_starters_replace_the_config_s_when_it_has_a_usable_list(tmp_path: Path) -> None:

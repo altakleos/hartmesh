@@ -39,7 +39,8 @@ export function WorkspaceHeader({
 }: React.ComponentProps<"header">) {
   const { t } = useI18n();
   const pathname = usePathname();
-  const { companyName } = useBranding();
+  const { companyName, isLoading } = useBranding();
+  const isProductWorkspace = !isLoading && companyName === null;
   const segments = useMemo(() => {
     const parts = pathname?.split("/") || [];
     if (parts.length > 0) {
@@ -94,7 +95,7 @@ export function WorkspaceHeader({
           </BreadcrumbList>
         </Breadcrumb>
       </div>
-      {companyName === null && (
+      {isProductWorkspace && (
         <div className="pr-4">
           <Tooltip content={t.workspace.githubTooltip}>
             <a

@@ -1,7 +1,7 @@
 "use client";
 
 import { DownloadIcon, FolderIcon, Trash2Icon } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -26,6 +26,7 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import { useDocumentTitle } from "@/core/features";
 import {
   urlOfMyFile,
   useDeleteMyFile,
@@ -50,9 +51,7 @@ export default function FilesPage() {
   // the heading rather than falling to the top of the document.
   const headingRef = useRef<HTMLHeadingElement>(null);
 
-  useEffect(() => {
-    document.title = `${t.files.title} - ${t.pages.appName}`;
-  }, [t.files.title, t.pages.appName]);
+  useDocumentTitle(t.files.title, t.pages.appName);
 
   const files = data?.files ?? [];
 

@@ -557,8 +557,8 @@ def bundle_report(document: Mapping[str, Any]) -> tuple[str, tuple[str, ...]]:
         return "tenant bundle: none configured", ()
     # The Gateway's own loader, so what --check reports is what the Gateway reads.
     bundle = import_module("deerflow.config.tenant_bundle").load_tenant_bundle(path)
-    if not Path(path).is_dir():
-        return f"tenant bundle at {path}: absent", bundle.problems
+    if not bundle.present:
+        return f"tenant bundle at {path}: unusable", bundle.problems
     starters = "none" if bundle.starters is None else str(len(bundle.starters))
     summary = f"tenant bundle at {path}: company_name {'set' if bundle.company_name else 'unset'}; logo {'present' if bundle.logo else 'absent'}; starters {starters}; report profiles {len(bundle.report_profiles)}"
     return summary, bundle.problems

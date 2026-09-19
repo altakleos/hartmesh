@@ -57,8 +57,10 @@ export function WorkspaceNavMenu() {
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
   // A named company's workspace carries that company's name on About and none
-  // of the product's own links; a deployment that names none stays the product.
-  const { companyName } = useBranding();
+  // of the product's own links; a deployment that names none stays the
+  // product, and one that has not answered yet offers neither.
+  const { companyName, isLoading } = useBranding();
+  const isProductWorkspace = !isLoading && companyName === null;
 
   useEffect(() => {
     setMounted(true);
@@ -92,7 +94,7 @@ export function WorkspaceNavMenu() {
                     <Settings2Icon />
                     {t.common.settings}
                   </DropdownMenuItem>
-                  {companyName === null && (
+                  {isProductWorkspace && (
                     <>
                       <DropdownMenuSeparator />
                       <a

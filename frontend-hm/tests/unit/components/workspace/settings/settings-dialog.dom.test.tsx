@@ -20,6 +20,7 @@ const presentation = rs.hoisted(() => ({
 rs.mock("@/core/features", () => ({
   useDeveloperSurfacesVisible: () => presentation.developerSurfacesVisible,
   useWorkspacePresentation: () => ({ isLoading: presentation.isLoading }),
+  useBranding: () => ({ companyName: null, isLoading: false }),
 }));
 
 import { SettingsDialog } from "@/components/workspace/settings/settings-dialog";

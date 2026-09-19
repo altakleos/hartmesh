@@ -216,23 +216,39 @@ The layout is the skill's contract, and every file is optional:
 Create it before the first `up` that carries this profile, owned by the
 Gateway and sandbox user:
 `install -d -o 1000 -g 1000 -m 0750 /srv/hartmesh/operator/tenant`.
-Left absent, Docker creates it root-owned
-(`0755`) the first time a sandbox starts; the profile still works, but the
-operator then needs root to write into it. Edits are live: the Gateway reads
-the files on each request and the sandbox mount is a bind, so a new
-`brand.json` reaches the next page load and the next report, no restart.
+Left absent, Compose creates it root-owned (`0755`) at `up`, before the
+Gateway starts, and the profile still works; the operator then needs root
+to write into it. That Compose entry is what makes the directory safe to
+bind: every sandbox mounts it with `--mount type=bind`, which refuses a
+missing source rather than creating one. Every file in it must be
+readable by uid 1000 (`install -o 1000 -g 1000 -m 0640 brand.json …`, or `chmod 0640`
+after a `sudo cp`). A directory uid 1000 cannot traverse, or a picture it
+cannot open, is one named problem: the workspace shows the product's name,
+and the Gateway starts regardless. An SVG logo is refused (it can carry a
+stylesheet or an image reference that reaches out); export it as PNG. Edits
+are live: the Gateway reads the files on each request and the sandbox mount
+is a bind, so a new `brand.json` reaches the next page load and the next
+report, no restart.
 
 A missing file is not a problem. A malformed one -- a logo that is not a PNG
 or JPEG inside the directory, a colour that is not `#rrggbb`, a company name
-that is blank or spans lines, a starter list that breaks the `ui.starters`
-rules -- degrades that field alone (the name still shows without its picture;
-Home keeps the grid `config.yaml` would have shown) and is named in the
-Gateway log as `tenant bundle: <file>: <rule>`, never with the value.
-`gateway/render_config.py --check` (§ "Operator-managed models" gives the
-invocation) prints the same problems and one summary line -- whether a name
-and a logo are set, how many starters and report profiles there are -- and
-still renders. Report profiles are listed, not validated: the skill validates
-a profile when it loads one and says what is missing.
+that is blank, longer than 80 characters or spans lines, a starter list that
+breaks the `ui.starters` rules -- degrades that field alone (the name still
+shows without its picture; Home keeps the grid `config.yaml` would have
+shown) and is named in the Gateway log as `tenant bundle: <file>: <rule>`,
+never with the value. `gateway/render_config.py --check` (§ "Operator-managed
+models" gives the invocation: an `exec` into the running Gateway, which reads
+the bundle through its own read-only mount, so what it sees is what the
+workspace sees) prints the same problems and one summary line -- whether a
+name and a logo are set, how many starters and report profiles there are --
+and still renders. Report profiles are listed, not validated: the skill
+validates a profile when it loads one and says what is missing.
+
+The profile runs the business profile (`ui.profile: business` in
+`config.yaml`): the screens for building the deployment -- skills, tools,
+subagents, integrations, and the scheduled-task recipes -- are offered to
+administrators only. It is presentation, not authorization; `system_role` is
+what limits a person.
 
 ### Public skills
 

@@ -181,6 +181,8 @@ export interface Translations {
   inputBox: {
     placeholder: string;
     disclaimer: string;
+    /** The same line in a company's workspace, which is not the product's to sign. */
+    assistantDisclaimer: string;
     createSkillPrompt: string;
     addAttachments: string;
     inputPolish: string;
@@ -822,6 +824,8 @@ export interface Translations {
   settings: {
     title: string;
     description: string;
+    /** The same line in a company's workspace, which is not the product's to describe. */
+    descriptionForCompany: string;
     sections: {
       account: string;
       appearance: string;

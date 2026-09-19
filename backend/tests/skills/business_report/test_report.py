@@ -1563,6 +1563,25 @@ def _tenant_bundle(tmp_path: Path, brand: dict | None = None, *, profile: dict |
     return tenant
 
 
+@pytest.mark.parametrize(
+    "brand",
+    [
+        pytest.param("{not json", id="malformed"),
+        pytest.param(json.dumps(["not", "an", "object"]), id="not-an-object"),
+        pytest.param(json.dumps({"company_name": "x" * 81}), id="too-long"),
+        pytest.param(json.dumps({"company_name": "Example\u202eServices"}), id="reordering"),
+        pytest.param(json.dumps({"company_name": "Example\nServices"}), id="two-lines"),
+        pytest.param(json.dumps({"company_name": 42}), id="not-text"),
+    ],
+)
+def test_a_brand_the_gateway_would_not_show_is_not_carried_by_the_report_either(report, brand: str, tmp_path) -> None:
+    """One name, written once, shown the same: the skill reads brand.json under the header's rules and degrades
+    the same way, so a report never carries a company the workspace refused, and a typo never fails the run."""
+    tenant = _tenant_bundle(tmp_path)
+    (tenant / "brand.json").write_text(brand, encoding="utf-8")
+    assert report.load_brand(str(tenant)) == report.load_brand(None)
+
+
 def test_a_bundle_whose_logo_is_missing_still_brands_the_report_with_the_name(report, capsys, tmp_path) -> None:
     """The picture is a bonus; the company is the brand. A bundle written before the logo arrives renders."""
     tenant = _tenant_bundle(tmp_path, {"company_name": "Example Services Co.", "logo": "logo.png", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}})

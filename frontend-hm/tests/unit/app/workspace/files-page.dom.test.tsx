@@ -41,6 +41,8 @@ rs.mock("next/navigation", () => ({
   useRouter: () => ({ push: rs.fn(), replace: rs.fn(), prefetch: rs.fn() }),
 }));
 rs.mock("sonner", () => ({ toast: { success: rs.fn(), error: rs.fn() } }));
+// The tab title asks the deployment whose workspace this is; not what this is about.
+rs.mock("@/core/features", () => ({ useDocumentTitle: () => undefined }));
 rs.mock("@/components/workspace/workspace-container", () => ({
   WorkspaceContainer: ({ children }: { children: React.ReactNode }) => (
     <div>{children}</div>

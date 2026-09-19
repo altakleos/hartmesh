@@ -189,6 +189,12 @@ services:
       # has on the host so that value is a real host path either side of the
       # boundary. Docker creates the directory if the operator has not.
       - ${HARTMESH_DATA_DIR}/operator:${HARTMESH_DATA_DIR}/operator:ro
+      # The tenant bundle (README: "Tenant bundle"), already inside the mount
+      # above. Named on its own so Compose creates the host directory at `up`:
+      # every sandbox binds it with `--mount type=bind`, which refuses a
+      # missing source rather than creating one, and nothing else on the
+      # start path can create it (this container sees operator/ read-only).
+      - ${HARTMESH_DATA_DIR}/operator/tenant:${HARTMESH_DATA_DIR}/operator/tenant:ro
       # The shipped profile stays read-only; rendered files go to the data dir.
       - ./gateway:/opt/hartmesh/gateway:ro
       - ./config.yaml:/opt/hartmesh/config.yaml:ro

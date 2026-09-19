@@ -133,7 +133,7 @@ describe("branding", () => {
         branding: {
           company_name: "Example Services Co.",
           colors: { primary: "#0a6b3d", secondary: "#9ccdb4" },
-          logo: true,
+          has_logo: true,
         },
       }),
     );
@@ -166,7 +166,7 @@ describe("branding", () => {
         branding: {
           company_name: "   ",
           colors: { primary: "green", secondary: 42 },
-          logo: "yes",
+          has_logo: "yes",
         },
       }),
     );

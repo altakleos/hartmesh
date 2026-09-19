@@ -76,7 +76,7 @@ class BrandingFeature(BaseModel):
 
     company_name: str | None = Field(..., max_length=MAX_COMPANY_NAME_CHARS, description="The company the workspace shows, or null for the product's own name")
     colors: BrandColors
-    logo: bool = Field(..., description="Whether GET /api/branding/logo serves a picture")
+    has_logo: bool = Field(..., description="Whether GET /api/branding/logo serves a picture")
 
 
 class FeaturesResponse(BaseModel):
@@ -99,7 +99,7 @@ class FeaturesResponse(BaseModel):
 async def list_features(request: Request, config: AppConfig = Depends(get_config)) -> FeaturesResponse:
     """Return availability of optional frontend features."""
     browser = browser_capability(config)
-    bundle = configured_tenant_bundle(config)
+    bundle = configured_tenant_bundle(config.tenant_bundle.path)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     return FeaturesResponse(
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
@@ -125,7 +125,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
         branding=BrandingFeature(
             company_name=bundle.company_name,
             colors=BrandColors(primary=bundle.primary, secondary=bundle.secondary),
-            logo=bundle.logo is not None,
+            has_logo=bundle.logo is not None,
         ),
     )
 

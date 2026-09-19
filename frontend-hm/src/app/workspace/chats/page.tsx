@@ -16,6 +16,7 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import { useDocumentTitle } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { useInfiniteThreads } from "@/core/threads/hooks";
 import { buildThreadListModel } from "@/core/threads/thread-list-model";
@@ -42,9 +43,7 @@ export default function ChatsPage() {
   const [search, setSearch] = useState("");
   const isSearching = search.trim().length > 0;
 
-  useEffect(() => {
-    document.title = `${t.pages.chats} - ${t.pages.appName}`;
-  }, [t.pages.chats, t.pages.appName]);
+  useDocumentTitle(t.pages.chats, t.pages.appName);
 
   const filteredThreads = useMemo(() => {
     return threads.filter((thread) => {

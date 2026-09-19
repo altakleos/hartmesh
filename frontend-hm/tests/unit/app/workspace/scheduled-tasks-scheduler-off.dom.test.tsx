@@ -58,6 +58,7 @@ rs.mock("next/navigation", () => ({
 }));
 rs.mock("@/core/features", () => ({
   useDeveloperSurfacesVisible: () => false,
+  useDocumentTitle: () => undefined,
 }));
 rs.mock("@/components/workspace/workspace-container", () => ({
   WorkspaceContainer: ({ children }: { children: React.ReactNode }) => (
