@@ -39,7 +39,11 @@ const files = rs.hoisted(() => ({
 const routerReplace = rs.hoisted(() => rs.fn());
 rs.mock("next/navigation", () => ({
   usePathname: () => "/workspace/files",
-  useRouter: () => ({ push: rs.fn(), replace: routerReplace, prefetch: rs.fn() }),
+  useRouter: () => ({
+    push: rs.fn(),
+    replace: routerReplace,
+    prefetch: rs.fn(),
+  }),
   useSearchParams: () => new URLSearchParams(window.location.search),
 }));
 rs.mock("sonner", () => ({ toast: { success: rs.fn(), error: rs.fn() } }));
