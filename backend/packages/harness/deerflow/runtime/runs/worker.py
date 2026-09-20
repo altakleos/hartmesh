@@ -402,6 +402,31 @@ async def _await_accepted_skill_projection_claim(
             return True
         remaining = deadline - loop.time()
         if remaining <= 0:
+            # The predecessor may be held by a release whose provider work
+            # never confirmed, with nobody holding the consumer token that
+            # would retry it. Finish it here, where the alternative is
+            # refusing this turn outright; an unconfirmed clear changes
+            # nothing and still refuses.
+            from deerflow.sandbox.accepted_projection import (
+                complete_pending_projection_clear,
+            )
+
+            # The claim, not the bool, decides: parking the sandbox is the one
+            # step that runs after the fence is already released, so a refusal
+            # there can report failure over a thread that is genuinely free.
+            await asyncio.to_thread(
+                complete_pending_projection_clear,
+                user_id=user_id,
+                thread_id=thread_id,
+            )
+            if coordinator.try_claim_committed_run(
+                user_id=user_id,
+                thread_id=thread_id,
+                run_id=run_id,
+                snapshot_id=snapshot_id,
+                evidence=evidence,
+            ):
+                return True
             raise SkillProjectionBusyError()
         try:
             await asyncio.wait_for(
@@ -725,9 +750,10 @@ async def _materialize_accepted_skill_projection(
         invalidate_runtime_skill_projection_token(runtime, token)
         if token is not None:
             try:
-                released = await asyncio.to_thread(release_accepted_skill_consumer, token)
+                # Said by ``release_accepted_skill_consumer`` itself when it
+                # refuses, so this path only has to report an outright failure.
+                await asyncio.to_thread(release_accepted_skill_consumer, token)
             except Exception:
-                released = True
                 logger.warning(
                     "Failed to release rejected accepted skill consumer",
                     exc_info=True,
@@ -738,11 +764,6 @@ async def _materialize_accepted_skill_projection(
                 logger.warning(
                     "Rejected accepted skill consumer cleanup interrupted",
                 )
-            else:
-                if not released:
-                    from deerflow.sandbox.accepted_projection import _warn_release_unfinished
-
-                    _warn_release_unfinished(token)
         elif materializer is None and sandbox_id is not None and provider is not None:
             try:
                 await asyncio.to_thread(provider.release, sandbox_id)

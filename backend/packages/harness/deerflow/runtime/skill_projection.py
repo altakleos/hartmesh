@@ -502,6 +502,20 @@ class SkillProjectionCoordinator:
             state = self._states.get(key)
             return state is not None and state.clearing == clear
 
+    def pending_clear(self, *, user_id: str, thread_id: str) -> SkillProjectionClear | None:
+        """The clear this thread is held under right now, if it is held under one.
+
+        The read side of :meth:`release`. ``release`` answers the caller that
+        still holds the exact consumer token; this answers the thread's
+        identity, which is all a later admission has. It is the one fact that
+        says a thread is fenced pending provider cleanup, so finishing that
+        cleanup reads it rather than keeping a second record beside it.
+        """
+        key = self._key(user_id, thread_id)
+        with self._lock:
+            state = self._states.get(key)
+            return None if state is None else state.clearing
+
     def release_unactivated_run(self, *, user_id: str, thread_id: str, run_id: str) -> bool:
         """Release a committed owner only when no sandbox consumer ever activated."""
         key = self._key(user_id, thread_id)

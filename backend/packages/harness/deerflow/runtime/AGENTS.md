@@ -33,7 +33,11 @@ stable named tool adapters must match their accepted contract digests.
 
 Durable sandbox operations use `AcceptedSandboxSession`; see
 `backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`. It composes run/material
-authority and exposes no raw provider handle.
+authority and exposes no raw provider handle. A thread the coordinator holds
+as clearing is freed only by a provider that proves the material gone:
+gateway admission and the worker's claim wait each finish the pending clear
+before refusing (`complete_pending_projection_clear`), and an unproven clear
+must leave the fence exactly as it was. Never free one on elapsed time.
 
 Accepted durable lead execution also binds `AssemblyEvidenceV1` to the running
 owner/state-version fence. After accepted material is verified and the run starts,

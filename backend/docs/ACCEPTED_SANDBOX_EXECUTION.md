@@ -356,18 +356,64 @@ declared contract is a bool. The refusal cannot be spelled by asking `get`
 again: `get` answers None for a quarantined set and for one another reaper has
 reserved, so absence is asked of a predicate that excludes both.
 
-A refused release is retried once. `token_for_consumer` returns the retained
-clearing token to the same consumer id, and the worker's terminal cleanup
-re-obtains it and re-drives the release
+A refused release is retried by whoever still holds the token.
+`token_for_consumer` returns the retained clearing token to the same consumer
+id, and the worker's terminal cleanup re-obtains it and re-drives the release
 (`runtime/runs/worker.py`; `tests/test_skill_projection_binding_recovery.py`
-pins that contract). What no caller does is retry *after* that: nothing sweeps
-threads left clearing, and five of the seven call sites discard the bool
-rather than warn on it (`sandbox/middleware.py` twice, the worker's terminal
-path, `subagents/executor.py`, `subagents/batch_service.py`). So a set whose
-teardown never confirms still strands its thread. Closing that outright means
-something asking again on its own; the coordinator's `clearing` state already
-is that fact, so the derived form is a sweep that reads it rather than a
-second ledger beside it. That is a change of its own and is not made here.
+pins that contract).
+
+Once that holder is gone, nobody has the token, and the thread is fenced as
+clearing with no way back: `reserve_admission`, `fence_committed_owner` and
+`try_claim_committed_run` all refuse a clearing state, so every later turn on
+that chat is rejected until the Gateway restarts. The thing that can ask again
+is the thread's own `clearing` proof, which is already the fact that it is
+fenced, so it is read rather than mirrored:
+`SkillProjectionCoordinator.pending_clear` answers a thread's identity with the
+clear it is held under, and `complete_pending_projection_clear`
+(`sandbox/accepted_projection.py`) drives exactly the tail
+`release_accepted_skill_consumer` drives -- compare-and-clear, then the absence
+proof, then `provider.release` and `finalize_release`.
+
+It is asked at the two points where the thread is wanted and the alternative is
+refusal: gateway admission, just before it raises `ConflictError`
+(`app/gateway/services.py`), and the worker's bounded claim wait, just before it
+raises `SkillProjectionBusyError` (`runtime/runs/worker.py`). Nothing sweeps on
+a timer and there is no staleness knob to tune: a thread nobody wants costs
+nothing by staying fenced. Neither caller believes the returned bool, because
+parking the sandbox is the one step that runs *after* the fence is released and
+can therefore fail over a thread that is genuinely free; the reservation and
+the claim are the authority, and `complete_pending_projection_clear` reads its
+own answer back from the coordinator for the same reason.
+
+The retry also had to be able to ask at all. `_destroy_reserved` untracks the
+sandbox before it stops it, and `_quarantine_after_failed_destroy` puts the
+identity back in `_warm_pool_identity` rather than the active maps, so
+`_identity_for_sandbox` -- the gate both `clear_accepted_skill_snapshot` and
+`ensure_accepted_skill_snapshot_absent` check first -- answered "not this
+thread's sandbox" for exactly the sets whose cleanup still has to be retried,
+and kept answering it after the set was confirmed absent. It now reads the warm
+map too, which is the third place the same fact lives, not a fourth record.
+
+The whole tail is serialized per thread. Two drivers of one clear were already
+possible (the agent loop's release and the worker's terminal cleanup both hold
+the token) and the retry adds a third on a different clock; the earlier steps
+are fenced under `is_clearing` -- `empty_skill_snapshot_active_view` rechecks it
+under the views lock, the remote destroy under the local teardown reservation
+-- but `provider.release` is not, and behind a `finalize_release` a new turn can
+reclaim the same warm sandbox immediately. A driver that takes the lock and
+finds the clear already gone therefore reports that completion and touches the
+provider not at all.
+
+What remains is the honest case: a set whose teardown the provisioner never
+confirms keeps its thread fenced, and is freed by the first turn after it can
+be proven gone. An unproven clear must not free a thread. One path is not
+covered, and could not be shown reachable: a worker whose
+`ResolvedAgentRevision.material` was not captured in this process skips the
+claim wait and resolves its material later, and only the restart recovery path
+does that -- a restart empties this process-local coordinator anyway. The
+refusal is no longer silent either -- `release_accepted_skill_consumer` warns at
+the one point it is known, since only the worker's interrupted-predecessor wait
+inspects the bool and every other caller discards it.
 
 ### Rediscovery is not creation
 
