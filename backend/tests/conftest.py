@@ -20,6 +20,29 @@ _SKIPPED_POSTGRES_CONTRACTS: list[str] = []
 _SKIPPED_KUBERNETES_CONTRACTS: list[str] = []
 
 
+def pytest_configure(config: pytest.Config) -> None:
+    """Give every parallel worker its own writable DeerFlow home.
+
+    ``DEER_FLOW_HOME`` holds process-owned state -- the accepted skill snapshot
+    store above all -- whose bookkeeping is in-process by design, because one
+    Gateway owns one home. Its retention pass keeps every tree this process has
+    leased and removes the rest, and its startup cleanup removes staging trees
+    it does not recognise. Point eight workers at one home and each of them is
+    that "other process": one worker prunes a snapshot another is holding
+    (``skill_snapshot_manifest_missing``, ``skill_snapshot_tree_unreadable``)
+    or clears a ``.building-`` tree another is still writing into.
+
+    So the home is per worker. This is also simply correct: a test run has no
+    business writing into the home a developer's own Gateway uses.
+    """
+    worker = os.environ.get("PYTEST_XDIST_WORKER")
+    if worker is None or os.environ.get("DEER_FLOW_TEST_HOME_PER_WORKER") == "0":
+        return
+    home = Path(config.rootpath) / ".deer-flow-test" / worker
+    home.mkdir(parents=True, exist_ok=True)
+    os.environ["DEER_FLOW_HOME"] = str(home)
+
+
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
     """Record required opt-in contract skips for their session gates."""
 

@@ -19,6 +19,13 @@ import time
 
 import pytest
 
+# The suite runs one worker per core, and this module claims Docker containers
+# by a fixed name prefix: the autouse fixture below removes *every* container
+# matching it, so two of these tests running side by side would tear down each
+# other's container mid-test. The group name keeps them in one worker, in
+# order, while the rest of the suite still scatters freely.
+pytestmark = pytest.mark.xdist_group("sandbox-e2e-containers")
+
 
 def _docker_available() -> bool:
     try:
