@@ -22,6 +22,8 @@ This directory contains detailed documentation for the DeerFlow backend.
 | [RUN_EVENT_STREAM.md](RUN_EVENT_STREAM.md) | Persisted run event stream contract: envelope, producers, consumers, and known gaps |
 | [INVOCATION_RUNTIME.md](INVOCATION_RUNTIME.md) | Durable launch trust, accepted facts, contributors, and pinned-agent drift behavior |
 | [CHECKPOINT_CHANNEL_MODES.md](CHECKPOINT_CHANNEL_MODES.md) | `full` vs `delta` checkpoint channels: freeze, compatibility gate, replay lineage, rollback, and benchmarks |
+| [RUNTIME_INVARIANTS.md](RUNTIME_INVARIANTS.md) | The backend runtime's rules in full: admission, fencing, evidence, sandbox sessions, scheduling, and governance |
+| [RUN_MANAGER_CONTRACT.md](RUN_MANAGER_CONTRACT.md) | How Gateway admits, owns, cancels, and recovers runs: leases, takeover, reservations, and stream recovery |
 | [EVIDENCE_BEARING_RETRIEVAL.md](EVIDENCE_BEARING_RETRIEVAL.md) | Durable external-retrieval policy, privacy, receipt linkage, API, and qualification |
 | [FILE_UPLOAD.md](FILE_UPLOAD.md) | File upload functionality |
 | [PATH_EXAMPLES.md](PATH_EXAMPLES.md) | Path types and usage examples |
@@ -61,6 +63,8 @@ docs/
 ├── RUN_EVENT_STREAM.md        # Persisted run event stream contract
 ├── INVOCATION_RUNTIME.md      # Accepted invocation and pinned agent runtime
 ├── CHECKPOINT_CHANNEL_MODES.md  # Checkpoint channel modes (full/delta)
+├── RUNTIME_INVARIANTS.md      # Backend runtime rules in full
+├── RUN_MANAGER_CONTRACT.md    # Run admission, ownership, recovery
 ├── AUTO_TITLE_GENERATION.md   # Title generation
 ├── TITLE_GENERATION_IMPLEMENTATION.md  # Title implementation details
 └── TODO.md                    # Roadmap and issues
