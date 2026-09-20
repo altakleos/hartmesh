@@ -42,6 +42,8 @@ extensions_config.json
 coverage.xml
 coverage/
 .deer-flow/
+# Per-worker writable homes created by the parallel backend test run.
+.deer-flow-test/
 .claude/
 skills/custom/*
 logs/

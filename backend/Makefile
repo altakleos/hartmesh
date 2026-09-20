@@ -19,8 +19,20 @@ dev:
 gateway:
 	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run --locked uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
 
+# The offline suite runs one worker per core. It is wall-clock bound, not CPU
+# bound -- a serial run leaves seven of eight cores idle and takes over an hour
+# where the same tests finish in a fraction of that in parallel. `loadgroup`
+# scatters per test, which measured materially faster than per-file, and pins
+# only the modules that declare `pytest.mark.xdist_group` because they claim a
+# process-external resource by a fixed name (the Docker-backed reconciliation
+# e2e removes every container matching its own prefix in an autouse fixture).
+# Set PYTEST_WORKERS=0 to run serially -- required when
+# DEERFLOW_TEST_POSTGRES_URL is configured, because those tests share one
+# database that nothing partitions per worker.
+PYTEST_WORKERS ?= auto
+PYTEST_DIST ?= loadgroup
 test:
-	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run --locked --extra opensandbox pytest -m "not live" --ignore=tests/blocking_io tests/ -v -rs
+	PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run --locked --extra opensandbox pytest -m "not live" --ignore=tests/blocking_io $(if $(filter-out 0,$(PYTEST_WORKERS)),-n $(PYTEST_WORKERS) --dist $(PYTEST_DIST),) tests/ -rs
 
 test-live:
 	DEER_FLOW_RUN_LIVE_TESTS=1 PYTHONPATH=. PYTHONIOENCODING=utf-8 PYTHONUTF8=1 uv run pytest -m live tests/ -v -s

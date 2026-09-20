@@ -124,7 +124,7 @@ make stop       # Stop all services
 make install            # Install backend dependencies
 make dev                # Run Gateway API with runtime-safe reload (port 8001)
 make gateway            # Run Gateway API only (port 8001)
-make test               # Run offline backend tests with the lock-pinned OpenSandbox probe SDK (excludes live external-API tests)
+make test               # Offline backend tests, one worker per core (PYTEST_WORKERS=0 runs them serially, which a configured DEERFLOW_TEST_POSTGRES_URL requires); lock-pinned OpenSandbox probe SDK; excludes live tests
 make test-live          # Explicitly run live DeerFlowClient tests with real APIs
 make test-blocking-io   # Run strict Blockbuster runtime gate on tests/blocking_io/
 make test-shard SPLITS=4 GROUP=2  # Run one duration-aware test shard
