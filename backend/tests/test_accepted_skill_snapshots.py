@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from _skill_projection_release import release_thread_projection
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -2045,10 +2046,6 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
     from deerflow.runtime.runs.worker import (
         _materialize_accepted_skill_projection,
     )
-    from deerflow.runtime.skill_projection import (
-        SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
-        get_skill_projection_coordinator,
-    )
     from deerflow.subagents.batch_acceptance import (
         PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
     )
@@ -2279,12 +2276,9 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
     finally:
         if result is not None:
             await result.release()
-        token = runtime.context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
-        if token is not None:
-            coordinator = get_skill_projection_coordinator()
-            clear = coordinator.release(token)
-            if clear is not None:
-                coordinator.finalize_release(clear)
+        # The cancelled arm never reaches a consumer token: the admission was
+        # reserved and the run then cancelled at the post-acquire fence.
+        release_thread_projection(user_id="user-1", thread_id="thread-1", run_id="run-neutral")
         material.release_process_material()
 
     assert provider.destroyed == ["sandbox-neutral"]
@@ -3057,7 +3051,6 @@ async def test_the_accepted_preparation_says_where_its_own_time_went(
     """
 
     from deerflow.runtime.runs.worker import _materialize_accepted_skill_projection
-    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
     from deerflow.runtime.turn_phases import TurnPhase, turn_phases
 
     # The finding is about a *warm* turn, and the helper imports its
@@ -3124,11 +3117,9 @@ async def test_the_accepted_preparation_says_where_its_own_time_went(
         with turn_phases(correlation_id="trace-attributed", run_id="run-attributed") as journal, journal.span(TurnPhase.SKILL_MATERIALIZATION):
             await _materialize_accepted_skill_projection(runtime, user_id="user-1")
     finally:
-        get_skill_projection_coordinator().release_unactivated_run(
-            user_id="user-1",
-            thread_id="thread-attributed",
-            run_id="run-attributed",
-        )
+        # A consumer activated here, so the unactivated release alone answers
+        # False and drops nothing.
+        release_thread_projection(user_id="user-1", thread_id="thread-attributed", run_id="run-attributed")
         material.release_process_material()
 
     assert bound_snapshots == ["sandbox-attributed"]

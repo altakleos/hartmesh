@@ -6,6 +6,7 @@ import asyncio
 import threading
 
 import pytest
+from _skill_projection_release import release_thread_projection
 from langchain.tools import ToolRuntime
 from langgraph.types import Overwrite
 
@@ -550,6 +551,7 @@ async def test_lazy_accepted_acquisition_carries_committed_binding() -> None:
         sandbox = await ensure_sandbox_initialized_async(runtime)
     finally:
         reset_sandbox_provider()
+        release_thread_projection(user_id="accepted-owner", thread_id="accepted-thread", run_id="accepted-run")
 
     assert sandbox is provider.sandbox
     assert len(provider.bound_acquisitions) == 1
@@ -584,6 +586,7 @@ def test_lazy_accepted_acquisition_borrows_the_execution_lease_without_parking()
         assert provider.released == []
     finally:
         reset_sandbox_provider()
+        release_thread_projection(user_id="accepted-owner", thread_id="accepted-thread", run_id="accepted-run")
 
 
 @pytest.mark.anyio
@@ -604,6 +607,7 @@ async def test_lazy_accepted_acquisition_borrows_the_execution_lease_without_par
         assert provider.released == []
     finally:
         reset_sandbox_provider()
+        release_thread_projection(user_id="accepted-owner", thread_id="accepted-thread", run_id="accepted-run")
 
 
 @pytest.mark.anyio

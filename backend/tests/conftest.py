@@ -123,6 +123,34 @@ def provisioner_module():
 
 
 @pytest.fixture(autouse=True)
+def _no_leaked_projection_state():
+    """Fail the test that leaves a thread owned by the projection coordinator.
+
+    ``SkillProjectionCoordinator`` is a process singleton, so a test that
+    admits a thread and never releases it hands the next test a thread that is
+    already owned. ``reserve_admission`` answers a matching reservation
+    idempotently, so the next test quietly exercises the re-reserve branch
+    rather than the fresh admission it reads as testing -- and which branch it
+    takes moves with the shard split. Blaming the test that leaked beats
+    debugging the one that inherited it. The state is cleared either way, so
+    one leak cannot cascade; release properly with
+    ``_skill_projection_release.release_thread_projection``.
+    """
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    coordinator = get_skill_projection_coordinator()
+    before = set(coordinator._states)
+    try:
+        yield
+    finally:
+        leaked = sorted(set(coordinator._states) - before)
+        for key in leaked:
+            coordinator._states.pop(key, None)
+    if leaked:
+        raise AssertionError(f"test left projection state with the coordinator for {leaked}; release it in teardown (the singleton outlives the test, so the next one inherits an owned thread)")
+
+
+@pytest.fixture(autouse=True)
 def _reset_skill_storage_singleton():
     """Reset the SkillStorage singleton between tests to prevent cross-test contamination."""
     try:
