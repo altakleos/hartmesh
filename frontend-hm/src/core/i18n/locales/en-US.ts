@@ -392,6 +392,41 @@ export const enUS: Translations = {
       `Saved ${kept} of ${total}. Couldn't save the rest. Try again.`,
     saveFailed: "Couldn't save to My files. Try again.",
     openMyFiles: "Open My files",
+    pageTitle: "Files",
+  },
+
+  shared: {
+    title: "Shared",
+    description:
+      "What anyone at the company published. Everyone here can open these, in any chat.",
+    empty: "Nothing shared yet",
+    emptyHint:
+      "Use Share with everyone — on a report in a conversation, or on one of your files — and it will show up here for everyone at the company.",
+    loadFailed: "Couldn't load what was shared",
+    publishedBy: (who) => `Shared by ${who}`,
+    publishedByNobody: "No record of who shared this",
+    publisher: "Shared by",
+    published: "Shared on",
+    remove: "Remove",
+    removeTitle: "Remove from Shared?",
+    removeConfirm: (name) =>
+      `Remove ${name} from Shared? Nobody at the company will be able to open it here. Your own copy, if you have one, stays.`,
+    removing: "Removing…",
+    removed: (name) => `Removed ${name} from Shared`,
+    removeFailed: "Couldn't remove it. Try again.",
+    truncated: (count) => `Showing the first ${count.toLocaleString()} files.`,
+    shareWithEveryone: "Share with everyone",
+    sharing: "Sharing…",
+    shared: (name) => `Shared ${name} with everyone at the company`,
+    sharedMany: (count) => `Shared ${count} files with everyone at the company`,
+    sharedSome: (published, total) =>
+      `Shared ${published} of ${total}. Couldn't share the rest. Try again.`,
+    shareFailed: "Couldn't share it. Try again.",
+    openShared: "Open Shared",
+    undo: "Undo",
+    undone: (name) => `Took ${name} back out of Shared`,
+    alreadyShared: "Already shared with everyone",
+    reportsFolder: "Reports",
   },
 
   backgroundTasks: {

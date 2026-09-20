@@ -23,6 +23,15 @@ rs.mock("@/core/files", () => ({
     isPending: myFiles.isPending,
   }),
 }));
+const shareWithEveryone = rs.hoisted(() => rs.fn());
+rs.mock("@/core/shared", () => ({
+  useShareWithEveryone: () => ({
+    share: shareWithEveryone,
+    isPending: false,
+    hasShared: () => false,
+    openShared: rs.fn(),
+  }),
+}));
 
 const fetchWithAuth = rs.hoisted(() => rs.fn());
 rs.mock("@/core/api/fetcher", () => ({ fetch: fetchWithAuth }));

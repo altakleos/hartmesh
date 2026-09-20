@@ -13,6 +13,7 @@ import {
   SaveIcon,
   SquareArrowOutUpRightIcon,
   XIcon,
+  UsersIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -60,6 +61,7 @@ import { writeTextToClipboard } from "@/core/clipboard";
 import { canKeepInMyFiles, useSaveToMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
+import { canPublishToShared, useShareWithEveryone } from "@/core/shared";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
 import {
   canBrowserPreviewFile,
@@ -394,6 +396,11 @@ export function ArtifactFileDetail({
   const myFiles = useSaveToMyFiles(threadId);
   const canKeep =
     !isWriteFile && !isMock && !isReportFile && canKeepInMyFiles(filepath);
+  // Sharing reaches one place further than keeping: a file already in the
+  // person's own files can be handed to everyone from here too.
+  const everyone = useShareWithEveryone(threadId);
+  const canShare =
+    !isWriteFile && !isMock && !isReportFile && canPublishToShared(filepath);
 
   const handleInstallSkill = useCallback(async () => {
     if (isInstalling) return;
@@ -612,6 +619,20 @@ export function ArtifactFileDetail({
                 tooltip={t.files.saveToMyFiles}
                 disabled={myFiles.isPending}
                 onClick={() => void myFiles.save([filepath])}
+              />
+            )}
+            {!isEditing && canShare && (
+              <ArtifactAction
+                icon={everyone.isPending ? LoaderIcon : UsersIcon}
+                label={
+                  everyone.hasShared([filepath])
+                    ? t.shared.alreadyShared
+                    : t.shared.shareWithEveryone
+                }
+                // The tooltip answers what the label cannot: who "everyone" is.
+                tooltip={t.shared.description}
+                disabled={everyone.isPending || everyone.hasShared([filepath])}
+                onClick={() => void everyone.share([filepath])}
               />
             )}
             {!isEditing && !isWriteFile && (

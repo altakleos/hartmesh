@@ -107,6 +107,10 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
     assert "- User files: `/mnt/user-data/files`" in prompt
     assert "deliverables still go to `/mnt/user-data/outputs`" in prompt
     assert "copy it to `/mnt/user-data/outputs` and name the copy under `present`" in prompt
+    # The company's Shared area: readable, and not the agent's to publish into.
+    assert "- Shared: `/mnt/user-data/shared`" in prompt
+    assert "read-only" in prompt
+    assert "Share with everyone" in prompt
 
 
 @pytest.mark.parametrize(
@@ -135,6 +139,7 @@ def test_apply_prompt_template_names_user_files_only_where_the_sandbox_mounts_th
     prompt = prompt_module.apply_prompt_template()
 
     assert ("/mnt/user-data/files" in prompt) is named
+    assert ("/mnt/user-data/shared" in prompt) is named, "Shared is the same host directory story as the person's own files"
 
 
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):

@@ -22,6 +22,15 @@ rs.mock("@/core/files", () => ({
     isPending: myFiles.isPending,
   }),
 }));
+const shareWithEveryone = rs.hoisted(() => rs.fn());
+rs.mock("@/core/shared", () => ({
+  useShareWithEveryone: () => ({
+    share: shareWithEveryone,
+    isPending: false,
+    hasShared: () => false,
+    openShared: rs.fn(),
+  }),
+}));
 
 // The card proves a render is still there before offering it, so these tests
 // answer every probe as a live file; which renders are *offered* is what they

@@ -57,10 +57,12 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             user_id: Optional user ID for per-user path isolation.
 
         Returns:
-            Dictionary with workspace_path, uploads_path, outputs_path and
-            files_path: the first three are the thread's, ``files_path`` is
-            the person's, the same on every thread of theirs. A caller that
-            passes no user (the legacy thread layout) gets no files entry.
+            Dictionary with workspace_path, uploads_path, outputs_path,
+            files_path and shared_path: the first three are the thread's,
+            ``files_path`` is the person's, the same on every thread of
+            theirs, and ``shared_path`` is the company's, the same on every
+            thread of everyone. A caller that passes no user (the legacy
+            thread layout) gets no files entry.
         """
         paths = {
             "workspace_path": str(self._paths.sandbox_work_dir(thread_id, user_id=user_id)),
@@ -69,6 +71,7 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         }
         if user_id is not None:
             paths["files_path"] = str(self._paths.user_files_dir(user_id))
+        paths["shared_path"] = str(self._paths.shared_dir())
         return paths
 
     def _create_thread_directories(self, thread_id: str, user_id: str | None = None) -> dict[str, str]:
@@ -82,6 +85,7 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             Dictionary with the created directory paths.
         """
         self._paths.ensure_thread_dirs(thread_id, user_id=user_id)
+        self._paths.ensure_shared_dir()
         return self._get_thread_paths(thread_id, user_id=user_id)
 
     @override

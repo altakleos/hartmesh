@@ -178,6 +178,26 @@ and then says so once, with a way to the page; a failure part-way names the
 failure and leaves what already landed. Presentation stays an outputs
 contract: a file from _My files_ is handed over by copying it into outputs.
 
+_Shared_ is the second tab of the same page (`?tab=shared` opens it;
+`core/shared/`): what anyone at the company published, readable by everyone.
+The Gateway keeps one directory for the tenant and every sandbox mounts it
+read-only at `/mnt/user-data/shared`, so only publishing puts anything there.
+The report card's _Share with everyone_ publishes the renders it is offering
+under a _Reports_ folder, the artifact panel's action publishes the open file,
+and a _My files_ row shares that file directly — anything under uploads,
+outputs or the person's own files (`canPublishToShared`). All three go through
+`useShareWithEveryone`, the same shape as saving: it publishes each path, says
+so once, and carries **Undo** in that toast, because handing a file to the
+whole company is one click and taking it back must be too. It also remembers
+what it has already handed over (`hasShared`), so a second click on the same
+file says _Already shared_ instead of quietly publishing an `_N` duplicate.
+The listing carries when each file was published, who published it — resolved
+server-side to the person a colleague would recognise, never the stored id —
+and `can_remove`, which the server decides per caller (the publisher, or an
+admin) so the page never reasons about roles: _Remove_ is offered exactly
+where it would succeed. Both tabs live under one heading, _Files_, so the
+sidebar entry and the page agree whichever tab is open.
+
 The deployment owns two presentation settings, both read from
 `GET /api/features` (`core/features`): `ui.starters` is Home's starter grid —
 choosing one fills the composer through the prompt-input controller, focuses it

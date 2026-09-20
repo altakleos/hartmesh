@@ -36,9 +36,11 @@ const files = rs.hoisted(() => ({
   deletePending: false,
 }));
 
+const routerReplace = rs.hoisted(() => rs.fn());
 rs.mock("next/navigation", () => ({
   usePathname: () => "/workspace/files",
-  useRouter: () => ({ push: rs.fn(), replace: rs.fn(), prefetch: rs.fn() }),
+  useRouter: () => ({ push: rs.fn(), replace: routerReplace, prefetch: rs.fn() }),
+  useSearchParams: () => new URLSearchParams(window.location.search),
 }));
 rs.mock("sonner", () => ({ toast: { success: rs.fn(), error: rs.fn() } }));
 // The tab title asks the deployment whose workspace this is; not what this is about.
@@ -52,7 +54,55 @@ rs.mock("@/components/workspace/workspace-container", () => ({
   ),
   WorkspaceHeader: () => null,
 }));
+const shared = rs.hoisted(() => ({
+  data: undefined as
+    | {
+        files: Array<{
+          path: string;
+          name: string;
+          size: number;
+          modified: number;
+          virtual_path: string;
+          url: string;
+          published_by: string | null;
+          published_at: string | null;
+          from_thread_id: string | null;
+          can_remove: boolean;
+        }>;
+        count: number;
+        truncated: boolean;
+      }
+    | undefined,
+  error: null as Error | null,
+  isPending: false,
+  refetch: rs.fn(),
+  removeMutate: rs.fn(),
+  removePending: false,
+}));
+
+const shareWithEveryone = rs.hoisted(() => rs.fn());
+rs.mock("@/core/shared", () => ({
+  urlOfSharedFile: (path: string, { download = false } = {}) =>
+    `/api/shared/${path}${download ? "?download=true" : ""}`,
+  useSharedFiles: () => ({
+    data: shared.data,
+    error: shared.error,
+    isPending: shared.isPending,
+    refetch: shared.refetch,
+  }),
+  useRemoveSharedFile: () => ({
+    mutate: shared.removeMutate,
+    isPending: shared.removePending,
+  }),
+  useShareWithEveryone: () => ({
+    share: shareWithEveryone,
+    isPending: false,
+    hasShared: () => false,
+    openShared: rs.fn(),
+  }),
+}));
 rs.mock("@/core/files", () => ({
+  MY_FILES_VIRTUAL_PREFIX: "/mnt/user-data/files",
   urlOfMyFile: (path: string, { download = false } = {}) =>
     `/api/files/${path}${download ? "?download=true" : ""}`,
   useMyFiles: () => ({
@@ -98,6 +148,36 @@ const NOTES = {
   url: "/api/files/notes.txt",
 };
 
+const PUBLISHED = {
+  path: "Reports/august.pdf",
+  name: "august.pdf",
+  size: 48_213,
+  modified: Date.now() / 1000 - 3600,
+  virtual_path: "/mnt/user-data/shared/Reports/august.pdf",
+  url: "/api/shared/Reports/august.pdf",
+  published_by: "owner-1",
+  published_at: new Date(Date.now() - 3600_000).toISOString(),
+  from_thread_id: "11111111-1111-1111-1111-111111111111",
+  can_remove: true,
+};
+const PLACED = {
+  path: "Exports/jobs.xlsx",
+  name: "jobs.xlsx",
+  size: 1024,
+  modified: Date.now() / 1000 - 86_400,
+  virtual_path: "/mnt/user-data/shared/Exports/jobs.xlsx",
+  url: "/api/shared/Exports/jobs.xlsx",
+  published_by: null,
+  published_at: null,
+  from_thread_id: null,
+  can_remove: false,
+};
+
+function openSharedTab() {
+  // A tab trigger activates on pointer down, the way the tab primitive does.
+  fireEvent.mouseDown(screen.getByTestId("files-tab-shared"), { button: 0 });
+}
+
 describe("FilesPage", () => {
   beforeEach(() => {
     files.data = { files: [AUGUST, NOTES], count: 2, truncated: false };
@@ -105,9 +185,124 @@ describe("FilesPage", () => {
     files.isPending = false;
     files.deleteMutate.mockReset();
     files.refetch.mockReset();
+    shared.data = { files: [PUBLISHED, PLACED], count: 2, truncated: false };
+    shared.error = null;
+    shared.isPending = false;
+    shared.removeMutate.mockReset();
+    shared.refetch.mockReset();
+    window.history.replaceState(null, "", "/workspace/files");
   });
 
   afterEach(cleanup);
+
+  it("opens on the person's own files, and a link can ask for Shared", () => {
+    renderPage();
+    expect(screen.getByTestId("my-files-list")).toBeTruthy();
+    expect(screen.queryByTestId("shared-files-list")).toBeNull();
+    cleanup();
+
+    window.history.replaceState(null, "", "/workspace/files?tab=shared");
+    renderPage();
+    expect(screen.getByTestId("shared-files-list")).toBeTruthy();
+    // One page, two tabs: the heading names the page, so clicking "My files"
+    // in the sidebar never lands on a page headed something else.
+    expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Files");
+  });
+
+  it("puts the open tab in the URL, so a copied link lands where the person was", () => {
+    renderPage();
+    routerReplace.mockClear();
+
+    openSharedTab();
+    expect(routerReplace).toHaveBeenCalledWith("/workspace/files?tab=shared");
+
+    fireEvent.mouseDown(screen.getByTestId("files-tab-mine"), { button: 0 });
+    expect(routerReplace).toHaveBeenCalledWith("/workspace/files");
+  });
+
+  it("lists what the company shared, with who put it there", () => {
+    renderPage();
+    openSharedTab();
+
+    const list = screen.getByTestId("shared-files-list");
+    const august = within(list).getByTestId("shared-file-Reports/august.pdf");
+    expect(
+      within(august)
+        .getByRole("link", { name: "august.pdf" })
+        .getAttribute("href"),
+    ).toBe("/api/shared/Reports/august.pdf");
+    expect(august.textContent).toContain("Reports");
+    // Who shared it is a column, not a tooltip: it is the first thing asked of
+    // a company folder, and a tooltip is unreachable on a phone.
+    expect(august.textContent).toContain("owner-1");
+    expect(
+      within(august)
+        .getByRole("link", { name: "Download august.pdf" })
+        .getAttribute("href"),
+    ).toBe("/api/shared/Reports/august.pdf?download=true");
+    // A file an operator placed by hand says so, and is nobody's to remove.
+    const jobs = within(list).getByTestId("shared-file-Exports/jobs.xlsx");
+    expect(jobs.textContent).toContain("No record of who shared this");
+    expect(within(jobs).queryByRole("button", { name: /Remove/ })).toBeNull();
+  });
+
+  it("offers Remove only where the server said the person may, and asks first", () => {
+    renderPage();
+    openSharedTab();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove august.pdf" }));
+    expect(
+      screen.getByText(/Remove august.pdf from Shared\?/).textContent,
+    ).toContain("Your own copy, if you have one, stays.");
+    expect(shared.removeMutate).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: /^Remove$/ }));
+
+    expect(shared.removeMutate).toHaveBeenCalledWith(
+      "Reports/august.pdf",
+      expect.anything(),
+    );
+  });
+
+  it("lets a person hand one of their own files to the whole company", () => {
+    renderPage();
+
+    const list = screen.getByTestId("my-files-list");
+    const august = within(list).getByTestId("my-file-Reports/august.pdf");
+    fireEvent.click(
+      within(august).getByRole("button", {
+        name: "Share with everyone august.pdf",
+      }),
+    );
+
+    // The path the sandbox knows it by, so the server can find the caller's
+    // own copy; no conversation is involved, so no thread.
+    expect(shareWithEveryone).toHaveBeenCalledWith([
+      "/mnt/user-data/files/Reports/august.pdf",
+    ]);
+  });
+
+  it("says when nothing was shared yet, and how something gets here", () => {
+    shared.data = { files: [], count: 0, truncated: false };
+    renderPage();
+    openSharedTab();
+
+    const empty = screen.getByTestId("shared-files-empty");
+    expect(empty.textContent).toContain("Nothing shared yet");
+    expect(empty.textContent).toContain("Share with everyone");
+  });
+
+  it("offers to try again when Shared could not be loaded", () => {
+    shared.data = undefined;
+    shared.error = new Error("HTTP 503");
+    renderPage();
+    openSharedTab();
+
+    const failure = screen.getByTestId("shared-files-load-error");
+    expect(failure.textContent).toContain("Couldn't load what was shared");
+    fireEvent.click(within(failure).getByRole("button", { name: "Try again" }));
+    expect(shared.refetch).toHaveBeenCalled();
+  });
 
   it("lists what was kept, with its folder, size and a download", () => {
     renderPage();

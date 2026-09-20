@@ -111,8 +111,9 @@ def make_authed_test_app(
             that need a stable id across requests.
         owner_check_passes: When True (default), ``thread_store.check_access``
             returns True for every call so ``@require_permission(owner_check=True)``
-            never blocks the route under test. Pass False to verify that
-            permission failures surface correctly.
+            never blocks the route under test, and ``thread_store.get``
+            answers with a row. Pass False to verify that permission failures
+            surface correctly.
 
     Returns:
         A ``FastAPI`` app with the stub middleware installed and
@@ -125,6 +126,10 @@ def make_authed_test_app(
 
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)
+    # The owner-filtered read, for routes that require a real owner match
+    # rather than ``check_access``'s "or the row has no owner". Mirrors
+    # ``owner_check_passes`` so both gates answer the same way by default.
+    repo.get = AsyncMock(return_value={"thread_id": "stub"} if owner_check_passes else None)
     app.state.thread_store = repo
     app.state.runtime_readiness = _ReadyAdmissionFence()
     app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")

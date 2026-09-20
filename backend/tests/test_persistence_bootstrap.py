@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0037_merge_upstream_0018"
+HEAD = "0038_shared_publications"
 BASELINE = "0001_baseline"
 
 

@@ -539,6 +539,7 @@ if TYPE_CHECKING:
     from app.gateway.auth.local_provider import LocalAuthProvider
     from app.gateway.auth.models import User
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.shared_publications import SharedPublicationRepository
     from deerflow.persistence.thread_meta.base import ThreadMetaStore
     from deerflow.runtime import RunRecord
 
@@ -933,6 +934,9 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             app.state.run_store = RunRepository(sf, tenant=tenant_reference)
             app.state.feedback_repo = FeedbackRepository(sf)
+            from deerflow.persistence.shared_publications import SharedPublicationRepository
+
+            app.state.shared_publications_repo = SharedPublicationRepository(sf)
             from app.gateway.auth.pat import PAT_LAST_USED_WRITE_INTERVAL_SECONDS
 
             app.state.credential_audit_repo = CredentialAuditRepository(
@@ -953,6 +957,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
 
             app.state.run_store = MemoryRunStore(tenant=tenant_reference)
             app.state.feedback_repo = None
+            app.state.shared_publications_repo = None
             app.state.credential_audit_repo = InMemoryCredentialAuditRepository(tenant=tenant_reference)
             # Memory backend has no durable PAT store, so Bearer credentials
             # cannot be validated there and are rejected by the middleware.
@@ -1482,6 +1487,7 @@ get_run_manager: Callable[[Request], RunManager] = _require("run_manager", "Run 
 get_checkpointer: Callable[[Request], Checkpointer] = _require("checkpointer", "Checkpointer")
 get_run_event_store: Callable[[Request], RunEventStore] = _require("run_event_store", "Run event store")
 get_feedback_repo: Callable[[Request], FeedbackRepository] = _require("feedback_repo", "Feedback")
+get_shared_publications_repo: Callable[[Request], SharedPublicationRepository] = _require("shared_publications_repo", "Shared publications")
 get_run_store: Callable[[Request], RunStore] = _require("run_store", "Run store")
 
 
@@ -1674,6 +1680,25 @@ def get_local_provider() -> LocalAuthProvider:
 
         _cached_local_provider = LocalAuthProvider(repository=_cached_repo)
     return _cached_local_provider
+
+
+def get_user_repo() -> SQLiteUserRepository | None:
+    """The users table, for turning a stored user id back into a person.
+
+    Returns ``None`` where there is no users table to read (the memory
+    backend, or before the engine is up): a caller that only wants to put a
+    name beside a record must degrade to the record, not fail the request.
+    """
+    global _cached_repo
+    if _cached_repo is None:
+        from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+        from deerflow.persistence.engine import get_session_factory
+
+        sf = get_session_factory()
+        if sf is None:
+            return None
+        _cached_repo = SQLiteUserRepository(sf)
+    return _cached_repo
 
 
 def get_pat_repo(request: Request):

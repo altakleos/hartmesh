@@ -366,6 +366,41 @@ export const zhCN: Translations = {
       `已保存 ${kept}/${total} 个，其余保存失败，请重试。`,
     saveFailed: "无法保存到我的文件，请重试。",
     openMyFiles: "打开我的文件",
+    pageTitle: "文件",
+  },
+
+  shared: {
+    title: "共享",
+    description:
+      "公司里任何人共享的文件。这里的每个人都能在任何对话中打开它们。",
+    empty: "还没有共享任何文件",
+    emptyHint:
+      "在对话中的报告上，或在你的文件上，使用「共享给所有人」，它就会出现在这里，供公司里的每个人查看。",
+    loadFailed: "无法加载共享的文件",
+    publishedBy: (who) => `由 ${who} 共享`,
+    publishedByNobody: "没有共享者记录",
+    publisher: "共享者",
+    published: "共享时间",
+    remove: "移除",
+    removeTitle: "从共享中移除？",
+    removeConfirm: (name) =>
+      `从共享中移除 ${name}？公司里的人将无法再在这里打开它。你自己的副本（如果有）会保留。`,
+    removing: "移除中…",
+    removed: (name) => `已从共享中移除 ${name}`,
+    removeFailed: "无法移除，请重试。",
+    truncated: (count) => `仅显示前 ${count.toLocaleString()} 个文件。`,
+    shareWithEveryone: "共享给所有人",
+    sharing: "共享中…",
+    shared: (name) => `已将 ${name} 共享给公司里的所有人`,
+    sharedMany: (count) => `已将 ${count} 个文件共享给公司里的所有人`,
+    sharedSome: (published, total) =>
+      `已共享 ${published}/${total} 个，其余共享失败，请重试。`,
+    shareFailed: "无法共享，请重试。",
+    openShared: "打开共享",
+    undo: "撤销",
+    undone: (name) => `已将 ${name} 撤出共享`,
+    alreadyShared: "已共享给所有人",
+    reportsFolder: "报告",
   },
 
   backgroundTasks: {

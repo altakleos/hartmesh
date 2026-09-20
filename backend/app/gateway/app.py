@@ -47,6 +47,7 @@ from app.gateway.routers import (
     runs,
     runtime_api,
     scheduled_tasks,
+    shared,
     skills,
     subagent_batches,
     subagents,
@@ -1368,6 +1369,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # The person's own files: /api/files, plus /api/threads/{thread_id}/files to keep one
     app.include_router(files.router)
+    # The company's Shared area: what anyone published, readable by everyone.
+    app.include_router(shared.router)
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)

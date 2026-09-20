@@ -1,6 +1,11 @@
 "use client";
 
-import { DownloadIcon, FolderPlusIcon, LoaderIcon } from "lucide-react";
+import {
+  DownloadIcon,
+  FolderPlusIcon,
+  LoaderIcon,
+  UsersIcon,
+} from "lucide-react";
 import { useMemo } from "react";
 
 import { Button } from "@/components/ui/button";
@@ -23,6 +28,7 @@ import {
 import { useSaveToMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
+import { useShareWithEveryone } from "@/core/shared";
 import { cn } from "@/lib/utils";
 
 /** Columns of these units are read down a column, so they line up right. */
@@ -329,6 +335,8 @@ export function ReportCard({
   // The downloads are what a person keeps: the documents, not the JSON the
   // card is drawn from. The showcase has no files to keep them in.
   const myFiles = useSaveToMyFiles(threadId);
+  // Sharing hands the same documents to everyone at the company.
+  const everyone = useShareWithEveryone(threadId);
   const renderPaths = renders.map((kind) => reportRenderPath(filepath, kind));
 
   const chartURL = (png: string) =>
@@ -408,6 +416,27 @@ export function ReportCard({
                   <FolderPlusIcon className="size-4" />
                 )}
                 {myFiles.isPending ? t.files.saving : t.files.saveToMyFiles}
+              </Button>
+            )}
+            {!isMock && (
+              <Button
+                disabled={everyone.isPending || everyone.hasShared(renderPaths)}
+                onClick={() =>
+                  void everyone.share(renderPaths, t.shared.reportsFolder)
+                }
+                size="sm"
+                variant="outline"
+              >
+                {everyone.isPending ? (
+                  <LoaderIcon className="size-4 animate-spin" />
+                ) : (
+                  <UsersIcon className="size-4" />
+                )}
+                {everyone.isPending
+                  ? t.shared.sharing
+                  : everyone.hasShared(renderPaths)
+                    ? t.shared.alreadyShared
+                    : t.shared.shareWithEveryone}
               </Button>
             )}
           </div>
