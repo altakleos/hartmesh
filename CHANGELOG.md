@@ -5,6 +5,18 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.29] — 2026-09-20
+
+- hartmesh#125 — the shared agent-guidance trunk was over its hard budget on two chains, so any file added under them started out non-compliant. The runtime and gateway depth moved into `backend/docs/RUNTIME_INVARIANTS.md` and `backend/docs/RUN_MANAGER_CONTRACT.md`, verbatim, leaving one-line invariants and a pointer in the trunk. Cutting the trunk rather than the two 40 KB leaves is what cleared both chains at once, because the trunk is what every chain pays for.
+
+- hartmesh#126 — tests no longer leave a thread owned by the skill-projection coordinator. An autouse guard fails the test that leaks one, which found seven leaks across four modules; three shared a user/thread pair, so the second and third were quietly exercising the idempotent re-reserve branch instead of the path they named. The same change fixes a pre-existing flake: `Thread.start()` returns before the socket is bound, so the capability-gate test called a port nothing was listening on — two failures in twelve under load before, none in twelve after.
+
+- hartmesh#127 — a receiptless bind failure on the AIO remote backend destroys the sandbox instead of wedging the thread. That backend reaches nothing inside a sandbox, so clearing material in place is not expressible there; destroying the exact sandbox is, and it makes the material absent by construction. Three fences make that safe: the destroy rests on the coordinator's `clearing` proof rather than sandbox identity alone, because warm reuse hands the next turn the same sandbox id; a destroy that cannot confirm quarantines the set and answers False rather than raising through callers that catch nothing; and absence is never claimed for a quarantined set, whose handle `get` already refuses.
+
+- hartmesh#128 — a chat whose teardown could not confirm no longer stops answering until the Gateway restarts. Only a caller still holding the exact consumer token could retry that release, and nothing holds it once the owning worker has finished, so the thread stayed fenced and every later turn on it was rejected. The thread's own `clearing` state is the fact that says it is fenced, so it is read rather than mirrored: gateway admission and the worker's claim wait each finish the pending clear before refusing. No timer and no staleness knob — a thread nobody wants costs nothing by staying fenced, and an unproven clear still frees nothing. The retry also had to be able to ask: a failed destroy untracks the sandbox and the quarantine restores its identity to the warm map, which the identity gate did not read, so absence became unaskable at the moment it became certain.
+
+- hartmesh#129 — development tooling only, with no runtime change: the offline backend suite runs one worker per core. It was wall-clock bound rather than CPU bound, holding about 0.4 of one core on an eight-core box for over an hour. Running it in parallel then found a real collision — `DEER_FLOW_HOME` holds process-owned state whose bookkeeping is in-process by design, so eight workers sharing one home pruned each other's skill snapshots — and each worker now gets its own home, which a test run should have had regardless.
+
 ## [2.1.0+hartmesh.28] — 2026-09-20
 
 - hartmesh#121 — a failed bind no longer wedges a thread until the Gateway is restarted. A bind that raised inside staging, while the thread's view map still held a record of some other identity, left the coordinator `clearing` forever: every later turn on that thread refused, `fence_committed_owner` included, so neither interrupt nor rollback could rescue it, and the sandbox never parked. Recovery meant restarting the Gateway, which took every other thread's sandbox down with it. Ownership of a thread's projection is the coordinator's, not the view map's: while the coordinator holds a thread as clearing, no other run can be admitted to it and the only sandbox mounting its view is the one the clear names, so the record the map carries is not a live owner and the release empties it on the coordinator's word, checked under the views lock every bind takes. A clear the coordinator has not fenced empties nothing. One narrower shape stays open and is named in the doc: a bind that raised before any receipt was recorded, on the AIO remote backend, while the sandbox still lives.
@@ -298,6 +310,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.29]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.29
 [2.1.0+hartmesh.28]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.28
 [2.1.0+hartmesh.27]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.27
 [2.1.0+hartmesh.26]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.26
