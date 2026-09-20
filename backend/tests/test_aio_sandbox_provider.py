@@ -3032,6 +3032,289 @@ def test_aio_release_recovery_is_not_wedged_by_a_retained_view(tmp_path, monkeyp
         snapshot.release()
 
 
+def _remote_provider_with_accepted_sandbox(tmp_path, sandbox_id, identity, *, destroys=True):
+    """A remote-backend provider holding one accepted-only sandbox for ``identity``.
+
+    The shape the receiptless wedge needs: the material lives inside the
+    sandbox, the sandbox is still there, and no ``accepted_skill_material``
+    receipt was ever recorded because the bind raised before it got that far.
+    """
+    from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
+
+    provider, _sandbox, _aio_mod = _make_provider_with_active_sandbox(tmp_path, sandbox_id)
+    provider._thread_sandboxes[identity] = sandbox_id
+    provider._active_sandbox_identity[sandbox_id] = identity
+    provider._accepted_only_sandbox_ids = {sandbox_id}
+    provider._backend = MagicMock(spec=RemoteSandboxBackend)
+
+    destroyed: list[str] = []
+
+    def _destroy(target: str) -> None:
+        destroyed.append(target)
+        if destroys:
+            provider._sandbox_infos.pop(target, None)
+            provider._sandboxes.pop(target, None)
+
+    provider.destroy = _destroy
+    return provider, destroyed
+
+
+def test_aio_remote_a_receiptless_bind_failure_destroys_the_sandbox_instead_of_wedging(tmp_path) -> None:
+    """The wedge this closes.
+
+    A bind that raised before any receipt was recorded leaves a live remote
+    sandbox and nothing to compare. Answering only for the sandbox being gone
+    refused forever: the thread stayed clearing, every later turn refused, and
+    only a Gateway restart recovered -- taking every other thread's sandbox
+    with it. The material lives inside this sandbox, so destroying the exact
+    sandbox is what makes it absent.
+    """
+    identity = ("remote-owner", "remote-thread")
+    provider, destroyed = _remote_provider_with_accepted_sandbox(tmp_path, "sandbox-remote", identity)
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    coordinator = get_skill_projection_coordinator()
+    failed = _fenced_release(
+        coordinator,
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-remote",
+        run_id="remote-run",
+        snapshot_id="7fae1c990b9176076c07a67317eaa1fa68b67156c8103dad10cd8cc1e75b7221",
+    )
+    try:
+        assert provider.ensure_accepted_skill_snapshot_absent(failed) is True
+        assert destroyed == ["sandbox-remote"]
+        assert provider.get("sandbox-remote") is None
+    finally:
+        assert coordinator.finalize_release(failed)
+
+
+def test_aio_remote_a_destroy_that_cannot_confirm_absence_still_refuses(tmp_path) -> None:
+    """Fail closed. A destroy that leaves the sandbox present proves nothing.
+
+    Nothing retries this call, so a refusal here still wedges the thread --
+    that is the residual, and it is narrower than refusing every receiptless
+    failure. What must not happen is claiming absence the provider cannot see.
+    """
+    identity = ("stubborn-owner", "stubborn-thread")
+    provider, destroyed = _remote_provider_with_accepted_sandbox(tmp_path, "sandbox-stubborn", identity, destroys=False)
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    coordinator = get_skill_projection_coordinator()
+    failed = _fenced_release(
+        coordinator,
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-stubborn",
+        run_id="stubborn-run",
+        snapshot_id="a2aca17f718efd7744059b6952523f0fc7e771caba9778714041a35b74c614f2",
+    )
+    try:
+        assert provider.ensure_accepted_skill_snapshot_absent(failed) is False
+        assert destroyed == ["sandbox-stubborn"]
+    finally:
+        assert coordinator.finalize_release(failed)
+
+
+def test_aio_remote_a_clear_for_another_identity_destroys_nothing(tmp_path) -> None:
+    """The identity gate is what makes destroying safe; it must run first."""
+    identity = ("real-owner", "real-thread")
+    provider, destroyed = _remote_provider_with_accepted_sandbox(tmp_path, "sandbox-owned", identity)
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    coordinator = get_skill_projection_coordinator()
+    foreign = _fenced_release(
+        coordinator,
+        user_id="other-owner",
+        thread_id="other-thread",
+        sandbox_id="sandbox-owned",
+        run_id="other-run",
+        snapshot_id="c7f6ef03014abb15979371cc7758851aeef9aa1d2046e319a22c62a687550816",
+    )
+    try:
+        assert provider.ensure_accepted_skill_snapshot_absent(foreign) is False
+        assert destroyed == []
+        assert provider.get("sandbox-owned") is not None
+    finally:
+        assert coordinator.finalize_release(foreign)
+
+
+def test_aio_remote_a_sandbox_already_gone_answers_absent_without_destroying(tmp_path) -> None:
+    """The existing answer is preserved: gone is absent, and needs no destroy."""
+    identity = ("gone-owner", "gone-thread")
+    provider, destroyed = _remote_provider_with_accepted_sandbox(tmp_path, "sandbox-gone", identity)
+    provider._sandbox_infos.pop("sandbox-gone", None)
+    provider._sandboxes.pop("sandbox-gone", None)
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    coordinator = get_skill_projection_coordinator()
+    failed = _fenced_release(
+        coordinator,
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-gone",
+        run_id="gone-run",
+        snapshot_id="bd7887b858be157bdc769910bce14651fea1a89ee1b7ec1866dff4cba8bdc646",
+    )
+    try:
+        assert provider.ensure_accepted_skill_snapshot_absent(failed) is True
+        assert destroyed == []
+    finally:
+        assert coordinator.finalize_release(failed)
+
+
+def test_aio_remote_a_sandbox_without_accepted_isolation_is_refused(tmp_path) -> None:
+    """An ordinary sandbox is not this method's to destroy."""
+    identity = ("plain-owner", "plain-thread")
+    provider, destroyed = _remote_provider_with_accepted_sandbox(tmp_path, "sandbox-plain", identity)
+    provider._accepted_only_sandbox_ids = set()
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    coordinator = get_skill_projection_coordinator()
+    failed = _fenced_release(
+        coordinator,
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-plain",
+        run_id="plain-run",
+        snapshot_id="c8fbc01821973b28f93a0b3c37a9ca7591f71e54d998abe47ffa52cb4b737aaa",
+    )
+    try:
+        assert provider.ensure_accepted_skill_snapshot_absent(failed) is False
+        assert destroyed == []
+    finally:
+        assert coordinator.finalize_release(failed)
+
+
+def test_aio_remote_a_stale_clear_cannot_destroy_the_sandbox_a_live_run_reclaimed(tmp_path) -> None:
+    """The reason the destroy is fenced on the coordinator, not on identity alone.
+
+    The coordinator hands the same clear to two releasers -- the agent loop and
+    the worker's terminal cleanup. Once the first finalizes, the next turn can
+    be admitted, and warm reuse gives it the *same* sandbox id, so the identity
+    gate still matches. A second releaser arriving with the finalized proof
+    would then destroy a container a live run is executing in. Before the
+    destroy existed this line was a harmless lookup; it is the destroy that
+    makes the stale proof dangerous.
+    """
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    identity = ("stale-owner", "stale-thread")
+    provider, destroyed = _remote_provider_with_accepted_sandbox(tmp_path, "sandbox-stale", identity)
+    coordinator = get_skill_projection_coordinator()
+    stale = _fenced_release(
+        coordinator,
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-stale",
+        run_id="first-run",
+        snapshot_id="91865a18a4bec3ab3df6ae394dfbe75a79c8637fddb981fc4931e8258601aa88",
+    )
+    assert coordinator.finalize_release(stale)
+
+    # The next turn takes the thread and reclaims the same warm sandbox.
+    coordinator.claim_committed_run(
+        user_id=identity[0],
+        thread_id=identity[1],
+        run_id="second-run",
+        snapshot_id="91865a18a4bec3ab3df6ae394dfbe75a79c8637fddb981fc4931e8258601aa88",
+    )
+    live = coordinator.activate(
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-stale",
+        run_id="second-run",
+        snapshot_id="91865a18a4bec3ab3df6ae394dfbe75a79c8637fddb981fc4931e8258601aa88",
+        consumer_id="run:second-run:lead",
+    )
+    try:
+        assert provider.ensure_accepted_skill_snapshot_absent(stale) is False
+        assert destroyed == []
+        assert provider.get("sandbox-stale") is not None
+    finally:
+        clear = coordinator.release(live)
+        assert clear is not None
+        assert coordinator.finalize_release(clear)
+
+
+def _remote_provider_with_real_destroy(tmp_path, sandbox_id, identity, *, outcome):
+    """A provider whose ``destroy`` is the real one, over a backend it can fake.
+
+    The fake in the other helper replaces the bound method, so nothing reaches
+    `_destroy_tracked`, the ownership claim, the quarantine, or the raise the
+    real path produces. This one fakes only the backend.
+    """
+    from deerflow.community.aio_sandbox.backend import DestroyOutcome
+    from deerflow.community.aio_sandbox.remote_backend import RemoteSandboxBackend
+
+    provider, _sandbox, _aio_mod = _make_provider_with_active_sandbox(tmp_path, sandbox_id)
+    provider._thread_sandboxes[identity] = sandbox_id
+    provider._active_sandbox_identity[sandbox_id] = identity
+    provider._accepted_only_sandbox_ids = {sandbox_id}
+    backend = MagicMock(spec=RemoteSandboxBackend)
+    backend.destroy.return_value = outcome if isinstance(outcome, DestroyOutcome) else None
+    provider._backend = backend
+    return provider
+
+
+def test_aio_remote_a_real_destroy_that_cannot_confirm_answers_false_and_does_not_raise(tmp_path) -> None:
+    """The contract here is a bool, and the real destroy raises.
+
+    ``_destroy_reserved`` quarantines a set it could not confirm absent and
+    raises ``SandboxCleanupIncompleteError``. Two call sites of
+    ``release_accepted_skill_consumer`` do not catch anything, so letting that
+    out would take down the agent turn instead of refusing. And the quarantine
+    is exactly what makes ``get`` answer None for a container that may still be
+    up, so refusing must not be spelled by asking ``get`` again.
+    """
+    from deerflow.community.aio_sandbox.backend import DestroyOutcome
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    identity = ("unconfirmed-owner", "unconfirmed-thread")
+    provider = _remote_provider_with_real_destroy(tmp_path, "sandbox-unconfirmed", identity, outcome=DestroyOutcome.UNKNOWN)
+    coordinator = get_skill_projection_coordinator()
+    failed = _fenced_release(
+        coordinator,
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-unconfirmed",
+        run_id="unconfirmed-run",
+        snapshot_id="be76fcfc8654054e2eaca3a4fdda215085f0a1271dd44b4f47878c278111412e",
+    )
+    try:
+        assert provider.ensure_accepted_skill_snapshot_absent(failed) is False
+        assert provider._cleanup_pending_for("sandbox-unconfirmed") is not None
+        # The quarantine makes `get` answer None; that must not read as absence.
+        assert provider.get("sandbox-unconfirmed") is None
+        assert provider._accepted_material_confirmed_absent("sandbox-unconfirmed") is False
+    finally:
+        assert coordinator.finalize_release(failed)
+
+
+def test_aio_remote_a_real_destroy_that_confirms_absence_answers_true(tmp_path) -> None:
+    """The other side of the same path, through the real destroy."""
+    from deerflow.community.aio_sandbox.backend import DestroyOutcome
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    identity = ("confirmed-owner", "confirmed-thread")
+    provider = _remote_provider_with_real_destroy(tmp_path, "sandbox-confirmed", identity, outcome=DestroyOutcome.ABSENT)
+    coordinator = get_skill_projection_coordinator()
+    failed = _fenced_release(
+        coordinator,
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-confirmed",
+        run_id="confirmed-run",
+        snapshot_id="c0d43ca5c0441df06ddc683110ec223603aaacebffd1b3e2276190184419002d",
+    )
+    try:
+        assert provider.ensure_accepted_skill_snapshot_absent(failed) is True
+        assert provider._cleanup_pending_for("sandbox-confirmed") is None
+    finally:
+        assert coordinator.finalize_release(failed)
+
+
 def test_aio_a_failed_bind_over_a_foreign_record_releases_the_thread_and_parks_the_sandbox(tmp_path, monkeypatch) -> None:
     """The wedge, end to end: the unwind of a failed bind finishes whatever record the map holds.
 

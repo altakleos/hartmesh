@@ -4461,6 +4461,24 @@ class AioSandboxProvider(
 
         force_clear_skill_snapshot_active_view(user_id=user_id, thread_id=thread_id)
 
+    def _accepted_material_confirmed_absent(self, sandbox_id: str) -> bool:
+        """Absence this provider can prove, not merely the absence of a handle.
+
+        ``get`` answers None for a set in ``_cleanup_pending`` -- tracked
+        precisely because its teardown did not confirm -- so a handle-shaped
+        None can mean a container still up with the accepted material inside
+        it. A retry after a failed destroy reads exactly that None, so only a
+        not-found that is not a quarantine counts as absent here.
+        """
+        with self._lock:
+            if sandbox_id in getattr(self, "_cleanup_pending", {}):
+                return False
+            if self._being_torn_down_locally(sandbox_id):
+                # Another holder's reservation. Their teardown may yet refuse
+                # ownership or quarantine, so their None is not our absence.
+                return False
+        return self.get(sandbox_id) is None
+
     def clear_accepted_skill_snapshot(
         self,
         clear: "SkillProjectionClear",
@@ -4483,8 +4501,11 @@ class AioSandboxProvider(
                 return clear.snapshot_id is None
             if receipt.snapshot_id != clear.snapshot_id or receipt.run_id != clear.run_id or receipt.generation != clear.generation:
                 return False
-            self.destroy(clear.sandbox_id)
-            return self.get(clear.sandbox_id) is None
+            try:
+                self.destroy(clear.sandbox_id)
+            except SandboxCleanupIncompleteError:
+                return False
+            return self._accepted_material_confirmed_absent(clear.sandbox_id)
         return clear_skill_snapshot_active_view(
             user_id=clear.user_id,
             thread_id=clear.thread_id,
@@ -4506,10 +4527,32 @@ class AioSandboxProvider(
         ):
             return False
         if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
-            # The material lives inside the sandbox, so absent means the
-            # sandbox is gone; a sandbox that is still there is the honest
-            # unknown and stays refused.
-            return self.get(clear.sandbox_id) is None
+            # The material lives inside the sandbox, and this backend has no
+            # surface that reaches inside one -- create, destroy, is_alive,
+            # discover, list_running, renew, and nothing else -- so clearing it
+            # in place is not expressible here. Destroying the exact sandbox
+            # is, and it makes the material absent by construction. That is
+            # safe precisely here: the identity check above proves the sandbox
+            # is this thread's, and the coordinator holds the thread as
+            # clearing for the whole call, so no other run can be admitted to
+            # it. The alternative was refusing forever, which wedged the thread
+            # until a Gateway restart took every other thread's sandbox too.
+            from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+            # The fence this destroy rests on, checked rather than assumed:
+            # the host sibling checks the same thing before it empties a view.
+            if not get_skill_projection_coordinator().is_clearing(clear):
+                return False
+            if self._accepted_material_confirmed_absent(clear.sandbox_id):
+                return True
+            try:
+                self.destroy(clear.sandbox_id)
+            except SandboxCleanupIncompleteError:
+                # Quarantined, not gone. The contract here is a bool, so the
+                # refusal must not leave as an exception through callers that
+                # do not expect one.
+                return False
+            return self._accepted_material_confirmed_absent(clear.sandbox_id)
         return empty_skill_snapshot_active_view(clear=clear)
 
     def destroy(self, sandbox_id: str) -> None:
