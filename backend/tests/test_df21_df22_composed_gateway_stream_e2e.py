@@ -140,12 +140,12 @@ def _tagged(history: Any) -> list[dict[str, Any]]:
     return found
 
 
-def _turn(gateway: e2e._Gateway, prompt: str, *, on_frame: Any = None) -> dict[str, Any]:
+def _turn(gateway: e2e._Gateway, prompt: str) -> dict[str, Any]:
     base = gateway.loopback_url
     probe.BOUND_TOOL_NAMES.clear()
     with httpx.Client() as client:
         csrf, thread_id = e2e._register_and_create_thread(client, base)
-        observed = e2e._observe_stream(client, base, thread_id, csrf, prompt, on_frame=on_frame, timeout=120.0, recursion_limit=100)
+        observed = e2e._observe_stream(client, base, thread_id, csrf, prompt, timeout=120.0, recursion_limit=100)
         run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
         history = client.post(f"{base}/api/threads/{thread_id}/history", json={"limit": 30}, headers={"X-CSRF-Token": csrf}).json()
         delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/delivery").json()

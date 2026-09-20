@@ -105,6 +105,7 @@ when the provider produced text and no consumer here marked it.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import threading
 import time
@@ -152,6 +153,8 @@ MAX_TRACKED_INTERVALS = 256
 MAX_TRACKED_TOOL_NAMES = 16
 #: Where calls beyond that cap are counted.
 OTHER_TOOLS_LABEL = "other"
+#: How long a tool label may be, digest suffix included.
+TOOL_LABEL_LIMIT = 48
 # How many of them the emitted *message* names, largest first. The
 # structured record carries all of them.
 MAX_RENDERED_TOOL_NAMES = 4
@@ -396,8 +399,10 @@ class TurnPhaseSnapshot:
     #: What the tool time was spent on: ``(name, calls, ms)`` largest first,
     #: capped at :data:`MAX_TRACKED_TOOL_NAMES` distinct names with the rest
     #: pooled under :data:`OTHER_TOOLS_LABEL`. Only completed calls, merged
-    #: per name exactly as ``tool_ms`` is across all of them -- so the parts
-    #: can total less than the whole when two tools overlap, never more.
+    #: per name exactly as ``tool_ms`` is across all of them. The parts can
+    #: total less than the whole, never more: two tools that overlap are one
+    #: stretch of the turn, and a call opened past :data:`MAX_OPEN_CALLS` is
+    #: counted but not timed -- by then ``tool_ms`` has dropped it too.
     tool_names: tuple[tuple[str, int, float], ...]
     #: Both kinds together, overlap counted once across them. Each figure
     #: above is individually inside ``total_ms``, but their sum need not be --
@@ -592,6 +597,26 @@ def _merged(intervals: Iterable[tuple[float, float]]) -> list[list[float]]:
 def _covered_ms(intervals: Iterable[tuple[float, float]]) -> float:
     """How much wall clock *intervals* cover between them, overlap counted once."""
     return sum(end - start for start, end in _merged(intervals))
+
+
+def _tool_label(name: str | None) -> str:
+    """*name* as a log-safe label that still tells two tools apart.
+
+    ``bounded_label`` keeps the log line parseable -- it strips the delimiters
+    the line is built from, so a tool named ``evil=9/99999ms,fake`` cannot
+    forge a field -- and truncates. Both of those merge names: every tool
+    named in a non-Latin script sanitizes to the same run of underscores, and
+    two long MCP names sharing a 48-character prefix become one. Merging is
+    the one thing this breakdown must not do, so when sanitizing changed the
+    name, a short digest of the original is appended. Ordinary first-party
+    names pass through untouched and unadorned.
+    """
+    if not isinstance(name, str) or not name.strip():
+        return "unnamed"
+    label = _bounded_label(name, fallback="unnamed", limit=TOOL_LABEL_LIMIT)
+    if label == name:
+        return label
+    return f"{label[: TOOL_LABEL_LIMIT - 7]}.{hashlib.sha256(name.encode('utf-8')).hexdigest()[:6]}"
 
 
 class _Occupancy:
@@ -925,7 +950,7 @@ class TurnPhaseJournal:
         to dedupe against and count every later call as a dropped record --
         reporting far more loss than actually happened.
         """
-        label = _bounded_label(name, fallback="unnamed", limit=48) if name is not None else "unnamed"
+        label = _tool_label(name)
         with self._lock:
             at_ms = self._elapsed_ms()
             opened = self._tools.enter(call_id, at_ms)

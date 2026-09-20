@@ -17,10 +17,12 @@ from deerflow.runtime.turn_phases import (
     MAX_TRACKED_RUNS,
     MAX_TRACKED_TOOL_NAMES,
     OTHER_TOOLS_LABEL,
+    TOOL_LABEL_LIMIT,
     AcquisitionSource,
     TurnPhase,
     TurnPhaseCallbackHandler,
     TurnPhaseJournal,
+    _tool_label,
     current_turn_phases,
     mark_first_stream_text,
     reset_turn_phase_registry,
@@ -809,6 +811,40 @@ def test_a_tool_plane_that_mints_names_cannot_grow_the_journal():
     pooled = {name: calls for name, calls, _ms in snapshot.tool_names}
     assert pooled[OTHER_TOOLS_LABEL] == MAX_TRACKED_TOOL_NAMES * 2
     assert snapshot.to_log_line().count("=") < 40, "the line stays readable"
+
+
+def test_a_name_that_cannot_be_logged_as_itself_stays_distinguishable():
+    """Sanitizing must not merge two tools into one row.
+
+    The log line is built from ``,`` ``=`` ``(`` ``)``, so a name carrying
+    them is neutralized -- but neutralizing maps whole families of names onto
+    the same string. Every tool named in a non-Latin script becomes one run of
+    underscores, and two long MCP names sharing a prefix become one label.
+    Merging is exactly what a per-tool breakdown must never do.
+    """
+    assert _tool_label("execute_command") == "execute_command", "an ordinary name is untouched"
+    assert _tool_label("evil=9/99999ms,fake").count("=") == 0, "no forged field"
+    distinct = {_tool_label(name) for name in ("\u65e5\u672c\u8a9e\u30c4\u30fc\u30eb", "\u5225\u306e\u30c4\u30fc\u30eb")}
+    assert len(distinct) == 2, "two tools, two rows"
+    long_prefix = "mcp__" + "x" * 60
+    assert _tool_label(f"{long_prefix}__alpha") != _tool_label(f"{long_prefix}__beta")
+    assert all(len(label) <= TOOL_LABEL_LIMIT for label in distinct)
+
+
+def test_calls_pooled_past_the_name_cap_carry_their_time_with_them():
+    """The pooled bucket has to hold the milliseconds, not just the count."""
+    journal = TurnPhaseJournal(correlation_id="trace-pooled")
+    for index in range(MAX_TRACKED_TOOL_NAMES):
+        journal.record_tool_start(index, name=f"tool_{index}")
+        journal.record_tool_end(index)
+
+    journal.record_tool_start("over", name="one_name_too_many")
+    time.sleep(0.03)
+    journal.record_tool_end("over")
+
+    pooled = {name: (calls, ms) for name, calls, ms in journal.snapshot().tool_names}
+    assert pooled[OTHER_TOOLS_LABEL][0] == 1
+    assert pooled[OTHER_TOOLS_LABEL][1] >= 15.0, "the over-cap call's time is pooled, not lost"
 
 
 def test_an_unnamed_tool_is_counted_under_a_label_rather_than_dropped():
