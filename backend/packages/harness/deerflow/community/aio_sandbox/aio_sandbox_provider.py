@@ -4385,14 +4385,29 @@ class AioSandboxProvider(
         logger.info(f"Released sandbox {sandbox_id} to warm pool (container still running)")
 
     def _identity_for_sandbox(self, sandbox_id: str) -> tuple[str, str] | None:
+        """Whose sandbox this is, from whichever map currently holds it.
+
+        Three maps carry the same fact at different points in a sandbox's
+        life, and the warm one is not optional: ``release`` moves the identity
+        there when a turn parks a sandbox, and ``_quarantine_after_failed_destroy``
+        puts it back there for a set whose teardown could not be confirmed --
+        after ``_remove_tracked_sandbox`` has already emptied the other two.
+        Reading only the active maps therefore answered ``None`` for exactly
+        the sets whose cleanup still has to be retried, so the retry's own
+        identity gate refused it forever. A stored ``None`` (an adopted
+        sandbox whose owner this process never learned) stays ``None``.
+        """
         with self._lock:
             identity = self._active_sandbox_identity.get(sandbox_id)
             if identity is not None:
                 return identity
-            return next(
+            mapped = next(
                 (key for key, mapped_id in self._thread_sandboxes.items() if mapped_id == sandbox_id),
                 None,
             )
+            if mapped is not None:
+                return mapped
+            return self._warm_pool_identity.get(sandbox_id)
 
     def bind_accepted_skill_snapshot(
         self,

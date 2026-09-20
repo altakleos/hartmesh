@@ -3309,6 +3309,49 @@ class _GatewayDurableRuns:
         async with goal_thread_lock(thread_id):
             yield
 
+    async def _reserve_after_pending_clear(self, launch: PreparedLaunch, material):
+        """Reserve once more if a stranded clear was what held the thread.
+
+        Returns the reservation when finishing that clear freed the thread,
+        and ``None`` whenever it did not -- because there was no pending clear,
+        because the provider still cannot prove the material gone, or because
+        a live owner took the thread in between. Every ``None`` leaves the
+        caller on exactly the path it was already on.
+
+        The reservation itself is the authority on whether the thread is free,
+        not the bool: parking the sandbox is the one step that runs after the
+        fence is already released, so a refusal there can report failure over
+        a thread that is genuinely available.
+        """
+        import asyncio as _asyncio
+
+        from deerflow.runtime.skill_projection import (
+            SkillProjectionBusyError,
+            SkillProjectionEvidence,
+            get_skill_projection_coordinator,
+        )
+        from deerflow.sandbox.accepted_projection import (
+            complete_pending_projection_clear,
+        )
+
+        user_id = launch.user_id or DEFAULT_USER_ID
+        await _asyncio.to_thread(
+            complete_pending_projection_clear,
+            user_id=user_id,
+            thread_id=launch.thread_id,
+        )
+        snapshot = material.skill_snapshot
+        try:
+            return get_skill_projection_coordinator().reserve_admission(
+                user_id=user_id,
+                thread_id=launch.thread_id,
+                reservation_id=f"admission:{uuid.uuid4().hex}",
+                snapshot_id=None if snapshot is None else snapshot.snapshot_id,
+                evidence=SkillProjectionEvidence.from_snapshot(snapshot),
+            )
+        except SkillProjectionBusyError:
+            return None
+
     async def prepare_admission(self, launch: PreparedLaunch) -> None:
         run_manager = get_run_manager(self._request)
         launch_identity = id(launch)
@@ -3344,21 +3387,31 @@ class _GatewayDurableRuns:
                 )
             except SkillProjectionBusyError as exc:
                 coordinator = get_skill_projection_coordinator()
-                replacement = launch.multitask_strategy in ("interrupt", "rollback")
-                if not replacement:
-                    raise ConflictError(
-                        "Thread has an invocation-owned skill projection",
-                    ) from exc
-                try:
-                    supersession = coordinator.fence_committed_owner(
-                        user_id=launch.user_id or DEFAULT_USER_ID,
-                        thread_id=launch.thread_id,
-                    )
-                except SkillProjectionBusyError:
-                    raise ConflictError(
-                        "Thread has an invocation-owned skill projection",
-                    ) from exc
-                self._projection_supersessions[launch_identity] = supersession
+                # A thread whose last release could not confirm stays fenced as
+                # clearing, and nothing holds the consumer token that would
+                # retry it any more. This admission is the next thing that
+                # wants the thread, so it finishes that clear before deciding
+                # the thread is busy; a clear that still cannot confirm leaves
+                # the state exactly as it was.
+                reservation = await self._reserve_after_pending_clear(launch, material)
+                if reservation is not None:
+                    self._projection_reservations[launch_identity] = reservation
+                else:
+                    replacement = launch.multitask_strategy in ("interrupt", "rollback")
+                    if not replacement:
+                        raise ConflictError(
+                            "Thread has an invocation-owned skill projection",
+                        ) from exc
+                    try:
+                        supersession = coordinator.fence_committed_owner(
+                            user_id=launch.user_id or DEFAULT_USER_ID,
+                            thread_id=launch.thread_id,
+                        )
+                    except SkillProjectionBusyError:
+                        raise ConflictError(
+                            "Thread has an invocation-owned skill projection",
+                        ) from exc
+                    self._projection_supersessions[launch_identity] = supersession
             else:
                 self._projection_reservations[launch_identity] = reservation
         try:

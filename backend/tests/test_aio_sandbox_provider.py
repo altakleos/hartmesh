@@ -3292,6 +3292,43 @@ def test_aio_remote_a_real_destroy_that_cannot_confirm_answers_false_and_does_no
         assert coordinator.finalize_release(failed)
 
 
+def test_aio_remote_a_quarantined_set_can_still_be_asked_about_later(tmp_path) -> None:
+    """The retry has to be able to ask, or the first refusal is permanent.
+
+    ``_destroy_reserved`` untracks the sandbox before it stops it, and the
+    quarantine puts the identity back in the warm map rather than the active
+    ones. Reading only the active maps therefore answered "not this thread's
+    sandbox" for exactly the sets whose cleanup still has to be retried, so
+    the absence proof refused on identity, before it ever asked whether the
+    material was gone -- and kept refusing after the set was confirmed absent.
+    """
+    from deerflow.community.aio_sandbox.backend import DestroyOutcome
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    identity = ("requarantine-owner", "requarantine-thread")
+    provider = _remote_provider_with_real_destroy(tmp_path, "sandbox-requarantine", identity, outcome=DestroyOutcome.UNKNOWN)
+    coordinator = get_skill_projection_coordinator()
+    failed = _fenced_release(
+        coordinator,
+        user_id=identity[0],
+        thread_id=identity[1],
+        sandbox_id="sandbox-requarantine",
+        run_id="requarantine-run",
+        snapshot_id="be76fcfc8654054e2eaca3a4fdda215085f0a1271dd44b4f47878c278111412e",
+    )
+    try:
+        assert provider.ensure_accepted_skill_snapshot_absent(failed) is False
+        assert provider._cleanup_pending_for("sandbox-requarantine") is not None
+        # The identity survives the failed teardown, in the map the quarantine
+        # put it in.
+        assert provider._identity_for_sandbox("sandbox-requarantine") == identity
+
+        provider._backend.destroy.return_value = DestroyOutcome.ABSENT
+        assert provider.ensure_accepted_skill_snapshot_absent(failed) is True
+    finally:
+        coordinator.finalize_release(failed)
+
+
 def test_aio_remote_a_real_destroy_that_confirms_absence_answers_true(tmp_path) -> None:
     """The other side of the same path, through the real destroy."""
     from deerflow.community.aio_sandbox.backend import DestroyOutcome

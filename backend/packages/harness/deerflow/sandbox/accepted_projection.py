@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 from collections.abc import Callable
 
 from deerflow.sandbox.accepted_material import (
@@ -291,30 +292,131 @@ def release_accepted_skill_consumer(token: object) -> bool:
     clear = coordinator.release(token)
     if clear is None:
         return False
+    released = _drive_clear(clear)
+    if not released:
+        # Said once, here: only the worker's interrupted-predecessor wait
+        # inspects this bool, every other caller discards it, so the refusal
+        # is otherwise invisible until a tenant reports a chat that stopped
+        # answering.
+        _warn_release_unfinished(token)
+    return released
+
+
+def complete_pending_projection_clear(*, user_id: str, thread_id: str) -> bool:
+    """Finish the clear a thread is fenced under, for a caller holding no token.
+
+    ``release_accepted_skill_consumer`` retries a refused release only for a
+    caller that still has the exact consumer token, and nothing holds that
+    token once the owning worker has finished. A clear whose provider work
+    never confirmed therefore holds the thread forever: admission,
+    replacement fencing and the worker's claim all refuse a clearing state,
+    so every later turn on that chat is rejected until the process restarts.
+
+    Callers about to fail for exactly that reason ask here first. The thread's
+    own ``clearing`` proof is the authority for the retry, so this can never
+    disturb a thread a consumer still owns, and a provider that still cannot
+    confirm absence leaves the thread fenced -- an unproven clear must not free
+    it. Provider failures are logged rather than raised: every caller is
+    already on its failure path. The answer is read back from the coordinator
+    rather than inferred from the failure, because parking the sandbox is the
+    one step that runs after the thread is already free -- it can raise over a
+    fence that is genuinely gone.
+    """
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    coordinator = get_skill_projection_coordinator()
+    clear = coordinator.pending_clear(user_id=user_id, thread_id=thread_id)
+    if clear is None:
+        return False
+    try:
+        return _drive_clear(clear)
+    except Exception:
+        fenced = coordinator.pending_clear(user_id=user_id, thread_id=thread_id) is not None
+        logger.warning(
+            "The accepted-skill clear on thread %s failed (thread still fenced: %s)",
+            thread_id,
+            fenced,
+            exc_info=True,
+        )
+        return not fenced
+
+
+_drive_locks_guard = threading.Lock()
+_drive_locks: dict[tuple[str, str], threading.Lock] = {}
+
+
+def _drive_lock_for(key: tuple[str, str]) -> threading.Lock:
+    with _drive_locks_guard:
+        return _drive_locks.setdefault(key, threading.Lock())
+
+
+def _forget_drive_lock(key: tuple[str, str], lock: threading.Lock) -> None:
+    """Drop a per-thread lock nobody is waiting on, so the table stays bounded.
+
+    A driver that takes the entry between the check and the pop is harmless:
+    by then the clear is finalized, so whichever lock object it waits on, it
+    finds the thread no longer clearing and touches nothing.
+    """
+    with _drive_locks_guard:
+        if _drive_locks.get(key) is lock and not lock.locked():
+            _drive_locks.pop(key, None)
+
+
+def _drive_clear(clear: object) -> bool:
+    """Empty the view ``clear`` fences, then finalize the thread's ownership.
+
+    Serialized per thread. Two drivers of one clear were already possible --
+    the agent loop's release and the worker's terminal cleanup both hold the
+    token -- and the retry adds a third on a different clock. Only the last
+    step, parking the sandbox, is unfenced: ``finalize_release`` frees the
+    thread, a new turn may reclaim the same warm sandbox at once, and a second
+    driver arriving there would park a container that run is executing in. So
+    the whole tail runs under one lock, and a driver that finds the clear
+    already gone reports the completion it was asking for without touching the
+    provider.
+    """
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    coordinator = get_skill_projection_coordinator()
+    key = (clear.user_id, clear.thread_id)
+    lock = _drive_lock_for(key)
+    try:
+        return _drive_clear_locked(clear, coordinator, lock)
+    finally:
+        _forget_drive_lock(key, lock)
+
+
+def _drive_clear_locked(clear: object, coordinator: object, lock: threading.Lock) -> bool:
     # Resolved at call time so a replaced or test-installed provider is the
     # one that clears; the coordinator's ownership outlives any one instance.
     from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
-    provider = get_sandbox_provider()
-    projection = require_accepted_skill_projection(provider)
-    cleared = projection.clear_accepted_skill_snapshot(clear)
-    if not cleared:
-        cleared = projection.ensure_accepted_skill_snapshot_absent(clear)
-    if not cleared:
-        return False
-    try:
-        provider.release(clear.sandbox_id)
-    finally:
-        # A successful compare-and-clear is the material-isolation boundary:
-        # it releases the exact binding, and the retained bytes behind it can
-        # only be used again by a bind that re-verifies them. Where there was
-        # no exact record to compare, the provider emptied the view under this
-        # same fence, the stronger form of the same boundary. Resource
-        # parking/teardown may fail after that, but it cannot make anything
-        # reachable that the next bind would not have to prove, so stale
-        # ownership must not strand the thread indefinitely.
-        finalized = coordinator.finalize_release(clear)
-    return finalized
+    with lock:
+        if not coordinator.is_clearing(clear):
+            # Another driver of this exact clear finished it. Nothing here is
+            # this thread's to empty or park any more.
+            return True
+        provider = get_sandbox_provider()
+        projection = require_accepted_skill_projection(provider)
+        cleared = projection.clear_accepted_skill_snapshot(clear)
+        if not cleared:
+            cleared = projection.ensure_accepted_skill_snapshot_absent(clear)
+        if not cleared:
+            return False
+        try:
+            provider.release(clear.sandbox_id)
+        finally:
+            # A successful compare-and-clear is the material-isolation
+            # boundary: it releases the exact binding, and the retained bytes
+            # behind it can only be used again by a bind that re-verifies
+            # them. Where there was no exact record to compare, the provider
+            # emptied the view under this same fence, the stronger form of the
+            # same boundary. Resource parking/teardown may fail after that,
+            # but it cannot make anything reachable that the next bind would
+            # not have to prove, so stale ownership must not strand the thread
+            # indefinitely.
+            finalized = coordinator.finalize_release(clear)
+        return finalized
 
 
 def _runtime_thread_id(runtime: object) -> str:
@@ -340,21 +442,18 @@ def _unwind_failed_binding(
     invalidate_runtime_skill_projection_token(runtime, token)
     if token is not None:
         try:
-            released = release_accepted_skill_consumer(token)
+            release_accepted_skill_consumer(token)
         except Exception:
             logger.warning("Failed to clear a rejected accepted-skill projection", exc_info=True)
-            return
-        if not released:
-            _warn_release_unfinished(token)
         return
     if release_unbound is not None:
         release_unbound()
 
 
 def _warn_release_unfinished(token: object) -> None:
-    """Say so when a failed bind's release could not finish: the thread stays fenced until it is retried."""
+    """Say so when a release could not finish: the thread stays fenced until one does."""
     logger.warning(
-        "Failed bind for run %s on thread %s could not release its accepted-skill projection; the thread stays fenced until that release is retried",
+        "Run %s on thread %s could not release its accepted-skill projection; the thread stays fenced until a later turn on it finishes that clear",
         getattr(token, "run_id", None),
         getattr(token, "thread_id", None),
     )
@@ -503,6 +602,7 @@ __all__ = [
     "invalidate_runtime_skill_projection_token",
     "provision_runtime_accepted_skill_projection",
     "provision_runtime_accepted_skill_projection_async",
+    "complete_pending_projection_clear",
     "release_accepted_skill_consumer",
     "require_accepted_skill_projection",
     "require_runtime_accepted_skill_isolation",
