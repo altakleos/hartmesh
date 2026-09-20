@@ -73,7 +73,7 @@ checkpoint-kept messages against the paged feed; the REST reads resolve the
 store via `threads.py::_optional_run_event_store` (a feed-less deployment
 still reads threads), and `services.py::normalize_input` strips the
 server-owned key from client input (#4380). Mechanism and identity rule:
-`packages/harness/deerflow/runtime/AGENTS.md`.
+`backend/docs/CHECKPOINT_CHANNEL_MODES.md`.
 
 **Workspace change review**: `packages/harness/deerflow/workspace_changes/`
 captures a pre-run and post-run snapshot of the thread-owned `workspace` and
