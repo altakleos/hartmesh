@@ -331,29 +331,43 @@ special-cased: a real `AcceptedSkillSandboxBindingV1` can legally carry it,
 and the release does not consult the generation at all. A provider whose
 material lives inside the sandbox answers for that sandbox, not for a host
 view: E2B clears the material in the live sandbox and quarantines the exact
-sandbox when it cannot. The AIO remote backend cannot clear in place -- its
-whole surface is create, destroy, is_alive, discover, list_running and renew,
-with nothing that reaches inside a live sandbox -- so it takes the contract's
-other answer and destroys the exact sandbox, which makes the material absent
-by construction. Destroying is safe precisely there: the identity check proves
-the sandbox is that thread's, and the coordinator holds the thread as clearing
-for the whole call, so no other run can be admitted to it. The alternative was
-refusing forever, which wedged the thread until a Gateway restart took every
-other thread's sandbox with it. The prewarm's compare-and-pop stays, as
-hygiene.
+sandbox when it cannot. The AIO remote backend does not clear in place: the accepted
+tree is staged read-only by the provisioner, and the backend's own surface is
+create, destroy, is_alive, discover, list_running and renew. So it takes the
+contract's other answer and destroys the exact sandbox, which makes the
+material absent by construction. Three things have to hold before it does:
+the sandbox carries accepted isolation, `_identity_for_sandbox` proves it is
+this thread's, and the coordinator still holds the thread as clearing under
+*this* proof. The last is checked, not assumed, for the same reason
+`empty_skill_snapshot_active_view` checks it: the coordinator hands the same
+clear to two releasers, and once the first finalizes, the next turn can be
+admitted and warm-reuse hands it the same sandbox id. A stale proof would then
+pass the identity gate and destroy a container a live run is executing in.
+Before the destroy existed that line was a harmless lookup. The prewarm's
+compare-and-pop stays, as hygiene.
 
-**What stays open.** Only a positive not-found is absence, so a destroy this
-instance no longer owns, or one whose result cannot be observed, still answers
-False and still wedges that thread. Nothing retries: every caller of
-`release_accepted_skill_consumer` is fire-once and warns on False
-(`runtime/runs/worker.py`, `sandbox/middleware.py`,
-`sandbox/accepted_projection.py`), and nothing sweeps threads left clearing.
-The exact cleanup proof is retained for a retry -- `release` returns the same
-clearing proof to the same token -- but no caller re-obtains it. Closing the
-class outright means something asking again; the coordinator's `clearing`
-state already is that fact, so the derived form is a sweep that reads it
-rather than a second ledger beside it. That is a change of its own and is not
-made here.
+**What stays open.** Absence here means the provisioner accepted the delete
+and the set is not in quarantine -- `RemoteSandboxBackend.destroy` says of
+itself that acceptance is not verified absence, since Kubernetes removes pods
+asynchronously. A destroy that cannot confirm quarantines the set and raises
+`SandboxCleanupIncompleteError`; the branch catches it and answers False,
+because two callers of `release_accepted_skill_consumer` catch nothing and the
+declared contract is a bool. The refusal cannot be spelled by asking `get`
+again: `get` answers None for a quarantined set and for one another reaper has
+reserved, so absence is asked of a predicate that excludes both.
+
+A refused release is retried once. `token_for_consumer` returns the retained
+clearing token to the same consumer id, and the worker's terminal cleanup
+re-obtains it and re-drives the release
+(`runtime/runs/worker.py`; `tests/test_skill_projection_binding_recovery.py`
+pins that contract). What no caller does is retry *after* that: nothing sweeps
+threads left clearing, and five of the seven call sites discard the bool
+rather than warn on it (`sandbox/middleware.py` twice, the worker's terminal
+path, `subagents/executor.py`, `subagents/batch_service.py`). So a set whose
+teardown never confirms still strands its thread. Closing that outright means
+something asking again on its own; the coordinator's `clearing` state already
+is that fact, so the derived form is a sweep that reads it rather than a
+second ledger beside it. That is a change of its own and is not made here.
 
 ### Rediscovery is not creation
 
