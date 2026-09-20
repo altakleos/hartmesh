@@ -96,6 +96,51 @@ def snapshot_paths(monkeypatch, tmp_path: Path) -> Paths:
     cleanup_abandoned_skill_snapshots()
 
 
+@pytest.fixture(autouse=True)
+def _no_leaked_projection_state():
+    """Fail the test that leaves a thread registered with the coordinator.
+
+    ``SkillProjectionCoordinator`` is a process singleton, so a test that
+    reserves an admission and never releases it hands the next test a thread
+    that is already owned. That reads as a mysterious refusal in whatever runs
+    next, which is a far worse failure than this one: it names the wrong test
+    and moves with shard ordering. The state is cleared either way, so one
+    leak cannot cascade.
+    """
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    coordinator = get_skill_projection_coordinator()
+    before = set(coordinator._states)
+    try:
+        yield
+    finally:
+        leaked = sorted(set(coordinator._states) - before)
+        for key in leaked:
+            coordinator._states.pop(key, None)
+    if leaked:
+        raise AssertionError(f"test left projection state with the coordinator for {leaked}; release the admission it reserved (the singleton outlives the test, so the next one inherits an owned thread)")
+
+
+def _release_thread_projection(*, user_id: str, thread_id: str, run_id: str) -> None:
+    """Give a thread's projection back, activated or not.
+
+    Which call releases depends on how far the run got, and getting it wrong
+    is silent: ``release_unactivated_run`` answers ``False`` once a consumer
+    has activated, so a teardown that only calls it leaks the state it meant
+    to drop. Ask for the token first and fall back.
+    """
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+
+    coordinator = get_skill_projection_coordinator()
+    token = coordinator.current_token(user_id=user_id, thread_id=thread_id)
+    if token is not None:
+        clear = coordinator.release(token)
+        if clear is not None:
+            coordinator.finalize_release(clear)
+        return
+    coordinator.release_unactivated_run(user_id=user_id, thread_id=thread_id, run_id=run_id)
+
+
 def _write_skill(
     root: Path,
     *,
@@ -2045,10 +2090,6 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
     from deerflow.runtime.runs.worker import (
         _materialize_accepted_skill_projection,
     )
-    from deerflow.runtime.skill_projection import (
-        SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
-        get_skill_projection_coordinator,
-    )
     from deerflow.subagents.batch_acceptance import (
         PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
     )
@@ -2279,12 +2320,9 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
     finally:
         if result is not None:
             await result.release()
-        token = runtime.context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
-        if token is not None:
-            coordinator = get_skill_projection_coordinator()
-            clear = coordinator.release(token)
-            if clear is not None:
-                coordinator.finalize_release(clear)
+        # The cancelled arm never reaches a consumer token: the admission was
+        # reserved and the run then cancelled at the post-acquire fence.
+        _release_thread_projection(user_id="user-1", thread_id="thread-1", run_id="run-neutral")
         material.release_process_material()
 
     assert provider.destroyed == ["sandbox-neutral"]
@@ -3057,7 +3095,6 @@ async def test_the_accepted_preparation_says_where_its_own_time_went(
     """
 
     from deerflow.runtime.runs.worker import _materialize_accepted_skill_projection
-    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
     from deerflow.runtime.turn_phases import TurnPhase, turn_phases
 
     # The finding is about a *warm* turn, and the helper imports its
@@ -3124,11 +3161,9 @@ async def test_the_accepted_preparation_says_where_its_own_time_went(
         with turn_phases(correlation_id="trace-attributed", run_id="run-attributed") as journal, journal.span(TurnPhase.SKILL_MATERIALIZATION):
             await _materialize_accepted_skill_projection(runtime, user_id="user-1")
     finally:
-        get_skill_projection_coordinator().release_unactivated_run(
-            user_id="user-1",
-            thread_id="thread-attributed",
-            run_id="run-attributed",
-        )
+        # A consumer activated here, so the unactivated release alone answers
+        # False and drops nothing.
+        _release_thread_projection(user_id="user-1", thread_id="thread-attributed", run_id="run-attributed")
         material.release_process_material()
 
     assert bound_snapshots == ["sandbox-attributed"]
