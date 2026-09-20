@@ -34,6 +34,16 @@ relay headers, provider handles and deployment identities are never recorded --
 only that a phase happened and when. Correlation ids live in the record's own
 fields, never in a metric label.
 
+One exception, taken deliberately: a tool's *registered name* is recorded, so
+``tools=14/308000ms(execute_command=9/270000ms,...)`` names the call that spent
+the turn instead of leaving an operator to instrument again and re-run. Its
+arguments and its output are not, and neither is anything about the call beyond
+its name and how long it took. Note what that admits: built-in tool names are
+first-party vocabulary, but MCP and skill-provided tools are named by the
+operator's configuration, so those names now reach the Gateway's logs. Names
+are bounded and the distinct set is capped
+(:data:`MAX_TRACKED_TOOL_NAMES`, then :data:`OTHER_TOOLS_LABEL`).
+
 Acquisition
 -----------
 ``acquisition_source`` is the turn's own *origin* -- how the container it used
@@ -63,6 +73,23 @@ counters are what this process observed through its own calls; the backend's
 own counters (Docker, the provisioner) are the independent record to
 reconcile them against.
 
+A turn's own work is counted the same way but as *occupancy*, not as spans:
+``tool_calls``/``tool_ms`` and ``model_calls``/``model_ms`` say how many calls
+of each kind the turn made and how much of its wall clock the completed ones
+covered. Overlap counts once, so each figure is inside ``total_ms`` -- but
+their *sum* need not be, because a tool and a model call can run at the same
+time. ``busy_ms`` is the two merged together and is the one to subtract from
+the total; the difference from ``tool_ms + model_ms`` is the overlap. A call
+whose end was never seen is reported as open (``tool_open``) rather than
+folded into the measured figure, which is what keeps one lost event from
+turning the rest of the turn into tool time.
+
+Scope: this journal hears the lead agent's own calls. A subagent is invoked
+with its own ``callbacks`` list, which replaces the inherited one rather than
+extending it, so its tool and model calls are not counted here -- a blocking
+delegation appears as the one long tool call it is, and a backgrounded one
+appears only as the short call that launched it.
+
 Honesty
 -------
 A phase that could not be observed is recorded as such with a reason
@@ -82,7 +109,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -111,6 +138,23 @@ MAX_RENDERED_PHASES = 24
 MAX_RENDERED_PHASE_TAIL = 6
 MAX_RENDERED_UNOBSERVABLE = 4
 MAX_RENDERED_REASON = 80
+# How many calls of one kind may be tracked open at once. A framework that
+# loses an end event leaves one open forever, so the set that holds them is
+# capped rather than trusted to drain.
+MAX_OPEN_CALLS = 64
+# How many closed intervals are kept before they are merged down to the
+# disjoint stretches they cover. Merging loses nothing: the union is the
+# only thing ever read back from them.
+MAX_TRACKED_INTERVALS = 256
+# How many distinct tool names are broken out before the rest are pooled
+# into one bucket. A turn uses a handful; the cap is for a tool plane that
+# mints names, so the journal cannot grow with the configuration.
+MAX_TRACKED_TOOL_NAMES = 16
+#: Where calls beyond that cap are counted.
+OTHER_TOOLS_LABEL = "other"
+# How many of them the emitted *message* names, largest first. The
+# structured record carries all of them.
+MAX_RENDERED_TOOL_NAMES = 4
 
 
 class TurnPhase(StrEnum):
@@ -184,6 +228,14 @@ class TurnPhase(StrEnum):
     FIRST_PROVIDER_TEXT = "first_provider_text"
     FIRST_STREAM_TEXT = "first_stream_text"
     MODEL_COMPLETION = "model_completion"
+    # Where the turn's tool work began. The phases above end at the first
+    # answer, so on a turn that then goes to work -- a report is minutes of
+    # commands after a few seconds of talking -- everything after
+    # ``model_completion`` was one unexplained block. This names the start of
+    # it; ``tool_calls``/``tool_ms`` and ``model_calls``/``model_ms`` say how
+    # much of the block was each. Marked once, like the first-text phases: a
+    # turn makes many tool calls and a span name may only be opened once.
+    TOOL_EXECUTION = "tool_execution"
     TERMINAL = "terminal"
 
 
@@ -326,6 +378,33 @@ class TurnPhaseSnapshot:
     evictions: int
     queue_ms: float
     failed_attempts: int
+    #: How many tool calls the turn made, and how much of its wall clock the
+    #: *completed* ones covered between them (overlap counted once).
+    tool_calls: int
+    tool_ms: float
+    #: Calls whose end was never seen, and how long they have been open. A
+    #: cancelled async tool ends up here; kept beside the measured figure
+    #: rather than inside it, so an unfinished call cannot inflate the answer.
+    tool_open: int
+    tool_open_ms: float
+    #: The same for model calls. ``MODEL_REQUEST`` names only the first, so
+    #: without these a multi-step turn's later calls are residual too.
+    model_calls: int
+    model_ms: float
+    model_open: int
+    model_open_ms: float
+    #: What the tool time was spent on: ``(name, calls, ms)`` largest first,
+    #: capped at :data:`MAX_TRACKED_TOOL_NAMES` distinct names with the rest
+    #: pooled under :data:`OTHER_TOOLS_LABEL`. Only completed calls, merged
+    #: per name exactly as ``tool_ms`` is across all of them -- so the parts
+    #: can total less than the whole when two tools overlap, never more.
+    tool_names: tuple[tuple[str, int, float], ...]
+    #: Both kinds together, overlap counted once across them. Each figure
+    #: above is individually inside ``total_ms``, but their sum need not be --
+    #: a tool and a model call can run at the same time. This is the one to
+    #: subtract from the total, and ``tool_ms + model_ms - busy_ms`` is how
+    #: much of the turn was spent doing both at once.
+    busy_ms: float
     unobservable: tuple[tuple[str, str], ...]
     outcome: str | None
     dropped_records: int
@@ -380,6 +459,31 @@ class TurnPhaseSnapshot:
             parts.append(f"snapshot={snapshot}")
         if self.queue_ms:
             parts.append(f"queue={round(self.queue_ms)}ms")
+        # Rendered as calls/time so one field answers both questions a slow
+        # working turn raises: how much of it was tools rather than the
+        # provider, and whether that was a few long calls or very many. An
+        # unfinished call gets its own field rather than joining the measured
+        # one, because the two mean different things to a reader.
+        for label, calls, occupied_ms, open_calls, open_ms in (
+            ("tools", self.tool_calls, self.tool_ms, self.tool_open, self.tool_open_ms),
+            ("model", self.model_calls, self.model_ms, self.model_open, self.model_open_ms),
+        ):
+            if calls:
+                # The breakdown rides inside the field rather than beside it,
+                # comma-joined, so a reader splitting the line on whitespace
+                # keeps "which tool" attached to "how much tool".
+                named = ""
+                if label == "tools" and self.tool_names:
+                    shown = [f"{name}={name_calls}/{round(name_ms)}ms" for name, name_calls, name_ms in self.tool_names[:MAX_RENDERED_TOOL_NAMES]]
+                    omitted = len(self.tool_names) - len(shown)
+                    if omitted > 0:
+                        shown.append(f"+{omitted} more")
+                    named = f"({','.join(shown)})"
+                parts.append(f"{label}={calls}/{round(occupied_ms)}ms{named}")
+            if open_calls:
+                parts.append(f"{label}_open={open_calls}/{round(open_ms)}ms")
+        if self.busy_ms:
+            parts.append(f"busy={round(self.busy_ms)}ms")
         if self.launch_ms is not None:
             steps = [f"{name}={round(ms)}ms" for name, ms in self.launch_steps]
             if self.launch_handoff_ms is not None:
@@ -434,7 +538,7 @@ class TurnPhaseSnapshot:
                 "steps": [{"step": name, "ms": round(ms, 3)} for name, ms in self.launch_steps],
             }
         return {
-            "version": 5,
+            "version": 6,
             "correlation_id": self.correlation_id,
             "launch": launch,
             "run_id": self.run_id,
@@ -456,12 +560,101 @@ class TurnPhaseSnapshot:
             "teardown_failures": self.teardown_failures,
             "evictions": self.evictions,
             "queue_ms": round(self.queue_ms, 3),
+            "tool_calls": self.tool_calls,
+            "tool_ms": round(self.tool_ms, 3),
+            "tool_open": self.tool_open,
+            "tool_open_ms": round(self.tool_open_ms, 3),
+            "model_calls": self.model_calls,
+            "model_ms": round(self.model_ms, 3),
+            "model_open": self.model_open,
+            "model_open_ms": round(self.model_open_ms, 3),
+            "tool_names": [{"name": name, "calls": calls, "ms": round(occupied_ms, 3)} for name, calls, occupied_ms in self.tool_names],
+            "busy_ms": round(self.busy_ms, 3),
             "failed_attempts": self.failed_attempts,
             "outcome": self.outcome,
             "dropped_records": self.dropped_records,
             "phases": [record.to_wire() for record in self.phases],
             "unobservable": [{"phase": phase, "reason": reason} for phase, reason in self.unobservable],
         }
+
+
+def _merged(intervals: Iterable[tuple[float, float]]) -> list[list[float]]:
+    """*intervals* as the disjoint stretches they cover, in order."""
+    merged: list[list[float]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return merged
+
+
+def _covered_ms(intervals: Iterable[tuple[float, float]]) -> float:
+    """How much wall clock *intervals* cover between them, overlap counted once."""
+    return sum(end - start for start, end in _merged(intervals))
+
+
+class _Occupancy:
+    """How much of the turn had a call of one kind open, and how many there were.
+
+    Two rules, and the second is the one that cost a rewrite.
+
+    *Overlap counts once.* A working turn runs calls repeatedly and sometimes
+    at the same time; adding their durations up would report more time than
+    the turn took. What is kept is the stretches of the turn's own wall clock
+    each call covered, merged. That keeps the figure inside ``total_ms``, which
+    is what makes the leftover a residual a reader can reason about.
+
+    *A call that never ends must not take the rest of the turn with it.* It
+    happens: ``asyncio.CancelledError`` is a ``BaseException``, LangChain's
+    tool base catches ``Exception``, and a cancelled async tool -- a subagent
+    that hit its timeout, a run that was aborted -- therefore reaches neither
+    ``on_tool_end`` nor ``on_tool_error``. Counting depth alone, that one lost
+    event froze the accounting and then reported every later second, tool or
+    not, as time inside a tool: a measured 100 ms of work rendered as
+    ``tools=1/601ms`` on a 602 ms turn. So each call is closed by its own
+    identity and only *completed* calls are ever added up. One that is still
+    open is reported as open (``open_calls``), never folded into the figure --
+    the journal says what it saw, and an end it never saw is not a duration.
+
+    Not a span vocabulary: one name per turn is the journal's rule and a turn
+    has many calls, so these are counters beside the phases, not records
+    among them.
+    """
+
+    __slots__ = ("_closed", "_open", "calls")
+
+    def __init__(self) -> None:
+        self.calls = 0
+        self._open: dict[object, float] = {}
+        self._closed: list[tuple[float, float]] = []
+
+    def enter(self, key: object, now_ms: float) -> bool:
+        """Open a call under *key*; ``True`` when it is the turn's first of this kind."""
+        self.calls += 1
+        if key not in self._open and len(self._open) < MAX_OPEN_CALLS:
+            self._open[key] = now_ms
+        return self.calls == 1
+
+    def leave(self, key: object, now_ms: float) -> None:
+        """Close the call opened under *key*. An end for nothing open is dropped."""
+        started = self._open.pop(key, None)
+        if started is None:
+            return
+        self._closed.append((started, now_ms))
+        if len(self._closed) >= MAX_TRACKED_INTERVALS:
+            self._closed = [(start, end) for start, end in _merged(self._closed)]
+
+    @property
+    def open_calls(self) -> int:
+        """Calls still open: at the end of a turn, ones whose end was never seen."""
+        return len(self._open)
+
+    def closed(self) -> list[tuple[float, float]]:
+        return list(self._closed)
+
+    def open(self, now_ms: float) -> list[tuple[float, float]]:
+        return [(started, now_ms) for started in self._open.values()]
 
 
 class TurnPhaseJournal:
@@ -485,6 +678,7 @@ class TurnPhaseJournal:
         "_launch",
         "_lock",
         "_mandatory_materialization",
+        "_model",
         "_outcome",
         "_queue_ms",
         "_records",
@@ -500,6 +694,9 @@ class TurnPhaseJournal:
         "_snapshot_package_count",
         "_snapshot_present",
         "_start",
+        "_tool_by_name",
+        "_tool_call_labels",
+        "_tools",
         "_unobservable",
     )
 
@@ -528,6 +725,10 @@ class TurnPhaseJournal:
         self._evictions = 0
         self._queue_ms = 0.0
         self._failed_attempts = 0
+        self._tools = _Occupancy()
+        self._model = _Occupancy()
+        self._tool_by_name: dict[str, _Occupancy] = {}
+        self._tool_call_labels: dict[object, str] = {}
         self._unobservable: list[tuple[str, str]] = []
         self._outcome: str | None = None
         self._launch: LaunchTimings | None = None
@@ -709,6 +910,57 @@ class TurnPhaseJournal:
         with self._lock:
             self._evictions += 1
 
+    def record_tool_start(self, call_id: object, *, name: str | None = None) -> None:
+        """A tool call began: *call_id* identifies it, *name* says which tool.
+
+        *call_id* is the framework's own handle for this call (LangChain's
+        ``run_id``), used only to pair the end with the start and never
+        recorded. Pairing is what makes a lost end event cost one call's
+        measurement instead of the whole turn's. *name* is recorded, bounded;
+        its arguments and its output are not (see the module's Disclosure).
+
+        The phase is offered exactly once per turn, on the first call, rather
+        than on every transition out of idle: a turn that had already filled
+        the record cap never appends it, so ``mark_once`` would find nothing
+        to dedupe against and count every later call as a dropped record --
+        reporting far more loss than actually happened.
+        """
+        label = _bounded_label(name, fallback="unnamed", limit=48) if name is not None else "unnamed"
+        with self._lock:
+            at_ms = self._elapsed_ms()
+            opened = self._tools.enter(call_id, at_ms)
+            if label not in self._tool_by_name and len(self._tool_by_name) >= MAX_TRACKED_TOOL_NAMES:
+                label = OTHER_TOOLS_LABEL
+            by_name = self._tool_by_name.setdefault(label, _Occupancy())
+            by_name.enter(call_id, at_ms)
+            # Bounded by the same cap as the occupancy's own open set, so a
+            # framework that loses ends cannot grow this either.
+            if len(self._tool_call_labels) < MAX_OPEN_CALLS:
+                self._tool_call_labels[call_id] = label
+        if opened:
+            self.mark_once(TurnPhase.TOOL_EXECUTION)
+
+    def record_tool_end(self, call_id: object) -> None:
+        """A tool call returned or raised; either way the turn is out of it."""
+        with self._lock:
+            at_ms = self._elapsed_ms()
+            self._tools.leave(call_id, at_ms)
+            label = self._tool_call_labels.pop(call_id, None)
+            if label is not None:
+                self._tool_by_name[label].leave(call_id, at_ms)
+
+    def record_model_start(self, call_id: object) -> None:
+        """A model call began, and the first one is also ``MODEL_REQUEST``."""
+        with self._lock:
+            self._model.enter(call_id, self._elapsed_ms())
+        self.mark_once(TurnPhase.MODEL_REQUEST)
+
+    def record_model_end(self, call_id: object, *, detail: str | None = None) -> None:
+        """A model call finished, and the first one is also ``MODEL_COMPLETION``."""
+        with self._lock:
+            self._model.leave(call_id, self._elapsed_ms())
+        self.mark_once(TurnPhase.MODEL_COMPLETION, detail=detail)
+
     def add_queue_ms(self, milliseconds: float) -> None:
         """Add time spent waiting for a serializer or lock, not doing work."""
         with self._lock:
@@ -749,6 +1001,11 @@ class TurnPhaseJournal:
 
     def snapshot(self) -> TurnPhaseSnapshot:
         with self._lock:
+            # One read of the clock for the whole snapshot: the total and the
+            # occupancy of a still-open call must be consistent with each
+            # other, or a tool running right now can be reported as having
+            # cost more than the turn.
+            now_ms = self._elapsed_ms()
             launch = self._launch
             launch_ms = None if launch is None else max(0.0, (self._start - launch.received_at) * 1000.0)
             handoff_ms = None if launch is None else max(0.0, (self._start - launch.persisted_at) * 1000.0)
@@ -758,7 +1015,7 @@ class TurnPhaseJournal:
                 launch_steps=() if launch is None else launch.steps,
                 correlation_id=self._correlation_id,
                 run_id=self._run_id,
-                total_ms=self._elapsed_ms(),
+                total_ms=now_ms,
                 phases=tuple(self._records),
                 acquisition_source=self._acquisition_source,
                 acquisition_reuse=self._acquisition_reuse,
@@ -778,6 +1035,21 @@ class TurnPhaseJournal:
                 evictions=self._evictions,
                 queue_ms=self._queue_ms,
                 failed_attempts=self._failed_attempts,
+                tool_calls=self._tools.calls,
+                tool_ms=_covered_ms(self._tools.closed()),
+                tool_open=self._tools.open_calls,
+                tool_open_ms=_covered_ms(self._tools.open(now_ms)),
+                model_calls=self._model.calls,
+                model_ms=_covered_ms(self._model.closed()),
+                model_open=self._model.open_calls,
+                model_open_ms=_covered_ms(self._model.open(now_ms)),
+                tool_names=tuple(
+                    sorted(
+                        ((label, occupancy.calls, _covered_ms(occupancy.closed())) for label, occupancy in self._tool_by_name.items()),
+                        key=lambda entry: (-entry[2], -entry[1], entry[0]),
+                    )
+                ),
+                busy_ms=_covered_ms(self._tools.closed() + self._model.closed()),
                 unobservable=tuple(self._unobservable),
                 outcome=self._outcome,
                 dropped_records=self._dropped,
@@ -978,13 +1250,21 @@ class TurnPhaseCallbackHandler:
     First text means first *text*. Reasoning tokens, empty chunks and tool-call
     fragments carry no assistant answer and do not mark it, which is what keeps
     the figure comparable with what a reader actually sees.
+
+    Tool calls are timed here for the same reason and with the same restraint.
+    ``ignore_agent`` is what LangChain gates every tool callback on, so it is
+    ``False`` -- the agent-action hooks it also lets through are no-ops. The
+    hooks are handed the tool's name, its arguments and its output; the name
+    is recorded so the time can be attributed, the other two never are.
     """
 
     raise_error = False
     run_inline = True
     ignore_llm = False
     ignore_chain = True
-    ignore_agent = True
+    # Not "we want agent callbacks": this is the flag the tool hooks below
+    # are gated on. Left ``True``, they are never called at all.
+    ignore_agent = False
     ignore_retriever = True
     ignore_chat_model = False
     ignore_custom_event = True
@@ -1001,10 +1281,10 @@ class TurnPhaseCallbackHandler:
         raise AttributeError(name)
 
     def on_chat_model_start(self, *args: Any, **kwargs: Any) -> None:
-        self._journal.mark_once(TurnPhase.MODEL_REQUEST)
+        self._journal.record_model_start(kwargs.get("run_id"))
 
     def on_llm_start(self, *args: Any, **kwargs: Any) -> None:
-        self._journal.mark_once(TurnPhase.MODEL_REQUEST)
+        self._journal.record_model_start(kwargs.get("run_id"))
 
     def on_llm_new_token(self, token: Any = "", *args: Any, chunk: Any = None, **kwargs: Any) -> None:
         # When the chunk carries structured content, judge it by the same
@@ -1021,11 +1301,25 @@ class TurnPhaseCallbackHandler:
             self._journal.mark_once(TurnPhase.FIRST_PROVIDER_TEXT)
 
     def on_llm_end(self, *args: Any, **kwargs: Any) -> None:
-        self._journal.mark_once(TurnPhase.MODEL_COMPLETION)
+        self._journal.record_model_end(kwargs.get("run_id"))
 
     def on_llm_error(self, *args: Any, **kwargs: Any) -> None:
-        self._journal.mark_once(TurnPhase.MODEL_COMPLETION, detail="error")
+        self._journal.record_model_end(kwargs.get("run_id"), detail="error")
         self._journal.record_failed_attempt()
+
+    def on_tool_start(self, serialized: Any = None, *args: Any, **kwargs: Any) -> None:
+        # ``serialized`` is the tool's own descriptor; only its name is read,
+        # and ``input_str``/``inputs`` -- the arguments -- are left untouched.
+        name = serialized.get("name") if isinstance(serialized, dict) else None
+        self._journal.record_tool_start(kwargs.get("run_id"), name=name if isinstance(name, str) else None)
+
+    def on_tool_end(self, *args: Any, **kwargs: Any) -> None:
+        self._journal.record_tool_end(kwargs.get("run_id"))
+
+    def on_tool_error(self, *args: Any, **kwargs: Any) -> None:
+        # A tool that raised still occupied the turn; the exception says why
+        # and is the agent's to handle, so nothing of it is recorded here.
+        self._journal.record_tool_end(kwargs.get("run_id"))
 
 
 def _ignore(*_args: Any, **_kwargs: Any) -> None:

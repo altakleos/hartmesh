@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import threading
 import time
@@ -14,6 +15,8 @@ from deerflow.runtime.turn_phases import (
     MAX_PHASE_RECORDS,
     MAX_RENDERED_PHASES,
     MAX_TRACKED_RUNS,
+    MAX_TRACKED_TOOL_NAMES,
+    OTHER_TOOLS_LABEL,
     AcquisitionSource,
     TurnPhase,
     TurnPhaseCallbackHandler,
@@ -330,8 +333,9 @@ def test_the_callback_handler_records_a_model_error_as_a_failed_attempt():
 def test_the_callback_handler_ignores_the_hooks_it_does_not_implement():
     handler = TurnPhaseCallbackHandler(TurnPhaseJournal(correlation_id="trace-ignore"))
 
-    handler.on_tool_start({}, "input")
     handler.on_chain_end({})
+    handler.on_agent_action(None)
+    handler.on_retriever_start({}, "query")
 
     with pytest.raises(AttributeError):
         handler.not_a_callback
@@ -635,3 +639,318 @@ def test_launch_step_names_are_bounded_labels_and_a_stamp_behind_the_request_is_
     # Diagnostics never fail a run: an impossible ordering is clamped, not raised.
     clamped = LaunchTimings(received_at=now + 1, persisted_at=now, steps=())
     assert clamped.persisted_at == clamped.received_at == now + 1
+
+
+# ── Where a working turn's time goes ──────────────────────────────────────
+
+
+def test_tool_work_opens_the_tool_execution_phase_once_and_counts_every_call():
+    journal = TurnPhaseJournal(correlation_id="trace-tools")
+
+    for call in ("a", "b"):
+        journal.record_tool_start(call)
+        journal.record_tool_end(call)
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_calls == 2
+    opened = [record for record in snapshot.phases if record.phase is TurnPhase.TOOL_EXECUTION]
+    assert len(opened) == 1, "the phase names where tool work began, not each call"
+
+
+def test_a_turn_that_runs_no_tools_reports_no_tool_time():
+    journal = TurnPhaseJournal(correlation_id="trace-no-tools")
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_calls == 0
+    assert snapshot.tool_ms == 0.0
+    assert snapshot.phase_at_ms(TurnPhase.TOOL_EXECUTION) is None
+
+
+def test_overlapping_tool_calls_are_counted_once_not_summed():
+    """Two tools running together cost the turn one stretch of wall clock.
+
+    Summing durations would report more tool time than the turn took, which
+    is how an attribution loses the reader's trust: the named work must stay
+    inside the total.
+    """
+    journal = TurnPhaseJournal(correlation_id="trace-parallel")
+
+    journal.record_tool_start("a")
+    journal.record_tool_start("b")
+    time.sleep(0.02)
+    journal.record_tool_end("a")
+    journal.record_tool_end("b")
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_calls == 2
+    assert snapshot.tool_ms >= 15.0
+    assert snapshot.tool_ms <= snapshot.total_ms
+    assert snapshot.tool_ms < 35.0, "two overlapping 20ms calls are one stretch, not two"
+
+
+def test_a_tool_still_running_is_reported_as_open_not_as_measured_time():
+    """An end the journal never saw is not a duration it may claim."""
+    journal = TurnPhaseJournal(correlation_id="trace-unfinished")
+
+    journal.record_tool_start("a")
+    time.sleep(0.02)
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_calls == 1
+    assert snapshot.tool_ms == 0.0, "nothing completed, so nothing is measured"
+    assert snapshot.tool_open == 1
+    assert snapshot.tool_open_ms >= 15.0
+    assert "tools_open=1/" in snapshot.to_log_line()
+
+
+def test_a_tool_end_without_a_start_invents_no_span():
+    journal = TurnPhaseJournal(correlation_id="trace-stray-end")
+
+    journal.record_tool_end("never-started")
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_ms == 0.0
+    assert snapshot.tool_calls == 0
+    assert snapshot.tool_open == 0
+
+
+def test_model_calls_after_the_first_are_counted_and_timed():
+    """``model_request`` names the first call only; a working turn makes many."""
+    journal = TurnPhaseJournal(correlation_id="trace-model-calls")
+
+    for call in range(3):
+        journal.record_model_start(call)
+        journal.record_model_end(call)
+
+    snapshot = journal.snapshot()
+    assert snapshot.model_calls == 3
+    assert len([r for r in snapshot.phases if r.phase is TurnPhase.MODEL_REQUEST]) == 1
+    assert snapshot.model_ms >= 0.0
+
+
+def test_tool_and_model_time_reach_the_line_an_operator_reads():
+    journal = TurnPhaseJournal(correlation_id="trace-line", run_id="run-line")
+    journal.record_model_start("m")
+    journal.record_model_end("m")
+    journal.record_tool_start("t")
+    time.sleep(0.01)
+    journal.record_tool_end("t")
+
+    line = journal.snapshot().to_log_line()
+    assert "tools=1/" in line
+    assert "model=1/" in line
+
+
+def test_the_wire_record_carries_the_working_turn_fields_at_a_new_version():
+    journal = TurnPhaseJournal(correlation_id="trace-wire")
+    journal.record_tool_start("t")
+    journal.record_tool_end("t")
+
+    wire = journal.snapshot().to_wire()
+    assert wire["version"] == 6
+    assert wire["tool_calls"] == 1
+    assert wire["model_calls"] == 0
+    for field in ("tool_ms", "tool_open", "tool_open_ms", "model_ms", "model_open", "model_open_ms", "busy_ms"):
+        assert field in wire
+
+
+def test_the_callback_handler_records_the_tool_name_and_nothing_else_about_the_call():
+    """The name is the point; the arguments and the output are never recorded.
+
+    Naming the tool is what turns "it was tools" into something an operator
+    can act on. It is also the one thing this module's disclosure contract
+    admits about a call, so the rest is pinned here rather than assumed.
+    """
+    journal = TurnPhaseJournal(correlation_id="trace-tool-callback")
+    handler = TurnPhaseCallbackHandler(journal)
+
+    handler.on_tool_start({"name": "execute_command", "description": "Run a command."}, "rm -rf /tenant-secret", run_id="call-1")
+    time.sleep(0.01)
+    handler.on_tool_end("SECRET-OUTPUT", run_id="call-1")
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_calls == 1
+    assert snapshot.tool_ms >= 5.0
+    assert [(name, calls) for name, calls, _ms in snapshot.tool_names] == [("execute_command", 1)]
+    rendered = snapshot.to_log_line() + repr(snapshot.to_wire())
+    assert "execute_command" in rendered
+    assert "tenant-secret" not in rendered
+    assert "SECRET-OUTPUT" not in rendered
+    assert "Run a command" not in rendered
+
+
+def test_the_tool_breakdown_names_the_call_that_spent_the_turn():
+    journal = TurnPhaseJournal(correlation_id="trace-breakdown")
+
+    journal.record_tool_start("slow", name="execute_command")
+    time.sleep(0.03)
+    journal.record_tool_end("slow")
+    journal.record_tool_start("fast", name="read_file")
+    journal.record_tool_end("fast")
+
+    snapshot = journal.snapshot()
+    names = [name for name, _calls, _ms in snapshot.tool_names]
+    assert names == ["execute_command", "read_file"], "largest first, so the guilty call reads first"
+    assert "tools=2/" in snapshot.to_log_line()
+    assert "(execute_command=1/" in snapshot.to_log_line()
+
+
+def test_a_tool_plane_that_mints_names_cannot_grow_the_journal():
+    """Operator configuration decides these names, so the set has to be capped."""
+    journal = TurnPhaseJournal(correlation_id="trace-many-names")
+
+    for index in range(MAX_TRACKED_TOOL_NAMES * 3):
+        journal.record_tool_start(index, name=f"mcp_tool_{index}")
+        journal.record_tool_end(index)
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_calls == MAX_TRACKED_TOOL_NAMES * 3
+    assert len(snapshot.tool_names) <= MAX_TRACKED_TOOL_NAMES + 1
+    pooled = {name: calls for name, calls, _ms in snapshot.tool_names}
+    assert pooled[OTHER_TOOLS_LABEL] == MAX_TRACKED_TOOL_NAMES * 2
+    assert snapshot.to_log_line().count("=") < 40, "the line stays readable"
+
+
+def test_an_unnamed_tool_is_counted_under_a_label_rather_than_dropped():
+    journal = TurnPhaseJournal(correlation_id="trace-unnamed")
+
+    journal.record_tool_start("a")
+    journal.record_tool_end("a")
+
+    snapshot = journal.snapshot()
+    assert [name for name, _calls, _ms in snapshot.tool_names] == ["unnamed"]
+
+
+def test_the_callback_handler_closes_a_tool_that_raised():
+    journal = TurnPhaseJournal(correlation_id="trace-tool-error")
+    handler = TurnPhaseCallbackHandler(journal)
+
+    handler.on_tool_start({}, "input", run_id="call-1")
+    handler.on_tool_error(RuntimeError("provider said something untrusted"), run_id="call-1")
+    journal.record_tool_start("call-2")
+    journal.record_tool_end("call-2")
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_calls == 2
+    assert all("untrusted" not in str(record.detail) for record in snapshot.phases)
+
+
+def test_the_callback_handler_hears_tool_events_at_all():
+    """LangChain gates every tool callback on ``ignore_agent``.
+
+    Left at the handler's earlier ``True`` the tool hooks below are never
+    called, and tool time stays the residual this phase exists to name.
+    """
+    assert TurnPhaseCallbackHandler.ignore_agent is False
+
+
+def test_a_real_tool_invocation_reaches_the_handler_the_worker_attaches():
+    """The flag is only half of it: LangChain has to route the event here.
+
+    This is the wiring the phase depends on -- a tool invoked the way the
+    graph invokes one, with the handler in ``config["callbacks"]`` exactly as
+    ``run_agent`` puts it there.
+    """
+    from langchain_core.tools import tool
+
+    @tool
+    def slow_thing(argument: str) -> str:
+        """A tool that takes a moment."""
+        time.sleep(0.02)
+        return "done"
+
+    journal = TurnPhaseJournal(correlation_id="trace-real-tool")
+    handler = TurnPhaseCallbackHandler(journal)
+
+    slow_thing.invoke({"argument": "x"}, config={"callbacks": [handler]})
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_calls == 1, "LangChain never delivered the tool event"
+    assert snapshot.tool_ms >= 15.0
+    assert snapshot.phase_at_ms(TurnPhase.TOOL_EXECUTION) is not None
+
+
+def test_a_full_journal_does_not_count_every_later_tool_call_as_a_dropped_record():
+    """The cap loses records; it must not make the loss look worse than it is.
+
+    ``dropped_records`` is what an operator reads to decide whether to trust
+    the rest of the line. A turn that ran hundreds of tools after filling the
+    cap would have reported hundreds of drops for one record.
+    """
+    journal = TurnPhaseJournal(correlation_id="trace-full")
+    for _ in range(MAX_PHASE_RECORDS):
+        journal.mark(TurnPhase.GRAPH_START)
+    for call in range(50):
+        journal.record_tool_start(call)
+        journal.record_tool_end(call)
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_calls == 50
+    assert snapshot.dropped_records <= 1
+
+
+def test_a_cancelled_async_tool_does_not_turn_the_rest_of_the_turn_into_tool_time():
+    """The end event LangChain never sends must cost one call, not the turn.
+
+    ``asyncio.CancelledError`` is a ``BaseException`` and LangChain's tool base
+    catches ``Exception``, so a cancelled async tool reaches neither
+    ``on_tool_end`` nor ``on_tool_error``. Counting depth alone, that one lost
+    event reported a measured 100 ms of work as ``tools=1/601ms`` on a 602 ms
+    turn -- the residual this phase exists to remove, inverted. Subagent
+    timeouts and run aborts both reach it, and the turn carries on afterwards.
+    """
+    import asyncio
+
+    from langchain_core.tools import tool
+
+    @tool
+    async def never_returns(argument: str) -> str:
+        """A tool the caller gives up on."""
+        await asyncio.sleep(30)
+        return "done"
+
+    async def scenario() -> TurnPhaseJournal:
+        journal = TurnPhaseJournal(correlation_id="trace-cancelled")
+        handler = TurnPhaseCallbackHandler(journal)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(never_returns.ainvoke({"argument": "x"}, config={"callbacks": [handler]}), timeout=0.05)
+        await asyncio.sleep(0.2)  # the turn carries on: pure non-tool time
+        return journal
+
+    snapshot = asyncio.run(scenario()).snapshot()
+    assert snapshot.tool_calls == 1
+    assert snapshot.tool_ms == 0.0, "nothing completed, so nothing may be claimed as measured"
+    assert snapshot.tool_open == 1
+    assert snapshot.busy_ms < snapshot.total_ms / 2, "idle time after the cancellation is not tool time"
+    assert "tools_open=1/" in snapshot.to_log_line()
+
+
+def test_a_lost_end_does_not_stop_later_tool_calls_being_measured():
+    """Depth counting lost every later call too; intervals must not."""
+    journal = TurnPhaseJournal(correlation_id="trace-after-loss")
+
+    journal.record_tool_start("lost")  # never ends
+    journal.record_tool_start("real")
+    time.sleep(0.02)
+    journal.record_tool_end("real")
+
+    snapshot = journal.snapshot()
+    assert snapshot.tool_calls == 2
+    assert snapshot.tool_ms >= 15.0, "the call that did finish is still measurable"
+    assert snapshot.tool_open == 1
+
+
+def test_busy_time_merges_both_kinds_so_the_residual_stays_positive():
+    """A tool and a model call can overlap; their sum can exceed the turn."""
+    journal = TurnPhaseJournal(correlation_id="trace-busy")
+
+    journal.record_tool_start("t")
+    journal.record_model_start("m")
+    time.sleep(0.02)
+    journal.record_tool_end("t")
+    journal.record_model_end("m")
+
+    snapshot = journal.snapshot()
+    assert snapshot.busy_ms <= snapshot.total_ms
+    assert snapshot.busy_ms < snapshot.tool_ms + snapshot.model_ms, "the overlap is counted once"
+    assert "busy=" in snapshot.to_log_line()
