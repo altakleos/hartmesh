@@ -5,6 +5,35 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.28] — 2026-09-20
+
+- hartmesh#121 — a failed bind no longer wedges a thread until the Gateway is restarted. A bind that raised inside staging, while the thread's view map still held a record of some other identity, left the coordinator `clearing` forever: every later turn on that thread refused, `fence_committed_owner` included, so neither interrupt nor rollback could rescue it, and the sandbox never parked. Recovery meant restarting the Gateway, which took every other thread's sandbox down with it. Ownership of a thread's projection is the coordinator's, not the view map's: while the coordinator holds a thread as clearing, no other run can be admitted to it and the only sandbox mounting its view is the one the clear names, so the record the map carries is not a live owner and the release empties it on the coordinator's word, checked under the views lock every bind takes. A clear the coordinator has not fenced empties nothing. One narrower shape stays open and is named in the doc: a bind that raised before any receipt was recorded, on the AIO remote backend, while the sandbox still lives.
+
+- hartmesh#122 — a file one person makes is a file the company has. Everything made here used to stop with its author: a monthly review, a price list, a supplier comparison could only reach a colleague by being sent, and the agent could never see it again. **Share with everyone** now appears on a report card, on an open file in the artifact panel, and on a row of *My files*, and the success toast carries **Undo**, because handing a file to the whole company is one click and taking it back should be one too. The Files page gains a *Shared* tab whose selection is written back to the URL, so a copied link lands where the person was; each row says who shared it and when, and **Remove** appears exactly where it will succeed, because the server decides that per caller instead of the page reasoning about roles.
+
+One directory per tenant, mounted read-only in every sandbox of every person
+and written only by the publish route. Publishing copies exact bytes of
+something the person already has and records who, when, and from where; a name
+already taken keeps both, so nothing is ever overwritten. Removal takes the
+file and amends the record with who took it away — rows are never deleted, so a
+file that is gone still says who put it there. The agent is told about the area
+as well, and told it is read-only, because otherwise a request to compare a
+review a colleague shared would reach a model that had never heard of the path.
+
+- hartmesh#123 — the turn journal names where a working turn's time goes. It used to name a turn's time up to the first answer and leave everything after it as one unexplained block, which on a report turn is most of the turn: minutes of commands after seconds of talking. An operator could see that a turn took 380 s and nothing about where 370 of them went. Tool and model calls are now measured as occupancy — overlap counts once, so each figure stays inside the turn — with the per-tool breakdown naming the calls that spent it, and `busy_ms` merging both kinds so the residual is a real number to subtract rather than a guess. Tool names are recorded so the time can be attributed; arguments and output are not. One cost stated plainly: built-in tool names are first-party vocabulary, but MCP and skill tools are named by operator configuration, so those names now reach Gateway logs, capped at sixteen distinct names with the rest pooled.
+
+The accounting is paired and closed by the framework's own run id rather than
+counted by depth, which matters because `asyncio.CancelledError` is a
+`BaseException` and LangChain's tool base catches `Exception`: a cancelled
+async tool reaches neither the end nor the error callback. Under depth
+counting that one lost event froze the accounting and reported every later
+second as tool time — a measured 100 ms of work rendering as 601 ms on a 602 ms
+turn, reproduced rather than theorised, and reachable from both subagent
+timeouts and run aborts. A call whose end was never seen is now reported as
+open, so a lost event costs one call's measurement instead of the turn's.
+
+- hartmesh#124 — the checkpoint channel modes reference moved out of the agent guidance chain into `backend/docs/`, verbatim. The chain had seventy bytes of headroom against its hard limit and a guidance edit had already failed CI on it. Nothing was summarized away: the saving is relocation, because that content was bought with real incidents and a rewrite would have lost the specifics worth keeping.
+
 ## [2.1.0+hartmesh.27] — 2026-09-19
 
 - hartmesh#119 — a tenant's own name, logo and report profiles come from one directory on its data disk. Everything the operator sets for a company was scattered: the header read one file, the report skill read another under looser rules, the product's name was still under every message and in every browser tab, and a company that wanted its own report styling had nowhere to put it. The bundle is one read-only mount the Gateway and every sandbox see, with `render_config.py --check` reporting what it cannot use and rendering anyway. The rules are now the same wherever the name is shown: the report applies the header's name rules and degrades the same way, so a report never carries a company the workspace refused and a typo never fails a run. Every branded surface waits for the answer rather than showing the product's while the answer is unknown, and a failed fetch is unknown rather than a fallback to ours.
@@ -269,6 +298,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.28]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.28
 [2.1.0+hartmesh.27]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.27
 [2.1.0+hartmesh.26]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.26
 [2.1.0+hartmesh.25]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.25
