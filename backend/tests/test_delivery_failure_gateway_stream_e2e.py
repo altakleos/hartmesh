@@ -20,6 +20,7 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+import _turn_phase_probe_model as probe
 import httpx
 import pytest
 import test_turn_phase_gateway_stream_e2e as e2e
@@ -48,15 +49,16 @@ def _outputs_dir(home: Path, thread_id: str) -> Path | None:
 
 
 def _produce_one_artifact_mid_turn(home: Path, thread_id: str) -> Any:
-    """Write an output as soon as the turn is visibly under way, then stop."""
+    """Write an output as the turn produces it, then stop.
+
+    Register the returned callback with ``probe.ON_TURN_UNDER_WAY`` so it runs
+    inside the agent loop. Writing from the SSE consumer instead races the
+    delivery middleware's window from the outside; the probe's own docstring
+    carries the mechanism.
+    """
     written = {"done": False}
 
-    def on_frame(observation: e2e._StreamObservation) -> None:
-        # Every frame the client can see is already past the pre-run snapshot,
-        # which the worker captures before it publishes ``metadata``. So write
-        # on the earliest frame whose turn has laid down the outputs directory,
-        # rather than on a chosen frame, and keep the whole rest of the turn as
-        # margin before the post-run scan.
+    def write() -> None:
         if written["done"]:
             return
         outputs = _outputs_dir(home, thread_id)
@@ -68,7 +70,7 @@ def _produce_one_artifact_mid_turn(home: Path, thread_id: str) -> Any:
             encoding="utf-8",
         )
 
-    return on_frame, written
+    return write, written
 
 
 def _frames_of(observed: e2e._StreamObservation, event: str) -> list[Any]:
@@ -123,8 +125,12 @@ def test_a_turn_that_produced_a_file_and_presented_none_of_it_delivers_it_anyway
     base = delivery_gateway.loopback_url
     with httpx.Client() as client:
         csrf, thread_id = e2e._register_and_create_thread(client, base)
-        on_frame, written = _produce_one_artifact_mid_turn(delivery_gateway.tmp_home, thread_id)
-        observed = e2e._observe_stream(client, base, thread_id, csrf, "probe:text please", on_frame=on_frame)
+        write_artifact, written = _produce_one_artifact_mid_turn(delivery_gateway.tmp_home, thread_id)
+        probe.ON_TURN_UNDER_WAY.append(write_artifact)
+        try:
+            observed = e2e._observe_stream(client, base, thread_id, csrf, "probe:text please")
+        finally:
+            probe.ON_TURN_UNDER_WAY.clear()
         run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
         history = client.post(f"{base}/api/threads/{thread_id}/history", json={"limit": 20}, headers={"X-CSRF-Token": csrf}).json()
         delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/delivery").json()
@@ -166,8 +172,12 @@ def test_the_fence_still_speaks_when_the_runtime_cannot_hand_the_file_over(
     base = delivery_gateway.loopback_url
     with httpx.Client() as client:
         csrf, thread_id = e2e._register_and_create_thread(client, base)
-        on_frame, written = _produce_one_artifact_mid_turn(delivery_gateway.tmp_home, thread_id)
-        observed = e2e._observe_stream(client, base, thread_id, csrf, "probe:text please", on_frame=on_frame)
+        write_artifact, written = _produce_one_artifact_mid_turn(delivery_gateway.tmp_home, thread_id)
+        probe.ON_TURN_UNDER_WAY.append(write_artifact)
+        try:
+            observed = e2e._observe_stream(client, base, thread_id, csrf, "probe:text please")
+        finally:
+            probe.ON_TURN_UNDER_WAY.clear()
         run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
         runs = client.get(f"{base}/api/threads/{thread_id}/runs").json()
         flagged = [row for row in runs if row["stop_reason"] == "artifact_delivery_incomplete"]

@@ -80,13 +80,34 @@ tools:
 
 
 class _RefusingProvider:
-    """The hosted reader's behaviour: every address, the same refusal."""
+    """The hosted reader's behaviour: every address, the same refusal.
 
-    def __init__(self) -> None:
+    *on_fetch* stands in for the producing call that wrote a file and left it
+    out of ``present``. It runs here, inside the tool call, because this is
+    the only place the write is guaranteed to land inside the window
+    ``RuntimeDeliveryMiddleware`` measures -- after its ``before_agent``
+    snapshot and before its ``after_agent`` diff.
+
+    Writing from the SSE consumer instead races both edges of that window,
+    and the run fails whichever one it loses. Too early and the file is
+    already in the middleware's snapshot, so nothing was "produced"; too late
+    and the diff has already been taken. Either way the middleware presents
+    nothing while the worker's fence -- whose own snapshot is taken before the
+    first frame is even published -- still sees a file this turn produced, and
+    the run ends ``artifact_delivery_incomplete`` with nothing presented. The
+    late edge is the reachable one: the client decides when it writes, and it
+    has an unbounded tree walk and the machine's load between it and the
+    frame, while the run is free to finish. Reproduced at 5 s of client lag.
+    """
+
+    def __init__(self, *, on_fetch: Any = None) -> None:
         self.urls: list[str] = []
+        self._on_fetch = on_fetch
 
     async def fetch(self, url: str) -> FetchRefusal:
         self.urls.append(url)
+        if self._on_fetch is not None:
+            self._on_fetch()
         return FetchRefusal("provider", "auth", "the fetch provider refuses this deployment's requests without a valid key", 401)
 
 
@@ -119,12 +140,12 @@ def _tagged(history: Any) -> list[dict[str, Any]]:
     return found
 
 
-def _turn(gateway: e2e._Gateway, prompt: str, *, on_frame: Any = None) -> dict[str, Any]:
+def _turn(gateway: e2e._Gateway, prompt: str) -> dict[str, Any]:
     base = gateway.loopback_url
     probe.BOUND_TOOL_NAMES.clear()
     with httpx.Client() as client:
         csrf, thread_id = e2e._register_and_create_thread(client, base)
-        observed = e2e._observe_stream(client, base, thread_id, csrf, prompt, on_frame=on_frame, timeout=120.0, recursion_limit=100)
+        observed = e2e._observe_stream(client, base, thread_id, csrf, prompt, timeout=120.0, recursion_limit=100)
         run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
         history = client.post(f"{base}/api/threads/{thread_id}/history", json={"limit": 30}, headers={"X-CSRF-Token": csrf}).json()
         delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/delivery").json()
@@ -146,17 +167,17 @@ def _turn(gateway: e2e._Gateway, prompt: str, *, on_frame: Any = None) -> dict[s
     }
 
 
-def _write_artifact_mid_turn(home: Any, thread_id_box: dict[str, str]) -> Any:
-    """Write the PDF as soon as the turn has laid down its outputs directory.
+def _artifact_writer(home: Any, thread_id_box: dict[str, str]) -> Any:
+    """The producing call's write: the PDF, into this thread's outputs directory.
 
-    The probe issues no ``bash`` call, so this stands in for the producing
-    call that omitted ``present``. It lands after the worker's pre-run
-    snapshot and after the middleware's, which is the window a real producing
-    call writes in.
+    The probe issues no ``bash`` call, so this stands in for the one that
+    omitted ``present``. Hand it to ``_RefusingProvider(on_fetch=...)`` so it
+    runs inside the tool call; that is what makes it land in the delivery
+    middleware's window every time rather than most times.
     """
     written = {"done": False}
 
-    def on_frame(observation: e2e._StreamObservation) -> None:
+    def write() -> None:
         if written["done"]:
             return
         for candidate in home.rglob(f"threads/{thread_id_box['id']}/user-data/outputs"):
@@ -165,7 +186,7 @@ def _write_artifact_mid_turn(home: Any, thread_id_box: dict[str, str]) -> Any:
                 written["done"] = True
                 return
 
-    return on_frame, written
+    return write, written
 
 
 def test_the_great_lakes_turn_stops_at_one_refusal_and_still_answers(
@@ -202,20 +223,19 @@ def test_the_muse_turn_refuses_once_delivers_the_pdf_and_ends_success(
     composed_gateway: e2e._Gateway,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    provider = _RefusingProvider()
+    # The thread id is only known once the run has been created, so the writer
+    # reads it from the box the turn fills in before the fetch can happen.
+    thread_id_box: dict[str, str] = {"id": ""}
+    write_artifact, written = _artifact_writer(composed_gateway.tmp_home, thread_id_box)
+    provider = _RefusingProvider(on_fetch=write_artifact)
     monkeypatch.setattr(fetch_tools, "_client_from_config", lambda _config: provider)
 
-    thread_id_box: dict[str, str] = {"id": ""}
-    on_frame, written = _write_artifact_mid_turn(composed_gateway.tmp_home, thread_id_box)
-
-    # The thread id is only known once the run has been created, so the frame
-    # callback reads it from the box the turn fills in.
     base = composed_gateway.loopback_url
     probe.BOUND_TOOL_NAMES.clear()
     with httpx.Client() as client:
         csrf, thread_id = e2e._register_and_create_thread(client, base)
         thread_id_box["id"] = thread_id
-        observed = e2e._observe_stream(client, base, thread_id, csrf, f"probe:fetch {MUSE_URL}", on_frame=on_frame, timeout=120.0, recursion_limit=100)
+        observed = e2e._observe_stream(client, base, thread_id, csrf, f"probe:fetch {MUSE_URL}", timeout=120.0, recursion_limit=100)
         run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
         history = client.post(f"{base}/api/threads/{thread_id}/history", json={"limit": 30}, headers={"X-CSRF-Token": csrf}).json()
         delivery = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}/delivery").json()
@@ -293,18 +313,17 @@ def test_the_next_turn_in_the_same_chat_tries_the_fetch_once_more(
     ``test_provider_refusal_middleware.py`` is where that is pinned; it fails
     on exactly that mutation.
     """
-    provider = _RefusingProvider()
-    monkeypatch.setattr(fetch_tools, "_client_from_config", lambda _config: provider)
-
     thread_id_box: dict[str, str] = {"id": ""}
-    on_frame, written = _write_artifact_mid_turn(composed_gateway.tmp_home, thread_id_box)
+    write_artifact, written = _artifact_writer(composed_gateway.tmp_home, thread_id_box)
+    provider = _RefusingProvider(on_fetch=write_artifact)
+    monkeypatch.setattr(fetch_tools, "_client_from_config", lambda _config: provider)
     base = composed_gateway.loopback_url
 
     with httpx.Client() as client:
         csrf, thread_id = e2e._register_and_create_thread(client, base)
         thread_id_box["id"] = thread_id
         probe.BOUND_TOOL_NAMES.clear()
-        first = e2e._observe_stream(client, base, thread_id, csrf, f"probe:fetch {MUSE_URL}", on_frame=on_frame, timeout=120.0, recursion_limit=100)
+        first = e2e._observe_stream(client, base, thread_id, csrf, f"probe:fetch {MUSE_URL}", timeout=120.0, recursion_limit=100)
         first_bound = [list(names) for names in probe.BOUND_TOOL_NAMES]
 
         probe.BOUND_TOOL_NAMES.clear()
@@ -372,27 +391,17 @@ def test_the_captured_malformed_tool_name_neither_executes_nor_ends_the_run(
     Gateway because it needs the same profile: a second one would double a
     minute of boot on one CI shard to prove nothing extra.
     """
-    provider = _RefusingProvider()
-    monkeypatch.setattr(fetch_tools, "_client_from_config", lambda _config: provider)
-
     thread_id_box: dict[str, str] = {"id": ""}
-    write_artifact, _written = _write_artifact_mid_turn(composed_gateway.tmp_home, thread_id_box)
-
-    # The write has to land after the middleware's pre-run snapshot, or the
-    # file is not something "this turn produced" and the fence correctly fails
-    # the run. Writing on the first frame races that snapshot; waiting for the
-    # refusal to appear on the wire does not, because the refusal cannot exist
-    # until the agent has started and taken it.
-    def on_frame(observation: e2e._StreamObservation) -> None:
-        if any(REFUSED_TOOL_NAME in str(payload) for _event, payload in observation.frames):
-            write_artifact(observation)
+    write_artifact, _written = _artifact_writer(composed_gateway.tmp_home, thread_id_box)
+    provider = _RefusingProvider(on_fetch=write_artifact)
+    monkeypatch.setattr(fetch_tools, "_client_from_config", lambda _config: provider)
 
     base = composed_gateway.loopback_url
     probe.BOUND_TOOL_NAMES.clear()
     with httpx.Client() as client:
         csrf, thread_id = e2e._register_and_create_thread(client, base)
         thread_id_box["id"] = thread_id
-        observed = e2e._observe_stream(client, base, thread_id, csrf, f"probe:malformed {MUSE_URL}", on_frame=on_frame, timeout=120.0, recursion_limit=100)
+        observed = e2e._observe_stream(client, base, thread_id, csrf, f"probe:malformed {MUSE_URL}", timeout=120.0, recursion_limit=100)
         run = client.get(f"{base}/api/threads/{thread_id}/runs/{observed.run_id}").json()
         history = client.post(f"{base}/api/threads/{thread_id}/history", json={"limit": 40}, headers={"X-CSRF-Token": csrf}).json()
         download = client.get(f"{base}/api/threads/{thread_id}/artifacts/{ARTIFACT_PATH.lstrip('/')}", params={"download": "true"}, headers={"X-CSRF-Token": csrf})

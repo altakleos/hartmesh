@@ -586,9 +586,10 @@ def test_the_wire_form_carries_every_counter_separately():
         journal.record_teardown_refusal()
         journal.record_teardown_failure()
     wire = journal.snapshot().to_wire()
-    # 5 since the record gained the launch interval; the version is the
-    # contract's own stamp, so a consumer can tell the shapes apart.
-    assert wire["version"] == 5
+    # 6 since the record gained the working-turn split (tool and model calls
+    # and their occupancy); the version is the contract's own stamp, so a
+    # consumer can tell the shapes apart.
+    assert wire["version"] == 6
     assert wire["acquisition_reuse"] is None
     # A journal nobody handed launch timings to says so, rather than reporting
     # a zero a reader would take for a launch that cost nothing.

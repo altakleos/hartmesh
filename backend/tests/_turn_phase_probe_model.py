@@ -35,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
 from langchain_core.language_models.chat_models import BaseChatModel
@@ -60,6 +60,21 @@ MALFORMED_TOOL_ARGS = {"description": "Check weasyprint and create output dir"}
 #: The tool names bound on every model request, in order. Process-global,
 #: like the model instance the Gateway builds; a test clears it.
 BOUND_TOOL_NAMES: list[list[str]] = []
+
+#: Callbacks run once at the start of every streamed model call -- that is,
+#: inside the agent loop.
+#:
+#: A test that has to write a file "as the turn produces it" hooks here rather
+#: than from the SSE consumer. This is inside ``RuntimeDeliveryMiddleware``'s
+#: ``before_agent``/``after_agent`` window by construction; the consumer races
+#: both edges of it. Write too early and the file is already in the
+#: middleware's snapshot, so nothing was produced; too late and the diff has
+#: been taken -- and either way the worker's fence, whose own snapshot predates
+#: the first published frame, still sees a file this turn made that nothing
+#: presented, and the run ends ``artifact_delivery_incomplete``. The late edge
+#: is the reachable one, because the client decides when it writes while the
+#: run is free to finish. A test that sets this clears it.
+ON_TURN_UNDER_WAY: list[Callable[[], None]] = []
 _REASONING_BLOCK = [{"type": "reasoning", "reasoning": "hidden deliberation"}]
 
 
@@ -169,6 +184,8 @@ class ProbeStreamingChatModel(BaseChatModel):
         **kwargs: Any,
     ) -> AsyncIterator[ChatGenerationChunk]:
         script = _script_for(messages)
+        for under_way in list(ON_TURN_UNDER_WAY):
+            under_way()
         # Hidden reasoning first: bytes on the wire, but not the answer.
         yield ChatGenerationChunk(message=AIMessageChunk(content=list(_REASONING_BLOCK)))
         if script == "search" and not self._already_called_tool(messages):
