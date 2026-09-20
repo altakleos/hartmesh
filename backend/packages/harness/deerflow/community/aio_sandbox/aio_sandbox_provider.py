@@ -4506,9 +4506,23 @@ class AioSandboxProvider(
         ):
             return False
         if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
-            # The material lives inside the sandbox, so absent means the
-            # sandbox is gone; a sandbox that is still there is the honest
-            # unknown and stays refused.
+            # The material lives inside the sandbox, and this backend has no
+            # surface that reaches inside one -- create, destroy, is_alive,
+            # discover, list_running, renew, and nothing else -- so clearing it
+            # in place is not expressible here. Destroying the exact sandbox
+            # is, and it makes the material absent by construction. That is
+            # safe precisely here: the identity check above proves the sandbox
+            # is this thread's, and the coordinator holds the thread as
+            # clearing for the whole call, so no other run can be admitted to
+            # it. The alternative was refusing forever, which wedged the thread
+            # until a Gateway restart took every other thread's sandbox too.
+            if self.get(clear.sandbox_id) is None:
+                return True
+            self.destroy(clear.sandbox_id)
+            # Only a positive not-found is absence. A destroy this instance no
+            # longer owns, or one whose result cannot be observed, leaves the
+            # thread refused -- narrower than refusing every receiptless
+            # failure, and nothing retries this call.
             return self.get(clear.sandbox_id) is None
         return empty_skill_snapshot_active_view(clear=clear)
 

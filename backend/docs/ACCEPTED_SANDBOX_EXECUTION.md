@@ -331,15 +331,29 @@ special-cased: a real `AcceptedSkillSandboxBindingV1` can legally carry it,
 and the release does not consult the generation at all. A provider whose
 material lives inside the sandbox answers for that sandbox, not for a host
 view: E2B clears the material in the live sandbox and quarantines the exact
-sandbox when it cannot, and the AIO remote backend answers only for the
-sandbox being gone, so there a sandbox that is still present is the honest
-unknown, its release stays refused and the exact cleanup proof is retained
-(`release` returns the same clearing proof to the same token) for a retry
-that nothing in this change adds and that cannot succeed while the sandbox
-exists. That remote shape — a bind that raised
-before any receipt was recorded, while the sandbox lives — is the one wedge
-this leaves open, and the unwind now warns when a release answers False so
-it is at least visible. The prewarm's compare-and-pop stays, as hygiene.
+sandbox when it cannot. The AIO remote backend cannot clear in place -- its
+whole surface is create, destroy, is_alive, discover, list_running and renew,
+with nothing that reaches inside a live sandbox -- so it takes the contract's
+other answer and destroys the exact sandbox, which makes the material absent
+by construction. Destroying is safe precisely there: the identity check proves
+the sandbox is that thread's, and the coordinator holds the thread as clearing
+for the whole call, so no other run can be admitted to it. The alternative was
+refusing forever, which wedged the thread until a Gateway restart took every
+other thread's sandbox with it. The prewarm's compare-and-pop stays, as
+hygiene.
+
+**What stays open.** Only a positive not-found is absence, so a destroy this
+instance no longer owns, or one whose result cannot be observed, still answers
+False and still wedges that thread. Nothing retries: every caller of
+`release_accepted_skill_consumer` is fire-once and warns on False
+(`runtime/runs/worker.py`, `sandbox/middleware.py`,
+`sandbox/accepted_projection.py`), and nothing sweeps threads left clearing.
+The exact cleanup proof is retained for a retry -- `release` returns the same
+clearing proof to the same token -- but no caller re-obtains it. Closing the
+class outright means something asking again; the coordinator's `clearing`
+state already is that fact, so the derived form is a sweep that reads it
+rather than a second ledger beside it. That is a change of its own and is not
+made here.
 
 ### Rediscovery is not creation
 
