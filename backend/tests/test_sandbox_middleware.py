@@ -5,6 +5,7 @@ import logging
 from typing import get_type_hints
 
 import pytest
+from _skill_projection_release import release_thread_projection
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools import ToolRuntime
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -444,6 +445,7 @@ async def test_accepted_empty_skill_set_fails_closed_for_unsupported_provider() 
             await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
     finally:
         reset_sandbox_provider()
+        release_thread_projection(user_id="owner-accepted", thread_id="thread-accepted", run_id="run-accepted")
 
     # Durable accepted material selects the explicit accepted-only acquisition
     # profile. Unsupported providers fail before creating a sandbox that might
@@ -480,6 +482,7 @@ async def test_accepted_acquisition_requires_provider_isolation_advertisement() 
             await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
     finally:
         reset_sandbox_provider()
+        release_thread_projection(user_id="owner-incomplete", thread_id="thread-incomplete", run_id="run-incomplete")
 
     assert provider.thread_ids == ["thread-incomplete"]
     assert provider.released_ids == ["async-sandbox"]
@@ -638,6 +641,7 @@ async def test_nonempty_accepted_material_requires_hard_read_only_provider(
             await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
     finally:
         reset_sandbox_provider()
+        release_thread_projection(user_id="owner-read-only", thread_id="thread-read-only", run_id="run-read-only")
         snapshot.release()
 
     assert provider.released_ids == ["async-sandbox"]

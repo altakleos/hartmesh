@@ -19,6 +19,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from _skill_projection_release import release_thread_projection
 from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
 
@@ -94,66 +95,6 @@ def snapshot_paths(monkeypatch, tmp_path: Path) -> Paths:
     monkeypatch.setattr(snapshot_module, "get_paths", lambda: paths)
     yield paths
     cleanup_abandoned_skill_snapshots()
-
-
-@pytest.fixture(autouse=True)
-def _no_leaked_projection_state():
-    """Fail the test that leaves a thread registered with the coordinator.
-
-    ``SkillProjectionCoordinator`` is a process singleton, so a test that
-    reserves an admission and never releases it hands the next test a thread
-    that is already owned. That reads as a mysterious refusal in whatever runs
-    next, which is a far worse failure than this one: it names the wrong test
-    and moves with shard ordering. The state is cleared either way, so one
-    leak cannot cascade.
-    """
-    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-    coordinator = get_skill_projection_coordinator()
-    before = set(coordinator._states)
-    try:
-        yield
-    finally:
-        leaked = sorted(set(coordinator._states) - before)
-        for key in leaked:
-            coordinator._states.pop(key, None)
-    if leaked:
-        raise AssertionError(f"test left projection state with the coordinator for {leaked}; release the admission it reserved (the singleton outlives the test, so the next one inherits an owned thread)")
-
-
-def _release_thread_projection(*, user_id: str, thread_id: str, run_id: str) -> None:
-    """Give a thread's projection back, whatever state the run left it in.
-
-    Which call releases depends on how far the run got, and getting it wrong is
-    silent: ``release_unactivated_run`` answers ``False`` once a consumer has
-    activated, so a teardown that only calls it leaks the state it meant to
-    drop. Releasing one token is not enough either -- a lead plus a retained
-    subagent consumer leaves the thread busy, and ``release`` yields no clear
-    until the last consumer goes. So: drain the consumers, then recover a
-    release left part-finished, then fall back to the unactivated drop.
-    """
-    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-    coordinator = get_skill_projection_coordinator()
-
-    def _finish(token) -> None:
-        clear = coordinator.release(token)
-        if clear is not None:
-            coordinator.finalize_release(clear)
-
-    while (token := coordinator.current_token(user_id=user_id, thread_id=thread_id)) is not None:
-        _finish(token)
-    # A clear that was started and never finalized keeps the thread fenced with
-    # no consumer to find; the clearing token is reachable only by name.
-    pending = coordinator.token_for_consumer(
-        user_id=user_id,
-        thread_id=thread_id,
-        run_id=run_id,
-        consumer_id=f"run:{run_id}:lead",
-    )
-    if pending is not None:
-        _finish(pending)
-    coordinator.release_unactivated_run(user_id=user_id, thread_id=thread_id, run_id=run_id)
 
 
 def _write_skill(
@@ -2337,7 +2278,7 @@ async def test_qualified_aio_worker_materialization_uses_neutral_evidence(
             await result.release()
         # The cancelled arm never reaches a consumer token: the admission was
         # reserved and the run then cancelled at the post-acquire fence.
-        _release_thread_projection(user_id="user-1", thread_id="thread-1", run_id="run-neutral")
+        release_thread_projection(user_id="user-1", thread_id="thread-1", run_id="run-neutral")
         material.release_process_material()
 
     assert provider.destroyed == ["sandbox-neutral"]
@@ -3178,7 +3119,7 @@ async def test_the_accepted_preparation_says_where_its_own_time_went(
     finally:
         # A consumer activated here, so the unactivated release alone answers
         # False and drops nothing.
-        _release_thread_projection(user_id="user-1", thread_id="thread-attributed", run_id="run-attributed")
+        release_thread_projection(user_id="user-1", thread_id="thread-attributed", run_id="run-attributed")
         material.release_process_material()
 
     assert bound_snapshots == ["sandbox-attributed"]
