@@ -122,22 +122,37 @@ def _no_leaked_projection_state():
 
 
 def _release_thread_projection(*, user_id: str, thread_id: str, run_id: str) -> None:
-    """Give a thread's projection back, activated or not.
+    """Give a thread's projection back, whatever state the run left it in.
 
-    Which call releases depends on how far the run got, and getting it wrong
-    is silent: ``release_unactivated_run`` answers ``False`` once a consumer
-    has activated, so a teardown that only calls it leaks the state it meant
-    to drop. Ask for the token first and fall back.
+    Which call releases depends on how far the run got, and getting it wrong is
+    silent: ``release_unactivated_run`` answers ``False`` once a consumer has
+    activated, so a teardown that only calls it leaks the state it meant to
+    drop. Releasing one token is not enough either -- a lead plus a retained
+    subagent consumer leaves the thread busy, and ``release`` yields no clear
+    until the last consumer goes. So: drain the consumers, then recover a
+    release left part-finished, then fall back to the unactivated drop.
     """
     from deerflow.runtime.skill_projection import get_skill_projection_coordinator
 
     coordinator = get_skill_projection_coordinator()
-    token = coordinator.current_token(user_id=user_id, thread_id=thread_id)
-    if token is not None:
+
+    def _finish(token) -> None:
         clear = coordinator.release(token)
         if clear is not None:
             coordinator.finalize_release(clear)
-        return
+
+    while (token := coordinator.current_token(user_id=user_id, thread_id=thread_id)) is not None:
+        _finish(token)
+    # A clear that was started and never finalized keeps the thread fenced with
+    # no consumer to find; the clearing token is reachable only by name.
+    pending = coordinator.token_for_consumer(
+        user_id=user_id,
+        thread_id=thread_id,
+        run_id=run_id,
+        consumer_id=f"run:{run_id}:lead",
+    )
+    if pending is not None:
+        _finish(pending)
     coordinator.release_unactivated_run(user_id=user_id, thread_id=thread_id, run_id=run_id)
 
 
