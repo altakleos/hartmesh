@@ -6,6 +6,7 @@ import importlib.util
 import json
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime, timedelta
@@ -242,6 +243,25 @@ def _ready_v2_attempt(provisioner_module):
         "total_bytes": evidence.total_bytes,
     }
     return projection, capability, lease, pod, verifier_receipt, secrets, policies
+
+
+def _wait_until_listening(host: str, port: int, *, timeout: float = 5.0) -> None:
+    """Wait until a server thread actually accepts connections.
+
+    ``Thread.start()`` returns before the target has bound its socket, so a
+    request issued straight after it races the bind and is refused. The race is
+    invisible on an idle host and real on a busy one: this test failed 2 runs
+    in 12 with four spinning cores.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            with socket.create_connection((host, port), timeout=0.25):
+                return
+        except OSError:
+            if time.monotonic() >= deadline:
+                raise AssertionError(f"nothing listening on {host}:{port} after {timeout}s") from None
+            time.sleep(0.01)
 
 
 def _load_verifier_module():
@@ -2176,6 +2196,7 @@ def test_capability_gate_rejects_wrong_identity_and_proxies_once(
     upstream = verifier.http.server.ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
     upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
     upstream_thread.start()
+    _wait_until_listening("127.0.0.1", upstream.server_port)
     capability_file = tmp_path / "capability"
     capability_file.write_text("A" * 43, encoding="utf-8")
     receipt_file = tmp_path / "receipt.json"
@@ -2204,6 +2225,7 @@ def test_capability_gate_rejects_wrong_identity_and_proxies_once(
         daemon=True,
     )
     gate_thread.start()
+    _wait_until_listening("127.0.0.1", gate_port)
 
     wrong = urllib.request.Request(
         f"http://127.0.0.1:{gate_port}/v1/test",
