@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import mimetypes
 import os
 import stat
 from pathlib import Path
@@ -27,12 +26,11 @@ from fastapi.responses import FileResponse, Response
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import resolve_thread_virtual_path
-from app.gateway.routers.artifacts import ACTIVE_CONTENT_MIME_TYPES, _build_attachment_headers, _build_content_disposition, is_text_file_by_content
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths, make_safe_user_id
+from app.gateway.routers._file_http import acting_user_id, existing_regular_file, response_plan
+from app.gateway.routers.artifacts import _build_attachment_headers, _build_content_disposition
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.files import UserFile, UserFileError, delete_user_file, keep_file, list_user_files, resolve_user_file
-from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -85,46 +83,16 @@ class KeepFileRequest(BaseModel):
     folder: str | None = Field(default=None, max_length=1024)
 
 
-def _files_user_id(request: Request) -> str:
-    """The owner these files belong to: the trusted internal owner, else the caller."""
-    raw_owner = get_trusted_internal_owner_user_id(request)
-    if raw_owner:
-        return make_safe_user_id(raw_owner)
-    return get_effective_user_id()
-
-
 def _existing_regular_file(user_id: str, path: str) -> Path:
     """Worker-thread body: the host path of one of the person's files, or the HTTP reason it is not."""
-    try:
-        actual = resolve_user_file(user_id, path)
-    except UserFileError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-    try:
-        metadata = os.lstat(actual)
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"File not found: {path}") from None
-    if stat.S_ISLNK(metadata.st_mode):
-        raise HTTPException(status_code=400, detail=f"Not a file: {path}")
-    if not stat.S_ISREG(metadata.st_mode):
-        raise HTTPException(status_code=404, detail=f"File not found: {path}")
-    return actual
-
-
-def _response_plan(actual: Path, download: bool) -> tuple[bool, str | None]:
-    """Worker-thread body: whether to force a download, and the media type."""
-    mime_type, _ = mimetypes.guess_type(actual)
-    if download or mime_type in ACTIVE_CONTENT_MIME_TYPES:
-        return True, mime_type
-    if mime_type is None and is_text_file_by_content(actual):
-        mime_type = "text/plain"
-    return False, mime_type
+    return existing_regular_file(lambda: resolve_user_file(user_id, path), label=path)
 
 
 @router.get("/api/files", response_model=UserFileListResponse, summary="List My Files")
 @require_permission("threads", "read")
 async def list_files(request: Request) -> UserFileListResponse:
     """Every file the caller has kept, across all their conversations."""
-    entries, truncated = await asyncio.to_thread(list_user_files, _files_user_id(request))
+    entries, truncated = await asyncio.to_thread(list_user_files, acting_user_id(request))
     return UserFileListResponse(files=[UserFileInfo.of(entry) for entry in entries], count=len(entries), truncated=truncated)
 
 
@@ -136,8 +104,8 @@ async def get_file(path: str, request: Request, download: bool = False) -> Respo
     Active content (HTML, XHTML, SVG) is always a download, as the artifact
     route does, so nothing generated runs in the application origin.
     """
-    actual = await asyncio.to_thread(_existing_regular_file, _files_user_id(request), path)
-    force_download, mime_type = await asyncio.to_thread(_response_plan, actual, download)
+    actual = await asyncio.to_thread(_existing_regular_file, acting_user_id(request), path)
+    force_download, mime_type = await asyncio.to_thread(response_plan, actual, download)
     if force_download:
         return FileResponse(path=actual, filename=actual.name, media_type=mime_type, headers=_build_attachment_headers(actual.name, _NOSNIFF))
     return FileResponse(
@@ -151,7 +119,7 @@ async def get_file(path: str, request: Request, download: bool = False) -> Respo
 @require_permission("threads", "delete")
 async def delete_file(path: str, request: Request) -> DeleteUserFileResponse:
     """Remove one of the caller's files. Folders stay."""
-    user_id = _files_user_id(request)
+    user_id = acting_user_id(request)
     try:
         await asyncio.to_thread(delete_user_file, user_id, path)
     except UserFileError as exc:
@@ -196,7 +164,7 @@ async def keep_thread_file(thread_id: ThreadId, body: KeepFileRequest, request: 
     one with the next free ``_N`` suffix, nothing is overwritten, and the
     conversation's own file is untouched.
     """
-    user_id = _files_user_id(request)
+    user_id = acting_user_id(request)
     source = await asyncio.to_thread(_keepable_source, thread_id, body.path, user_id)
     try:
         kept = await asyncio.to_thread(keep_file, user_id, source, name=Path(body.path).name, folder=body.folder)

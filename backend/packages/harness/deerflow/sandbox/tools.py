@@ -25,7 +25,7 @@ from deerflow.authz.sandbox_authz import (
     safe_app_config_async,
 )
 from deerflow.config import get_app_config
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.config.paths import SHARED_VIRTUAL_PREFIX, VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -201,6 +201,11 @@ def _is_skills_path(path: str) -> bool:
     """Check if a path is under the skills container path."""
     skills_prefix = _get_skills_container_path()
     return path == skills_prefix or path.startswith(f"{skills_prefix}/")
+
+
+def _is_shared_path(path: str) -> bool:
+    """Whether *path* names the company's Shared area or something inside it."""
+    return path == SHARED_VIRTUAL_PREFIX or path.startswith(f"{SHARED_VIRTUAL_PREFIX}/")
 
 
 _ACCEPTED_SKILL_ACCESS_DENIED = "Accepted invocation may access only its accepted skill snapshot"
@@ -891,6 +896,7 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
     uploads = thread_data.get("uploads_path")
     outputs = thread_data.get("outputs_path")
     files = thread_data.get("files_path")
+    shared = thread_data.get("shared_path")
 
     if workspace:
         mappings[f"{VIRTUAL_PATH_PREFIX}/workspace"] = workspace
@@ -902,6 +908,11 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
         # Outside the thread's user-data root, so it takes no part in the
         # common-parent check below and is never reached through the root.
         mappings[f"{VIRTUAL_PATH_PREFIX}/files"] = files
+    if shared:
+        # The company's, on the same footing as the person's own files: outside
+        # the thread's root, and readable only — the write gate is in
+        # ``validate_local_tool_path``.
+        mappings[SHARED_VIRTUAL_PREFIX] = shared
 
     # Also map the virtual root when all known dirs share the same parent.
     actual_dirs = [p for p in (workspace, uploads, outputs) if p]
@@ -1052,6 +1063,7 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     virtual and let the provider's mount table resolve them.
 
     Allowed virtual-path families:
+      - ``/mnt/user-data/shared/*`` — allowed only when *read_only* is True
       - ``/mnt/user-data/*``  — always allowed (read + write)
       - ``/mnt/skills/*``     — allowed only when *read_only* is True
       - ``/mnt/acp-workspace/*`` — allowed only when *read_only* is True
@@ -1060,7 +1072,8 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
     Args:
         path: The virtual path to validate.
         thread_data: Thread data (must be present for local sandbox).
-        read_only: When True, skills and ACP workspace paths are permitted.
+        read_only: When True, the Shared area, skills and ACP workspace paths
+            are permitted.
 
     Raises:
         SandboxRuntimeError: If thread data is missing.
@@ -1083,6 +1096,13 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
         return
 
+    # The company's Shared area — read-only, like a mounted skill. Publishing
+    # is the person's decision through the Gateway, never the agent's write.
+    if _is_shared_path(path):
+        if not read_only:
+            raise PermissionError(f"Write access to the Shared area is not allowed: {path}")
+        return
+
     # User-data paths
     if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
         return
@@ -1100,8 +1120,8 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
 def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataState) -> None:
     """Verify that a resolved host path stays inside the roots this thread may touch.
 
-    Raises PermissionError if the path escapes workspace/uploads/outputs or
-    the person's own files.
+    Raises PermissionError if the path escapes workspace/uploads/outputs,
+    the person's own files, or the company's Shared area.
     """
     allowed_roots = [
         Path(p).resolve()
@@ -1110,6 +1130,7 @@ def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataSta
             thread_data.get("uploads_path"),
             thread_data.get("outputs_path"),
             thread_data.get("files_path"),
+            thread_data.get("shared_path"),
         )
         if p is not None
     ]

@@ -116,6 +116,13 @@ on installs that never enabled it. The convention is:
   remain explicitly legacy; downgrade blocks once any policy projection exists
   because removing it would make accepted recovery forget counters or stops.
 - `migrations/versions/0037_merge_upstream_0018.py` — no-op merge of the HartMesh head `0036_execution_policy_state` and upstream `0018_oauth_identity_pg_partial`
+- `migrations/versions/0038_shared_publications.py` — adds `shared_publications`,
+  the record of who published a file into the company's Shared area, when, from
+  where, and who removed it. Rows are amended, never deleted, so a removed file
+  still says who put it there. A database that already has the table (a fresh
+  one provisioned by `create_all`) is left alone; downgrade blocks once any
+  publication exists, because the table is the only account of what was shared.
+  Tests: `tests/test_migration_0038_shared_publications.py`
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch decision + locking
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps)

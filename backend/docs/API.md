@@ -1192,6 +1192,116 @@ Content-Type: application/json
 outside uploads/outputs or a bad folder, `404` for a missing source or a thread
 the caller does not own.
 
+
+### Shared
+
+The company's Shared area: what anyone at the tenant published, readable by
+everyone signed in. It lives under `shared/` and every sandbox of every person
+mounts it at `/mnt/user-data/shared`; only the publish route writes it, so
+nothing is shared by accident. The mount is read-only to the sandbox wherever
+the provider enforces it — container-backed providers do; the local provider
+refuses the write in the tool layer but does not confine host `bash`, which
+runs as the Gateway's own uid. Publishing copies the exact bytes and
+records who, when and from where; a name already there keeps both, nothing is
+overwritten; removing takes the file and leaves the record with who removed it
+and when. The routes carry the same `threads:*` authorities as the person's own
+files.
+
+#### List Shared Files
+
+```http
+GET /api/shared
+```
+
+**Response:**
+```json
+{
+  "files": [
+    {
+      "path": "Reports/2026-08-business-review.pdf",
+      "name": "2026-08-business-review.pdf",
+      "size": 48213,
+      "modified": 1757980800.0,
+      "virtual_path": "/mnt/user-data/shared/Reports/2026-08-business-review.pdf",
+      "url": "/api/shared/Reports/2026-08-business-review.pdf",
+      "published_by": "alex@example.com",
+      "published_at": "2026-09-19T10:00:00+00:00",
+      "from_thread_id": "11111111-1111-1111-1111-111111111111",
+      "can_remove": true
+    }
+  ],
+  "count": 1,
+  "truncated": false
+}
+```
+
+`published_by`, `published_at` and `from_thread_id` are the publication record.
+`published_by` is the person as a colleague would recognise them, resolved from
+the record's stored user id; it is null when the record has none (a file placed
+on the disk by hand) or when the account behind it is gone. A file with no
+record at all is listed with all three null.
+`can_remove` is decided per caller: the publisher, or an admin. The listing is
+recursive and sorted by path; hidden, symlinked and unaddressable paths are
+skipped. `truncated` is `true` when the area holds more files than one listing
+returns, in which case `files` is the first page of them by path.
+
+All four routes answer `503` when the deployment has no record store (the
+`memory` persistence backend), because a publication that cannot be recorded
+cannot say who shared it.
+
+#### Get One Shared File
+
+```http
+GET /api/shared/{path}
+```
+
+**Query Parameters:**
+- `download` (boolean): force a download; HTML, XHTML and SVG are always downloads
+
+Answers `200` with the file. `400` for a path that cannot name a file here
+(a link, or a path that escapes the area), `404` for one that is not there.
+
+#### Publish A File To Shared
+
+```http
+POST /api/shared/publish
+```
+
+**Request Body:**
+```json
+{
+  "path": "/mnt/user-data/outputs/report-3/2026-08-business-review.pdf",
+  "thread_id": "11111111-1111-1111-1111-111111111111",
+  "folder": "Reports"
+}
+```
+
+`path` is the file as the sandbox names it: one of the caller's own files
+(`/mnt/user-data/files/...`), or one of a conversation's uploads or outputs, in
+which case `thread_id` names the conversation and it must be the caller's.
+`folder` is where in Shared to put it; the root when omitted. Answers `201`
+with the same shape as one listing entry. `400` for a path outside those
+places or a folder that is not a plain path; `404` for a missing source or a
+conversation that is not the caller's.
+
+#### Remove One Shared File
+
+```http
+DELETE /api/shared/{path}
+```
+
+The publisher may, and an admin may; anyone else gets `403`. Removes the file
+and leaves the folder; the publication record keeps who removed it and when.
+`400` for a path that cannot name a file here, `404` for a missing file.
+
+**Response:**
+```json
+{
+  "success": true,
+  "message": "Removed Reports/2026-08-business-review.pdf"
+}
+```
+
 ### Thread Cleanup
 
 Remove DeerFlow-managed local thread files under `.deer-flow/threads/{thread_id}` after the LangGraph thread itself has been deleted.

@@ -1063,9 +1063,19 @@ def _sandbox_mounts_thread_data(app_config: AppConfig | None) -> bool:
     return not use
 
 
+SHARED_FILES_PROMPT_LINE = (
+    "- Shared: `/mnt/user-data/shared` - Files anyone at the company published for everyone, read-only "
+    "(`ls` it when the user refers to something a colleague shared). "
+    "You cannot put anything here: if they want something shared, say they can use **Share with everyone** "
+    "on the file or report in the app\n"
+)
+
+
 def _build_user_files_section(*, app_config: AppConfig | None = None) -> str:
-    """The per-user files bullet, only where the sandbox can see that directory."""
-    return USER_FILES_PROMPT_LINE if _sandbox_mounts_thread_data(app_config) else ""
+    """The files bullets — the person's own and the company's — only where the sandbox can see those directories."""
+    if not _sandbox_mounts_thread_data(app_config):
+        return ""
+    return USER_FILES_PROMPT_LINE + SHARED_FILES_PROMPT_LINE
 
 
 def _build_custom_mounts_section(*, app_config: AppConfig | None = None) -> str:

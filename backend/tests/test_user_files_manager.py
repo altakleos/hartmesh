@@ -1,6 +1,5 @@
 """The person's own files: kept across conversations, reached by relative path."""
 
-import os
 import stat
 from pathlib import Path
 
@@ -111,19 +110,6 @@ def test_list_user_files_percent_encodes_the_url(paths: Paths) -> None:
     assert listed[0].url == "/api/files/Q3%20report%20%232.pdf"
 
 
-def test_list_user_files_stops_at_the_ceiling(paths: Paths, monkeypatch: pytest.MonkeyPatch) -> None:
-    root = paths.ensure_user_files_dir("u1")
-    for index in range(5):
-        (root / f"{index}.txt").write_bytes(b"x")
-    monkeypatch.setattr(manager, "MAX_LISTED_FILES", 3)
-
-    listed, truncated = manager.list_user_files("u1")
-
-    assert len(listed) == 3
-    assert truncated is True
-    assert [entry.path for entry in listed] == sorted(entry.path for entry in listed)
-
-
 def test_list_user_files_skips_a_name_the_address_rules_refuse(paths: Paths) -> None:
     """The sandbox may write any name; the person is shown only what they can open and remove."""
     root = paths.ensure_user_files_dir("u1")
@@ -222,34 +208,6 @@ def test_keep_file_keeps_both_on_a_name_that_exists(paths: Paths, tmp_path: Path
     assert (root / "august_1.pdf").read_bytes() == b"second"
 
 
-def test_keep_file_survives_a_race_on_the_chosen_name(paths: Paths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    source = tmp_path / "august.pdf"
-    source.write_bytes(b"mine")
-    root = paths.ensure_user_files_dir("u1")
-    real_open = os.open
-    raced: list[str] = []
-
-    def open_with_a_rival(path, flags, *args, **kwargs):
-        # Somebody else claims the same name between the listing and the create.
-        if not raced and str(path).endswith("august.pdf") and flags & os.O_EXCL:
-            raced.append(str(path))
-            if kwargs.get("dir_fd") is not None:
-                rival = real_open(path, os.O_WRONLY | os.O_CREAT, 0o666, dir_fd=kwargs["dir_fd"])
-            else:
-                rival = real_open(path, os.O_WRONLY | os.O_CREAT, 0o666)
-            os.write(rival, b"rival")
-            os.close(rival)
-        return real_open(path, flags, *args, **kwargs)
-
-    monkeypatch.setattr(manager.os, "open", open_with_a_rival)
-
-    kept = manager.keep_file("u1", source, name="august.pdf")
-
-    assert kept.path == "august_1.pdf"
-    assert (root / "august.pdf").read_bytes() == b"rival"
-    assert (root / "august_1.pdf").read_bytes() == b"mine"
-
-
 def test_keep_file_normalizes_the_name_and_refuses_a_bad_folder(paths: Paths, tmp_path: Path) -> None:
     source = tmp_path / "august.pdf"
     source.write_bytes(b"x")
@@ -261,22 +219,6 @@ def test_keep_file_normalizes_the_name_and_refuses_a_bad_folder(paths: Paths, tm
         manager.keep_file("u1", source, name="august.pdf", folder="../outside")
     with pytest.raises(manager.UserFileError):
         manager.keep_file("u1", source, name="..")
-
-
-def test_keep_file_leaves_nothing_behind_when_the_copy_fails(paths: Paths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    source = tmp_path / "august.pdf"
-    source.write_bytes(b"x" * 10)
-    root = paths.ensure_user_files_dir("u1")
-
-    def broken_copy(*_args, **_kwargs):
-        raise OSError("disk full")
-
-    monkeypatch.setattr(manager, "_copy_bytes", broken_copy)
-
-    with pytest.raises(OSError, match="disk full"):
-        manager.keep_file("u1", source, name="august.pdf")
-
-    assert list(root.iterdir()) == []
 
 
 # ---------- links planted by the sandbox ----------

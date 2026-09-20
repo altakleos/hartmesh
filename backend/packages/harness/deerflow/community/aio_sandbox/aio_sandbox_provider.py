@@ -1346,6 +1346,10 @@ class AioSandboxProvider(
             # layout) has no user bucket to mount.
             paths.ensure_user_files_dir(effective_user_id)
             mounts.append((paths.host_user_files_dir(effective_user_id), f"{VIRTUAL_PATH_PREFIX}/files", False))
+        # The company's Shared area, the same for everyone and read-only in
+        # the sandbox: publication is the Gateway's alone.
+        paths.ensure_shared_dir()
+        mounts.append((paths.host_shared_dir(), f"{VIRTUAL_PATH_PREFIX}/shared", True))
         return mounts + [
             # ACP workspace: read-only inside the sandbox (lead agent reads results;
             # the ACP subprocess writes from the host side, not from within the container).

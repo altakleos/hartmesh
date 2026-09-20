@@ -42,6 +42,10 @@ class ThreadDataState(TypedDict):
     outputs_path: NotRequired[str | None]
     # The person's own files (``/mnt/user-data/files``): per user, not per thread.
     files_path: NotRequired[str | None]
+    # The company's Shared area (``/mnt/user-data/shared``): one for the whole
+    # tenant, the same on every thread of every person, and read-only to the
+    # sandbox — only the Gateway's publish route writes it.
+    shared_path: NotRequired[str | None]
 
 
 class BackgroundTaskState(TypedDict):

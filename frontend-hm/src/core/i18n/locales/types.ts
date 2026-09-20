@@ -304,6 +304,39 @@ export interface Translations {
     savedSome: (kept: number, total: number) => string;
     saveFailed: string;
     openMyFiles: string;
+    /** The page holding both tabs. */
+    pageTitle: string;
+  };
+
+  // The company's Shared area: what anyone published, readable by everyone.
+  shared: {
+    title: string;
+    description: string;
+    empty: string;
+    emptyHint: string;
+    loadFailed: string;
+    publishedBy: (who: string) => string;
+    publishedByNobody: string;
+    publisher: string;
+    published: string;
+    remove: string;
+    removeTitle: string;
+    removeConfirm: (name: string) => string;
+    removing: string;
+    removed: (name: string) => string;
+    removeFailed: string;
+    truncated: (count: number) => string;
+    shareWithEveryone: string;
+    sharing: string;
+    shared: (name: string) => string;
+    sharedMany: (count: number) => string;
+    sharedSome: (published: number, total: number) => string;
+    shareFailed: string;
+    openShared: string;
+    undo: string;
+    undone: (name: string) => string;
+    alreadyShared: string;
+    reportsFolder: string;
   };
 
   // Thread-scoped MCP background tasks

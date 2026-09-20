@@ -124,7 +124,10 @@ Two directories cross the container boundary:
   uploads and artifacts under `home/users/<user>/threads/<thread>/user-data/`
   and each person's kept files under `home/users/<user>/files/` (mounted into
   every sandbox of theirs at `/mnt/user-data/files`; no quota, nothing reaps
-  it, and it outlives the conversations it came from), so the pre-created
+  it, and it outlives the conversations it came from) and the company's
+  Shared area under `home/shared/` (mounted read-only into every sandbox at
+  `/mnt/user-data/shared`; written only by the Gateway's publish route, with
+  the publication records in the database), so the pre-created
   `uploads/` and `artifacts/` directories are unused by this profile and stay
   empty. `home/runtime/` is the other persistent consumer of this disk: the
   accepted skill snapshots and thread views a warm turn reuses instead of

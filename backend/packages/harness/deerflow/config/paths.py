@@ -14,6 +14,11 @@ VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 # mounted read-write into every sandbox of that user (see ``Paths.user_files_dir``).
 USER_FILES_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/files"
 _USER_FILES_SEGMENT = "files"
+# The company's Shared area: one directory for the tenant, mounted read-only
+# into every sandbox and written only by the Gateway's publish route (see
+# ``Paths.shared_dir``).
+SHARED_VIRTUAL_PREFIX = f"{VIRTUAL_PATH_PREFIX}/shared"
+_SHARED_SEGMENT = "shared"
 
 _SAFE_USER_ID_RE = re.compile(r"^[A-Za-z0-9_\-]+$")
 _SAFE_INTEGRATION_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]+$")
@@ -262,6 +267,31 @@ class Paths:
         files_dir.chmod(0o777)
         return files_dir
 
+    def shared_dir(self) -> Path:
+        """The company's Shared area: `{base_dir}/shared/`.
+
+        One directory for the tenant, not per user. Mounted at
+        ``/mnt/user-data/shared`` in every sandbox, so anyone at the company
+        can read what was published there; publishing is the Gateway's route,
+        never an agent's write. Container-backed providers hold that
+        read-only with the mount itself. ``LocalSandboxProvider`` refuses the
+        write in the tool layer, but its host ``bash`` runs as the Gateway's
+        own uid and is not confined to any mapping -- that backend is not a
+        filesystem boundary for Shared any more than it is for the rest of
+        ``{base_dir}``.
+        """
+        return self.base_dir / _SHARED_SEGMENT
+
+    def ensure_shared_dir(self) -> Path:
+        """Create the Shared area, readable by the sandbox uid and writable only by the Gateway."""
+        shared = self.shared_dir()
+        try:
+            shared.mkdir(parents=True)
+        except FileExistsError:
+            return shared
+        shared.chmod(0o755)
+        return shared
+
     def user_memory_file(self, user_id: str) -> Path:
         """Per-user memory file: `{base_dir}/users/{user_id}/memory.json`."""
         return self.user_dir(user_id) / "memory.json"
@@ -490,6 +520,10 @@ class Paths:
         """Host path for the per-user files mount source."""
         return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), _USER_FILES_SEGMENT)
 
+    def host_shared_dir(self) -> str:
+        """Host path for the tenant's Shared area mount source."""
+        return _join_host_path(self._host_base_dir_str(), _SHARED_SEGMENT)
+
     def host_user_custom_skills_dir(self, user_id: str) -> str:
         """Host path for a user's custom skills directory, preserving Windows path syntax."""
         return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), "skills", "custom")
@@ -545,7 +579,8 @@ class Paths:
             virtual_path: Virtual path as seen inside the sandbox, e.g.
                           ``/mnt/user-data/outputs/report.pdf``. A path under
                           ``/mnt/user-data/files`` names the owner's own files
-                          rather than the thread's data.
+                          rather than the thread's data, and one under
+                          ``/mnt/user-data/shared`` the company's Shared area.
                           Leading slashes are stripped before matching.
             user_id: Optional user ID for user-scoped path resolution.
 
@@ -565,7 +600,12 @@ class Paths:
             raise ValueError(f"Path must start with /{prefix}")
 
         relative = stripped[len(prefix) :].lstrip("/")
-        if relative == _USER_FILES_SEGMENT or relative.startswith(_USER_FILES_SEGMENT + "/"):
+        if relative == _SHARED_SEGMENT or relative.startswith(_SHARED_SEGMENT + "/"):
+            # The company's Shared area is nobody's thread and nobody's user
+            # bucket: it resolves the same for everyone.
+            base = self.shared_dir().resolve()
+            relative = relative[len(_SHARED_SEGMENT) :].lstrip("/")
+        elif relative == _USER_FILES_SEGMENT or relative.startswith(_USER_FILES_SEGMENT + "/"):
             # The person's files are not under the thread: they resolve to the
             # owner's directory from any of that owner's threads, and to nobody
             # else's. The legacy thread layout has no owner and so no files.

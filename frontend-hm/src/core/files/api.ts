@@ -8,6 +8,11 @@
 
 import { fetch } from "../api/fetcher";
 import { getBackendBaseURL } from "../config";
+import {
+  encodeRelativePath,
+  FileAreaRequestError,
+  readErrorDetail,
+} from "../file-areas";
 
 /** Where the sandbox sees the person's files. */
 export const MY_FILES_VIRTUAL_PREFIX = "/mnt/user-data/files";
@@ -37,33 +42,10 @@ export interface KeepInMyFilesRequest {
   folder?: string;
 }
 
-export class MyFilesRequestError extends Error {
-  readonly status: number;
-
+export class MyFilesRequestError extends FileAreaRequestError {
   constructor(status: number, message: string) {
-    super(message);
-    this.name = "MyFilesRequestError";
-    this.status = status;
+    super(status, message, "MyFilesRequestError");
   }
-}
-
-async function readErrorDetail(
-  response: Response,
-  fallback: string,
-): Promise<string> {
-  const data = (await response.json().catch(() => null)) as unknown;
-  if (
-    typeof data === "object" &&
-    data !== null &&
-    typeof (data as { detail?: unknown }).detail === "string"
-  ) {
-    return (data as { detail: string }).detail;
-  }
-  return fallback;
-}
-
-function encodeRelativePath(path: string) {
-  return path.split("/").map(encodeURIComponent).join("/");
 }
 
 /** Where the browser fetches one of the person's files. */
