@@ -18,6 +18,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
+from app.gateway.auth.mode import owner_is_inert, sign_on_required
 from app.gateway.auth_disabled import (
     AUTH_SOURCE_AUTH_DISABLED,
     AUTH_SOURCE_INTERNAL,
@@ -112,6 +113,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             owner_user_id = request.headers.get(INTERNAL_OWNER_USER_ID_HEADER_NAME)
             if owner_user_id:
                 owner_user_id = owner_user_id.strip()
+            if owner_user_id and await owner_is_inert(owner_user_id):
+                # Sign-on only: an internal service may not act as an account
+                # this mode does not honour (an IM connection bound while
+                # its owner still held a local session).
+                record_run_evidence_outcome(request, "refused", actor_digest=evidence_actor_digest)
+                if is_runtime_api_path(request.url.path):
+                    return runtime_error_response(401, FailureCode.denied)
+                return JSONResponse(status_code=401, content={"detail": sign_on_required(401).detail})
             internal_user = get_internal_user(owner_user_id=owner_user_id or None)
 
         auth_source = AUTH_SOURCE_SESSION

@@ -855,7 +855,7 @@ def profile_local_auth() -> LocalAuthConfig:
     sys.modules[spec.name] = module
     try:
         spec.loader.exec_module(module)
-        environ = {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0"}
+        environ = {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0", "HARTMESH_LOCAL_PASSWORDS": "allowed"}
         rendered, _ = module.render_text((PROFILE / "config.yaml").read_text(encoding="utf-8"), module.load_catalog(PROFILE / "providers"), environ)
     finally:
         sys.modules.pop(spec.name, None)

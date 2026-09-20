@@ -44,7 +44,7 @@ other. Documentation values are in `.env.example`, which renders under
 | Key | Consumed by |
 | --- | --- |
 | `HARTMESH_TENANT` | `DEER_FLOW_TENANT_ID` on the Gateway (a DNS label). |
-| `HARTMESH_PUBLIC_HOST` | nginx `server_name` only. Nothing in the application consumes it: the frontend derives its API origin from the page and its `NEXT_PUBLIC_*` values are baked at build time. |
+| `HARTMESH_PUBLIC_HOST` | nginx `server_name`, and in sign-on-only mode the callback and the frontend address `gateway/render_config.py` derives from it (§ "Sign-in"). Nothing else in the application consumes it: the frontend derives its API origin from the page and its `NEXT_PUBLIC_*` values are baked at build time. |
 | `HARTMESH_TRUSTED_PROXIES` | nginx `set_real_ip_from`, one per comma-separated address or CIDR. The front-door proxies whose `X-Forwarded-For` is trusted as the client address. |
 | `HARTMESH_LISTEN` | nginx's published port, `<bind address>:<port>`; the only published port in the stack. |
 | `HARTMESH_DATA_DIR` | Every bind mount, `DEER_FLOW_HOME`, `DEER_FLOW_HOST_BASE_DIR`, the rendered `config.yaml`, and the service-level `env_file` (`${HARTMESH_DATA_DIR}/.env`). Fixed at `/srv/hartmesh` by `config.yaml`, see below. |
@@ -53,6 +53,8 @@ other. Documentation values are in `.env.example`, which renders under
 | `POSTGRES_PASSWORD` | `initdb` on the first start and `DATABASE_URL` on every start. Stable for the tenant's lifetime. |
 | `REDIS_PASSWORD` | `redis-server --requirepass` and `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`. Stable for the tenant's lifetime. |
 | `AUTH_JWT_SECRET` | The Gateway's session-signing secret, so sessions survive a `home/` restored from backup. |
+| `HARTMESH_SIGN_ON_ISSUER`, `HARTMESH_SIGN_ON_CLIENT_ID`, `HARTMESH_SIGN_ON_CLIENT_SECRET` | The sign-in mode, one side or the other: all three present is sign-on only, the identity provider as the one way in (§ "Sign-in"). Read by `gateway/render_config.py`; the secret reaches the Gateway as the reference `$HARTMESH_SIGN_ON_CLIENT_SECRET` and is never written to disk. |
+| `HARTMESH_LOCAL_PASSWORDS` | The other side: exactly `allowed`, and none of the three above, is local passwords as before. Neither side, both, or one or two of the three refuses to render and the Gateway does not start. |
 
 Provider keys follow verbatim, any subset of the `*_API_KEY` names
 `config.example.yaml` references; nothing guarantees any particular one is
@@ -64,10 +66,11 @@ Gateway's `env_file` are the same file): a bare `$NAME` or `${NAME}` inside a
 value is interpolated, ` #` after whitespace starts a comment, and surrounding
 quotes are stripped. A secret carrying a `$` would therefore be silently
 rewritten before the Gateway saw it. The operator single-quotes every value it
-does not fix itself (the bao secrets and every provider key), which disables
-interpolation entirely, and refuses a value containing a single quote or a
-newline, which the format cannot carry. The fixed keys are quote-free by
-construction.
+does not fix itself (the bao secrets, every provider key, and the sign-on
+client secret), which disables interpolation entirely, and refuses a value
+containing a single quote or a newline, which the format cannot carry. The
+fixed keys are quote-free by construction; an issuer URL carrying `#` or `$`
+must be single-quoted too.
 
 Only the Gateway receives the whole `.env` (`env_file`). The frontend and nginx
 get explicit `environment:` entries and never see a provider key.
@@ -79,6 +82,11 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
 | `SANDBOX_READY_TIMEOUT` | The cold-start readiness budget, `sandbox.ready_timeout` in the rendered `config.yaml`: whole seconds from 60 to 600. Absent -- which is what every existing tenant `.env` is -- the template's 120 applies. Anything else (zero, a negative or fractional number, text, a value outside the range) refuses to render and the Gateway does not start, so no value can turn the deadline off (§ "Sandbox readiness budget"). |
+| `HARTMESH_SIGN_ON_ADMINS` | Sign-on only. Comma-separated email addresses that become the provider's `admin_emails`: an address on it is created as `admin` at its first sign-in, every other address as `user`. Absent, the deployment has **no administrator** (§ "Sign-in"). |
+| `HARTMESH_SIGN_ON_SCOPES` | Sign-on only. Extra scopes to request, separated by spaces or commas, appended to the default `openid email profile`; some providers emit a claim only when its scope is asked for. Absent, the default three. |
+| `HARTMESH_SIGN_ON_CLIENT_AUTH` | Sign-on only. How the Gateway authenticates at the token endpoint: `client_secret_post` (absent) or `client_secret_basic`. The deployer registers the client to match. |
+| `HARTMESH_SIGN_ON_NAME` | Sign-on only. The label on the sign-in button ("Continue with …"), at most 64 printable characters. Absent, `Single sign-on`. |
+| `AUTH_TOKEN_EXPIRY_DAYS` | Both modes. The session lifetime in whole days, 1 to 30 (the product's bound). Absent -- which is what every existing tenant `.env` is -- 7, exactly as before. Anything else refuses to render and the Gateway does not start. |
 | `HARTMESH_SANDBOX_RESOLV_CONF` | The Docker host's upstream DNS file, default `/run/systemd/resolve/resolv.conf` on the Debian tenant VM. The Gateway receives a read-only view; open-mode runsc sandboxes bind the validated file at `/etc/resolv.conf`. On hosts without systemd-resolved, select an existing resolver file containing reachable upstream IP addresses. A loopback stub file is refused (§ "DNS under gVisor"). |
 
 These are absent from `.env.example`: the fixed keys are what onboarding
@@ -90,12 +98,163 @@ creating an empty directory in its place.
 They reach the stack by different routes, on purpose. Both `HARTMESH_APP_SUBNET`
 uses are the same `${HARTMESH_APP_SUBNET:-...}` reference, so an override
 cannot move the network without moving the Gateway's trust with it.
-`HARTMESH_MODELS_FILE` and `SANDBOX_READY_TIMEOUT` are not interpolated by
-`compose.yaml` at all: they reach the Gateway through `env_file` and are read
-inside the container by `gateway/render_config.py`, so leaving either unset is
-simply an unset variable rather than a hole in the rendered Compose document.
+`HARTMESH_MODELS_FILE`, `SANDBOX_READY_TIMEOUT`, the sign-in keys and the
+`HARTMESH_SIGN_ON_*` options are not interpolated by `compose.yaml` at all:
+they reach the Gateway through `env_file` and are read inside the container by
+`gateway/render_config.py`, so leaving one unset is simply an unset variable
+rather than a hole in the rendered Compose document.
 The resolver source and its Gateway environment value share the same
 interpolation, so validation reads the file Docker will bind into the sandbox.
+
+## Sign-in
+
+Who may enter a tenant is the `.env`'s to say, and it says it one of two ways.
+Nothing is assumed: a `.env` that says neither, says both, or sets one or two
+of the three sign-on keys refuses to render, `gateway/run.sh` exits, and the
+Gateway never becomes ready, with the refusal naming every key involved in
+its journal. This deliberately breaks the convention of the optional keys
+above, where an absent key means "exactly as before". The reason is the
+direction of failure on a tenant published on the internet: a forgotten key
+that leaves local registration open is noticed by nobody, while a forgotten
+key that leaves a tenant nobody can enter is noticed at once.
+
+### Sign-on only (the three sign-on keys)
+
+```
+HARTMESH_SIGN_ON_ISSUER=https://login.example.com/realms/tenant
+HARTMESH_SIGN_ON_CLIENT_ID=hartmesh
+HARTMESH_SIGN_ON_CLIENT_SECRET='…'
+```
+
+All three present, the rendered `config.yaml` carries one OIDC provider,
+named `sso`, enabled, with local passwords switched off
+(`auth.local.enabled: false`, `allow_registration: false`). The identity
+provider is the one way in:
+
+- **The callback** the deployer registers at the provider is
+  `https://<HARTMESH_PUBLIC_HOST>/api/v1/auth/callback/sso`, computable from
+  the public host alone before the VM exists; the frontend address is
+  `https://<HARTMESH_PUBLIC_HOST>`. The host is a bare hostname (a value with
+  a port or a scheme refuses to render), and the issuer must be an
+  `https://` URL: the ID token's `iss` is checked against it exactly.
+- **Client authentication** at the token endpoint is `client_secret_post`
+  unless `HARTMESH_SIGN_ON_CLIENT_AUTH=client_secret_basic`; register the
+  client to match. The authorization-code flow uses PKCE (S256) and a nonce,
+  and the ID token is checked for signature, issuer, audience and expiry.
+- **Scopes** requested are `openid email profile`, plus whatever
+  `HARTMESH_SIGN_ON_SCOPES` adds.
+- **Accounts** are created at a person's first sign-in and a verified email
+  is required (the product's defaults). An address on
+  `HARTMESH_SIGN_ON_ADMINS` is created as `admin`, any other as `user`.
+  First-admin initialization is closed in this mode, so that list is the only
+  way a sign-on-only deployment gets an administrator: **a deployment without
+  it has no administrator.** What each role may do is unchanged: an administrator holds
+  the developer screens and the administrative routes (lockouts, skill
+  install, MCP and integration configuration, sharing removal); a `user`
+  runs ordinary chats with every tool and the sandbox.
+- **The session** lives `AUTH_TOKEN_EXPIRY_DAYS` days (7 unless set).
+- **The button** reads "Continue with `HARTMESH_SIGN_ON_NAME`" (default
+  `Single sign-on`), and it is the only thing the login page offers: no
+  local form, no create-admin page, no register link.
+
+What this mode closes, whatever the admin count and on whatever database the
+Gateway starts on -- an empty one, one with accounts but no admin, one that
+already holds local accounts, which is what a restore produces:
+
+- `POST /api/v1/auth/initialize`, `/login/local`, `/register` and
+  `/change-password` answer `403` (`change-password` `401`) with the code
+  `sign_on_required` and create nothing;
+- an account without a provider identity is **inert**: no session and no
+  personal access token of such an account is honoured, including ones
+  minted before the switch (`401`);
+- `GET /api/v1/auth/setup-status` is the constant
+  `{"needs_setup": false, "registration_enabled": false, "sign_on_only": true}`;
+- the `reset_admin` command refuses and says why, before it opens the
+  database;
+- `DEER_FLOW_AUTH_DISABLED=1` refuses the start, whatever `DEER_FLOW_ENV`
+  says;
+- the Gateway's internal-caller headers (`X-DeerFlow-Internal-Token`,
+  `X-DeerFlow-Owner-User-Id`) are blanked by nginx in every location it
+  proxies, in both modes: the published port is nginx, so whatever a client
+  sends in them dies there, whether or not `DEER_FLOW_INTERNAL_AUTH_TOKEN`
+  is set. Internal services keep working; their one sender is the channel
+  manager inside the Gateway process, which never crosses nginx.
+
+**The readiness signal.** `GET /health` on the Gateway carries `"auth_mode":
+"sign_on_only"` or `"local"`, readable without credentials from inside the
+deployment (`gateway:8001` on the `app` network) and also through nginx,
+which proxies `/health`; the mode it names is what the login page shows
+anyone anyway. The Gateway's journal has one line at start, `auth mode:
+sign_on_only (local passwords off; provider sso (…))`. An apply asserts
+either before it publishes the tenant.
+
+**Local accounts from before the switch.** A database that already holds
+local-password accounts keeps them, inert. Their owners see the provider's
+sign-in and nothing else; a session they still hold answers `401
+sign_on_required` and the page sends them to sign in. Their address is
+still held by the inert row, so signing in through the provider with that
+address is refused with `sso_account_exists` until the row is gone -- an
+identity-provider account is never linked onto a local one. Clearing them is
+the deployer's job, with the Gateway stopped:
+`DELETE FROM users WHERE password_hash IS NOT NULL AND oauth_provider IS NULL;`
+(their conversations stay in the database under the old account id and are
+not reachable by the new one). A tenant deployed in this mode starts with no
+local accounts and needs none.
+
+**An account never crosses issuers.** Each provider-created account records
+the issuer that created it (`users.oauth_issuer`, migration
+`0039_users_oauth_issuer`), and a sign-in whose subject matches but whose
+issuer does not is refused with `sso_not_allowed` -- so pointing
+`HARTMESH_SIGN_ON_ISSUER` at another provider cannot hand an account to
+whoever holds the same subject there. Accounts created before this column
+existed carry no issuer; the first start on this release pins every such
+row under `sso` to the issuer configured at that moment (the last moment it
+is known for certain), and one a bare deployment misses adopts the
+configured issuer at its next sign-in.
+When the issuer's address legitimately changes (the same provider at a new
+URL, the same subjects), re-point the recorded issuer with the Gateway
+stopped, then change the key and start:
+`UPDATE users SET oauth_issuer = '<new issuer>' WHERE oauth_provider = 'sso' AND oauth_issuer = '<old issuer>';`
+
+**Upgrade note.** These keys are honoured from `v2.1.0+hartmesh.30`, the
+first release carrying them. A release older than that ignores them and
+serves local passwords with registration open, exactly as before. From
+`.30` on, a tenant whose `.env` carries neither side **stops at start**: put
+`HARTMESH_LOCAL_PASSWORDS=allowed` (today's behaviour) or the three sign-on
+keys into `.env` before the pin moves. To check the render before the
+restart, run the **new** bundle's renderer (the `.29` renderer knows no
+sign-in keys and renders clean whatever `.env` says) against the edited keys
+passed explicitly -- `docker compose exec` sees the running container's
+environment from its creation, not the edited file, so without `-e` it
+reports exactly the refusal the check is meant to rule out (the same caveat
+as § "Operator-managed models"):
+
+```bash
+docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
+  exec --user 1000 -e HARTMESH_LOCAL_PASSWORDS=allowed gateway \
+  sh -c 'cd /app/backend && PYTHONPATH=. uv run --no-sync python /opt/hartmesh/gateway/render_config.py --template /opt/hartmesh/config.yaml --catalog /opt/hartmesh/providers --check'
+```
+
+(or `-e HARTMESH_SIGN_ON_ISSUER=… -e HARTMESH_SIGN_ON_CLIENT_ID=… -e
+HARTMESH_SIGN_ON_CLIENT_SECRET=…` for sign-on) reports
+`sign-in=sign_on_only (provider sso, callback …)` or `sign-in=local`, or the
+refusal. A tenant that was upgraded without the key shows the refusal in the
+Gateway's journal (`render_config: refusing to render: no sign-in mode is
+selected …`), the container exits and restarts until the key is added and
+`up -d` is run again. A sign-on option (`HARTMESH_SIGN_ON_ADMINS`, `_SCOPES`,
+`_CLIENT_AUTH`, `_NAME`) set beside `HARTMESH_LOCAL_PASSWORDS=allowed` also
+refuses rather than being ignored. `.env.example` shows sign-on-only mode.
+
+### Local passwords (`HARTMESH_LOCAL_PASSWORDS=allowed`)
+
+Today's behaviour, unchanged: the rendered `auth` block is the template's
+lockout policy and nothing else, so local login, registration
+(`allow_registration` at its default, open), the first-admin page and
+`reset_admin` all work exactly as before, and the rendered `config.yaml` is
+byte for byte the previous release's render. For a consumer who wants local
+passwords; not for a tenant published on the internet under this profile's
+rule that a person has access only while the company's identity provider
+says so.
 
 ## Mount points
 
@@ -1879,6 +2038,7 @@ config ConfigMap under the chart README's recommended values, at
 | `run_events.backend` | upstream default (`memory`) | `db` | run events survive a Gateway restart on a single-Gateway VM |
 | `auth.local.lockout_store` | absent (`memory`) | `redis` | § "Login lockout": one replica with a recreate rollout, so clearing a lockout must not need a restart |
 | `auth.local.source_max_failures` | absent (`300`) | `600` | § "Login lockout": twenty staff reaching their own account lock and retrying past it is 300 failures exactly, so the generic limit leaves the office no margin |
+| `auth.local.enabled`, `auth.local.allow_registration`, `auth.oidc` | absent (local passwords, registration open) | in sign-on-only mode `false`, `false`, and one provider `sso`; in local mode absent | § "Sign-in": the `.env` selects the mode, and the template carries no open default |
 
 ## Moving the `app` subnet on a running tenant
 

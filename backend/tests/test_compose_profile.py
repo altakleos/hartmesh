@@ -57,7 +57,12 @@ OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 # Optional keys compose.yaml never interpolates: they reach the Gateway
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
-PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE", "SANDBOX_READY_TIMEOUT"}
+PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE", "SANDBOX_READY_TIMEOUT", "HARTMESH_SIGN_ON_ADMINS", "HARTMESH_SIGN_ON_SCOPES", "HARTMESH_SIGN_ON_CLIENT_AUTH", "HARTMESH_SIGN_ON_NAME", "AUTH_TOKEN_EXPIRY_DAYS"}
+# The sign-in mode: one side or the other is required, read by
+# gateway/render_config.py only. See tests/test_compose_sign_on.py.
+SIGN_ON_KEYS = {"HARTMESH_SIGN_ON_ISSUER", "HARTMESH_SIGN_ON_CLIENT_ID", "HARTMESH_SIGN_ON_CLIENT_SECRET"}
+LOCAL_PASSWORDS_KEY = "HARTMESH_LOCAL_PASSWORDS"
+MODE_KEYS = SIGN_ON_KEYS | {LOCAL_PASSWORDS_KEY}
 MEMORY_MIB = {"gateway": 1088, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256, "searxng": 256}
 # The sandbox image's own service switches (its entrypoint compares each to the
 # string "true"): the profile ships every sandbox with the browser, VNC,
@@ -127,7 +132,9 @@ def _mib(value: str) -> int:
 
 
 def _base_environ() -> dict[str, str]:
-    return {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0"}
+    # Local-password mode: the render every test here relied on before the
+    # sign-in mode existed, and still the same document.
+    return {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0", LOCAL_PASSWORDS_KEY: "allowed"}
 
 
 def _open_runsc_environ() -> dict[str, str]:
@@ -712,9 +719,11 @@ def test_single_quoted_env_values_pass_through_compose_verbatim(tmp_path: Path) 
 def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     lines = (PROFILE / ".env.example").read_text(encoding="utf-8").splitlines()
     keys = {line.split("=", 1)[0] for line in lines if line and not line.startswith("#")}
-    assert keys == CONTRACT_KEYS
+    assert keys == CONTRACT_KEYS | SIGN_ON_KEYS, "the example shows sign-on-only mode"
     comments = [line for line in lines if line.startswith("#")]
-    assert len(comments) == 1 and "verbatim" in comments[0] and "subset" in comments[0]
+    assert len(comments) == 2
+    assert "sign-on-only" in comments[0] and LOCAL_PASSWORDS_KEY in comments[0] and "callback" in comments[0]
+    assert "verbatim" in comments[1] and "subset" in comments[1]
     values = dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
     assert values["HARTMESH_TRUSTED_PROXIES"] == "192.0.2.10,192.0.2.11"
     assert values["HARTMESH_PUBLIC_HOST"] == "tenant.example.com"
@@ -761,7 +770,8 @@ def test_profile_consumes_no_key_outside_the_contract() -> None:
     seams = {"HARTMESH_RENDER_ONLY", "HARTMESH_NGINX_SOURCE", "HARTMESH_NGINX_TARGET"}
     for path in (PROFILE / "gateway" / "run.sh", PROFILE / "gateway" / "entrypoint.sh", PROFILE / "gateway" / "render_config.py", PROFILE / "nginx" / "render.sh"):
         names = set(contract_like.findall(path.read_text(encoding="utf-8"))) - seams
-        assert names <= CONTRACT_KEYS | OPTIONAL_KEYS | PASSTHROUGH_KEYS, (path.name, names - CONTRACT_KEYS - OPTIONAL_KEYS - PASSTHROUGH_KEYS)
+        allowed = CONTRACT_KEYS | OPTIONAL_KEYS | PASSTHROUGH_KEYS | MODE_KEYS
+        assert names <= allowed, (path.name, names - allowed)
 
 
 def test_gateway_entrypoint_drops_to_uid_1000_with_the_socket_group_and_runs_one_worker() -> None:
@@ -958,7 +968,7 @@ def test_check_mode_refuses_a_bad_readiness_budget_and_writes_nothing(render_con
 
 def test_render_refuses_a_template_reference_to_an_unset_variable(render_config: ModuleType) -> None:
     with pytest.raises(render_config.RenderError, match="DATABASE_URL"):
-        render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), {})
+        render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), {LOCAL_PASSWORDS_KEY: "allowed"})
 
 
 def test_render_output_is_a_valid_app_config(render_config: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

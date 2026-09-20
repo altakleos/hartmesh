@@ -3065,6 +3065,17 @@ authorization:
 
 # auth:
 #   local:
+#     # Sign-on-only mode. false switches local passwords off altogether: an
+#     # enabled OIDC provider below is then the one way in. Local login,
+#     # registration, first-admin initialization and password change all
+#     # refuse whatever the admin count; an account without a provider
+#     # identity is inert (no session, no personal access token, including
+#     # ones minted before the switch); setup-status tells an unauthenticated
+#     # caller nothing about bootstrap; the reset_admin command refuses;
+#     # DEER_FLOW_AUTH_DISABLED refuses the start. Requires auth.oidc.enabled
+#     # with at least one provider, or the config is refused. /health carries
+#     # auth_mode: local | sign_on_only.
+#     # enabled: true
 #     allow_registration: false
 #     # Login throttling. The lock that matters is keyed on the ACCOUNT:
 #     # five failures against one email address lock that address for five

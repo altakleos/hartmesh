@@ -9,6 +9,8 @@ from pydantic import BaseModel, Field
 logger = logging.getLogger(__name__)
 
 _SECRET_FILE = ".jwt_secret"
+TOKEN_EXPIRY_DAYS_ENV_VAR = "AUTH_TOKEN_EXPIRY_DAYS"
+TOKEN_EXPIRY_DAYS_RANGE = (1, 30)
 
 
 class AuthConfig(BaseModel):
@@ -30,6 +32,23 @@ class AuthConfig(BaseModel):
 
 
 _auth_config: AuthConfig | None = None
+
+
+def token_expiry_days_from_environment() -> int | None:
+    """The session lifetime the operator set, or None for the model default.
+
+    Whole days within :data:`TOKEN_EXPIRY_DAYS_RANGE`, the bound the model
+    has always carried. Anything else raises here, naming the variable and
+    the rule and not the value, so a start can refuse it before a session
+    is ever minted.
+    """
+    raw = os.environ.get(TOKEN_EXPIRY_DAYS_ENV_VAR, "").strip()
+    if not raw:
+        return None
+    low, high = TOKEN_EXPIRY_DAYS_RANGE
+    if not raw.isdigit() or not low <= int(raw) <= high:
+        raise ValueError(f"{TOKEN_EXPIRY_DAYS_ENV_VAR} must be a whole number of days from {low} to {high} (or unset)")
+    return int(raw)
 
 
 def _load_or_create_secret() -> str:
@@ -75,7 +94,8 @@ def get_auth_config() -> AuthConfig:
                 "For production, add AUTH_JWT_SECRET to your .env file: "
                 'python -c "import secrets; print(secrets.token_urlsafe(32))"'
             )
-        _auth_config = AuthConfig(jwt_secret=jwt_secret)
+        expiry_days = token_expiry_days_from_environment()
+        _auth_config = AuthConfig(jwt_secret=jwt_secret) if expiry_days is None else AuthConfig(jwt_secret=jwt_secret, token_expiry_days=expiry_days)
     return _auth_config
 
 

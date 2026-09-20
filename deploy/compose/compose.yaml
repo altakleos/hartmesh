@@ -333,7 +333,8 @@ services:
     # image's /docker-entrypoint.d templating never runs.
     command: ["sh", "/opt/hartmesh/nginx/render.sh"]
     environment:
-      # server_name only; nothing in the application consumes this host.
+      # server_name here; in sign-on-only mode gateway/render_config.py also
+      # derives the sign-on callback from it (README: "Sign-in").
       HARTMESH_PUBLIC_HOST: ${HARTMESH_PUBLIC_HOST:?HARTMESH_PUBLIC_HOST is a required .env key}
       # The front-door proxies whose X-Forwarded-For nginx trusts as the
       # client address (set_real_ip_from), one per comma-separated entry.

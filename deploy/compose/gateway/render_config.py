@@ -25,6 +25,17 @@ seconds from 60 to 600; anything else refuses to render, so no value can
 disable the cold-start deadline. The rendered document is checked so that no
 ``$NAME`` reference remains for a variable that is absent or empty.
 
+The sign-in mode is selected by the tenant ``.env`` and nothing is assumed:
+the three sign-on keys (``HARTMESH_SIGN_ON_ISSUER``, ``_CLIENT_ID``,
+``_CLIENT_SECRET``) render the identity provider as the one way in --
+``auth.local.enabled: false``, registration off, one provider named ``sso``
+whose callback is ``https://<HARTMESH_PUBLIC_HOST>/api/v1/auth/callback/sso``
+-- while ``HARTMESH_LOCAL_PASSWORDS=allowed`` copies the template's ``auth``
+through unchanged, which is local passwords exactly as before. Neither, both,
+or a half-set sign-on group refuses to render and names every key involved
+(README: "Sign-in"). The client secret reaches the Gateway as the reference
+``$HARTMESH_SIGN_ON_CLIENT_SECRET`` and is never written to disk.
+
 ``HARTMESH_MODELS_FILE`` is optional. Absent (or empty), everything above is
 the whole story. Set, it names a YAML file on the tenant's own data disk --
 mounted read-only at ``<HARTMESH_DATA_DIR>/operator`` -- carrying ``models:``
@@ -82,6 +93,31 @@ READY_TIMEOUT_ENV = "SANDBOX_READY_TIMEOUT"
 READY_TIMEOUT_RANGE = (60, 600)
 _WHOLE_SECONDS = re.compile(r"\A[0-9]+\Z")
 MODELS_ENV = "HARTMESH_MODELS_FILE"
+# ── Sign-in mode ────────────────────────────────────────────────────────────
+SIGN_ON_ISSUER_ENV = "HARTMESH_SIGN_ON_ISSUER"
+SIGN_ON_CLIENT_ID_ENV = "HARTMESH_SIGN_ON_CLIENT_ID"
+SIGN_ON_CLIENT_SECRET_ENV = "HARTMESH_SIGN_ON_CLIENT_SECRET"
+SIGN_ON_KEYS = (SIGN_ON_ISSUER_ENV, SIGN_ON_CLIENT_ID_ENV, SIGN_ON_CLIENT_SECRET_ENV)
+LOCAL_PASSWORDS_ENV = "HARTMESH_LOCAL_PASSWORDS"
+LOCAL_PASSWORDS_VALUE = "allowed"
+SIGN_ON_ADMINS_ENV = "HARTMESH_SIGN_ON_ADMINS"
+SIGN_ON_SCOPES_ENV = "HARTMESH_SIGN_ON_SCOPES"
+SIGN_ON_CLIENT_AUTH_ENV = "HARTMESH_SIGN_ON_CLIENT_AUTH"
+SIGN_ON_NAME_ENV = "HARTMESH_SIGN_ON_NAME"
+SIGN_ON_OPTIONAL_KEYS = (SIGN_ON_ADMINS_ENV, SIGN_ON_SCOPES_ENV, SIGN_ON_CLIENT_AUTH_ENV, SIGN_ON_NAME_ENV)
+PUBLIC_HOST_ENV = "HARTMESH_PUBLIC_HOST"
+TOKEN_EXPIRY_DAYS_ENV = "AUTH_TOKEN_EXPIRY_DAYS"
+TOKEN_EXPIRY_DAYS_RANGE = (1, 30)
+SIGN_IN_MODES = ("sign_on_only", "local")
+# The provider's name is fixed so the callback a deployer registers is
+# computable from the public host alone, before the VM exists.
+SIGN_ON_PROVIDER_ID = "sso"
+SIGN_ON_DEFAULT_NAME = "Single sign-on"
+SIGN_ON_DEFAULT_SCOPES = ("openid", "email", "profile")
+SIGN_ON_CLIENT_AUTH_METHODS = ("client_secret_post", "client_secret_basic")
+_HOSTNAME = re.compile(r"\A[A-Za-z0-9.-]+\Z")
+_SCOPE = re.compile(r"\A[A-Za-z0-9_.:/-]+\Z")
+_EMAIL = re.compile(r"\A[^\s@]+@[^\s@]+\.[^\s@]+\Z")
 OPERATOR_DIRECTORY = "<HARTMESH_DATA_DIR>/operator"
 # A field is credential-bearing when its name's last `_`/`-` segment is one of
 # these. Suffix matching on segments, not substrings, is what keeps `max_tokens`
@@ -447,6 +483,119 @@ def open_runsc_resolver_mount(environ: Mapping[str, str]) -> dict[str, object]:
     return {"host_path": source, "container_path": "/etc/resolv.conf", "read_only": True}
 
 
+def select_sign_in(environ: Mapping[str, str]) -> str:
+    """Return the sign-in mode the contract selected, or refuse.
+
+    Three outcomes and no fourth: every sign-on key present is
+    ``sign_on_only``; ``HARTMESH_LOCAL_PASSWORDS=allowed`` alone is ``local``;
+    neither, both, or a half-set sign-on group is a refusal that names every
+    key involved. Nothing falls back to local passwords: a forgotten key is a
+    tenant nobody can enter, which is noticed at once, where an open one on
+    the internet is not.
+    """
+
+    present = [name for name in SIGN_ON_KEYS if _present(environ, name)]
+    local = environ.get(LOCAL_PASSWORDS_ENV, "").strip()
+    if local and local != LOCAL_PASSWORDS_VALUE:
+        raise RenderError(f"{LOCAL_PASSWORDS_ENV} must be exactly `{LOCAL_PASSWORDS_VALUE}` (or absent)")
+    if local and present:
+        raise RenderError(f"{LOCAL_PASSWORDS_ENV} and the sign-on keys ({', '.join(present)}) are both set; a tenant signs in one way. Remove one side")
+    if local:
+        stray = [name for name in SIGN_ON_OPTIONAL_KEYS if _present(environ, name)]
+        if stray:
+            raise RenderError(f"{LOCAL_PASSWORDS_ENV}={LOCAL_PASSWORDS_VALUE} selects local passwords, but the sign-on options {', '.join(stray)} are set and would be ignored. Remove them, or select sign-on with the three sign-on keys")
+        return "local"
+    if not present:
+        raise RenderError(f"no sign-in mode is selected: set the sign-on keys {', '.join(SIGN_ON_KEYS)} for the identity provider, or {LOCAL_PASSWORDS_ENV}={LOCAL_PASSWORDS_VALUE} for local passwords. Nothing is assumed")
+    missing = [name for name in SIGN_ON_KEYS if name not in present]
+    if missing:
+        raise RenderError(f"the sign-on keys are incomplete: missing {', '.join(missing)} (present: {', '.join(present)}). Nothing falls back to local passwords")
+    return "sign_on_only"
+
+
+def select_token_expiry_days(environ: Mapping[str, str]) -> int | None:
+    """Validate the optional session lifetime the Gateway reads from its environment."""
+
+    raw = environ.get(TOKEN_EXPIRY_DAYS_ENV, "").strip()
+    if not raw:
+        return None
+    low, high = TOKEN_EXPIRY_DAYS_RANGE
+    if not _WHOLE_SECONDS.match(raw) or not low <= int(raw) <= high:
+        raise RenderError(f"{TOKEN_EXPIRY_DAYS_ENV} must be a whole number of days from {low} to {high} (or absent)")
+    return int(raw)
+
+
+def _split_list(raw: str) -> list[str]:
+    return [item for item in re.split(r"[,\s]+", raw.strip()) if item]
+
+
+def sign_on_auth(template_auth: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
+    """The rendered ``auth`` block for sign-on-only mode.
+
+    Diagnostics name the key and the rule, never the value: the issuer,
+    the client id and every optional value are operator-typed, and a paste
+    can put the secret in any of them.
+    """
+
+    host = environ.get(PUBLIC_HOST_ENV, "").strip()
+    if not host or _HOSTNAME.fullmatch(host) is None:
+        raise RenderError(f"{PUBLIC_HOST_ENV} must be a hostname (letters, digits, dots, hyphens): the sign-on callback is derived from it")
+    issuer = environ[SIGN_ON_ISSUER_ENV].strip()
+    if not issuer.startswith("https://") or any(character.isspace() for character in issuer) or len(issuer) <= len("https://"):
+        raise RenderError(f"{SIGN_ON_ISSUER_ENV} must be the provider's issuer URL, starting with https:// (the tenant is published on the internet, and the ID token's `iss` must equal it)")
+    client_id = environ[SIGN_ON_CLIENT_ID_ENV].strip()
+    if any(character.isspace() for character in client_id):
+        raise RenderError(f"{SIGN_ON_CLIENT_ID_ENV} must not contain whitespace")
+
+    admins = _split_list(environ.get(SIGN_ON_ADMINS_ENV, ""))
+    bad = [str(index) for index, email in enumerate(admins) if _EMAIL.fullmatch(email) is None]
+    if bad:
+        raise RenderError(f"{SIGN_ON_ADMINS_ENV} must be a comma-separated list of email addresses; entries at position {', '.join(bad)} are not")
+
+    scopes = list(SIGN_ON_DEFAULT_SCOPES)
+    for scope in _split_list(environ.get(SIGN_ON_SCOPES_ENV, "")):
+        if _SCOPE.fullmatch(scope) is None:
+            raise RenderError(f"{SIGN_ON_SCOPES_ENV} must be a list of scope tokens separated by spaces or commas")
+        if scope not in scopes:
+            scopes.append(scope)
+
+    method = environ.get(SIGN_ON_CLIENT_AUTH_ENV, "").strip() or SIGN_ON_CLIENT_AUTH_METHODS[0]
+    if method not in SIGN_ON_CLIENT_AUTH_METHODS:
+        raise RenderError(f"{SIGN_ON_CLIENT_AUTH_ENV} must be one of {', '.join(SIGN_ON_CLIENT_AUTH_METHODS)} (or absent)")
+
+    name = environ.get(SIGN_ON_NAME_ENV, "").strip() or SIGN_ON_DEFAULT_NAME
+    if len(name) > 64 or not name.isprintable():
+        raise RenderError(f"{SIGN_ON_NAME_ENV} must be printable text of at most 64 characters")
+
+    local = dict(_mapping(template_auth.get("local", {}), "template `auth.local`"))
+    if "enabled" in local or "allow_registration" in local:
+        raise RenderError("template `auth.local.enabled` and `auth.local.allow_registration` must be absent; the sign-in keys select them")
+    if "oidc" in template_auth:
+        raise RenderError("template `auth.oidc` must be absent; the sign-on keys render it")
+    local.update({"enabled": False, "allow_registration": False})
+    return {
+        **template_auth,
+        "local": local,
+        "oidc": {
+            "enabled": True,
+            "frontend_base_url": f"https://{host}",
+            "providers": {
+                SIGN_ON_PROVIDER_ID: {
+                    "display_name": name,
+                    "issuer": issuer,
+                    "client_id": client_id,
+                    # The reference, never the value: the Gateway expands it.
+                    "client_secret": f"${SIGN_ON_CLIENT_SECRET_ENV}",
+                    "redirect_uri": f"https://{host}/api/v1/auth/callback/{SIGN_ON_PROVIDER_ID}",
+                    "scopes": scopes,
+                    "token_endpoint_auth_method": method,
+                    "admin_emails": admins,
+                }
+            },
+        },
+    }
+
+
 def render(
     template: Mapping[str, Any],
     fragments: tuple[Fragment, ...],
@@ -528,6 +677,13 @@ def render(
         sandbox["mounts"] = [*mounts, open_runsc_resolver_mount(environ)]
     document["sandbox"] = sandbox
 
+    template_auth = _mapping(document.get("auth", {}), "template `auth`")
+    if "oidc" in template_auth or "enabled" in _mapping(template_auth.get("local", {}), "template `auth.local`"):
+        raise RenderError("template `auth.oidc` and `auth.local.enabled` must be absent; the sign-in keys select them")
+    select_token_expiry_days(environ)
+    if select_sign_in(environ) == "sign_on_only":
+        document["auth"] = sign_on_auth(template_auth, environ)
+
     problems: list[str] = []
     _credential_problems(document, (), problems)
     if problems:
@@ -595,7 +751,9 @@ def main(argv: list[str] | None = None) -> int:
     bundle_line, bundle_problems = bundle_report(document)
     for problem in bundle_problems:
         print(f"render_config: warning: tenant bundle: {problem}", file=sys.stderr)
-    summary = f"models from {source}; egress={select_egress(os.environ)}; provider keys found: {providers}; sandbox ready_timeout={budget}s; {bundle_line}"
+    sign_in = select_sign_in(os.environ)
+    sign_in_line = f"sign-in={sign_in}" + (f" (provider {SIGN_ON_PROVIDER_ID}, callback https://{os.environ[PUBLIC_HOST_ENV].strip()}/api/v1/auth/callback/{SIGN_ON_PROVIDER_ID})" if sign_in == "sign_on_only" else "")
+    summary = f"models from {source}; egress={select_egress(os.environ)}; {sign_in_line}; provider keys found: {providers}; sandbox ready_timeout={budget}s; {bundle_line}"
     if args.check:
         print(f"render_config: {args.template} renders ({summary})")
         return 0

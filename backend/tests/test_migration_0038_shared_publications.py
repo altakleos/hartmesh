@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.bootstrap import _get_alembic_config
 
-_REVISION = "0038_shared_publications"
+_REVISION = "0039_users_oauth_issuer"
 _PREVIOUS = "0037_merge_upstream_0018"
 
 

@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
+from app.gateway.auth.mode import auth_mode
 from app.gateway.auth_disabled import (
     AUTH_SOURCE_INTERNAL,
     AUTH_SOURCE_PAT,
@@ -1444,6 +1445,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             "status": "healthy",
             "service": "deer-flow-gateway",
             "tenant_identity": tenant_observability_projection(tenant_identity.to_persisted_reference()),
+            # Which way people sign in, for an apply to assert before it
+            # publishes the tenant: "local" or "sign_on_only", read live
+            # like every door reads it.
+            "auth_mode": auth_mode(),
         }
         memory_diagnostics = _memory_backend_diagnostics(app)
         if memory_diagnostics is not None:

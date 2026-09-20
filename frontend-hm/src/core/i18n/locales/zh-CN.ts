@@ -1505,6 +1505,9 @@ export const zhCN: Translations = {
       "DeerFlow 需要先创建管理员账号，然后才能创建新的普通账号。",
     orContinueWith: "或使用以下方式登录",
     ssoHint: "如果你的账号使用单点登录（SSO），请改用下方的选项登录。",
+    signOnOnlyDescription: "使用你所在组织的账号登录。你的访问权限由组织授予。",
+    signOnOnlyNoProvider:
+      "本部署通过组织账号登录，但当前没有可用的登录方式。请联系管理员。",
     continueWith: (provider: string) => `使用 ${provider} 登录`,
     noAccountSignUp: "还没有账号？立即注册",
     haveAccountSignIn: "已有账号？立即登录",
@@ -1521,6 +1524,10 @@ export const zhCN: Translations = {
       sso_account_exists:
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
+    },
+    signOnOnlyErrors: {
+      sso_failed: "登录未完成，请重试。",
+      sso_account_exists: "该邮箱已被一个早先的账号占用。请联系管理员清理。",
     },
   },
 };

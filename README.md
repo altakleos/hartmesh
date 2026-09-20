@@ -170,7 +170,11 @@ printf 'Copy this token into the trusted client terminal:\n%s\n' \
 make dev
 ```
 
-In a second terminal, export the printed token and run this standard-library-only client:
+In a second terminal, export the printed token and run this standard-library-only client.
+It talks to `make dev`'s nginx (`docker/nginx/nginx.local.conf`); the Docker stack and the
+tenant compose profile blank the internal-caller headers at their nginx
+(`docker/nginx/nginx.conf`), so an internal caller there speaks to the Gateway on its own
+network, never through the published port:
 
 ```bash
 export DEER_FLOW_INTERNAL_AUTH_TOKEN='<paste the generated token>'

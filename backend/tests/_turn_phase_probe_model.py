@@ -20,6 +20,9 @@ exactly as it would interrupt a provider call:
   a shell command where the tool name belongs. Then, once the runtime has
   answered it, an ordinary ``web_fetch`` for that address and the text script,
   so one turn shows the refusal and the recovery.
+* ``probe:bash <command>`` -- one ``bash`` call running that command in the
+  turn's sandbox, then the ordinary text answer. How a suite proves a role
+  can still use a tool and the sandbox without a real model.
 * ``probe:fetch <url>`` -- one ``web_fetch`` call for that address, then the
   ordinary text; every ``bind_tools`` call records the tool names it was
   given in :data:`BOUND_TOOL_NAMES`, so a test can see what the model could
@@ -51,6 +54,7 @@ TEXT_CHUNKS = ("Hello", " from", " the probe.")
 SEARCH_TOOL_NAME = "web_search"
 SEARCH_QUERY = "what is the capital of france"
 FETCH_TOOL_NAME = "web_fetch"
+BASH_TOOL_NAME = "bash"
 #: Verbatim from a released-profile qualification capture
 #: ``the model`` sent this 129-byte shell command as the
 #: tool *name*, carrying only a description in its arguments.
@@ -100,8 +104,22 @@ def _script_for(messages: list[BaseMessage]) -> str:
                 return "malformed"
             if "probe:fetch" in text:
                 return "fetch"
+            if "probe:bash" in text:
+                return "bash"
             return "text"
     return "text"
+
+
+def _bash_command(messages: list[BaseMessage]) -> str:
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            content = message.content
+            text = content if isinstance(content, str) else " ".join(str(block.get("text", "")) for block in content if isinstance(block, dict))
+            if "probe:bash" in text:
+                # The first line only: a middleware appends its own reminder
+                # to the user's message, and that is not part of the command.
+                return text.split("probe:bash", 1)[1].strip().splitlines()[0].strip()
+    return "true"
 
 
 def _fetch_url(messages: list[BaseMessage]) -> str:
@@ -172,7 +190,7 @@ class ProbeStreamingChatModel(BaseChatModel):
         # middleware makes with its own trimmed message list. Answering those
         # with a tool call would dispatch a tool nobody asked for, so the
         # retrieval script is scripted only in ``_astream``.
-        if script in ("text", "search", "fetch", "malformed"):
+        if script in ("text", "search", "fetch", "malformed", "bash"):
             content.append({"type": "text", "text": "".join(TEXT_CHUNKS)})
         return ChatResult(generations=[ChatGeneration(message=AIMessage(content=content))])
 
@@ -219,6 +237,22 @@ class ProbeStreamingChatModel(BaseChatModel):
                 )
                 yield ChatGenerationChunk(message=AIMessageChunk(content=[], tool_call_chunks=[call]))
                 return
+        if script == "bash" and not self._already_called_tool(messages):
+            yield ChatGenerationChunk(
+                message=AIMessageChunk(
+                    content=[],
+                    tool_call_chunks=[
+                        {
+                            "name": BASH_TOOL_NAME,
+                            "args": json.dumps({"command": _bash_command(messages), "description": "probe"}),
+                            "id": "probe-bash-1",
+                            "index": 0,
+                            "type": "tool_call_chunk",
+                        }
+                    ],
+                )
+            )
+            return
         if script == "fetch" and not self._already_called_tool(messages):
             yield ChatGenerationChunk(
                 message=AIMessageChunk(

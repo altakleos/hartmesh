@@ -13,6 +13,11 @@
 #   - `sandbox.network` is chosen by SANDBOX_EGRESS: the allowlist block below
 #     when the key is `allowlist` or absent, `mode: open` alone for `open`;
 #     any other value refuses to render.
+#   - `auth` is the sign-in mode: the three HARTMESH_SIGN_ON_* keys add
+#     `auth.oidc` (one provider, `sso`) and close local passwords
+#     (`auth.local.enabled: false`, registration off); HARTMESH_LOCAL_PASSWORDS
+#     =allowed copies the block below through unchanged. Neither, both, or a
+#     half-set group refuses to render (README: "Sign-in").
 #
 # Everything else is copied through unchanged. Paths are literal because this
 # file cannot interpolate them: HARTMESH_DATA_DIR is therefore fixed at
@@ -32,6 +37,10 @@ models: []
 # here is a visible interruption for everyone still working, because the stack
 # is one replica with a recreate rollout. A Redis outage fails login closed;
 # on this profile Redis is already load-bearing for streaming.
+#
+# Deliberately absent here: `auth.local.enabled`, `allow_registration` and
+# `auth.oidc`. They are the sign-in mode, and the renderer writes them from
+# the tenant .env so the template cannot carry an open default.
 auth:
   local:
     lockout_store: redis

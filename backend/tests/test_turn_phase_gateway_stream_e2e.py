@@ -137,13 +137,16 @@ def _phase_at(wire: dict[str, Any], phase: str) -> float | None:
 
 
 def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.gateway import deps as deps_module
     from deerflow.config import app_config as app_config_module
     from deerflow.config import paths as paths_module
     from deerflow.persistence import engine as engine_module
     from deerflow.sandbox.sandbox_provider import shutdown_sandbox_provider
 
     # The provider singleton outlives a served Gateway; the next one must
-    # build its own from its own config.
+    # build its own from its own config. So does the users-table provider
+    # cached in deps: left alone, a second served Gateway would keep reading
+    # the first one's accounts.
     shutdown_sandbox_provider()
     for module, attr in (
         (app_config_module, "_app_config"),
@@ -152,6 +155,8 @@ def _reset_process_singletons(monkeypatch: pytest.MonkeyPatch) -> None:
         (paths_module, "_paths_singleton"),
         (engine_module, "_engine"),
         (engine_module, "_session_factory"),
+        (deps_module, "_cached_local_provider"),
+        (deps_module, "_cached_repo"),
     ):
         monkeypatch.setattr(module, attr, None, raising=False)
 
@@ -272,17 +277,8 @@ def serve_gateway(home: Path, *, config_yaml: str = _MINIMAL_CONFIG_YAML) -> Ite
     server = uvicorn.Server(uvicorn.Config(create_app(), log_level="warning", lifespan="on"))
     thread = threading.Thread(target=lambda: asyncio.run(server.serve(sockets=[loopback])), name="turn-phase-e2e-gateway", daemon=True)
     thread.start()
-    deadline = time.monotonic() + 60
-    while not server.started:
-        if not thread.is_alive():
-            raise RuntimeError("the test Gateway exited before it started")
-        if time.monotonic() > deadline:
-            raise TimeoutError("the test Gateway did not start in time")
-        time.sleep(0.05)
 
-    try:
-        yield _Gateway(loopback_url=loopback_url, loopback_port=loopback_port, journals=sink, tmp_home=home)
-    finally:
+    def _tear_down() -> None:
         server.should_exit = True
         thread.join(timeout=30)
         with contextlib.suppress(OSError):
@@ -293,6 +289,26 @@ def serve_gateway(home: Path, *, config_yaml: str = _MINIMAL_CONFIG_YAML) -> Ite
 
         shutdown_sandbox_provider()
         monkeypatch.undo()
+
+    # A Gateway that refuses to start is a result some suites assert on; the
+    # environment and singletons this function set must not outlive it either,
+    # or every later test in the worker reads this Gateway's config.
+    try:
+        deadline = time.monotonic() + 60
+        while not server.started:
+            if not thread.is_alive():
+                raise RuntimeError("the test Gateway exited before it started")
+            if time.monotonic() > deadline:
+                raise TimeoutError("the test Gateway did not start in time")
+            time.sleep(0.05)
+    except BaseException:
+        _tear_down()
+        raise
+
+    try:
+        yield _Gateway(loopback_url=loopback_url, loopback_port=loopback_port, journals=sink, tmp_home=home)
+    finally:
+        _tear_down()
 
 
 @pytest.fixture(scope="module")

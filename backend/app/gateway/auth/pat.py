@@ -300,6 +300,23 @@ async def authenticate_pat(
             reason_code="credential_invalid",
         )
         raise HTTPException(status_code=401, detail="Invalid token")
+    from app.gateway.auth.mode import is_provider_account, sign_on_only
+
+    if sign_on_only() and not is_provider_account(user):
+        # A local-password account is inert in sign-on-only mode, and so is
+        # every token it minted, whenever it minted it. Same 401 as any dead
+        # token: the answer must not say why.
+        audit_identity = pat_repo.audit_identity_for_record(record)
+        await pat_repo.record_audit_best_effort(
+            method="personal_access_token",
+            action="authentication_failed",
+            credential_ref=audit_identity.credential_ref,
+            actor_digest=audit_identity.actor_digest,
+            authority_digest=None,
+            route_category=route_category,
+            reason_code="account_inert",
+        )
+        raise HTTPException(status_code=401, detail="Invalid token")
     await pat_repo.touch_last_used(str(record["id"]))
     return user, frozenset(canonical_scopes), record
 
