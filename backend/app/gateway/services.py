@@ -2056,6 +2056,15 @@ async def _principal_projection_for_intent(
         owner = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
         if owner is None:
             raise ValueError("trusted internal launch owner could not be revalidated")
+        from app.gateway.auth.mode import account_refusal
+
+        refusal = account_refusal(owner)
+        if refusal is not None:
+            # Every process-internal launch for an owner -- a due scheduled
+            # task, a channel message, an MCP task notification -- resolves
+            # the owner here, so an account nothing may act for starts no run.
+            logger.warning("Internal launch refused: owner %s is %s (%s)", sanitize_log_param(owner_user_id), refusal, intent.source_kind.value)
+            raise ValueError(f"trusted internal launch owner's account is {refusal}")
         if intent.source_kind is InternalSourceKind.native_channel:
             facts = intent.native_channel
             if facts is None or not facts.provider:

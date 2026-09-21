@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 import secrets
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlencode
 
@@ -47,6 +47,10 @@ class OIDCIdentity:
     email_verified: bool
     name: str | None
     claims: dict[str, Any]
+    # The two sources apart, so a reader can prefer one: ``claims`` above is
+    # the merge (userinfo winning) that email and name are taken from.
+    id_token_claims: dict[str, Any] = field(default_factory=dict)
+    userinfo_claims: dict[str, Any] = field(default_factory=dict)
 
 
 class OIDCError(Exception):
@@ -425,6 +429,8 @@ class OIDCService:
             email_verified=email_verified,
             name=merged.get("name"),
             claims=merged,
+            id_token_claims=dict(claims),
+            userinfo_claims=dict(userinfo),
         )
 
 

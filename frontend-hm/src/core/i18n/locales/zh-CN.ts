@@ -1524,10 +1524,14 @@ export const zhCN: Translations = {
       sso_account_exists:
         "该邮箱对应的账号已存在。请使用密码登录或联系管理员。",
       sso_not_allowed: "你的账号不允许使用 SSO 登录。请联系管理员。",
+      sso_no_access: "你没有此工作区的访问权限。请联系管理员。",
+      sso_access_off: "你对此工作区的访问已被关闭。请联系管理员。",
     },
     signOnOnlyErrors: {
       sso_failed: "登录未完成，请重试。",
       sso_account_exists: "该邮箱已被一个早先的账号占用。请联系管理员清理。",
+      sso_no_access: "你没有此工作区的访问权限。请联系管理员。",
+      sso_access_off: "你对此工作区的访问已被关闭。请联系管理员。",
     },
   },
 };

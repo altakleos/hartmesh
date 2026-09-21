@@ -59,33 +59,66 @@ def sign_on_required(status_code: int = status.HTTP_403_FORBIDDEN) -> HTTPExcept
     )
 
 
+ACCOUNT_INERT = "inert"
+ACCOUNT_DISABLED = "disabled"
+
+
+def access_turned_off(status_code: int = status.HTTP_401_UNAUTHORIZED) -> HTTPException:
+    """What a credential of an account the deployer turned off gets."""
+    return HTTPException(
+        status_code=status_code,
+        detail=AuthErrorResponse(
+            code=AuthErrorCode.ACCOUNT_DISABLED,
+            message="Your access to this workspace has been turned off. Ask your administrator.",
+        ).model_dump(),
+    )
+
+
+def account_refusal(user: Any) -> str | None:
+    """Why nothing may act for this account right now, or ``None``.
+
+    ``disabled``: the deployer turned the identity off (``user.disabled_at``,
+    derived at every read from ``disabled_identities``), in either mode.
+    ``inert``: sign-on only, and the account has no provider identity.
+    """
+    if getattr(user, "disabled_at", None) is not None:
+        return ACCOUNT_DISABLED
+    if sign_on_only() and not is_provider_account(user):
+        return ACCOUNT_INERT
+    return None
+
+
+def refusal_response(refusal: str, status_code: int = status.HTTP_401_UNAUTHORIZED) -> HTTPException:
+    return access_turned_off(status_code) if refusal == ACCOUNT_DISABLED else sign_on_required(status_code)
+
+
 def require_live_account(user: Any) -> None:
-    """Refuse an account this mode does not honour, wherever a session resolves to one.
+    """Refuse an account nothing may act for, wherever a credential resolves to one.
 
     Every path that turns a credential into a user row -- the auth
     middleware, the browser WebSocket, the LangGraph auth hook -- ends here,
-    so the inert-account rule has one home. In local mode every account is
-    live.
+    so the inert-account and disabled-account rules have one home.
     """
-    if sign_on_only() and not is_provider_account(user):
-        raise sign_on_required(status.HTTP_401_UNAUTHORIZED)
+    refusal = account_refusal(user)
+    if refusal is not None:
+        raise refusal_response(refusal)
 
 
-async def owner_is_inert(owner_user_id: str) -> bool:
-    """Whether an internal caller's owner header names an account this mode does not honour.
+async def owner_is_refused(owner_user_id: str) -> str | None:
+    """Why an internal caller may not act for the owner its header names, or ``None``.
 
-    An IM connection bound while its owner held a local session would
-    otherwise keep running turns as that owner after the switch, an account
-    that can no longer sign in to unbind it. An owner id with no row (an
-    unbound channel's own id) is not an account and is left alone; a bare
-    app with no users table cannot answer and refuses nothing.
+    An IM connection bound while its owner held a session would otherwise
+    keep running turns as that owner after the owner was turned off, or
+    after the switch to sign-on only made a local owner inert. An owner id
+    with no row (an unbound channel's own id) is not an account and is left
+    alone; a bare app with no users table cannot answer and refuses nothing.
     """
-    if not sign_on_only():
-        return False
     from app.gateway.deps import get_local_provider
 
     try:
         owner = await get_local_provider().get_user(owner_user_id)
     except RuntimeError:
-        return False
-    return owner is not None and not is_provider_account(owner)
+        return None
+    if owner is None:
+        return None
+    return account_refusal(owner)

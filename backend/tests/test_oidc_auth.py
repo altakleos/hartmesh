@@ -1,4 +1,4 @@
-from unittest.mock import AsyncMock
+from unittest.mock import ANY, AsyncMock
 
 import pytest
 from fastapi import HTTPException
@@ -35,6 +35,7 @@ def _identity(**overrides):
 async def test_oidc_existing_local_account_blocks_sso_login_even_when_unverified():
     local_user = User(email="user@example.com", password_hash="hash")
     local_provider = AsyncMock()
+    local_provider.is_identity_disabled.return_value = False
     local_provider.get_user_by_oauth.return_value = None
     local_provider.get_user_by_email.return_value = local_user
 
@@ -57,6 +58,7 @@ async def test_oidc_existing_local_account_blocks_sso_login_even_when_unverified
 async def test_oidc_existing_local_account_blocks_sso_login_even_when_verified():
     local_user = User(email="user@example.com", password_hash="hash")
     local_provider = AsyncMock()
+    local_provider.is_identity_disabled.return_value = False
     local_provider.get_user_by_oauth.return_value = None
     local_provider.get_user_by_email.return_value = local_user
 
@@ -76,6 +78,7 @@ async def test_oidc_existing_local_account_blocks_sso_login_even_when_verified()
 @pytest.mark.asyncio
 async def test_oidc_auto_create_assigns_admin_role_from_configured_email():
     local_provider = AsyncMock()
+    local_provider.is_identity_disabled.return_value = False
     local_provider.get_user_by_oauth.return_value = None
     local_provider.get_user_by_email.return_value = None
     created_user = User(
@@ -101,6 +104,7 @@ async def test_oidc_auto_create_assigns_admin_role_from_configured_email():
         oauth_id="admin-subject",
         system_role="admin",
         oauth_issuer="https://issuer.example.com",
+        last_sign_in_at=ANY,
     )
 
 
@@ -175,6 +179,7 @@ async def test_oidc_validate_id_token_rejects_hmac_algorithms(monkeypatch):
 async def test_oidc_existing_account_lookup_uses_normalized_email():
     local_user = User(email="user@example.com", password_hash="hash")
     local_provider = AsyncMock()
+    local_provider.is_identity_disabled.return_value = False
     local_provider.get_user_by_oauth.return_value = None
     local_provider.get_user_by_email.return_value = local_user
 
@@ -193,6 +198,7 @@ async def test_oidc_existing_account_lookup_uses_normalized_email():
 @pytest.mark.asyncio
 async def test_oidc_auto_create_uses_normalized_email():
     local_provider = AsyncMock()
+    local_provider.is_identity_disabled.return_value = False
     local_provider.get_user_by_oauth.return_value = None
     local_provider.get_user_by_email.return_value = None
     created_user = User(email="user@example.com", password_hash=None, oauth_provider="keycloak", oauth_id="subject")
@@ -211,6 +217,7 @@ async def test_oidc_auto_create_uses_normalized_email():
         oauth_id="subject",
         system_role="user",
         oauth_issuer="https://issuer.example.com",
+        last_sign_in_at=ANY,
     )
 
 
@@ -271,6 +278,7 @@ async def test_oidc_provision_recovers_existing_user_on_create_race():
     """A concurrent create that loses the unique index re-resolves to the winner's row."""
     created_user = User(email="user@example.com", password_hash=None, oauth_provider="keycloak", oauth_id="subject")
     local_provider = AsyncMock()
+    local_provider.is_identity_disabled.return_value = False
     # First lookup (by oauth) misses, then create races and raises, then re-lookup wins.
     local_provider.get_user_by_oauth.side_effect = [None, created_user]
     local_provider.get_user_by_email.return_value = None
@@ -291,6 +299,7 @@ async def test_oidc_provision_recovers_existing_user_on_create_race():
 async def test_oidc_provision_create_race_on_email_only_raises_409():
     """A create race that collides on email (different identity) surfaces a clean 409, not a 500."""
     local_provider = AsyncMock()
+    local_provider.is_identity_disabled.return_value = False
     # No existing oauth link before or after the race (email collision, not same subject).
     local_provider.get_user_by_oauth.return_value = None
     local_provider.get_user_by_email.return_value = None

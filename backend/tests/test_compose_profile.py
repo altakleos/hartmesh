@@ -57,7 +57,18 @@ OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 # Optional keys compose.yaml never interpolates: they reach the Gateway
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
-PASSTHROUGH_KEYS = {"HARTMESH_MODELS_FILE", "SANDBOX_READY_TIMEOUT", "HARTMESH_SIGN_ON_ADMINS", "HARTMESH_SIGN_ON_SCOPES", "HARTMESH_SIGN_ON_CLIENT_AUTH", "HARTMESH_SIGN_ON_NAME", "AUTH_TOKEN_EXPIRY_DAYS"}
+PASSTHROUGH_KEYS = {
+    "HARTMESH_MODELS_FILE",
+    "SANDBOX_READY_TIMEOUT",
+    "HARTMESH_SIGN_ON_ADMINS",
+    "HARTMESH_SIGN_ON_SCOPES",
+    "HARTMESH_SIGN_ON_CLIENT_AUTH",
+    "HARTMESH_SIGN_ON_NAME",
+    "HARTMESH_SIGN_ON_ACCESS_CLAIM",
+    "HARTMESH_SIGN_ON_ACCESS_VALUES",
+    "HARTMESH_SIGN_ON_ROLES",
+    "AUTH_TOKEN_EXPIRY_DAYS",
+}
 # The sign-in mode: one side or the other is required, read by
 # gateway/render_config.py only. See tests/test_compose_sign_on.py.
 SIGN_ON_KEYS = {"HARTMESH_SIGN_ON_ISSUER", "HARTMESH_SIGN_ON_CLIENT_ID", "HARTMESH_SIGN_ON_CLIENT_SECRET"}

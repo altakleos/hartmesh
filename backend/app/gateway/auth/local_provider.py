@@ -1,6 +1,7 @@
 """Local email/password authentication provider."""
 
 import logging
+from datetime import datetime
 
 from app.gateway.auth.models import User
 from app.gateway.auth.password import equalize_password_timing, hash_password_async, needs_rehash, verify_password_async
@@ -108,6 +109,10 @@ class LocalAuthProvider(AuthProvider):
         """Get user by email."""
         return await self._repo.get_user_by_email(email)
 
+    async def is_identity_disabled(self, issuer: str, subject: str) -> bool:
+        """Whether the deployer turned this provider identity off (account or not)."""
+        return await self._repo.is_identity_disabled(issuer, subject)
+
     async def create_oauth_user(
         self,
         email: str,
@@ -115,6 +120,7 @@ class LocalAuthProvider(AuthProvider):
         oauth_id: str,
         system_role: str = "user",
         oauth_issuer: str | None = None,
+        last_sign_in_at: datetime | None = None,
     ) -> User:
         """Create a new user from an OAuth/OIDC login.
 
@@ -136,5 +142,6 @@ class LocalAuthProvider(AuthProvider):
             oauth_provider=oauth_provider,
             oauth_id=oauth_id,
             oauth_issuer=oauth_issuer,
+            last_sign_in_at=last_sign_in_at,
         )
         return await self._repo.create_user(user)

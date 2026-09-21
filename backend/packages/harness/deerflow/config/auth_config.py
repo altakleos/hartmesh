@@ -45,6 +45,71 @@ class OIDCProviderConfig(BaseModel):
         description="Users with these email addresses are automatically granted the admin role on first login",
     )
 
+    # ── Membership follows a claim ────────────────────────────────────
+    access_claim: str | None = Field(
+        default=None,
+        description=(
+            "The literal name of one claim (colons and dots are ordinary characters, not a "
+            "path: 'urn:zitadel:iam:org:project:roles' is one name) that must carry one of "
+            "access_values for a sign-in to be admitted. Read from the ID token, and from "
+            "userinfo when the ID token does not carry it. Accepted as a list of strings, a "
+            "single string, or an object whose keys are the values. Checked at every "
+            "sign-in before an account is created or an existing one returned; a claim that "
+            "is missing, empty or of another type refuses, and nothing falls back to "
+            "allowed_email_domains. Unset, admission is as before."
+        ),
+    )
+    access_values: list[str] = Field(
+        default_factory=list,
+        description="The values of access_claim that admit a sign-in. Required with access_claim, refused without it.",
+    )
+    access_roles: dict[str, Literal["admin", "user"]] = Field(
+        default_factory=dict,
+        description=(
+            "Optional: which product role each admitting value carries. When set it covers "
+            "every access value exactly, the role is re-read at every sign-in and written to "
+            "the account in both directions ('admin' wins when a token carries several), and "
+            "admin_emails plays no part (setting both is refused). Unset, roles come from "
+            "admin_emails at account creation, as before."
+        ),
+    )
+
+    @model_validator(mode="after")
+    def _access_claim_is_whole(self) -> OIDCProviderConfig:
+        """Refuse a half-configured admission rule rather than admit by accident.
+
+        Every refusal here names what is missing: a claim with no values would
+        admit nobody, values with no claim would check nothing, and a role
+        mapping that misses an admitting value would hand that value an
+        unspecified role.
+        """
+        claim = (self.access_claim or "").strip()
+        values = [value.strip() for value in self.access_values]
+        if any(not value for value in values):
+            raise ValueError("access_values must not contain empty entries")
+        if len(set(values)) != len(values):
+            raise ValueError("access_values must not repeat a value")
+        if self.access_claim is not None and not claim:
+            raise ValueError("access_claim must not be blank")
+        if claim and not values:
+            raise ValueError(f"access_claim is set ({claim!r}) but access_values is empty: no value would admit anyone. Name the admitting values, or unset the claim")
+        if values and not claim:
+            raise ValueError("access_values is set but access_claim is not: there is no claim to look the values up in. Name the claim, or unset the values")
+        self.access_claim = claim or None
+        self.access_values = values
+        if self.access_roles:
+            if not claim:
+                raise ValueError("access_roles is set but access_claim is not: a role mapping needs the admission claim it maps. Set access_claim and access_values, or unset the mapping")
+            if self.admin_emails:
+                raise ValueError("access_roles and admin_emails are both set: roles come from the claim or from the email list, not both. Unset one")
+            unmapped = sorted(set(values) - set(self.access_roles))
+            if unmapped:
+                raise ValueError(f"access_roles gives no role to admitting value(s) {', '.join(unmapped)}: every value that admits must carry a role")
+            stray = sorted(set(self.access_roles) - set(values))
+            if stray:
+                raise ValueError(f"access_roles maps value(s) {', '.join(stray)} that are not in access_values: a role can only follow a value that admits")
+        return self
+
     # ── PKCE / nonce ──────────────────────────────────────────────────
     pkce_enabled: bool = Field(default=True, description="Enable PKCE (S256) for the authorization code flow")
     nonce_enabled: bool = Field(default=True, description="Include and validate the nonce claim in ID tokens")

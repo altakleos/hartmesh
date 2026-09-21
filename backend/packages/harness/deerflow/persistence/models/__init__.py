@@ -46,6 +46,7 @@ from deerflow.persistence.tool_plane.model import (
     ToolPlaneScopeRow,
 )
 from deerflow.persistence.topology.model import TopologyReplicaRow
+from deerflow.persistence.user.access import DisabledIdentityRow
 from deerflow.persistence.user.model import UserRow
 from deerflow.persistence.webhook_delivery.model import WebhookDeliveryRow
 
@@ -58,6 +59,7 @@ __all__ = [
     "CredentialAuditEventRow",
     "FeedbackRow",
     "DeploymentIdentityRow",
+    "DisabledIdentityRow",
     "InboundReceiptRow",
     "McpTaskRow",
     "ManagedSubagentRow",
