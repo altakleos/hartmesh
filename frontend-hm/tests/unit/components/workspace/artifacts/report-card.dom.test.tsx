@@ -57,7 +57,11 @@ const report = parseBusinessReport(JSON.stringify(fixture))!;
 function renderCard(
   artifacts: string[] = [REPORT],
   override: Partial<typeof report> = {},
-  { isMock = false, locale = "en-US" as const, t = enUS }: { isMock?: boolean; locale?: "en-US" | "zh-CN"; t?: typeof enUS } = {},
+  {
+    isMock = false,
+    locale = "en-US" as const,
+    t = enUS,
+  }: { isMock?: boolean; locale?: "en-US" | "zh-CN"; t?: typeof enUS } = {},
 ) {
   return render(
     <QueryClientProvider
@@ -67,9 +71,7 @@ function renderCard(
         })
       }
     >
-      <I18nContext.Provider
-        value={{ locale, setLocale: () => undefined, t }}
-      >
+      <I18nContext.Provider value={{ locale, setLocale: () => undefined, t }}>
         <ReportCard
           artifacts={artifacts}
           filepath={REPORT}
@@ -105,7 +107,9 @@ describe("ReportCard", () => {
     const rendered = [REPORT, `${DIRECTORY}/2026-08-business-review.pdf`];
     renderCard(rendered);
     await screen.findByRole("button", { name: "Share with everyone" });
-    fireEvent.click(screen.getByRole("button", { name: "Share with everyone" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Share with everyone" }),
+    );
     const [, englishFolder] = shareWithEveryone.mock.calls[0]!;
 
     cleanup();
