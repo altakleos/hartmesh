@@ -87,8 +87,8 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_SIGN_ON_CLIENT_AUTH` | Sign-on only. How the Gateway authenticates at the token endpoint: `client_secret_post` (absent) or `client_secret_basic`. The deployer registers the client to match. |
 | `HARTMESH_SIGN_ON_NAME` | Sign-on only. The label on the sign-in button ("Continue with …"), at most 64 printable characters. Absent, `Single sign-on`. |
 | `HARTMESH_SIGN_ON_ACCESS_CLAIM` | Sign-on only, with `_ACCESS_VALUES`. The literal name of one claim the token must carry for a sign-in to be admitted (§ "Membership follows the claim"). Absent, admission is as before. |
-| `HARTMESH_SIGN_ON_ACCESS_VALUES` | Sign-on only, with `_ACCESS_CLAIM`. Comma-separated values of that claim that admit. One without the other refuses to render. |
-| `HARTMESH_SIGN_ON_ROLES` | Sign-on only, with the two above. `<value>=admin,<value>=user`, one entry per admitting value: the role then follows the claim at every sign-in, and `HARTMESH_SIGN_ON_ADMINS` must be absent. |
+| `HARTMESH_SIGN_ON_ACCESS_VALUES` | Sign-on only, with `_ACCESS_CLAIM`. Comma-separated values of that claim that admit (commas only: a value may contain a space, and is trimmed). One without the other refuses to render. |
+| `HARTMESH_SIGN_ON_ROLES` | Sign-on only, with the two above. `<value>=admin,<value>=user`, comma-separated, one entry per admitting value: the role then follows the claim at every sign-in, and `HARTMESH_SIGN_ON_ADMINS` must be absent. |
 | `AUTH_TOKEN_EXPIRY_DAYS` | Both modes. The session lifetime in whole days, 1 to 30 (the product's bound). Absent -- which is what every existing tenant `.env` is -- 7, exactly as before. Anything else refuses to render and the Gateway does not start. |
 | `HARTMESH_SANDBOX_RESOLV_CONF` | The Docker host's upstream DNS file, default `/run/systemd/resolve/resolv.conf` on the Debian tenant VM. The Gateway receives a read-only view; open-mode runsc sandboxes bind the validated file at `/etc/resolv.conf`. On hosts without systemd-resolved, select an existing resolver file containing reachable upstream IP addresses. A loopback stub file is refused (§ "DNS under gVisor"). |
 
@@ -289,6 +289,8 @@ HARTMESH_SIGN_ON_ROLES=admin=admin,member=user
   before.
 - **A half-set pair** -- the claim without values, values without the claim,
   or the mapping without the claim -- refuses to render and names the keys.
+  Values and role entries are separated by commas only (a value may contain
+  a space); positions in a refusal count from 0.
 - **Readiness.** The renderer's summary line carries `admission by claim` and
   `roles from claim` when the keys are set (`sign-in=sign_on_only (provider
   sso, callback …, admission by claim, roles from claim)`).
@@ -306,7 +308,7 @@ idempotent.
 ```bash
 docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   exec --user 1000 gateway \
-  sh -c 'cd /app/backend && uv run --no-sync python -m app.gateway.auth.accounts list'
+  sh -c 'cd /app/backend && PYTHONPATH=. uv run --no-sync python -m app.gateway.auth.accounts list'
 # … disable      --issuer https://login.example.com --subject 3141592
 # … enable       --issuer https://login.example.com --subject 3141592
 # … end-sessions --issuer https://login.example.com --subject 3141592
@@ -356,10 +358,12 @@ Sample output of `disable`:
 ```
 
 **Upgrade note.** The three access keys and the command are honoured from
-`v2.1.0+hartmesh.31`. An older release ignores the keys at render time and
-has no command; a `.env` carrying them under an older pin renders
-sign-on-only mode without the claim check. Migration `0040_account_access`
-runs at the first start on this release.
+the first release carrying this change, `v2.1.0+hartmesh.30` (the same cut
+that first carries the sign-on keys above) or whichever release is cut
+next. An older release ignores the keys at render time and has no command;
+a `.env` carrying them under an older pin renders sign-on-only mode without
+the claim check. Migration `0040_account_access` runs at the first start on
+this release.
 
 ### Local passwords (`HARTMESH_LOCAL_PASSWORDS=allowed`)
 

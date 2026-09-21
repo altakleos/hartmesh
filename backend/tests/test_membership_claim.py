@@ -190,6 +190,9 @@ class _Users:
         self.updated.append(user)
         return user
 
+    async def record_sign_in(self, user):
+        self.updated.append(user)
+
     async def create_oauth_user(self, **kwargs):
         user = SimpleNamespace(id=uuid4(), needs_setup=False, token_version=0, password_hash=None, disabled_at=None, **kwargs)
         self.created.append(user)
@@ -260,10 +263,10 @@ async def test_a_turned_off_identity_is_refused_before_anything_else_even_when_t
 
     users = _Users(disabled={(ISSUER, "sub-1")})
     with caplog.at_level(logging.WARNING), pytest.raises(AccessRefused) as refused:
-        await get_or_provision_oidc_user("sso", _provider(**MAPPED), _identity(id_token={CLAIM: ["admin"]}), users)
+        await get_or_provision_oidc_user("sso", _provider(**MAPPED), _identity(id_token={CLAIM: ["admin"], "at_hash": "FAKE-TOKEN-SENTINEL"}), users)
     assert refused.value.redirect_code == ACCESS_OFF_CODE and refused.value.detail == ACCESS_OFF_MESSAGE
     assert users.created == [], "no account is created"
-    assert "sub-1" in caplog.text and ISSUER in caplog.text
+    assert "sub-1" in caplog.text and ISSUER in caplog.text and "FAKE-TOKEN-SENTINEL" not in caplog.text
     # With an account: refused before it is returned.
     users = _Users(_linked(), disabled={(ISSUER, "sub-1")})
     with pytest.raises(AccessRefused):

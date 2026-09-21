@@ -75,7 +75,9 @@ async def get_or_provision_oidc_user(
                 logger.info("OIDC sign-in: role of subject %s at issuer %s is now %s (was %s)", identity.subject, provider_config.issuer, role, existing.system_role)
                 existing.system_role = role  # type: ignore[assignment]
         existing.last_sign_in_at = now
-        await local_provider.update_user(existing)
+        # A targeted write: never the whole row, so a token_version read a
+        # moment ago cannot land back over an end-sessions that ran meanwhile.
+        await local_provider.record_sign_in(existing)
         return {"user": existing, "created": False}
 
     # 2. Verified email requirement

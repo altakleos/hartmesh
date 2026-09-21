@@ -36,6 +36,7 @@ async def test_oidc_existing_local_account_blocks_sso_login_even_when_unverified
     local_user = User(email="user@example.com", password_hash="hash")
     local_provider = AsyncMock()
     local_provider.is_identity_disabled.return_value = False
+    local_provider.record_sign_in.return_value = None
     local_provider.get_user_by_oauth.return_value = None
     local_provider.get_user_by_email.return_value = local_user
 

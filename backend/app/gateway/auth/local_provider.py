@@ -109,6 +109,10 @@ class LocalAuthProvider(AuthProvider):
         """Get user by email."""
         return await self._repo.get_user_by_email(email)
 
+    async def record_sign_in(self, user: User) -> None:
+        """Write what a provider sign-in changed on an existing account (role, issuer, the stamp)."""
+        await self._repo.record_sign_in(str(user.id), system_role=user.system_role, oauth_issuer=user.oauth_issuer, last_sign_in_at=user.last_sign_in_at)
+
     async def is_identity_disabled(self, issuer: str, subject: str) -> bool:
         """Whether the deployer turned this provider identity off (account or not)."""
         return await self._repo.is_identity_disabled(issuer, subject)

@@ -111,8 +111,10 @@ class AccountsCommand:
         account = await self._users.get_user_by_email(email.strip())
         if account is None:
             raise CommandError(f"no account has the email {email.strip()!r}; a person with no account is addressed by --issuer and --subject")
-        if not account.oauth_issuer or not account.oauth_id:
+        if not account.oauth_provider or not account.oauth_id:
             raise CommandError(f"the account with email {email.strip()!r} has no identity-provider identity (a local-password account); this command addresses provider accounts")
+        if not account.oauth_issuer:
+            raise CommandError(f"the account with email {email.strip()!r} was linked before its issuer was recorded and has not signed in since; address it by --issuer (the provider's configured issuer) and --subject {account.oauth_id!r}")
         return (issuer_key(account.oauth_issuer), account.oauth_id), account
 
     # ── The forms ────────────────────────────────────────────────────────
@@ -126,6 +128,10 @@ class AccountsCommand:
     async def disable(self, identity: tuple[str, str], account: User | None) -> dict[str, Any]:
         issuer, subject = identity
         recorded = await self._users.disable_identity(issuer, subject)
+        # Looked up again after the row is recorded: a first sign-in racing the
+        # command may have created the account in between, and its session
+        # must be ended like any other.
+        account = await self._users.get_user_by_identity(issuer, subject)
         document: dict[str, Any] = {
             "command": "disable",
             "identity": {"issuer": issuer, "subject": subject},
@@ -140,9 +146,7 @@ class AccountsCommand:
             return document
         # The derived refusal already stops every path; ending the sessions
         # and revoking the tokens is what keeps them dead after an enable.
-        account.token_version += 1
-        await self._users.update_user(account)
-        document["sessions_ended"] = True
+        document["sessions_ended"] = await self._users.end_sessions(str(account.id))
         document["tokens_revoked"] = await self._revoke_tokens(account)
         document["schedules_held"] = await self._count_schedules(account)
         document["account"] = _account_document(await self._users.get_user_by_id(str(account.id)) or account)
@@ -165,8 +169,7 @@ class AccountsCommand:
         issuer, subject = identity
         if account is None:
             raise CommandError(f"no account exists for subject {subject!r} at issuer {issuer!r}; there are no sessions to end")
-        account.token_version += 1
-        await self._users.update_user(account)
+        await self._users.end_sessions(str(account.id))
         return {
             "command": "end-sessions",
             "identity": {"issuer": issuer, "subject": subject},
@@ -237,6 +240,9 @@ def main(argv: list[str] | None = None) -> int:
         document = asyncio.run(_run(args.command, issuer=args.issuer, subject=args.subject, email=args.email))
     except CommandError as exc:
         print(json.dumps({"command": args.command, "error": str(exc)}, sort_keys=True), flush=True)
+        return 1
+    except Exception as exc:  # noqa: BLE001 - the document is the answer the consumer reads, whatever failed
+        print(json.dumps({"command": args.command, "error": f"{type(exc).__name__}: {exc}"}, sort_keys=True), flush=True)
         return 1
     print(json.dumps(document, sort_keys=True), flush=True)
     return 0

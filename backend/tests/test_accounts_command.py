@@ -13,6 +13,7 @@ status) is exercised there as a subprocess, the way the deployer runs it.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import Iterator
 from datetime import UTC, datetime, timedelta
@@ -46,7 +47,7 @@ def stores(tmp_path) -> Iterator[tuple[SQLiteUserRepository, object, object]]:
         asyncio.run(close_engine())
 
 
-def _provider_account(email: str = "pat@example.com", subject: str = "sub-pat", *, issuer: str = ISSUER, role: str = "user") -> User:
+def _provider_account(email: str = "pat@example.com", subject: str = "sub-pat", *, issuer: str | None = ISSUER, role: str = "user") -> User:
     return User(email=email, password_hash=None, system_role=role, oauth_provider="sso", oauth_id=subject, oauth_issuer=issuer, last_sign_in_at=datetime.now(UTC))
 
 
@@ -152,6 +153,84 @@ async def test_list_shows_every_account_with_the_disabled_one_marked(stores) -> 
     assert by_email["pat@example.com"]["disabled"] is True and by_email["pat@example.com"]["disabled_at"] and by_email["pat@example.com"]["last_sign_in_at"]
     assert by_email["local@example.com"]["issuer"] is None and by_email["local@example.com"]["subject"] is None and by_email["local@example.com"]["last_sign_in_at"] is None
     assert listed["disabled_without_account"] == [], "an identity with an account is listed once, on the account"
+
+
+@pytest.mark.anyio
+async def test_an_account_linked_before_its_issuer_was_recorded_is_turned_off_by_subject(stores) -> None:
+    """A NULL ``oauth_issuer`` (0039) must not leave the account impossible to turn off: fail closed on the subject."""
+    users, tokens, schedules = stores
+    legacy = await _seed(users, tokens, schedules, _provider_account("legacy@example.com", "sub-legacy", issuer=None), pats=1, tasks=0)
+    command = AccountsCommand(users, tokens=tokens, schedules=schedules)
+    with pytest.raises(CommandError, match="before its issuer was recorded"):
+        await command.run("disable", email="legacy@example.com")
+    document = await command.run("disable", issuer=ISSUER, subject="sub-legacy")
+    assert document["account"]["email"] == "legacy@example.com" and document["sessions_ended"] is True and document["tokens_revoked"] == 1, document
+    refreshed = await users.get_user_by_id(str(legacy.id))
+    assert refreshed.disabled_at is not None and refreshed.token_version == legacy.token_version + 1
+    assert (await users.get_user_by_email("legacy@example.com")).disabled_at is not None
+    listed = await command.run("list")
+    assert next(entry for entry in listed["accounts"] if entry["email"] == "legacy@example.com")["disabled"] is True
+
+
+@pytest.mark.anyio
+async def test_a_sign_in_racing_end_sessions_cannot_carry_a_stale_version_back(stores) -> None:
+    users, tokens, schedules = stores
+    account = await _seed(users, tokens, schedules, _provider_account(), pats=0, tasks=0)
+    stale = await users.get_user_by_id(str(account.id))
+    assert await users.end_sessions(str(account.id)) is True
+    # What a sign-in writes on an existing account, with the object it read before the bump.
+    stale.system_role = "admin"
+    stale.last_sign_in_at = datetime.now(UTC)
+    await users.record_sign_in(str(stale.id), system_role=stale.system_role, oauth_issuer=stale.oauth_issuer, last_sign_in_at=stale.last_sign_in_at)
+    refreshed = await users.get_user_by_id(str(account.id))
+    assert refreshed.token_version == account.token_version + 1 and refreshed.system_role == "admin"
+
+
+def test_main_answers_with_one_document_and_a_non_zero_exit_whatever_failed(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    from app.gateway.auth import accounts
+
+    async def _refuse(command: str, **_: object) -> dict:
+        raise CommandError("no account exists for this subject")
+
+    async def _break(command: str, **_: object) -> dict:
+        raise RuntimeError("database unreachable")
+
+    monkeypatch.setattr(accounts, "_run", _refuse)
+    assert accounts.main(["end-sessions", "--issuer", ISSUER, "--subject", "sub-x"]) == 1
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1 and json.loads(out[0]) == {"command": "end-sessions", "error": "no account exists for this subject"}
+    monkeypatch.setattr(accounts, "_run", _break)
+    assert accounts.main(["list"]) == 1
+    out = capsys.readouterr().out.strip().splitlines()
+    assert len(out) == 1 and json.loads(out[0]) == {"command": "list", "error": "RuntimeError: database unreachable"}
+
+
+def test_a_disabled_account_is_refused_by_the_browser_websocket_and_the_langgraph_hook(stores, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The two paths that resolve a cookie outside the middleware, with a cookie carrying the *current* version."""
+    from types import SimpleNamespace
+
+    from app.gateway import deps
+    from app.gateway.auth import create_access_token
+    from app.gateway.auth.config import AuthConfig, set_auth_config
+    from app.gateway.langgraph_auth import authenticate
+    from app.gateway.routers.browser import _authenticate_ws
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+
+    users, tokens, schedules = stores
+    set_auth_config(AuthConfig(jwt_secret=os.environ["AUTH_JWT_SECRET"]))
+    monkeypatch.setattr(deps, "_cached_local_provider", None)
+    monkeypatch.setattr(deps, "_cached_repo", None)
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider")))
+    account = asyncio.run(_seed(users, tokens, schedules, _provider_account(), pats=0, tasks=0))
+    live_cookie = create_access_token(str(account.id), token_version=account.token_version)
+    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": live_cookie}))).email == "pat@example.com"
+    asyncio.run(users.disable_identity(ISSUER, "sub-pat"))
+    current = asyncio.run(users.get_user_by_id(str(account.id)))
+    cookie = create_access_token(str(account.id), token_version=current.token_version)
+    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": cookie}))) is None
+    with pytest.raises(Exception, match="turned off"):
+        asyncio.run(authenticate(SimpleNamespace(cookies={"access_token": cookie}, headers={}, method="GET", url=SimpleNamespace(path="/api/threads"))))
 
 
 @pytest.mark.anyio

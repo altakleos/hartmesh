@@ -89,6 +89,13 @@ def test_a_half_set_rule_refuses_and_names_the_keys_never_the_values(render_conf
     assert not any(sentinel in message for sentinel in SENTINELS) and "owner@example.com" not in message and CLAIM not in message, message
 
 
+def test_values_are_split_on_commas_only_and_a_value_may_contain_a_space(render_config: ModuleType) -> None:
+    provider = _provider(render_config, _environ(HARTMESH_SIGN_ON_ACCESS_CLAIM=CLAIM, HARTMESH_SIGN_ON_ACCESS_VALUES="Project Admin, member", HARTMESH_SIGN_ON_ROLES="Project Admin = admin, member=user"))
+    assert provider["access_values"] == ["Project Admin", "member"] and provider["access_roles"] == {"Project Admin": "admin", "member": "user"}
+    with pytest.raises(render_config.RenderError, match="HARTMESH_SIGN_ON_ACCESS_CLAIM must be one claim name without whitespace"):
+        _provider(render_config, _environ(HARTMESH_SIGN_ON_ACCESS_CLAIM="two words", HARTMESH_SIGN_ON_ACCESS_VALUES="member"))
+
+
 def test_the_access_keys_beside_local_passwords_refuse(render_config: ModuleType) -> None:
     environ = {"HARTMESH_LOCAL_PASSWORDS": "allowed", "HARTMESH_SIGN_ON_ACCESS_CLAIM": CLAIM, "HARTMESH_SIGN_ON_ACCESS_VALUES": "member"}
     with pytest.raises(render_config.RenderError, match="HARTMESH_SIGN_ON_ACCESS_CLAIM, HARTMESH_SIGN_ON_ACCESS_VALUES"):
@@ -119,7 +126,7 @@ def test_the_readme_and_env_example_name_the_keys_and_the_command() -> None:
     for key in ("HARTMESH_SIGN_ON_ACCESS_CLAIM", "HARTMESH_SIGN_ON_ACCESS_VALUES", "HARTMESH_SIGN_ON_ROLES"):
         assert f"| `{key}` |" in readme, key
     assert "### Membership follows the claim" in readme
-    for phrase in ("python -m app.gateway.auth.accounts list", "end-sessions", "sso_no_access", "sso_access_off", "0040_account_access", "nothing reachable over HTTP"):
+    for phrase in ("python -m app.gateway.auth.accounts list", "end-sessions", "sso_no_access", "sso_access_off", "0040_account_access", "nothing reachable over HTTP", "PYTHONPATH=. uv run --no-sync python -m app.gateway.auth.accounts"):
         assert phrase in readme, phrase
     example = (PROFILE / ".env.example").read_text(encoding="utf-8")
     assert "#HARTMESH_SIGN_ON_ACCESS_CLAIM=" in example and "#HARTMESH_SIGN_ON_ROLES=" in example

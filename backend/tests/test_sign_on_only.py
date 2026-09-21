@@ -397,6 +397,9 @@ class _Users:
         self.updated.append(user)
         return user
 
+    async def record_sign_in(self, user):
+        self.updated.append(user)
+
     async def create_oauth_user(self, **kwargs):
         user = SimpleNamespace(id=uuid4(), needs_setup=False, token_version=0, password_hash=None, **kwargs)
         self.created.append(user)

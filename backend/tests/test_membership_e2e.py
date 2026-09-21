@@ -348,8 +348,15 @@ class TestMembership:
             _wait(_run_started, timeout=30.0, what="the stream to open and its run to start")
             assert "error" not in stream, stream.get("error")
 
+            def _run_status() -> tuple | None:
+                with sqlite3.connect(_db(gateway)) as connection:
+                    return connection.execute("SELECT status FROM runs WHERE thread_id = ?", (thread_id,)).fetchone()
+
+            assert _run_status() == ("running",), "the run is in flight when the command runs"
             code, document = _accounts(gateway, "disable", "--issuer", issuer, "--subject", "sub-off")
             assert code == 0, document
+            assert _run_status() == ("running",), "the command did not interrupt the run"
+            t_disabled = time.monotonic()
             assert document["verdict"] == "disabled" and document["sessions_ended"] is True and document["tokens_revoked"] == 1 and document["schedules_held"] == 1, document
             assert document["account"]["email"] == "off@example.com" and document["account"]["disabled"] is True and document["account"]["subject"] == "sub-off"
 
@@ -365,6 +372,9 @@ class TestMembership:
             worker.join(timeout=120)
             assert not worker.is_alive() and "error" not in stream, stream.get("error")
             observed = stream["observed"]
+            assert observed.t_end is not None and observed.events[-1] == "end", "the stream ran to its end frame"
+            assert observed.t_end > t_disabled, "and ended after the command had returned"
+            assert "stream-ran-to-its-end" in "".join(str(payload) for _, payload in observed.frames)
             with httpx.Client(base_url=base, timeout=30.0) as internal:
                 pair = generate_csrf_token()
                 # An internal caller acting for the owner (a channel bound to the account) is refused too --
@@ -385,7 +395,7 @@ class TestMembership:
                 assert _error(refused_sign_in) == "sso_access_off", refused_sign_in.headers
                 assert "access_token" not in again.cookies
             lines = [line for line in journal.lines if "access turned off for subject sub-off" in line]
-            assert lines and issuer in lines[-1]
+            assert lines and issuer in lines[-1] and CLIENT_SECRET not in lines[-1] and "eyJ" not in lines[-1], "issuer and subject, never a token"
 
             # The due schedule: not started. The scheduler records the refusal on the task and no run row appears for it.
             def _held() -> bool:
@@ -413,6 +423,9 @@ class TestMembership:
         assert _row(gateway, "early@example.com") is None
         code, again = _accounts(gateway, "disable", "--issuer", provider.issuer_url("a"), "--subject", "sub-early")
         assert code == 0 and again["verdict"] == "already_disabled"
+        # The failure contract through the command line: one document, non-zero exit.
+        code, failed = _accounts(gateway, "end-sessions", "--issuer", provider.issuer_url("a"), "--subject", "sub-early")
+        assert code == 1 and failed == {"command": "end-sessions", "error": failed["error"]} and "no account exists" in failed["error"]
 
     # ── Evidence 8: enable revives nothing ───────────────────────────────
 

@@ -536,6 +536,11 @@ def _split_list(raw: str) -> list[str]:
     return [item for item in re.split(r"[,\s]+", raw.strip()) if item]
 
 
+def _split_on_commas(raw: str) -> list[str]:
+    """Comma-separated entries, each stripped; an entry may contain a space."""
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
 def sign_on_access(environ: Mapping[str, str]) -> dict[str, Any]:
     """The provider's admission rule from the optional access keys, or ``{}``.
 
@@ -549,7 +554,10 @@ def sign_on_access(environ: Mapping[str, str]) -> dict[str, Any]:
     """
 
     claim = environ.get(SIGN_ON_ACCESS_CLAIM_ENV, "").strip()
-    values = _split_list(environ.get(SIGN_ON_ACCESS_VALUES_ENV, ""))
+    if any(character.isspace() for character in claim):
+        raise RenderError(f"{SIGN_ON_ACCESS_CLAIM_ENV} must be one claim name without whitespace")
+    # Commas only: a claim value may itself contain a space ("Project Admin").
+    values = _split_on_commas(environ.get(SIGN_ON_ACCESS_VALUES_ENV, ""))
     roles_raw = environ.get(SIGN_ON_ROLES_ENV, "").strip()
     if claim and not values:
         raise RenderError(f"{SIGN_ON_ACCESS_CLAIM_ENV} is set but {SIGN_ON_ACCESS_VALUES_ENV} is empty: no value would admit anyone. Set the admitting values, or unset the claim")
@@ -565,8 +573,9 @@ def sign_on_access(environ: Mapping[str, str]) -> dict[str, Any]:
     if _present(environ, SIGN_ON_ADMINS_ENV):
         raise RenderError(f"{SIGN_ON_ROLES_ENV} and {SIGN_ON_ADMINS_ENV} are both set: roles come from the claim or from the email list, not both. Unset one")
     mapping: dict[str, str] = {}
-    for index, entry in enumerate(_split_list(roles_raw)):
+    for index, entry in enumerate(_split_on_commas(roles_raw)):
         value, separator, role = entry.rpartition("=")
+        value, role = value.strip(), role.strip()
         if not separator or not value or role not in SIGN_ON_ROLE_NAMES:
             raise RenderError(f"{SIGN_ON_ROLES_ENV} must be entries of the form <value>=admin or <value>=user separated by commas; the entry at position {index} is not")
         if value in mapping:
