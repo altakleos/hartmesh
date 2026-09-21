@@ -260,7 +260,16 @@ def serve_gateway(home: Path, *, config_yaml: str = _MINIMAL_CONFIG_YAML) -> Ite
 
     from deerflow.config import app_config as app_config_module
 
-    cfg = app_config_module.get_app_config()
+    # A config the Gateway refuses at load is a result some suites assert on
+    # (a validation error); the environment set above must not outlive it
+    # either, or every later test in the worker reads this Gateway's config.
+    try:
+        cfg = app_config_module.get_app_config()
+    except Exception:
+        journal_logger.removeHandler(sink)
+        journal_logger.setLevel(previous_level)
+        monkeypatch.undo()
+        raise
     cfg.database.sqlite_dir = str(home / "deer-flow-home" / "db")
 
     import uvicorn
