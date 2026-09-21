@@ -98,7 +98,9 @@ describe("useShareWithEveryone", () => {
     });
     expect(toast.success).toHaveBeenCalledTimes(1);
     const [message, options] = toast.success.mock.calls[0]!;
-    expect(message).toBe("Shared 2 files with everyone at the company");
+    expect(message).toBe(
+      "Shared 2 files with everyone at the company, in Reports",
+    );
     expect((options as ToastOptions).action.label).toBe("Undo");
     expect(toast.info).not.toHaveBeenCalled();
     await act(async () => {
@@ -106,6 +108,25 @@ describe("useShareWithEveryone", () => {
     });
     expect(mockedRemove).toHaveBeenNthCalledWith(1, "a.pdf");
     expect(mockedRemove).toHaveBeenNthCalledWith(2, "a.xlsx");
+  });
+
+  it("says which folder it went into, because the person did not choose it", async () => {
+    mockedPublish.mockResolvedValue(published("august.pdf"));
+    const { result } = renderHook(() => useShareWithEveryone("thread-1"), {
+      wrapper: createWrapper(),
+    });
+
+    await act(async () => {
+      await result.current.share(
+        ["/mnt/user-data/outputs/august.pdf"],
+        "Reports",
+      );
+    });
+
+    expect(toast.success).toHaveBeenCalledWith(
+      "Shared august.pdf with everyone at the company, in Reports",
+      expect.anything(),
+    );
   });
 
   it("says which name the same bytes already carry when it is not the one clicked", async () => {

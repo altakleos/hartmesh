@@ -121,10 +121,16 @@ export function useShareWithEveryone(threadId?: string) {
         );
         return published;
       }
+      // The folder is derived from the file, so the person never chose it:
+      // the toast is where they find out which one it was.
       toast.success(
         fresh.length === 1
-          ? t.shared.shared(fresh[0]!.name)
-          : t.shared.sharedMany(fresh.length),
+          ? folder
+            ? t.shared.sharedInFolder(fresh[0]!.name, folder)
+            : t.shared.shared(fresh[0]!.name)
+          : folder
+            ? t.shared.sharedManyInFolder(fresh.length, folder)
+            : t.shared.sharedMany(fresh.length),
         {
           // Handing a file to the whole company is one click, so taking it
           // back is one click too, right where the person is looking.

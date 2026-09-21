@@ -8,6 +8,7 @@ import { fetch as fetcher } from "@/core/api/fetcher";
 import {
   canPublishToShared,
   publishToShared,
+  sharedFolderFor,
   SharedRequestError,
   urlOfSharedFile,
 } from "@/core/shared";
@@ -102,5 +103,56 @@ describe("canPublishToShared", () => {
     expect(canPublishToShared("/mnt/user-data/workspace/notes.md")).toBe(false);
     expect(canPublishToShared("/mnt/user-data/shared/august.pdf")).toBe(false);
     expect(canPublishToShared("/etc/passwd")).toBe(false);
+  });
+});
+
+describe("sharedFolderFor", () => {
+  const report =
+    "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json";
+  const render =
+    "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.pdf";
+
+  it("files a report's render with the reports, wherever it was shared from", () => {
+    // The card, the artifact panel and a row of My files all ask this, so the
+    // same render lands in one place however the person reached it.
+    expect(sharedFolderFor(render, { artifacts: [report, render] })).toBe(
+      "Reports",
+    );
+    expect(sharedFolderFor(render, { artifacts: [], report })).toBe("Reports");
+  });
+
+  it("leaves an ordinary conversation file at the root", () => {
+    expect(
+      sharedFolderFor("/mnt/user-data/outputs/notes.txt", { artifacts: [] }),
+    ).toBeUndefined();
+    expect(
+      sharedFolderFor("/mnt/user-data/uploads/jobs.csv", { artifacts: [] }),
+    ).toBeUndefined();
+  });
+
+  it("carries a report the person keeps in their own Reports folder", () => {
+    // Where this product files a report for them, in their own files and in
+    // Shared, is the same folder, so keeping one and then sharing it lands
+    // beside the copy the report card would have shared.
+    expect(
+      sharedFolderFor("/mnt/user-data/files/Reports/august.pdf", {
+        artifacts: [],
+      }),
+    ).toBe("Reports");
+  });
+
+  it("never carries the rest of how a person keeps their files", () => {
+    // A folder named for a customer or a deal is not the company's business,
+    // and a folder each person names differently would put the same bytes in
+    // Shared twice, which is what this rule exists to prevent.
+    for (const own of [
+      "/mnt/user-data/files/Acme-acquisition/terms.pdf",
+      "/mnt/user-data/files/Invoices/2026/aug.pdf",
+      "/mnt/user-data/files/Reports/2026/august.pdf",
+      "/mnt/user-data/files/august.pdf",
+      "/mnt/user-data/files/ReportsOfMine/august.pdf",
+    ]) {
+      expect(sharedFolderFor(own, { artifacts: [] })).toBeUndefined();
+    }
   });
 });

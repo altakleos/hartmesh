@@ -82,10 +82,17 @@ export function useSaveToMyFiles(threadId: string) {
       if (kept.length === 0) {
         return kept;
       }
+      // Where it went is part of what happened: a report's downloads are
+      // filed under their own folder, and a person who is not told goes
+      // looking at the root.
       toast.success(
         kept.length === 1
-          ? t.files.saved(kept[0]!.name)
-          : t.files.savedMany(kept.length),
+          ? folder
+            ? t.files.savedToFolder(kept[0]!.name, folder)
+            : t.files.saved(kept[0]!.name)
+          : folder
+            ? t.files.savedManyToFolder(kept.length, folder)
+            : t.files.savedMany(kept.length),
         {
           action: {
             label: t.files.openMyFiles,

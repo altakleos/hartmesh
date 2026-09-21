@@ -15,6 +15,7 @@ import {
   cellFormat,
   checksLine,
   formatValue,
+  filingFolderFor,
   reportRenderPath,
   reportSiblingPath,
   useLiveReportRenders,
@@ -28,7 +29,7 @@ import {
 import { useSaveToMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
-import { SHARED_REPORTS_FOLDER, useShareWithEveryone } from "@/core/shared";
+import { sharedFolderFor, useShareWithEveryone } from "@/core/shared";
 import { cn } from "@/lib/utils";
 
 /** Columns of these units are read down a column, so they line up right. */
@@ -338,6 +339,20 @@ export function ReportCard({
   // Sharing hands the same documents to everyone at the company.
   const everyone = useShareWithEveryone(threadId);
   const renderPaths = renders.map((kind) => reportRenderPath(filepath, kind));
+  // Where these downloads belong is asked of the file, not decided by this
+  // card: the artifact panel and a row of My files ask the same question of
+  // the same file and get the same answer, so one report reaches each area
+  // once however the person got there.
+  // Where these downloads belong is asked of the file, not decided here: the
+  // artifact panel and a row of My files ask the same question of the same
+  // file and get the same answer, so one report reaches each area once
+  // however the person got there. The card holds the report they are renders
+  // of, so it says so rather than having the rule find that out again. Both
+  // buttons render only where there is a render, so there is one to ask about.
+  const presented = { artifacts, report: filepath };
+  const filedUnder = renderPaths[0] ?? filepath;
+  const myFilesFolder = filingFolderFor(filedUnder, presented);
+  const sharedFolder = sharedFolderFor(filedUnder, presented);
 
   const chartURL = (png: string) =>
     urlOfArtifact({
@@ -406,7 +421,7 @@ export function ReportCard({
             {!isMock && (
               <Button
                 disabled={myFiles.isPending}
-                onClick={() => void myFiles.save(renderPaths)}
+                onClick={() => void myFiles.save(renderPaths, myFilesFolder)}
                 size="sm"
                 variant="outline"
               >
@@ -421,9 +436,7 @@ export function ReportCard({
             {!isMock && (
               <Button
                 disabled={everyone.isPending}
-                onClick={() =>
-                  void everyone.share(renderPaths, SHARED_REPORTS_FOLDER)
-                }
+                onClick={() => void everyone.share(renderPaths, sharedFolder)}
                 size="sm"
                 variant="outline"
               >

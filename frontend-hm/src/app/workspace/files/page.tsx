@@ -39,6 +39,7 @@ import {
 } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import {
+  sharedFolderFor,
   urlOfSharedFile,
   useRemoveSharedFile,
   useShareWithEveryone,
@@ -243,11 +244,15 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
                     <Button
                       aria-label={`${t.shared.shareWithEveryone} ${file.name}`}
                       disabled={everyone.isPending}
-                      onClick={() =>
-                        void everyone.share([
-                          `${MY_FILES_VIRTUAL_PREFIX}/${file.path}`,
-                        ])
-                      }
+                      onClick={() => {
+                        const path = `${MY_FILES_VIRTUAL_PREFIX}/${file.path}`;
+                        // No conversation is involved, so the file itself is
+                        // all there is to go on.
+                        void everyone.share(
+                          [path],
+                          sharedFolderFor(path, { artifacts: [] }),
+                        );
+                      }}
                       size="icon-sm"
                       title={t.shared.description}
                       variant="ghost"

@@ -300,7 +300,9 @@ export interface Translations {
     saveToMyFiles: string;
     saving: string;
     saved: (name: string) => string;
+    savedToFolder: (name: string, folder: string) => string;
     savedMany: (count: number) => string;
+    savedManyToFolder: (count: number, folder: string) => string;
     savedSome: (kept: number, total: number) => string;
     saveFailed: string;
     openMyFiles: string;
@@ -329,7 +331,9 @@ export interface Translations {
     shareWithEveryone: string;
     sharing: string;
     shared: (name: string) => string;
+    sharedInFolder: (name: string, folder: string) => string;
     sharedMany: (count: number) => string;
+    sharedManyInFolder: (count: number, folder: string) => string;
     sharedSome: (published: number, total: number) => string;
     shareFailed: string;
     openShared: string;

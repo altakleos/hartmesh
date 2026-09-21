@@ -9,6 +9,13 @@
 
 export const REPORT_RENDER_KINDS = ["pdf", "docx", "xlsx"] as const;
 
+/**
+ * The folder a report's downloads are filed under, in the person's own files
+ * and in the company's Shared area alike. Not a translated string: a folder
+ * name is data, and Shared is one directory for everyone.
+ */
+export const REPORTS_FOLDER = "Reports";
+
 export type ReportRenderKind = (typeof REPORT_RENDER_KINDS)[number];
 
 const REPORT_SUFFIX = ".report.json";
@@ -61,4 +68,60 @@ export function availableReportRenders(
   return REPORT_RENDER_KINDS.filter((kind) =>
     presented.has(reportRenderPath(reportPath, kind)),
   );
+}
+
+/**
+ * The report a render belongs to, or `null` when *path* is not a render.
+ *
+ * The inverse of {@link reportRenderPath}: the skill writes `<name>.pdf`
+ * beside `<name>.report.json`, so the report is named by the render.
+ */
+export function reportOfRender(path: string): string | null {
+  const dot = path.lastIndexOf(".");
+  if (dot < 0) {
+    return null;
+  }
+  const kind = path.slice(dot + 1);
+  if (!REPORT_RENDER_KINDS.includes(kind as ReportRenderKind)) {
+    return null;
+  }
+  return `${path.slice(0, dot)}${REPORT_SUFFIX}`;
+}
+
+/**
+ * What the reader of a file knows about where it came from.
+ *
+ * `artifacts` is the conversation's presented files; `report` is the report a
+ * card already holds, so it states what it knows instead of rediscovering it.
+ */
+export interface Presented {
+  artifacts: readonly string[];
+  report?: string;
+}
+
+/**
+ * Whether *path* is a render of a report that was actually presented.
+ *
+ * The name alone is a guess — any PDF can sit next to nothing — so the report
+ * it claims to belong to must be the one in hand or among the artifacts.
+ */
+export function isReportRender(path: string, presented: Presented): boolean {
+  const report = reportOfRender(path);
+  if (report === null) {
+    return false;
+  }
+  return report === presented.report || presented.artifacts.includes(report);
+}
+
+/**
+ * The folder a file belongs in when it is filed away, or `undefined` for the
+ * root. Asked by every action that files something — keeping it in My files,
+ * sharing it with the company — so where a file lands is decided by what it
+ * is, never by which button the person happened to press.
+ */
+export function filingFolderFor(
+  path: string,
+  presented: Presented,
+): string | undefined {
+  return isReportRender(path, presented) ? REPORTS_FOLDER : undefined;
 }

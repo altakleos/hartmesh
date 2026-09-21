@@ -387,7 +387,10 @@ export const enUS: Translations = {
     saveToMyFiles: "Save to My files",
     saving: "Saving…",
     saved: (name) => `Saved ${name} to My files`,
+    savedToFolder: (name, folder) => `Saved ${name} to My files, in ${folder}`,
     savedMany: (count) => `Saved ${count} files to My files`,
+    savedManyToFolder: (count, folder) =>
+      `Saved ${count} files to My files, in ${folder}`,
     savedSome: (kept, total) =>
       `Saved ${kept} of ${total}. Couldn't save the rest. Try again.`,
     saveFailed: "Couldn't save to My files. Try again.",
@@ -418,7 +421,11 @@ export const enUS: Translations = {
     shareWithEveryone: "Share with everyone",
     sharing: "Sharing…",
     shared: (name) => `Shared ${name} with everyone at the company`,
+    sharedInFolder: (name, folder) =>
+      `Shared ${name} with everyone at the company, in ${folder}`,
     sharedMany: (count) => `Shared ${count} files with everyone at the company`,
+    sharedManyInFolder: (count, folder) =>
+      `Shared ${count} files with everyone at the company, in ${folder}`,
     sharedSome: (published, total) =>
       `Shared ${published} of ${total}. Couldn't share the rest. Try again.`,
     shareFailed: "Couldn't share it. Try again.",

@@ -9,23 +9,54 @@
  */
 
 import { fetch } from "../api/fetcher";
+import {
+  filingFolderFor,
+  REPORTS_FOLDER,
+  type Presented,
+} from "../business-report/paths";
 import { getBackendBaseURL } from "../config";
 import {
   encodeRelativePath,
   FileAreaRequestError,
   readErrorDetail,
 } from "../file-areas";
+import { MY_FILES_VIRTUAL_PREFIX } from "../files/api";
 
 /** Where every sandbox sees the Shared area. */
 export const SHARED_VIRTUAL_PREFIX = "/mnt/user-data/shared";
 
 /**
- * The folder a shared report lands in. Shared is one directory for the whole
- * company, so a folder name is data, not words on one person's screen: were
- * it translated, two colleagues reading different languages would file the
- * same report in two places and neither would find the other's.
+ * Where a file lands in Shared, or `undefined` for the root.
+ *
+ * One rule for every way of sharing — the report card, the artifact panel,
+ * a row of *My files* — because the folder is a property of the file, not of
+ * the button pressed: otherwise the same report reaches Shared twice, once
+ * per route, and the company sees two copies of one thing.
+ *
+ * A report's download is filed with the reports, and so is one of the
+ * person's own files that they keep in the same _Reports_ folder, which is
+ * where this product puts a report it saves for them. Anything else sits at
+ * the root: the rest of how someone keeps their own files is theirs, not the
+ * company's.
  */
-export const SHARED_REPORTS_FOLDER = "Reports";
+export function sharedFolderFor(
+  path: string,
+  presented: Presented,
+): string | undefined {
+  if (path.startsWith(`${MY_FILES_VIRTUAL_PREFIX}/`)) {
+    // Only the product's own folder crosses over. The rest of how a person
+    // keeps their files is theirs: a folder named for a customer or a deal
+    // would otherwise become a company-wide folder on one click, and two
+    // colleagues who file the same report differently would put two copies
+    // in Shared, which is the thing this rule exists to prevent.
+    const relative = path.slice(MY_FILES_VIRTUAL_PREFIX.length + 1);
+    return relative.startsWith(`${REPORTS_FOLDER}/`) &&
+      !relative.slice(REPORTS_FOLDER.length + 1).includes("/")
+      ? REPORTS_FOLDER
+      : undefined;
+  }
+  return filingFolderFor(path, presented);
+}
 
 export interface SharedFileInfo {
   /** Relative to the Shared root, e.g. `Reports/august.pdf`. */
