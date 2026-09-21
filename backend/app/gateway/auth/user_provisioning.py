@@ -4,14 +4,21 @@ Handles the logic of finding existing users, auto-creating new ones, and
 enforcing email domain restrictions. A pre-existing local account is never
 auto-linked to an OIDC identity: an email collision blocks the SSO login with
 a 409 instead, so an SSO login can never seize a local password account.
+
+Two checks come before anything else at every sign-in, first or not: an
+identity the deployer turned off is refused, and, where an admission claim
+is configured, a token that does not carry an admitting value is refused,
+with no account created and none returned.
 """
 
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
 
+from app.gateway.auth.access import admitted_values, refuse_turned_off, role_for
 from app.gateway.auth.local_provider import LocalAuthProvider
 from app.gateway.auth.oidc import OIDCIdentity
 from deerflow.config.auth_config import OIDCProviderConfig
@@ -28,13 +35,22 @@ async def get_or_provision_oidc_user(
     """Resolve an OIDC identity to a DeerFlow user.
 
     Flow:
-    1. Look up existing user by (provider, subject)
+    0. Refuse an identity the deployer turned off, and (with an admission
+       claim configured) a token without an admitting value
+    1. Look up existing user by (provider, subject); re-read its role when
+       the role mapping is set; stamp the sign-in
     2. If not found, enforce domain/email-verified rules
     3. Block if a local account already owns the email (never auto-link)
     4. Auto-create if enabled
 
     Returns a dict with ``user`` (the User model instance) and ``created`` (bool).
     """
+    # 0. Before any account is created or returned.
+    if await local_provider.is_identity_disabled(provider_config.issuer, identity.subject):
+        raise refuse_turned_off(provider_config, identity)
+    admitted = admitted_values(provider_config, identity)
+    now = datetime.now(UTC)
+
     # 1. Existing OAuth link, pinned to the issuer that created it. The lookup
     # key is (provider name, subject); the issuer is what stops a provider
     # name pointed at a new issuer from handing this account to whoever holds
@@ -46,13 +62,22 @@ async def get_or_provision_oidc_user(
         recorded = getattr(existing, "oauth_issuer", None)
         if recorded is None:
             existing.oauth_issuer = provider_config.issuer
-            await local_provider.update_user(existing)
         elif _issuer_key(recorded) != _issuer_key(provider_config.issuer):
             logger.warning("OIDC sign-in refused: the subject under provider %s is linked to issuer %s, and the provider is configured for %s", provider_id, recorded, provider_config.issuer)
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="Your account is linked to a different identity provider. Contact your administrator.",
             )
+        if provider_config.access_roles:
+            # The role follows the claim at every sign-in, in both directions.
+            role = role_for(provider_config, admitted, existing.email)
+            if role != existing.system_role:
+                logger.info("OIDC sign-in: role of subject %s at issuer %s is now %s (was %s)", identity.subject, provider_config.issuer, role, existing.system_role)
+                existing.system_role = role  # type: ignore[assignment]
+        existing.last_sign_in_at = now
+        # A targeted write: never the whole row, so a token_version read a
+        # moment ago cannot land back over an end-sessions that ran meanwhile.
+        await local_provider.record_sign_in(existing)
         return {"user": existing, "created": False}
 
     # 2. Verified email requirement
@@ -97,7 +122,7 @@ async def get_or_provision_oidc_user(
             detail="Automatic account creation is disabled. Contact your administrator.",
         )
 
-    role = _resolve_role(email, provider_config.admin_emails)
+    role = role_for(provider_config, admitted, email)
     try:
         user = await local_provider.create_oauth_user(
             email=email,
@@ -105,6 +130,7 @@ async def get_or_provision_oidc_user(
             oauth_id=identity.subject,
             system_role=role,
             oauth_issuer=provider_config.issuer,
+            last_sign_in_at=now,
         )
     except ValueError:
         # Lost a race: a concurrent callback (double-click, replayed code) already

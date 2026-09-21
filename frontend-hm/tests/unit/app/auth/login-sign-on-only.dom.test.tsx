@@ -163,4 +163,29 @@ describe("the login page in sign-on-only mode", () => {
     expect(screen.queryByLabelText(enUS.login.password)).toBeNull();
     expect(screen.queryByText(enUS.login.errors.sso_account_exists)).toBeNull();
   });
+
+  it.each([
+    ["sso_no_access", enUS.login.signOnOnlyErrors.sso_no_access],
+    ["sso_access_off", enUS.login.signOnOnlyErrors.sso_access_off],
+  ])(
+    "tells a person refused by the membership rule what to do (%s)",
+    async (code, message) => {
+      search = `error=${code}`;
+      installGateway(
+        { needs_setup: false, registration_enabled: false, sign_on_only: true },
+        [{ id: "sso", display_name: "Single sign-on", type: "oidc" }],
+      );
+
+      renderLogin();
+
+      await waitFor(() => {
+        expect(screen.getByRole("alert").textContent).toBe(message);
+      });
+      expect(message).toContain("Ask your administrator");
+      expect(message.toLowerCase()).not.toContain("claim");
+      expect(
+        screen.getByRole("button", { name: "Continue with Single sign-on" }),
+      ).toBeTruthy();
+    },
+  );
 });

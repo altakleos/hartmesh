@@ -12,15 +12,16 @@ construct this after ``init_engine_from_config()`` has run.
 
 from __future__ import annotations
 
-from datetime import UTC
+from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
+from deerflow.persistence.user.access import DisabledIdentityRow, issuer_key
 from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
 
 # ``email`` is ``mapped_column(unique=True, index=True)``, which SQLAlchemy
@@ -113,6 +114,13 @@ def _violated_constraint(exc: IntegrityError) -> str | None:
     return None
 
 
+def _aware(value: datetime | None) -> datetime | None:
+    """SQLite loses tzinfo on read; reattach UTC so timestamps compare reliably."""
+    if value is None or value.tzinfo is not None:
+        return value
+    return value.replace(tzinfo=UTC)
+
+
 def _normalize_email(email: str) -> str:
     """Canonicalise an email address for storage and lookup.
 
@@ -141,7 +149,7 @@ class SQLiteUserRepository(UserRepository):
     # ── Converters ────────────────────────────────────────────────────
 
     @staticmethod
-    def _row_to_user(row: UserRow) -> User:
+    def _row_to_user(row: UserRow, disabled_at: datetime | None = None) -> User:
         return User(
             id=UUID(row.id),
             email=row.email,
@@ -149,13 +157,36 @@ class SQLiteUserRepository(UserRepository):
             system_role=row.system_role,  # type: ignore[arg-type]
             # SQLite loses tzinfo on read; reattach UTC so downstream
             # code can compare timestamps reliably.
-            created_at=row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
+            created_at=_aware(row.created_at),
             oauth_provider=row.oauth_provider,
             oauth_id=row.oauth_id,
             oauth_issuer=row.oauth_issuer,
             needs_setup=row.needs_setup,
             token_version=row.token_version,
+            last_sign_in_at=_aware(row.last_sign_in_at),
+            disabled_at=_aware(disabled_at),
         )
+
+    async def _disabled_at(self, session: AsyncSession, row: UserRow) -> datetime | None:
+        """Whether the deployer turned this identity off: the one place the fact lives.
+
+        Only a provider account has an identity to look up; a local account
+        cannot be turned off this way and never matches. A provider account
+        linked before the issuer was recorded (NULL, see 0039) matches on its
+        subject alone: fail closed, since the row will adopt the configured
+        issuer at its next sign-in and until then only the subject is known.
+        """
+        if not row.oauth_id or not row.oauth_provider:
+            return None
+        stmt = select(DisabledIdentityRow.disabled_at).where(DisabledIdentityRow.subject == row.oauth_id)
+        if row.oauth_issuer:
+            stmt = stmt.where(DisabledIdentityRow.issuer == issuer_key(row.oauth_issuer))
+        return await session.scalar(stmt.limit(1))
+
+    async def _load(self, session: AsyncSession, row: UserRow | None) -> User | None:
+        if row is None:
+            return None
+        return self._row_to_user(row, await self._disabled_at(session, row))
 
     @staticmethod
     def _user_to_row(user: User) -> UserRow:
@@ -170,6 +201,7 @@ class SQLiteUserRepository(UserRepository):
             oauth_issuer=user.oauth_issuer,
             needs_setup=user.needs_setup,
             token_version=user.token_version,
+            last_sign_in_at=user.last_sign_in_at,
         )
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -226,8 +258,7 @@ class SQLiteUserRepository(UserRepository):
 
     async def get_user_by_id(self, user_id: str) -> User | None:
         async with self._sf() as session:
-            row = await session.get(UserRow, user_id)
-            return self._row_to_user(row) if row is not None else None
+            return await self._load(session, await session.get(UserRow, user_id))
 
     async def get_user_by_email(self, email: str) -> User | None:
         # Case-insensitive match: an account is keyed by its email regardless of
@@ -240,8 +271,7 @@ class SQLiteUserRepository(UserRepository):
         stmt = select(UserRow).where(func.lower(UserRow.email) == _normalize_email(email)).order_by(UserRow.created_at, UserRow.id).limit(1)
         async with self._sf() as session:
             result = await session.execute(stmt)
-            row = result.scalars().first()
-            return self._row_to_user(row) if row is not None else None
+            return await self._load(session, result.scalars().first())
 
     async def update_user(self, user: User) -> User:
         async with self._sf() as session:
@@ -279,6 +309,7 @@ class SQLiteUserRepository(UserRepository):
             row.oauth_issuer = user.oauth_issuer
             row.needs_setup = user.needs_setup
             row.token_version = user.token_version
+            row.last_sign_in_at = user.last_sign_in_at
             await session.commit()
         return user
 
@@ -296,5 +327,93 @@ class SQLiteUserRepository(UserRepository):
         stmt = select(UserRow).where(UserRow.oauth_provider == provider, UserRow.oauth_id == oauth_id)
         async with self._sf() as session:
             result = await session.execute(stmt)
-            row = result.scalar_one_or_none()
-            return self._row_to_user(row) if row is not None else None
+            return await self._load(session, result.scalar_one_or_none())
+
+    async def get_user_by_identity(self, issuer: str, subject: str) -> User | None:
+        """The account an identity provider's ``(issuer, subject)`` created, if any.
+
+        A row linked before the issuer was recorded (NULL) is that account
+        when no row records this issuer for the subject: the deployer names
+        the issuer the provider is configured for, which is the one the row
+        will adopt at its next sign-in.
+        """
+        stmt = select(UserRow).where(UserRow.oauth_id == subject, UserRow.oauth_provider.is_not(None))
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            for row in rows:
+                if row.oauth_issuer and issuer_key(row.oauth_issuer) == issuer_key(issuer):
+                    return await self._load(session, row)
+            for row in rows:
+                if not row.oauth_issuer:
+                    return await self._load(session, row)
+            return None
+
+    async def end_sessions(self, user_id: str) -> bool:
+        """Invalidate every session of the account: one atomic increment of ``token_version``.
+
+        Atomic so a sign-in writing the row at the same moment cannot carry
+        a stale version back over the bump.
+        """
+        async with self._sf() as session:
+            result = await session.execute(update(UserRow).where(UserRow.id == user_id).values(token_version=UserRow.token_version + 1))
+            await session.commit()
+            return bool(result.rowcount)
+
+    async def record_sign_in(self, user_id: str, *, system_role: str, oauth_issuer: str | None, last_sign_in_at: datetime) -> None:
+        """What a provider sign-in writes to an existing account, and nothing else.
+
+        A targeted update rather than ``update_user``: the sign-in must not
+        carry a ``token_version`` it read a moment ago back over an
+        ``end_sessions`` that landed in between.
+        """
+        async with self._sf() as session:
+            await session.execute(update(UserRow).where(UserRow.id == user_id).values(system_role=system_role, oauth_issuer=oauth_issuer, last_sign_in_at=last_sign_in_at))
+            await session.commit()
+
+    async def list_users(self) -> list[User]:
+        """Every account, oldest first, each with its derived disabled state."""
+        async with self._sf() as session:
+            rows = (await session.execute(select(UserRow).order_by(UserRow.created_at, UserRow.id))).scalars().all()
+            return [await self._load(session, row) for row in rows]  # type: ignore[misc]
+
+    # ── Identities the deployer turned off ────────────────────────────
+
+    async def is_identity_disabled(self, issuer: str, subject: str) -> bool:
+        """Read before an account is created or returned at sign-in."""
+        stmt = select(DisabledIdentityRow.disabled_at).where(DisabledIdentityRow.issuer == issuer_key(issuer), DisabledIdentityRow.subject == subject)
+        async with self._sf() as session:
+            return await session.scalar(stmt) is not None
+
+    async def disable_identity(self, issuer: str, subject: str) -> bool:
+        """Record the refusal; returns False when it was already recorded (idempotent)."""
+        key = issuer_key(issuer)
+        async with self._sf() as session:
+            existing = await session.get(DisabledIdentityRow, (key, subject))
+            if existing is not None:
+                return False
+            session.add(DisabledIdentityRow(issuer=key, subject=subject, disabled_at=datetime.now(UTC)))
+            try:
+                await session.commit()
+            except IntegrityError:
+                # Lost a race with another disable of the same identity: the
+                # refusal is recorded either way.
+                await session.rollback()
+                return False
+            return True
+
+    async def enable_identity(self, issuer: str, subject: str) -> bool:
+        """Withdraw the refusal; returns False when there was none (idempotent)."""
+        async with self._sf() as session:
+            existing = await session.get(DisabledIdentityRow, (issuer_key(issuer), subject))
+            if existing is None:
+                return False
+            await session.delete(existing)
+            await session.commit()
+            return True
+
+    async def list_disabled_identities(self) -> list[tuple[str, str, datetime]]:
+        """Every identity turned off, whether or not an account exists for it."""
+        stmt = select(DisabledIdentityRow).order_by(DisabledIdentityRow.disabled_at, DisabledIdentityRow.issuer, DisabledIdentityRow.subject)
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            return [(row.issuer, row.subject, _aware(row.disabled_at)) for row in rows]  # type: ignore[misc]

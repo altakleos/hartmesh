@@ -86,6 +86,9 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_SIGN_ON_SCOPES` | Sign-on only. Extra scopes to request, separated by spaces or commas, appended to the default `openid email profile`; some providers emit a claim only when its scope is asked for. Absent, the default three. |
 | `HARTMESH_SIGN_ON_CLIENT_AUTH` | Sign-on only. How the Gateway authenticates at the token endpoint: `client_secret_post` (absent) or `client_secret_basic`. The deployer registers the client to match. |
 | `HARTMESH_SIGN_ON_NAME` | Sign-on only. The label on the sign-in button ("Continue with …"), at most 64 printable characters. Absent, `Single sign-on`. |
+| `HARTMESH_SIGN_ON_ACCESS_CLAIM` | Sign-on only, with `_ACCESS_VALUES`. The literal name of one claim the token must carry for a sign-in to be admitted (§ "Membership follows the claim"). Absent, admission is as before. |
+| `HARTMESH_SIGN_ON_ACCESS_VALUES` | Sign-on only, with `_ACCESS_CLAIM`. Comma-separated values of that claim that admit (commas only: a value may contain a space, and is trimmed). One without the other refuses to render. |
+| `HARTMESH_SIGN_ON_ROLES` | Sign-on only, with the two above. `<value>=admin,<value>=user`, comma-separated, one entry per admitting value: the role then follows the claim at every sign-in, and `HARTMESH_SIGN_ON_ADMINS` must be absent. |
 | `AUTH_TOKEN_EXPIRY_DAYS` | Both modes. The session lifetime in whole days, 1 to 30 (the product's bound). Absent -- which is what every existing tenant `.env` is -- 7, exactly as before. Anything else refuses to render and the Gateway does not start. |
 | `HARTMESH_SANDBOX_RESOLV_CONF` | The Docker host's upstream DNS file, default `/run/systemd/resolve/resolv.conf` on the Debian tenant VM. The Gateway receives a read-only view; open-mode runsc sandboxes bind the validated file at `/etc/resolv.conf`. On hosts without systemd-resolved, select an existing resolver file containing reachable upstream IP addresses. A loopback stub file is refused (§ "DNS under gVisor"). |
 
@@ -242,8 +245,125 @@ refusal. A tenant that was upgraded without the key shows the refusal in the
 Gateway's journal (`render_config: refusing to render: no sign-in mode is
 selected …`), the container exits and restarts until the key is added and
 `up -d` is run again. A sign-on option (`HARTMESH_SIGN_ON_ADMINS`, `_SCOPES`,
-`_CLIENT_AUTH`, `_NAME`) set beside `HARTMESH_LOCAL_PASSWORDS=allowed` also
-refuses rather than being ignored. `.env.example` shows sign-on-only mode.
+`_CLIENT_AUTH`, `_NAME`, `_ACCESS_CLAIM`, `_ACCESS_VALUES`, `_ROLES`) set
+beside `HARTMESH_LOCAL_PASSWORDS=allowed` also refuses rather than being
+ignored. `.env.example` shows sign-on-only mode.
+
+### Membership follows the claim (optional)
+
+A consumer that shares one identity provider across many tenants keeps the
+membership there: for each deployment the provider knows who belongs and
+whether each person administers it, and says so as one claim at sign-in.
+Three optional keys make the tenant read that claim; without them
+sign-on-only mode behaves exactly as above, which is right for a consumer
+with one company per issuer.
+
+```
+HARTMESH_SIGN_ON_ACCESS_CLAIM=urn:zitadel:iam:org:project:roles
+HARTMESH_SIGN_ON_ACCESS_VALUES=admin,member
+HARTMESH_SIGN_ON_ROLES=admin=admin,member=user
+```
+
+- **Admission.** With the claim and its values set, a sign-in is admitted
+  only when the token carries one of the values under that claim -- checked
+  at **every** sign-in, before an account is created and before an existing
+  one is returned. The name is taken literally (colons and dots are
+  characters of the name, not a path). The claim is read from the ID token,
+  and from userinfo only when the ID token does not carry the name at all.
+  It may be a list of strings, a single string, or an object whose keys are
+  the values (`{"admin": {…}, "member": {…}}`). A claim that is missing,
+  empty or of another type refuses; nothing falls back to an email-domain
+  filter. The person sees "You have no access to this workspace. Ask your
+  administrator." (`sso_no_access`), which does not name the claim; the
+  Gateway's journal carries the issuer and subject, never a token.
+- **Role.** With `HARTMESH_SIGN_ON_ROLES` set, each admitting value carries
+  `admin` or `user`, and the role is re-read and written to the account at
+  every sign-in, in both directions; `admin` wins when a token carries
+  several. Every request reads the account's role afresh, so once the
+  demotion is written no open session of that account is an administrator
+  any more, in any browser. The mapping covers every admitting value exactly
+  (a value without a role, or a role for a value that does not admit,
+  refuses to render), it needs the admission claim, and it replaces
+  `HARTMESH_SIGN_ON_ADMINS`: setting both refuses to render. Without the
+  mapping, roles come from the administrators' list at account creation, as
+  before.
+- **A half-set pair** -- the claim without values, values without the claim,
+  or the mapping without the claim -- refuses to render and names the keys.
+  Values and role entries are separated by commas only (a value may contain
+  a space); positions in a refusal count from 0.
+- **Readiness.** The renderer's summary line carries `admission by claim` and
+  `roles from claim` when the keys are set (`sign-in=sign_on_only (provider
+  sso, callback …, admission by claim, roles from claim)`).
+
+**The deployer can turn one account off, or end its sessions.** An operator
+command, run inside the deployment like `reset_admin` and never a network
+route: nothing reachable over HTTP turns an account off or on or ends
+another account's sessions, with any credential. Accounts are addressed by
+the provider's **issuer and subject**, which exist before an account does;
+`--email` is a convenience that must resolve to exactly one provider
+account. Every form prints one JSON document on stdout and exits non-zero
+on failure (the document then carries `error`), and every form is
+idempotent.
+
+```bash
+docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
+  exec --user 1000 gateway \
+  sh -c 'cd /app/backend && PYTHONPATH=. uv run --no-sync python -m app.gateway.auth.accounts list'
+# … disable      --issuer https://login.example.com --subject 3141592
+# … enable       --issuer https://login.example.com --subject 3141592
+# … end-sessions --issuer https://login.example.com --subject 3141592
+# … disable      --email pat@example.com
+```
+
+- `disable` records the refusal (`disabled_identities`, keyed by issuer and
+  subject, migration `0040_account_access`), ends the account's sessions and
+  revokes its personal access tokens. From that row every path that acts for
+  the account derives its refusal at the next request: the session cookie
+  and personal access tokens (`401`), the browser WebSocket, the LangGraph
+  auth hook, an internal caller acting for that owner (an IM channel bound
+  to it), and every process-internal launch for the owner -- a due
+  scheduled task, a channel message, an MCP task notification -- which the
+  scheduler records as a failed occurrence naming the refusal, so no run
+  starts. A sign-in is refused even when the claim admits, with "Your
+  access to this workspace has been turned off. Ask your administrator."
+  (`sso_access_off`) and a journal line naming issuer and subject. **A run
+  already executing is not interrupted**: the command is a database write
+  the Gateway reads at its next credential resolution or launch, so a run in
+  flight finishes under its own budget and the stream carrying it ends when
+  the run does; nothing new starts. The output says what was done
+  (`sessions_ended`, `tokens_revoked`, `schedules_held` -- the account's
+  active schedules, each of which is refused while the account is off and
+  resumes untouched when it is on again).
+- `disable` for a subject that **has no account yet** records the refusal
+  anyway and says so (`"account": null`); a person removed before their
+  first sign-in cannot create an account later. The row survives a restart
+  and comes back with a restored database.
+- `enable` withdraws the refusal. Sessions ended and tokens revoked by
+  `disable` stay ended and revoked; the person signs in again.
+- `end-sessions` signs one account out everywhere without turning it off and
+  without touching its tokens: every open session is refused at its next
+  request and the next sign-in re-reads the claim. This is how a demotion
+  takes effect at once.
+- `list` shows every account -- issuer, subject, email, role, whether it is
+  off and since when, and its last sign-in (`users.last_sign_in_at`, stamped
+  at every provider sign-in) -- plus every identity turned off before it had
+  an account, for the deployer to compare with the provider's list.
+- The account's content stays where it is, owned by the account; nothing is
+  exported, reassigned or deleted.
+
+Sample output of `disable`:
+
+```json
+{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "role": "user", "subject": "3141592"}, "command": "disable", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "schedules_held": 1, "sessions_ended": true, "tokens_revoked": 2, "verdict": "disabled"}
+```
+
+**Upgrade note.** The three access keys and the command are honoured from
+the first release carrying this change, `v2.1.0+hartmesh.30` (the same cut
+that first carries the sign-on keys above) or whichever release is cut
+next. An older release ignores the keys at render time and has no command;
+a `.env` carrying them under an older pin renders sign-on-only mode without
+the claim check. Migration `0040_account_access` runs at the first start on
+this release.
 
 ### Local passwords (`HARTMESH_LOCAL_PASSWORDS=allowed`)
 

@@ -34,7 +34,10 @@ whose callback is ``https://<HARTMESH_PUBLIC_HOST>/api/v1/auth/callback/sso``
 through unchanged, which is local passwords exactly as before. Neither, both,
 or a half-set sign-on group refuses to render and names every key involved
 (README: "Sign-in"). The client secret reaches the Gateway as the reference
-``$HARTMESH_SIGN_ON_CLIENT_SECRET`` and is never written to disk.
+``$HARTMESH_SIGN_ON_CLIENT_SECRET`` and is never written to disk. The optional
+``HARTMESH_SIGN_ON_ACCESS_CLAIM`` / ``_ACCESS_VALUES`` pair makes admission
+follow one claim of the token, and ``HARTMESH_SIGN_ON_ROLES`` makes the role
+follow it too (README: "Membership follows the claim").
 
 ``HARTMESH_MODELS_FILE`` is optional. Absent (or empty), everything above is
 the whole story. Set, it names a YAML file on the tenant's own data disk --
@@ -104,7 +107,11 @@ SIGN_ON_ADMINS_ENV = "HARTMESH_SIGN_ON_ADMINS"
 SIGN_ON_SCOPES_ENV = "HARTMESH_SIGN_ON_SCOPES"
 SIGN_ON_CLIENT_AUTH_ENV = "HARTMESH_SIGN_ON_CLIENT_AUTH"
 SIGN_ON_NAME_ENV = "HARTMESH_SIGN_ON_NAME"
-SIGN_ON_OPTIONAL_KEYS = (SIGN_ON_ADMINS_ENV, SIGN_ON_SCOPES_ENV, SIGN_ON_CLIENT_AUTH_ENV, SIGN_ON_NAME_ENV)
+SIGN_ON_ACCESS_CLAIM_ENV = "HARTMESH_SIGN_ON_ACCESS_CLAIM"
+SIGN_ON_ACCESS_VALUES_ENV = "HARTMESH_SIGN_ON_ACCESS_VALUES"
+SIGN_ON_ROLES_ENV = "HARTMESH_SIGN_ON_ROLES"
+SIGN_ON_OPTIONAL_KEYS = (SIGN_ON_ADMINS_ENV, SIGN_ON_SCOPES_ENV, SIGN_ON_CLIENT_AUTH_ENV, SIGN_ON_NAME_ENV, SIGN_ON_ACCESS_CLAIM_ENV, SIGN_ON_ACCESS_VALUES_ENV, SIGN_ON_ROLES_ENV)
+SIGN_ON_ROLE_NAMES = ("admin", "user")
 PUBLIC_HOST_ENV = "HARTMESH_PUBLIC_HOST"
 TOKEN_EXPIRY_DAYS_ENV = "AUTH_TOKEN_EXPIRY_DAYS"
 TOKEN_EXPIRY_DAYS_RANGE = (1, 30)
@@ -529,6 +536,61 @@ def _split_list(raw: str) -> list[str]:
     return [item for item in re.split(r"[,\s]+", raw.strip()) if item]
 
 
+def _split_on_commas(raw: str) -> list[str]:
+    """Comma-separated entries, each stripped; an entry may contain a space."""
+    return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def sign_on_access(environ: Mapping[str, str]) -> dict[str, Any]:
+    """The provider's admission rule from the optional access keys, or ``{}``.
+
+    ``HARTMESH_SIGN_ON_ACCESS_CLAIM`` names one claim literally (a URN with
+    colons and dots is one name) and ``HARTMESH_SIGN_ON_ACCESS_VALUES`` the
+    values of it that admit; ``HARTMESH_SIGN_ON_ROLES`` optionally maps each
+    admitting value to ``admin`` or ``user``. A half-set pair, a mapping with
+    no claim, a mapping beside the administrators' list, an admitting value
+    with no role or a role for a value that does not admit each refuse and
+    name the keys and positions involved, never the values.
+    """
+
+    claim = environ.get(SIGN_ON_ACCESS_CLAIM_ENV, "").strip()
+    if any(character.isspace() for character in claim):
+        raise RenderError(f"{SIGN_ON_ACCESS_CLAIM_ENV} must be one claim name without whitespace")
+    # Commas only: a claim value may itself contain a space ("Project Admin").
+    values = _split_on_commas(environ.get(SIGN_ON_ACCESS_VALUES_ENV, ""))
+    roles_raw = environ.get(SIGN_ON_ROLES_ENV, "").strip()
+    if claim and not values:
+        raise RenderError(f"{SIGN_ON_ACCESS_CLAIM_ENV} is set but {SIGN_ON_ACCESS_VALUES_ENV} is empty: no value would admit anyone. Set the admitting values, or unset the claim")
+    if values and not claim:
+        raise RenderError(f"{SIGN_ON_ACCESS_VALUES_ENV} is set but {SIGN_ON_ACCESS_CLAIM_ENV} is not: there is no claim to look the values up in. Set the claim, or unset the values")
+    if len(set(values)) != len(values):
+        raise RenderError(f"{SIGN_ON_ACCESS_VALUES_ENV} repeats a value; each admitting value once, separated by commas")
+    access: dict[str, Any] = {"access_claim": claim, "access_values": values} if claim else {}
+    if not roles_raw:
+        return access
+    if not claim:
+        raise RenderError(f"{SIGN_ON_ROLES_ENV} is set but {SIGN_ON_ACCESS_CLAIM_ENV} is not: a role mapping needs the admission claim it maps. Set {SIGN_ON_ACCESS_CLAIM_ENV} and {SIGN_ON_ACCESS_VALUES_ENV}, or unset the mapping")
+    if _present(environ, SIGN_ON_ADMINS_ENV):
+        raise RenderError(f"{SIGN_ON_ROLES_ENV} and {SIGN_ON_ADMINS_ENV} are both set: roles come from the claim or from the email list, not both. Unset one")
+    mapping: dict[str, str] = {}
+    for index, entry in enumerate(_split_on_commas(roles_raw)):
+        value, separator, role = entry.rpartition("=")
+        value, role = value.strip(), role.strip()
+        if not separator or not value or role not in SIGN_ON_ROLE_NAMES:
+            raise RenderError(f"{SIGN_ON_ROLES_ENV} must be entries of the form <value>=admin or <value>=user separated by commas; the entry at position {index} is not")
+        if value in mapping:
+            raise RenderError(f"{SIGN_ON_ROLES_ENV} maps the value at position {index} twice")
+        mapping[value] = role
+    unmapped = [str(index) for index, value in enumerate(values) if value not in mapping]
+    if unmapped:
+        raise RenderError(f"{SIGN_ON_ROLES_ENV} gives no role to the admitting value(s) at position {', '.join(unmapped)} of {SIGN_ON_ACCESS_VALUES_ENV}: every value that admits must carry a role")
+    stray = [str(index) for index, value in enumerate(mapping) if value not in values]
+    if stray:
+        raise RenderError(f"{SIGN_ON_ROLES_ENV} maps value(s) at position {', '.join(stray)} that are not in {SIGN_ON_ACCESS_VALUES_ENV}: a role can only follow a value that admits")
+    access["access_roles"] = mapping
+    return access
+
+
 def sign_on_auth(template_auth: Mapping[str, Any], environ: Mapping[str, str]) -> dict[str, Any]:
     """The rendered ``auth`` block for sign-on-only mode.
 
@@ -566,6 +628,7 @@ def sign_on_auth(template_auth: Mapping[str, Any], environ: Mapping[str, str]) -
     name = environ.get(SIGN_ON_NAME_ENV, "").strip() or SIGN_ON_DEFAULT_NAME
     if len(name) > 64 or not name.isprintable():
         raise RenderError(f"{SIGN_ON_NAME_ENV} must be printable text of at most 64 characters")
+    access = sign_on_access(environ)
 
     local = dict(_mapping(template_auth.get("local", {}), "template `auth.local`"))
     if "enabled" in local or "allow_registration" in local:
@@ -590,6 +653,7 @@ def sign_on_auth(template_auth: Mapping[str, Any], environ: Mapping[str, str]) -
                     "scopes": scopes,
                     "token_endpoint_auth_method": method,
                     "admin_emails": admins,
+                    **access,
                 }
             },
         },
@@ -752,7 +816,11 @@ def main(argv: list[str] | None = None) -> int:
     for problem in bundle_problems:
         print(f"render_config: warning: tenant bundle: {problem}", file=sys.stderr)
     sign_in = select_sign_in(os.environ)
-    sign_in_line = f"sign-in={sign_in}" + (f" (provider {SIGN_ON_PROVIDER_ID}, callback https://{os.environ[PUBLIC_HOST_ENV].strip()}/api/v1/auth/callback/{SIGN_ON_PROVIDER_ID})" if sign_in == "sign_on_only" else "")
+    sign_in_line = f"sign-in={sign_in}"
+    if sign_in == "sign_on_only":
+        access = sign_on_access(os.environ)
+        membership = (", admission by claim" if access.get("access_claim") else "") + (", roles from claim" if access.get("access_roles") else "")
+        sign_in_line += f" (provider {SIGN_ON_PROVIDER_ID}, callback https://{os.environ[PUBLIC_HOST_ENV].strip()}/api/v1/auth/callback/{SIGN_ON_PROVIDER_ID}{membership})"
     summary = f"models from {source}; egress={select_egress(os.environ)}; {sign_in_line}; provider keys found: {providers}; sandbox ready_timeout={budget}s; {bundle_line}"
     if args.check:
         print(f"render_config: {args.template} renders ({summary})")

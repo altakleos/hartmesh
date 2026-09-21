@@ -26,6 +26,9 @@ class AuthErrorCode(StrEnum):
     # people in through its identity provider and local passwords are no
     # way in -- not for a new account, not for one restored from before.
     SIGN_ON_REQUIRED = "sign_on_required"
+    # The deployer turned the account off (``disabled_identities``); every
+    # credential that resolves to it is refused until it is turned on again.
+    ACCOUNT_DISABLED = "account_disabled"
 
 
 class TokenError(StrEnum):

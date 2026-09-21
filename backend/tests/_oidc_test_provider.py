@@ -9,6 +9,10 @@ password form. Everything a real provider would check is checked and
 recorded so a test can assert it happened: the redirect URI, the PKCE
 verifier against the S256 challenge, the client's credentials in the method
 it was registered with, and the nonce that goes into the ID token.
+
+The test also says what else the token and userinfo carry (``test_claims``,
+``test_userinfo_claims``, JSON): that is how a membership claim of any shape
+is put into the ID token, into userinfo, or into both, under any name.
 """
 
 from __future__ import annotations
@@ -90,10 +94,19 @@ class OIDCTestProvider:
     # ── what a test does at the "login page" ─────────────────────────────
 
     @staticmethod
-    def sign_in_url(authorization_url: str, *, subject: str, email: str, email_verified: bool = True) -> str:
-        """The authorization URL with the test's answer to the login form appended."""
+    def sign_in_url(authorization_url: str, *, subject: str, email: str, email_verified: bool = True, claims: dict[str, Any] | None = None, userinfo_claims: dict[str, Any] | None = None) -> str:
+        """The authorization URL with the test's answer to the login form appended.
+
+        ``claims`` go into the ID token only and ``userinfo_claims`` into the
+        userinfo response only, so a test controls which source carries what.
+        """
         joiner = "&" if "?" in authorization_url else "?"
-        return authorization_url + joiner + urlencode({"test_subject": subject, "test_email": email, "test_email_verified": "1" if email_verified else "0"})
+        answer = {"test_subject": subject, "test_email": email, "test_email_verified": "1" if email_verified else "0"}
+        if claims:
+            answer["test_claims"] = json.dumps(claims)
+        if userinfo_claims:
+            answer["test_userinfo_claims"] = json.dumps(userinfo_claims)
+        return authorization_url + joiner + urlencode(answer)
 
     # ── routing ──────────────────────────────────────────────────────────
 
@@ -137,7 +150,7 @@ class OIDCTestProvider:
             session = issuer.sessions.get(token)
             if session is None:
                 return self._json(handler, 401, {"error": "invalid_token"})
-            return self._json(handler, 200, {"sub": session["sub"], "email": session["email"], "email_verified": session["email_verified"], "name": session["sub"].title()})
+            return self._json(handler, 200, {"sub": session["sub"], "email": session["email"], "email_verified": session["email_verified"], "name": session["sub"].title(), **session["userinfo_claims"]})
         return self._json(handler, 404, {"error": "not found"})
 
     def _authorize(self, handler: BaseHTTPRequestHandler, issuer: Issuer, query: dict[str, list[str]]) -> None:
@@ -162,6 +175,8 @@ class OIDCTestProvider:
             "sub": one("test_subject"),
             "email": one("test_email"),
             "email_verified": one("test_email_verified") != "0",
+            "claims": json.loads(one("test_claims") or "{}"),
+            "userinfo_claims": json.loads(one("test_userinfo_claims") or "{}"),
         }
         location = one("redirect_uri") + ("&" if "?" in one("redirect_uri") else "?") + urlencode({"code": code, "state": one("state")})
         handler.send_response(302)
@@ -202,7 +217,7 @@ class OIDCTestProvider:
 
         now = int(time.time())
         access_token = secrets.token_urlsafe(24)
-        issuer.sessions[access_token] = {"sub": pending["sub"], "email": pending["email"], "email_verified": pending["email_verified"]}
+        issuer.sessions[access_token] = {"sub": pending["sub"], "email": pending["email"], "email_verified": pending["email_verified"], "userinfo_claims": pending["userinfo_claims"]}
         claims: dict[str, Any] = {
             "iss": self.issuer_url(issuer.name),
             "sub": pending["sub"],
@@ -212,6 +227,7 @@ class OIDCTestProvider:
             "email": pending["email"],
             "email_verified": pending["email_verified"],
         }
+        claims.update(pending["claims"])
         if pending["nonce"]:
             claims["nonce"] = ("not-" + pending["nonce"]) if issuer.wrong_nonce else pending["nonce"]
         id_token = jwt.encode(claims, issuer.private_key, algorithm="RS256", headers={"kid": issuer.kid})

@@ -377,7 +377,7 @@ def test_nginx_drops_the_internal_caller_headers_in_every_proxied_location() -> 
 
 
 class _Users:
-    """A users table with the three methods provisioning uses."""
+    """A users table with the four methods provisioning uses."""
 
     def __init__(self, *users) -> None:
         self.users = list(users)
@@ -390,9 +390,15 @@ class _Users:
     async def get_user_by_email(self, email: str):
         return next((u for u in self.users if u.email == email), None)
 
+    async def is_identity_disabled(self, issuer: str, subject: str) -> bool:
+        return False
+
     async def update_user(self, user):
         self.updated.append(user)
         return user
+
+    async def record_sign_in(self, user):
+        self.updated.append(user)
 
     async def create_oauth_user(self, **kwargs):
         user = SimpleNamespace(id=uuid4(), needs_setup=False, token_version=0, password_hash=None, **kwargs)
@@ -455,4 +461,5 @@ async def test_a_trailing_slash_is_not_a_different_issuer() -> None:
     bound = _linked(_PROVIDER.issuer + "/")
     result = await get_or_provision_oidc_user("sso", _PROVIDER, _identity(), bound_users := _Users(bound))
     assert result["user"] is bound
-    assert bound_users.updated == [], "an equivalent issuer is left as it was recorded"
+    assert bound.oauth_issuer == _PROVIDER.issuer + "/", "an equivalent issuer is left as it was recorded"
+    assert bound_users.updated == [bound] and bound.last_sign_in_at is not None, "the one write is the sign-in stamp"

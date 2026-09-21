@@ -1604,11 +1604,19 @@ export const enUS: Translations = {
         "An account with this email already exists. Please sign in with your password or contact your administrator.",
       sso_not_allowed:
         "SSO login is not allowed for your account. Contact your administrator.",
+      sso_no_access:
+        "You have no access to this workspace. Ask your administrator.",
+      sso_access_off:
+        "Your access to this workspace has been turned off. Ask your administrator.",
     },
     signOnOnlyErrors: {
       sso_failed: "Sign-in did not complete. Please try again.",
       sso_account_exists:
         "An earlier account already holds this email address. Contact your administrator to have it cleared.",
+      sso_no_access:
+        "You have no access to this workspace. Ask your administrator.",
+      sso_access_off:
+        "Your access to this workspace has been turned off. Ask your administrator.",
     },
   },
 };

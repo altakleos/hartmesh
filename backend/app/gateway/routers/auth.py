@@ -1225,8 +1225,8 @@ async def oauth_callback(
             status.HTTP_403_FORBIDDEN: "sso_not_allowed",
             status.HTTP_409_CONFLICT: "sso_account_exists",
         }
-        error_code = error_map.get(exc.status_code, "sso_failed")
-        logger.warning("OIDC user provisioning failed for %s (%s): %s", identity.email, provider, exc.detail)
+        error_code = getattr(exc, "redirect_code", None) or error_map.get(exc.status_code, "sso_failed")
+        logger.warning("OIDC user provisioning failed for %s (%s, subject %s at %s): %s", identity.email, provider, identity.subject, provider_config.issuer, exc.detail)
         redirect = _build_error_redirect(oidc_config.frontend_base_url, error_code)
         return RedirectResponse(url=redirect, status_code=status.HTTP_302_FOUND)
 

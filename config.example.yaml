@@ -3160,6 +3160,23 @@ authorization:
 #         #   - example.com
 #         admin_emails: []                 # Auto-grant admin role to these emails
 #
+#         # Membership follows a claim (optional). When the identity provider
+#         # is the membership authority, name one claim literally (a URN with
+#         # colons and dots is one name, not a path) and the values that admit:
+#         # a sign-in whose token carries none of them is refused before any
+#         # account is created or returned, at every sign-in. The claim is
+#         # read from the ID token, then from userinfo when the ID token does
+#         # not carry it; a list of strings, a single string, or an object
+#         # whose keys are the values. Missing, empty or another type refuses;
+#         # nothing falls back to allowed_email_domains.
+#         # access_claim: urn:example:workspace:roles
+#         # access_values: [admin, member]
+#         # Optional with the above: the role follows the claim too, re-read
+#         # and written at every sign-in in both directions ("admin" wins when
+#         # several mapped values are present). Every admitting value needs a
+#         # role, and admin_emails must then be empty.
+#         # access_roles: {admin: admin, member: user}
+#
 #         # Security features (enabled by default):
 #         pkce_enabled: true               # PKCE (S256) for authorization code flow
 #         nonce_enabled: true              # Nonce validation in ID tokens
