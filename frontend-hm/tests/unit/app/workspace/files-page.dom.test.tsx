@@ -101,7 +101,6 @@ rs.mock("@/core/shared", () => ({
   useShareWithEveryone: () => ({
     share: shareWithEveryone,
     isPending: false,
-    hasShared: () => false,
     openShared: rs.fn(),
   }),
 }));
@@ -282,6 +281,29 @@ describe("FilesPage", () => {
     // The path the sandbox knows it by, so the server can find the caller's
     // own copy; no conversation is involved, so no thread.
     expect(shareWithEveryone).toHaveBeenCalledWith([
+      "/mnt/user-data/files/Reports/august.pdf",
+    ]);
+  });
+
+  it("keeps the share action live after a share and a trip to the Shared tab", () => {
+    // Whether a file is already shared is the server's answer at the next
+    // click, never this page's memory of its own clicks: a memory is what a
+    // tab switch loses, and the old one let a second click copy `_1`.
+    shareWithEveryone.mockClear();
+    renderPage();
+    const shareButton = () =>
+      within(screen.getByTestId("my-files-list")).getByRole("button", {
+        name: "Share with everyone august.pdf",
+      });
+
+    fireEvent.click(shareButton());
+    openSharedTab();
+    fireEvent.mouseDown(screen.getByTestId("files-tab-mine"), { button: 0 });
+    expect((shareButton() as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(shareButton());
+
+    expect(shareWithEveryone).toHaveBeenCalledTimes(2);
+    expect(shareWithEveryone).toHaveBeenNthCalledWith(2, [
       "/mnt/user-data/files/Reports/august.pdf",
     ]);
   });

@@ -171,6 +171,257 @@ async def test_publishing_a_taken_name_keeps_both(paths: Paths, repo) -> None:
     assert (paths.shared_dir() / two["path"]).read_bytes() == b"second"
 
 
+# ---------- sharing the same thing again ----------
+
+
+@pytest.mark.anyio
+async def test_sharing_the_same_file_again_finds_it_there_instead_of_copying(paths: Paths, repo) -> None:
+    """A second click, a second tab, a second day: the bytes are already there, so nothing is copied."""
+    client, user = _client(repo)
+    source = _own_file(paths, user, "august.pdf", b"%PDF august")
+
+    with client:
+        first = client.post("/api/shared/publish", json={"path": source})
+        assert first.status_code == 201, first.text
+        again = client.post("/api/shared/publish", json={"path": source})
+        assert again.status_code == 200, again.text
+        assert again.json()["path"] == first.json()["path"] == "august.pdf"
+        assert again.json()["can_remove"] is True
+        listing = client.get("/api/shared").json()
+
+    assert [entry["path"] for entry in listing["files"]] == ["august.pdf"]
+    assert len(await _all_records(repo)) == 1, "no second record either"
+
+
+@pytest.mark.anyio
+async def test_the_same_bytes_under_another_name_in_the_same_folder_are_already_there(paths: Paths, repo) -> None:
+    client, user = _client(repo)
+    original = _own_file(paths, user, "august.pdf", b"%PDF august")
+    renamed = _own_file(paths, user, "august-final.pdf", b"%PDF august")
+
+    with client:
+        client.post("/api/shared/publish", json={"path": original, "folder": "Reports"})
+        again = client.post("/api/shared/publish", json={"path": renamed, "folder": "Reports"})
+        assert again.status_code == 200, again.text
+        assert again.json()["path"] == "Reports/august.pdf", "the answer names the copy that is there"
+        listing = client.get("/api/shared").json()
+
+    assert [entry["path"] for entry in listing["files"]] == ["Reports/august.pdf"]
+
+
+@pytest.mark.anyio
+async def test_the_same_bytes_in_another_folder_are_a_new_publication(paths: Paths, repo) -> None:
+    client, user = _client(repo)
+    source = _own_file(paths, user, "august.pdf", b"%PDF august")
+
+    with client:
+        client.post("/api/shared/publish", json={"path": source, "folder": "Reports"})
+        elsewhere = client.post("/api/shared/publish", json={"path": source, "folder": "Archive"})
+        assert elsewhere.status_code == 201, elsewhere.text
+        assert elsewhere.json()["path"] == "Archive/august.pdf"
+
+
+@pytest.mark.anyio
+async def test_a_file_shared_then_changed_is_shared_again_beside_the_old_one(paths: Paths, repo) -> None:
+    client, user = _client(repo)
+    source = _own_file(paths, user, "august.pdf", b"%PDF august v1")
+
+    with client:
+        one = client.post("/api/shared/publish", json={"path": source}).json()
+        _own_file(paths, user, "august.pdf", b"%PDF august v2")
+        two = client.post("/api/shared/publish", json={"path": source})
+        assert two.status_code == 201, two.text
+
+    assert one["path"] == "august.pdf"
+    assert two.json()["path"] == "august_1.pdf"
+    assert (paths.shared_dir() / "august.pdf").read_bytes() == b"%PDF august v1"
+    assert (paths.shared_dir() / "august_1.pdf").read_bytes() == b"%PDF august v2"
+
+
+@pytest.mark.anyio
+async def test_a_file_taken_out_of_shared_can_be_shared_again(paths: Paths, repo) -> None:
+    client, user = _client(repo)
+    source = _own_file(paths, user, "august.pdf", b"%PDF august")
+
+    with client:
+        client.post("/api/shared/publish", json={"path": source})
+        assert client.delete("/api/shared/august.pdf").status_code == 200
+        again = client.post("/api/shared/publish", json={"path": source})
+        assert again.status_code == 201, again.text
+        assert again.json()["path"] == "august.pdf"
+
+    assert (paths.shared_dir() / "august.pdf").read_bytes() == b"%PDF august"
+
+
+@pytest.mark.anyio
+async def test_a_record_whose_file_is_gone_by_hand_does_not_stop_a_fresh_copy(paths: Paths, repo) -> None:
+    """The record says it is there; the disk says otherwise. The disk wins and the person gets their file shared."""
+    client, user = _client(repo)
+    source = _own_file(paths, user, "august.pdf", b"%PDF august")
+
+    with client:
+        client.post("/api/shared/publish", json={"path": source})
+        (paths.shared_dir() / "august.pdf").unlink()
+        again = client.post("/api/shared/publish", json={"path": source})
+        assert again.status_code == 201, again.text
+
+    assert (paths.shared_dir() / "august.pdf").read_bytes() == b"%PDF august"
+
+
+@pytest.mark.anyio
+async def test_a_colleagues_identical_file_is_the_one_already_there(paths: Paths, repo) -> None:
+    """Shared holds bytes for the company; who put them there first is the record's story, not a reason for a second copy."""
+    client, user = _client(repo)
+    colleague, other = _client(repo, _user("colleague"))
+    mine = _own_file(paths, user, "price-list.xlsx", b"prices")
+    theirs = _own_file(paths, other, "price-list.xlsx", b"prices")
+
+    with client:
+        first = client.post("/api/shared/publish", json={"path": mine}).json()
+    with colleague:
+        again = colleague.post("/api/shared/publish", json={"path": theirs})
+        assert again.status_code == 200, again.text
+        assert again.json()["path"] == first["path"]
+        assert again.json()["can_remove"] is False, "it is still the first publisher's to take back"
+
+    records = await _all_records(repo)
+    assert len(records) == 1
+    assert records[0]["published_by"] == str(user.id)
+
+
+@pytest.mark.anyio
+async def test_a_record_whose_file_was_replaced_by_hand_yields_one_fresh_copy_not_one_per_click(paths: Paths, repo) -> None:
+    """The first record's file no longer holds the bytes; the fresh copy does, and every later share finds that one."""
+    client, user = _client(repo)
+    source = _own_file(paths, user, "august.pdf", b"%PDF august")
+
+    with client:
+        client.post("/api/shared/publish", json={"path": source})
+        (paths.shared_dir() / "august.pdf").write_bytes(b"replaced by hand")
+        fresh = client.post("/api/shared/publish", json={"path": source})
+        assert fresh.status_code == 201, fresh.text
+        assert fresh.json()["path"] == "august_1.pdf"
+        again = client.post("/api/shared/publish", json={"path": source})
+        assert again.status_code == 200, again.text
+        assert again.json()["path"] == "august_1.pdf"
+        listing = client.get("/api/shared").json()
+
+    assert [entry["path"] for entry in listing["files"]] == ["august.pdf", "august_1.pdf"]
+    assert len(await _all_records(repo)) == 2
+
+
+@pytest.mark.anyio
+async def test_a_conversations_output_shared_twice_lands_once(paths: Paths, repo) -> None:
+    client, user = _client(repo)
+    source = _thread_output(paths, user, "brief.pdf", b"%PDF brief")
+
+    with client:
+        first = client.post("/api/shared/publish", json={"path": source, "thread_id": THREAD, "folder": "Reports"})
+        assert first.status_code == 201, first.text
+        again = client.post("/api/shared/publish", json={"path": source, "thread_id": THREAD, "folder": "Reports"})
+        assert again.status_code == 200, again.text
+        assert again.json()["path"] == first.json()["path"]
+        assert again.json()["from_thread_id"] == THREAD
+
+    assert len(await _all_records(repo)) == 1
+
+
+@pytest.mark.anyio
+async def test_the_record_store_answers_every_live_publication_of_the_bytes_in_one_folder(repo) -> None:
+    """Folder equality, not prefix; removed rows never; earliest first."""
+
+    async def record(path: str) -> dict:
+        return await repo.record_publication(path=path, size=1, sha256="x" * 64, published_by="p", from_thread_id=None, from_path=None)
+
+    root = await record("a.pdf")
+    reports_first = await record("Reports/a.pdf")
+    removed = await record("Reports/b.pdf")
+    await repo.record_removal(removed["publication_id"], removed_by="p")
+    await record("Reports/Sub/a.pdf")
+    reports_second = await record("Reports/a_1.pdf")
+    await repo.record_publication(path="Reports/other.pdf", size=1, sha256="y" * 64, published_by="p", from_thread_id=None, from_path=None)
+
+    assert [row["publication_id"] for row in await repo.live_publications_holding("x" * 64, folder="")] == [root["publication_id"]]
+    assert [row["path"] for row in await repo.live_publications_holding("x" * 64, folder="Reports")] == ["Reports/a.pdf", "Reports/a_1.pdf"]
+    assert [row["publication_id"] for row in await repo.live_publications_holding("x" * 64, folder="Reports")] == [reports_first["publication_id"], reports_second["publication_id"]]
+    assert await repo.live_publications_holding("x" * 64, folder="Archive") == []
+    assert await repo.live_publications_holding("y" * 64, folder="") == []
+
+
+@pytest.mark.anyio
+async def test_two_publishes_of_the_same_bytes_at_once_land_once(paths: Paths, repo, monkeypatch) -> None:
+    """Two tabs, or a retried request: both digest at the same time, one copies, the other finds it."""
+    import threading
+    import time
+    from concurrent.futures import ThreadPoolExecutor
+
+    both_arrived = threading.Barrier(2, timeout=10)
+    real_digest = shared_router.digest_of
+
+    def slow_digest(source: Path) -> str:
+        both_arrived.wait()
+        time.sleep(0.05)
+        return real_digest(source)
+
+    monkeypatch.setattr(shared_router, "digest_of", slow_digest)
+    client, user = _client(repo)
+    source = _own_file(paths, user, "august.pdf", b"%PDF august")
+
+    with client, ThreadPoolExecutor(max_workers=2) as pool:
+        responses = list(pool.map(lambda _: client.post("/api/shared/publish", json={"path": source}), range(2)))
+        listing = client.get("/api/shared").json()
+
+    assert sorted(response.status_code for response in responses) == [200, 201], [response.text for response in responses]
+    assert {response.json()["path"] for response in responses} == {"august.pdf"}
+    assert [entry["path"] for entry in listing["files"]] == ["august.pdf"]
+    assert len(await _all_records(repo)) == 1
+
+
+@pytest.mark.anyio
+async def test_a_record_store_that_cannot_be_read_shares_nothing(paths: Paths, repo, monkeypatch) -> None:
+    async def _refuse(*_args, **_kwargs):
+        raise RuntimeError("the record store is having a moment")
+
+    monkeypatch.setattr(repo, "live_publications_holding", _refuse)
+    client, user = _client(repo)
+    source = _own_file(paths, user, "august.pdf", b"pdf")
+
+    with client:
+        response = client.post("/api/shared/publish", json={"path": source})
+        assert response.status_code == 503, response.text
+
+    assert list(paths.ensure_shared_dir().iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_a_source_swapped_for_a_link_after_the_preflight_is_refused_not_a_crash(paths: Paths, repo, monkeypatch) -> None:
+    """The sandbox writes the person's files; what the digest opens is checked the way the copy checks it."""
+    client, user = _client(repo)
+    source = _own_file(paths, user, "august.pdf", b"%PDF august")
+    real = paths.ensure_user_files_dir(str(user.id)) / "august.pdf"
+    elsewhere = paths.ensure_user_files_dir(str(user.id)) / "elsewhere.pdf"
+    elsewhere.write_bytes(b"other")
+    real_source = shared_router._own_file_source
+
+    def swap_then_resolve(user_id: str, virtual_path: str) -> Path:
+        resolved = real_source(user_id, virtual_path)
+        real.unlink()
+        try:
+            real.symlink_to(elsewhere)
+        except OSError as exc:
+            if getattr(exc, "winerror", None) == 1314:
+                pytest.skip("Windows symlink privilege is not available")
+            raise
+        return resolved
+
+    monkeypatch.setattr(shared_router, "_own_file_source", swap_then_resolve)
+    with client:
+        response = client.post("/api/shared/publish", json={"path": source})
+        assert response.status_code == 400, response.text
+
+    assert list(paths.ensure_shared_dir().iterdir()) == []
+
+
 # ---------- reading ----------
 
 

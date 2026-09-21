@@ -188,9 +188,14 @@ and a _My files_ row shares that file directly — anything under uploads,
 outputs or the person's own files (`canPublishToShared`). All three go through
 `useShareWithEveryone`, the same shape as saving: it publishes each path, says
 so once, and carries **Undo** in that toast, because handing a file to the
-whole company is one click and taking it back must be too. It also remembers
-what it has already handed over (`hasShared`), so a second click on the same
-file says _Already shared_ instead of quietly publishing an `_N` duplicate.
+whole company is one click and taking it back must be too. Whether a file is
+already shared is the server's word, never the page's memory: the publish
+route answers `200` with the entry that already holds the same bytes instead
+of copying them (`publishToShared` returns `alreadyShared`), so a second
+click from any tab or session gets an _already shared_ toast with a way to
+the Shared tab, and **Undo** takes back only what that click put there. The
+buttons are never disabled on that account; a page's memory of its own
+clicks is exactly what a tab switch loses.
 The listing carries when each file was published, who published it — resolved
 server-side to the person a colleague would recognise, never the stored id —
 and `can_remove`, which the server decides per caller (the publisher, or an

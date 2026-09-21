@@ -55,6 +55,18 @@ export interface PublishToSharedRequest {
   folder?: string;
 }
 
+/** What publishing did: the entry in Shared, and whether it was already there. */
+export interface PublishOutcome {
+  file: SharedFileInfo;
+  /**
+   * The same bytes were already in that folder of Shared, so nothing was
+   * copied and the entry is the one that was there (the server answers
+   * `200` instead of `201`). A second click, a second tab, a colleague's
+   * identical file: all land once.
+   */
+  alreadyShared: boolean;
+}
+
 export class SharedRequestError extends FileAreaRequestError {
   constructor(status: number, message: string) {
     super(status, message, "SharedRequestError");
@@ -91,7 +103,7 @@ export async function removeSharedFile(path: string): Promise<void> {
 
 export async function publishToShared(
   request: PublishToSharedRequest,
-): Promise<SharedFileInfo> {
+): Promise<PublishOutcome> {
   const response = await fetch(`${getBackendBaseURL()}/api/shared/publish`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -103,7 +115,10 @@ export async function publishToShared(
       await readErrorDetail(response, "Failed to publish file"),
     );
   }
-  return response.json() as Promise<SharedFileInfo>;
+  return {
+    file: (await response.json()) as SharedFileInfo,
+    alreadyShared: response.status === 200,
+  };
 }
 
 /**

@@ -335,7 +335,9 @@ export interface Translations {
     openShared: string;
     undo: string;
     undone: (name: string) => string;
-    alreadyShared: string;
+    alreadyShared: (name: string) => string;
+    alreadySharedAs: (name: string, sharedAs: string) => string;
+    alreadySharedMany: (count: number) => string;
     reportsFolder: string;
   };
 

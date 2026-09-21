@@ -242,12 +242,7 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
                     </Button>
                     <Button
                       aria-label={`${t.shared.shareWithEveryone} ${file.name}`}
-                      disabled={
-                        everyone.isPending ||
-                        everyone.hasShared([
-                          `${MY_FILES_VIRTUAL_PREFIX}/${file.path}`,
-                        ])
-                      }
+                      disabled={everyone.isPending}
                       onClick={() =>
                         void everyone.share([
                           `${MY_FILES_VIRTUAL_PREFIX}/${file.path}`,

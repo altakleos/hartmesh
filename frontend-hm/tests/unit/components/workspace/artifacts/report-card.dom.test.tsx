@@ -27,7 +27,6 @@ rs.mock("@/core/shared", () => ({
   useShareWithEveryone: () => ({
     share: shareWithEveryone,
     isPending: false,
-    hasShared: () => false,
     openShared: rs.fn(),
   }),
 }));

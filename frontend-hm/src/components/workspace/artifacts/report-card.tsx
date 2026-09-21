@@ -420,7 +420,7 @@ export function ReportCard({
             )}
             {!isMock && (
               <Button
-                disabled={everyone.isPending || everyone.hasShared(renderPaths)}
+                disabled={everyone.isPending}
                 onClick={() =>
                   void everyone.share(renderPaths, t.shared.reportsFolder)
                 }
@@ -434,9 +434,7 @@ export function ReportCard({
                 )}
                 {everyone.isPending
                   ? t.shared.sharing
-                  : everyone.hasShared(renderPaths)
-                    ? t.shared.alreadyShared
-                    : t.shared.shareWithEveryone}
+                  : t.shared.shareWithEveryone}
               </Button>
             )}
           </div>

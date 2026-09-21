@@ -103,6 +103,43 @@ def test_publish_refuses_a_link_and_anything_that_is_not_a_file(shared_paths: Pa
         publish_file(link, name="link.txt", folder=None)
 
 
+def test_the_digest_reads_what_publishing_would_copy_and_refuses_the_same_things(shared_paths: Paths, tmp_path: Path) -> None:
+    from deerflow.files.shared import SharedFileError, digest_of, publish_file
+
+    source = _source(tmp_path, "august.pdf", b"%PDF august")
+    assert digest_of(source) == hashlib.sha256(b"%PDF august").hexdigest()
+    assert digest_of(source) == publish_file(source, name="august.pdf", folder=None).sha256
+
+    directory = tmp_path / "source" / "a-folder"
+    directory.mkdir(parents=True)
+    with pytest.raises(SharedFileError):
+        digest_of(directory)
+    link = tmp_path / "source" / "link.pdf"
+    try:
+        link.symlink_to(source)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege is not available")
+        raise
+    with pytest.raises(SharedFileError):
+        digest_of(link)
+
+
+def test_a_published_file_is_held_only_while_its_bytes_are_the_ones_recorded(shared_paths: Paths, tmp_path: Path) -> None:
+    """The record is the story and the directory is the fact: a file gone or replaced by hand is not 'already there'."""
+    from deerflow.files.shared import publish_file, shared_file_holding
+
+    published = publish_file(_source(tmp_path, "august.pdf", b"%PDF august"), name="august.pdf", folder="Reports")
+    held = shared_file_holding(published.path, published.sha256)
+    assert held is not None
+    assert (held.path, held.name, held.size, held.sha256) == ("Reports/august.pdf", "august.pdf", len(b"%PDF august"), published.sha256)
+
+    assert shared_file_holding("Reports/nowhere.pdf", published.sha256) is None
+    assert shared_file_holding("../outside.pdf", published.sha256) is None
+    (shared_paths.shared_dir() / "Reports" / "august.pdf").write_bytes(b"replaced by hand")
+    assert shared_file_holding(published.path, published.sha256) is None
+
+
 def test_publish_refuses_a_folder_that_is_not_a_plain_path(shared_paths: Paths, tmp_path: Path) -> None:
     from deerflow.files.shared import SharedFileError, publish_file
 

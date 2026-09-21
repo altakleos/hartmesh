@@ -22,15 +22,17 @@ from pathlib import Path
 from urllib.parse import quote
 
 from deerflow.config.paths import SHARED_VIRTUAL_PREFIX, get_paths
-from deerflow.files.store import StoredFile, StoreError, copy_into, delete_under, list_under, resolve_under
+from deerflow.files.store import StoredFile, StoreError, copy_into, delete_under, digest_and_stat, list_under, resolve_under, sha256_of
 
 __all__ = [
     "SharedFile",
     "SharedFileError",
+    "digest_of",
     "list_shared_files",
     "publish_file",
     "remove_shared_file",
     "resolve_shared_file",
+    "shared_file_holding",
 ]
 
 #: A path that cannot name a file in the Shared area.
@@ -80,6 +82,28 @@ def list_shared_files() -> tuple[list[SharedFile], bool]:
 def resolve_shared_file(path: str) -> Path:
     """The host path *path* names in Shared, refusing any symlinked segment on the way."""
     return resolve_under(_shared_root(), path)
+
+
+def digest_of(source: Path) -> str:
+    """The SHA-256 of what publishing *source* would copy, read the way ``publish_file`` reads it."""
+    return sha256_of(source)
+
+
+def shared_file_holding(path: str, sha256: str) -> SharedFile | None:
+    """The published file at *path* if it is there and holds exactly the bytes *sha256* names, else ``None``.
+
+    A publication record is the story; the directory is the fact. A record
+    whose file an operator removed or replaced by hand does not say the
+    bytes are there, so the caller checks the bytes before answering that
+    nothing needs copying.
+    """
+    try:
+        digest, metadata = digest_and_stat(resolve_shared_file(path))
+    except (StoreError, OSError):
+        return None
+    if digest != sha256:
+        return None
+    return SharedFile(path=path, name=path.rsplit("/", 1)[-1], size=metadata.st_size, modified=metadata.st_mtime, sha256=sha256)
 
 
 def publish_file(source: Path, *, name: str, folder: str | None = None) -> SharedFile:

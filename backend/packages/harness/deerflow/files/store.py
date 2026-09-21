@@ -30,9 +30,11 @@ __all__ = [
     "StoredFile",
     "copy_into",
     "delete_under",
+    "digest_and_stat",
     "list_under",
     "normalize_relative_path",
     "resolve_under",
+    "sha256_of",
 ]
 
 #: How deep a folder path may go. These are shallow trees; a deeper path is
@@ -253,6 +255,25 @@ def _copy_bytes(source_fd: int, target_fd: int) -> str:
         writer.flush()
         os.fsync(target_fd)
     return digest.hexdigest()
+
+
+def sha256_of(source: Path) -> str:
+    """The SHA-256 of *source*'s bytes; a link or anything but a regular file is refused as ``copy_into`` refuses it."""
+    return digest_and_stat(source)[0]
+
+
+def digest_and_stat(source: Path) -> tuple[str, os.stat_result]:
+    """*source*'s SHA-256 and the metadata of the very file that was hashed, from one descriptor."""
+    fd = _open_regular_source(source)
+    try:
+        digest = hashlib.sha256()
+        with os.fdopen(fd, "rb", closefd=False) as reader:
+            while chunk := reader.read(_COPY_CHUNK_BYTES):
+                digest.update(chunk)
+        metadata = os.fstat(fd)
+    finally:
+        os.close(fd)
+    return digest.hexdigest(), metadata
 
 
 def _create_exclusive(directory: Path, safe_name: str, *, dir_fd: int | None, mode: int) -> tuple[str, int]:
