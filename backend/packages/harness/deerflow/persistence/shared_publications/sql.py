@@ -16,6 +16,11 @@ from deerflow.persistence.shared_publications.model import SharedPublicationRow
 from deerflow.utils.time import coerce_iso
 
 
+def _folder_of(path: str) -> str:
+    """The folder a published path sits in, relative to the Shared root; ``""`` at the root."""
+    return path.rsplit("/", 1)[0] if "/" in path else ""
+
+
 class SharedPublicationRepository:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
@@ -64,6 +69,20 @@ class SharedPublicationRepository:
             stmt = select(SharedPublicationRow).where(SharedPublicationRow.path == path, SharedPublicationRow.removed_at.is_(None)).order_by(SharedPublicationRow.published_at.desc())
             row = (await session.execute(stmt)).scalars().first()
             return None if row is None else self._row_to_dict(row)
+
+    async def live_publications_holding(self, sha256: str, *, folder: str) -> list[dict]:
+        """Every live publication of exactly these bytes in *folder* (``""`` for the root), earliest first.
+
+        This is what makes publishing the same thing twice land once: the
+        route asks before it copies, and checks each answer against the
+        disk, because a record whose file an operator replaced by hand must
+        not hide a later, intact copy. The same bytes in another folder are
+        another publication; a removed one no longer counts.
+        """
+        async with self._sf() as session:
+            stmt = select(SharedPublicationRow).where(SharedPublicationRow.sha256 == sha256, SharedPublicationRow.removed_at.is_(None)).order_by(SharedPublicationRow.published_at.asc())
+            rows = (await session.execute(stmt)).scalars().all()
+        return [self._row_to_dict(row) for row in rows if _folder_of(row.path) == folder]
 
     async def live_publications(self) -> dict[str, dict]:
         """Every publication not yet removed, keyed by path."""

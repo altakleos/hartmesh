@@ -624,14 +624,10 @@ export function ArtifactFileDetail({
             {!isEditing && canShare && (
               <ArtifactAction
                 icon={everyone.isPending ? LoaderIcon : UsersIcon}
-                label={
-                  everyone.hasShared([filepath])
-                    ? t.shared.alreadyShared
-                    : t.shared.shareWithEveryone
-                }
+                label={t.shared.shareWithEveryone}
                 // The tooltip answers what the label cannot: who "everyone" is.
                 tooltip={t.shared.description}
-                disabled={everyone.isPending || everyone.hasShared([filepath])}
+                disabled={everyone.isPending}
                 onClick={() => void everyone.share([filepath])}
               />
             )}

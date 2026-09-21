@@ -1202,9 +1202,11 @@ nothing is shared by accident. The mount is read-only to the sandbox wherever
 the provider enforces it — container-backed providers do; the local provider
 refuses the write in the tool layer but does not confine host `bash`, which
 runs as the Gateway's own uid. Publishing copies the exact bytes and
-records who, when and from where; a name already there keeps both, nothing is
-overwritten; removing takes the file and leaves the record with who removed it
-and when. The routes carry the same `threads:*` authorities as the person's own
+records who, when and from where. The same bytes already in that folder are
+not copied again: the route answers with the entry that holds them, so a
+second click, a second tab or a colleague's identical file lands once.
+Different bytes under a name already there keep both, nothing is overwritten;
+removing takes the file and leaves the record with who removed it and when. The routes carry the same `threads:*` authorities as the person's own
 files.
 
 #### List Shared Files
@@ -1280,9 +1282,19 @@ POST /api/shared/publish
 (`/mnt/user-data/files/...`), or one of a conversation's uploads or outputs, in
 which case `thread_id` names the conversation and it must be the caller's.
 `folder` is where in Shared to put it; the root when omitted. Answers `201`
-with the same shape as one listing entry. `400` for a path outside those
-places or a folder that is not a plain path; `404` for a missing source or a
-conversation that is not the caller's.
+with the same shape as one listing entry. When a live publication in that
+folder already holds exactly these bytes and the file is still there, nothing
+is copied and no record is written: the answer is `200` with that entry,
+whoever published it (`can_remove` is still decided for the caller). The same
+bytes in another folder, or a file that has changed since it was shared, are
+a new publication, and the changed one takes the next free `_N` suffix beside
+the old. Publishes are handled one at a time per Gateway from that check to
+the record of the copy, so two requests carrying the same bytes at once land
+once; the `200` describes Shared at the moment of the check. `400` for a path
+outside those places, a folder that is not a plain path, or a source that is
+not a plain file; `404` for a missing source or a conversation that is not the
+caller's; `503` when the publication records cannot be read or written, in
+which case nothing was shared.
 
 #### Remove One Shared File
 

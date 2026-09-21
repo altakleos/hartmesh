@@ -12,10 +12,12 @@ from .manager import (
 from .shared import (
     SharedFile,
     SharedFileError,
+    digest_of,
     list_shared_files,
     publish_file,
     remove_shared_file,
     resolve_shared_file,
+    shared_file_holding,
 )
 
 __all__ = [
@@ -26,6 +28,7 @@ __all__ = [
     "UserFile",
     "UserFileError",
     "delete_user_file",
+    "digest_of",
     "keep_file",
     "list_shared_files",
     "list_user_files",
@@ -34,4 +37,5 @@ __all__ = [
     "remove_shared_file",
     "resolve_shared_file",
     "resolve_user_file",
+    "shared_file_holding",
 ]

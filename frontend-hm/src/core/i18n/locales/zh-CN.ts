@@ -399,7 +399,10 @@ export const zhCN: Translations = {
     openShared: "打开共享",
     undo: "撤销",
     undone: (name) => `已将 ${name} 撤出共享`,
-    alreadyShared: "已共享给所有人",
+    alreadyShared: (name) => `${name} 已共享给所有人`,
+    alreadySharedAs: (name, sharedAs) =>
+      `${name} 已以 ${sharedAs} 的名称共享给所有人`,
+    alreadySharedMany: (count) => `这 ${count} 个文件均已共享给所有人`,
     reportsFolder: "报告",
   },
 

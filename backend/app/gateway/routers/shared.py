@@ -5,9 +5,12 @@
 ``/mnt/user-data/shared``. ``POST /api/shared/publish`` copies the exact bytes
 of something the caller already has -- one of their own files, or one of a
 conversation's uploads or outputs -- into Shared and records who published
-it, when, and from where; a name already there keeps both, nothing is
-overwritten. ``DELETE`` is the publisher's or an admin's, and leaves the
-record with who removed it and when. The routes carry the same ``threads:*``
+it, when, and from where. The same bytes already in that folder of Shared
+are not copied again: the route answers with what is there, so a second
+click, a second tab or a colleague's identical file lands once. Different
+bytes under a name already there keep both, nothing is overwritten.
+``DELETE`` is the publisher's or an admin's, and leaves the record with who
+removed it and when. The routes carry the same ``threads:*``
 authorities as the person's own files, for the same reason: the authority
 universe is capped, and a role that names threads names what is theirs to
 read, keep and hand out.
@@ -30,7 +33,7 @@ from app.gateway.routers._file_http import acting_user_id, existing_regular_file
 from app.gateway.routers.artifacts import _build_attachment_headers, _build_content_disposition
 from app.gateway.routers.files import _keepable_source
 from deerflow.config.paths import USER_FILES_VIRTUAL_PREFIX, VIRTUAL_PATH_PREFIX
-from deerflow.files import SharedFile, SharedFileError, list_shared_files, normalize_relative_path, publish_file, remove_shared_file, resolve_shared_file, resolve_user_file
+from deerflow.files import SharedFile, SharedFileError, digest_of, list_shared_files, normalize_relative_path, publish_file, remove_shared_file, resolve_shared_file, resolve_user_file, shared_file_holding
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -42,6 +45,12 @@ _NOSNIFF = {"X-Content-Type-Options": "nosniff"}
 _CONVERSATION_PREFIXES = (f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PREFIX}/outputs/")
 
 __all__ = ["router"]
+
+#: One publish at a time per Gateway, from the "is it there already?" check
+#: to the record of the copy: two requests carrying the same bytes at once
+#: (two tabs, a retried request) would otherwise both find nothing and both
+#: copy. Publishing is a person's click, so serialising it costs nothing.
+_publish_lock = asyncio.Lock()
 
 
 class SharedFileInfo(BaseModel):
@@ -165,14 +174,23 @@ async def list_shared(request: Request) -> SharedFileListResponse:
     return SharedFileListResponse(files=files, count=len(entries), truncated=truncated)
 
 
-@router.post("/api/shared/publish", response_model=SharedFileInfo, status_code=201, summary="Publish A File To Shared")
+@router.post(
+    "/api/shared/publish",
+    response_model=SharedFileInfo,
+    status_code=201,
+    responses={200: {"model": SharedFileInfo, "description": "The same bytes were already in that folder of Shared; nothing was copied and this is the entry that holds them."}},
+    summary="Publish A File To Shared",
+)
 @require_permission("threads", "write")
-async def publish(body: PublishRequest, request: Request) -> SharedFileInfo:
+async def publish(body: PublishRequest, request: Request, response: Response) -> SharedFileInfo:
     """Copy one of the caller's files, or one of their conversation's, into Shared.
 
     The exact bytes are copied and the record says who, when and from where.
-    A name already taken is kept beside the new one with the next free
-    ``_N`` suffix; nothing is overwritten, and the source is untouched.
+    The same bytes already published to that folder, and still there, are
+    answered with ``200`` and the entry that holds them: nothing is copied
+    and no second record is written. Different bytes under a name already
+    taken are kept beside it with the next free ``_N`` suffix; nothing is
+    overwritten, and the source is untouched.
     """
     repo = get_shared_publications_repo(request)
     user_id = acting_user_id(request)
@@ -199,30 +217,54 @@ async def publish(body: PublishRequest, request: Request) -> SharedFileInfo:
     else:
         raise HTTPException(status_code=400, detail=f"Only files under {USER_FILES_VIRTUAL_PREFIX}, {' or '.join(prefix.rstrip('/') for prefix in _CONVERSATION_PREFIXES)} can be published")
     try:
-        published = await asyncio.to_thread(publish_file, source, name=Path(normalized).name, folder=body.folder)
+        folder = normalize_relative_path(body.folder or "", allow_empty=True)
+        # The source is preflighted above, but the sandbox writes the
+        # person's files and can swap one for a link in between; the digest
+        # refuses that the way the copy would, and for the same reason.
+        sha256 = await asyncio.to_thread(digest_of, source)
     except SharedFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    try:
-        record = await repo.record_publication(
-            path=published.path,
-            size=published.size,
-            sha256=published.sha256 or "",
-            published_by=user_id,
-            from_thread_id=thread_id,
-            from_path=normalized,
-        )
-    except Exception:
-        # The bytes are already in Shared. A file nobody can be shown as the
-        # publisher of is a file only an admin can remove and nobody can
-        # account for, so the copy goes back out rather than outliving its
-        # record. (A path too long for the column is one way here; so is the
-        # database being briefly unavailable.)
-        logger.exception("Could not record the publication of %s; taking the copy back out of Shared", published.path)
+    async with _publish_lock:
         try:
-            await asyncio.to_thread(remove_shared_file, published.path)
+            candidates = await repo.live_publications_holding(sha256, folder=folder)
         except Exception:
-            logger.exception("Could not take %s back out of Shared; it is there with no publication record", published.path)
-        raise HTTPException(status_code=503, detail="Could not record the publication; nothing was shared") from None
+            logger.exception("Could not read the publication records; nothing was shared")
+            raise HTTPException(status_code=503, detail="Could not read the publication records; nothing was shared") from None
+        for already in candidates:
+            # The record says the bytes are there; the directory has the last
+            # word, so a file an operator took out or replaced by hand does not
+            # count, and the next intact copy does.
+            held = await asyncio.to_thread(shared_file_holding, already["path"], sha256)
+            if held is not None:
+                logger.info("%s is already in Shared as %s; nothing copied", normalized, held.path)
+                response.status_code = 200
+                names = await _publisher_names([already])
+                return SharedFileInfo.of(held, already, can_remove=_may_remove(already, user_id=user_id, admin=await is_admin_user(request)), publisher=names.get(already.get("published_by", "")))
+        try:
+            published = await asyncio.to_thread(publish_file, source, name=Path(normalized).name, folder=folder)
+        except SharedFileError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+        try:
+            record = await repo.record_publication(
+                path=published.path,
+                size=published.size,
+                sha256=published.sha256 or "",
+                published_by=user_id,
+                from_thread_id=thread_id,
+                from_path=normalized,
+            )
+        except Exception:
+            # The bytes are already in Shared. A file nobody can be shown as the
+            # publisher of is a file only an admin can remove and nobody can
+            # account for, so the copy goes back out rather than outliving its
+            # record. (A path too long for the column is one way here; so is the
+            # database being briefly unavailable.)
+            logger.exception("Could not record the publication of %s; taking the copy back out of Shared", published.path)
+            try:
+                await asyncio.to_thread(remove_shared_file, published.path)
+            except Exception:
+                logger.exception("Could not take %s back out of Shared; it is there with no publication record", published.path)
+            raise HTTPException(status_code=503, detail="Could not record the publication; nothing was shared") from None
     logger.info("Published %s to Shared as %s", normalized, published.path)
     return SharedFileInfo.of(published, record, can_remove=True, publisher=(await _publisher_names([record])).get(user_id))
 

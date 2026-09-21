@@ -425,7 +425,11 @@ export const enUS: Translations = {
     openShared: "Open Shared",
     undo: "Undo",
     undone: (name) => `Took ${name} back out of Shared`,
-    alreadyShared: "Already shared with everyone",
+    alreadyShared: (name) => `${name} is already shared with everyone`,
+    alreadySharedAs: (name, sharedAs) =>
+      `${name} is already shared with everyone, as ${sharedAs}`,
+    alreadySharedMany: (count) =>
+      `All ${count} files are already shared with everyone`,
     reportsFolder: "Reports",
   },
 
