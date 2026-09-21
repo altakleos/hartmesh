@@ -73,6 +73,19 @@ class OIDCAuthConfig(BaseModel):
 class LocalAuthConfig(BaseModel):
     """Configuration for the built-in email/password authentication provider."""
 
+    enabled: bool = Field(
+        default=True,
+        description=(
+            "Whether local passwords are a way in at all. False is sign-on-only mode: people "
+            "sign in through an enabled OIDC provider and nothing else. Local login, "
+            "registration, first-admin initialization and password change all refuse, whatever "
+            "the admin count; an account without a provider identity is inert (no session, no "
+            "personal access token); setup-status tells an unauthenticated caller nothing about "
+            "bootstrap; the reset_admin command refuses; DEER_FLOW_AUTH_DISABLED refuses the "
+            "start. Requires auth.oidc.enabled with at least one provider, or the config is "
+            "refused: a deployment nobody can enter is a mistake to name, not a mode."
+        ),
+    )
     allow_registration: bool = Field(
         default=True,
         description=(
@@ -221,3 +234,15 @@ class AuthAppConfig(BaseModel):
 
     oidc: OIDCAuthConfig = Field(default_factory=OIDCAuthConfig, description="OIDC SSO authentication settings")
     local: LocalAuthConfig = Field(default_factory=LocalAuthConfig, description="Built-in email/password authentication settings")
+
+    @model_validator(mode="after")
+    def _sign_on_only_needs_a_provider(self) -> AuthAppConfig:
+        """Refuse a configuration under which nobody could ever sign in.
+
+        Sign-on-only mode closes every local door, so the identity provider
+        is the one way in; a config that closes the doors and names no
+        provider is refused at load rather than started as an empty tenant.
+        """
+        if self.local.enabled or (self.oidc.enabled and self.oidc.providers):
+            return self
+        raise ValueError("auth.local.enabled is false but auth.oidc has no enabled provider: nobody could sign in. Enable auth.oidc with at least one provider, or leave local passwords on.")

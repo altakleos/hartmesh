@@ -28,6 +28,7 @@ from app.gateway.auth.login_throttle import (
     normalize_account,
     views_as_payload,
 )
+from app.gateway.auth.mode import sign_on_only, sign_on_required
 from app.gateway.auth.oidc import OIDCError, OIDCService
 from app.gateway.auth.oidc_state import (
     OIDCStatePayload,
@@ -343,6 +344,11 @@ async def login_local(
     remember_me: bool = Form(default=True),
 ):
     """Local email/password login."""
+    if await asyncio.to_thread(sign_on_only):
+        # Before the throttle store and before any account is read: the
+        # answer is the mode, not the credentials. Off the loop like the
+        # throttle policy read below, for the same reason.
+        raise sign_on_required()
     client_ip = _get_client_ip(request)
     account = normalize_account(form_data.username)
     policy, store = await _resolve_throttle(request)
@@ -442,8 +448,11 @@ async def register(request: Request, response: Response, body: RegisterRequest):
     The first admin is created explicitly through /initialize. This endpoint creates regular users.
     Auto-login by setting the session cookie.
 
-    Returns 403 when ``auth.local.allow_registration`` is false.
+    Returns 403 when ``auth.local.allow_registration`` is false, and in
+    sign-on-only mode, where a local account is no way in at all.
     """
+    if sign_on_only():
+        raise sign_on_required()
     if not _local_registration_enabled():
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -488,6 +497,13 @@ async def change_password(request: Request, response: Response, body: ChangePass
     from app.gateway.auth.password import hash_password_async, verify_password_async
     from app.gateway.auth_disabled import AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_PAT
 
+    if sign_on_only():
+        # A local password opens nothing here, so neither does changing one --
+        # including the first-boot setup flow this route also completes.
+        # 401 rather than 403: the caller's session, if any, belongs to an
+        # account this mode does not honour, and the page should send them
+        # to the provider's sign-in.
+        raise sign_on_required(401)
     user = await get_current_user_from_request(request)
 
     if getattr(request.state, "auth_source", None) in {AUTH_SOURCE_PAT, AUTH_SOURCE_AUTH_DISABLED}:
@@ -827,7 +843,16 @@ async def clear_lockout(request: Request, body: LockoutClearRequest):
 
 @router.get("/setup-status")
 async def setup_status(request: Request):
-    """Check if an admin account exists. Returns needs_setup=True when no admin exists."""
+    """Check if an admin account exists. Returns needs_setup=True when no admin exists.
+
+    In sign-on-only mode the answer is a constant that names the mode and
+    nothing else: it does not vary with the admin count or with which
+    accounts exist, so an unauthenticated caller learns nothing about
+    bootstrap, and the frontend (whose own settings are fixed at build time)
+    learns to show only the provider's sign-in.
+    """
+    if sign_on_only():
+        return {"needs_setup": False, "registration_enabled": False, "sign_on_only": True}
     client_ip = _get_client_ip(request)
     now = time.time()
 
@@ -862,7 +887,7 @@ async def setup_status(request: Request):
 
             async def _compute_setup_status() -> dict:
                 admin_count = await get_local_provider().count_admin_users()
-                return {"needs_setup": admin_count == 0, "registration_enabled": _local_registration_enabled()}
+                return {"needs_setup": admin_count == 0, "registration_enabled": _local_registration_enabled(), "sign_on_only": False}
 
             task = asyncio.create_task(_compute_setup_status())
             _SETUP_STATUS_INFLIGHT[client_ip] = task
@@ -901,7 +926,14 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
 
     On success, the admin account is created with ``needs_setup=False`` and
     the session cookie is set.
+
+    In sign-on-only mode this refuses whatever the admin count: a tenant
+    whose owner has not signed in yet must not be claimable by whoever
+    reaches this route first. Administrators come from the provider's
+    ``admin_emails`` there.
     """
+    if sign_on_only():
+        raise sign_on_required()
     admin_count = await get_local_provider().count_admin_users()
     if admin_count > 0:
         raise HTTPException(

@@ -100,6 +100,7 @@ async def test_oidc_auto_create_assigns_admin_role_from_configured_email():
         oauth_provider="keycloak",
         oauth_id="admin-subject",
         system_role="admin",
+        oauth_issuer="https://issuer.example.com",
     )
 
 
@@ -209,6 +210,7 @@ async def test_oidc_auto_create_uses_normalized_email():
         oauth_provider="keycloak",
         oauth_id="subject",
         system_role="user",
+        oauth_issuer="https://issuer.example.com",
     )
 
 

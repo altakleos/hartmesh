@@ -149,7 +149,7 @@ More specific `AGENTS.md` files in backend code directories contain the subsyste
 The backend is split into two layers with a strict dependency direction:
 
 - **Harness** (`packages/harness/deerflow/`): Publishable agent framework package (`deerflow-harness`). Import prefix: `deerflow.*`. Contains agent orchestration, tools, sandbox, models, MCP, skills, config — everything needed to build and run agents.
-- **App** (`app/`): Unpublished application code. Import prefix: `app.*`. Contains the FastAPI Gateway API and IM channel integrations (Feishu, Slack, Telegram, DingTalk).
+- **App** (`app/`): Unpublished application code. Import prefix: `app.*`. Contains the FastAPI Gateway API and IM channel integrations (Feishu, Slack, Telegram, DingTalk). Sign-in has two modes from one fact, `auth.local.enabled` (`app/gateway/auth/mode.py`): `false` is sign-on-only, where an enabled OIDC provider is the one way in, every local-password door refuses whatever the admin count, an account without a provider identity is inert, `reset_admin` and `DEER_FLOW_AUTH_DISABLED` refuse, and `/health` reports `auth_mode`; provider accounts are pinned to their issuer (`users.oauth_issuer`). The compose profile selects the mode from the tenant `.env` (`deploy/compose/README.md`, "Sign-in").
 
 **Dependency rule**: App imports deerflow, but deerflow never imports app. This boundary is enforced by `tests/test_harness_boundary.py` which runs in CI.
 

@@ -22,6 +22,10 @@ class AuthErrorCode(StrEnum):
     NOT_AUTHENTICATED = "not_authenticated"
     SYSTEM_ALREADY_INITIALIZED = "system_already_initialized"
     REGISTRATION_DISABLED = "registration_disabled"
+    # Sign-on-only mode (auth.local.enabled: false): the deployment signs
+    # people in through its identity provider and local passwords are no
+    # way in -- not for a new account, not for one restored from before.
+    SIGN_ON_REQUIRED = "sign_on_required"
 
 
 class TokenError(StrEnum):

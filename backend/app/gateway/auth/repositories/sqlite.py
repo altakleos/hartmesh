@@ -152,6 +152,7 @@ class SQLiteUserRepository(UserRepository):
             created_at=row.created_at if row.created_at.tzinfo else row.created_at.replace(tzinfo=UTC),
             oauth_provider=row.oauth_provider,
             oauth_id=row.oauth_id,
+            oauth_issuer=row.oauth_issuer,
             needs_setup=row.needs_setup,
             token_version=row.token_version,
         )
@@ -166,6 +167,7 @@ class SQLiteUserRepository(UserRepository):
             created_at=user.created_at,
             oauth_provider=user.oauth_provider,
             oauth_id=user.oauth_id,
+            oauth_issuer=user.oauth_issuer,
             needs_setup=user.needs_setup,
             token_version=user.token_version,
         )
@@ -274,6 +276,7 @@ class SQLiteUserRepository(UserRepository):
             row.system_role = user.system_role
             row.oauth_provider = user.oauth_provider
             row.oauth_id = user.oauth_id
+            row.oauth_issuer = user.oauth_issuer
             row.needs_setup = user.needs_setup
             row.token_version = user.token_version
             await session.commit()

@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0038_shared_publications"
+HEAD = "0039_users_oauth_issuer"
 
 
 def _url(tmp_path: Path) -> str:

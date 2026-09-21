@@ -43,6 +43,8 @@ const AUTH_ERROR_CODES = [
   "provider_not_found",
   "not_authenticated",
   "system_already_initialized",
+  "registration_disabled",
+  "sign_on_required",
 ] as const;
 
 export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number];

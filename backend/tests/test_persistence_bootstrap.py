@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0038_shared_publications"
+HEAD = "0039_users_oauth_issuer"
 BASELINE = "0001_baseline"
 
 

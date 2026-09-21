@@ -1583,6 +1583,10 @@ export const enUS: Translations = {
     orContinueWith: "Or continue with",
     ssoHint:
       "If your account uses single sign-on, sign in with the option below instead.",
+    signOnOnlyDescription:
+      "Sign in with your organization's account. Your access follows what your organization grants you.",
+    signOnOnlyNoProvider:
+      "Sign-in is through your organization's account, but no sign-in option is available right now. Contact your administrator.",
     continueWith: (provider: string) => `Continue with ${provider}`,
     noAccountSignUp: "Don't have an account? Sign up",
     haveAccountSignIn: "Already have an account? Sign in",
@@ -1600,6 +1604,11 @@ export const enUS: Translations = {
         "An account with this email already exists. Please sign in with your password or contact your administrator.",
       sso_not_allowed:
         "SSO login is not allowed for your account. Contact your administrator.",
+    },
+    signOnOnlyErrors: {
+      sso_failed: "Sign-in did not complete. Please try again.",
+      sso_account_exists:
+        "An earlier account already holds this email address. Contact your administrator to have it cleared.",
     },
   },
 };

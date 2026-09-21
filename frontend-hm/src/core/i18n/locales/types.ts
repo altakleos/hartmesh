@@ -1238,6 +1238,8 @@ export interface Translations {
     adminSetupRequiredDescription: string;
     orContinueWith: string;
     ssoHint: string;
+    signOnOnlyDescription: string;
+    signOnOnlyNoProvider: string;
     continueWith: (provider: string) => string;
     noAccountSignUp: string;
     haveAccountSignIn: string;
@@ -1252,6 +1254,12 @@ export interface Translations {
       sso_cancelled: string;
       sso_account_exists: string;
       sso_not_allowed: string;
+    };
+    // The same failures where local passwords are no way in: nothing may
+    // suggest an email login or a password.
+    signOnOnlyErrors: {
+      sso_failed: string;
+      sso_account_exists: string;
     };
   };
 }

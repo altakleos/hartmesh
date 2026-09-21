@@ -54,6 +54,12 @@ class UserRow(Base):
     # unconstrained so plain password accounts can coexist.
     oauth_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
     oauth_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # The issuer whose assertion created the account. The lookup key stays
+    # (oauth_provider, oauth_id); this pins the row to one issuer so pointing
+    # the same provider name elsewhere cannot hand it to a stranger. NULL on
+    # rows linked before 0039_users_oauth_issuer; they adopt the configured
+    # issuer on their next sign-in.
+    oauth_issuer: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     # Auth lifecycle flags
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)

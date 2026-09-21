@@ -35,9 +35,24 @@ async def get_or_provision_oidc_user(
 
     Returns a dict with ``user`` (the User model instance) and ``created`` (bool).
     """
-    # 1. Existing OAuth link
+    # 1. Existing OAuth link, pinned to the issuer that created it. The lookup
+    # key is (provider name, subject); the issuer is what stops a provider
+    # name pointed at a new issuer from handing this account to whoever holds
+    # the same subject there. A row linked before the issuer was recorded
+    # carries None and adopts the configured issuer now: nothing else could
+    # ever know which issuer it belonged to.
     existing = await local_provider.get_user_by_oauth(provider_id, identity.subject)
     if existing:
+        recorded = getattr(existing, "oauth_issuer", None)
+        if recorded is None:
+            existing.oauth_issuer = provider_config.issuer
+            await local_provider.update_user(existing)
+        elif _issuer_key(recorded) != _issuer_key(provider_config.issuer):
+            logger.warning("OIDC sign-in refused: the subject under provider %s is linked to issuer %s, and the provider is configured for %s", provider_id, recorded, provider_config.issuer)
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Your account is linked to a different identity provider. Contact your administrator.",
+            )
         return {"user": existing, "created": False}
 
     # 2. Verified email requirement
@@ -89,6 +104,7 @@ async def get_or_provision_oidc_user(
             oauth_provider=provider_id,
             oauth_id=identity.subject,
             system_role=role,
+            oauth_issuer=provider_config.issuer,
         )
     except ValueError:
         # Lost a race: a concurrent callback (double-click, replayed code) already
@@ -104,6 +120,11 @@ async def get_or_provision_oidc_user(
         ) from None
     logger.info("Auto-created OIDC user %s (provider=%s, role=%s)", email, provider_id, role)
     return {"user": user, "created": True}
+
+
+def _issuer_key(issuer: str) -> str:
+    """Two spellings of one issuer: discovery already treats a trailing slash as the same address."""
+    return issuer.strip().rstrip("/")
 
 
 def _resolve_role(email: str, admin_emails: list[str]) -> str:

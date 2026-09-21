@@ -55,8 +55,9 @@ fi
 cd /app/backend
 
 # Reads the environment as well as these two paths: the provider keys select
-# catalog fragments, and the optional HARTMESH_MODELS_FILE replaces the model
-# list wholesale (README: "Operator-managed models"). A refusal exits non-zero,
+# catalog fragments, the optional HARTMESH_MODELS_FILE replaces the model
+# list wholesale (README: "Operator-managed models"), and the sign-in keys
+# select the mode (README: "Sign-in"). A refusal exits non-zero,
 # which `set -e` turns into a container exit, leaving the last rendered
 # config.yaml where it was.
 PYTHONPATH=. uv run --no-sync python "$PROFILE/gateway/render_config.py" \

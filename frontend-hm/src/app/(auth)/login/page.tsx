@@ -18,6 +18,7 @@ import {
 import {
   canCreateRegularAccount,
   fetchSetupStatus,
+  isSignOnOnly,
   type SetupStatusResponse,
 } from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
@@ -69,7 +70,15 @@ export default function LoginPage() {
     checked: setupStatusPhase === "ready",
     status: setupStatus,
   });
-  const systemNeedsAdminSetup = setupStatus?.needs_setup === true;
+  // Sign-on-only: the Gateway closed local passwords, so the page is the
+  // provider's sign-in and nothing else -- no form, no create-admin notice,
+  // no register link. Read from the same checked answer as the signup entry.
+  const signOnOnly = isSignOnOnly({
+    checked: setupStatusPhase === "ready",
+    status: setupStatus,
+  });
+  const systemNeedsAdminSetup =
+    !signOnOnly && setupStatus?.needs_setup === true;
   const showSetupStatusUnavailable =
     setupStatusPhase === "unavailable" ||
     (setupStatusAttempt > 0 && setupStatusPhase === "checking");
@@ -215,7 +224,11 @@ export default function LoginPage() {
         <div className="text-center">
           <h1 className="text-foreground font-serif text-3xl">DeerFlow</h1>
           <p className="text-muted-foreground mt-2">
-            {isLogin ? t.login.signInTitle : t.login.createAccountTitle}
+            {signOnOnly
+              ? t.login.signOnOnlyDescription
+              : isLogin
+                ? t.login.signInTitle
+                : t.login.createAccountTitle}
           </p>
         </div>
 
@@ -262,54 +275,72 @@ export default function LoginPage() {
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-2">
-          <div className="flex flex-col space-y-1">
-            <label htmlFor="email" className="text-sm font-medium">
-              {t.login.email}
-            </label>
-            <Input
-              id="email"
-              type="email"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder={t.login.emailPlaceholder}
-              required
+        {signOnOnly && ssoProviders.length === 0 && (
+          <p role="status" className="text-muted-foreground text-sm">
+            {t.login.signOnOnlyNoProvider}
+          </p>
+        )}
+
+        {signOnOnly && error && (
+          <p role="alert" className="text-sm text-red-500">
+            {(errorParam &&
+              t.login.signOnOnlyErrors[
+                errorParam as keyof typeof t.login.signOnOnlyErrors
+              ]) ??
+              error}
+          </p>
+        )}
+
+        {!signOnOnly && (
+          <form onSubmit={handleSubmit} className="space-y-2">
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="email" className="text-sm font-medium">
+                {t.login.email}
+              </label>
+              <Input
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder={t.login.emailPlaceholder}
+                required
+              />
+            </div>
+            <div className="flex flex-col space-y-1">
+              <label htmlFor="password" className="text-sm font-medium">
+                {t.login.password}
+              </label>
+              <Input
+                id="password"
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder={t.login.passwordPlaceholder}
+                required
+                minLength={isLogin ? 6 : 8}
+              />
+            </div>
+
+            <RememberSessionOption
+              checked={rememberMe}
+              onCheckedChange={setRememberMe}
             />
-          </div>
-          <div className="flex flex-col space-y-1">
-            <label htmlFor="password" className="text-sm font-medium">
-              {t.login.password}
-            </label>
-            <Input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder={t.login.passwordPlaceholder}
-              required
-              minLength={isLogin ? 6 : 8}
-            />
-          </div>
 
-          <RememberSessionOption
-            checked={rememberMe}
-            onCheckedChange={setRememberMe}
-          />
+            {error && <p className="text-sm text-red-500">{error}</p>}
 
-          {error && <p className="text-sm text-red-500">{error}</p>}
-
-          <Button type="submit" className="w-full" disabled={loading}>
-            {loading
-              ? t.login.pleaseWait
-              : isLogin
-                ? t.login.signIn
-                : t.login.createAccount}
-          </Button>
-        </form>
+            <Button type="submit" className="w-full" disabled={loading}>
+              {loading
+                ? t.login.pleaseWait
+                : isLogin
+                  ? t.login.signIn
+                  : t.login.createAccount}
+            </Button>
+          </form>
+        )}
 
         {ssoProviders.length > 0 && (
           <div className="space-y-2">
-            {isLogin && (
+            {isLogin && !signOnOnly && (
               <div className="relative my-4">
                 <div className="absolute inset-0 flex items-center">
                   <span className="w-full border-t" />

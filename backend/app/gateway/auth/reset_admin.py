@@ -33,6 +33,15 @@ async def _run(email: str | None) -> int:
     )
 
     config = get_app_config()
+    if not config.auth.local.enabled:
+        # Sign-on only: there is no local password to reset, and putting one
+        # on an account would not open anything -- a local password is no
+        # way in here. Said before the database is touched.
+        print(
+            "Error: this deployment is sign-on only (auth.local.enabled: false). Local passwords are not a way in, so there is no admin password to reset; administrators are the addresses in the identity provider's admin_emails.",
+            file=sys.stderr,
+        )
+        return 1
     await init_engine_from_config(config.database)
     try:
         sf = get_session_factory()

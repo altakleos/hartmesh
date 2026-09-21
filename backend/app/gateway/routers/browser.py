@@ -133,6 +133,14 @@ async def _authenticate_ws(websocket: WebSocket):
             provider = get_local_provider()
             user = await provider.get_user(payload.sub)
             if user is not None and user.token_version == payload.ver:
+                from app.gateway.auth.mode import require_live_account
+
+                # The same rule the middleware applies: an account this mode
+                # does not honour drives no retained browser session either.
+                try:
+                    require_live_account(user)
+                except HTTPException:
+                    return None
                 return user
     if is_auth_disabled():
         return get_auth_disabled_user()
