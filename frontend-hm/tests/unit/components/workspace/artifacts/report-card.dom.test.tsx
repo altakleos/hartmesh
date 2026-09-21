@@ -23,7 +23,9 @@ rs.mock("@/core/files", () => ({
   }),
 }));
 const shareWithEveryone = rs.hoisted(() => rs.fn());
-rs.mock("@/core/shared", () => ({
+// The hook is stood in for; the Shared module's constants stay real, so the
+// folder this test reads is the folder the product shares into.
+rs.mock("@/core/shared/hooks", () => ({
   useShareWithEveryone: () => ({
     share: shareWithEveryone,
     isPending: false,
@@ -42,6 +44,7 @@ import { ReportCard } from "@/components/workspace/artifacts/report-card";
 import { parseBusinessReport } from "@/core/business-report";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { zhCN } from "@/core/i18n/locales/zh-CN";
 
 import fixture from "../../../../fixtures/business-report/2026-08-business-review.report.json";
 
@@ -54,7 +57,11 @@ const report = parseBusinessReport(JSON.stringify(fixture))!;
 function renderCard(
   artifacts: string[] = [REPORT],
   override: Partial<typeof report> = {},
-  { isMock = false } = {},
+  {
+    isMock = false,
+    locale = "en-US" as const,
+    t = enUS,
+  }: { isMock?: boolean; locale?: "en-US" | "zh-CN"; t?: typeof enUS } = {},
 ) {
   return render(
     <QueryClientProvider
@@ -64,9 +71,7 @@ function renderCard(
         })
       }
     >
-      <I18nContext.Provider
-        value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-      >
+      <I18nContext.Provider value={{ locale, setLocale: () => undefined, t }}>
         <ReportCard
           artifacts={artifacts}
           filepath={REPORT}
@@ -83,6 +88,7 @@ function renderCard(
 afterEach(() => {
   cleanup();
   myFiles.save.mockReset();
+  shareWithEveryone.mockReset();
 });
 
 beforeEach(() => {
@@ -94,6 +100,30 @@ beforeEach(() => {
 });
 
 describe("ReportCard", () => {
+  it("puts a shared report in the same folder whatever language the person reads", async () => {
+    // Shared is one directory for the whole company, so the folder is data,
+    // not words on this person's screen: a colleague reading another
+    // language must land in the same place, not beside it.
+    const rendered = [REPORT, `${DIRECTORY}/2026-08-business-review.pdf`];
+    renderCard(rendered);
+    await screen.findByRole("button", { name: "Share with everyone" });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Share with everyone" }),
+    );
+    const [, englishFolder] = shareWithEveryone.mock.calls[0]!;
+
+    cleanup();
+    renderCard(rendered, {}, { locale: "zh-CN", t: zhCN });
+    await screen.findByRole("button", { name: zhCN.shared.shareWithEveryone });
+    fireEvent.click(
+      screen.getByRole("button", { name: zhCN.shared.shareWithEveryone }),
+    );
+    const [, chineseFolder] = shareWithEveryone.mock.calls[1]!;
+
+    expect(englishFolder).toBe("Reports");
+    expect(chineseFolder).toBe(englishFolder);
+  });
+
   it("names the report, the company, the period and the draft", () => {
     renderCard();
 

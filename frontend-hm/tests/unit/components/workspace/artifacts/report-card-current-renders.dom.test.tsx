@@ -24,7 +24,7 @@ rs.mock("@/core/files", () => ({
   }),
 }));
 const shareWithEveryone = rs.hoisted(() => rs.fn());
-rs.mock("@/core/shared", () => ({
+rs.mock("@/core/shared/hooks", () => ({
   useShareWithEveryone: () => ({
     share: shareWithEveryone,
     isPending: false,

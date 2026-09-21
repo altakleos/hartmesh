@@ -19,6 +19,14 @@ import {
 /** Where every sandbox sees the Shared area. */
 export const SHARED_VIRTUAL_PREFIX = "/mnt/user-data/shared";
 
+/**
+ * The folder a shared report lands in. Shared is one directory for the whole
+ * company, so a folder name is data, not words on one person's screen: were
+ * it translated, two colleagues reading different languages would file the
+ * same report in two places and neither would find the other's.
+ */
+export const SHARED_REPORTS_FOLDER = "Reports";
+
 export interface SharedFileInfo {
   /** Relative to the Shared root, e.g. `Reports/august.pdf`. */
   path: string;

@@ -403,7 +403,6 @@ export const zhCN: Translations = {
     alreadySharedAs: (name, sharedAs) =>
       `${name} 已以 ${sharedAs} 的名称共享给所有人`,
     alreadySharedMany: (count) => `这 ${count} 个文件均已共享给所有人`,
-    reportsFolder: "报告",
   },
 
   backgroundTasks: {

@@ -430,7 +430,6 @@ export const enUS: Translations = {
       `${name} is already shared with everyone, as ${sharedAs}`,
     alreadySharedMany: (count) =>
       `All ${count} files are already shared with everyone`,
-    reportsFolder: "Reports",
   },
 
   backgroundTasks: {

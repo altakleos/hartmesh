@@ -183,7 +183,10 @@ _Shared_ is the second tab of the same page (`?tab=shared` opens it;
 The Gateway keeps one directory for the tenant and every sandbox mounts it
 read-only at `/mnt/user-data/shared`, so only publishing puts anything there.
 The report card's _Share with everyone_ publishes the renders it is offering
-under a _Reports_ folder, the artifact panel's action publishes the open file,
+under a _Reports_ folder (`SHARED_REPORTS_FOLDER`, never a translated string:
+Shared is one directory for the company, so two colleagues reading different
+languages must file a report in the same place), the artifact panel's action
+publishes the open file,
 and a _My files_ row shares that file directly — anything under uploads,
 outputs or the person's own files (`canPublishToShared`). All three go through
 `useShareWithEveryone`, the same shape as saving: it publishes each path, says
