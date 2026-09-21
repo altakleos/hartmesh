@@ -28,7 +28,7 @@ import {
 import { useSaveToMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import type { Translations } from "@/core/i18n/locales/types";
-import { useShareWithEveryone } from "@/core/shared";
+import { SHARED_REPORTS_FOLDER, useShareWithEveryone } from "@/core/shared";
 import { cn } from "@/lib/utils";
 
 /** Columns of these units are read down a column, so they line up right. */
@@ -422,7 +422,7 @@ export function ReportCard({
               <Button
                 disabled={everyone.isPending}
                 onClick={() =>
-                  void everyone.share(renderPaths, t.shared.reportsFolder)
+                  void everyone.share(renderPaths, SHARED_REPORTS_FOLDER)
                 }
                 size="sm"
                 variant="outline"

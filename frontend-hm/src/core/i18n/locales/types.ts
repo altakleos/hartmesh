@@ -338,7 +338,6 @@ export interface Translations {
     alreadyShared: (name: string) => string;
     alreadySharedAs: (name: string, sharedAs: string) => string;
     alreadySharedMany: (count: number) => string;
-    reportsFolder: string;
   };
 
   // Thread-scoped MCP background tasks
