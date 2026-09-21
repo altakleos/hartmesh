@@ -54,6 +54,7 @@ import {
 } from "@/core/artifacts/viewer";
 import { useAuth } from "@/core/auth/AuthProvider";
 import {
+  filingFolderFor,
   isBusinessReportPath,
   parseBusinessReport,
 } from "@/core/business-report";
@@ -61,7 +62,11 @@ import { writeTextToClipboard } from "@/core/clipboard";
 import { canKeepInMyFiles, useSaveToMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
-import { canPublishToShared, useShareWithEveryone } from "@/core/shared";
+import {
+  canPublishToShared,
+  sharedFolderFor,
+  useShareWithEveryone,
+} from "@/core/shared";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
 import {
   canBrowserPreviewFile,
@@ -618,7 +623,12 @@ export function ArtifactFileDetail({
                 label={t.files.saveToMyFiles}
                 tooltip={t.files.saveToMyFiles}
                 disabled={myFiles.isPending}
-                onClick={() => void myFiles.save([filepath])}
+                onClick={() =>
+                  void myFiles.save(
+                    [filepath],
+                    filingFolderFor(filepath, { artifacts }),
+                  )
+                }
               />
             )}
             {!isEditing && canShare && (
@@ -628,7 +638,12 @@ export function ArtifactFileDetail({
                 // The tooltip answers what the label cannot: who "everyone" is.
                 tooltip={t.shared.description}
                 disabled={everyone.isPending}
-                onClick={() => void everyone.share([filepath])}
+                onClick={() =>
+                  void everyone.share(
+                    [filepath],
+                    sharedFolderFor(filepath, { artifacts }),
+                  )
+                }
               />
             )}
             {!isEditing && !isWriteFile && (

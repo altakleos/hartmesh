@@ -17,7 +17,7 @@ const myFiles = rs.hoisted(() => ({
   save: rs.fn<(paths: readonly string[]) => Promise<unknown[]>>(),
   isPending: false,
 }));
-rs.mock("@/core/files", () => ({
+rs.mock("@/core/files/hooks", () => ({
   useSaveToMyFiles: () => ({
     save: myFiles.save,
     isPending: myFiles.isPending,

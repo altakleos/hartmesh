@@ -85,9 +85,11 @@ const shared = rs.hoisted(() => ({
 }));
 
 const shareWithEveryone = rs.hoisted(() => rs.fn());
-rs.mock("@/core/shared", () => ({
-  urlOfSharedFile: (path: string, { download = false } = {}) =>
-    `/api/shared/${path}${download ? "?download=true" : ""}`,
+// Only the hooks are stood in for. Where a file is addressed and which
+// folder it belongs in are the module's own rules and stay real, so this
+// page's tests read the folder the product would share into. (The backend
+// base URL is empty in a test, so the real address is the one asserted.)
+rs.mock("@/core/shared/hooks", () => ({
   useSharedFiles: () => ({
     data: shared.data,
     error: shared.error,
@@ -104,10 +106,7 @@ rs.mock("@/core/shared", () => ({
     openShared: rs.fn(),
   }),
 }));
-rs.mock("@/core/files", () => ({
-  MY_FILES_VIRTUAL_PREFIX: "/mnt/user-data/files",
-  urlOfMyFile: (path: string, { download = false } = {}) =>
-    `/api/files/${path}${download ? "?download=true" : ""}`,
+rs.mock("@/core/files/hooks", () => ({
   useMyFiles: () => ({
     data: files.data,
     error: files.error,
@@ -280,9 +279,43 @@ describe("FilesPage", () => {
 
     // The path the sandbox knows it by, so the server can find the caller's
     // own copy; no conversation is involved, so no thread.
-    expect(shareWithEveryone).toHaveBeenCalledWith([
-      "/mnt/user-data/files/Reports/august.pdf",
-    ]);
+    // A report kept in the product's own Reports folder lands beside the
+    // copy the report card would have shared, rather than at the root.
+    expect(shareWithEveryone).toHaveBeenCalledWith(
+      ["/mnt/user-data/files/Reports/august.pdf"],
+      "Reports",
+    );
+  });
+
+  it("keeps the rest of how a person files their own work to themselves", () => {
+    // Sharing one file is not consent to publish a folder named for a
+    // customer or a deal, so nothing but the product's own folder crosses.
+    files.data = {
+      files: [
+        {
+          path: "Acme-acquisition/terms.pdf",
+          name: "terms.pdf",
+          size: 12,
+          modified: 0,
+          virtual_path: "/mnt/user-data/files/Acme-acquisition/terms.pdf",
+          url: "/api/files/Acme-acquisition/terms.pdf",
+        },
+      ],
+      count: 1,
+      truncated: false,
+    };
+    renderPage();
+
+    fireEvent.click(
+      within(screen.getByTestId("my-files-list")).getByRole("button", {
+        name: "Share with everyone terms.pdf",
+      }),
+    );
+
+    expect(shareWithEveryone).toHaveBeenCalledWith(
+      ["/mnt/user-data/files/Acme-acquisition/terms.pdf"],
+      undefined,
+    );
   });
 
   it("keeps the share action live after a share and a trip to the Shared tab", () => {
@@ -303,9 +336,11 @@ describe("FilesPage", () => {
     fireEvent.click(shareButton());
 
     expect(shareWithEveryone).toHaveBeenCalledTimes(2);
-    expect(shareWithEveryone).toHaveBeenNthCalledWith(2, [
-      "/mnt/user-data/files/Reports/august.pdf",
-    ]);
+    expect(shareWithEveryone).toHaveBeenNthCalledWith(
+      2,
+      ["/mnt/user-data/files/Reports/august.pdf"],
+      "Reports",
+    );
   });
 
   it("says when nothing was shared yet, and how something gets here", () => {

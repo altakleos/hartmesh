@@ -21,9 +21,14 @@ export {
 } from "./format";
 export {
   availableReportRenders,
+  filingFolderFor,
+  isReportRender,
   REPORT_RENDER_KINDS,
+  reportOfRender,
+  REPORTS_FOLDER,
   reportRenderPath,
   reportSiblingPath,
+  type Presented,
   type ReportRenderKind,
 } from "./paths";
 export {

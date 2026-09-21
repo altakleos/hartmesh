@@ -13,10 +13,12 @@ import {
 // query client and a router the card itself does not; what the card owns is
 // which paths it hands over.
 const myFiles = rs.hoisted(() => ({
-  save: rs.fn<(paths: readonly string[]) => Promise<unknown[]>>(),
+  save: rs.fn<
+    (paths: readonly string[], folder?: string) => Promise<unknown[]>
+  >(),
   isPending: false,
 }));
-rs.mock("@/core/files", () => ({
+rs.mock("@/core/files/hooks", () => ({
   useSaveToMyFiles: () => ({
     save: myFiles.save,
     isPending: myFiles.isPending,
@@ -100,6 +102,28 @@ beforeEach(() => {
 });
 
 describe("ReportCard", () => {
+  it("files a report's downloads with the reports in both areas", async () => {
+    // One question asked of the file: My files and Shared answer alike, so a
+    // report kept and a report shared are found in the same place in each.
+    const rendered = [REPORT, `${DIRECTORY}/2026-08-business-review.pdf`];
+    renderCard(rendered);
+    await screen.findByRole("button", { name: "Share with everyone" });
+
+    fireEvent.click(screen.getByRole("button", { name: "Save to My files" }));
+    expect(myFiles.save).toHaveBeenCalledWith(
+      [`${DIRECTORY}/2026-08-business-review.pdf`],
+      "Reports",
+    );
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Share with everyone" }),
+    );
+    expect(shareWithEveryone).toHaveBeenCalledWith(
+      [`${DIRECTORY}/2026-08-business-review.pdf`],
+      "Reports",
+    );
+  });
+
   it("puts a shared report in the same folder whatever language the person reads", async () => {
     // Shared is one directory for the whole company, so the folder is data,
     // not words on this person's screen: a colleague reading another
@@ -275,10 +299,13 @@ describe("ReportCard", () => {
     fireEvent.click(screen.getByRole("button", { name: "Save to My files" }));
 
     // The documents, not the JSON the card is drawn from.
-    expect(myFiles.save).toHaveBeenCalledWith([
-      `${DIRECTORY}/2026-08-business-review.pdf`,
-      `${DIRECTORY}/2026-08-business-review.xlsx`,
-    ]);
+    expect(myFiles.save).toHaveBeenCalledWith(
+      [
+        `${DIRECTORY}/2026-08-business-review.pdf`,
+        `${DIRECTORY}/2026-08-business-review.xlsx`,
+      ],
+      "Reports",
+    );
   });
 
   it("has nowhere to keep a showcase report", () => {

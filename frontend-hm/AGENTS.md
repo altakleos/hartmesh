@@ -173,38 +173,51 @@ gets the next `_N`). Two places offer it: the report card's _Save to my files_
 keeps the renders it is offering — the documents, not the JSON — and the
 artifact panel's action keeps the open file, for anything under uploads or
 outputs (`canKeepInMyFiles`); neither is offered on the showcase, which has no
-files to keep them in. Both go through `useSaveToMyFiles`, which keeps each path
-and then says so once, with a way to the page; a failure part-way names the
-failure and leaves what already landed. Presentation stays an outputs
-contract: a file from _My files_ is handed over by copying it into outputs.
+files to keep them in. Both go through `useSaveToMyFiles`, which keeps each
+path and then says so once, naming the folder when there is one, with a way to
+the page; a failure part-way names the failure and leaves what already landed.
+Where a file lands is asked of the file (`filingFolderFor`): a report's renders
+are kept under _Reports_, everything else at the root, the same question the
+Shared actions ask, so one report is in one place in each area. Presentation
+stays an outputs contract: a file from _My files_ is handed over by copying it
+into outputs.
 
 _Shared_ is the second tab of the same page (`?tab=shared` opens it;
 `core/shared/`): what anyone at the company published, readable by everyone.
 The Gateway keeps one directory for the tenant and every sandbox mounts it
 read-only at `/mnt/user-data/shared`, so only publishing puts anything there.
-The report card's _Share with everyone_ publishes the renders it is offering
-under a _Reports_ folder (`SHARED_REPORTS_FOLDER`, never a translated string:
-Shared is one directory for the company, so two colleagues reading different
-languages must file a report in the same place), the artifact panel's action
-publishes the open file,
-and a _My files_ row shares that file directly — anything under uploads,
-outputs or the person's own files (`canPublishToShared`). All three go through
-`useShareWithEveryone`, the same shape as saving: it publishes each path, says
-so once, and carries **Undo** in that toast, because handing a file to the
-whole company is one click and taking it back must be too. Whether a file is
-already shared is the server's word, never the page's memory: the publish
-route answers `200` with the entry that already holds the same bytes instead
-of copying them (`publishToShared` returns `alreadyShared`), so a second
-click from any tab or session gets an _already shared_ toast with a way to
-the Shared tab, and **Undo** takes back only what that click put there. The
-buttons are never disabled on that account; a page's memory of its own
-clicks is exactly what a tab switch loses.
-The listing carries when each file was published, who published it — resolved
-server-side to the person a colleague would recognise, never the stored id —
-and `can_remove`, which the server decides per caller (the publisher, or an
-admin) so the page never reasons about roles: _Remove_ is offered exactly
-where it would succeed. Both tabs live under one heading, _Files_, so the
-sidebar entry and the page agree whichever tab is open.
+The report card's _Share with everyone_ publishes the renders it is offering,
+the artifact panel's action publishes the open file, and a _My files_ row
+shares that file directly — anything under uploads, outputs or the person's own
+files (`canPublishToShared`). Where any of them lands is one question asked of
+the file, never of the button: `sharedFolderFor` files a report's download
+under _Reports_ (`REPORTS_FOLDER`, and `filingFolderFor` files it there in the
+person's own files too), carries a file they keep in that same folder, and
+leaves everything else at the root. The rest of how someone keeps their own
+files never crosses: a folder named for a customer would otherwise become a
+company folder on one click, and two people who file one report differently
+would put two copies in Shared, which is what the rule prevents. A folder name
+is data, so it is never a translated string: Shared is one directory for the
+company, and two colleagues reading different languages must file a report in
+the same place. A render is recognised by the report it belongs to, either the
+one its reader holds or one among the thread's artifacts, never by its name
+alone. Both toasts name the folder, because the person did not choose it. All
+three go through `useShareWithEveryone`, the same shape as saving: it publishes
+each path, says so once, and carries **Undo** in that toast, because handing a
+file to the whole company is one click and taking it back must be too. Whether
+a file is already shared is the server's word, never the page's memory: the
+publish route answers `200` with the entry that already holds the same bytes
+instead of copying them (`publishToShared` returns `alreadyShared`), so a
+second click from any tab or session gets an _already shared_ toast with a way
+to the Shared tab, and **Undo** takes back only what that click put there. The
+buttons are never disabled on that account; a page's memory of its own clicks
+is exactly what a tab switch loses. The listing carries when each file was
+published, who published it — resolved server-side to the person a colleague
+would recognise, never the stored id — and `can_remove`, which the server
+decides per caller (the publisher, or an admin) so the page never reasons about
+roles: _Remove_ is offered exactly where it would succeed. Both tabs live under
+one heading, _Files_, so the sidebar entry and the page agree whichever tab is
+open.
 
 The deployment owns two presentation settings, both read from
 `GET /api/features` (`core/features`): `ui.starters` is Home's starter grid —

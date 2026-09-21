@@ -104,6 +104,25 @@ describe("useSaveToMyFiles", () => {
     );
   });
 
+  it("says which folder it went into, because the person did not choose it", async () => {
+    mockedKeep.mockResolvedValue(kept("august.pdf"));
+    const { result } = renderHook(() => useSaveToMyFiles("thread-1"), {
+      wrapper: createWrapper(),
+    });
+
+    await act(async () => {
+      await result.current.save(
+        ["/mnt/user-data/outputs/august.pdf"],
+        "Reports",
+      );
+    });
+
+    expect(toast.success).toHaveBeenCalledWith(
+      "Saved august.pdf to My files, in Reports",
+      expect.anything(),
+    );
+  });
+
   it("reports a failure in the person's words and keeps what it can", async () => {
     // The failing render is in the middle: what comes after it is still kept.
     mockedKeep
