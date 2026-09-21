@@ -252,7 +252,11 @@ class TestServedGateway:
         assert provider.issuers["a"].exchanges[-1]["method"] == "client_secret_basic"
         # Two providers are two account namespaces: the owner's subject presented
         # through the other provider is a different (provider, subject) key, and
-        # the address it carries already belongs to the owner's account.
+        # the address it carries already belongs to the owner's account. (The
+        # owner signs in first here rather than relying on an earlier test:
+        # the shards split a class across processes.)
+        with _client(base) as client:
+            assert _sign_in(client, base, provider, subject="sub-owner", email=OWNER).headers["location"].startswith("/auth/callback")
         with _client(base) as client:
             landed = _sign_in(client, base, provider, subject="sub-owner", email=OWNER, provider_id="sso-basic")
             assert landed.headers["location"] == "/login?error=sso_account_exists"
@@ -361,6 +365,16 @@ class TestServedGateway:
         with _client(base) as client:
             assert _sign_in(client, base, provider, subject="sub-mover", email=email).headers["location"] == "/login?error=sso_not_allowed"
 
+    # ── Evidence 10: the secret ──────────────────────────────────────────────
+
+    def test_zz_the_client_secret_appears_in_no_log_line(self, gateway: e2e._Gateway, journal: _Journal, tmp_path_factory: pytest.TempPathFactory) -> None:
+        """Runs last in the class: every line every Gateway served in this process journalled so far, and every config file one wrote."""
+        assert journal.lines, "the Gateway logged something while it was driven"
+        leaked = [line for line in journal.lines if CLIENT_SECRET in line]
+        assert leaked == []
+        for config in tmp_path_factory.getbasetemp().glob("sign-on-only*/config.yaml"):
+            assert CLIENT_SECRET not in config.read_text(encoding="utf-8"), f"{config} must carry the reference, not the value"
+
 
 # ── Evidence 6 (last clause): no administrators' list, no administrator ──
 
@@ -442,15 +456,3 @@ def test_auth_disabled_refuses_the_start(provider: OIDCTestProvider, tmp_path_fa
     finally:
         env.undo()
     assert "DEER_FLOW_AUTH_DISABLED=1 is set on a sign-on-only deployment" in caplog.text
-
-
-# ── Evidence 10: the secret ──────────────────────────────────────────────
-
-
-def test_zz_the_client_secret_appears_in_no_log_line(journal: _Journal, tmp_path_factory: pytest.TempPathFactory) -> None:
-    """Runs last in this module: every line every Gateway served above journalled, the refused start included."""
-    assert journal.lines, "the Gateway logged something while it was driven"
-    leaked = [line for line in journal.lines if CLIENT_SECRET in line]
-    assert leaked == []
-    for config in tmp_path_factory.getbasetemp().glob("sign-on-only*/config.yaml"):
-        assert CLIENT_SECRET not in config.read_text(encoding="utf-8"), f"{config} must carry the reference, not the value"
