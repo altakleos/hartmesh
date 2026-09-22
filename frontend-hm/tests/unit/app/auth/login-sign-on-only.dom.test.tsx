@@ -213,6 +213,46 @@ describe("the login page in sign-on-only mode", () => {
     ).toBeTruthy();
   });
 
+  it("says an address belongs to another account without suggesting a password", async () => {
+    // A new subject carrying an address an old provider account still holds.
+    // It must never read as "sign in with your password": there is no
+    // password account of theirs to sign in to, and in this mode none can
+    // exist at all.
+    search = "error=sso_email_taken";
+    installGateway(
+      { needs_setup: false, registration_enabled: false, sign_on_only: true },
+      [{ id: "sso", display_name: "Single sign-on", type: "oidc" }],
+    );
+
+    renderLogin();
+
+    const message = enUS.login.signOnOnlyErrors.sso_email_taken;
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toBe(message);
+    });
+    expect(message).not.toBe(enUS.login.authFailed);
+    expect(message.toLowerCase()).not.toContain("password");
+    expect(screen.queryByLabelText(enUS.login.password)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Continue with Single sign-on" }),
+    ).toBeTruthy();
+    // The two held-address refusals reach the same page in this mode and
+    // their remedies are opposite: the other one is a stale account of the
+    // person's own to clear, this one is another person's live account, and
+    // clearing that would delete someone. A support person hears these read
+    // aloud, so they must not be near-identical sentences.
+    const other = enUS.login.signOnOnlyErrors.sso_account_exists;
+    expect(message).not.toBe(other);
+    for (const [refusal, word] of [
+      [message, "release"],
+      [other, "cleared"],
+    ] as const) {
+      expect(refusal.toLowerCase()).toContain(word);
+      const opposite = refusal === message ? other : message;
+      expect(opposite.toLowerCase()).not.toContain(word);
+    }
+  });
+
   it("names the address refusal on a Gateway that still serves local passwords", async () => {
     // The other map: a deployment with local passwords AND a provider gets the
     // same redirect, and reads `login.errors`. Without its own entry there the
@@ -241,5 +281,27 @@ describe("the login page in sign-on-only mode", () => {
     ]) {
       expect(message.toLowerCase()).not.toContain(leak);
     }
+  });
+
+  it("names a held address on a Gateway that still serves local passwords", async () => {
+    // `sso_email_taken` was added to both maps; the mixed-mode one reads
+    // `login.errors`, and without a test there it could be deleted and the
+    // page would degrade to "Authentication failed." with nothing failing.
+    search = "error=sso_email_taken";
+    installGateway({ needs_setup: false, registration_enabled: true }, [
+      { id: "sso", display_name: "Single sign-on", type: "oidc" },
+    ]);
+
+    renderLogin();
+
+    const message = enUS.login.errors.sso_email_taken;
+    expect(await screen.findByText(message)).toBeTruthy();
+    // Proves the mixed-mode branch rendered, not the sign-on-only one.
+    expect(screen.getByLabelText(enUS.login.password)).toBeTruthy();
+    expect(message).not.toBe(enUS.login.authFailed);
+    // Even here, where a password door exists, it is not this person's: the
+    // account in the way is somebody else's.
+    expect(message).not.toBe(enUS.login.errors.sso_account_exists);
+    expect(message.toLowerCase()).not.toContain("your password");
   });
 });

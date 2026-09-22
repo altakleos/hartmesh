@@ -1259,6 +1259,7 @@ export interface Translations {
       sso_cancelled: string;
       sso_account_exists: string;
       sso_email_unusable: string;
+      sso_email_taken: string;
       sso_not_allowed: string;
       sso_no_access: string;
       sso_access_off: string;
@@ -1269,6 +1270,7 @@ export interface Translations {
       sso_failed: string;
       sso_account_exists: string;
       sso_email_unusable: string;
+      sso_email_taken: string;
       sso_no_access: string;
       sso_access_off: string;
     };

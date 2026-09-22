@@ -68,6 +68,12 @@ class UserRow(Base):
     # accounts and on provider accounts that have not signed in since.
     last_sign_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
+    # The address this account held before the deployer released it
+    # (0041_email_released_from). NULL on every account whose email is its
+    # own; non-NULL is what "released" means, so nothing has to read the
+    # shape of the replacement address to know.
+    email_released_from: Mapped[str | None] = mapped_column(String(320), nullable=True)
+
     __table_args__ = (
         # sqlite_where alone is a SQLAlchemy dialect-specific kwarg -- it
         # does not apply on the postgresql dialect, so a table created

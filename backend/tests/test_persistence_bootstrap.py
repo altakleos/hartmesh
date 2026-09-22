@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0040_account_access"
+HEAD = "0041_email_released_from"
 BASELINE = "0001_baseline"
 
 

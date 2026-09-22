@@ -219,6 +219,49 @@ URL, the same subjects), re-point the recorded issuer with the Gateway
 stopped, then change the key and start:
 `UPDATE users SET oauth_issuer = '<new issuer>' WHERE oauth_provider = 'sso' AND oauth_issuer = '<old issuer>';`
 
+**The address follows the sign-in.** A person's subject at the provider is
+who they are; their address is something the provider says about them. At
+every sign-in of an account that already exists, the account takes the
+address the token carries, so a company that corrects someone's address at
+the provider does not have to correct it here too. Five things leave the
+stored address alone, and each of them still signs the person in: a token
+carrying no address; an unverified one where the deployment requires
+verification; one from a domain `allowed_email_domains` does not allow (the
+same rule, and the same list, that governs account creation -- an address a
+new person may not have is not one an existing person may acquire); one no
+account record can hold (the paragraph below); and one another account
+already holds.
+
+That last is the deployer's to resolve, and what to do depends on the
+holder, which the journal names -- subject, provider and issuer, or "a local
+password account". `release-email` applies only to a **turned-off provider
+account**: it refuses a local-password account, and it refuses one that is
+still on, because while a person can sign in their address is theirs. A
+leftover local-password account is cleared the way this guide's sign-on-only
+section already describes; an address held by someone who still works there
+is a duplicate to fix at the provider, not here.
+
+Where no role mapping is configured, the administrators' list is read from
+the address the sign-in settles on, so a changed address can promote or
+demote in the same sign-in. That is why the domain rule above is not
+optional: without it, acquiring an address on the administrators' list would
+be a promotion the domain list exists to prevent.
+
+**An address another account holds.** A sign-in whose subject has
+no account yet, carrying an address that one does, is refused -- an identity
+is never given an existing account. What the person is told depends on which
+account holds it. A local-password account of their own is theirs to sign in
+with: `sso_account_exists`, as before. A **provider account of another
+subject** is not, and telling them to use a password would be false, so that
+answers `sso_email_taken` with "That email address belongs to another
+person's account here. Ask your administrator to release it." The two are
+deliberately unlike each other read aloud, because their remedies are
+opposite: one is a stale account to clear, the other is a live account of
+someone else's, and clearing that would delete a person. The journal names
+the holder's subject, provider and issuer -- the provider too, since two
+configured providers may point at one issuer. The deployer's remedy is
+`release-email` on the account holding it, once it is turned off.
+
 **An address no account can hold.** The address the provider asserts becomes
 the account's address, and an account record holds only an address that
 parses as one: a special-use domain (`.invalid`, `.test`, `.local`,
@@ -313,7 +356,8 @@ HARTMESH_SIGN_ON_ROLES=admin=admin,member=user
   `roles from claim` when the keys are set (`sign-in=sign_on_only (provider
   sso, callback …, admission by claim, roles from claim)`).
 
-**The deployer can turn one account off, or end its sessions.** An operator
+**The deployer can turn one account off, or end its sessions, or release
+its address.** An operator
 command, run inside the deployment like `reset_admin` and never a network
 route: nothing reachable over HTTP turns an account off or on or ends
 another account's sessions, with any credential. Accounts are addressed by
@@ -327,10 +371,11 @@ idempotent.
 docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   exec --user 1000 gateway \
   sh -c 'cd /app/backend && PYTHONPATH=. uv run --no-sync python -m app.gateway.auth.accounts list'
-# … disable      --issuer https://login.example.com --subject 3141592
-# … enable       --issuer https://login.example.com --subject 3141592
-# … end-sessions --issuer https://login.example.com --subject 3141592
-# … disable      --email pat@example.com
+# … disable       --issuer https://login.example.com --subject 3141592
+# … enable        --issuer https://login.example.com --subject 3141592
+# … end-sessions  --issuer https://login.example.com --subject 3141592
+# … release-email --issuer https://login.example.com --subject 3141592
+# … disable       --email pat@example.com
 ```
 
 - `disable` records the refusal (`disabled_identities`, keyed by issuer and
@@ -362,8 +407,45 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   without touching its tokens: every open session is refused at its next
   request and the next sign-in re-reads the claim. This is how a demotion
   takes effect at once.
+- `release-email` gives up the address of an account that is **turned off**,
+  so a person may hold it again. `users.email` is unique, so one address
+  belongs to one account for good -- right while the account is someone's,
+  wrong once it is nobody's. Two ordinary acts at the provider send a *new*
+  subject carrying an address an old account still holds, and until this
+  existed every sign-in of theirs was refused with no deployer command that
+  could change it: **deleting a person and inviting them again** (the provider's own
+  remedy for an invitation that reached the wrong person), and **giving a
+  departed person's address to someone new**. The command refuses an account
+  that is still on -- while a person can sign in, their address is theirs --
+  so `disable` first. The account keeps its subject, its issuer, its role,
+  its turned-off state and everything it holds; only the address changes, to
+  one at `released.example`, a domain reserved by RFC 2606 that can never be
+  registered and to which nothing can ever be delivered. What it held is
+  recorded (`users.email_released_from`, migration
+  `0041_email_released_from`), so `list` still says which address it was.
+  **The returning person gets a new, empty account.** They sign in under a
+  new subject at the provider, so the product gives them a new account;
+  every thread, file and share stays on the old one, which is still there
+  and still turned off. This frees an address, it does not hand work over.
+  **There is no undo**: once a sign-in takes the address, it is that
+  account's. An account that later holds a real address again -- turned back
+  on, signing in with an address nobody holds -- is no longer released, and
+  can be released again if the deployer turns it off again.
+- Every form is addressed by issuer and subject, or by `--email`. One
+  subject at one issuer is normally one account; the uniqueness the schema
+  enforces is (provider, subject), so a deployment with **two providers
+  configured at the same issuer** can have two accounts for one subject.
+  The command then refuses the pair, names both accounts and their provider,
+  and asks for `--email` -- rather than acting on whichever it found first,
+  which would release or sign out the wrong person. In that deployment the
+  refusal `disable` records is still keyed by issuer and subject, because it
+  is the *person at the provider* who is turned off: it covers both of their
+  accounts. Ending sessions, revoking tokens and releasing an address act on
+  the one account addressed, and the `disable` document lists the others the
+  refusal reached under `identity_also_covers`.
 - `list` shows every account -- issuer, subject, email, role, whether it is
-  off and since when, and its last sign-in (`users.last_sign_in_at`, stamped
+  off and since when, whether its address was released and which one it held,
+  and its last sign-in (`users.last_sign_in_at`, stamped
   at every provider sign-in) -- plus every identity turned off before it had
   an account, for the deployer to compare with the provider's list.
 - The account's content stays where it is, owned by the account; nothing is
@@ -372,7 +454,22 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
 Sample output of `disable`:
 
 ```json
-{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "role": "user", "subject": "3141592"}, "command": "disable", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "schedules_held": 1, "sessions_ended": true, "tokens_revoked": 2, "verdict": "disabled"}
+{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "subject": "3141592"}, "command": "disable", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "schedules_held": 1, "sessions_ended": true, "tokens_revoked": 2, "verdict": "disabled"}
+```
+
+and of `release-email` on that account, then of running it a second time:
+
+```json
+{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00+00:00", "email": "released-0b5f…@released.example", "id": "0b5f…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": true, "released_from": "pat@example.com", "role": "user", "subject": "3141592"}, "command": "release-email", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "released": "pat@example.com", "verdict": "released"}
+{"account": {"…": "…"}, "command": "release-email", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "released": "pat@example.com", "verdict": "already_released"}
+```
+
+An account that is still on, and a subject with no account, each answer with
+an `error` and a non-zero exit instead:
+
+```json
+{"command": "release-email", "error": "the account of subject '3141592' at issuer 'https://login.example.com' is not turned off; releasing an address is for an account nobody can use any more, so turn it off first with `disable`"}
+{"command": "release-email", "error": "no account exists for subject 'nobody' at issuer 'https://login.example.com'; there is no address to release"}
 ```
 
 **Upgrade note.** The three access keys and the command are honoured from

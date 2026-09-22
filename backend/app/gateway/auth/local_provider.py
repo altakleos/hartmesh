@@ -109,9 +109,17 @@ class LocalAuthProvider(AuthProvider):
         """Get user by email."""
         return await self._repo.get_user_by_email(email)
 
-    async def record_sign_in(self, user: User) -> None:
-        """Write what a provider sign-in changed on an existing account (role, issuer, the stamp)."""
-        await self._repo.record_sign_in(str(user.id), system_role=user.system_role, oauth_issuer=user.oauth_issuer, last_sign_in_at=user.last_sign_in_at)
+    async def record_sign_in(self, user: User, *, email: str | None = None) -> bool:
+        """Write what a provider sign-in changed on an existing account (role, issuer, the stamp, and the address when it follows).
+
+        Returns whether the address followed; ``False`` also when another
+        account took it between the caller's check and this write.
+        """
+        return await self._repo.record_sign_in(str(user.id), system_role=user.system_role, oauth_issuer=user.oauth_issuer, last_sign_in_at=user.last_sign_in_at, email=email)
+
+    async def release_email(self, user_id: str, *, replacement: str) -> str | None:
+        """Give up an account's address, recording what it held; ``None`` when there was nothing to release."""
+        return await self._repo.release_email(user_id, replacement=replacement)
 
     async def is_identity_disabled(self, issuer: str, subject: str) -> bool:
         """Whether the deployer turned this provider identity off (account or not)."""

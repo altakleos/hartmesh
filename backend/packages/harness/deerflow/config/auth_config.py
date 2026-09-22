@@ -70,7 +70,9 @@ class OIDCProviderConfig(BaseModel):
             "every access value exactly, the role is re-read at every sign-in and written to "
             "the account in both directions ('admin' wins when a token carries several), and "
             "admin_emails plays no part (setting both is refused). Unset, roles come from "
-            "admin_emails at account creation, as before."
+            "admin_emails, read at account creation and again whenever a sign-in changes the "
+            "account's address -- that list is keyed by address, so a role read from an address "
+            "the account no longer holds would be the wrong one."
         ),
     )
 
