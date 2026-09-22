@@ -3173,6 +3173,11 @@ async def _run_agent(
                         record,
                     )
 
+                async def _receipt_cancellation_fence(held: tuple[str, int]) -> tuple[str, int] | None:
+                    held_owner, held_epoch = held
+                    epoch = await run_manager.adopt_cancellation_epoch(run_id, owner_id=held_owner, held_epoch=held_epoch)
+                    return None if epoch is None else (held_owner, epoch)
+
                 install_tool_evidence_context(
                     runtime_ctx,
                     binding=ToolEvidenceRuntimeBinding(
@@ -3195,6 +3200,7 @@ async def _run_agent(
                     sink=RunEventToolReceiptSink(
                         event_store,
                         on_ownership_lost=_receipt_ownership_lost,
+                        refresh_cancellation_fence=_receipt_cancellation_fence,
                     ),
                 )
                 _install_runtime_context(config, runtime_ctx)

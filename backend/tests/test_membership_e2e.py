@@ -80,6 +80,9 @@ agents_api:
 database:
   backend: sqlite
   sqlite_dir: {home / "deer-flow-home" / "db"}
+# As the tenant profile has it, so a run's evidence is the durable kind.
+run_events:
+  backend: db
 scheduler:
   enabled: true
   poll_interval_seconds: 1
@@ -411,6 +414,16 @@ class TestMembership:
             # The work stopped, not only the output: the process is gone, well
             # before its own 240 s would have ended it.
             assert _wait_for_exit(command_pid, timeout=30.0), "the sandbox command outlived the refusal"
+            # The evidence says so too: the bash call closed its receipt as
+            # cancelled. The cancellation advanced the run's epoch under the
+            # call, so without the sink following that advance the call stayed
+            # started-and-never-finished, which recovery reads as indeterminate.
+            with sqlite3.connect(_db(gateway)) as connection:
+                receipts = connection.execute("SELECT event_type, content FROM run_events WHERE thread_id = ? AND event_type LIKE 'tool_receipt.%' ORDER BY seq", (thread_id,)).fetchall()
+            started = [json.loads(content) for kind, content in receipts if kind == "tool_receipt.started.v1"]
+            outcomes = [json.loads(content) for kind, content in receipts if kind == "tool_receipt.outcome.v1"]
+            assert [body["tool_name"] for body in started] == ["bash"], receipts
+            assert [(body["tool_name"], body["phase"]) for body in outcomes] == [("bash", "cancelled")], receipts
             assert document["account"]["email"] == "off@example.com" and document["account"]["disabled"] is True and document["account"]["subject"] == "sub-off"
 
             # The session: refused at its next request. Disable ended the sessions

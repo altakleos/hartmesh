@@ -35,7 +35,7 @@ _ABORTED_CALL_MEMORY = 512
 # process group but not the environment it inherited. Written for POSIX ``sh``
 # with busybox-compatible ``grep`` flags so it does not depend on the image
 # carrying bash or GNU coreutils.
-_ABORT_SWEEP = "for d in /proc/[0-9]*; do p=${{d#/proc/}}; if tr '\\0' '\\n' < \"$d/environ\" 2>/dev/null | grep -qxF {marker}; then kill -9 \"$p\" 2>/dev/null; fi; done; exit 0"
+_ABORT_SWEEP = "for d in /proc/[0-9]*; do p=${{d#/proc/}}; if tr '\\0' '\\n' 2>/dev/null < \"$d/environ\" | grep -qxF {marker}; then kill -9 \"$p\" 2>/dev/null; fi; done; true"
 
 # Env-bearing commands require the bash.exec API (POST /v1/bash/exec), which the
 # all-in-one-sandbox image only ships since 1.9.x. Older images (including any

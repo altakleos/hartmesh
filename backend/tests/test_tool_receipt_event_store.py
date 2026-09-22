@@ -1477,3 +1477,227 @@ async def test_database_receipt_writes_accept_a_single_node_null_lease(tmp_path)
         ]
     finally:
         await engine.dispose()
+
+
+# A cancellation advances the run's ``state_version`` by one and leaves the same
+# worker owning it, so the call it cancelled still has to close its receipt:
+# without that, every stopped tool call stays indeterminate in the evidence, and
+# a recovery reading it cannot tell "cancelled" from "the worker died mid-call".
+# The sink asks, once, whether the fence moved for that reason; a takeover (a
+# different owner) and a start (new work after the cancel) stay refused.
+
+
+def _cancel(runs: _OwnedRunStore) -> None:
+    """What the store's cancellation request does to the row."""
+    runs.row["cancel_action"] = "interrupt"
+    runs.row["state_version"] = int(runs.row["state_version"]) + 1
+
+
+def _worker_refresh(runs: _OwnedRunStore):
+    """The worker's refresh, over the fake row: the rule RunManager.adopt_cancellation_epoch applies."""
+    calls: list[tuple[str, int]] = []
+
+    async def refresh(held: tuple[str, int]) -> tuple[str, int] | None:
+        calls.append(held)
+        owner, epoch = held
+        row = runs.row
+        if row["status"] != "running" or row["owner_worker_id"] != owner or row.get("cancel_action") is None or row["state_version"] != epoch + 1:
+            return None
+        return owner, int(row["state_version"])
+
+    return refresh, calls
+
+
+def _spy_appends(store) -> list[tuple[str, int]]:
+    """Every fence the sink writes under, in order, whatever the store answers."""
+    attempts: list[tuple[str, int]] = []
+    for name in ("append_idempotent", "append_retrieval_pair"):
+        original = getattr(store, name)
+
+        async def spy(*args, _original=original, **kwargs):
+            attempts.append((kwargs["owner_id"], kwargs["lease_epoch"]))
+            return await _original(*args, **kwargs)
+
+        setattr(store, name, spy)
+    return attempts
+
+
+async def _reserved(sink: RunEventToolReceiptSink, runs: _OwnedRunStore, tool_call_id: str, *, tool_name: str = "bash"):
+    return await sink.reserve_started(
+        binding=_tenant_binding(runs),
+        tool_call_id=tool_call_id,
+        tool_name=tool_name,
+        request_projection_digest="f" * 64,
+        dispatch=_DISPATCH_1,
+    )
+
+
+def _cancelled_outcome(reservation) -> DurableToolReceiptV1:
+    return reservation.started.outcome(phase="cancelled", result_projection_digest=None, result_kind=None, safe_error_code="cancelled")
+
+
+def _succeeded_outcome(reservation) -> DurableToolReceiptV1:
+    return reservation.started.outcome(phase="succeeded", result_projection_digest="9" * 64, result_kind="tool_message", safe_error_code=None)
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_call_closes_its_receipt_at_the_cancellation_epoch(local_store) -> None:
+    store, runs = local_store
+    refresh, calls = _worker_refresh(runs)
+    rejected = AsyncMock()
+    sink = RunEventToolReceiptSink(store, on_ownership_lost=rejected, refresh_cancellation_fence=refresh)
+    reservation = await _reserved(sink, runs, "call-cancelled")
+    attempts = _spy_appends(store)
+    _cancel(runs)
+
+    await sink.record_outcome(_cancelled_outcome(reservation))
+
+    events = await store.list_events("thread-1", "run-1")
+    assert [event["event_type"] for event in events] == ["tool_receipt.started.v1", "tool_receipt.outcome.v1"]
+    assert parse_tool_receipt_event(events[-1]).receipt.phase == "cancelled"
+    assert calls == [("worker-1", 5)], "asked once, with the fence the call held"
+    assert attempts == [("worker-1", 5), ("worker-1", 6)]
+    rejected.assert_not_awaited()
+
+
+@pytest.mark.anyio
+async def test_a_cancelled_retrieval_call_closes_its_pair_at_the_cancellation_epoch(local_store) -> None:
+    store, runs = local_store
+    refresh, calls = _worker_refresh(runs)
+    sink = RunEventToolReceiptSink(store, refresh_cancellation_fence=refresh)
+    reservation = await _reserved(sink, runs, "call-retrieval-cancelled", tool_name="web_search")
+    attempts = _spy_appends(store)
+    _cancel(runs)
+
+    await sink.record_with_receipt_outcome(_succeeded_outcome(reservation), _retrieval_draft(reservation.started))
+
+    assert calls == [("worker-1", 5)]
+    assert attempts == [("worker-1", 5), ("worker-1", 6)]
+    assert len(await store.list_events("thread-1", "run-1")) == 3
+
+
+@pytest.mark.anyio
+async def test_a_takeover_still_refuses_the_terminal_receipt(local_store) -> None:
+    store, runs = local_store
+    refresh, _calls = _worker_refresh(runs)
+    rejected = AsyncMock()
+    sink = RunEventToolReceiptSink(store, on_ownership_lost=rejected, refresh_cancellation_fence=refresh)
+    reservation = await _reserved(sink, runs, "call-taken-over")
+    attempts = _spy_appends(store)
+    runs.row["owner_worker_id"] = "worker-2"
+    runs.row["state_version"] = 6
+
+    with pytest.raises(ToolReceiptOwnershipLost):
+        await sink.record_outcome(_cancelled_outcome(reservation))
+
+    rejected.assert_awaited_once_with("append")
+    assert attempts == [("worker-1", 5)], "no write under a fence the call never held"
+    assert [event["event_type"] for event in await store.list_events("thread-1", "run-1")] == ["tool_receipt.started.v1"]
+
+
+@pytest.mark.anyio
+async def test_the_sink_adopts_no_fence_for_another_owner(local_store) -> None:
+    """Defence in depth: whatever the refresh answers, the owner must be the held one."""
+    store, runs = local_store
+
+    async def refresh(held: tuple[str, int]) -> tuple[str, int] | None:
+        return "worker-2", held[1] + 1
+
+    sink = RunEventToolReceiptSink(store, refresh_cancellation_fence=refresh)
+    reservation = await _reserved(sink, runs, "call-other-owner")
+    attempts = _spy_appends(store)
+    runs.row["owner_worker_id"] = "worker-2"
+    runs.row["state_version"] = 6
+
+    with pytest.raises(ToolReceiptOwnershipLost):
+        await sink.record_outcome(_cancelled_outcome(reservation))
+
+    assert attempts == [("worker-1", 5)]
+
+
+@pytest.mark.parametrize("answered", [5, 7], ids=["same-epoch", "two-epochs-on"])
+@pytest.mark.anyio
+async def test_the_sink_adopts_only_the_epoch_one_past_the_one_it_held(local_store, answered) -> None:
+    """A cancellation advances the epoch by exactly one; anything else is not it."""
+    store, runs = local_store
+
+    async def refresh(held: tuple[str, int]) -> tuple[str, int] | None:
+        return held[0], answered
+
+    sink = RunEventToolReceiptSink(store, refresh_cancellation_fence=refresh)
+    reservation = await _reserved(sink, runs, f"call-epoch-{answered}")
+    attempts = _spy_appends(store)
+    _cancel(runs)
+
+    with pytest.raises(ToolReceiptOwnershipLost):
+        await sink.record_outcome(_cancelled_outcome(reservation))
+
+    assert attempts == [("worker-1", 5)], "no retry under an epoch the cancellation did not produce"
+
+
+@pytest.mark.parametrize("path", ["outcome", "retrieval pair"])
+@pytest.mark.anyio
+async def test_the_sink_asks_once_even_when_the_adopted_fence_is_refused_too(local_store, path) -> None:
+    """The adopted fence can itself be refused (the lease ran out meanwhile).
+
+    Without the bound the sink would ask and retry forever; the refresh raises
+    on a second call so a regression fails here instead of hanging the suite.
+    """
+    store, runs = local_store
+    asked: list[tuple[str, int]] = []
+
+    async def refresh(held: tuple[str, int]) -> tuple[str, int] | None:
+        if asked:
+            raise AssertionError("asked twice")
+        asked.append(held)
+        return held[0], held[1] + 1
+
+    rejected = AsyncMock()
+    sink = RunEventToolReceiptSink(store, on_ownership_lost=rejected, refresh_cancellation_fence=refresh)
+    reservation = await _reserved(sink, runs, f"call-refused-twice-{path}", tool_name="web_search")
+    attempts = _spy_appends(store)
+    _cancel(runs)
+    runs.row["lease_expires_at"] = (datetime.now(UTC) - timedelta(seconds=1)).isoformat()
+
+    with pytest.raises(ToolReceiptOwnershipLost):
+        if path == "outcome":
+            await sink.record_outcome(_cancelled_outcome(reservation))
+        else:
+            await sink.record_with_receipt_outcome(_succeeded_outcome(reservation), _retrieval_draft(reservation.started))
+
+    assert asked == [("worker-1", 5)]
+    assert attempts == [("worker-1", 5), ("worker-1", 6)]
+    rejected.assert_awaited_once()
+
+
+@pytest.mark.anyio
+async def test_a_failed_lookup_leaves_the_refusal_as_the_answer(local_store) -> None:
+    store, runs = local_store
+
+    async def refresh(held: tuple[str, int]) -> tuple[str, int] | None:
+        raise RuntimeError("database unreachable")
+
+    rejected = AsyncMock()
+    sink = RunEventToolReceiptSink(store, on_ownership_lost=rejected, refresh_cancellation_fence=refresh)
+    reservation = await _reserved(sink, runs, "call-lookup-failed")
+    _cancel(runs)
+
+    with pytest.raises(ToolReceiptOwnershipLost):
+        await sink.record_outcome(_cancelled_outcome(reservation))
+
+    rejected.assert_awaited_once_with("append")
+
+
+@pytest.mark.anyio
+async def test_a_start_is_never_written_under_a_cancellation_epoch(local_store) -> None:
+    store, runs = local_store
+    refresh, calls = _worker_refresh(runs)
+    sink = RunEventToolReceiptSink(store, refresh_cancellation_fence=refresh)
+    receipt = DurableToolReceiptV1.from_event_body(_body(), occurred_at=datetime.now(UTC))
+    _cancel(runs)
+
+    with pytest.raises(ToolReceiptOwnershipLost):
+        await sink.record_started(receipt)
+
+    assert calls == [], "new work after a cancellation is not asked about"
+    assert await store.list_events("thread-1", "run-1") == []
