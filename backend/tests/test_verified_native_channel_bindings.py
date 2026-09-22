@@ -5,7 +5,9 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -78,6 +80,31 @@ def _verified_request(
 class _ReadyAdmissionFence:
     async def ready_for_admission(self) -> bool:
         return True
+
+
+# A hang guard, not a timing assertion. The waits below are for work that
+# crosses the bus and the receipt processor on their own schedule, so a fixed
+# budget is a deadline on other people's scheduling: a one-second one failed
+# this test on a loaded box while the work was merely late. Only a genuine
+# hang should trip this, and the assertion that follows each wait reports
+# what was actually observed.
+_SETTLE_TIMEOUT_S = 30.0
+
+
+async def _settled(predicate, *, timeout: float = _SETTLE_TIMEOUT_S) -> None:
+    """Give *predicate* until *timeout* to hold, then return either way.
+
+    Accepts a plain or an async predicate, so a condition that has to query
+    the database reads the same as one that inspects a list.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        holds = predicate()
+        if inspect.isawaitable(holds):
+            holds = await holds
+        if holds or time.monotonic() >= deadline:
+            return
+        await asyncio.sleep(0.01)
 
 
 class _RecordingRuntime:
@@ -638,21 +665,21 @@ async def test_signed_route_reaches_real_runtime_and_redelivery_replays(
                     headers=headers,
                 )
                 assert response.status_code == 200
-                for _ in range(100):
-                    if len(recording_runtime.receipts) == 2:
-                        break
-                    await asyncio.sleep(0.01)
+                await _settled(lambda: len(recording_runtime.receipts) == 2)
                 assert len(recording_runtime.receipts) == 2
                 first_receipts = tuple(recording_runtime.receipts)
                 for receipt in first_receipts:
                     assert receipt.record.task is not None
                     await receipt.record.task
-                for _ in range(100):
+                stored_rows: tuple[InboundReceiptRow, ...] = ()
+
+                async def _receipts_completed() -> bool:
+                    nonlocal stored_rows
                     async with receipt_sessions() as session:
                         stored_rows = tuple(await session.scalars(sa.select(InboundReceiptRow).where(InboundReceiptRow.provider_delivery_id == "delivery-1")))
-                    if len(stored_rows) == 2 and all(stored.state == "completed" for stored in stored_rows):
-                        break
-                    await asyncio.sleep(0.01)
+                    return len(stored_rows) == 2 and all(stored.state == "completed" for stored in stored_rows)
+
+                await _settled(_receipts_completed)
                 assert len(stored_rows) == 2
                 assert all(stored.state == "completed" for stored in stored_rows)
                 assert all(stored.provider_event_digest is not None for stored in stored_rows)
