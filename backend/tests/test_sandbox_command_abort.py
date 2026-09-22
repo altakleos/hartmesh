@@ -16,8 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shlex
+import shutil
+import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -479,3 +483,37 @@ async def test_a_sandbox_without_an_abort_hook_still_cancels_the_old_way():
     released.set()
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=15)
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or not Path("/proc/self/environ").exists(), reason="the sweep is a bash loop over /proc")
+def test_the_aio_sweep_kills_the_marked_process_and_leaves_its_shell_running():
+    """The sweep runs as one command in a persistent shell session.
+
+    It once ended with ``exit 0``, which closed that shell: the API never saw
+    the command finish and every abort waited out its own 20 s request
+    timeout, measured against the released image under gVisor, holding the
+    cancelled tool call that long after its command was already dead. Here the
+    sweep runs in a shell reading commands the way a session does, and the
+    line after it has to run.
+    """
+    from deerflow.community.aio_sandbox.aio_sandbox import _ABORT_SWEEP
+
+    token = f"df-{uuid.uuid4().hex}"
+    marked = subprocess.Popen(["sleep", "60"], env={**os.environ, ABORT_TOKEN_ENV: token})
+    unmarked = subprocess.Popen(["sleep", "60"])
+    try:
+        command = _ABORT_SWEEP.format(marker=shlex.quote(f"{ABORT_TOKEN_ENV}={token}"))
+        shell = subprocess.run(["bash"], input=f"{command}\necho the-session-is-still-here\n", capture_output=True, text=True, timeout=30)
+
+        assert "the-session-is-still-here" in shell.stdout, shell
+        # Nothing but the answer: an environ the sandbox user cannot read (a
+        # root process) is skipped quietly rather than printed per process
+        # into the result the abort waits for.
+        assert shell.stderr == "", shell.stderr
+        assert marked.wait(timeout=10) == -9
+        assert unmarked.poll() is None
+    finally:
+        for process in (marked, unmarked):
+            if process.poll() is None:
+                process.kill()
+                process.wait()
