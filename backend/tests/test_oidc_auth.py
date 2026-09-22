@@ -417,3 +417,265 @@ def test_oidc_redirect_uri_fallback_plain_host_when_no_proxy_headers():
     result = _resolve_oidc_redirect_uri(req, "keycloak", cfg)
 
     assert result == "http://localhost:8001/api/v1/auth/callback/keycloak"
+
+
+# ── Clock skew between the Gateway and the identity provider ──────────────
+#
+# The product validated the ID token with no leeway at all, so a Gateway
+# whose clock had fallen behind the provider refused every token as "not yet
+# valid (iat)" -- on a measured tenant, a 1.5 s lag between NTP polls was a
+# complete sign-in outage for the whole company, showing nothing but a
+# generic `sso_failed`. A VM that is a second or two behind is ordinary; the
+# tolerance is bounded so a real replay is still refused.
+#
+# These tests sign real tokens and let PyJWT decide. Stubbing `jwt.decode`
+# would assert the stub, and the whole question here is what PyJWT does with
+# a timestamp on either side of the bound.
+
+
+def _signing_keypair():
+    from cryptography.hazmat.primitives.asymmetric import ec
+
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    return private_key, private_key.public_key()
+
+
+def _skew_service(monkeypatch, public_key):
+    """An OIDCService whose JWKS lookup answers with ``public_key``."""
+    service = OIDCService()
+
+    async def load_jwks(jwks_uri, force_refresh=False):
+        return {"keys": []}
+
+    async def resolve_signing_key(jwks_data, kid, algorithm, jwks_uri):
+        return public_key
+
+    monkeypatch.setattr(service, "_load_jwks", load_jwks)
+    monkeypatch.setattr(service, "_resolve_signing_key", resolve_signing_key)
+    return service
+
+
+def _skew_metadata():
+    return OIDCMetadata(
+        issuer="https://issuer.example.com",
+        authorization_endpoint="https://issuer.example.com/auth",
+        token_endpoint="https://issuer.example.com/token",
+        userinfo_endpoint=None,
+        jwks_uri="https://issuer.example.com/jwks",
+    )
+
+
+def _id_token(private_key, *, iat_offset: float = 0.0, exp_offset: float = 300.0):
+    """A real ES256 ID token whose timestamps sit where the caller asks."""
+    import time
+
+    import jwt as pyjwt
+
+    now = time.time()
+    return pyjwt.encode(
+        {
+            "iss": "https://issuer.example.com",
+            "sub": "subject",
+            "aud": "deer-flow",
+            "iat": now + iat_offset,
+            "exp": now + exp_offset,
+        },
+        private_key,
+        algorithm="ES256",
+        headers={"kid": "skew-kid"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_token_issued_seconds_ahead_of_this_gateways_clock_is_accepted(monkeypatch):
+    """The measured outage: a guest clock behind the provider by a second or two."""
+    private_key, public_key = _signing_keypair()
+    service = _skew_service(monkeypatch, public_key)
+
+    claims = await service.validate_id_token(
+        _skew_metadata(),
+        "deer-flow",
+        _id_token(private_key, iat_offset=5),
+        leeway=60,
+    )
+
+    assert claims["sub"] == "subject"
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_token_issued_far_ahead_is_still_refused_and_the_refusal_names_the_skew(monkeypatch):
+    """Outside the bound the answer is still no, and the operator is told why.
+
+    "Not yet valid" alone cannot be told apart from a replayed or forged
+    token; the number of seconds and its direction is what distinguishes a
+    clock that needs NTP from a token that needs refusing.
+    """
+    private_key, public_key = _signing_keypair()
+    service = _skew_service(monkeypatch, public_key)
+
+    with pytest.raises(OIDCValidationError) as refusal:
+        await service.validate_id_token(
+            _skew_metadata(),
+            "deer-flow",
+            _id_token(private_key, iat_offset=120),
+            leeway=60,
+        )
+
+    message = str(refusal.value)
+    assert "120" in message, f"the refusal must carry the measured skew in seconds: {message}"
+    assert "60" in message, f"the refusal must name the leeway it was measured against: {message}"
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_token_that_expired_seconds_ago_is_accepted_within_the_leeway(monkeypatch):
+    """The same clock lag in the other direction: a Gateway running ahead."""
+    private_key, public_key = _signing_keypair()
+    service = _skew_service(monkeypatch, public_key)
+
+    claims = await service.validate_id_token(
+        _skew_metadata(),
+        "deer-flow",
+        _id_token(private_key, iat_offset=-300, exp_offset=-5),
+        leeway=60,
+    )
+
+    assert claims["sub"] == "subject"
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_a_token_that_expired_long_ago_is_refused_with_its_age(monkeypatch):
+    private_key, public_key = _signing_keypair()
+    service = _skew_service(monkeypatch, public_key)
+
+    with pytest.raises(OIDCValidationError) as refusal:
+        await service.validate_id_token(
+            _skew_metadata(),
+            "deer-flow",
+            _id_token(private_key, iat_offset=-300, exp_offset=-120),
+            leeway=60,
+        )
+
+    message = str(refusal.value)
+    assert "expired" in message.lower()
+    assert "120" in message, f"the refusal must carry how far past expiry the token is: {message}"
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_the_leeway_is_a_bound_the_caller_sets_not_a_constant(monkeypatch):
+    """A zero leeway must still refuse, or the configured value does nothing.
+
+    Every test above passes against a hardcoded 60 s. This one fails unless
+    the number the caller passes is the number PyJWT is given.
+    """
+    private_key, public_key = _signing_keypair()
+    service = _skew_service(monkeypatch, public_key)
+    token = _id_token(private_key, iat_offset=5)
+
+    with pytest.raises(OIDCValidationError):
+        await service.validate_id_token(_skew_metadata(), "deer-flow", token, leeway=0)
+
+    assert (await service.validate_id_token(_skew_metadata(), "deer-flow", token, leeway=300))["sub"] == "subject"
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_the_orchestrated_callback_carries_the_leeway_down_to_the_token(monkeypatch):
+    """``authenticate_callback`` is the entry the route uses, so the bound has
+    to survive the hop from it to the validation underneath."""
+    private_key, public_key = _signing_keypair()
+    service = _skew_service(monkeypatch, public_key)
+    token = _id_token(private_key, iat_offset=5)
+
+    async def exchange_code(**kwargs):
+        return {"id_token": token, "access_token": "at"}
+
+    monkeypatch.setattr(service, "exchange_code", exchange_code)
+    call = dict(provider_id="sso", metadata=_skew_metadata(), client_id="deer-flow", client_secret=None, code="c", redirect_uri="https://tenant.example.com/cb")
+
+    with pytest.raises(OIDCValidationError):
+        await service.authenticate_callback(**call, leeway=0)
+
+    identity = await service.authenticate_callback(**call, leeway=60)
+    assert identity.subject == "subject"
+    await service.close()
+
+
+@pytest.mark.asyncio
+async def test_the_callback_route_hands_the_service_the_configured_leeway(monkeypatch):
+    """The knob has to be wired, not merely present.
+
+    Every other test here passes with a leeway hardcoded anywhere below the
+    route. This one drives the route itself and reads back what it passed, so
+    a configured value that stopped at the config model -- looking adjustable
+    while every deployment stayed on the default -- fails here.
+    """
+    from starlette.requests import Request
+
+    from app.gateway.auth import oidc_state
+    from app.gateway.routers import auth as auth_router
+
+    configured_leeway = 137.0
+    provider_id = "sso"
+
+    class _Config:
+        class auth:  # noqa: N801
+            class oidc:  # noqa: N801
+                enabled = True
+                frontend_base_url = "https://tenant.example.com"
+                clock_skew_leeway_seconds = configured_leeway
+                providers = {provider_id: _provider_config()}
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: _Config)
+
+    passed: dict = {}
+
+    class _Service:
+        async def discover(self, issuer, overrides=None):
+            return _skew_metadata()
+
+        async def authenticate_callback(self, **kwargs):
+            passed.update(kwargs)
+            raise OIDCError("stop here: the recorded arguments are the subject of this test")
+
+    monkeypatch.setattr(auth_router, "_get_oidc_service", lambda: _Service())
+
+    state_value = "state-value"
+    payload = oidc_state.OIDCStatePayload(provider=provider_id, state=state_value, nonce=None, code_verifier=None)
+    monkeypatch.setattr(auth_router, "get_state_cookie", lambda request, provider: payload)
+
+    request = Request({"type": "http", "method": "GET", "path": f"/callback/{provider_id}", "headers": [], "query_string": b"", "scheme": "https", "server": ("tenant.example.com", 443)})
+
+    await auth_router.oauth_callback(request=request, provider=provider_id, code="auth-code", state=state_value)
+
+    assert passed.get("leeway") == configured_leeway, f"the route passed {passed.get('leeway')!r}, not the configured {configured_leeway!r}"
+
+
+def test_the_leeway_is_bounded_at_the_config_the_gateway_starts_from():
+    """A tolerance wide enough to accept a stale token is not a clock tolerance.
+
+    Asserted through the real ``AppConfig -> AuthAppConfig -> OIDCAuthConfig``
+    chain rather than the model alone, because the requirement is that a bad
+    value stops a Gateway from starting, not merely that some model would
+    have refused it.
+    """
+    import pydantic
+    import pytest as _pytest
+
+    from deerflow.config.app_config import AppConfig
+
+    auth_config = AppConfig.model_fields["auth"].annotation
+    oidc_config = auth_config.model_fields["oidc"].annotation
+
+    assert oidc_config().clock_skew_leeway_seconds == 60.0, "the default is a tolerance, not none"
+
+    for refused in (301, -1, float("inf"), float("nan")):
+        with _pytest.raises(pydantic.ValidationError):
+            auth_config(oidc={"enabled": True, "providers": {}, "clock_skew_leeway_seconds": refused})
+
+    # 0 is a real setting: it restores the behaviour that had no tolerance.
+    assert auth_config(oidc={"enabled": True, "providers": {}, "clock_skew_leeway_seconds": 0}).oidc.clock_skew_leeway_seconds == 0
+    assert auth_config(oidc={"enabled": True, "providers": {}, "clock_skew_leeway_seconds": 300}).oidc.clock_skew_leeway_seconds == 300

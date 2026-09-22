@@ -94,6 +94,8 @@ def test_the_sign_on_keys_render_the_provider_as_the_one_way_in(render_config: M
     assert auth["oidc"] == {
         "enabled": True,
         "frontend_base_url": f"https://{HOST}",
+        # One tolerance for this host's clock, not one per provider.
+        "clock_skew_leeway_seconds": 60,
         "providers": {
             "sso": {
                 "display_name": "Single sign-on",
@@ -320,3 +322,28 @@ def test_the_readme_states_the_keys_the_callback_the_method_and_the_upgrade_note
         "no administrator",
     ):
         assert needle in section, needle
+
+
+def test_the_clock_tolerance_is_rendered_with_a_default_and_is_overridable(render_config: ModuleType, catalog: tuple) -> None:
+    """The tenant is a VM, and a VM's clock drifts between NTP polls.
+
+    With no tolerance at all a guest a second or two behind the provider
+    refuses every sign-in by everyone -- measured on a released tenant, six
+    attempts in thirty seconds, all `not yet valid (iat)`. The renderer owns
+    the whole ``auth.oidc`` block (a template that names it is refused), so
+    without a key here the tolerance would be unreachable on exactly the
+    deployment shape that hit this.
+    """
+    document, _ = _render(render_config, catalog, _environ(**SIGN_ON))
+    assert document["auth"]["oidc"]["clock_skew_leeway_seconds"] == 60
+
+    for raw, expected in (("0", 0), ("5", 5), (" 120 ", 120), ("300", 300)):
+        document, _ = _render(render_config, catalog, _environ(**SIGN_ON, HARTMESH_SIGN_ON_CLOCK_SKEW=raw))
+        assert document["auth"]["oidc"]["clock_skew_leeway_seconds"] == expected
+
+
+@pytest.mark.parametrize("bad", ["-1", "301", "1.5", "abc", "inf", "nan", "true", "+5", "5s"])
+def test_the_clock_tolerance_is_a_whole_number_of_seconds_in_range(render_config: ModuleType, catalog: tuple, bad: str) -> None:
+    message = _refusal(render_config, catalog, _environ(**SIGN_ON, HARTMESH_SIGN_ON_CLOCK_SKEW=bad))
+    assert "HARTMESH_SIGN_ON_CLOCK_SKEW" in message and "0 to 300" in message
+    assert not any(sentinel in message for sentinel in SENTINELS), "a refusal names the key and the rule, never the value"
