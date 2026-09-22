@@ -198,7 +198,8 @@ test("sanitize step preserves legitimate artifact HTML", () => {
 
 test("sanitize step does not break KaTeX math rendering", () => {
   const html = renderArtifactMarkdown(
-    ["Inline $x^2$ math", "", "$$", "E=mc^2", "$$"].join("\n"),
+    // Inline math is `$$...$$` too: one `$` is currency, not a delimiter.
+    ["Inline $$x^2$$ math", "", "$$", "E=mc^2", "$$"].join("\n"),
   );
 
   // rehype-katex runs after the sanitize step; its output must still be

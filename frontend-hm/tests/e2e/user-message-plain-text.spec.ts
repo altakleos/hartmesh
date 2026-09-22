@@ -88,6 +88,25 @@ test.describe("User message plain-text rendering", () => {
     await expect(page.locator(".is-user .katex")).toHaveCount(0);
   });
 
+  test("currency in an assistant message is not typeset as math", async ({
+    page,
+  }) => {
+    // The user bubble above is plain text, so it never exercised the Markdown
+    // renderer. The assistant bubble does, and that is where a released build
+    // typeset the span between two amounts as an equation. The extracted text
+    // was correct there while the pixels showed mathematics, so this asserts
+    // the absence of a KaTeX render, not the text.
+    const summary =
+      "August 2026: $201,487.04 in revenue across 502 jobs, an average of $401.37 per job.";
+    mockLangGraphAPI(page, threadWithMessages("how did August go?", summary));
+
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    const assistant = page.locator(".is-assistant");
+    await expect(assistant).toContainText("per job", { timeout: 15_000 });
+
+    await expect(page.locator(".is-assistant .katex")).toHaveCount(0);
+  });
+
   test("deeply nested blockquote markers in a user message do not crash the page", async ({
     page,
   }) => {

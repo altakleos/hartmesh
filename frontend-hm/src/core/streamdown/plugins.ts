@@ -179,7 +179,14 @@ export function rehypeClobberFragments() {
 
 const sharedRemarkPlugins = [
   [remarkGfm, { singleTilde: false }],
-  [remarkMath, { singleDollarTextMath: true }],
+  // One `$` is money, two are mathematics. With singleDollarTextMath on, a
+  // sentence carrying two currency amounts had the span between them typeset
+  // as an equation -- "$201,487.04 in revenue ... an average of $401.37" lost
+  // both dollar signs and every space between them. Every figure in a business
+  // report is currency, so that is the ordinary sentence, not an edge case.
+  // `$$...$$` still renders, inline and display alike, and is the only way to
+  // ask for math; preprocess.ts rewrites `\(...\)` to `$$` to match.
+  [remarkMath, { singleDollarTextMath: false }],
 ] as StreamdownProps["remarkPlugins"];
 
 export const streamdownRenderingPlugins = {

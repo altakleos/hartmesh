@@ -106,7 +106,7 @@ test("capMarkdownNesting caps both blockquote and list nesting", () => {
 test("normalizeStreamdownMathMarkdown converts inline math delimiters", () => {
   expect(
     normalizeStreamdownMathMarkdown("Given \\(x\\), compute \\(x^2\\)."),
-  ).toBe("Given $x$, compute $x^2$.");
+  ).toBe("Given $$x$$, compute $$x^2$$.");
 });
 
 test("normalizeStreamdownMathMarkdown converts multiline display math delimiters", () => {
@@ -141,7 +141,7 @@ test("normalizeStreamdownMathMarkdown leaves fenced and indented code untouched"
     "    \\(literal\\)",
   ].join("\n");
   const expected = [
-    "Text $x$",
+    "Text $$x$$",
     "```tex",
     "\\[",
     "x^2",
@@ -245,7 +245,7 @@ test("normalizeStreamdownMathMarkdown preserves delimiters inside multi-backtick
 
 test("normalizeStreamdownMathMarkdown requires matching backtick run to close code spans", () => {
   const input = "Use ``\\(literal\\)` and still code`` then \\(x\\)";
-  const expected = "Use ``\\(literal\\)` and still code`` then $x$";
+  const expected = "Use ``\\(literal\\)` and still code`` then $$x$$";
   expect(normalizeStreamdownMathMarkdown(input)).toBe(expected);
 });
 
