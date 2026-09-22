@@ -16,8 +16,10 @@
 #   - `auth` is the sign-in mode: the three HARTMESH_SIGN_ON_* keys add
 #     `auth.oidc` (one provider, `sso`) and close local passwords
 #     (`auth.local.enabled: false`, registration off); HARTMESH_LOCAL_PASSWORDS
-#     =allowed copies the block below through unchanged. Neither, both, or a
-#     half-set group refuses to render (README: "Sign-in").
+#     =allowed adds `auth.local.enabled: true` and `allow_registration` from
+#     HARTMESH_LOCAL_REGISTRATION (`open` or `closed`, required). Neither,
+#     both, a half-set group, or local passwords without the registration key
+#     refuses to render (README: "Sign-in").
 #
 # Everything else is copied through unchanged. Paths are literal because this
 # file cannot interpolate them: HARTMESH_DATA_DIR is therefore fixed at
@@ -39,8 +41,10 @@ models: []
 # on this profile Redis is already load-bearing for streaming.
 #
 # Deliberately absent here: `auth.local.enabled`, `allow_registration` and
-# `auth.oidc`. They are the sign-in mode, and the renderer writes them from
-# the tenant .env so the template cannot carry an open default.
+# `auth.oidc`. They are the sign-in mode and whether visitors may sign up, and
+# the renderer writes them from the tenant .env in both modes (and refuses a
+# template that names one), so the template cannot carry an open default and
+# one bundle serves every tenant.
 auth:
   local:
     lockout_store: redis

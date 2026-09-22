@@ -46,6 +46,8 @@ export default function SetupPage() {
 
     if (isAuthenticated && user?.needs_setup) {
       setMode("change_password");
+      // The address the account already has; a reset admin may correct it.
+      setEmail((current) => current || user.email);
     } else if (!isAuthenticated) {
       // Check if the system has no users yet. A slow Gateway must not leave the
       // setup page in an infinite loading state or silently redirect away.
@@ -283,6 +285,9 @@ export default function SetupPage() {
   }
 
   // ── Change-password form (needs_setup after login) ─────────────────
+  // An administrator after reset_admin, or a person an administrator added
+  // with a one-time password: the same form, in words that fit each.
+  const addedPerson = user?.system_role !== "admin";
   return (
     <div className="bg-background flex min-h-screen items-center justify-center">
       <FlickeringGrid
@@ -297,10 +302,14 @@ export default function SetupPage() {
         <div className="text-center">
           <h1 className="font-serif text-3xl">DeerFlow</h1>
           <p className="text-muted-foreground mt-2">
-            Complete admin account setup
+            {addedPerson
+              ? "Finish setting up your account"
+              : "Complete admin account setup"}
           </p>
           <p className="text-muted-foreground mt-1 text-xs">
-            Set your real email and a new password.
+            {addedPerson
+              ? "Enter the one-time password you were given, then choose your own."
+              : "Set your real email and a new password."}
           </p>
         </div>
         <form onSubmit={handleChangePassword} className="space-y-4">
@@ -309,11 +318,14 @@ export default function SetupPage() {
             placeholder="Your email"
             value={email}
             onChange={(e) => setEmail(e.target.value)}
+            // The address the administrator added the person under; only a
+            // reset administrator corrects theirs here.
+            readOnly={addedPerson}
             required
           />
           <Input
             type="password"
-            placeholder="Current password"
+            placeholder={addedPerson ? "One-time password" : "Current password"}
             value={currentPassword}
             onChange={(e) => setCurrentPassword(e.target.value)}
             required

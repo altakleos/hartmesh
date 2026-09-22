@@ -23,8 +23,8 @@ verdict and what was done. Three exit statuses: ``0`` means done; ``1`` means
 the command refused and changed nothing (the document then carries ``error``);
 ``2`` means it did what was asked but could not confirm that every run it
 cancelled had stopped (the document names them under ``runs_unconfirmed``).
-The consumer runs this through a guest agent whose own exit status does not
-carry the command's, so the document is the answer.
+A caller that runs this through a remote runner may not see its exit status,
+so the document is the answer.
 
 What ``disable`` does, and where the fact lives: one row in
 ``disabled_identities`` keyed by ``(issuer, subject)``. Every read of the
@@ -555,7 +555,7 @@ def main(argv: list[str] | None = None) -> int:
     except CommandError as exc:
         print(json.dumps({"command": args.command, "error": str(exc)}, sort_keys=True), flush=True)
         return 1
-    except Exception as exc:  # noqa: BLE001 - the document is the answer the consumer reads, whatever failed
+    except Exception as exc:  # noqa: BLE001 - the document is the answer, whatever failed
         print(json.dumps({"command": args.command, "error": f"{type(exc).__name__}: {exc}"}, sort_keys=True), flush=True)
         return 1
     print(json.dumps(document, sort_keys=True), flush=True)

@@ -54,7 +54,8 @@ other. Documentation values are in `.env.example`, which renders under
 | `REDIS_PASSWORD` | `redis-server --requirepass` and `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`. Stable for the tenant's lifetime. |
 | `AUTH_JWT_SECRET` | The Gateway's session-signing secret, so sessions survive a `home/` restored from backup. |
 | `HARTMESH_SIGN_ON_ISSUER`, `HARTMESH_SIGN_ON_CLIENT_ID`, `HARTMESH_SIGN_ON_CLIENT_SECRET` | The sign-in mode, one side or the other: all three present is sign-on only, the identity provider as the one way in (§ "Sign-in"). Read by `gateway/render_config.py`; the secret reaches the Gateway as the reference `$HARTMESH_SIGN_ON_CLIENT_SECRET` and is never written to disk. |
-| `HARTMESH_LOCAL_PASSWORDS` | The other side: exactly `allowed`, and none of the three above, is local passwords as before. Neither side, both, or one or two of the three refuses to render and the Gateway does not start. |
+| `HARTMESH_LOCAL_PASSWORDS` | The other side: exactly `allowed`, and none of the three above, is local passwords. Neither side, both, one or two of the three, or local passwords without `HARTMESH_LOCAL_REGISTRATION` refuses to render and the Gateway does not start. |
+| `HARTMESH_LOCAL_REGISTRATION` | Local-password mode only, and required there: exactly `open` (visitors may create their own account) or `closed` (an administrator adds each person). Absent, empty or any other value refuses to render; set beside the sign-on keys it refuses too (§ "Local passwords"). |
 
 Provider keys follow verbatim, any subset of the `*_API_KEY` names
 `config.example.yaml` references; nothing guarantees any particular one is
@@ -115,8 +116,9 @@ interpolation, so validation reads the file Docker will bind into the sandbox.
 ## Sign-in
 
 Who may enter a tenant is the `.env`'s to say, and it says it one of two ways.
-Nothing is assumed: a `.env` that says neither, says both, or sets one or two
-of the three sign-on keys refuses to render, `gateway/run.sh` exits, and the
+Nothing is assumed: a `.env` that says neither, says both, sets one or two
+of the three sign-on keys, or selects local passwords without saying whether
+visitors may sign up refuses to render, `gateway/run.sh` exits, and the
 Gateway never becomes ready, with the refusal naming every key involved in
 its journal. This deliberately breaks the convention of the optional keys
 above, where an absent key means "exactly as before". The reason is the
@@ -187,12 +189,15 @@ already holds local accounts, which is what a restore produces:
   manager inside the Gateway process, which never crosses nginx.
 
 **The readiness signal.** `GET /health` on the Gateway carries `"auth_mode":
-"sign_on_only"` or `"local"`, readable without credentials from inside the
+"sign_on_only"` or `"local"`, and `"registration": "open"` or `"closed"`
+(always `closed` in this mode), readable without credentials from inside the
 deployment (`gateway:8001` on the `app` network) and also through nginx,
-which proxies `/health`; the mode it names is what the login page shows
+which proxies `/health`; what they name is what the login page shows
 anyone anyway. The Gateway's journal has one line at start, `auth mode:
-sign_on_only (local passwords off; provider sso (…))`. An apply asserts
-either before it publishes the tenant.
+sign_on_only (local passwords off; provider sso (…); registration closed)`,
+or in local mode `auth mode: local (local passwords on; registration open)`
+or `… registration closed)`. An apply asserts either before it publishes the
+tenant.
 
 **Local accounts from before the switch.** A database that already holds
 local-password accounts keeps them, inert. Their owners see the provider's
@@ -287,7 +292,8 @@ was never there.
 first release carrying them. A release older than that ignores them and
 serves local passwords with registration open, exactly as before. From
 `.30` on, a tenant whose `.env` carries neither side **stops at start**: put
-`HARTMESH_LOCAL_PASSWORDS=allowed` (today's behaviour) or the three sign-on
+`HARTMESH_LOCAL_PASSWORDS=allowed` (with, from the release after `.30`,
+`HARTMESH_LOCAL_REGISTRATION`; § "Local passwords") or the three sign-on
 keys into `.env` before the pin moves. To check the render before the
 restart, run the **new** bundle's renderer (the `.29` renderer knows no
 sign-in keys and renders clean whatever `.env` says) against the edited keys
@@ -298,14 +304,14 @@ as § "Operator-managed models"):
 
 ```bash
 docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
-  exec --user 1000 -e HARTMESH_LOCAL_PASSWORDS=allowed gateway \
+  exec --user 1000 -e HARTMESH_LOCAL_PASSWORDS=allowed -e HARTMESH_LOCAL_REGISTRATION=closed gateway \
   sh -c 'cd /app/backend && PYTHONPATH=. uv run --no-sync python /opt/hartmesh/gateway/render_config.py --template /opt/hartmesh/config.yaml --catalog /opt/hartmesh/providers --check'
 ```
 
 (or `-e HARTMESH_SIGN_ON_ISSUER=… -e HARTMESH_SIGN_ON_CLIENT_ID=… -e
 HARTMESH_SIGN_ON_CLIENT_SECRET=…` for sign-on) reports
-`sign-in=sign_on_only (provider sso, callback …)` or `sign-in=local`, or the
-refusal. A tenant that was upgraded without the key shows the refusal in the
+`sign-in=sign_on_only (provider sso, callback …)` or `sign-in=local
+(registration closed)`, or the refusal. A tenant that was upgraded without the key shows the refusal in the
 Gateway's journal (`render_config: refusing to render: no sign-in mode is
 selected …`), the container exits and restarts until the key is added and
 `up -d` is run again. A sign-on option (`HARTMESH_SIGN_ON_ADMINS`, `_SCOPES`,
@@ -509,14 +515,111 @@ this release.
 
 ### Local passwords (`HARTMESH_LOCAL_PASSWORDS=allowed`)
 
-Today's behaviour, unchanged: the rendered `auth` block is the template's
-lockout policy and nothing else, so local login, registration
-(`allow_registration` at its default, open), the first-admin page and
-`reset_admin` all work exactly as before, and the rendered `config.yaml` is
-byte for byte the previous release's render. For a consumer who wants local
-passwords; not for a tenant published on the internet under this profile's
-rule that a person has access only while the company's identity provider
-says so.
+```
+HARTMESH_LOCAL_PASSWORDS=allowed
+HARTMESH_LOCAL_REGISTRATION=closed
+```
+
+People sign in with an email and a password this deployment keeps. The
+rendered `auth` block is the template's lockout policy plus
+`auth.local.enabled: true` and `auth.local.allow_registration` from the
+second key, which is **required** in this mode and takes exactly one of two
+values:
+
+- `HARTMESH_LOCAL_REGISTRATION=closed`: nobody signs themselves up.
+  `POST /api/v1/auth/register` answers `403` `registration_disabled`, the
+  login page offers no create-account form (`setup-status` carries
+  `"registration_enabled": false`), and an administrator adds each person
+  (below). The value for a tenant published on the internet.
+- `HARTMESH_LOCAL_REGISTRATION=open`: anyone who can reach the login page
+  may create an ordinary (`user`) account, as every local-password
+  deployment of this profile did before the key existed.
+
+Absent, empty or any other value refuses to start and names the key --
+nothing is assumed, for the reason this section opens with. Set beside the
+three sign-on keys it refuses as a conflicting key, because in sign-on-only
+mode nobody creates a local account. The template names neither
+`auth.local.enabled` nor `auth.local.allow_registration`, in either mode,
+and the renderer refuses one that does: the renderer owns both, so one
+unmodified bundle serves a sign-on-only `.env` and a local-password one.
+
+The first administrator is created on the first-admin page (or
+`/api/v1/auth/initialize`) while there is none, whichever the key says --
+anyone who reaches the tenant first can take that page, so create the first
+administrator before the tenant is published. `reset_admin` works as before,
+and its reset account is confined like an added one (below) until its person
+completes setup. `/health` names the state (`"auth_mode":
+"local"`, `"registration": "open"` or `"closed"`), and so does the start line
+(`auth mode: local (local passwords on; registration closed)`).
+
+#### Adding a person
+
+With registration closed, an administrator adds each person; with it open
+they can too. Two surfaces, one operation: the new account has role `user`
+(an administrator is not created this way) and a **one-time password**.
+
+- **In the product**: Settings → Account → _Add a person_, shown to an
+  administrator in local-password mode. Behind it is
+  `POST /api/v1/auth/users` with `{"email": "…"}`, which takes an
+  administrator's interactive session only -- the authority of the lockout
+  routes; a personal access token is refused -- and answers `201` with
+  `{"id", "email", "system_role": "user", "needs_setup": true,
+  "one_time_password"}` and `Cache-Control: no-store`. It sets no cookie: the
+  administrator stays signed in as themselves.
+- **In the deployment**, for a deployer with no browser session:
+
+  ```bash
+  docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
+    exec --user 1000 gateway \
+    sh -c 'cd /app/backend && PYTHONPATH=. uv run --no-sync python -m app.gateway.auth.add_user --email pat@example.com'
+  ```
+
+  prints one JSON document on stdout: on success (exit `0`)
+  `{"command": "add-user", "id", "email", "system_role": "user",
+  "needs_setup": true, "one_time_password"}`; on a refusal (exit `1`,
+  nothing added) `{"command": "add-user", "error", "message"}`, where
+  `error` is `email_already_exists`, `sign_on_required`, `email_invalid`,
+  `usage` or `failed`. The document is the answer: a remote runner's own exit
+  status may not carry the command's.
+
+Both refuse an address any account already holds (`email_already_exists`,
+what `/register` answers), and both refuse in sign-on-only mode
+(`sign_on_required`), where the identity provider decides who has an
+account.
+
+**The one-time password** is shown once, in that one response, and never
+again: only its hash is kept, it is never logged, and nothing can show it
+later. Hand it to the person yourself. They sign in with it and land on the
+setup page, where they enter it once more and choose their own password.
+Until they have, the account can do nothing else: its sessions are refused
+everywhere but "who am I" and completing setup (`403` `setup_required`), and
+it holds no token, channel or schedule and cannot create one. The moment they
+choose their own, the one-time password opens nothing (`401
+invalid_credentials`). It keeps opening the setup page until then -- a person
+who signs in and closes the tab can come back to it -- because nothing in the
+product issues a second one: an administrator cannot reset another person's
+password. If it may have reached anyone else, the person should sign in and
+choose their own at once. The deployer can still start over: `reset_admin
+--email <address>` gives any local account a new one-time password (written
+to `.deer-flow/admin_initial_credentials.txt`, mode `0600`), ends its
+sessions, and returns it to setup.
+
+The same confinement applies to an account `reset_admin` resets, and to
+sessions only: the reset account's personal access tokens, channels and
+scheduled tasks keep working, since the reset exposed none of them.
+
+**Upgrade note.** `HARTMESH_LOCAL_REGISTRATION` is honoured from the first
+release after `v2.1.0+hartmesh.30`, and from that release on a
+local-password tenant whose `.env` lacks it **stops at start**, with
+`render_config: refusing to render: HARTMESH_LOCAL_PASSWORDS=allowed selects
+local passwords, and HARTMESH_LOCAL_REGISTRATION must then say …` in the
+Gateway's journal. Add `HARTMESH_LOCAL_REGISTRATION=open` to keep the
+sign-up form exactly as it was, or `=closed` to close it, before the pin
+moves; check the render with the new bundle's renderer as in the sign-in
+upgrade note above. A release that old ignores the key. A bundle whose
+template was edited to name `allow_registration` must drop that edit: from
+that release on the renderer refuses it in both modes. Sign-on-only tenants
+change nothing.
 
 ## Mount points
 
@@ -2319,7 +2422,7 @@ config ConfigMap under the chart README's recommended values, at
 | `run_events.backend` | upstream default (`memory`) | `db` | run events survive a Gateway restart on a single-Gateway VM |
 | `auth.local.lockout_store` | absent (`memory`) | `redis` | § "Login lockout": one replica with a recreate rollout, so clearing a lockout must not need a restart |
 | `auth.local.source_max_failures` | absent (`300`) | `600` | § "Login lockout": twenty staff reaching their own account lock and retrying past it is 300 failures exactly, so the generic limit leaves the office no margin |
-| `auth.local.enabled`, `auth.local.allow_registration`, `auth.oidc` | absent (local passwords, registration open) | in sign-on-only mode `false`, `false`, and one provider `sso`; in local mode absent | § "Sign-in": the `.env` selects the mode, and the template carries no open default |
+| `auth.local.enabled`, `auth.local.allow_registration`, `auth.oidc` | absent (local passwords, registration open) | in sign-on-only mode `false`, `false`, and one provider `sso`; in local mode `true`, from `HARTMESH_LOCAL_REGISTRATION`, and absent | § "Sign-in": the `.env` selects the mode and whether visitors may sign up, and the template carries no open default |
 
 ## Moving the `app` subnet on a running tenant
 

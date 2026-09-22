@@ -33,10 +33,14 @@ the three sign-on keys (``HARTMESH_SIGN_ON_ISSUER``, ``_CLIENT_ID``,
 ``_CLIENT_SECRET``) render the identity provider as the one way in --
 ``auth.local.enabled: false``, registration off, one provider named ``sso``
 whose callback is ``https://<HARTMESH_PUBLIC_HOST>/api/v1/auth/callback/sso``
--- while ``HARTMESH_LOCAL_PASSWORDS=allowed`` copies the template's ``auth``
-through unchanged, which is local passwords exactly as before. Neither, both,
-or a half-set sign-on group refuses to render and names every key involved
-(README: "Sign-in"). The client secret reaches the Gateway as the reference
+-- while ``HARTMESH_LOCAL_PASSWORDS=allowed`` renders local passwords, with
+``HARTMESH_LOCAL_REGISTRATION`` (``open`` or ``closed``, required in that
+mode and refused in the other) saying whether a visitor may create their own
+account. Neither mode, both, a half-set sign-on group, or local passwords
+without a registration choice refuses to render and names every key involved
+(README: "Sign-in"). The renderer owns ``auth.local.enabled`` and
+``auth.local.allow_registration`` in both modes; the template names neither.
+The client secret reaches the Gateway as the reference
 ``$HARTMESH_SIGN_ON_CLIENT_SECRET`` and is never written to disk. The optional
 ``HARTMESH_SIGN_ON_ACCESS_CLAIM`` / ``_ACCESS_VALUES`` pair makes admission
 follow one claim of the token, and ``HARTMESH_SIGN_ON_ROLES`` makes the role
@@ -119,6 +123,8 @@ SIGN_ON_CLIENT_SECRET_ENV = "HARTMESH_SIGN_ON_CLIENT_SECRET"
 SIGN_ON_KEYS = (SIGN_ON_ISSUER_ENV, SIGN_ON_CLIENT_ID_ENV, SIGN_ON_CLIENT_SECRET_ENV)
 LOCAL_PASSWORDS_ENV = "HARTMESH_LOCAL_PASSWORDS"
 LOCAL_PASSWORDS_VALUE = "allowed"
+LOCAL_REGISTRATION_ENV = "HARTMESH_LOCAL_REGISTRATION"
+LOCAL_REGISTRATION_VALUES = ("open", "closed")
 SIGN_ON_ADMINS_ENV = "HARTMESH_SIGN_ON_ADMINS"
 SIGN_ON_SCOPES_ENV = "HARTMESH_SIGN_ON_SCOPES"
 SIGN_ON_CLIENT_AUTH_ENV = "HARTMESH_SIGN_ON_CLIENT_AUTH"
@@ -552,13 +558,38 @@ def select_sign_in(environ: Mapping[str, str]) -> str:
         stray = [name for name in SIGN_ON_OPTIONAL_KEYS if _present(environ, name)]
         if stray:
             raise RenderError(f"{LOCAL_PASSWORDS_ENV}={LOCAL_PASSWORDS_VALUE} selects local passwords, but the sign-on options {', '.join(stray)} are set and would be ignored. Remove them, or select sign-on with the three sign-on keys")
+        select_local_registration(environ)
         return "local"
     if not present:
         raise RenderError(f"no sign-in mode is selected: set the sign-on keys {', '.join(SIGN_ON_KEYS)} for the identity provider, or {LOCAL_PASSWORDS_ENV}={LOCAL_PASSWORDS_VALUE} for local passwords. Nothing is assumed")
     missing = [name for name in SIGN_ON_KEYS if name not in present]
     if missing:
         raise RenderError(f"the sign-on keys are incomplete: missing {', '.join(missing)} (present: {', '.join(present)}). Nothing falls back to local passwords")
+    if _present(environ, LOCAL_REGISTRATION_ENV):
+        raise RenderError(
+            f"{LOCAL_REGISTRATION_ENV} is set, but the sign-on keys select sign-on only, where nobody creates a local account "
+            f"and the identity provider decides who has one. Remove it, or select local passwords with {LOCAL_PASSWORDS_ENV}={LOCAL_PASSWORDS_VALUE}"
+        )
     return "sign_on_only"
+
+
+def select_local_registration(environ: Mapping[str, str]) -> str:
+    """Whether a visitor may create their own local account: ``open`` or ``closed``, or refuse.
+
+    Asked only of local-password mode, and never assumed: an open sign-up
+    form on a tenant published on the internet is noticed by nobody, and a
+    closed one is noticed by the first person who needs an account, who then
+    gets one from an administrator.
+    """
+
+    raw = environ.get(LOCAL_REGISTRATION_ENV, "").strip()
+    if not raw:
+        raise RenderError(
+            f"{LOCAL_PASSWORDS_ENV}={LOCAL_PASSWORDS_VALUE} selects local passwords, and {LOCAL_REGISTRATION_ENV} must then say whether visitors may create their own account: {' or '.join(LOCAL_REGISTRATION_VALUES)}. Nothing is assumed"
+        )
+    if raw not in LOCAL_REGISTRATION_VALUES:
+        raise RenderError(f"{LOCAL_REGISTRATION_ENV} must be exactly `{'` or `'.join(LOCAL_REGISTRATION_VALUES)}`")
+    return raw
 
 
 def select_token_expiry_days(environ: Mapping[str, str]) -> int | None:
@@ -791,11 +822,16 @@ def render(
     document["sandbox"] = sandbox
 
     template_auth = _mapping(document.get("auth", {}), "template `auth`")
-    if "oidc" in template_auth or "enabled" in _mapping(template_auth.get("local", {}), "template `auth.local`"):
-        raise RenderError("template `auth.oidc` and `auth.local.enabled` must be absent; the sign-in keys select them")
+    template_local = _mapping(template_auth.get("local", {}), "template `auth.local`")
+    if "oidc" in template_auth or "enabled" in template_local or "allow_registration" in template_local:
+        # One owner in both modes: a template that carried either key would
+        # be an edit one mode needs and the other refuses.
+        raise RenderError("template `auth.oidc`, `auth.local.enabled` and `auth.local.allow_registration` must be absent; the sign-in keys select them")
     select_token_expiry_days(environ)
     if select_sign_in(environ) == "sign_on_only":
         document["auth"] = sign_on_auth(template_auth, environ)
+    else:
+        document["auth"] = {**template_auth, "local": {**template_local, "enabled": True, "allow_registration": select_local_registration(environ) == "open"}}
 
     problems: list[str] = []
     _credential_problems(document, (), problems)
@@ -871,6 +907,8 @@ def main(argv: list[str] | None = None) -> int:
         access = sign_on_access(os.environ)
         membership = (", admission by claim" if access.get("access_claim") else "") + (", roles from claim" if access.get("access_roles") else "")
         sign_in_line += f" (provider {SIGN_ON_PROVIDER_ID}, callback https://{os.environ[PUBLIC_HOST_ENV].strip()}/api/v1/auth/callback/{SIGN_ON_PROVIDER_ID}{membership})"
+    else:
+        sign_in_line += f" (registration {select_local_registration(os.environ)})"
     summary = f"models from {source}; egress={select_egress(os.environ)}; {sign_in_line}; provider keys found: {providers}; sandbox ready_timeout={budget}s, capacity_wait_timeout={slot_wait}s; {bundle_line}"
     if args.check:
         print(f"render_config: {args.template} renders ({summary})")

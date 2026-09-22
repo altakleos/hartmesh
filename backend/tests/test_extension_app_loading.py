@@ -158,6 +158,7 @@ def test_create_app_mounts_extension_routers_after_all_host_routes(monkeypatch):
         "status": "healthy",
         "service": "deer-flow-gateway",
         "auth_mode": "local",
+        "registration": "open",
         "tenant_identity": {
             "version": 1,
             "public_ref": "tenant-fd1e0d1ead4a5e20",

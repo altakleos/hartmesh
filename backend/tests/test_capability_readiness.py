@@ -695,6 +695,7 @@ async def test_gateway_liveness_is_independent_and_readiness_is_minimal(
         "service": "deer-flow-gateway",
         # Which way people sign in, read live; this config leaves local passwords on.
         "auth_mode": "local",
+        "registration": "open",
         "tenant_identity": {
             "version": 1,
             "public_ref": "tenant-fd1e0d1ead4a5e20",

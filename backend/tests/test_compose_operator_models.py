@@ -104,6 +104,7 @@ def _base_environ(**extra: str) -> dict[str, str]:
         "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0",
         # Local-password mode, the render these tests always exercised.
         "HARTMESH_LOCAL_PASSWORDS": "allowed",
+        "HARTMESH_LOCAL_REGISTRATION": "closed",
     }
     environ.update(extra)
     return environ

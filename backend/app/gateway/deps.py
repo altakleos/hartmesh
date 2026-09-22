@@ -777,12 +777,15 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     _enforce_auth_settings(startup_config)
     # The one readiness fact a deployment reads before it publishes a tenant:
     # which way people sign in. /health derives it live; this is the journal's line.
+    from app.gateway.auth.mode import registration_state
+
     startup_auth = getattr(startup_config, "auth", None)
     if startup_auth is None or startup_auth.local.enabled:
-        logger.info("auth mode: local (local passwords on; registration %s)", "open" if startup_auth is None or startup_auth.local.allow_registration else "closed")
+        logger.info("auth mode: local (local passwords on; registration %s)", registration_state())
     else:
         providers = ", ".join(f"{name} ({provider.issuer})" for name, provider in startup_auth.oidc.providers.items())
-        logger.info("auth mode: sign_on_only (local passwords off; provider %s)", providers)
+        # Registration last, so a check written against the earlier line still matches.
+        logger.info("auth mode: sign_on_only (local passwords off; provider %s; registration %s)", providers, registration_state())
 
     async with AsyncExitStack() as stack:
         # Lifecycle and system-model hooks can originate on isolated subagent
@@ -1861,12 +1864,14 @@ async def get_current_user_from_request(request: Request):
             ).model_dump(),
         )
 
-    from app.gateway.auth.mode import require_live_account
+    from app.gateway.auth.mode import SETUP_ROUTES, require_live_account
+    from app.gateway.request_path import get_request_route_path
 
     # Sign-on only: an account without a provider identity is inert, so a
     # session it minted before the switch is refused now, not honoured
-    # until it expires.
-    require_live_account(user)
+    # until it expires. An account whose setup is pending reaches only the
+    # routes that complete it.
+    require_live_account(user, completing_setup=get_request_route_path(request).rstrip("/") in SETUP_ROUTES)
 
     return user
 

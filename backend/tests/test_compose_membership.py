@@ -97,7 +97,7 @@ def test_values_are_split_on_commas_only_and_a_value_may_contain_a_space(render_
 
 
 def test_the_access_keys_beside_local_passwords_refuse(render_config: ModuleType) -> None:
-    environ = {"HARTMESH_LOCAL_PASSWORDS": "allowed", "HARTMESH_SIGN_ON_ACCESS_CLAIM": CLAIM, "HARTMESH_SIGN_ON_ACCESS_VALUES": "member"}
+    environ = {"HARTMESH_LOCAL_PASSWORDS": "allowed", "HARTMESH_LOCAL_REGISTRATION": "closed", "HARTMESH_SIGN_ON_ACCESS_CLAIM": CLAIM, "HARTMESH_SIGN_ON_ACCESS_VALUES": "member"}
     with pytest.raises(render_config.RenderError, match="HARTMESH_SIGN_ON_ACCESS_CLAIM, HARTMESH_SIGN_ON_ACCESS_VALUES"):
         render_config.select_sign_in(environ)
 

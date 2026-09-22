@@ -432,13 +432,11 @@ def _local_registration_enabled() -> bool:
 
     ``/register`` reads this fresh on every request (``get_app_config`` reloads on file
     change); ``/setup-status`` may serve it up to 60s stale via its per-IP result cache.
+    The one reading lives in ``app.gateway.auth.mode``, which ``/health`` shares.
     """
-    from deerflow.config.app_config import get_app_config
+    from app.gateway.auth.mode import local_registration_open
 
-    try:
-        return get_app_config().auth.local.allow_registration
-    except FileNotFoundError:
-        return True
+    return local_registration_open()
 
 
 @router.post("/register", response_model=UserResponse, status_code=status.HTTP_201_CREATED)
@@ -582,6 +580,61 @@ def require_session_source(request: Request) -> None:
 
     if getattr(request.state, "auth_source", None) != AUTH_SOURCE_SESSION:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This endpoint requires interactive session authentication")
+
+
+# ── Adding a person (local passwords) ────────────────────────────────────
+
+
+class AddUserRequest(BaseModel):
+    """An administrator adds a person by address; the role is always ``user``."""
+
+    email: EmailStr
+
+
+class AddedUserResponse(BaseModel):
+    """The new account, and the one-time password that opens its setup -- shown here once and never again."""
+
+    id: str
+    email: str
+    system_role: str
+    needs_setup: bool
+    one_time_password: str
+
+
+_ADD_USER_ADMIN_DETAIL = "Admin role required to add people"
+
+
+@router.post("/users", response_model=AddedUserResponse, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_session_source)])
+async def add_user(request: Request, response: Response, body: AddUserRequest):
+    """Add a local-password account for someone, whether or not self-registration is open.
+
+    An administrator's interactive session only, as for the lockout routes:
+    a personal access token cannot add people. Refused in sign-on-only mode,
+    where the identity provider decides who has an account. The new account
+    has role ``user`` and a one-time password that opens nothing but its
+    setup (``app.gateway.auth.local_accounts``). No cookie is set: the
+    administrator stays signed in as themselves.
+    """
+    from app.gateway.auth.local_accounts import AddAccountRefused, add_local_account
+
+    admin = await require_admin_user(request, detail=_ADD_USER_ADMIN_DETAIL)
+    try:
+        added = await add_local_account(get_local_provider(), body.email)
+    except AddAccountRefused as refused:
+        if refused.code == AuthErrorCode.SIGN_ON_REQUIRED:
+            raise sign_on_required() from None
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=AuthErrorResponse(code=refused.code, message=refused.message).model_dump()) from None
+    # The only response that carries the password: nothing between here and
+    # the administrator's page may keep a copy.
+    response.headers["Cache-Control"] = "no-store"
+    logger.info("Local account added: %s (role user, setup pending) by %s", added.user.email, getattr(admin, "email", "admin"))
+    return AddedUserResponse(
+        id=str(added.user.id),
+        email=added.user.email,
+        system_role=added.user.system_role,
+        needs_setup=added.user.needs_setup,
+        one_time_password=added.one_time_password,
+    )
 
 
 class PATCreateRequest(BaseModel):

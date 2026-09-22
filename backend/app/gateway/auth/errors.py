@@ -29,6 +29,10 @@ class AuthErrorCode(StrEnum):
     # The deployer turned the account off (``disabled_identities``); every
     # credential that resolves to it is refused until it is turned on again.
     ACCOUNT_DISABLED = "account_disabled"
+    # The account's first password was set for it (``reset_admin``, or an
+    # administrator adding the person): until the person chooses their own,
+    # the one thing any credential of it may do is complete that setup.
+    SETUP_REQUIRED = "setup_required"
 
 
 class TokenError(StrEnum):
