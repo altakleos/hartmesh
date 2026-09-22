@@ -210,6 +210,17 @@ async def test_the_run_of_another_worker_is_ended_by_the_worker_that_owns_it(dep
 
     bystander = _worker(run_store())
     owner = _worker(run_store())
+    # The scoping claim is only testable if we can see what the bystander did:
+    # `_signal_local_cancel` is a no-op for a run it does not hold, so without
+    # this the assertion below would pass with the owner filter deleted.
+    signalled: list[str] = []
+    bystander_signal = bystander._signal_local_cancel
+
+    async def recording_signal(run_id, *, action):
+        signalled.append(run_id)
+        await bystander_signal(run_id, action=action)
+
+    bystander._signal_local_cancel = recording_signal
     await bystander.start_cancellation_watch()
     await owner.start_cancellation_watch()
     try:
@@ -233,9 +244,10 @@ async def test_the_run_of_another_worker_is_ended_by_the_worker_that_owns_it(dep
         assert document["runs_found"] == 2
         assert document["runs_cancelled"] == 1
         assert document["runs_unconfirmed"] == [bystander_record.run_id]
-        assert document["returncode"] == 1
+        assert document["returncode"] == 2, "acted but could not confirm -- not the 1 a refusal exits with"
 
-        assert record.run_id not in bystander._runs, "the run belongs to the other worker"
+        assert record.run_id not in signalled, "a worker acted on a run it does not own"
+        assert bystander_record.run_id in signalled, "the bystander's watch was awake and querying throughout"
         assert await _await(lambda: not _alive(command_pid)), "the owner never reached its command"
         assert await _await(lambda: record.task.done())
     finally:
@@ -302,7 +314,7 @@ async def test_a_demoted_administrator_keeps_their_run_unless_the_deployer_says_
         )
         await asyncio.sleep(0.4)
 
-        assert "runs_found" not in plain
+        assert plain["runs_found"] == 0 and plain["runs_cancelled"] == 0, "the keys are present either way, zeroed"
         assert _alive(command_pid), "demotion is not removal; the run must keep going"
         assert not record.task.done()
 

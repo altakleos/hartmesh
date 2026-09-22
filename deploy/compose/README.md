@@ -393,21 +393,34 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   starts. A sign-in is refused even when the claim admits, with "Your
   access to this workspace has been turned off. Ask your administrator."
   (`sso_access_off`) and a journal line naming issuer and subject. It also
-  **ends the account's running work**: every run the account has executing is
-  cancelled the way the person's own cancel would, the Gateway that owns the
-  run applies it, and the in-flight sandbox command is killed along with the
-  children and detached processes it started -- so nothing of theirs keeps
-  writing files or calling out after the refusal. The command then waits for
-  each run to reach a terminal status before it answers. The output says
-  what was done (`sessions_ended`, `tokens_revoked`, `schedules_held` -- the
-  account's active schedules, each of which is refused while the account is
-  off and resumes untouched when it is on again -- plus `runs_found`,
-  `runs_cancelled`, and `runs_unconfirmed`). **A run named in
-  `runs_unconfirmed` did not stop**: the command exits non-zero and reports
-  it rather than calling it done, which usually means the Gateway is not
-  running or is not answering. Re-run the command once it is; the refusal
-  itself is already recorded and nothing new starts meanwhile.
-  `--wait-seconds` moves the bound (default 60).
+  **ends the running work of every account the refusal covers** (a subject
+  with an account under each configured provider is refused on both, and both
+  have their runs ended): each run is cancelled the way the person's own
+  cancel would be, the Gateway that owns it applies that, and the command
+  waits for each run to reach a terminal status before it answers. What is
+  *guaranteed* is that the run is cancelled, its stream ends, and no new run
+  starts. Cancelling a run also **attempts** to kill the sandbox command it
+  has in flight, along with the children and detached processes that command
+  started; that reach depends on the sandbox provider, is best-effort on the
+  remote one, and a provider that cannot reach its commands leaves them to
+  their own timeout. The output says what was done (`sessions_ended`,
+  `tokens_revoked`, `schedules_held` -- the account's active schedules, each
+  of which is refused while the account is off and resumes untouched when it
+  is on again -- plus `runs_found`, `runs_cancelled`, `runs_finished_first`
+  and `runs_unconfirmed`).
+- Exit statuses: **0** done; **1** the command refused and changed nothing
+  (the document carries `error`); **2** it did what was asked but a run named
+  in `runs_unconfirmed` had not reached a terminal status when the wait ran
+  out. **2 is not "nothing happened"** -- the refusal is recorded, the
+  sessions are ended and the tokens are revoked either way, and nothing new
+  starts. A run can be unconfirmed because it is still unwinding or because
+  the Gateway is not answering, and the command cannot tell those apart from
+  the database, so it does not guess: re-run it to see whether the run has
+  since stopped, and only investigate the Gateway if it stays unconfirmed.
+  `--wait-seconds` moves the bound (default 120). Ids under
+  `runs_finished_first` are runs that completed on their own before the
+  cancellation reached them -- they stopped, but their results were
+  delivered.
 - `disable` for a subject that **has no account yet** records the refusal
   anyway and says so (`"account": null`); a person removed before their
   first sign-in cannot create an account later. The row survives a restart

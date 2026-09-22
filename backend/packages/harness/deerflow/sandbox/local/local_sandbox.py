@@ -18,7 +18,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sandbox.env_policy import build_sandbox_env
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.path_patterns import replace_output_path_matches
-from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV, Sandbox, _validate_extra_env
+from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV, Sandbox, _validate_extra_env, current_sandbox_command_call
 from deerflow.sandbox.search import GrepMatch, find_glob_matches, find_grep_matches
 
 logger = logging.getLogger(__name__)
@@ -97,15 +97,31 @@ class ResolvedPath(NamedTuple):
 #: are ``@staticmethod`` and are monkeypatched by name in the suite, so the
 #: owning instance travels thread-locally rather than through their signatures;
 #: ``execute_command`` and the ``Popen`` it leads to are the same thread.
+#: How many aborted calls a sandbox remembers. The memory only has to outlive
+#: the command each abort was aimed at.
+_ABORTED_CALL_MEMORY = 512
+
 _COMMAND_OWNER = threading.local()
 
 
 class _CommandOwnership(NamedTuple):
     sandbox: "LocalSandbox"
+    #: The tool call this command belongs to, or None when a command is run
+    #: outside one (a middleware probe, a direct call in a test).
+    call_id: str | None
+    #: Unique to this command, exported into its environment so the sweep can
+    #: recognize a child that left the process group.
+    token: str
     #: The sandbox's abort generation when the command started. An abort that
     #: lands between here and ``Popen`` returning would otherwise find nothing
     #: to kill and let the command run on; a mismatch kills it on arrival.
     generation: int
+
+
+class _RunningCommand(NamedTuple):
+    process: subprocess.Popen
+    call_id: str | None
+    token: str
 
 
 class LocalSandbox(Sandbox):
@@ -246,17 +262,19 @@ class LocalSandbox(Sandbox):
         # Track files written through write_file so read_file only
         # reverse-resolves paths in agent-authored content.
         self._agent_written_paths: set[str] = set()
-        # Every command in flight, so a cancelled run can kill them. Keyed by
-        # pid because that is what both the process group and the environment
-        # sweep below need; a command removes its own entry when it returns,
-        # so a later abort can never signal a pid the host has since reused.
-        self._running_commands: dict[int, subprocess.Popen] = {}
+        # Every command in flight, so a cancelled call can kill its own. Keyed
+        # by pid, which is what the process-group kill needs; an entry is
+        # removed only when the command that owns it returns, and by identity,
+        # so a reaped pid the host reused cannot evict a live command.
+        self._running_commands: dict[int, _RunningCommand] = {}
         self._running_commands_lock = threading.Lock()
+        # Calls already aborted, newest last: a command that spawns afterwards
+        # kills itself rather than outliving the abort. Bounded because nothing
+        # here can observe a tool call ending.
+        self._aborted_calls: dict[str, None] = {}
+        # The same guard for an abort with no call: any command that starts
+        # after it is not one the abort could have seen.
         self._abort_generation = 0
-        # Exported into every command. A child that calls ``setsid`` leaves the
-        # process group the abort kills, but it keeps the environment it
-        # inherited, so the Linux sweep still finds it.
-        self._abort_token = f"df-{uuid.uuid4().hex}"
 
     # ``path_mappings`` is set once in ``__init__`` and never mutated, so the
     # sorted views and resolved roots below are stable for the sandbox's
@@ -532,9 +550,11 @@ class LocalSandbox(Sandbox):
         # request-scoped secrets on top (#3861). An explicit env is always passed
         # so platform credentials never leak into skill subprocesses.
         sandbox_env = build_sandbox_env(env)
-        # Marks every process this command starts as this sandbox's, so an
-        # abort can find a child that detached itself from the process group.
-        sandbox_env[ABORT_TOKEN_ENV] = self._abort_token
+        # Unique to this command, so an abort of the call that started it can
+        # find a child that detached itself from the process group -- and
+        # nothing else.
+        abort_token = f"df-{uuid.uuid4().hex}"
+        sandbox_env[ABORT_TOKEN_ENV] = abort_token
         timed_out = False
         if os.name == "nt":
             if self._is_powershell(shell):
@@ -551,10 +571,10 @@ class LocalSandbox(Sandbox):
                             "MSYS2_ARG_CONV_EXCL": exclusions,
                         }
 
-            stdout, stderr, returncode, timed_out = self._with_abort_ownership(self._run_windows_command, args, timeout, sandbox_env)
+            stdout, stderr, returncode, timed_out = self._with_abort_ownership(abort_token, self._run_windows_command, args, timeout, sandbox_env)
         else:
             args = [shell, "-c", resolved_command]
-            stdout, stderr, returncode, timed_out = self._with_abort_ownership(self._run_posix_command, args, timeout, sandbox_env)
+            stdout, stderr, returncode, timed_out = self._with_abort_ownership(abort_token, self._run_posix_command, args, timeout, sandbox_env)
 
         output = stdout
         if stderr:
@@ -641,11 +661,12 @@ class LocalSandbox(Sandbox):
 
         return stdout_capture.read(), stderr_capture.read(), returncode, timed_out
 
-    def _with_abort_ownership(self, runner, *args):
-        """Claim this thread for this sandbox while one command runs."""
+    def _with_abort_ownership(self, abort_token: str, runner, *args):
+        """Claim this thread for one command of one call while it runs."""
+        call_id = current_sandbox_command_call()
         with self._running_commands_lock:
             generation = self._abort_generation
-        _COMMAND_OWNER.ownership = _CommandOwnership(self, generation)
+        _COMMAND_OWNER.ownership = _CommandOwnership(self, call_id, abort_token, generation)
         try:
             return runner(*args)
         finally:
@@ -653,26 +674,35 @@ class LocalSandbox(Sandbox):
 
     @staticmethod
     def _track_command_process(process: subprocess.Popen) -> None:
-        """Record a freshly spawned command so an abort can reach it."""
+        """Record a freshly spawned command so an abort of its call can reach it."""
         ownership = getattr(_COMMAND_OWNER, "ownership", None)
         if ownership is None:
             return
-        sandbox, generation = ownership
+        sandbox = ownership.sandbox
         with sandbox._running_commands_lock:
-            aborted_already = sandbox._abort_generation != generation
+            aborted_already = sandbox._abort_generation != ownership.generation or (ownership.call_id is not None and ownership.call_id in sandbox._aborted_calls)
             if not aborted_already:
-                sandbox._running_commands[process.pid] = process
+                sandbox._running_commands[process.pid] = _RunningCommand(process, ownership.call_id, ownership.token)
         if aborted_already:
             LocalSandbox._kill_process_tree(process)
 
     @staticmethod
     def _untrack_command_process(process: subprocess.Popen) -> None:
-        """Forget a command that returned, so a later abort cannot signal a reused pid."""
+        """Forget a command that returned.
+
+        By identity, not by pid alone: the child has already been reaped by the
+        time this runs, so the host may have handed that pid to a command
+        another thread started, and popping the key would drop a live entry the
+        next abort has to reach.
+        """
         ownership = getattr(_COMMAND_OWNER, "ownership", None)
         if ownership is None:
             return
-        with ownership.sandbox._running_commands_lock:
-            ownership.sandbox._running_commands.pop(process.pid, None)
+        sandbox = ownership.sandbox
+        with sandbox._running_commands_lock:
+            running = sandbox._running_commands.get(process.pid)
+            if running is not None and running.process is process:
+                del sandbox._running_commands[process.pid]
 
     @staticmethod
     def _kill_process_tree(process: subprocess.Popen) -> None:
@@ -707,8 +737,8 @@ class LocalSandbox(Sandbox):
             except OSError:
                 logger.debug("Process %s already exited before the abort reached it", process.pid)
 
-    def abort_running_commands(self) -> int:
-        """Kill every command in flight on this sandbox and return how many there were.
+    def abort_running_commands(self, call_id: str | None = None) -> int:
+        """Kill the commands one call has in flight and return how many there were.
 
         Two sweeps, because a command can outrun either one alone. The process
         group covers the command's shell, its children and any job it
@@ -716,35 +746,52 @@ class LocalSandbox(Sandbox):
         A child that called ``setsid`` left that group -- but not the
         environment it inherited, so the token sweep finds it on Linux.
 
+        ``call_id`` selects one tool call's commands. One sandbox is shared by
+        the lead agent and its subagents, so ending everything here would make
+        a subagent's own timeout kill its siblings' work and a person's Stop
+        kill the server they backgrounded three turns ago. ``None`` means every
+        command, for a caller that means the whole sandbox.
+
         Nothing here waits on the killed processes: the thread blocked in
         ``execute_command`` owns the reaping and returns as soon as its command
         dies, which is the whole point of the call.
         """
         with self._running_commands_lock:
-            # Bump first: a command that spawns while this abort runs sees the
-            # newer generation and kills itself rather than surviving it.
-            self._abort_generation += 1
-            processes = list(self._running_commands.values())
-            self._running_commands.clear()
-        for process in processes:
-            self._kill_process_tree(process)
-        self._kill_processes_carrying_the_abort_token()
-        if processes:
-            logger.info("Sandbox %s aborted %d running command(s)", self.id, len(processes))
-        return len(processes)
+            if call_id is None:
+                # A command that spawns while this abort runs sees the newer
+                # generation and kills itself rather than surviving it.
+                self._abort_generation += 1
+                selected = list(self._running_commands.values())
+                self._running_commands.clear()
+            else:
+                # The same guard, per call: a command this call has not spawned
+                # yet kills itself when it does.
+                self._aborted_calls[call_id] = None
+                while len(self._aborted_calls) > _ABORTED_CALL_MEMORY:
+                    self._aborted_calls.pop(next(iter(self._aborted_calls)))
+                selected = [running for running in self._running_commands.values() if running.call_id == call_id]
+                for running in selected:
+                    self._running_commands.pop(running.process.pid, None)
+        for running in selected:
+            self._kill_process_tree(running.process)
+        self._kill_processes_carrying_the_abort_tokens({running.token for running in selected})
+        if selected:
+            logger.info("Sandbox %s aborted %d running command(s)", self.id, len(selected))
+        return len(selected)
 
-    def _kill_processes_carrying_the_abort_token(self) -> None:
-        """SIGKILL anything still holding this sandbox's token in its environment.
+    def _kill_processes_carrying_the_abort_tokens(self, tokens: set[str]) -> None:
+        """SIGKILL anything still holding one of these commands' tokens in its environment.
 
         Linux only: ``/proc/<pid>/environ`` is the one reliably available way
-        to ask whether a process descends from this sandbox's commands after it
-        has left their process group. The match is on a whole variable, never a
-        substring, and this process is skipped -- it is the Gateway.
+        to ask whether a process descends from a command after it has left that
+        command's process group. The match is on a whole variable, never a
+        substring, and this process is skipped -- it is the Gateway, and
+        killing it would take the deployment down.
         """
         proc = Path("/proc")
-        if os.name == "nt" or not proc.is_dir():
+        if not tokens or os.name == "nt" or not proc.is_dir():
             return
-        marker = f"{ABORT_TOKEN_ENV}={self._abort_token}".encode()
+        markers = {f"{ABORT_TOKEN_ENV}={token}".encode() for token in tokens}
         own_pid = os.getpid()
         try:
             entries = list(proc.iterdir())
@@ -761,7 +808,7 @@ class LocalSandbox(Sandbox):
             except (OSError, ValueError):
                 # Gone between the listing and the read, or not ours to read.
                 continue
-            if marker not in environ.split(b"\0"):
+            if not markers.intersection(environ.split(b"\0")):
                 continue
             try:
                 os.kill(pid, signal.SIGKILL)

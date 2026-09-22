@@ -216,6 +216,25 @@ def _accounts(gateway: e2e._Gateway, *args: str) -> tuple[int, dict[str, Any]]:
     return completed.returncode, document
 
 
+def _process_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _wait_for_exit(pid: int, *, timeout: float) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if not _process_alive(pid):
+            return True
+        time.sleep(0.1)
+    return False
+
+
 def _create_thread(client: httpx.Client, base: str) -> str:
     thread_id = str(uuid.uuid4())
     created = client.post(f"{base}/api/threads", json={"thread_id": thread_id, "metadata": {}}, headers=_csrf(client))
@@ -331,14 +350,18 @@ class TestMembership:
             assert created.status_code == 200, created.text
             task_id = created.json()["id"]
 
-            # A stream open: the run's bash call sleeps far longer than the
-            # command's whole wait, so nothing about the timing below can be
-            # explained by the command finishing on its own.
+            # A stream open: the run's bash call records its own pid and then
+            # sleeps far longer than the command's whole wait, so nothing below
+            # can be explained by the command finishing on its own, and the
+            # pid is the proof that the cancellation reached the process rather
+            # than only the graph around it.
             stream: dict[str, Any] = {}
 
             def _run_stream() -> None:
                 try:
-                    stream["observed"] = e2e._observe_stream(client, base, thread_id, _csrf(client)["X-CSRF-Token"], "probe:bash sleep 240; printf 'stream-ran-to-its-%s\\n' end", timeout=120.0, recursion_limit=100)
+                    stream["observed"] = e2e._observe_stream(
+                        client, base, thread_id, _csrf(client)["X-CSRF-Token"], "probe:bash echo $$ > /mnt/user-data/workspace/command.pid; sleep 240; printf 'stream-ran-to-its-%s\\n' end", timeout=120.0, recursion_limit=100
+                    )
                 except BaseException as exc:  # noqa: BLE001 - reported below
                     stream["error"] = exc
 
@@ -353,6 +376,21 @@ class TestMembership:
 
             _wait(_run_started, timeout=30.0, what="the stream to open and its run to start")
             assert "error" not in stream, stream.get("error")
+
+            # The command itself, not just the run row: its pid, from inside
+            # the sandbox. Without this the assertions below would all be
+            # satisfied by a build that cancelled the graph and left the
+            # process running, which is the defect under test.
+            def _command_pid() -> int | None:
+                for candidate in gateway.tmp_home.rglob("command.pid"):
+                    text = candidate.read_text().strip()
+                    if text.isdigit():
+                        return int(text)
+                return None
+
+            _wait(lambda: _command_pid() is not None, timeout=60.0, what="the sandbox command to start")
+            command_pid = _command_pid()
+            assert _process_alive(command_pid), "the command under test is not running"
 
             def _run_status() -> tuple | None:
                 with sqlite3.connect(_db(gateway)) as connection:
@@ -370,6 +408,9 @@ class TestMembership:
             assert document["runs_unconfirmed"] == [] and document["returncode"] == 0, document
             assert _run_status() == ("interrupted",), "the command returned before the run was terminal"
             assert t_disabled - t_command < 120, "the command took longer than the run it was ending"
+            # The work stopped, not only the output: the process is gone, well
+            # before its own 240 s would have ended it.
+            assert _wait_for_exit(command_pid, timeout=30.0), "the sandbox command outlived the refusal"
             assert document["account"]["email"] == "off@example.com" and document["account"]["disabled"] is True and document["account"]["subject"] == "sub-off"
 
             # The session: refused at its next request. Disable ended the sessions

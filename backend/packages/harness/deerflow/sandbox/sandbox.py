@@ -1,5 +1,6 @@
 import re
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 
 from deerflow.sandbox.search import GrepMatch
 
@@ -11,13 +12,29 @@ from deerflow.sandbox.search import GrepMatch
 # forwards it as the SDK's ``envs``. The check is defense-in-depth for the
 # contract: a future shell-splicing implementation must not have to re-derive
 # its own rule.
-#: Exported into every command a sandbox runs, so ``abort_running_commands``
-#: can recognize a process as that sandbox's own. The value is per sandbox
-#: instance, never per command: ending a person's work means ending whatever
-#: any of their commands started, including a server one left in the
-#: background. Implementations that cannot mark their commands simply never
-#: set it.
+#: Exported into every command a sandbox runs, carrying a value unique to that
+#: one call, so ``abort_running_commands`` can tell that call's processes from
+#: everything else in the sandbox -- including a child that detached itself and
+#: left the shell's process group, which still carries the environment it
+#: inherited. Implementations that cannot mark their commands simply never set
+#: it.
 ABORT_TOKEN_ENV = "DEERFLOW_SANDBOX_ABORT_TOKEN"
+
+#: The sandbox call the current context belongs to, set by
+#: ``run_sync_sandbox_command`` before it hands the tool body to a worker
+#: thread and read by the sandbox when it starts a command. It travels through
+#: ``asyncio.to_thread``, which copies the context, so the thread's command is
+#: attributable to the call that can be cancelled.
+SANDBOX_COMMAND_CALL: ContextVar[str | None] = ContextVar(
+    "deerflow_sandbox_command_call",
+    default=None,
+)
+
+
+def current_sandbox_command_call() -> str | None:
+    """The call a command started here belongs to, or None outside a tool call."""
+    return SANDBOX_COMMAND_CALL.get()
+
 
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
@@ -136,8 +153,8 @@ class Sandbox(ABC):
         """Release provider-specific command state for one execution scope."""
         del scope_id
 
-    def abort_running_commands(self) -> int:
-        """Stop every command this sandbox is running now, and return how many.
+    def abort_running_commands(self, call_id: str | None = None) -> int:
+        """Stop the commands one call is running, and return how many there were.
 
         A cancelled run must stop its work, not only the graph around it.
         ``asyncio.to_thread`` cannot interrupt the worker that is blocked on a
@@ -146,16 +163,25 @@ class Sandbox(ABC):
         cancelled, and the drain that follows then returns as soon as the
         command dies instead of waiting out a ``sleep 541``.
 
-        The contract is the command *and its descendants*, including a child
-        that detached itself -- work that keeps writing files or calling out
-        after its owner was removed is exactly what an operator is ending.
-        The scope is this sandbox: one sandbox serves one person's thread, and
-        a run's cancellation ends that thread's work.
+        The contract is that call's command *and its descendants*, including a
+        child that detached itself -- work that keeps writing files or calling
+        out after its owner was removed is exactly what an operator is ending.
+        A run being cancelled cancels every tool call it has open, so every
+        command it is running is ended, one call at a time.
+
+        The scope matters because one sandbox is shared: the lead agent and
+        its subagents run in the same container, and a person's own Stop, a
+        subagent's timeout and a disconnect all arrive here. Ending everything
+        in the sandbox would make a slow subagent kill its siblings' work, and
+        a Stop kill the server the person backgrounded three turns ago. So
+        ``call_id`` selects one call's commands; ``None`` means every command
+        in the sandbox and is for a caller that means the whole sandbox.
 
         Implementations that cannot reach their commands return 0 and leave
         cancellation as it was; the hook is additive, and a custom provider
         loaded by class path never has to implement it.
         """
+        del call_id
         return 0
 
     @abstractmethod

@@ -26,7 +26,7 @@ import pytest
 
 os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-accounts-runs-min-32-chars")
 
-from app.gateway.auth.accounts import AccountsCommand
+from app.gateway.auth.accounts import EXIT_UNCONFIRMED_RUNS, AccountsCommand
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 
@@ -108,8 +108,12 @@ async def test_disable_reports_a_run_it_could_not_confirm_stopped_as_a_failure(s
     assert document["runs_found"] == 1
     assert document["runs_cancelled"] == 0
     assert document["runs_unconfirmed"] == [run_id]
-    assert document["returncode"] == 1
+    # Its own status, distinct from the 1 a refusal exits with: the refusal
+    # here *was* recorded, and an offboarding script must not read this as
+    # "the command did nothing".
+    assert document["returncode"] == EXIT_UNCONFIRMED_RUNS == 2
     assert "runs_unconfirmed" in document["note"]
+    assert "Gateway" not in document["note"], "the command cannot tell a slow unwind from a dead Gateway"
 
 
 @pytest.mark.anyio
@@ -135,7 +139,7 @@ async def test_disable_confirms_a_run_the_worker_stopped(stores) -> None:
     assert document["runs_cancelled"] == 1
     assert document["runs_unconfirmed"] == []
     assert document["returncode"] == 0
-    assert run_id in str(document) or True  # the id is not reported when nothing went wrong
+    assert run_id not in str(document), "a run that stopped is counted, not named"
 
 
 @pytest.mark.anyio
@@ -225,7 +229,10 @@ async def test_end_sessions_leaves_a_demoted_administrator_s_run_running(stores)
     document = await _command(users, runs).run("end-sessions", issuer=ISSUER, subject="sub-pat")
 
     assert document["sessions_ended"] is True
-    assert "runs_found" not in document
+    # The keys are present either way, zeroed, so one script can read this
+    # document without knowing which form produced it.
+    assert document["runs_found"] == 0 and document["runs_cancelled"] == 0
+    assert document["runs_unconfirmed"] == [] and document["returncode"] == 0
     assert (await _row(runs, run_id))["cancel_action"] is None
     assert "--end-running-work" in document["note"]
 
@@ -261,3 +268,80 @@ def test_a_negative_wait_is_refused(capsys) -> None:
 
     assert main(["disable", "--issuer", ISSUER, "--subject", "s", "--wait-seconds", "-1"]) == 1
     assert "cannot be negative" in json.loads(capsys.readouterr().out)["error"]
+
+
+@pytest.mark.anyio
+async def test_a_run_that_finished_on_its_own_is_named_rather_than_counted_as_cancelled(stores) -> None:
+    """It stopped -- but it also delivered its result into a thread after the removal."""
+    users, runs = stores
+    account = await users.create_user(_account())
+    run_id = await _seed_run(runs, str(account.id))
+    original_get = runs.get
+    finished = {"done": False}
+
+    async def it_completes_first(run_id_arg, *args, **kwargs):
+        if not finished["done"]:
+            finished["done"] = True
+            await runs.update_status(run_id_arg, "success")
+        return await original_get(run_id_arg, *args, **kwargs)
+
+    runs.get = it_completes_first
+    document = await _command(users, runs, wait_seconds=5).run("disable", issuer=ISSUER, subject="sub-pat")
+
+    assert document["runs_found"] == 1
+    assert document["runs_finished_first"] == [run_id]
+    assert document["runs_cancelled"] == 0
+    assert document["runs_unconfirmed"] == [] and document["returncode"] == 0
+    assert "delivered" in document["note"]
+
+
+@pytest.mark.anyio
+async def test_the_run_of_a_sibling_account_the_refusal_covers_is_ended_too(stores) -> None:
+    """One identity can hold an account under each configured provider.
+
+    `disable` records the refusal against the identity, so both accounts are
+    refused; leaving one of them writing files would be the same defect one
+    account over.
+    """
+    users, runs = stores
+    named = await users.create_user(_account(email="pat@example.com", subject="sub-pat"))
+    sibling = await users.create_user(User(email="pat.other@example.com", password_hash=None, system_role="user", oauth_provider="entra", oauth_id="sub-pat", oauth_issuer=ISSUER, last_sign_in_at=datetime.now(UTC)))
+    named_run = await _seed_run(runs, str(named.id))
+    sibling_run = await _seed_run(runs, str(sibling.id))
+
+    document = await _command(users, runs, wait_seconds=0).run("disable", email="pat@example.com")
+
+    assert document["runs_found"] == 2
+    assert [entry["email"] for entry in document["identity_also_covers"]] == ["pat.other@example.com"]
+    assert (await _row(runs, named_run))["cancel_action"] == "interrupt"
+    assert (await _row(runs, sibling_run))["cancel_action"] == "interrupt"
+
+
+def test_the_exit_status_carries_an_unconfirmed_run(stores, monkeypatch, capsys) -> None:
+    """The headline of the feature, through the command line the deployer runs.
+
+    Synchronous on purpose: ``main`` owns its own ``asyncio.run``, which is
+    what the deployer invokes, and asserting the document alone would leave
+    the exit status -- the part a runbook branches on -- unproven.
+    """
+    import json as json_module
+
+    from app.gateway.auth import accounts as accounts_module
+
+    users, runs = stores
+
+    async def seed() -> str:
+        account = await users.create_user(_account())
+        return await _seed_run(runs, str(account.id))
+
+    run_id = asyncio.run(seed())
+
+    async def fake_run(command, **kwargs):
+        return await _command(users, runs, wait_seconds=0).run(command, issuer=kwargs.get("issuer"), subject=kwargs.get("subject"), email=kwargs.get("email"))
+
+    monkeypatch.setattr(accounts_module, "_run", fake_run)
+    status = accounts_module.main(["disable", "--issuer", ISSUER, "--subject", "sub-pat"])
+
+    document = json_module.loads(capsys.readouterr().out)
+    assert document["runs_unconfirmed"] == [run_id], document
+    assert status == EXIT_UNCONFIRMED_RUNS

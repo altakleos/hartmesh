@@ -145,3 +145,36 @@ async def test_the_watch_asks_the_store_nothing_while_no_run_is_active():
         assert queries["count"] == 0
     finally:
         await manager.stop_cancellation_watch()
+
+
+@pytest.mark.anyio
+async def test_a_store_outside_this_repository_can_still_name_an_account_s_running_runs():
+    """`list_active_by_user` is concrete on the base class on purpose.
+
+    A store implemented elsewhere would break the deployer's command if the
+    method were abstract, so the default filters `list_inflight`, which every
+    store has. Only the SQL override is otherwise exercised.
+    """
+    store = _DurableMemoryRunStore()
+    await store.put("theirs", thread_id="t1", user_id="user-1", status="running", created_at="2026-01-01T00:00:00+00:00")
+    await store.put("also-theirs", thread_id="t2", user_id="user-1", status="pending", created_at="2026-01-01T00:00:01+00:00")
+    await store.put("finished", thread_id="t3", user_id="user-1", status="success", created_at="2026-01-01T00:00:02+00:00")
+    await store.put("someone-else", thread_id="t4", user_id="user-2", status="running", created_at="2026-01-01T00:00:03+00:00")
+
+    active = await store.list_active_by_user("user-1")
+
+    assert sorted(row["run_id"] for row in active) == ["also-theirs", "theirs"]
+
+
+@pytest.mark.anyio
+async def test_stopping_a_watch_that_will_not_finish_cancels_it():
+    """A stuck tick must not hold Gateway shutdown open past its timeout."""
+    manager = await _manager(heartbeat=False)
+    await manager.start_cancellation_watch()
+    task = manager._cancellation_watch_task
+    assert task is not None
+
+    await manager.stop_cancellation_watch(timeout=0.0)
+
+    assert manager._cancellation_watch_task is None
+    assert task.done()

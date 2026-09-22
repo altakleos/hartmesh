@@ -88,6 +88,15 @@ class _FakeRunManager:
     async def stop_heartbeat(self) -> None:
         pass
 
+    # Gateway startup arms both observers of a cancellation, so the double has
+    # to carry both: the lease heartbeat, and the watch that covers the
+    # deployments where no heartbeat runs.
+    async def start_cancellation_watch(self) -> None:
+        pass
+
+    async def stop_cancellation_watch(self) -> None:
+        pass
+
     async def shutdown(self, *, timeout: float = 5.0) -> bool:
         # No in-flight tasks in these startup-recovery tests; langgraph_runtime
         # drains the manager on teardown, so the double must accept the call.

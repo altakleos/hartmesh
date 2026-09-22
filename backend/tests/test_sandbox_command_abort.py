@@ -24,6 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX process-group semantics")
 linux_proc_only = pytest.mark.skipif(not Path("/proc/self/environ").exists(), reason="requires Linux /proc environ")
@@ -164,35 +165,74 @@ def test_a_command_that_finishes_leaves_nothing_for_a_later_abort_to_kill():
     assert sandbox.abort_running_commands() == 0
 
 
+@posix_only
+@linux_proc_only
+def test_the_token_sweep_never_kills_the_gateway_itself(monkeypatch):
+    """One line stands between the sweep and SIGKILLing the process it runs in.
+
+    The Gateway's own environment can carry the variable -- it is inherited by
+    anything the deployment was started from, and a test process is proof the
+    shape is reachable -- so the sweep skips its own pid explicitly.
+    """
+    sandbox = LocalSandbox("t")
+    token = "df-sweep-must-not-kill-its-own-process"
+    monkeypatch.setitem(os.environ, ABORT_TOKEN_ENV, token)
+
+    sandbox._kill_processes_carrying_the_abort_tokens({token})
+
+    assert _alive(os.getpid()), "the sweep killed the process it was running in"
+
+
 # ── The AIO sandbox, against a fake client ──────────────────────────────
 
 
 class _FakeShell:
-    """Records what the sandbox asks the container to do."""
+    """Records what the sandbox asks the container to do, and how it bounds it."""
 
     def __init__(self) -> None:
         self.sessions: list[str] = []
         self.cleaned: list[str] = []
         self.commands: list[tuple[str | None, str]] = []
         self.killed: list[str] = []
+        #: The ``request_options`` of every call, in order. An abort request
+        #: with no timeout can hang the cancelled call's drain for the client's
+        #: whole 600 s command budget, so every one of them is recorded.
+        self.request_options: list[dict | None] = []
         self.block = threading.Event()
 
-    def create_session(self, *, id: str | None = None, **kwargs) -> None:  # noqa: A002 - the SDK's parameter name
+    def create_session(self, *, id: str | None = None, request_options=None, **kwargs) -> None:  # noqa: A002 - the SDK's parameter name
         self.sessions.append(id)
+        self.request_options.append(request_options)
 
-    def cleanup_session(self, session_id: str, **kwargs) -> None:
+    def cleanup_session(self, session_id: str, request_options=None, **kwargs) -> None:
         self.cleaned.append(session_id)
+        self.request_options.append(request_options)
 
-    def kill_process(self, *, id: str, **kwargs):  # noqa: A002 - the SDK's parameter name
+    def kill_process(self, *, id: str, request_options=None, **kwargs):  # noqa: A002 - the SDK's parameter name
         self.killed.append(id)
+        self.request_options.append(request_options)
         self.block.set()
         return SimpleNamespace(data=None)
 
-    def exec_command(self, *, command: str, id: str | None = None, **kwargs):  # noqa: A002
+    def exec_command(self, *, command: str, id: str | None = None, request_options=None, **kwargs):  # noqa: A002
         self.commands.append((id, command))
+        self.request_options.append(request_options)
         if id in self.sessions and not command.startswith("for d in /proc/"):
             self.block.wait(timeout=30)
         return SimpleNamespace(data=SimpleNamespace(output="", exit_code=0))
+
+
+class _FakeBash:
+    """The env-bearing path: `bash.exec` on a session the container creates."""
+
+    def __init__(self, shell: _FakeShell) -> None:
+        self._shell = shell
+        self.calls: list[dict] = []
+
+    def exec(self, *, command: str, env=None, **kwargs):
+        self.calls.append({"command": command, "env": env or {}})
+        self._shell.block.wait(timeout=30)
+        return SimpleNamespace(data=SimpleNamespace(stdout="", stderr=None, exit_code=0))
 
 
 def _aio_sandbox():
@@ -200,108 +240,177 @@ def _aio_sandbox():
     from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
     shell = _FakeShell()
+    bash = _FakeBash(shell)
     sandbox = AioSandbox("aio-test", base_url="http://sandbox.invalid", home_dir="/home/gem")
-    sandbox._client = SimpleNamespace(shell=shell, bash=None)
-    sandbox._abort_token = "abort-token-for-test"
-    return sandbox, shell
+    sandbox._client = SimpleNamespace(shell=shell, bash=bash)
+    return sandbox, shell, bash
 
 
-def _wait_for_command(shell: _FakeShell) -> None:
-    deadline = time.monotonic() + 5
+def _run_in_call(sandbox, command: str, call_id: str, *, env=None) -> threading.Thread:
+    """Run one command in the context of one tool call, as the wrapper does."""
+    from deerflow.sandbox.sandbox import SANDBOX_COMMAND_CALL
+
+    def body() -> None:
+        SANDBOX_COMMAND_CALL.set(call_id)
+        sandbox.execute_command(command, env=env)
+
+    thread = threading.Thread(target=body, daemon=True)
+    thread.start()
+    return thread
+
+
+def _wait_for(predicate, *, timeout: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if shell.commands:
+        if predicate():
             return
         time.sleep(0.01)
-    raise AssertionError("no command ever reached the container")
+    raise AssertionError("the container was never asked to run anything")
 
 
-def test_aio_marks_every_command_with_the_sandbox_abort_token():
-    sandbox, shell = _aio_sandbox()
+def test_aio_marks_every_command_with_a_token_unique_to_that_command():
+    sandbox, shell, _ = _aio_sandbox()
     shell.block.set()
 
-    sandbox.execute_command("echo hello")
+    sandbox.execute_command("echo one")
+    sandbox.execute_command("echo two")
 
-    _, sent = shell.commands[0]
-    assert "abort-token-for-test" in sent, "a command the abort cannot recognize cannot be stopped"
-    assert sent.rstrip().endswith("echo hello")
+    first, second = (command for _, command in shell.commands)
+    assert first.startswith(f"export {ABORT_TOKEN_ENV}=df-") and first.endswith("echo one")
+    assert second.endswith("echo two")
+    assert first.split(";")[0] != second.split(";")[0], "one token for two commands cannot tell them apart"
 
 
 def test_aio_abort_kills_the_session_process_and_sweeps_its_descendants():
-    sandbox, shell = _aio_sandbox()
+    sandbox, shell, _ = _aio_sandbox()
     sandbox._default_shell_corrupted = True  # forces an explicit session, as a live image does after one ErrorObservation
-    worker = threading.Thread(target=lambda: sandbox.execute_command("sleep 300"), daemon=True)
-    worker.start()
-    _wait_for_command(shell)
+    worker = _run_in_call(sandbox, "sleep 300", "call-1")
+    _wait_for(lambda: bool(shell.commands))
 
-    stopped = sandbox.abort_running_commands()
+    stopped = sandbox.abort_running_commands("call-1")
 
     assert stopped == 1
     assert shell.killed, "the session's foreground process must be killed"
     sweep = next((command for _, command in shell.commands if command.startswith("for d in /proc/")), None)
     assert sweep is not None, "descendants are found by the environment they inherited"
-    assert "abort-token-for-test" in sweep and "kill -9" in sweep
+    assert "kill -9" in sweep
+    marked = next(command for _, command in shell.commands if command.endswith("sleep 300"))
+    assert marked.split(";")[0].removeprefix(f"export {ABORT_TOKEN_ENV}=") in sweep, "the sweep must look for this command's own token"
 
     worker.join(timeout=15)
     assert not worker.is_alive()
 
 
-def test_aio_abort_retires_the_shell_session_it_killed():
-    """The abort kills the session's shell too, so the next command needs a new one."""
-    sandbox, shell = _aio_sandbox()
+def test_aio_abort_reaches_a_command_carrying_injected_secrets():
+    """Every skill that declares a required secret runs through `bash.exec`.
+
+    That path creates its own session and never appears in `shell.exec_command`,
+    so a sandbox that only counted the shell path reported nothing to abort and
+    left the command running with its credentials for its whole 600 s budget --
+    on the provider a tenant actually runs.
+    """
+    sandbox, shell, bash = _aio_sandbox()
+    worker = _run_in_call(sandbox, "gh pr create", "call-1", env={"GH_TOKEN": "FAKE-CREDENTIAL-SENTINEL-NOT-A-KEY"})
+    _wait_for(lambda: bool(bash.calls))
+
+    stopped = sandbox.abort_running_commands("call-1")
+
+    assert stopped == 1, "an env-bearing command must be abortable"
+    sweep = next((command for _, command in shell.commands if command.startswith("for d in /proc/")), None)
+    assert sweep is not None
+    assert bash.calls[0]["env"][ABORT_TOKEN_ENV] in sweep, "the sweep must look for the token that command carried"
+
     shell.block.set()
+    worker.join(timeout=15)
+
+
+def test_aio_abort_leaves_another_call_s_command_running():
+    """One sandbox serves the lead agent and its subagents; a subagent's own
+    timeout must not kill the lead's command."""
+    sandbox, shell, _ = _aio_sandbox()
     sandbox._default_shell_corrupted = True
-    sandbox.execute_command("echo one")
-    first_session = sandbox._recovery_session_id
-    assert first_session is not None
+    other = _run_in_call(sandbox, "sleep 300", "call-other")
+    _wait_for(lambda: bool(shell.commands))
 
-    sandbox._inflight_commands = 1  # the abort only acts while something is running
-    sandbox.abort_running_commands()
-    sandbox._inflight_commands = 0
-    sandbox.execute_command("echo two")
+    assert sandbox.abort_running_commands("call-mine") == 0
+    assert shell.killed == [] and not any(command.startswith("for d in /proc/") for _, command in shell.commands)
 
-    assert sandbox._recovery_session_id != first_session, "a killed shell session must not be reused"
+    shell.block.set()
+    other.join(timeout=15)
+
+
+def test_aio_abort_with_no_call_ends_every_command_in_the_sandbox():
+    sandbox, shell, _ = _aio_sandbox()
+    sandbox._default_shell_corrupted = True
+    worker = _run_in_call(sandbox, "sleep 300", "call-1")
+    _wait_for(lambda: bool(shell.commands))
+
+    assert sandbox.abort_running_commands() == 1
+
+    shell.block.set()
+    worker.join(timeout=15)
 
 
 def test_aio_abort_with_nothing_running_does_not_touch_the_container():
-    sandbox, shell = _aio_sandbox()
-    assert sandbox.abort_running_commands() == 0
-    assert shell.commands == [] and shell.killed == []
+    sandbox, shell, _ = _aio_sandbox()
+    assert sandbox.abort_running_commands("call-1") == 0
+    assert shell.commands == [] and shell.killed == [] and shell.sessions == []
 
 
 def test_aio_abort_never_waits_on_the_command_lock():
     """The abort runs while a command holds the serialization lock; it must not queue behind it."""
-    sandbox, shell = _aio_sandbox()
+    sandbox, shell, _ = _aio_sandbox()
     sandbox._default_shell_corrupted = True
-    worker = threading.Thread(target=lambda: sandbox.execute_command("sleep 300"), daemon=True)
-    worker.start()
-    _wait_for_command(shell)
+    worker = _run_in_call(sandbox, "sleep 300", "call-1")
+    _wait_for(lambda: bool(shell.commands))
 
     started = time.monotonic()
-    sandbox.abort_running_commands()
+    sandbox.abort_running_commands("call-1")
     assert time.monotonic() - started < 5, "the abort waited for the command it was meant to stop"
 
     worker.join(timeout=15)
 
 
 def test_aio_abort_bounds_every_request_it_makes():
-    """An abort that cannot be delivered must give up, not hang the drain behind it."""
-    sandbox, shell = _aio_sandbox()
-    seen: list[dict] = []
-    shell.kill_process = lambda *, id, **kwargs: seen.append(kwargs.get("request_options") or {})  # noqa: A002
-    original_exec = shell.exec_command
+    """An abort that cannot be delivered must give up, not hang the drain behind it.
 
-    def recording_exec(*, command, id=None, **kwargs):  # noqa: A002
-        seen.append(kwargs.get("request_options") or {})
-        return original_exec(command=command, id=id, **kwargs)
+    All four calls count: `create_session` and `cleanup_session` inherit the
+    client's 600 s command timeout unless the abort overrides it, and the drain
+    that follows deliberately cannot be interrupted.
+    """
+    sandbox, shell, _ = _aio_sandbox()
+    sandbox._default_shell_corrupted = True
+    worker = _run_in_call(sandbox, "sleep 300", "call-1")
+    _wait_for(lambda: bool(shell.commands))
+    shell.request_options.clear()
 
-    shell.exec_command = recording_exec
-    sandbox._inflight_commands = 1
-    sandbox._inflight_sessions = {"session-1": 1}
+    sandbox.abort_running_commands("call-1")
 
-    sandbox.abort_running_commands()
+    assert len(shell.request_options) == 4, shell.request_options
+    assert all(options and options.get("timeout_in_seconds") for options in shell.request_options), shell.request_options
 
-    assert seen, "the abort made no request"
-    assert all(options.get("timeout_in_seconds") for options in seen), "an abort request with no timeout can hang forever"
+    worker.join(timeout=15)
+
+
+def test_aio_does_not_re_run_a_command_its_own_abort_killed():
+    """A killed shell reports corruption; rotating would restart the work just ended."""
+    sandbox, shell, _ = _aio_sandbox()
+    sandbox._default_shell_corrupted = True
+    shell.block.set()
+    from deerflow.community.aio_sandbox.aio_sandbox import _ERROR_OBSERVATION_SIGNATURE
+    from deerflow.sandbox.sandbox import SANDBOX_COMMAND_CALL
+
+    def corrupted(*, command, id=None, request_options=None, **kwargs):  # noqa: A002
+        shell.commands.append((id, command))
+        return SimpleNamespace(data=SimpleNamespace(output=_ERROR_OBSERVATION_SIGNATURE, exit_code=None))
+
+    shell.exec_command = corrupted
+    SANDBOX_COMMAND_CALL.set("call-1")
+    sandbox._aborted_calls["call-1"] = None
+
+    sandbox.execute_command("rm -rf /mnt/user-data/outputs/report")
+
+    assert len([command for _, command in shell.commands if "report" in command]) == 1, "the killed command was run again"
 
 
 # ── The tool wrapper: a cancelled tool call aborts the command ──────────
@@ -310,10 +419,10 @@ def test_aio_abort_bounds_every_request_it_makes():
 class _AbortRecordingSandbox:
     def __init__(self) -> None:
         self.released = threading.Event()
-        self.aborted = threading.Event()
+        self.aborted: list[str | None] = []
 
-    def abort_running_commands(self) -> int:
-        self.aborted.set()
+    def abort_running_commands(self, call_id: str | None = None) -> int:
+        self.aborted.append(call_id)
         self.released.set()
         return 1
 
@@ -334,7 +443,10 @@ async def test_cancelling_a_sandbox_tool_call_aborts_the_command():
     with pytest.raises(asyncio.CancelledError):
         await asyncio.wait_for(task, timeout=15)
 
-    assert sandbox.aborted.is_set(), "cancellation must reach the sandbox command"
+    assert sandbox.aborted, "cancellation must reach the sandbox command"
+    # Scoped to this call, never to the sandbox: the lead agent and its
+    # subagents share one, and a subagent's own timeout arrives here too.
+    assert sandbox.aborted[0] is not None
 
 
 @pytest.mark.anyio
@@ -345,7 +457,7 @@ async def test_an_uncancelled_sandbox_tool_call_never_aborts_anything():
     sandbox.released.set()
 
     assert await run_sync_sandbox_command(sandbox, sandbox.run_long_command) == "done"
-    assert not sandbox.aborted.is_set()
+    assert sandbox.aborted == []
 
 
 @pytest.mark.anyio

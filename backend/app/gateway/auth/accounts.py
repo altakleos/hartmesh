@@ -19,9 +19,12 @@ Usage:
     python -m app.gateway.auth.accounts release-email --issuer URL --subject SUB
 
 Every form is idempotent and prints one JSON document on stdout, with the
-verdict and what was done, and exits non-zero on failure (the document then
-carries ``error``). The consumer runs this through a guest agent whose own
-exit status does not carry the command's, so the document is the answer.
+verdict and what was done. Three exit statuses: ``0`` means done; ``1`` means
+the command refused and changed nothing (the document then carries ``error``);
+``2`` means it did what was asked but could not confirm that every run it
+cancelled had stopped (the document names them under ``runs_unconfirmed``).
+The consumer runs this through a guest agent whose own exit status does not
+carry the command's, so the document is the answer.
 
 What ``disable`` does, and where the fact lives: one row in
 ``disabled_identities`` keyed by ``(issuer, subject)``. Every read of the
@@ -44,10 +47,13 @@ person was removed. Every non-terminal run the account owns is cancelled
 through the same durable request a person's own cancel makes, which the
 owning worker applies -- including a run owned by another worker. The
 command then waits, bounded, for each to reach a terminal status and
-reports what it saw: ``runs_found``, ``runs_cancelled``, and the ids under
-``runs_unconfirmed`` of any that did not stop, which is a failure with a
-non-zero ``returncode`` and never a silent success. ``--wait-seconds``
-moves the bound.
+reports what it saw: ``runs_found``, ``runs_cancelled``, the ids under
+``runs_finished_first`` of any that completed on their own before the
+cancellation reached them, and the ids under ``runs_unconfirmed`` of any
+that did not stop -- which is a failure carrying ``returncode`` 2, never a
+silent success. ``--wait-seconds`` moves the bound. What it cancels is
+every account the refusal covers, not only the one named: one identity can
+hold an account under each configured provider, and both are refused.
 
 ``end-sessions`` does the same only when asked, with
 ``--end-running-work``: demoting an administrator is not removing them, and
@@ -107,13 +113,21 @@ TERMINAL_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"}
 #: status. The owning worker applies a durable cancellation on its next
 #: observation -- every five seconds without a lease heartbeat, every
 #: ``lease_seconds / 3`` with one -- and then has to unwind the graph and the
-#: tool call around it. Sixty seconds leaves room for both without leaving the
-#: deployer waiting on a Gateway that is not answering; ``--wait-seconds``
-#: moves it.
-DEFAULT_RUN_WAIT_SECONDS = 60.0
+#: tool call around it, which on a remote sandbox includes bounded abort
+#: requests of its own. Waiting costs nothing when the runs stop (the wait ends
+#: as soon as they do), and reporting a run unconfirmed that was merely slow
+#: sends the deployer looking for a fault that is not there, so the default is
+#: generous; ``--wait-seconds`` moves it.
+DEFAULT_RUN_WAIT_SECONDS = 120.0
 
 #: How often the command re-reads the rows it is waiting on.
 RUN_WAIT_POLL_SECONDS = 0.5
+
+#: Exit status when the command did what was asked but could not confirm that
+#: every run it cancelled had stopped. Distinct from 1, which means the command
+#: refused and changed nothing: an offboarding script has to be able to tell
+#: "turned off, one run still unwinding" from "did not run".
+EXIT_UNCONFIRMED_RUNS = 2
 
 
 class CommandError(Exception):
@@ -240,6 +254,7 @@ class AccountsCommand:
             "schedules_held": 0,
             "runs_found": 0,
             "runs_cancelled": 0,
+            "runs_finished_first": [],
             "runs_unconfirmed": [],
             "returncode": 0,
         }
@@ -259,12 +274,13 @@ class AccountsCommand:
         document["sessions_ended"] = await self._users.end_sessions(str(account.id))
         document["tokens_revoked"] = await self._revoke_tokens(account)
         document["schedules_held"] = await self._count_schedules(account)
-        document.update(await self._end_running_work(account))
+        document.update(await self._end_running_work([account, *siblings]))
         document["account"] = _account_document(await self._users.get_user_by_id(str(account.id)) or account)
-        if document["runs_unconfirmed"]:
-            document["note"] = "sessions are refused at their next request and no new run starts for this account, but the runs named in `runs_unconfirmed` did not stop within the wait: check the Gateway is running and re-run this command"
-        else:
-            document["note"] = "sessions are refused at their next request; every run this account had executing was cancelled and its stream ended with it; no new run starts for this account"
+        document["note"] = self._run_note(
+            document,
+            done="sessions are refused at their next request; every run this identity had executing was cancelled and its stream ended with it; no new run starts",
+            undone="sessions are refused at their next request and no new run starts, but the runs named in `runs_unconfirmed` had not reached a terminal status when the wait ran out; re-run this command to see whether they have since",
+        )
         return document
 
     async def enable(self, identity: tuple[str, str], account: User | None) -> dict[str, Any]:
@@ -301,13 +317,31 @@ class AccountsCommand:
             "note": "every open session is refused at its next request; personal access tokens are untouched; a run already executing keeps going (pass --end-running-work to cancel it); the next sign-in re-reads the claim",
         }
         if not end_running_work:
+            # The keys are present either way, zeroed, so one script can read
+            # this document without knowing which form produced it.
+            document.update({"runs_found": 0, "runs_cancelled": 0, "runs_finished_first": [], "runs_unconfirmed": [], "returncode": 0})
             return document
-        document.update(await self._end_running_work(account))
-        if document["runs_unconfirmed"]:
-            document["note"] = "every open session is refused at its next request, but the runs named in `runs_unconfirmed` did not stop within the wait: check the Gateway is running and re-run this command"
-        else:
-            document["note"] = "every open session is refused at its next request; every run this account had executing was cancelled; personal access tokens are untouched and the next sign-in re-reads the claim"
+        document.update(await self._end_running_work([account]))
+        document["note"] = self._run_note(
+            document,
+            done="every open session is refused at its next request; every run this account had executing was cancelled; personal access tokens are untouched and the next sign-in re-reads the claim",
+            undone="every open session is refused at its next request, but the runs named in `runs_unconfirmed` had not reached a terminal status when the wait ran out; re-run this command to see whether they have since",
+        )
         return document
+
+    @staticmethod
+    def _run_note(document: dict[str, Any], *, done: str, undone: str) -> str:
+        """One sentence about the runs, saying only what the rows showed.
+
+        Deliberately not a diagnosis: a run still unwinding a cancelled tool
+        call and a Gateway that is not answering produce the same unconfirmed
+        row from here, and telling an operator to restart a healthy Gateway
+        would take every other person's work down with it.
+        """
+        note = undone if document["runs_unconfirmed"] else done
+        if document["runs_finished_first"]:
+            note += "; the runs named in `runs_finished_first` completed on their own before the cancellation reached them, so their results were delivered"
+        return note
 
     async def release_email(self, identity: tuple[str, str], account: User | None) -> dict[str, Any]:
         """Give up the address of an account that is turned off, so a person may hold it again.
@@ -343,8 +377,8 @@ class AccountsCommand:
 
     # ── What disable reaches beyond the row ──────────────────────────────
 
-    async def _end_running_work(self, account: User) -> dict[str, Any]:
-        """Cancel every run this account has executing, then wait for them to stop.
+    async def _end_running_work(self, accounts: list[User]) -> dict[str, Any]:
+        """Cancel every run these accounts have executing, then wait for them to stop.
 
         The cancellation is the durable request a person's own cancel makes,
         so the owning worker applies it through its normal abort and terminal
@@ -352,35 +386,60 @@ class AccountsCommand:
         holds the database and nothing else; it cannot reach into a worker,
         and it must not pretend a write is a stopped run.
 
+        It takes every account the refusal covers, not just the one the
+        deployer named. The refusal is keyed by the identity, so a subject with
+        an account under each of two configured providers is refused on both;
+        leaving one of those accounts' runs writing files would be the same
+        defect this exists to close, one account over.
+
         So it waits and then says what it saw. A run that did not reach a
         terminal status inside the bound is named, not rounded down: an
-        operator who is told "cancelled" while a sandbox command is still
-        writing files has been told the wrong thing.
+        operator told "cancelled" while a sandbox command is still writing
+        files has been told the wrong thing. A run that reached ``success``
+        before the cancellation landed is named too, under
+        ``runs_finished_first`` -- it stopped, but it also delivered its result
+        into a thread after the person was removed, which the operator should
+        hear rather than read as one more run cancelled.
         """
-        result: dict[str, Any] = {"runs_found": 0, "runs_cancelled": 0, "runs_unconfirmed": [], "returncode": 0}
+        result: dict[str, Any] = {
+            "runs_found": 0,
+            "runs_cancelled": 0,
+            "runs_finished_first": [],
+            "runs_unconfirmed": [],
+            "returncode": 0,
+        }
         if self._runs is None:
             return result
-        user_id = str(account.id)
-        active = await self._runs.list_active_by_user(user_id)
-        run_ids = [str(row["run_id"]) for row in active if row.get("run_id")]
-        result["runs_found"] = len(run_ids)
-        if not run_ids:
+        owners: dict[str, str] = {}
+        for account in accounts:
+            user_id = str(account.id)
+            for row in await self._runs.list_active_by_user(user_id):
+                run_id = row.get("run_id")
+                if run_id:
+                    owners[str(run_id)] = user_id
+        result["runs_found"] = len(owners)
+        if not owners:
             return result
-        for run_id in run_ids:
+        for run_id, user_id in owners.items():
             try:
                 await self._runs.request_cancel_compat(run_id, action="interrupt", user_id=user_id)
             except Exception as exc:  # noqa: BLE001 - one run that refuses the request must not hide the others
                 logger.warning("Failed to request cancellation of run %s: %s", run_id, exc)
-        stopped = await self._wait_for_terminal(run_ids, user_id)
-        result["runs_cancelled"] = len(stopped)
-        result["runs_unconfirmed"] = sorted(set(run_ids) - stopped)
-        result["returncode"] = 1 if result["runs_unconfirmed"] else 0
+        terminal = await self._wait_for_terminal(owners)
+        result["runs_finished_first"] = sorted(run_id for run_id, status in terminal.items() if status == "success")
+        result["runs_cancelled"] = len(terminal) - len(result["runs_finished_first"])
+        result["runs_unconfirmed"] = sorted(set(owners) - set(terminal))
+        result["returncode"] = EXIT_UNCONFIRMED_RUNS if result["runs_unconfirmed"] else 0
         return result
 
-    async def _wait_for_terminal(self, run_ids: list[str], user_id: str) -> set[str]:
-        """Poll until every named run is terminal or the wait runs out; return the ones that stopped."""
-        stopped: set[str] = set()
-        pending = list(run_ids)
+    async def _wait_for_terminal(self, owners: dict[str, str]) -> dict[str, str]:
+        """Poll until every named run is terminal or the wait runs out.
+
+        Returns the status each run that stopped reached, so the caller can
+        tell a run it ended from one that finished on its own first.
+        """
+        terminal: dict[str, str] = {}
+        pending = list(owners)
         deadline = time.monotonic() + max(0.0, self._wait_seconds)
         while True:
             still_running: list[str] = []
@@ -388,20 +447,23 @@ class AccountsCommand:
                 try:
                     # Scoped to the owner: this command only ever waits on a
                     # run it named from that account's own active rows.
-                    row = await self._runs.get(run_id, user_id=user_id)
+                    row = await self._runs.get(run_id, user_id=owners[run_id])
                 except Exception as exc:  # noqa: BLE001 - a read that fails is not a stopped run
                     logger.warning("Failed to read run %s while waiting for it to stop: %s", run_id, exc)
                     still_running.append(run_id)
                     continue
+                status = None if row is None else row.get("status")
                 # A row that is gone cannot still be executing; a row whose
                 # status is terminal has stopped. Anything else is pending.
-                if row is None or row.get("status") in TERMINAL_RUN_STATUSES:
-                    stopped.add(run_id)
+                if row is None:
+                    terminal[run_id] = "absent"
+                elif status in TERMINAL_RUN_STATUSES:
+                    terminal[run_id] = str(status)
                 else:
                     still_running.append(run_id)
             pending = still_running
             if not pending or time.monotonic() >= deadline:
-                return stopped
+                return terminal
             await asyncio.sleep(min(RUN_WAIT_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
 
     async def _revoke_tokens(self, account: User) -> int:
@@ -498,7 +560,9 @@ def main(argv: list[str] | None = None) -> int:
         return 1
     print(json.dumps(document, sort_keys=True), flush=True)
     # A run this command could not confirm stopped is a failure the exit
-    # status has to carry, not a detail buried in the document.
+    # status has to carry, not a detail buried in the document -- but its own
+    # status, because the refusal *was* recorded and a runbook must not read
+    # this as "the command did nothing".
     return int(document.get("returncode", 0))
 
 

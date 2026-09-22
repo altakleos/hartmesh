@@ -197,8 +197,8 @@ def release_command_scope(self, scope_id: str) -> None:
 
 
 @sandbox_operation
-def abort_running_commands(self) -> int:
-    """Stop every command in flight and return how many there were."""
+def abort_running_commands(self, call_id: str | None = None) -> int:
+    """Stop one call's commands, or every command in flight, and return how many."""
 
 
 @sandbox_operation

@@ -100,8 +100,12 @@ class TestAioSandboxEnvInjection:
         out = sandbox.execute_command("echo $TOK", env={"TOK": "secret-v"})
         sandbox._client.bash.exec.assert_called_once()
         _, kwargs = sandbox._client.bash.exec.call_args
-        # The abort marker rides the same structured env, never the command string.
-        assert kwargs["env"] == {"TOK": "secret-v", ABORT_TOKEN_ENV: sandbox._abort_token}
+        # The abort marker rides the same structured env, never the command
+        # string. Its value is fresh per command, so assert the shape: without
+        # it this call could not be aborted at all.
+        marker = kwargs["env"].pop(ABORT_TOKEN_ENV, None)
+        assert marker and marker.startswith("df-"), "an env-bearing command must be markable for abort"
+        assert kwargs["env"] == {"TOK": "secret-v"}
         # Secret must NOT be smuggled into the command string (audit / ps safety).
         assert "secret-v" not in kwargs["command"]
         sandbox._client.shell.exec_command.assert_not_called()
