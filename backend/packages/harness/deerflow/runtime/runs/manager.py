@@ -6056,12 +6056,29 @@ class RunManager:
                 )
                 continue
             claimed_any = True
+            # One line per run, not only the count below. After a restore
+            # this is the deployer's account of which pieces of work stopped
+            # and what they were doing when they did: the run, the status it
+            # came from, the status it goes to, and why.
+            logger.info(
+                "Recovery ended orphaned run %s: %s -> %s (%s)",
+                record.run_id,
+                record.status.value,
+                RunStatus.error.value,
+                effective_stop_reason,
+            )
             record.status = RunStatus.error
             record.error = error
             record.stop_reason = effective_stop_reason
             record.updated_at = now
             if self._store.durable_lifecycle:
-                stored = await self._store.get(record.run_id)
+                # Reconciliation runs at startup and on a background timer, so
+                # there is no request and no user in the contextvar. The AUTO
+                # default this read used to take resolves the caller from that
+                # contextvar and raises when it is empty -- which took the
+                # whole lifespan down on the first start after a restore. The
+                # row's own owner is what this lookup means.
+                stored = await self._store.get(record.run_id, user_id=record.user_id)
                 if stored is not None:
                     self._sync_record_from_store_row(record, stored)
                     terminal_version = stored.get("state_version")

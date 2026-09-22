@@ -57,6 +57,18 @@ root's. Markdown links resolve from this file.
   worker advances `ExecutionPolicyStateV1` with an owner/epoch/lease-fenced CAS,
   fails closed on missing keys, drift, or a stale writer, and only safe
   projections leave the runtime (`../docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md`).
+- Startup and background paths carry no request, so every user-scoped
+  repository call they make passes an explicit `user_id` -- the row's owner,
+  or `None` where the lookup is not user-scoped -- and never the `AUTO`
+  sentinel, which resolves the caller from a per-request contextvar and
+  raises when there is none. `reconcile_orphaned_inflight_runs` terminalizes
+  what it finds, never resumes it and never retries its tool calls, and
+  accounts for each run at INFO (run id, previous status, new status,
+  reason); its takeover claim commits before the record is returned, so a
+  raise between the two leaves a terminal row nobody is told about. The suite
+  binds a user contextvar for every test by default, so a test covering
+  either rule needs `@pytest.mark.no_auto_user` or it cannot fail:
+  `tests/test_startup_recovery_without_user_context.py`.
 - Live journal, subagent, workspace, and delivery event writes are
   authority-bound to tenant/run/owner/epoch; recovery uses a separate explicit
   administrative appender. Runtime failures become bounded correlated V1
