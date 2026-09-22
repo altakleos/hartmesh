@@ -9,6 +9,11 @@ Two checks come before anything else at every sign-in, first or not: an
 identity the deployer turned off is refused, and, where an admission claim
 is configured, a token that does not carry an admitting value is refused,
 with no account created and none returned.
+
+An address the account record will not hold is refused in its own right
+(``sso_email_unusable``), never as a collision with an account that does not
+exist: the record's own refusal and the repository's uniqueness refusal are
+both ``ValueError``, and only the second one means an account is in the way.
 """
 
 from __future__ import annotations
@@ -17,6 +22,7 @@ import logging
 from datetime import UTC, datetime
 
 from fastapi import HTTPException, status
+from pydantic import ValidationError
 
 from app.gateway.auth.access import admitted_values, refuse_turned_off, role_for
 from app.gateway.auth.local_provider import LocalAuthProvider
@@ -24,6 +30,20 @@ from app.gateway.auth.oidc import OIDCIdentity
 from deerflow.config.auth_config import OIDCProviderConfig
 
 logger = logging.getLogger(__name__)
+
+# The refusal for an address no account can hold, and the code the login page
+# maps it by. Its own code on purpose: an address the record refuses is not a
+# conflict with an account, so the person must not be sent looking for one.
+EMAIL_UNUSABLE_CODE = "sso_email_unusable"
+EMAIL_UNUSABLE_MESSAGE = "Your organization's sign-in did not provide a usable email address. Ask your administrator to correct it."
+
+
+class EmailUnusable(HTTPException):
+    """The provider asserted an address the account record will not hold."""
+
+    def __init__(self) -> None:
+        super().__init__(status_code=status.HTTP_403_FORBIDDEN, detail=EMAIL_UNUSABLE_MESSAGE)
+        self.redirect_code = EMAIL_UNUSABLE_CODE
 
 
 async def get_or_provision_oidc_user(
@@ -39,9 +59,10 @@ async def get_or_provision_oidc_user(
        claim configured) a token without an admitting value
     1. Look up existing user by (provider, subject); re-read its role when
        the role mapping is set; stamp the sign-in
-    2. If not found, enforce domain/email-verified rules
-    3. Block if a local account already owns the email (never auto-link)
-    4. Auto-create if enabled
+    2. If not found, require a verified email and an email at all
+    3. Enforce the domain restriction
+    4. Block if a local account already owns the email (never auto-link)
+    5. Auto-create if enabled, refusing an address no account can hold
 
     Returns a dict with ``user`` (the User model instance) and ``created`` (bool).
     """
@@ -132,6 +153,16 @@ async def get_or_provision_oidc_user(
             oauth_issuer=provider_config.issuer,
             last_sign_in_at=now,
         )
+    except ValidationError as exc:
+        # The record refused the address itself. This arm comes first because
+        # pydantic's ValidationError *is* a ValueError: without it the race
+        # handler below reports an address no account can hold as a collision
+        # with an account that does not exist. The model stays the only
+        # validator -- nothing here restates what an address may be.
+        if not _only_the_address_was_refused(exc):
+            raise
+        logger.warning("OIDC sign-in refused: the address asserted for subject %s at issuer %s is not one an account can hold", identity.subject, provider_config.issuer)
+        raise EmailUnusable() from None
     except ValueError:
         # Lost a race: a concurrent callback (double-click, replayed code) already
         # inserted a row that collides on the unique index. Re-resolve instead of
@@ -146,6 +177,17 @@ async def get_or_provision_oidc_user(
         ) from None
     logger.info("Auto-created OIDC user %s (provider=%s, role=%s)", email, provider_id, role)
     return {"user": user, "created": True}
+
+
+def _only_the_address_was_refused(exc: ValidationError) -> bool:
+    """True when the record's complaint is about the address and nothing else.
+
+    The address is the one field here a provider's assertion supplies; a
+    complaint about any other is a fault in this code, and propagating it says
+    so instead of refusing the person for something they did not send.
+    """
+    complaints = exc.errors()
+    return bool(complaints) and all(complaint.get("loc") == ("email",) for complaint in complaints)
 
 
 def _issuer_key(issuer: str) -> str:

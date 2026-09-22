@@ -159,6 +159,24 @@ def test_initialize_rejects_common_password(client):
     assert resp.status_code == 422
 
 
+def test_initialize_rejects_an_address_no_account_can_hold_before_the_handler(client):
+    """The route refuses the address itself, never as "email already registered".
+
+    The handler wraps ``create_user`` in ``except ValueError`` and reports a
+    collision -- the same shape that misreported a first SSO sign-in as an
+    existing account (``test_sso_unusable_email.py``). This door is not
+    exposed, because ``email`` on the request model is the same ``EmailStr``
+    the row is held to, so FastAPI answers 422 before the handler runs.
+    """
+    resp = client.post(
+        "/api/v1/auth/initialize",
+        json={**_init_payload(), "email": "someone@example.invalid"},
+    )
+    assert resp.status_code == 422, resp.text
+    assert resp.json()["detail"][0]["loc"][-1] == "email"
+    assert "already registered" not in resp.text
+
+
 # ── setup-status reflects initialization ─────────────────────────────────
 
 

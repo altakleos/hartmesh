@@ -219,6 +219,24 @@ URL, the same subjects), re-point the recorded issuer with the Gateway
 stopped, then change the key and start:
 `UPDATE users SET oauth_issuer = '<new issuer>' WHERE oauth_provider = 'sso' AND oauth_issuer = '<old issuer>';`
 
+**An address no account can hold.** The address the provider asserts becomes
+the account's address, and an account record holds only an address that
+parses as one: a special-use domain (`.invalid`, `.test`, `.local`,
+`.localhost`, `.arpa`) is refused, so is a domain with no dot at all --
+`pat@companyad`, which an on-prem directory readily emits -- and so is any
+malformed address. No mail is sent and no name is looked up, so an address
+at a plausible domain is held whether or not anyone reads it. Such a sign-in
+is refused with `sso_email_unusable` -- its own code, because nothing exists
+for it to collide with: no account is created, and the person sees "Your
+organization's sign-in did not provide a usable email address. Ask your
+administrator to correct it." The journal carries the issuer and the
+subject, and the line beside it names the address, which is what you
+correct: it is a provider-side fix (correct the address on the identity, or
+have the provider assert a real one), never a row to clear from the
+database. Releases up to and including `v2.1.0+hartmesh.30` answered
+`sso_account_exists` here, which sent operators looking for an account that
+was never there.
+
 **Upgrade note.** These keys are honoured from `v2.1.0+hartmesh.30`, the
 first release carrying them. A release older than that ignores them and
 serves local passwords with registration open, exactly as before. From

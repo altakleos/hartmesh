@@ -1612,6 +1612,8 @@ export const enUS: Translations = {
       sso_cancelled: "SSO login was cancelled.",
       sso_account_exists:
         "An account with this email already exists. Please sign in with your password or contact your administrator.",
+      sso_email_unusable:
+        "Your organization's sign-in did not provide a usable email address. Ask your administrator to correct it.",
       sso_not_allowed:
         "SSO login is not allowed for your account. Contact your administrator.",
       sso_no_access:
@@ -1623,6 +1625,8 @@ export const enUS: Translations = {
       sso_failed: "Sign-in did not complete. Please try again.",
       sso_account_exists:
         "An earlier account already holds this email address. Contact your administrator to have it cleared.",
+      sso_email_unusable:
+        "Your organization's sign-in did not provide a usable email address. Ask your administrator to correct it.",
       sso_no_access:
         "You have no access to this workspace. Ask your administrator.",
       sso_access_off:

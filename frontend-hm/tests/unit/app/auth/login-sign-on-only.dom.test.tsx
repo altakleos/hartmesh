@@ -188,4 +188,58 @@ describe("the login page in sign-on-only mode", () => {
       ).toBeTruthy();
     },
   );
+
+  it("names the address refusal instead of falling back to the generic failure", async () => {
+    // An address no account can hold is its own refusal. Without words of its
+    // own the page would show "Authentication failed." and send nobody
+    // anywhere; it must never read as a conflict with an existing account.
+    search = "error=sso_email_unusable";
+    installGateway(
+      { needs_setup: false, registration_enabled: false, sign_on_only: true },
+      [{ id: "sso", display_name: "Single sign-on", type: "oidc" }],
+    );
+
+    renderLogin();
+
+    const message = enUS.login.signOnOnlyErrors.sso_email_unusable;
+    await waitFor(() => {
+      expect(screen.getByRole("alert").textContent).toBe(message);
+    });
+    expect(message).not.toBe(enUS.login.authFailed);
+    expect(message.toLowerCase()).not.toContain("already");
+    expect(screen.queryByLabelText(enUS.login.password)).toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Continue with Single sign-on" }),
+    ).toBeTruthy();
+  });
+
+  it("names the address refusal on a Gateway that still serves local passwords", async () => {
+    // The other map: a deployment with local passwords AND a provider gets the
+    // same redirect, and reads `login.errors`. Without its own entry there the
+    // page would degrade to "Authentication failed." with nothing to act on.
+    search = "error=sso_email_unusable";
+    installGateway({ needs_setup: false, registration_enabled: true }, [
+      { id: "sso", display_name: "Single sign-on", type: "oidc" },
+    ]);
+
+    renderLogin();
+
+    // The mixed-mode branch renders the error as plain text, without the
+    // role="alert" the sign-on-only branch carries, so assert on the words.
+    const message = enUS.login.errors.sso_email_unusable;
+    expect(await screen.findByText(message)).toBeTruthy();
+    // Proves the mixed-mode branch rendered, not the sign-on-only one.
+    expect(screen.getByLabelText(enUS.login.password)).toBeTruthy();
+    expect(message).not.toBe(enUS.login.authFailed);
+    for (const leak of [
+      "special-use",
+      "reserved",
+      "@-sign",
+      "validator",
+      "pydantic",
+      "already",
+    ]) {
+      expect(message.toLowerCase()).not.toContain(leak);
+    }
+  });
 });
