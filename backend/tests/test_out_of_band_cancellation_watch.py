@@ -178,3 +178,36 @@ async def test_stopping_a_watch_that_will_not_finish_cancels_it():
 
     assert manager._cancellation_watch_task is None
     assert task.done()
+
+
+@pytest.mark.anyio
+async def test_the_owner_adopts_the_cancellation_epoch_without_a_heartbeat():
+    """The cancelled call's receipt is written at the epoch the cancel moved to.
+
+    A cancellation advances ``state_version`` and leaves this worker the owner.
+    The tool call it cancelled closes its receipt through this refresh; before
+    it answered only where the heartbeat runs, so on a single Gateway every
+    stopped call's receipt was refused and the attempt stayed indeterminate.
+    """
+    manager = await _manager(heartbeat=False)
+    run_id = await _running_run(manager)
+    record = manager._runs[run_id]
+    held = record.state_version
+
+    await manager._store.request_cancel_compat(run_id, action="interrupt", user_id="user-1")
+    row = await manager._store.get(run_id)
+
+    assert await manager.refresh_owned_cancellation(run_id) == "interrupt"
+    assert row["state_version"] > held
+    assert record.state_version == row["state_version"]
+    assert record.abort_event.is_set()
+
+
+@pytest.mark.anyio
+async def test_no_epoch_is_adopted_for_a_run_nobody_cancelled():
+    manager = await _manager(heartbeat=False)
+    run_id = await _running_run(manager)
+    held = manager._runs[run_id].state_version
+
+    assert await manager.refresh_owned_cancellation(run_id) is None
+    assert manager._runs[run_id].state_version == held

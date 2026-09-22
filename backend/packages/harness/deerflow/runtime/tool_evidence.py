@@ -1271,10 +1271,37 @@ class RunEventToolReceiptSink:
         event_store: Any,
         *,
         on_ownership_lost: Callable[[str], Awaitable[None]] | None = None,
+        refresh_cancellation_fence: Callable[[], Awaitable[tuple[str, int] | None]] | None = None,
     ) -> None:
         self._event_store = event_store
         self._on_ownership_lost = on_ownership_lost
+        self._refresh_cancellation_fence = refresh_cancellation_fence
         self._active_fences: dict[str, tuple[str, int]] = {}
+
+    async def _cancellation_fence(self, receipt: DurableToolReceiptV1, held: tuple[str, int]) -> tuple[str, int] | None:
+        """The fence a cancellation moved this call's run to, or None.
+
+        A cancellation request advances ``state_version`` and leaves the same
+        worker owning the run, so the terminal receipt of the call it cancelled
+        is refused at the epoch the call started under. That receipt is the
+        evidence that the call ended; without it the attempt stays
+        indeterminate. Only a terminal receipt asks, only once, and only a
+        fence held by the same owner at a later epoch is adopted -- a takeover
+        changes the owner and stays refused, and a start is new work that a
+        cancellation must not admit.
+        """
+
+        if self._refresh_cancellation_fence is None or receipt.phase == "started":
+            return None
+        refreshed = await self._refresh_cancellation_fence()
+        if refreshed is None:
+            return None
+        owner_id, lease_epoch = refreshed
+        held_owner, held_epoch = held
+        if owner_id != held_owner or type(lease_epoch) is not int or lease_epoch <= held_epoch:
+            return None
+        self._active_fences[receipt.receipt_id] = (owner_id, lease_epoch)
+        return owner_id, lease_epoch
 
     async def _report_ownership_lost(self, operation: str) -> None:
         if self._on_ownership_lost is not None:
@@ -1351,19 +1378,26 @@ class RunEventToolReceiptSink:
                 receipt.context.owner_id,
                 receipt.context.lease_epoch,
             )
-        owner_id, lease_epoch = active
-        try:
-            await self._event_store.append_idempotent(
-                receipt.context.run_id,
-                event_type=event_type,
-                idempotency_key=receipt.idempotency_key,
-                body=receipt.to_event_body(),
-                owner_id=owner_id,
-                lease_epoch=lease_epoch,
-            )
-        except ToolReceiptOwnershipLost:
-            await self._report_ownership_lost("append")
-            raise
+        fence: tuple[str, int] | None = active
+        refreshed = False
+        while True:
+            owner_id, lease_epoch = fence
+            try:
+                await self._event_store.append_idempotent(
+                    receipt.context.run_id,
+                    event_type=event_type,
+                    idempotency_key=receipt.idempotency_key,
+                    body=receipt.to_event_body(),
+                    owner_id=owner_id,
+                    lease_epoch=lease_epoch,
+                )
+                return
+            except ToolReceiptOwnershipLost:
+                fence = None if refreshed else await self._cancellation_fence(receipt, active)
+                refreshed = True
+                if fence is None:
+                    await self._report_ownership_lost("append")
+                    raise
 
     async def record_started(self, receipt: DurableToolReceiptV1) -> None:
         if receipt.phase != "started":
@@ -1404,18 +1438,25 @@ class RunEventToolReceiptSink:
             receipt.receipt_id,
             (receipt.context.owner_id, receipt.context.lease_epoch),
         )
-        owner_id, lease_epoch = active
-        try:
-            outcome = await self._event_store.append_retrieval_pair(
-                receipt.context.run_id,
-                receipt_body=receipt.to_event_body(),
-                observation_body=observation.to_event_body(),
-                owner_id=owner_id,
-                lease_epoch=lease_epoch,
-            )
-        except ToolReceiptOwnershipLost:
-            await self._report_ownership_lost("append_retrieval_pair")
-            raise
+        fence: tuple[str, int] | None = active
+        refreshed = False
+        while True:
+            owner_id, lease_epoch = fence
+            try:
+                outcome = await self._event_store.append_retrieval_pair(
+                    receipt.context.run_id,
+                    receipt_body=receipt.to_event_body(),
+                    observation_body=observation.to_event_body(),
+                    owner_id=owner_id,
+                    lease_epoch=lease_epoch,
+                )
+                break
+            except ToolReceiptOwnershipLost:
+                fence = None if refreshed else await self._cancellation_fence(receipt, active)
+                refreshed = True
+                if fence is None:
+                    await self._report_ownership_lost("append_retrieval_pair")
+                    raise
         stored = RetrievalObservationV1.from_event_body(outcome.observation_event["content"])
         if stored != observation:
             raise ToolReceiptIntegrityError("retrieval_observation_conflict")

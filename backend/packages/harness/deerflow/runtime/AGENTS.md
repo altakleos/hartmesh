@@ -94,7 +94,11 @@ database wall clock after locking the row. Omitting the fence remains compatible
 only for a genuinely null-lease single-node row; it never authorizes an actively
 leased row. A same-owner cancellation may advance the epoch before either write,
 so a rejected observation first refreshes the durable cancellation and signals
-the local abort rather than misclassifying it as a takeover.
+the local abort rather than misclassifying it as a takeover. A tool call's
+terminal receipt follows the same rule: the receipt sink asks once, adopts only
+a later epoch held by the same owner, and never for a `started` receipt, so the
+call a cancellation ended closes as `cancelled` instead of staying
+indeterminate. The refresh answers with or without the lease heartbeat.
 
 Qualified run ownership uses the versioned `database_v1` clock capability.
 Admission, renewal, and takeover accept a duration; SQL mints the persisted

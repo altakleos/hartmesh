@@ -3553,9 +3553,13 @@ class RunManager:
         A remote cancellation advances ``state_version`` while intentionally
         leaving the same worker owner in place. Live event appenders need that
         new epoch before they can write their bounded terminal evidence.
+
+        This holds with or without the lease heartbeat: a single Gateway takes
+        cancellations through its own route and through the out-of-band watch,
+        and both advance the epoch the same way.
         """
 
-        if self._store is None or not self.heartbeat_enabled:
+        if self._store is None or not self._store.durable_lifecycle:
             return None
         row = await self._store.get(run_id)
         if not isinstance(row, dict):
