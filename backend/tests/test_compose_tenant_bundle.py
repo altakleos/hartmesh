@@ -58,7 +58,7 @@ def template() -> dict:
 
 def _environ() -> dict[str, str]:
     # Local-password mode: the render these tests always exercised.
-    return {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0", "HARTMESH_LOCAL_PASSWORDS": "allowed"}
+    return {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0", "HARTMESH_LOCAL_PASSWORDS": "allowed", "HARTMESH_LOCAL_REGISTRATION": "closed"}
 
 
 def test_the_gateway_and_every_sandbox_read_the_same_directory(template: dict) -> None:

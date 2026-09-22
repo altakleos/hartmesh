@@ -1,8 +1,9 @@
 """The compose profile's sign-in mode: three outcomes from the tenant ``.env`` and no fourth.
 
 The three sign-on keys render the identity provider as the one way in; the
-explicit local-password key renders today's ``auth`` block unchanged;
-anything else refuses to render and names every key involved. The rendered
+explicit local-password key renders local passwords with the registration
+choice ``HARTMESH_LOCAL_REGISTRATION`` names; anything else refuses to render
+and names every key involved. The rendered
 callback is computable from ``HARTMESH_PUBLIC_HOST`` alone, the client
 secret reaches the Gateway as a reference and nothing else, and every
 refusal names keys and rules, never values. The Gateway side of the mode is
@@ -67,7 +68,8 @@ def _environ(**extra: str) -> dict[str, str]:
 
 
 SIGN_ON = {"HARTMESH_SIGN_ON_ISSUER": ISSUER, "HARTMESH_SIGN_ON_CLIENT_ID": CLIENT_ID, "HARTMESH_SIGN_ON_CLIENT_SECRET": SECRET}
-LOCAL = {"HARTMESH_LOCAL_PASSWORDS": "allowed"}
+REGISTRATION = "HARTMESH_LOCAL_REGISTRATION"
+LOCAL = {"HARTMESH_LOCAL_PASSWORDS": "allowed", REGISTRATION: "closed"}
 
 
 def _render(render_config: ModuleType, catalog: tuple, environ: dict[str, str]) -> tuple[dict[str, Any], str]:
@@ -113,12 +115,61 @@ def test_the_sign_on_keys_render_the_provider_as_the_one_way_in(render_config: M
     assert SECRET not in text
 
 
-def test_the_local_password_key_renders_exactly_the_previous_document(render_config: ModuleType, catalog: tuple) -> None:
-    """Evidence 9: the render for a .env that adds only the local key is the previous release's render."""
-    document, text = _render(render_config, catalog, _environ(**LOCAL))
+@pytest.mark.parametrize(("choice", "open_"), [("open", True), ("closed", False)])
+def test_the_local_password_key_renders_the_registration_choice(render_config: ModuleType, catalog: tuple, choice: str, open_: bool) -> None:
+    document, _ = _render(render_config, catalog, _environ(**{**LOCAL, REGISTRATION: choice}))
     template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
-    assert document["auth"] == template["auth"], "copied through unchanged: no enabled, no allow_registration, no oidc"
+    assert document["auth"] == {**template["auth"], "local": {**template["auth"]["local"], "enabled": True, "allow_registration": open_}}, "the lockout policy is kept; only the mode and the registration choice are added"
     assert "authorization" not in document
+
+
+def test_local_passwords_without_a_registration_choice_refuse_and_name_the_key(render_config: ModuleType, catalog: tuple) -> None:
+    for environ in (_environ(HARTMESH_LOCAL_PASSWORDS="allowed"), _environ(HARTMESH_LOCAL_PASSWORDS="allowed", **{REGISTRATION: " "})):
+        message = _refusal(render_config, catalog, environ)
+        assert REGISTRATION in message and "open or closed" in message and "Nothing is assumed" in message
+
+
+@pytest.mark.parametrize("bad", ["yes", "true", "Open", "CLOSED", "allowed", "open,closed", "SENTINEL"])
+def test_the_registration_choice_takes_exactly_one_of_two_values(render_config: ModuleType, catalog: tuple, bad: str) -> None:
+    message = _refusal(render_config, catalog, _environ(**{**LOCAL, REGISTRATION: bad}))
+    assert REGISTRATION in message and "exactly `open` or `closed`" in message
+    assert bad not in message.replace("`open` or `closed`", ""), "the refusal names the key and the rule, never the value"
+
+
+@pytest.mark.parametrize("choice", ["open", "closed"])
+def test_a_registration_choice_under_sign_on_refuses_as_a_conflicting_key(render_config: ModuleType, catalog: tuple, choice: str) -> None:
+    message = _refusal(render_config, catalog, _environ(**SIGN_ON, **{REGISTRATION: choice}))
+    assert REGISTRATION in message and "sign-on only" in message
+
+
+@pytest.mark.parametrize("value", [True, False])
+@pytest.mark.parametrize("environ", [LOCAL, SIGN_ON], ids=["local", "sign_on"])
+def test_a_template_naming_allow_registration_refuses_in_either_mode(render_config: ModuleType, catalog: tuple, environ: dict[str, str], value: bool) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    doctored = {**template, "auth": {**template["auth"], "local": {**template["auth"]["local"], "allow_registration": value}}}
+    with pytest.raises(render_config.RenderError, match="auth.local.allow_registration") as refused:
+        render_config.render(doctored, catalog, _environ(**environ))
+    assert "the sign-in keys select them" in str(refused.value)
+
+
+def test_one_unmodified_template_renders_all_three_sign_in_choices(render_config: ModuleType, catalog: tuple, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """One bundle serves both modes: the same template text renders sign-on only, and local passwords open and closed, and each loads."""
+    from deerflow.config.app_config import AppConfig
+
+    text = TEMPLATE.read_text(encoding="utf-8")
+    for name, environ, expected in (
+        ("sign_on", _environ(**SIGN_ON), (False, False)),
+        ("local_open", _environ(**{**LOCAL, REGISTRATION: "open"}), (True, True)),
+        ("local_closed", _environ(**LOCAL), (True, False)),
+    ):
+        rendered, _ = render_config.render_text(text, catalog, environ)
+        with monkeypatch.context() as scoped:
+            for key, value in environ.items():
+                scoped.setenv(key, value)
+            path = tmp_path / f"{name}.yaml"
+            path.write_text(rendered, encoding="utf-8")
+            config = AppConfig.from_file(str(path))
+        assert (config.auth.local.enabled, config.auth.local.allow_registration) == expected, name
 
 
 def test_neither_key_refuses_and_names_both_sides(render_config: ModuleType, catalog: tuple) -> None:
@@ -266,6 +317,9 @@ def test_the_template_carries_no_sign_in_mode_of_its_own(render_config: ModuleTy
     doctored["auth"] = {"local": {**template["auth"]["local"], "enabled": True}}
     with pytest.raises(render_config.RenderError, match="auth.local.enabled"):
         render_config.render(doctored, catalog, _environ(**LOCAL))
+    doctored["auth"] = {"local": {**template["auth"]["local"], "allow_registration": True}}
+    with pytest.raises(render_config.RenderError, match="auth.local.allow_registration"):
+        render_config.render(doctored, catalog, _environ(**LOCAL))
 
 
 def _example_environ() -> dict[str, str]:
@@ -281,8 +335,9 @@ def test_the_env_example_renders_sign_on_only_and_local_with_one_swap(render_con
     assert document["auth"]["oidc"]["providers"]["sso"]["redirect_uri"] == f"https://{example['HARTMESH_PUBLIC_HOST']}/api/v1/auth/callback/sso"
     local = {key: value for key, value in example.items() if not key.startswith("HARTMESH_SIGN_ON_")}
     local["HARTMESH_LOCAL_PASSWORDS"] = "allowed"
+    local[REGISTRATION] = "closed"
     document, _ = _render(render_config, catalog, local)
-    assert "oidc" not in document["auth"] and "enabled" not in document["auth"]["local"]
+    assert "oidc" not in document["auth"] and document["auth"]["local"]["enabled"] is True and document["auth"]["local"]["allow_registration"] is False
 
 
 def test_check_mode_reports_the_mode_and_the_callback(render_config: ModuleType, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -296,6 +351,15 @@ def test_check_mode_reports_the_mode_and_the_callback(render_config: ModuleType,
     monkeypatch.setenv("HARTMESH_LOCAL_PASSWORDS", "allowed")
     assert render_config.main(["--template", str(TEMPLATE), "--catalog", str(CATALOG), "--check"]) == 1
     assert "both set" in capsys.readouterr().err
+    for key in SIGN_ON:
+        monkeypatch.delenv(key)
+    for choice in ("open", "closed"):
+        monkeypatch.setenv(REGISTRATION, choice)
+        assert render_config.main(["--template", str(TEMPLATE), "--catalog", str(CATALOG), "--check"]) == 0
+        assert f"sign-in=local (registration {choice})" in capsys.readouterr().out
+    monkeypatch.delenv(REGISTRATION)
+    assert render_config.main(["--template", str(TEMPLATE), "--catalog", str(CATALOG), "--check"]) == 1
+    assert f"refusing to render: HARTMESH_LOCAL_PASSWORDS=allowed selects local passwords, and {REGISTRATION} must" in capsys.readouterr().err
 
 
 # ── 6. The README ────────────────────────────────────────────────────────────
@@ -309,6 +373,10 @@ def test_the_readme_states_the_keys_the_callback_the_method_and_the_upgrade_note
         "HARTMESH_SIGN_ON_CLIENT_ID",
         "HARTMESH_SIGN_ON_CLIENT_SECRET",
         "HARTMESH_LOCAL_PASSWORDS=allowed",
+        "HARTMESH_LOCAL_REGISTRATION=open",
+        "HARTMESH_LOCAL_REGISTRATION=closed",
+        "python -m app.gateway.auth.add_user",
+        "/api/v1/auth/users",
         "https://<HARTMESH_PUBLIC_HOST>/api/v1/auth/callback/sso",
         "client_secret_post",
         "HARTMESH_SIGN_ON_ADMINS",

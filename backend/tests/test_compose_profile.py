@@ -75,7 +75,7 @@ PASSTHROUGH_KEYS = {
 # gateway/render_config.py only. See tests/test_compose_sign_on.py.
 SIGN_ON_KEYS = {"HARTMESH_SIGN_ON_ISSUER", "HARTMESH_SIGN_ON_CLIENT_ID", "HARTMESH_SIGN_ON_CLIENT_SECRET"}
 LOCAL_PASSWORDS_KEY = "HARTMESH_LOCAL_PASSWORDS"
-MODE_KEYS = SIGN_ON_KEYS | {LOCAL_PASSWORDS_KEY}
+MODE_KEYS = SIGN_ON_KEYS | {LOCAL_PASSWORDS_KEY, "HARTMESH_LOCAL_REGISTRATION"}
 MEMORY_MIB = {"gateway": 1088, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256, "searxng": 256}
 # The sandbox image's own service switches (its entrypoint compares each to the
 # string "true"): the profile ships every sandbox with the browser, VNC,
@@ -147,7 +147,7 @@ def _mib(value: str) -> int:
 def _base_environ() -> dict[str, str]:
     # Local-password mode: the render every test here relied on before the
     # sign-in mode existed, and still the same document.
-    return {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0", LOCAL_PASSWORDS_KEY: "allowed"}
+    return {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0", LOCAL_PASSWORDS_KEY: "allowed", "HARTMESH_LOCAL_REGISTRATION": "closed"}
 
 
 def _open_runsc_environ() -> dict[str, str]:
@@ -1022,7 +1022,7 @@ def test_render_refuses_a_template_whose_slot_wait_is_out_of_range(render_config
 
 def test_render_refuses_a_template_reference_to_an_unset_variable(render_config: ModuleType) -> None:
     with pytest.raises(render_config.RenderError, match="DATABASE_URL"):
-        render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), {LOCAL_PASSWORDS_KEY: "allowed"})
+        render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), {LOCAL_PASSWORDS_KEY: "allowed", "HARTMESH_LOCAL_REGISTRATION": "closed"})
 
 
 def test_render_output_is_a_valid_app_config(render_config: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

@@ -10,6 +10,7 @@ import { useAuth } from "@/core/auth/AuthProvider";
 import { parseAuthError } from "@/core/auth/types";
 import { useI18n } from "@/core/i18n/hooks";
 
+import { AddPersonSection } from "./add-person-section";
 import { SettingsSection } from "./settings-section";
 
 export function AccountSettingsPage() {
@@ -154,6 +155,8 @@ export function AccountSettingsPage() {
           </p>
         </SettingsSection>
       )}
+
+      {user?.system_role === "admin" && <AddPersonSection />}
 
       <SettingsSection title="" description="">
         <Button

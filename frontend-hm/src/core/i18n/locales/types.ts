@@ -1218,6 +1218,17 @@ export interface Translations {
       updating: string;
       updatePassword: string;
       signOut: string;
+      addPersonTitle: string;
+      addPersonDescription: string;
+      addPersonEmail: string;
+      addPersonSubmit: string;
+      addPersonAdding: string;
+      addPersonAdded: string;
+      addPersonOneTimePassword: string;
+      addPersonHandOver: string;
+      addPersonCopy: string;
+      addPersonCopied: string;
+      addPersonAnother: string;
     };
     acknowledge: {
       emptyTitle: string;

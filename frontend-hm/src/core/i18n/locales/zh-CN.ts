@@ -1490,6 +1490,19 @@ export const zhCN: Translations = {
       updating: "更新中...",
       updatePassword: "修改密码",
       signOut: "退出登录",
+      addPersonTitle: "添加成员",
+      addPersonDescription:
+        "为团队成员创建账号。对方先用一次性密码登录一次，然后设置自己的密码。",
+      addPersonEmail: "对方的邮箱地址",
+      addPersonSubmit: "添加成员",
+      addPersonAdding: "添加中...",
+      addPersonAdded: "已添加 {email}。",
+      addPersonOneTimePassword: "一次性密码",
+      addPersonHandOver:
+        "请亲自交给对方。此密码只显示这一次，对方设置自己的密码后即失效。",
+      addPersonCopy: "复制",
+      addPersonCopied: "已复制",
+      addPersonAnother: "再添加一位",
     },
     acknowledge: {
       emptyTitle: "致谢",

@@ -45,6 +45,7 @@ const AUTH_ERROR_CODES = [
   "system_already_initialized",
   "registration_disabled",
   "sign_on_required",
+  "setup_required",
 ] as const;
 
 export type AuthErrorCode = (typeof AUTH_ERROR_CODES)[number];

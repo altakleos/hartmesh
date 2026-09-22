@@ -176,7 +176,9 @@ class LocalAuthConfig(BaseModel):
             "Allow visitors to self-register a local account via POST /api/v1/auth/register. "
             "Set to false when accounts are provisioned exclusively through SSO — the OIDC "
             "provisioning policy (allowed_email_domains, require_verified_email, auto_create_users) "
-            "does not apply to local registration."
+            "does not apply to local registration — or when an administrator should decide who has "
+            "an account: an administrator adds a person either way (POST /api/v1/auth/users, or "
+            "`python -m app.gateway.auth.add_user`). /health reports it as registration: open | closed."
         ),
     )
 

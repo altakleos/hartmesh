@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from app.gateway.auth.mode import auth_mode
+from app.gateway.auth.mode import auth_mode, registration_state
 from app.gateway.auth_disabled import (
     AUTH_SOURCE_INTERNAL,
     AUTH_SOURCE_PAT,
@@ -1447,8 +1447,11 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
             "tenant_identity": tenant_observability_projection(tenant_identity.to_persisted_reference()),
             # Which way people sign in, for an apply to assert before it
             # publishes the tenant: "local" or "sign_on_only", read live
-            # like every door reads it.
+            # like every door reads it -- and whether a visitor may create
+            # their own account there, "open" or "closed" (always closed
+            # in sign-on-only mode).
             "auth_mode": auth_mode(),
+            "registration": registration_state(),
         }
         memory_diagnostics = _memory_backend_diagnostics(app)
         if memory_diagnostics is not None:

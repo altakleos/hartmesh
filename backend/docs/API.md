@@ -1733,7 +1733,7 @@ DeerFlow enforces authentication for all non-public HTTP routes. Public routes a
 
 - `POST /api/v1/auth/initialize` creates the first admin account when no admin exists.
 - `POST /api/v1/auth/login/local` logs in with email/password and sets an HttpOnly `access_token` cookie.
-- `POST /api/v1/auth/register` creates a regular `user` account and sets the session cookie.
+- `POST /api/v1/auth/register` creates a regular `user` account and sets the session cookie; `403 registration_disabled` when `auth.local.allow_registration` is false.
 - `POST /api/v1/auth/logout` clears the session cookie.
 - `GET /api/v1/auth/setup-status` reports whether the first admin still needs to be created.
 
@@ -1741,6 +1741,9 @@ The authenticated auth endpoints are:
 
 - `GET /api/v1/auth/me` returns the current user.
 - `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie.
+- `POST /api/v1/auth/users` (administrator, interactive session only; local-password mode) adds a `user` account for `{"email"}` and answers `201` with `id`, `email`, `system_role`, `needs_setup: true` and `one_time_password`, shown only in this response. `400 email_already_exists` as `/register`; `403 sign_on_required` in sign-on-only mode. No cookie is set.
+
+A session of an account with `needs_setup` (added by an administrator, or reset by `reset_admin`) is refused with `403 setup_required` on every route but `/me` and `/change-password` until its person chooses a password; `change-password` with `new_email` completes the setup, after which the first password opens nothing. The rule binds sessions only: a reset account's personal access tokens keep working, and an added account has none.
 
 Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
 

@@ -1567,6 +1567,19 @@ export const enUS: Translations = {
       updating: "Updating...",
       updatePassword: "Update Password",
       signOut: "Sign Out",
+      addPersonTitle: "Add a person",
+      addPersonDescription:
+        "Create an account for someone on your team. They sign in once with a one-time password and then choose their own.",
+      addPersonEmail: "Their email address",
+      addPersonSubmit: "Add person",
+      addPersonAdding: "Adding...",
+      addPersonAdded: "Added {email}.",
+      addPersonOneTimePassword: "One-time password",
+      addPersonHandOver:
+        "Give this to them yourself. It is shown only now, and it stops working as soon as they choose their own password.",
+      addPersonCopy: "Copy",
+      addPersonCopied: "Copied",
+      addPersonAnother: "Add another person",
     },
     acknowledge: {
       emptyTitle: "Acknowledgements",
