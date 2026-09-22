@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import math
 import re
 import threading
@@ -29,6 +30,8 @@ from deerflow.runtime.events.catalog import (
 from deerflow.runtime.events.catalog import (
     TOOL_RECEIPT_STARTED_EVENT as _TOOL_RECEIPT_STARTED_DEFINITION,
 )
+
+logger = logging.getLogger(__name__)
 
 TOOL_RECEIPT_STARTED_EVENT = _TOOL_RECEIPT_STARTED_DEFINITION.event_type
 TOOL_RECEIPT_OUTCOME_EVENT = _TOOL_RECEIPT_OUTCOME_DEFINITION.event_type
@@ -1271,7 +1274,7 @@ class RunEventToolReceiptSink:
         event_store: Any,
         *,
         on_ownership_lost: Callable[[str], Awaitable[None]] | None = None,
-        refresh_cancellation_fence: Callable[[], Awaitable[tuple[str, int] | None]] | None = None,
+        refresh_cancellation_fence: Callable[[tuple[str, int]], Awaitable[tuple[str, int] | None]] | None = None,
     ) -> None:
         self._event_store = event_store
         self._on_ownership_lost = on_ownership_lost
@@ -1286,19 +1289,24 @@ class RunEventToolReceiptSink:
         is refused at the epoch the call started under. That receipt is the
         evidence that the call ended; without it the attempt stays
         indeterminate. Only a terminal receipt asks, only once, and only a
-        fence held by the same owner at a later epoch is adopted -- a takeover
+        fence held by the same owner one epoch later is adopted -- a takeover
         changes the owner and stays refused, and a start is new work that a
         cancellation must not admit.
         """
 
         if self._refresh_cancellation_fence is None or receipt.phase == "started":
             return None
-        refreshed = await self._refresh_cancellation_fence()
+        try:
+            refreshed = await self._refresh_cancellation_fence(held)
+        except Exception:
+            # The refusal stays the answer; a failed lookup must not replace it.
+            logger.warning("Could not look up a cancellation epoch for receipt %s", receipt.receipt_id, exc_info=True)
+            return None
         if refreshed is None:
             return None
         owner_id, lease_epoch = refreshed
         held_owner, held_epoch = held
-        if owner_id != held_owner or type(lease_epoch) is not int or lease_epoch <= held_epoch:
+        if owner_id != held_owner or type(lease_epoch) is not int or lease_epoch != held_epoch + 1:
             return None
         self._active_fences[receipt.receipt_id] = (owner_id, lease_epoch)
         return owner_id, lease_epoch

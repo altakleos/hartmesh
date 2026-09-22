@@ -53,10 +53,10 @@ running one of them and runs the same sweep in the container on a fresh session;
 every abort request carries `_ABORT_REQUEST_TIMEOUT_SECONDS` rather than the
 client's 600 s command budget, because the drain behind it cannot be
 interrupted. The sweep is one command in a persistent session, so it must never
-`exit`: that closed the session, the API never saw the command finish, and
-every abort waited out its request timeout (21 s under runsc). Measured on the
-released image's slim profile under runsc it returns in 3.2 s at one CPU and
-1.3 s at two. Every path that executes a command counts it, `bash.exec` included
+`exit`: that closed the session, the API never saw the command finish, every
+abort waited out its 20 s request timeout, and a second token in the same abort
+was never swept. Measured on the released image's slim profile under runsc the
+abort returns in 3.2 s at one CPU and 1.3 s at two. Every path that executes a command counts it, `bash.exec` included
 -- an uncounted command is one the abort reports nothing for and never reaches,
 which is every skill carrying a request-scoped secret -- and a command whose
 call was aborted is never rotated-and-retried, or the work just ended would

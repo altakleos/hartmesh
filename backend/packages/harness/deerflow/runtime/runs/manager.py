@@ -3553,13 +3553,9 @@ class RunManager:
         A remote cancellation advances ``state_version`` while intentionally
         leaving the same worker owner in place. Live event appenders need that
         new epoch before they can write their bounded terminal evidence.
-
-        This holds with or without the lease heartbeat: a single Gateway takes
-        cancellations through its own route and through the out-of-band watch,
-        and both advance the epoch the same way.
         """
 
-        if self._store is None or not self._store.durable_lifecycle:
+        if self._store is None or not self.heartbeat_enabled:
             return None
         row = await self._store.get(run_id)
         if not isinstance(row, dict):
@@ -3576,6 +3572,47 @@ class RunManager:
             record.abort_action = action
             record.abort_event.set()
         return action
+
+    async def adopt_cancellation_epoch(self, run_id: str, *, owner_id: str, held_epoch: int) -> int | None:
+        """The epoch a same-owner cancellation moved ``held_epoch`` to, or None.
+
+        A cancellation request advances ``state_version`` by exactly one and
+        leaves the owner in place, so a tool call that started before it holds
+        an epoch the store now refuses. This answers only that case: the row
+        still running, owned by ``owner_id`` -- this worker's record of the run
+        -- with a cancellation recorded and the epoch exactly one past the one
+        held. A takeover changes the owner and a terminal transition clears it,
+        so neither is adopted.
+
+        It moves this worker's epoch forward and nothing else. Signalling the
+        cancellation stays with the route, the heartbeat and the out-of-band
+        watch, which skip a run already signalled: setting the abort here would
+        let a quick tool's receipt stop them from cancelling the task that a
+        slow tool in the same step is still running in. It answers with or
+        without the lease heartbeat.
+        """
+
+        if self._store is None:
+            return None
+        row = await self._store.get(run_id)
+        if not isinstance(row, dict):
+            return None
+        epoch = row.get("state_version")
+        if (
+            row.get("status") != RunStatus.running.value
+            or row.get("owner_worker_id") != owner_id
+            or row.get("cancel_action") not in ("interrupt", "rollback")
+            or type(epoch) is not int
+            or type(held_epoch) is not int
+            or epoch != held_epoch + 1
+        ):
+            return None
+        async with self._lock:
+            record = self._runs.get(run_id)
+            if record is None or record.status != RunStatus.running or record.ownership_lost or record.owner_worker_id != owner_id:
+                return None
+            record.state_version = max(record.state_version, epoch)
+        return epoch
 
     async def set_status_if_not_cancelled(
         self,

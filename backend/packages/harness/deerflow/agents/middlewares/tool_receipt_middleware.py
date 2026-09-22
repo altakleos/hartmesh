@@ -365,9 +365,10 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                     # cancelled tool attempt with no terminal receipt is the
                     # indeterminate state recovery fails closed on, and this
                     # line was the only trace of it. (A durable cancellation
-                    # advances the run's epoch; the sink follows a same-owner
-                    # advance once, so what still lands here is a takeover or
-                    # a store that could not be reached.)
+                    # advances the run's epoch; the sink follows that one
+                    # same-owner step once, so what still lands here is a
+                    # takeover, an expired lease, a further epoch move, a
+                    # store that could not be reached or an integrity error.)
                     logger.warning("Failed to record durable tool cancellation outcome", exc_info=True)
                 raise
             except Exception as exc:

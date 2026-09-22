@@ -180,34 +180,100 @@ async def test_stopping_a_watch_that_will_not_finish_cancels_it():
     assert task.done()
 
 
-@pytest.mark.anyio
-async def test_the_owner_adopts_the_cancellation_epoch_without_a_heartbeat():
-    """The cancelled call's receipt is written at the epoch the cancel moved to.
+async def _cancelled_out_of_band(manager: RunManager) -> tuple[str, int]:
+    """A running run this worker owns, cancelled by another process; its epoch before."""
+    run_id = await _running_run(manager)
+    held = manager._runs[run_id].state_version
+    await manager._store.request_cancel_compat(run_id, action="interrupt", user_id="user-1")
+    return run_id, held
 
-    A cancellation advances ``state_version`` and leaves this worker the owner.
-    The tool call it cancelled closes its receipt through this refresh; before
-    it answered only where the heartbeat runs, so on a single Gateway every
-    stopped call's receipt was refused and the attempt stayed indeterminate.
+
+@pytest.mark.anyio
+async def test_a_cancelled_call_adopts_the_epoch_one_past_the_one_it_held():
+    """A tool call that started before the cancellation holds an epoch the store now refuses.
+
+    Its terminal receipt is written at the epoch the cancellation produced,
+    and only that one; this is the lookup that answers it, with or without the
+    lease heartbeat.
     """
     manager = await _manager(heartbeat=False)
-    run_id = await _running_run(manager)
+    run_id, held = await _cancelled_out_of_band(manager)
     record = manager._runs[run_id]
-    held = record.state_version
 
-    await manager._store.request_cancel_compat(run_id, action="interrupt", user_id="user-1")
-    row = await manager._store.get(run_id)
+    epoch = await manager.adopt_cancellation_epoch(run_id, owner_id=record.owner_worker_id, held_epoch=held)
 
-    assert await manager.refresh_owned_cancellation(run_id) == "interrupt"
-    assert row["state_version"] > held
-    assert record.state_version == row["state_version"]
-    assert record.abort_event.is_set()
+    assert epoch == held + 1
+    assert record.state_version == held + 1
+
+
+@pytest.mark.anyio
+async def test_adopting_the_epoch_leaves_the_cancellation_to_the_watch():
+    """The adoption signals nothing, or it would switch the watch off for this run.
+
+    Two tools in one step: the quick one's receipt adopts the epoch before the
+    watch's next tick. Had that set the run's abort, the watch -- which skips a
+    run already signalled -- would never cancel the task the slow one is still
+    running in, and its command would run to its own timeout.
+    """
+    manager = await _manager(heartbeat=False)
+    await manager.start_cancellation_watch()
+    try:
+        run_id, held = await _cancelled_out_of_band(manager)
+        record = manager._runs[run_id]
+        task = record.task
+
+        assert await manager.adopt_cancellation_epoch(run_id, owner_id=record.owner_worker_id, held_epoch=held) == held + 1
+        assert not record.abort_event.is_set()
+
+        assert await _wait_for_abort(manager, run_id)
+        await asyncio.sleep(0)
+        assert task.cancelled() or task.cancelling(), "the watch cancelled the task the slow tool runs in"
+    finally:
+        await manager.stop_cancellation_watch()
+
+
+@pytest.mark.anyio
+async def test_a_takeover_is_not_adopted():
+    manager = await _manager(heartbeat=False)
+    run_id, held = await _cancelled_out_of_band(manager)
+    record = manager._runs[run_id]
+    owner = record.owner_worker_id
+    manager._store._runs[run_id]["owner_worker_id"] = "another-worker"
+
+    assert await manager.adopt_cancellation_epoch(run_id, owner_id=owner, held_epoch=held) is None
+    assert record.state_version == held
+    assert not record.abort_event.is_set()
+
+
+@pytest.mark.anyio
+async def test_a_run_no_longer_running_is_not_adopted():
+    manager = await _manager(heartbeat=False)
+    run_id, held = await _cancelled_out_of_band(manager)
+    record = manager._runs[run_id]
+    manager._store._runs[run_id]["status"] = "interrupted"
+
+    assert await manager.adopt_cancellation_epoch(run_id, owner_id=record.owner_worker_id, held_epoch=held) is None
+    assert record.state_version == held
 
 
 @pytest.mark.anyio
 async def test_no_epoch_is_adopted_for_a_run_nobody_cancelled():
     manager = await _manager(heartbeat=False)
     run_id = await _running_run(manager)
-    held = manager._runs[run_id].state_version
+    record = manager._runs[run_id]
+    held = record.state_version
+    manager._store._runs[run_id]["state_version"] = held + 1  # moved, but not by a cancellation
 
-    assert await manager.refresh_owned_cancellation(run_id) is None
-    assert manager._runs[run_id].state_version == held
+    assert await manager.adopt_cancellation_epoch(run_id, owner_id=record.owner_worker_id, held_epoch=held) is None
+    assert record.state_version == held
+
+
+@pytest.mark.anyio
+async def test_only_the_epoch_one_past_the_held_one_is_adopted():
+    manager = await _manager(heartbeat=False)
+    run_id, held = await _cancelled_out_of_band(manager)
+    record = manager._runs[run_id]
+
+    assert await manager.adopt_cancellation_epoch(run_id, owner_id=record.owner_worker_id, held_epoch=held - 1) is None
+    assert await manager.adopt_cancellation_epoch(run_id, owner_id=record.owner_worker_id, held_epoch=held + 1) is None
+    assert record.state_version == held

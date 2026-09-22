@@ -95,10 +95,14 @@ only for a genuinely null-lease single-node row; it never authorizes an actively
 leased row. A same-owner cancellation may advance the epoch before either write,
 so a rejected observation first refreshes the durable cancellation and signals
 the local abort rather than misclassifying it as a takeover. A tool call's
-terminal receipt follows the same rule: the receipt sink asks once, adopts only
-a later epoch held by the same owner, and never for a `started` receipt, so the
-call a cancellation ended closes as `cancelled` instead of staying
-indeterminate. The refresh answers with or without the lease heartbeat.
+terminal receipt follows the cancellation too, through
+`RunManager.adopt_cancellation_epoch`: the sink asks once, never for a
+`started` receipt, and adopts only the epoch exactly one past the one it held,
+on a row still running under the same owner with a cancellation recorded. So
+the call a cancellation ended writes its terminal receipt instead of staying
+indeterminate. The adoption moves the epoch and signals nothing -- the route,
+heartbeat and out-of-band watch skip a run already signalled, so a quick
+tool's receipt must not stop them cancelling the task a slow one runs in.
 
 Qualified run ownership uses the versioned `database_v1` clock capability.
 Admission, renewal, and takeover accept a duration; SQL mints the persisted

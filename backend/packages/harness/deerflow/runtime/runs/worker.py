@@ -3173,12 +3173,10 @@ async def _run_agent(
                         record,
                     )
 
-                async def _receipt_cancellation_fence() -> tuple[str, int] | None:
-                    # Same-owner cancellation only: a takeover leaves no local
-                    # record owning the row, and the refresh answers None.
-                    if await run_manager.refresh_owned_cancellation(run_id) is None:
-                        return None
-                    return record.owner_worker_id, record.state_version
+                async def _receipt_cancellation_fence(held: tuple[str, int]) -> tuple[str, int] | None:
+                    held_owner, held_epoch = held
+                    epoch = await run_manager.adopt_cancellation_epoch(run_id, owner_id=held_owner, held_epoch=held_epoch)
+                    return None if epoch is None else (held_owner, epoch)
 
                 install_tool_evidence_context(
                     runtime_ctx,
