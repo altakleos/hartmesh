@@ -20,6 +20,8 @@ relative to its own directory, and the runtime is what reports where that is.
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -123,3 +125,25 @@ def test_every_command_example_fails_loudly_when_the_variable_is_unset(path: Pat
     """A copied-verbatim command must say what is missing, not resolve to ``/``."""
     offenders = [line for line in path.read_text(encoding="utf-8").splitlines() if "$SKILL_DIR/" in line or "${SKILL_DIR}/" in line]
     assert not offenders, f"{path.relative_to(REPO_ROOT)} uses an unguarded expansion; write ${{SKILL_DIR:?…}}: {offenders}"
+
+
+#: A ``${VAR:?message}`` guard, as the command examples write it.
+_GUARD = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:\?[^}]*\}")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is the sandbox shell; without it there is nothing to parse with")
+@pytest.mark.parametrize("path", SKILL_TEXT_FILES, ids=lambda path: path.relative_to(PUBLIC_SKILLS).as_posix())
+def test_every_path_guard_parses_in_bash(path: Path) -> None:
+    """The guard's message was once ``set it to this skill's directory``.
+
+    Inside a double-quoted ``${VAR:?word}`` bash still pairs single quotes, so
+    that apostrophe opened a quote nothing closed: a copied command was a
+    syntax error, and in the AIO sandbox's persistent shell it waited for the
+    closing quote until the call's own timeout, with no output. zsh and dash
+    accept it, which is why a local sandbox never showed it. Every guard is
+    parsed here the way the sandbox's shell parses it.
+    """
+    guards = sorted(set(_GUARD.findall(path.read_text(encoding="utf-8"))))
+    for guard in guards:
+        parsed = subprocess.run(["bash", "-n", "-c", f'python "{guard}/scripts/x.py"'], capture_output=True, text=True, timeout=10)
+        assert parsed.returncode == 0, f"{guard}: {parsed.stderr.strip()}"

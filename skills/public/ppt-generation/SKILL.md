@@ -100,7 +100,7 @@ Create a JSON file in `/mnt/user-data/workspace/` with the presentation structur
 ```
 
 ```bash
-python "${IMAGE_SKILL_DIR:?set it to the image-generation skill's directory}/scripts/generate.py" \
+python "${IMAGE_SKILL_DIR:?set IMAGE_SKILL_DIR to the image-generation skill directory}/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/slide-01-prompt.json \
   --output-file /mnt/user-data/outputs/slide-01.jpg \
   --aspect-ratio 16:9
@@ -119,7 +119,7 @@ python "${IMAGE_SKILL_DIR:?set it to the image-generation skill's directory}/scr
 ```
 
 ```bash
-python "${IMAGE_SKILL_DIR:?set it to the image-generation skill's directory}/scripts/generate.py" \
+python "${IMAGE_SKILL_DIR:?set IMAGE_SKILL_DIR to the image-generation skill directory}/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/slide-02-prompt.json \
   --reference-images /mnt/user-data/outputs/slide-01.jpg \
   --output-file /mnt/user-data/outputs/slide-02.jpg \
@@ -130,14 +130,14 @@ python "${IMAGE_SKILL_DIR:?set it to the image-generation skill's directory}/scr
 
 ```bash
 # Slide 3 references slide 2
-python "${IMAGE_SKILL_DIR:?set it to the image-generation skill's directory}/scripts/generate.py" \
+python "${IMAGE_SKILL_DIR:?set IMAGE_SKILL_DIR to the image-generation skill directory}/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/slide-03-prompt.json \
   --reference-images /mnt/user-data/outputs/slide-02.jpg \
   --output-file /mnt/user-data/outputs/slide-03.jpg \
   --aspect-ratio 16:9
 
 # Slide 4 references slide 3
-python "${IMAGE_SKILL_DIR:?set it to the image-generation skill's directory}/scripts/generate.py" \
+python "${IMAGE_SKILL_DIR:?set IMAGE_SKILL_DIR to the image-generation skill directory}/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/slide-04-prompt.json \
   --reference-images /mnt/user-data/outputs/slide-03.jpg \
   --output-file /mnt/user-data/outputs/slide-04.jpg \
@@ -149,7 +149,7 @@ python "${IMAGE_SKILL_DIR:?set it to the image-generation skill's directory}/scr
 After all slide images are generated, call the composition script:
 
 ```bash
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/generate.py" \
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/generate.py" \
   --plan-file /mnt/user-data/workspace/presentation-plan.json \
   --slide-images /mnt/user-data/outputs/slide-01.jpg /mnt/user-data/outputs/slide-02.jpg /mnt/user-data/outputs/slide-03.jpg \
   --output-file /mnt/user-data/outputs/presentation.pptx
@@ -245,7 +245,7 @@ Create `/mnt/user-data/workspace/nova-slide-01.json`:
 ```
 
 ```bash
-python "${IMAGE_SKILL_DIR:?set it to the image-generation skill's directory}/scripts/generate.py" \
+python "${IMAGE_SKILL_DIR:?set IMAGE_SKILL_DIR to the image-generation skill directory}/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/nova-slide-01.json \
   --output-file /mnt/user-data/outputs/nova-slide-01.jpg \
   --aspect-ratio 16:9
@@ -265,7 +265,7 @@ Create `/mnt/user-data/workspace/nova-slide-02.json`:
 ```
 
 ```bash
-python "${IMAGE_SKILL_DIR:?set it to the image-generation skill's directory}/scripts/generate.py" \
+python "${IMAGE_SKILL_DIR:?set IMAGE_SKILL_DIR to the image-generation skill directory}/scripts/generate.py" \
   --prompt-file /mnt/user-data/workspace/nova-slide-02.json \
   --reference-images /mnt/user-data/outputs/nova-slide-01.jpg \
   --output-file /mnt/user-data/outputs/nova-slide-02.jpg \
@@ -283,7 +283,7 @@ Key consistency rules for subsequent slides:
 ### Step 4: Compose final PPT
 
 ```bash
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/generate.py" \
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/generate.py" \
   --plan-file /mnt/user-data/workspace/nova-plan.json \
   --slide-images /mnt/user-data/outputs/nova-slide-01.jpg /mnt/user-data/outputs/nova-slide-02.jpg /mnt/user-data/outputs/nova-slide-03.jpg /mnt/user-data/outputs/nova-slide-04.jpg /mnt/user-data/outputs/nova-slide-05.jpg \
   --output-file /mnt/user-data/outputs/nova-presentation.pptx

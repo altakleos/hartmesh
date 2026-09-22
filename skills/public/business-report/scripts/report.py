@@ -86,7 +86,7 @@ try:
     from business_report_render import draw_charts, fetch_inline_only, render
     from business_report_sections import SECTION_BUILDERS, TABLE_ROW_LIMIT, build_report
 except ImportError as error:
-    from business_report_common import MISSING_LIBRARY_MESSAGE  # stdlib-only module, always importable
+    from business_report_common import MISSING_LIBRARY_MESSAGE  # importable without the libraries
 
     sys.stderr.write(f"{MISSING_LIBRARY_MESSAGE} ({error})\n")
     sys.exit(EXIT_MISSING_LIBRARY if "EXIT_MISSING_LIBRARY" in dir() else 2)
@@ -1587,10 +1587,15 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 # argparse's own status for a command line it refuses. It shares 2 with
-# EXIT_MISSING_LIBRARY; stderr tells the two apart, and SKILL.md says so.
+# EXIT_MISSING_LIBRARY; stderr tells the two apart, and SKILL.md gives each
+# its own action.
 EXIT_USAGE = 2
 
-PRESENT_REFUSAL = "report.py: error: --present is not an option of this script, and nothing was run: name the files in the bash tool's `present` argument, beside `command`, and run the same command without --present.\n"
+PRESENT_REFUSAL = (
+    "report.py: error: --present is not an option of this script, and nothing was run. "
+    "Make the call again with both arguments: this command line without --present and the paths after it as `command`, "
+    "and the files it writes (the report, then each render) in the bash tool's `present` argument.\n"
+)
 
 
 def _misplaced_present(argv: list[str]) -> bool:

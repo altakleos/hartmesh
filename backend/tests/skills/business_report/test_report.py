@@ -15,6 +15,7 @@ import datetime as dt
 import importlib.util
 import json
 import re
+import shlex
 import sys
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
@@ -204,7 +205,7 @@ def test_profile_and_skill_doc_stay_in_lockstep_with_the_script(report) -> None:
     # mount point the package cannot know. A durable accepted invocation mounts
     # the snapshot and nothing else, so the absolute form this once pinned was
     # a path its reader did not have.
-    assert '"${SKILL_DIR:?set it to this skill\'s directory}/scripts/report.py"' in doc
+    assert '"${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py"' in doc
     assert "/mnt/skills" not in doc
     assert "`$SKILL_DIR` is this skill's own directory" in doc
     assert report.DEFAULT_REPORTS_DIR in doc
@@ -1804,12 +1805,22 @@ def test_present_on_a_build_command_line_is_refused_with_the_fix(report, tmp_pat
     assert not out_dir.exists(), "the run must not have happened"
 
 
+def _snapshot(directory: Path) -> dict[str, tuple[int, int]]:
+    return {path.relative_to(directory).as_posix(): (path.stat().st_mtime_ns, path.stat().st_size) for path in sorted(directory.rglob("*")) if path.is_file()}
+
+
 @pytest.mark.parametrize("placement", sorted(PRESENT_PLACEMENTS))
-def test_present_on_a_render_command_line_is_refused_with_the_fix(report, small_report, capsys, placement) -> None:
-    out_dir, _built = small_report
+def test_present_on_a_render_command_line_is_refused_with_the_fix(report, small_report, tmp_path, capsys, placement) -> None:
+    # A private copy: the module's report directory already holds renders from
+    # earlier tests, so a refusal that re-rendered first would leave its file
+    # names unchanged. Every file's mtime and size is what must not move.
+    import shutil
+
+    source, _built = small_report
+    out_dir = tmp_path / source.name
+    shutil.copytree(source, out_dir)
     path = _report_path(out_dir)
-    before = sorted(p.name for p in out_dir.iterdir())
-    stamp = path.stat().st_mtime_ns
+    before = _snapshot(out_dir)
     rest = [str(path), "--to", "pdf,docx,xlsx"]
 
     code, out, err = _run(report, capsys, *PRESENT_PLACEMENTS[placement]("render", rest, [str(path)]))
@@ -1817,17 +1828,32 @@ def test_present_on_a_render_command_line_is_refused_with_the_fix(report, small_
     assert code == 2
     _assert_present_refused(err)
     assert out == ""
-    assert sorted(p.name for p in out_dir.iterdir()) == before, "no render was written"
-    assert path.stat().st_mtime_ns == stamp, "the report was not re-saved"
+    assert _snapshot(out_dir) == before, "nothing was rendered or re-saved"
 
 
-def test_present_after_the_end_of_options_marker_is_a_file_name(report) -> None:
-    # After `--` every token is positional, so the refusal must not fire there;
-    # argparse then treats it as the file it is.
-    assert report._misplaced_present(["build", "--out", "x", "--", "--present"]) is False
-    assert report._misplaced_present(["build", "--out", "x", "--present"]) is True
-    # A value that merely contains the word is not the option.
-    assert report._misplaced_present(["build", "--title", "--presentation", "--out", "x"]) is False
+def test_the_refusal_reaches_the_command_line_the_model_actually_runs(report, tmp_path, monkeypatch, capsys) -> None:
+    """``python report.py …`` reaches ``main()`` with no argument list."""
+    out_dir = tmp_path / "2026-08-business-review"
+    monkeypatch.setattr(sys, "argv", ["report.py", "build", str(SMALL_CSV), "--out", str(out_dir), "--present", str(out_dir / "x.pdf")])
+
+    code = report.main()
+
+    assert code == 2
+    _assert_present_refused(capsys.readouterr().err)
+    assert not out_dir.exists()
+
+
+def test_present_after_the_end_of_options_marker_is_a_file_name(report, tmp_path, capsys) -> None:
+    # After `--` every word is positional, so the refusal must not fire there;
+    # argparse then treats it as the file it is, and the build says it cannot
+    # read it rather than naming the bash tool.
+    out_dir = tmp_path / "out"
+    code, _out, err = _run(report, capsys, "build", "--out", str(out_dir), "--", "--present")
+
+    assert code != 0
+    assert "bash tool" not in err
+    # A value that merely starts with the word is not the option.
+    assert report._misplaced_present(["build", "--title=--presentation", "--out", "x"]) is False
 
 
 def test_an_unrelated_unknown_option_keeps_argparses_refusal(report, tmp_path, capsys) -> None:
@@ -1850,15 +1876,41 @@ def test_the_doc_shows_present_beside_command_in_one_call(report) -> None:
     model. The example is the one tool call as it is made, so there is no join."""
     doc = SKILL_DOC.read_text(encoding="utf-8")
     calls = [json.loads(block) for block in re.findall(r"```json\n(\{.*?\})\n```", doc, flags=re.S)]
-    call = next(block for block in calls if "command" in block)
+    call = next((block for block in calls if "command" in block), None)
+    assert call is not None, "no example shows the bash call as one object"
 
     assert set(call) == {"command", "present"}
-    assert " build " in call["command"] and "--render pdf,docx,xlsx" in call["command"]
-    assert "--present" not in call["command"]
-    assert [Path(p).name for p in call["present"]] == [
-        "2026-08-business-review.report.json",
-        "2026-08-business-review.pdf",
-        "2026-08-business-review.docx",
-        "2026-08-business-review.xlsx",
-    ]
+    words = shlex.split(call["command"])
+    assert "build" in words and "--present" not in words
+    assert words[words.index("--render") + 1] == "pdf,docx,xlsx"
+    out_dir = Path(words[words.index("--out") + 1])
+    assert [Path(p).parent for p in call["present"]] == [out_dir] * 4, "present names what this --out writes"
+    assert [Path(p).name for p in call["present"]] == [f"{out_dir.name}.{ext}" for ext in ("report.json", "pdf", "docx", "xlsx")]
+    assert not re.search(r"```bash\n[^`]*report\.py\" build", doc), "the build example is shown once, as the call"
     assert "`--present`" in doc, "the doc names the mistake the script refuses"
+
+
+def test_a_sandbox_without_the_libraries_gets_exit_2_and_the_plain_message(tmp_path) -> None:
+    """Exit 2 is the contract for "this is not the image the skill is built for".
+
+    The fallback that prints it imported ``business_report_common`` for the
+    message, and that module imports pandas, so a sandbox without pandas got a
+    traceback and exit 1 -- "a problem the user must hear about", with nothing
+    a person could act on -- instead of the one line telling the model not to
+    install anything.
+    """
+    import subprocess
+
+    blocker = tmp_path / "sitecustomize.py"
+    blocker.write_text("import sys\nsys.modules['pandas'] = None\n", encoding="utf-8")
+    completed = subprocess.run(
+        [sys.executable, "-B", str(SCRIPT), "inspect", str(SMALL_CSV)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+        env={"PATH": "/usr/bin:/bin", "PYTHONPATH": str(tmp_path), "PYTHONDONTWRITEBYTECODE": "1"},
+    )
+
+    assert completed.returncode == 2, completed.stderr
+    assert "not the image this skill is built for" in completed.stderr
+    assert "Traceback" not in completed.stderr

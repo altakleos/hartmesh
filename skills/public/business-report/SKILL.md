@@ -12,12 +12,12 @@ One script turns an export into a report draft: `report.json` plus PNG charts, t
 **Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here.
 
 ```
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" inspect <files…>
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build   <files…> [--period 2026-08] --out REPORTDIR [--render pdf,docx,xlsx]
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" show    REPORTDIR/<dirname>.report.json
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" prose   REPORTDIR/<dirname>.report.json --from prose.json [--render pdf,docx,xlsx]
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" render  REPORTDIR/<dirname>.report.json --to pdf,docx,xlsx
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" checks  REPORTDIR/<dirname>.report.json <files…>
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" inspect <files…>
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" build   <files…> [--period 2026-08] --out REPORTDIR [--render pdf,docx,xlsx]
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" show    REPORTDIR/<dirname>.report.json
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" prose   REPORTDIR/<dirname>.report.json --from prose.json [--render pdf,docx,xlsx]
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" render  REPORTDIR/<dirname>.report.json --to pdf,docx,xlsx
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" checks  REPORTDIR/<dirname>.report.json <files…>
 ```
 
 **A whole report is one run** — `build … --render pdf,docx,xlsx` — and a
@@ -44,7 +44,7 @@ under `present` is delivered whether or not the user wants it. Never call
 shell variables the next command needs), and never write your own Python to
 find out what a run did — the run that made the draft already printed it.
 
-Exit codes: `0` done; `1` a problem the user must hear about (stderr says what), including a withheld report or a period with no rows; `2` this sandbox is not the image the skill is built for (do not install anything; tell the user), or a command line the script refused, which stderr names with its fix; `3` one decision is needed before building (stderr carries the question and the candidates).
+Exit codes: `0` done; `1` a problem the user must hear about (stderr says what), including a withheld report or a period with no rows; `2` a command line the script refused, when stderr names the mistake (correct it and run again; there is nothing to tell the user), otherwise this sandbox is not the image the skill is built for (do not install anything; tell the user); `3` one decision is needed before building (stderr carries the question and the candidates).
 
 ## Workflow
 
@@ -65,7 +65,7 @@ inside the command line (`report.py` refuses `--present`, runs nothing, and
 says so):
 
 ```json
-{"command": "python \"${SKILL_DIR:?set it to this skill's directory}/scripts/report.py\" build /mnt/user-data/uploads/export.xlsx --period 2026-08 --out /mnt/user-data/outputs/reports/2026-08-business-review --render pdf,docx,xlsx",
+{"command": "python \"${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py\" build /mnt/user-data/uploads/export.xlsx --period 2026-08 --out /mnt/user-data/outputs/reports/2026-08-business-review --render pdf,docx,xlsx",
  "present": [
   "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json",
   "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.pdf",
@@ -91,7 +91,7 @@ cat > /tmp/prose.json <<'JSON'
 {"summary": ["August was the strongest month since March: $52,310.40 across 178 jobs, 6.4% above July."],
  "actions": ["Collect the $4,120.00 still unpaid across 21 jobs.", "Book the two technicians below 20 jobs onto the September installs."]}
 JSON
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" prose /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json --from /tmp/prose.json --render pdf,docx,xlsx
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" prose /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json --from /tmp/prose.json --render pdf,docx,xlsx
 ```
 
 again with `present` naming the report and the three renders. That one run makes the next draft without recomputing anything, renders all three formats and prints the same figures-checks-inputs digest the build printed — summary and actions included, as the report now carries them. So there is nothing to look up afterwards and Step 3 is already done. Run `show` only for a report built in an earlier turn, whose figures are no longer in front of you. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
@@ -104,14 +104,14 @@ format, and re-saves the report beside them, so in a later turn the report
 and its new renders are named together under `present`.
 
 ```bash
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" render <report.json> --to pdf,docx,xlsx
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" render <report.json> --to pdf,docx,xlsx
 ```
 
 Renders land next to the report as `<name>.pdf`, `.docx` and `.xlsx`; `--to html` also works but HTML is the sheet the PDF is printed from, not a format the user is offered. Rendering reads only `report.json` and the pictures inside the report directory (and the tenant bundle); it never rebuilds. The DOCX has real headings and tables so the user can edit it; the XLSX has a Summary sheet whose revenue, count and average are live formulas over the Rows sheet, one sheet per table with live `SUM` totals and a live ratio for average columns, and the cleaned rows.
 
 ### Step 4: Answer
 
-The files you named under `present` are already with the user: the tool result names them under "Presented to the user". Do not call `present_files` for those and do not run `ls` to check they exist. A `Not attached:` line from the tool names a file it did not deliver and why (it does not exist, or this run did not write it) — if the run printed an error, say what it printed and do not claim a delivery; a `Note:` line from the script names a file that sits beside the report but was not written by it. A result with no "Presented to the user" line handed nothing over. In the web workspace the `<name>.report.json` is drawn as the report itself — the figures, the charts, the checks line and a download button for the PDF, Word and Excel renders listed with it; on a chat platform it is simply one more file. Show the KPI strip, the checks line and any `Not included` items in your reply. Say which file the report used and when it was uploaded (the `Inputs:` line of the digest `build`, `prose` and `show` print). Then ask one short question about what to change, for example whether any rows should be excluded or a note added.
+The files you named under `present` are already with the user: the tool result names them under "Presented to the user". Do not call `present_files` for those and do not run `ls` to check they exist. A `Not attached:` line from the tool names a file it did not deliver and why (it does not exist, or this run did not write it) — if the run printed an error, say what it printed and do not claim a delivery; a `Note:` line from the script names a file that sits beside the report but was not written by it. A result with no "Presented to the user" line handed nothing over: hand over the report and the renders the run printed in one `present_files` call, without listing the directory first. In the web workspace the `<name>.report.json` is drawn as the report itself — the figures, the charts, the checks line and a download button for the PDF, Word and Excel renders listed with it; on a chat platform it is simply one more file. Show the KPI strip, the checks line and any `Not included` items in your reply. Say which file the report used and when it was uploaded (the `Inputs:` line of the digest `build`, `prose` and `show` print). Then ask one short question about what to change, for example whether any rows should be excluded or a note added.
 
 ## Changing a report
 
@@ -155,7 +155,7 @@ Every check is labelled "checked by the report script"; that is what it is.
 everything it returns about a file that builds is in what the build prints.
 
 ```bash
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" inspect /mnt/user-data/uploads/export.xlsx
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" inspect /mnt/user-data/uploads/export.xlsx
 ```
 
 Per file and sheet it gives the columns with their type and samples, the suggested roles with a confidence, `ambiguous` roles with their candidates, `missing` required roles, the months present, a `period_suggestion` (the busiest month), `date_order`, a `currency` guess and a ready-made `question` covering every open role at once. When `question` is set, ask exactly that, once, even when it names two roles; put every answer in one mapping file, `{"date": "Completed On", "amount": "Invoice Total"}`, and pass `--mapping` to the build. A column you name explicitly displaces any role the script guessed for it; `{"id": null}` clears a role. A workbook sheet is addressed as `export.xlsx::Sheet name`, never by sheet name alone.
