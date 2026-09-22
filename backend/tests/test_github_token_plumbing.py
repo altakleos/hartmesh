@@ -18,6 +18,7 @@ concurrent runs on different repos from clobbering each other's token.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -30,6 +31,7 @@ from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.channels.store import ChannelStore
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV
 from deerflow.sandbox.tools import _github_env_from_runtime, bash_tool
 
 
@@ -121,11 +123,20 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
     sbx._DEFAULT_HARD_TIMEOUT = 30
     sbx._bash_exec_unsupported = False
+    sbx._abort_lock = __import__("threading").Lock()
+    sbx._inflight_commands = {}
+    sbx._next_command_seq = 0
+    sbx._aborted_calls = {}
 
     out = sbx.execute_command("gh pr create", env={"GH_TOKEN": "tok-123"})
 
     assert out == "ok"
     assert captured["command"] == "gh pr create"
+    # The abort marker rides the structured env beside the secret, so a
+    # cancelled call can find and kill this command's processes. Its value is
+    # fresh per command, so assert the shape and the rest exactly.
+    marker = captured["env"].pop(ABORT_TOKEN_ENV, None)
+    assert marker and marker.startswith("df-")
     assert captured["env"] == {"GH_TOKEN": "tok-123"}
 
 
@@ -151,10 +162,15 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
     sbx._recovery_session_id = None
     sbx._default_shell_corrupted = False
+    sbx._abort_lock = __import__("threading").Lock()
+    sbx._inflight_commands = {}
+    sbx._next_command_seq = 0
+    sbx._aborted_calls = {}
 
     sbx.execute_command("echo hello")
 
-    assert captured["command"] == "echo hello"
+    # Prefixed with this command's abort marker and otherwise untouched.
+    assert re.fullmatch(rf"export {ABORT_TOKEN_ENV}=df-[0-9a-f]{{32}}; echo hello", captured["command"]), captured["command"]
 
 
 # ---------------------------------------------------------------------------

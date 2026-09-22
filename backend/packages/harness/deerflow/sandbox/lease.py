@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.sandbox import SANDBOX_COMMAND_CALL
 
 if TYPE_CHECKING:
     from deerflow.sandbox.sandbox_provider import SandboxProvider
@@ -72,6 +73,67 @@ async def run_sync_lifecycle_operation[T](func: Callable[..., T], /, *args: Any,
                 exc_info=True,
             )
         raise cancellation
+
+
+async def run_sync_sandbox_command[T](sandbox: object, func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """Run a blocking sandbox tool body, and stop its command if the call is cancelled.
+
+    ``run_sync_lifecycle_operation`` guarantees the worker thread has finished
+    before the fence around it is released, which is what keeps sandbox cleanup
+    correct. On its own, though, that guarantee means a cancelled run waits for
+    whatever the command was doing: on a deployment an operator turned an
+    account off while its ``sleep 541`` was running, and the sandbox process and
+    the stream ran on for another 537 s after the refusal was recorded.
+
+    So cancellation is delivered to the command first. The abort runs off the
+    event loop -- it makes network calls, and the accepted session refuses a
+    synchronous call made on its owner loop -- and every request it makes is
+    bounded by the sandbox implementation, so a container that stops answering
+    leaves the command's own timeout as the fallback rather than a second hang.
+    The drain then returns as soon as the command dies.
+    """
+    call_id = uuid.uuid4().hex
+    # Set before the task is created: a Task captures the current context, and
+    # ``asyncio.to_thread`` copies it again for the worker, so the command the
+    # tool body starts is attributable to this call and only this one.
+    call_token = SANDBOX_COMMAND_CALL.set(call_id)
+    try:
+        operation_task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    finally:
+        SANDBOX_COMMAND_CALL.reset(call_token)
+    try:
+        return await asyncio.shield(operation_task)
+    except asyncio.CancelledError as cancellation:
+        await _abort_sandbox_commands(sandbox, call_id)
+        try:
+            await _drain_task_after_cancellation(operation_task)
+        except Exception:
+            logger.warning(
+                "Cancelled sandbox command failed while draining",
+                exc_info=True,
+            )
+        raise cancellation
+
+
+async def _abort_sandbox_commands(sandbox: object, call_id: str) -> None:
+    """Ask one sandbox to kill what this call is running, tolerating a provider that cannot.
+
+    Scoped to the call, never to the sandbox: the lead agent and its subagents
+    share one container, and a subagent's own timeout arrives here exactly like
+    a person's Stop. The hook is additive, so a custom provider loaded by class
+    path that does not implement it keeps the previous behaviour rather than
+    failing a cancellation.
+    """
+    abort = getattr(sandbox, "abort_running_commands", None)
+    if not callable(abort):
+        return
+    try:
+        await _drain_task_after_cancellation(asyncio.create_task(asyncio.to_thread(abort, call_id)))
+    except Exception:
+        logger.warning(
+            "Failed to abort sandbox commands for a cancelled call; its command may run to its own timeout",
+            exc_info=True,
+        )
 
 
 @dataclass(slots=True)

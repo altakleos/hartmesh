@@ -34,6 +34,7 @@ SAMPLE_CALLS: dict[str, tuple[tuple[object, ...], dict[str, object]]] = {
     "execute_command": (("echo hi",), {"timeout": 3.0}),
     "execute_command_in_scope": (("echo hi",), {"scope_id": "scope-1"}),
     "release_command_scope": (("scope-1",), {}),
+    "abort_running_commands": ((), {"call_id": "call-1"}),
     "read_file": (("/f",), {"start_line": 1}),
     "download_file": (("/f",), {}),
     "list_dir": (("/d",), {"max_depth": 3}),
@@ -122,6 +123,7 @@ def test_operation_kind_enum_is_generated_from_the_declarations():
         ("update_file", ("/f", b"bytes"), {}),
         ("execute_command_in_scope", ("ls",), {"env": None, "timeout": None, "scope_id": None}),
         ("release_command_scope", ("scope-1",), {}),
+        ("abort_running_commands", (), {"call_id": None}),
     ],
 )
 def test_generated_envelope_constructors_keep_the_historical_argument_split(name, expected_args, expected_kwargs):

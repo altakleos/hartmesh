@@ -67,6 +67,12 @@ _MAX_POST_COMMIT_OBLIGATION_COUNT = 2_147_483_647
 ORPHAN_RECOVERY_STOP_REASON = "orphan_recovered"
 STARTUP_ORPHAN_RECOVERY_ERROR = "Gateway restarted before this run reached a durable final state."
 LEASE_ORPHAN_RECOVERY_ERROR = "Run lease expired — owning worker is unreachable."
+
+#: How often a worker with no lease heartbeat looks for a cancellation another
+#: process wrote. It sets the floor on how long the deployer's ``accounts
+#: disable`` waits before it can confirm a run stopped, so it is short; a tick
+#: costs one query, and only while this process owns an active run.
+OUT_OF_BAND_CANCELLATION_POLL_SECONDS = 5.0
 ASSEMBLY_EVIDENCE_UNAVAILABLE_ERROR = "Agent assembly evidence is unavailable"
 ASSEMBLY_EVIDENCE_UNAVAILABLE_STOP_REASON = "assembly_evidence_unavailable"
 TENANT_IDENTITY_MISMATCH_ERROR = "Persisted run tenant does not match this Gateway process identity."
@@ -521,6 +527,11 @@ class RunManager:
         self._tenant = tenant
         self._heartbeat_task: asyncio.Task | None = None
         self._heartbeat_stop: asyncio.Event | None = None
+        # Observes cancellations written by another process where no lease
+        # heartbeat does (see ``start_cancellation_watch``).
+        self._cancellation_watch_task: asyncio.Task | None = None
+        self._cancellation_watch_stop: asyncio.Event | None = None
+        self.out_of_band_cancellation_poll_seconds: float = OUT_OF_BAND_CANCELLATION_POLL_SECONDS
         # Database-clock lease timestamps are durable evidence, not a safe
         # scheduling clock for this process.  Each locally owned capability is
         # therefore paired with a conservative monotonic watchdog.  Timer
@@ -6235,6 +6246,91 @@ class RunManager:
             task_to_cancel.cancel()
         logger.error("Run %s lost lease ownership; local execution was fenced: %s", record.run_id, reason)
         return True
+
+    async def start_cancellation_watch(self) -> None:
+        """Observe cancellations this process did not make, where nothing else does.
+
+        ``accounts disable`` is a separate process inside the deployment: it
+        holds the database and no run manager, so the only cancellation it can
+        make is the durable request on the row, which the owning worker is
+        meant to apply. With the lease heartbeat on, ``_renew_leases`` already
+        reads ``cancel_action`` on every renewal and this watch stays off, so
+        one row never has two observers. With it off -- the single-Gateway
+        deployment a tenant runs -- nothing read the column at all and the
+        request sat there until the run ended by itself.
+
+        A tick costs one query, and only while this process actually owns an
+        active run: an idle Gateway asks the database nothing.
+
+        No-op unless the store records cancellations durably.
+        """
+        if self._store is None or not self._store.durable_lifecycle or self.heartbeat_enabled:
+            return
+        if self._cancellation_watch_task is not None and not self._cancellation_watch_task.done():
+            return
+        self._cancellation_watch_stop = asyncio.Event()
+        task = asyncio.create_task(self._cancellation_watch_loop())
+        task.set_name("deerflow-out-of-band-cancellation-watch")
+        self._cancellation_watch_task = task
+        logger.info("Out-of-band cancellation watch started for worker %s", self._worker_id)
+
+    async def stop_cancellation_watch(self, *, timeout: float = 5.0) -> None:
+        """Stop the cancellation watch within ``timeout`` seconds."""
+        if self._cancellation_watch_stop is not None:
+            self._cancellation_watch_stop.set()
+        if self._cancellation_watch_task is not None and not self._cancellation_watch_task.done():
+            _, pending = await asyncio.wait(
+                (self._cancellation_watch_task,),
+                timeout=max(0.0, timeout),
+            )
+            if pending:
+                self._cancellation_watch_task.cancel()
+                try:
+                    await self._cancellation_watch_task
+                except asyncio.CancelledError:
+                    pass
+        self._cancellation_watch_task = None
+        self._cancellation_watch_stop = None
+
+    async def _cancellation_watch_loop(self) -> None:
+        """Poll for out-of-band cancellations until stopped.
+
+        Guarded like the heartbeat is: a tick that raises must not take the
+        task down, because a dead watch silently stops honouring every later
+        cancellation -- exactly the failure this exists to remove.
+        """
+        stop = self._cancellation_watch_stop
+        if stop is None:
+            return
+        while not stop.is_set():
+            try:
+                await asyncio.wait_for(stop.wait(), timeout=max(0.01, self.out_of_band_cancellation_poll_seconds))
+                break
+            except TimeoutError:
+                pass
+            try:
+                await self._apply_out_of_band_cancellations()
+            except Exception:
+                logger.warning("Out-of-band cancellation watch cycle failed", exc_info=True)
+
+    async def _apply_out_of_band_cancellations(self) -> None:
+        """Signal every locally owned run whose row carries a cancellation request."""
+        if self._store is None:
+            return
+        async with self._lock:
+            watched = {run_id for run_id, record in self._runs.items() if record.status in (RunStatus.pending, RunStatus.running) and not record.abort_event.is_set()}
+        if not watched:
+            return
+        rows = await self._store.list_inflight()
+        for row in rows:
+            run_id = row.get("run_id")
+            if run_id not in watched:
+                continue
+            action = row.get("cancel_action")
+            if action not in ("interrupt", "rollback"):
+                continue
+            logger.info("Run %s carries a cancellation requested outside this process (action=%s)", run_id, action)
+            await self._signal_local_cancel(run_id, action=action)
 
     async def start_heartbeat(self) -> None:
         """Start the background lease-renewal task.

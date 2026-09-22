@@ -1,10 +1,27 @@
 """Tests for AioSandbox concurrent command serialization (#1433)."""
 
+import re
 import threading
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+
+from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV
+
+_ABORT_MARKER_RE = re.compile(rf"^export {ABORT_TOKEN_ENV}=df-[0-9a-f]{{32}}; ")
+
+
+def _without_abort_marker(command: str) -> str:
+    """Strip one command's abort marker, asserting it was the expected shape.
+
+    Every command carries a marker whose value is fresh per call, so it cannot
+    be compared literally -- but everything else about the command can be, and
+    a command with no marker cannot be aborted at all.
+    """
+    stripped, substitutions = _ABORT_MARKER_RE.subn("", command, count=1)
+    assert substitutions == 1, f"command is not markable for abort: {command!r}"
+    return stripped
 
 
 class _TeardownFirstScopeLock:
@@ -341,7 +358,10 @@ class TestScopedShellSessions:
         for thread in threads:
             thread.join()
 
-        assert sorted(outputs) == ["subagent-a", "subagent-b"]
+        # Each command is prefixed with its own abort marker; strip exactly
+        # that prefix rather than everything before the last "; ", so a
+        # regression that prepends anything else is still visible.
+        assert sorted(_without_abort_marker(output) for output in outputs) == ["subagent-a", "subagent-b"]
         assert max_active == 2
         assert len(set(session_ids)) == 2
 
@@ -447,7 +467,7 @@ class TestScopedShellSessions:
         assert not teardown_thread.is_alive()
         assert queued_results == ["Error: sandbox command scope is no longer active"]
         assert len(created_ids) == 1
-        assert executed_commands == ["initial"]
+        assert [_without_abort_marker(command) for command in executed_commands] == ["initial"]
         assert cleaned_ids == created_ids
 
     def test_queued_command_cannot_restart_session_while_sandbox_closes(self, sandbox):
@@ -483,7 +503,7 @@ class TestScopedShellSessions:
         assert not teardown_thread.is_alive()
         assert queued_results == ["Error: sandbox command scope is no longer active"]
         assert len(created_ids) == 1
-        assert executed_commands == ["initial"]
+        assert [_without_abort_marker(command) for command in executed_commands] == ["initial"]
         assert cleaned_ids == created_ids
 
     def test_env_command_keeps_fresh_bash_exec_semantics(self, sandbox):

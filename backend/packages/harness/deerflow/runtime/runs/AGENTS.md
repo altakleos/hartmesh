@@ -4,6 +4,69 @@ Scoped guide for `runtime/runs/` — the run manager, the worker, the run and
 event stores, and the delivery verdict they commit. Split out of
 [`../AGENTS.md`](../AGENTS.md), which owns the rest of the runtime.
 
+### Cancellations written by another process (`runs/manager.py`)
+
+`RunManager.cancel` is the in-process path. A cancellation from outside the
+process -- the deployer's `python -m app.gateway.auth.accounts disable`, which
+holds the database and no run manager -- is a durable request on the row
+(`request_cancel_compat`), and the worker that owns the run has to observe it.
+
+With `run_ownership.heartbeat_enabled`, `_renew_leases` already reads
+`cancel_action` on every renewal. Without it -- the single-Gateway deployment a
+tenant runs -- nothing read the column at all and the request sat there until
+the run ended by itself. `start_cancellation_watch` / `stop_cancellation_watch`
+fill exactly that gap and are a no-op wherever the heartbeat runs, so one row
+never has two observers. A tick costs one `list_inflight` query, and only while
+this process owns an active run, so an idle Gateway asks the database nothing;
+the interval is `OUT_OF_BAND_CANCELLATION_POLL_SECONDS` and sets the floor on
+how fast the deployer's command can confirm a run stopped. Both paths end in
+`_signal_local_cancel`, so the worker's own abort and terminal handling are
+unchanged. The Gateway starts and stops the watch alongside the heartbeat in
+`app/gateway/deps.py`.
+
+### Cancellation reaches the command (`sandbox/lease.py` + `sandbox/sandbox.py`)
+
+`asyncio.to_thread` cannot interrupt the worker blocked on a sandbox command,
+and `run_sync_lifecycle_operation` waits for that worker by design, so a
+cancelled run used to wait out whatever the command was doing -- measured on a
+deployment: a `sleep 541` and its stream ran on for 537 s after the account was
+turned off. Sandbox tool bodies now run through `run_sync_sandbox_command`,
+which calls `Sandbox.abort_running_commands(call_id)` before that drain: the
+drain still guarantees the worker thread has finished, but the thread returns
+because its command is dead rather than because the command ran out its own
+budget. The abort runs off the event loop -- an accepted session refuses a
+synchronous call on its owner loop, and the call makes network requests.
+
+The scope is the cancelled **call**, carried from the wrapper into the worker
+thread in `SANDBOX_COMMAND_CALL` (a context variable, which `to_thread` copies).
+One sandbox serves the lead agent and all its subagents, so a sandbox-wide abort
+would make a subagent's own timeout kill its siblings' commands and a person's
+Stop kill the server they backgrounded three turns ago; cancelling a run cancels
+every tool call it has open, so a run still stops all of its own work. `None`
+means every command in the sandbox.
+
+Each command carries its own `ABORT_TOKEN_ENV` value, which a child inherits
+even after `setsid` takes it out of the shell's process group. `LocalSandbox`
+kills each tracked process group and then sweeps `/proc` for that call's tokens,
+skipping its own pid. `AioSandbox` calls `shell.kill_process` on each session
+running one of them and runs the same sweep in the container on a fresh session;
+every abort request carries `_ABORT_REQUEST_TIMEOUT_SECONDS` rather than the
+client's 600 s command budget, because the drain behind it cannot be
+interrupted. Every path that executes a command counts it, `bash.exec` included
+-- an uncounted command is one the abort reports nothing for and never reaches,
+which is every skill carrying a request-scoped secret -- and a command whose
+call was aborted is never rotated-and-retried, or the work just ended would
+start again. A provider that cannot reach its commands returns 0 and keeps the
+previous behaviour, so the kill is an attempt; only the run's cancellation is a
+guarantee. The verb is declared in `sandbox/operations.py` like every other, so
+the accepted facade fences it.
+
+A run whose row carries a cancellation is never resumed by an execution
+takeover: `GatewayExecutionRecoveryCoordinator` refuses with
+`recovery_takeover_cancelled` at both its attachment and safe-point checks, and
+the manager detaches the takeover without executing anything, so no effect is
+replayed and no cancelled tool attempt is reattached.
+
 ### Run Delivery Receipts (`runtime/journal.py` + `runs/worker.py`)
 
 `RunJournal` records each non-empty artifact update once per tool `Command` for

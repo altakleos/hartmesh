@@ -235,6 +235,15 @@ class GatewayExecutionRecoveryCoordinator:
             or row.get("assembly_evidence_digest") != record.assembly_evidence_digest
         ):
             raise ValueError("recovery_takeover_lost")
+        if row.get("cancel_action") is not None:
+            # Someone asked for this run to stop -- a person cancelling their
+            # own run, or the deployer turning the account off -- and the
+            # worker that owned it died before it could. Resuming would replay
+            # the effects the cancellation was meant to end, and reattaching an
+            # open receipt would retry the very tool call being cancelled. The
+            # manager detaches this takeover without executing anything; the
+            # cancellation stays on the row for whoever applies it.
+            raise ValueError("recovery_takeover_cancelled")
         authorizer = getattr(
             self._run_store,
             "execution_owner_authorized",

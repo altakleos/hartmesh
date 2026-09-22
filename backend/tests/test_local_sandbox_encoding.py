@@ -7,12 +7,27 @@ import pytest
 
 import deerflow.sandbox.local.local_sandbox as local_sandbox
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping, _BoundedPipeCapture
+from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV
 
 
 def _open(base, file, mode="r", *args, **kwargs):
     if "b" in mode:
         return base(file, mode, *args, **kwargs)
     return base(file, mode, *args, encoding=kwargs.pop("encoding", "gbk"), **kwargs)
+
+
+def _record_without_abort_token(calls: list, args, timeout, env):
+    """Record one runner call, holding the per-sandbox abort marker aside.
+
+    Every command carries ``ABORT_TOKEN_ENV`` so a cancelled run can find and
+    kill its processes; its value is a fresh id per sandbox and cannot be
+    asserted literally. Checking it is present here and comparing the rest
+    keeps these environment assertions about what they are about.
+    """
+    recorded = dict(env) if env is not None else None
+    if recorded is not None:
+        assert recorded.pop(ABORT_TOKEN_ENV, None), "every command must be markable for abort"
+    calls.append((args, timeout, recorded))
 
 
 def test_bounded_pipe_capture_decodes_non_utf8_output_with_configured_encoding():
@@ -184,7 +199,7 @@ def test_execute_command_uses_powershell_command_mode_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
     def fake_run(args, timeout, env):
-        calls.append((args, timeout, env))
+        _record_without_abort_token(calls, args, timeout, env)
         return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -216,7 +231,7 @@ def test_execute_command_keeps_msys_path_conversion_for_host_commands_on_windows
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
     def fake_run(args, timeout, env):
-        calls.append((args, timeout, env))
+        _record_without_abort_token(calls, args, timeout, env)
         return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -244,7 +259,7 @@ def test_execute_command_scopes_msys_path_conversion_exclusions_on_windows(monke
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
     def fake_run(args, timeout, env):
-        calls.append((args, timeout, env))
+        _record_without_abort_token(calls, args, timeout, env)
         return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -266,7 +281,7 @@ def test_execute_command_ignores_root_msys_mapping_for_host_commands_on_windows(
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
     def fake_run(args, timeout, env):
-        calls.append((args, timeout, env))
+        _record_without_abort_token(calls, args, timeout, env)
         return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -299,7 +314,7 @@ def test_execute_command_does_not_set_msys_env_for_non_msys_posix_shell_on_windo
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
     def fake_run(args, timeout, env):
-        calls.append((args, timeout, env))
+        _record_without_abort_token(calls, args, timeout, env)
         return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")
@@ -320,7 +335,7 @@ def test_execute_command_uses_cmd_command_mode_on_windows(monkeypatch):
     calls: list[tuple[list[str], float, dict[str, str]]] = []
 
     def fake_run(args, timeout, env):
-        calls.append((args, timeout, env))
+        _record_without_abort_token(calls, args, timeout, env)
         return "ok", "", 0, False
 
     monkeypatch.setattr(local_sandbox.os, "name", "nt")

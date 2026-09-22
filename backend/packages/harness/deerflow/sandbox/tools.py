@@ -50,7 +50,7 @@ from deerflow.sandbox.exceptions import (
 from deerflow.sandbox.file_operation_lock import get_file_operation_lock
 from deerflow.sandbox.lease import (
     get_sandbox_lease_manager,
-    run_sync_lifecycle_operation,
+    run_sync_sandbox_command,
     sandbox_command_scope,
     sandbox_lease_owner,
 )
@@ -1961,12 +1961,14 @@ async def _run_sync_tool_after_async_sandbox_init(
     """Initialize lazily via async provider, then run sync tool body off-thread."""
     try:
         async with sandbox_authorization_scope_async(runtime):
-            await ensure_sandbox_initialized_async(runtime)
+            sandbox = await ensure_sandbox_initialized_async(runtime)
 
             if func is None:
                 return "Error: Tool implementation not available"
 
-            return await run_sync_lifecycle_operation(func, runtime, *args)
+            # Cancelling this call must stop the command the sandbox is
+            # running, not just stop waiting for it.
+            return await run_sync_sandbox_command(sandbox, func, runtime, *args)
     except _RAISED_PAST_THE_TOOL_BOUNDARY:
         raise
     except SandboxError as e:

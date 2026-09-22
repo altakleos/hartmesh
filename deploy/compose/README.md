@@ -376,7 +376,7 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   sh -c 'cd /app/backend && PYTHONPATH=. uv run --no-sync python -m app.gateway.auth.accounts list'
 # … disable       --issuer https://login.example.com --subject 3141592
 # … enable        --issuer https://login.example.com --subject 3141592
-# … end-sessions  --issuer https://login.example.com --subject 3141592
+# … end-sessions  --issuer https://login.example.com --subject 3141592 [--end-running-work]
 # … release-email --issuer https://login.example.com --subject 3141592
 # … disable       --email pat@example.com
 ```
@@ -392,14 +392,35 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   scheduler records as a failed occurrence naming the refusal, so no run
   starts. A sign-in is refused even when the claim admits, with "Your
   access to this workspace has been turned off. Ask your administrator."
-  (`sso_access_off`) and a journal line naming issuer and subject. **A run
-  already executing is not interrupted**: the command is a database write
-  the Gateway reads at its next credential resolution or launch, so a run in
-  flight finishes under its own budget and the stream carrying it ends when
-  the run does; nothing new starts. The output says what was done
-  (`sessions_ended`, `tokens_revoked`, `schedules_held` -- the account's
-  active schedules, each of which is refused while the account is off and
-  resumes untouched when it is on again).
+  (`sso_access_off`) and a journal line naming issuer and subject. It also
+  **ends the running work of every account the refusal covers** (a subject
+  with an account under each configured provider is refused on both, and both
+  have their runs ended): each run is cancelled the way the person's own
+  cancel would be, the Gateway that owns it applies that, and the command
+  waits for each run to reach a terminal status before it answers. What is
+  *guaranteed* is that the run is cancelled, its stream ends, and no new run
+  starts. Cancelling a run also **attempts** to kill the sandbox command it
+  has in flight, along with the children and detached processes that command
+  started; that reach depends on the sandbox provider, is best-effort on the
+  remote one, and a provider that cannot reach its commands leaves them to
+  their own timeout. The output says what was done (`sessions_ended`,
+  `tokens_revoked`, `schedules_held` -- the account's active schedules, each
+  of which is refused while the account is off and resumes untouched when it
+  is on again -- plus `runs_found`, `runs_cancelled`, `runs_finished_first`
+  and `runs_unconfirmed`).
+- Exit statuses: **0** done; **1** the command refused and changed nothing
+  (the document carries `error`); **2** it did what was asked but a run named
+  in `runs_unconfirmed` had not reached a terminal status when the wait ran
+  out. **2 is not "nothing happened"** -- the refusal is recorded, the
+  sessions are ended and the tokens are revoked either way, and nothing new
+  starts. A run can be unconfirmed because it is still unwinding or because
+  the Gateway is not answering, and the command cannot tell those apart from
+  the database, so it does not guess: re-run it to see whether the run has
+  since stopped, and only investigate the Gateway if it stays unconfirmed.
+  `--wait-seconds` moves the bound (default 120). Ids under
+  `runs_finished_first` are runs that completed on their own before the
+  cancellation reached them -- they stopped, but their results were
+  delivered.
 - `disable` for a subject that **has no account yet** records the refusal
   anyway and says so (`"account": null`); a person removed before their
   first sign-in cannot create an account later. The row survives a restart
@@ -409,7 +430,10 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
 - `end-sessions` signs one account out everywhere without turning it off and
   without touching its tokens: every open session is refused at its next
   request and the next sign-in re-reads the claim. This is how a demotion
-  takes effect at once.
+  takes effect at once. A run already executing keeps going, because
+  demoting someone is not removing them and their work is still theirs;
+  `--end-running-work` cancels it too, reporting the same run counts
+  `disable` does.
 - `release-email` gives up the address of an account that is **turned off**,
   so a person may hold it again. `users.email` is unique, so one address
   belongs to one account for good -- right while the account is someone's,

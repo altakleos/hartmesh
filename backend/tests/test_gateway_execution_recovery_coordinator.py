@@ -528,3 +528,46 @@ def test_exact_two_takeover_eligibility_rejects_unmaterialized_nonempty_skills()
     )
 
     assert gateway_deps._exact_two_execution_takeover_eligible(record) is False
+
+
+@pytest.mark.anyio
+async def test_a_run_asked_to_stop_is_not_taken_over() -> None:
+    """A cancelled run must not be resumed, and its tool attempt must not be retried.
+
+    The owner died between the cancellation request and applying it. Resuming
+    would replay exactly the effects the cancellation exists to end -- the case
+    the deployer's ``accounts disable`` cares about, where the person is gone
+    and their work must be too.
+    """
+    record = _record()
+    store = _RunStore(record)
+    store.row["cancel_action"] = "interrupt"
+    launched: list[object] = []
+
+    coordinator = GatewayExecutionRecoveryCoordinator(
+        run_store=store,
+        event_store=MemoryRunEventStore(),
+        checkpointer=_Checkpointer("previous-run-head"),
+        worker_launcher=lambda claimed, gate: launched.append(claimed),
+    )
+
+    with pytest.raises(ValueError, match="recovery_takeover_cancelled"):
+        await coordinator.recover(record)
+    assert launched == [], "no worker may be attached to a run that was asked to stop"
+
+
+@pytest.mark.anyio
+async def test_a_cancellation_that_lands_mid_recovery_stops_the_safe_point_decision() -> None:
+    """The row is re-read at the decision; a cancellation that arrived meanwhile wins."""
+    record = _record()
+    store = _RunStore(record)
+    coordinator = GatewayExecutionRecoveryCoordinator(
+        run_store=store,
+        event_store=MemoryRunEventStore(),
+        checkpointer=_Checkpointer("previous-run-head"),
+        worker_launcher=AsyncMock(),
+    )
+    store.row["cancel_action"] = "rollback"
+
+    with pytest.raises(ValueError, match="recovery_takeover_cancelled"):
+        await coordinator.decide(record, SimpleNamespace(effective_policies={}))
