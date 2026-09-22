@@ -40,7 +40,7 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.tool_result_meta import normalize_tool_result, stamp_exception_meta
-from deerflow.sandbox.exceptions import SandboxAuthorizationError
+from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxCapacityExceededError
 from deerflow.sandbox.tools import (
     read_current_file_content,
     sandbox_authorization_scope,
@@ -230,6 +230,17 @@ class ReadBeforeWriteMiddleware(AgentMiddleware):
             return None
         except SandboxAuthorizationError:
             raise
+        except SandboxCapacityExceededError:
+            # Not a gate failure, and not one to re-raise: this middleware
+            # composes *outer* of ToolErrorHandlingMiddleware, the only layer
+            # that turns an exception into a result, so raising here escapes
+            # it and kills the run. Letting it through costs nothing -- the
+            # tool body one frame lower asks for the same sandbox and refuses
+            # with the same error, inside that layer, where the run survives
+            # and the model is told to wait rather than retry. Logged at debug
+            # because the fail-open warning below reads like a gate defect.
+            logger.debug("read-before-write gate could not inspect %r: the deployment has no sandbox capacity", path)
+            return None
         except Exception:
             logger.warning("read-before-write gate could not inspect %r; allowing the write (fail-open)", path, exc_info=True)
             return None

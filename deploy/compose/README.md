@@ -82,6 +82,7 @@ get explicit `environment:` entries and never see a provider key.
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
 | `SANDBOX_READY_TIMEOUT` | The cold-start readiness budget, `sandbox.ready_timeout` in the rendered `config.yaml`: whole seconds from 60 to 600. Absent -- which is what every existing tenant `.env` is -- the template's 120 applies. Anything else (zero, a negative or fractional number, text, a value outside the range) refuses to render and the Gateway does not start, so no value can turn the deadline off (§ "Sandbox readiness budget"). |
+| `SANDBOX_CAPACITY_WAIT_TIMEOUT` | How long an acquisition waits for one of the two sandbox slots when both are in active use and nothing is parked to evict, `sandbox.capacity_wait_timeout` in the rendered `config.yaml`: whole seconds from 0 to 60, where 0 refuses at once. Absent, the template's 5 applies. Anything else refuses to render, so no value makes the wait unbounded (§ "Memory budget"). |
 | `HARTMESH_SIGN_ON_ADMINS` | Sign-on only. Comma-separated email addresses that become the provider's `admin_emails`: an address on it is created as `admin` at its first sign-in, every other address as `user`. Absent, the deployment has **no administrator** (§ "Sign-in"). |
 | `HARTMESH_SIGN_ON_SCOPES` | Sign-on only. Extra scopes to request, separated by spaces or commas, appended to the default `openid email profile`; some providers emit a claim only when its scope is asked for. Absent, the default three. |
 | `HARTMESH_SIGN_ON_CLIENT_AUTH` | Sign-on only. How the Gateway authenticates at the token endpoint: `client_secret_post` (absent) or `client_secret_basic`. The deployer registers the client to match. |
@@ -101,7 +102,8 @@ creating an empty directory in its place.
 They reach the stack by different routes, on purpose. Both `HARTMESH_APP_SUBNET`
 uses are the same `${HARTMESH_APP_SUBNET:-...}` reference, so an override
 cannot move the network without moving the Gateway's trust with it.
-`HARTMESH_MODELS_FILE`, `SANDBOX_READY_TIMEOUT`, the sign-in keys and the
+`HARTMESH_MODELS_FILE`, `SANDBOX_READY_TIMEOUT`,
+`SANDBOX_CAPACITY_WAIT_TIMEOUT`, the sign-in keys and the
 `HARTMESH_SIGN_ON_*` options are not interpolated by `compose.yaml` at all:
 they reach the Gateway through `env_file` and are read inside the container by
 `gateway/render_config.py`, so leaving one unset is simply an unset variable
@@ -1496,19 +1498,38 @@ the next increase to any limit in `compose.yaml` has to be paid for by a
 decrease somewhere else in it; `backend/tests/test_compose_profile.py`
 asserts the equality, not just the bound.
 
-`replicas` is a soft maximum with **LRU eviction of warm sandboxes**: a third
-acquisition does not fail, it evicts the least-recently-used sandbox that no
-thread is using, which is what keeps the count at two and the budget true
-while at least one slot is idle. With both in active use the provider logs a
-soft-cap breach and creates a third anyway, and neither the provider nor the
-kernel refuses a fourth: the limits are ceilings, not reservations. That
-third one (1024 + 96 MiB of limit) already exceeds the 1024 MiB the line
-leaves unallocated, so three concurrently active people put 6240 MiB of
+`replicas` is a **hard budget** with **LRU eviction of warm sandboxes** in
+front of it: a third acquisition first evicts the least-recently-used sandbox
+that no thread is using, which is what keeps the count at two while at least
+one slot is idle and is what every saturation event in estate qualification
+has taken so far. With both slots in active use there is nothing to evict,
+and the acquisition then waits up to `SANDBOX_CAPACITY_WAIT_TIMEOUT` seconds
+(default 5, the overlap at the edges of two turns) and is otherwise refused
+with a retryable capacity outcome. The slot is reserved before any container
+work and released only once the container, its sidecar and its networks are
+confirmed absent, so concurrent acquisitions cannot each take the last slot.
+
+That is a change of kind, and the reason for it is the arithmetic above: a
+third container (1024 + 96 MiB of limit) already exceeds the 1024 MiB the line
+leaves unallocated, so three concurrently active people would put 6240 MiB of
 limits against 6144 MiB of RAM (the four-slot profile reached that point at
-five to six), and what bounds them from there is the guest's own memory, with
-the victim of an OOM kill whatever the kernel scores highest rather than the
-newest sandbox. Bounding the breach in the provider is open. Eviction is
-customer-visible: a thread whose sandbox was evicted
+five to six). Nothing then bounds them but the guest's own memory, and the
+victim of an OOM kill is whatever the kernel scores highest rather than the
+sandbox that overshot. Until 2026-09-22 `replicas` was a soft maximum: the
+provider logged `All 2 replica slots are in active use; creating sandbox ...
+beyond the soft limit` and created the third anyway, and nothing refused a
+fourth.
+
+A refusal is customer-visible and deliberately so. Where it surfaces depends
+on when the sandbox was asked for. On this profile every turn projects the
+accepted skill snapshot before the model runs, so a refusal ends that turn
+before it says anything: the person is told "This workspace is already
+running as many sandboxes as it has room for", with `sandbox_capacity_exceeded`
+as the run's stop reason (§ "Reading a turn's timing"). A refusal raised later,
+from inside a tool call, reaches the model instead, which is told to finish
+with what it has rather than call the tool again. The control UI is unaffected
+either way; nothing queues behind the budget. Eviction is
+customer-visible too: a thread whose sandbox was evicted
 gets a fresh one on its next turn (its files persist under `home/`, and that
 turn waits a cold start before its first text).
 `idle_timeout: 1800` keeps an idle sandbox warm for thirty minutes: the budget
@@ -2437,6 +2458,21 @@ now runs after the lock is released, so what `queue=` still shows on a first
 turn is the container build itself. Total wait is what the cold start would have
 been, less the seconds the build had already run.
 
+**A tenant at its slot limit reads here too**, which is what tells "sized at
+its limit" apart from "something is broken". Both slots in active use and
+nothing parked to evict gives the turn a `sandbox_capacity_wait@…+<n>ms`
+phase and `capacity_waits=1`; a wait that ran out adds `capacity_refusals=1`,
+and the Gateway log carries `Refusing to create sandbox <id>: all 2 replica
+slots are in use (active=2 parked=0 starting=0) and none came free in 5.0s`.
+The person's turn then ends with "This workspace is already running as many
+sandboxes as it has room for" rather than a reference code. Waits without
+refusals are a tenant that keeps finding its slot in time; refusals arriving
+routinely are the signal to move to the 8 GiB VM class (§ "Memory budget"),
+not a defect to chase. Neither counter is printed when it is zero, so an
+ordinary turn's line is unchanged. A turn that *waited and then evicted*
+shows the wait beside `evictions=1` and no refusal: the wait ended when the
+other turn parked its container.
+
 `acquisition=` says where this turn's sandbox came from. `created`,
 `rediscovered`, `discovered`, `warm_reclaim`, `accepted_warm_reclaim` and
 `unknown_provenance` are **origins** — they name how the container came to be;
@@ -2519,8 +2555,9 @@ docker compose --project-directory /opt/hartmesh --env-file "$ENV" \
 is therefore a complete per-turn latency record. The same fields also ride the
 log record as a structured `turn_phases` field for deployments that enable
 `logging.enhance.format: json`; this profile logs text. That record stamps
-`version: 5` (`launch` was added in 5), and fields are added rather than repurposed, so a reader that
-tolerates unknown keys needs no change. The line reports
+`version: 7` (`launch` was added in 5, the tool/model working-turn split in 6,
+the capacity counters below in 7), and fields are added rather than repurposed,
+so a reader that tolerates unknown keys needs no change. The line reports
 confirmed resource counts (`creates=`, `teardowns=`), not attempts: the
 structured record keeps `create_attempts` and `unknown_create_results`
 separately, and one confirmed create can stand for several attempts.

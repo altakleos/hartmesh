@@ -42,6 +42,7 @@ from deerflow.sandbox.accepted_projection import (
 )
 from deerflow.sandbox.diagnostics import record_sandbox_diagnostic
 from deerflow.sandbox.exceptions import (
+    SandboxCapacityExceededError,
     SandboxError,
     SandboxNotFoundError,
     SandboxRuntimeError,
@@ -67,6 +68,19 @@ from deerflow.tools.presentation import with_presentation
 from deerflow.tools.types import Runtime
 
 logger = logging.getLogger(__name__)
+
+# Exceptions a sandbox tool must not flatten into its `"Error: ..."` return.
+#
+# Every other failure is this call's own and reads correctly as tool output.
+# These two are not: losing accepted execution authority is a fail-closed
+# signal the run has to see, and a capacity refusal is the deployment saying it
+# has no room -- an operational state the result contract classifies off the
+# exception's own type (``tool_error_type``). Flattened to a string, both lose
+# that type and reach the model as an unclassifiable tool error it is invited
+# to retry, which for capacity means retrying against a budget that is still
+# full. Raised, ``ToolErrorHandlingMiddleware`` builds the result and the run
+# continues either way.
+_RAISED_PAST_THE_TOOL_BOUNDARY = (AcceptedSandboxAuthorityLostError, SandboxCapacityExceededError)
 
 # The read-before-write middleware can enter the sandbox before or after the
 # tool body. Scope this marker to the complete composed invocation so all of
@@ -1953,7 +1967,7 @@ async def _run_sync_tool_after_async_sandbox_init(
                 return "Error: Tool implementation not available"
 
             return await run_sync_lifecycle_operation(func, runtime, *args)
-    except AcceptedSandboxAuthorityLostError:
+    except _RAISED_PAST_THE_TOOL_BOUNDARY:
         raise
     except SandboxError as e:
         return f"Error: {e}"
@@ -2408,7 +2422,7 @@ def bash_tool(
             max_chars=max_chars,
             truncate=_truncate_bash_output,
         )
-    except AcceptedSandboxAuthorityLostError:
+    except _RAISED_PAST_THE_TOOL_BOUNDARY:
         raise
     except SandboxError as e:
         return f"Error: {e}"
@@ -2483,7 +2497,7 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         except Exception:
             max_chars = 20000
         return _truncate_ls_output(output, max_chars)
-    except AcceptedSandboxAuthorityLostError:
+    except _RAISED_PAST_THE_TOOL_BOUNDARY:
         raise
     except SandboxError as e:
         return f"Error: {e}"
@@ -2551,7 +2565,7 @@ def glob_tool(
         # so a root above a disabled skill still surfaces its files.
         matches = _drop_disabled_skill_paths(matches, user_id=user_id)
         return _format_glob_results(requested_path, matches, truncated)
-    except AcceptedSandboxAuthorityLostError:
+    except _RAISED_PAST_THE_TOOL_BOUNDARY:
         raise
     except SandboxError as e:
         return f"Error: {e}"
@@ -2655,7 +2669,7 @@ def grep_tool(
         allowed = set(_drop_disabled_skill_paths([match.path for match in matches], user_id=user_id))
         matches = [match for match in matches if match.path in allowed]
         return _format_grep_results(requested_path, matches, truncated)
-    except AcceptedSandboxAuthorityLostError:
+    except _RAISED_PAST_THE_TOOL_BOUNDARY:
         raise
     except SandboxError as e:
         return f"Error: {e}"
@@ -2776,7 +2790,7 @@ def read_file_tool(
         except Exception:
             max_chars = 50000
         return _truncate_read_file_output(content, max_chars)
-    except AcceptedSandboxAuthorityLostError:
+    except _RAISED_PAST_THE_TOOL_BOUNDARY:
         raise
     except SandboxError as e:
         return f"Error: {e}"
@@ -2896,7 +2910,7 @@ def write_file_tool(
         with get_file_operation_lock(sandbox, path):
             sandbox.write_file(path, content, append)
         return "OK"
-    except AcceptedSandboxAuthorityLostError:
+    except _RAISED_PAST_THE_TOOL_BOUNDARY:
         raise
     except SandboxError as e:
         return _format_write_file_error(requested_path, e, runtime)
@@ -2975,7 +2989,7 @@ def str_replace_tool(
                 content = content.replace(old_str, new_str, 1)
             sandbox.write_file(path, content)
         return "OK"
-    except AcceptedSandboxAuthorityLostError:
+    except _RAISED_PAST_THE_TOOL_BOUNDARY:
         raise
     except SandboxError as e:
         return f"Error: {e}"

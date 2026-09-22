@@ -40,7 +40,7 @@ from deerflow.sandbox.accepted_projection import (
     release_accepted_skill_consumer,
 )
 from deerflow.sandbox.diagnostics import record_sandbox_diagnostic
-from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
+from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxCapacityExceededError, SandboxRuntimeError
 from deerflow.sandbox.lease import (
     ensure_sandbox_lease_owner,
     get_sandbox_lease_manager,
@@ -405,11 +405,25 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                 owner_id=owner_id,
             )
         elif acquired:
-            sandbox_id = self._acquire_sandbox(
-                thread_id,
-                user_id=user_id,
-                owner_id=owner_id,
-            )
+            # Eager acquisition on a full deployment must not kill a turn that may
+            # not need a sandbox at all. An explicit skill policy is projected
+            # before the first model so a restricted agent cannot see the shared
+            # view -- but nothing has been handed out yet, so there is nothing to
+            # leak by not acquiring: the lazy path re-runs this decision at the
+            # first sandbox-backed tool call, where the same refusal becomes a
+            # tool result the run survives and a turn that never touches a tool
+            # answers normally. The accepted branch is deliberately not caught: its
+            # material *must* be projected before the model, and that refusal is a
+            # run terminal (`runtime/runs/worker.py`), not a skip.
+            try:
+                sandbox_id = self._acquire_sandbox(
+                    thread_id,
+                    user_id=user_id,
+                    owner_id=owner_id,
+                )
+            except SandboxCapacityExceededError:
+                logger.info("Every sandbox slot is in use; deferring this turn's acquisition to its first sandbox-backed tool call (thread_id=%s)", thread_id)
+                return None
         elif owner_id is not None:
             # A live checkpointed sandbox is reused under this execution's lease
             # so the last holder, not the first, parks it.
@@ -594,11 +608,16 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                     owner_id=owner_id,
                 )
             elif acquired:
-                sandbox_id = await self._acquire_sandbox_async(
-                    thread_id,
-                    user_id=user_id,
-                    owner_id=owner_id,
-                )
+                # Same deferral as the sync path above, for the same reason.
+                try:
+                    sandbox_id = await self._acquire_sandbox_async(
+                        thread_id,
+                        user_id=user_id,
+                        owner_id=owner_id,
+                    )
+                except SandboxCapacityExceededError:
+                    logger.info("Every sandbox slot is in use; deferring this turn's acquisition to its first sandbox-backed tool call (thread_id=%s)", thread_id)
+                    return None
             elif owner_id is not None:
                 record_acquisition_source(AcquisitionSource.IN_PROCESS)
                 await get_sandbox_lease_manager(provider).retain_async(

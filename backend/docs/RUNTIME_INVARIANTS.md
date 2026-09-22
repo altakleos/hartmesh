@@ -95,6 +95,24 @@ root's. Markdown links resolve from this file.
   Compose limits under runsc, with the template's `sandbox.environment`
   applied and as many concurrent starts as `sandbox.replicas`:
   `tests/test_restricted_runsc_readiness_live.py`.
+- `sandbox.replicas` is a **hard budget** on that provider, counted per
+  Gateway process, not a soft cap. One admission decision (`_admit_create` /
+  `_admit_create_async`) serves both create paths: the slot is reserved in the
+  same critical section that reads the count, before any container work, and
+  is released only when the container, its sidecar and its networks are
+  confirmed absent or the reservation is abandoned. Active, parked,
+  quarantined and reserved sets all count; reuse of a set that is already
+  counted never spends a second slot. A full budget evicts the oldest parked
+  container first and never a live turn, then waits up to
+  `sandbox.capacity_wait_timeout` (default 5 s, 0 refuses at once, bounded at
+  300; interruptible on the async create path, and elsewhere bounded only by
+  the budget itself, which is why nothing may make it unbounded) and refuses with
+  `SandboxCapacityExceededError` — a typed retryable outcome whose
+  `tool_error_type` tells the model to summarize rather than retry, read off
+  the exception rather than matched in its text. The wait is one
+  `TurnPhase.SANDBOX_CAPACITY_WAIT` span per turn, beside the journal's
+  `capacity_waits` / `capacity_refusals` counters.
+  `tests/test_sandbox_capacity_budget.py`.
 - `make dev`, Docker dev, and production all run the agent runtime in Gateway
   via `RunManager` + `run_agent()` + `StreamBridge`
   (`packages/harness/deerflow/runtime/`); Nginx exposes it at

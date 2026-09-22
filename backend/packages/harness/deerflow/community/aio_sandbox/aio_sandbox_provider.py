@@ -23,9 +23,10 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import ExitStack
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 try:
     import fcntl
@@ -51,6 +52,8 @@ from deerflow.runtime.turn_phases import (
     TurnPhase,
     phase_span,
     record_acquisition_source,
+    record_capacity_refusal,
+    record_capacity_wait,
     record_create_attempt,
     record_create_result,
     record_eviction,
@@ -82,6 +85,7 @@ from deerflow.sandbox.capabilities import (
     reject_writable_accepted_skill_aliases,
 )
 from deerflow.sandbox.egress import EgressAllowanceV1
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
@@ -127,6 +131,37 @@ DEFAULT_PREWARM_CLAIM_TIMEOUT = 300
 PREWARM_VIEW_RUN_ID = "prewarm"
 IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 
+# How long an acquisition waits for a replica slot before the budget refuses
+# it. Short on purpose: the saturation this catches is the overlap at the edges
+# of two turns -- one parking its container while another asks for one -- and a
+# slot that is not free within a few seconds is held by work measured in
+# minutes. Waiting longer would trade a refusal the person can act on for a
+# spinner they cannot.
+DEFAULT_CAPACITY_WAIT_TIMEOUT = 5.0
+CAPACITY_WAIT_TIMEOUT_MAX = 300.0
+
+
+def resolve_capacity_wait_timeout(configured: object) -> float:
+    """The slot-wait budget, in seconds, for ``sandbox.capacity_wait_timeout``.
+
+    ``None`` (the key absent) is :data:`DEFAULT_CAPACITY_WAIT_TIMEOUT`. ``0``
+    is a legitimate value -- refuse immediately rather than wait -- which is
+    why this is the one budget in this provider that is not required to be
+    positive. Anything unusable falls back to the default rather than
+    disabling the budget: the schema already refuses bad input, and a
+    configuration object built without it must not be able to make the wait
+    unbounded.
+    """
+    if configured is None:
+        return DEFAULT_CAPACITY_WAIT_TIMEOUT
+    try:
+        budget = float(configured)
+    except (TypeError, ValueError):
+        return DEFAULT_CAPACITY_WAIT_TIMEOUT
+    if isinstance(configured, bool) or budget != budget or budget < 0:
+        return DEFAULT_CAPACITY_WAIT_TIMEOUT
+    return min(budget, CAPACITY_WAIT_TIMEOUT_MAX)
+
 
 def resolve_ready_timeout(configured: object) -> float:
     """The readiness budget, in seconds, for ``sandbox.ready_timeout`` = *configured*.
@@ -140,6 +175,18 @@ def resolve_ready_timeout(configured: object) -> float:
     if configured is None:
         return float(SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT)
     return normalize_ready_timeout(configured)
+
+
+def _resolve_capacity_waiter(future: "asyncio.Future[None]") -> None:
+    """Wake one event-loop capacity waiter, on its own loop.
+
+    Written as a module function because it is handed to
+    ``loop.call_soon_threadsafe`` from whichever thread freed the slot; by the
+    time it runs the task may already have been cancelled or timed out, and a
+    settled future must be left alone.
+    """
+    if not future.done():
+        future.set_result(None)
 
 
 class SandboxBeingDestroyedError(RuntimeError):
@@ -302,6 +349,12 @@ class AioSandboxProvider(
         # readiness wait is the one long window in which a running container is
         # neither tracked nor warm; see _mark_starting.
         self._starting: set[str] = set()
+        # Event-loop waiters for a replica slot: (loop, future) pairs woken
+        # from whichever thread frees one. The sync half of the same wait is
+        # the condition in `_capacity_gate`; both are signalled together by
+        # `_slot_freed_locked`, because a slot can be freed by a worker thread
+        # (a reaper, a teardown) and wanted by the event loop, or the reverse.
+        self._capacity_async_waiters: list[tuple[Any, Any]] = []
         # Accepted-skills projection bookkeeping, both keyed by sandbox id. The
         # set answers "did this process provision this container as an
         # accepted-only projection?"; the map records the create-time inputs
@@ -439,6 +492,7 @@ class AioSandboxProvider(
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
             "prewarm_claim_timeout": getattr(sandbox_config, "prewarm_claim_timeout", None),
             "ready_timeout": resolve_ready_timeout(getattr(sandbox_config, "ready_timeout", None)),
+            "capacity_wait_timeout": resolve_capacity_wait_timeout(getattr(sandbox_config, "capacity_wait_timeout", None)),
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
             "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
@@ -503,6 +557,14 @@ class AioSandboxProvider(
         configuration object can make it zero, negative or non-finite.
         """
         return resolve_ready_timeout(self._config.get("ready_timeout"))
+
+    def sandbox_capacity_wait_timeout(self) -> float:
+        """How long an acquisition may wait for a replica slot, in seconds.
+
+        Re-validated on every read for the same reason as the readiness
+        budget: no configuration object may make this wait unbounded.
+        """
+        return resolve_capacity_wait_timeout(self._config.get("capacity_wait_timeout"))
 
     def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
         if not isinstance(self._backend, LocalContainerBackend):
@@ -606,6 +668,284 @@ class AioSandboxProvider(
     #   forgetting — a peer legitimately owns it and must win, so the promote is
     #              the thing to detect: compare the acquire epoch we decided on.
 
+    # ── The replica budget ───────────────────────────────────────────────
+    #
+    # `replicas` is a hard budget, not a soft cap, because what backs it is
+    # memory the deployment does not have: the released Compose profile sums
+    # its in-VM limits to exactly the guest's RAM at two concurrent sandboxes,
+    # so a third is not slower, it is an OOM kill of whatever the kernel scores
+    # highest -- which is rarely the sandbox that overshot.
+    #
+    # Four rules make that budget hold, and all four are properties of the one
+    # reservation below rather than checks spread over the call paths:
+    #
+    #   Reserve before any container work. The reservation is `_starting`, the
+    #   same set reconciliation and lease renewal already honour, taken in the
+    #   same critical section that reads the count -- so two threads cannot
+    #   both see the last slot. Checking and then marking is the window, not a
+    #   narrower version of it.
+    #
+    #   Count real resource sets. Active containers, parked ones, sets whose
+    #   destroy did not confirm absence (quarantined into the warm pool for
+    #   exactly this reason) and reservations, all of them. A map entry that
+    #   names no container would make the budget pass on the defect it exists
+    #   to stop.
+    #
+    #   Reuse never spends a second slot. Every reuse path -- in-process,
+    #   warm reclaim, accepted reclaim, backend discovery -- returns before
+    #   this, because the container it hands back is already counted.
+    #
+    #   A live turn is never evicted for capacity. Only warm entries are
+    #   eviction candidates, and a refusal is the answer when there are none.
+    #
+    # The wait is what keeps the common case off that refusal: saturation is
+    # usually two turns overlapping at their edges, and one of them is about
+    # to park. It is bounded (`sandbox.capacity_wait_timeout`, five seconds by
+    # default), cancellable on the async path, and ends in a typed retryable
+    # outcome rather than a create.
+
+    def _capacity_gate(self) -> threading.Condition:
+        """The condition a waiting acquisition sleeps on, bound to ``self._lock``.
+
+        Bound lazily, and rebound if the lock object itself is replaced, so a
+        sleeper and a waker always meet on the same lock: a condition built
+        against a stale lock either refuses to notify or never wakes anyone,
+        and both failures are silent. Callers hold ``self._lock``, which is
+        also what makes building it here race-free.
+        """
+        gate = getattr(self, "_capacity_gate_cond", None)
+        if gate is None or getattr(self, "_capacity_gate_lock", None) is not self._lock:
+            gate = threading.Condition(self._lock)
+            self._capacity_gate_cond = gate
+            self._capacity_gate_lock = self._lock
+        return gate
+
+    def _wake_capacity_waiters_locked(self) -> None:
+        """A slot may now be obtainable; wake everything waiting for one.
+
+        Two different events reach here, and missing either one turns the
+        bounded wait into a flat latency tax:
+
+        * a counted set went away, so there is room; and
+        * a set became *evictable* -- a turn ended and parked its container.
+          Parking frees no slot (the container is still there, still counted),
+          but the waiter's next pass can now evict it, which is the whole case
+          the wait exists for: two turns overlapping at their edges, one of
+          them about to finish.
+
+        Called under the lock that guards the counted state, so a waiter's "is
+        there room?" and this "look again" cannot cross. Waking spuriously is
+        harmless -- a woken waiter re-reads everything -- so the call sites err
+        towards notifying.
+        """
+        try:
+            self._capacity_gate().notify_all()
+        except RuntimeError:
+            # A test may swap `_lock` for a mock between the bind and the
+            # notify. Losing a wake-up costs a waiter the rest of its bounded
+            # budget; raising here would cost a teardown.
+            logger.debug("Could not wake sandbox capacity waiters", exc_info=True)
+        waiters = getattr(self, "_capacity_async_waiters", None) or []
+        self._capacity_async_waiters = []
+        for loop, future in waiters:
+            try:
+                loop.call_soon_threadsafe(_resolve_capacity_waiter, future)
+            except RuntimeError:
+                # Its loop is closed; the task that registered it is gone.
+                continue
+
+    def _await_capacity_slot(self) -> "asyncio.Future[None]":
+        """Register this task's wake-up *before* it checks the count.
+
+        Registration precedes the check on purpose: a slot freed between a
+        check and a wait is the lost wake-up that turns a five-second budget
+        into a five-second stall with a free slot sitting there. Callers hold
+        ``self._lock``.
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+        waiters = getattr(self, "_capacity_async_waiters", None)
+        if waiters is None:
+            waiters = self._capacity_async_waiters = []
+        waiters.append((loop, future))
+        return future
+
+    def _forget_capacity_waiter(self, future: "asyncio.Future[None]") -> None:
+        with self._lock:
+            waiters = getattr(self, "_capacity_async_waiters", None) or []
+            self._capacity_async_waiters = [entry for entry in waiters if entry[1] is not future]
+
+    def _counted_slots_locked(self) -> tuple[int, int, int, int]:
+        """``(replicas, active, parked, reserved)`` as the budget counts them."""
+        replicas = int(self._config.get("replicas", DEFAULT_REPLICAS))
+        return replicas, self._active_count_locked(), len(self._warm_pool), len(self._starting)
+
+    def _try_reserve_slot_locked(self, sandbox_id: str) -> bool:
+        """Take a replica slot for *sandbox_id*, or report that there is none.
+
+        Raises:
+            SandboxBeingDestroyedError: the id is reserved for teardown here,
+                the same refusal ``_mark_starting`` makes and for the same
+                reason -- creating under a name being stopped either collides
+                with the container mid-stop or starts a generation the
+                reaper's retry cannot tell apart.
+        """
+        if self._being_torn_down_locally(sandbox_id):
+            raise SandboxBeingDestroyedError(sandbox_id)
+        if sandbox_id in self._starting:
+            # Already reserved by this acquisition; re-entering must not take
+            # a second slot for the same container. This reads as one
+            # reservation rather than a count because at most one acquisition
+            # in this process is ever in flight for a given id: acquisitions
+            # for one thread key are serialized by `_acquire_serializer`, and
+            # the create path holds the per-id file lock across the whole
+            # attempt. If either of those ever stops holding, this has to
+            # become a refcount -- the first `_unmark_starting` would
+            # otherwise hand the slot away while the second attempt is still
+            # using it.
+            return True
+        replicas, active, parked, reserved = self._counted_slots_locked()
+        if active + parked + reserved >= replicas:
+            return False
+        self._starting.add(sandbox_id)
+        return True
+
+    def _capacity_refusal(self, sandbox_id: str, *, waited: float) -> SandboxCapacityExceededError:
+        with self._lock:
+            replicas, active, parked, reserved = self._counted_slots_locked()
+        logger.warning(
+            "Refusing to create sandbox %s: all %s replica slots are in use (active=%s parked=%s starting=%s) and none came free in %.1fs",
+            sandbox_id,
+            replicas,
+            active,
+            parked,
+            reserved,
+            waited,
+        )
+        return SandboxCapacityExceededError(
+            "This deployment is already running as many sandboxes as it has room for",
+            active=active,
+            warm=parked,
+            reserved=reserved,
+            replicas=replicas,
+            retry_after_seconds=max(self.sandbox_capacity_wait_timeout(), 1.0),
+        )
+
+    def _admit_create(self, sandbox_id: str, *, allow_eviction: bool) -> None:
+        """Reserve a replica slot for *sandbox_id*, or refuse the create.
+
+        The single admission decision both create paths make. Duplicating it
+        per path is what let the async one drift into having no budget at all:
+        two concurrent async creates each read the count, each found room, and
+        each created.
+
+        ``allow_eviction`` is the difference between a turn and a prewarm. A
+        turn may stop somebody's parked container for its slot and may wait for
+        one; a prewarm may do neither, because trading a container a thread
+        will reclaim for one nobody has asked for yet is a trade against the
+        person at the keyboard. A prewarm therefore gets the fast refusal
+        (``SandboxSlotsBusyError``) its caller already handles.
+
+        Raises:
+            SandboxBeingDestroyedError: the id is reserved for teardown here.
+            SandboxSlotsBusyError: no slot, and the caller declined to wait.
+            SandboxCapacityExceededError: no slot came free within the budget.
+        """
+        started = time.monotonic()
+        deadline = started + (self.sandbox_capacity_wait_timeout() if allow_eviction else 0.0)
+        waiting = False
+        with ExitStack() as measured:
+            while True:
+                with self._lock:
+                    if self._try_reserve_slot_locked(sandbox_id):
+                        return
+                if not allow_eviction:
+                    raise SandboxSlotsBusyError(sandbox_id)
+                # Outside the lock: a stop is a container round trip, and the
+                # lock guards every acquire path in this process.
+                if self._evict_oldest_warm(exclude=sandbox_id) is not None:
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    record_capacity_refusal()
+                    raise self._capacity_refusal(sandbox_id, waited=time.monotonic() - started)
+                waiting = waiting or self._open_capacity_wait_span(measured, sandbox_id)
+                with self._lock:
+                    # Re-checked here, in the same critical section as the
+                    # wait: between the check at the top of the loop and this
+                    # point a slot may have come free, and sleeping through it
+                    # would spend the whole budget for nothing.
+                    if self._try_reserve_slot_locked(sandbox_id):
+                        return
+                    self._capacity_gate().wait(remaining)
+
+    async def _admit_create_async(self, sandbox_id: str) -> None:
+        """``_admit_create`` for the event loop: same decision, awaited wait.
+
+        The counting and the eviction are blocking work and are offloaded; the
+        wait itself is an awaited future, so a ``Stop`` during it cancels the
+        acquisition at once and leaves no reservation behind, rather than
+        sitting out the budget in a worker thread nothing can interrupt.
+
+        No ``allow_eviction`` here, unlike the sync form: the only caller that
+        declines to evict or wait is the prewarm, which is synchronous. The
+        parameter would be a branch nothing takes and nothing tests.
+
+        That is true of callers that reach here, which is the ordinary async
+        acquisition. It is **not** true of every async caller of the provider:
+        the accepted projection runs its whole acquisition -- and so the sync
+        admission -- in a worker thread, where a cancellation is observed when
+        the wait returns rather than during it. The budget is what bounds the
+        delay there, which is why it is short and why nothing may make it
+        unbounded.
+        """
+        started = time.monotonic()
+        deadline = started + self.sandbox_capacity_wait_timeout()
+        waiting = False
+        with ExitStack() as measured:
+            while True:
+                waiter: asyncio.Future[None] | None = None
+                with self._lock:
+                    if self._try_reserve_slot_locked(sandbox_id):
+                        return
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        # Registered before the lock is dropped, so a slot
+                        # freed while we evict or measure cannot be missed.
+                        waiter = self._await_capacity_slot()
+                try:
+                    if await asyncio.to_thread(self._evict_oldest_warm, exclude=sandbox_id) is not None:
+                        continue
+                    if waiter is None:
+                        record_capacity_refusal()
+                        raise self._capacity_refusal(sandbox_id, waited=time.monotonic() - started)
+                    waiting = waiting or self._open_capacity_wait_span(measured, sandbox_id)
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        try:
+                            await asyncio.wait_for(asyncio.shield(waiter), timeout=remaining)
+                        except TimeoutError:
+                            pass
+                finally:
+                    if waiter is not None:
+                        self._forget_capacity_waiter(waiter)
+
+    def _open_capacity_wait_span(self, measured: ExitStack, sandbox_id: str) -> bool:
+        """Open the wait's span and count it. Returns ``True``, the new flag.
+
+        One span even when the admission loop goes round several times: a
+        phase name opened twice in a turn has its second span measured and
+        then dropped, so a retry would hide the very wait the phase exists to
+        explain. The counter follows the same rule -- a turn that waited once
+        is one waiting turn, however many passes that took. The "already
+        opened" flag is the caller's local, not provider state: concurrent
+        acquisitions in this process each measure their own wait.
+        """
+        measured.enter_context(phase_span(TurnPhase.SANDBOX_CAPACITY_WAIT))
+        record_capacity_wait()
+        logger.info("Waiting for a replica slot before creating sandbox %s", sandbox_id)
+        return True
+
     def _mark_starting(self, sandbox_id: str) -> None:
         """Record that this process is creating *sandbox_id* and waiting on it.
 
@@ -629,6 +969,10 @@ class AioSandboxProvider(
         stopped would either collide with the container mid-stop and adopt
         it, or start a generation the reaper's retry could not tell apart.
 
+        The create paths reach this through ``_admit_create``, which makes the
+        same mark inside the replica budget's own critical section; this is the
+        mark without the budget, for a caller that already holds a slot.
+
         Raises:
             SandboxBeingDestroyedError: the id is reserved for teardown here.
         """
@@ -649,9 +993,16 @@ class AioSandboxProvider(
         Ordering matters on the failure path: the mark must outlive the
         ownership-fenced destroy, or reconciliation could adopt the container in
         the instant between the readiness timeout and the teardown reservation.
+
+        The mark is also the replica reservation, so dropping one an
+        acquisition abandoned -- a failed create, a readiness timeout, a
+        cancellation -- is what returns its slot. A mark that became a tracked
+        container hands the slot on rather than freeing it, and the waiter this
+        wakes simply finds the count unchanged.
         """
         with self._lock:
             self._starting.discard(sandbox_id)
+            self._wake_capacity_waiters_locked()
 
     def _reserve_local_teardown(self, sandbox_id: str, still_reapable: Callable[[], bool]) -> bool:
         """Reserve *sandbox_id* for teardown by this process.
@@ -1711,6 +2062,9 @@ class AioSandboxProvider(
             for key, mapped_id in list(self._thread_sandboxes.items()):
                 if mapped_id == sandbox_id:
                     del self._thread_sandboxes[key]
+            # The container is somebody else's now, so it stops counting
+            # against this process's budget even though nothing was stopped.
+            self._wake_capacity_waiters_locked()
 
         # Close the host-side HTTP client we are dropping (#2872); the container
         # itself stays up for its new owner.
@@ -1843,6 +2197,14 @@ class AioSandboxProvider(
             # A set whose cleanup did not confirm is the cheapest slot to free
             # and must not sit behind healthy entries, so it is retried first.
             candidates = [(sandbox_id, entry) for sandbox_id, (entry, _) in sorted(self._warm_pool.items(), key=lambda item: (item[0] not in pending, item[1][1])) if sandbox_id != exclude]
+
+        if not candidates:
+            # Nothing to evict, so nothing to measure. The admission loop asks
+            # again on every pass of a wait, and a phase name opened twice in
+            # a turn has its second span measured and then dropped -- so an
+            # empty attempt would spend the turn's eviction span on a stop
+            # that never happened and leave the real one unaccounted.
+            return None
 
         with phase_span(TurnPhase.SANDBOX_EVICTION):
             for sandbox_id, entry in candidates:
@@ -2299,6 +2661,7 @@ class AioSandboxProvider(
             self._warm_pool_identity.pop(sandbox_id, None)
             self._forget_accepted_reuse_fingerprint_locked(sandbox_id)
             self._clear_cleanup_pending_locked(sandbox_id)
+            self._wake_capacity_waiters_locked()
 
         return sandbox, info, True
 
@@ -2566,6 +2929,7 @@ class AioSandboxProvider(
                     self._warm_pool.pop(sandbox_id, None)
                     cleared_identity = self._warm_pool_identity.pop(sandbox_id, None)
                     self._forget_accepted_reuse_fingerprint_locked(sandbox_id)
+                    self._wake_capacity_waiters_locked()
                 self._clear_cleanup_pending_locked(sandbox_id)
         finally:
             self._finish_local_teardown(sandbox_id)
@@ -4071,28 +4435,12 @@ class AioSandboxProvider(
             user_id=effective_user_id,
         )
 
-        # Marked first: an id reserved for teardown is refused here, before an
-        # unrelated warm set is evicted for it or an attempt is journaled.
-        self._mark_starting(sandbox_id)
+        # Admission first: the slot is reserved, an id reserved for teardown is
+        # refused, and a saturated deployment is refused -- all before a
+        # container is asked for, an unrelated warm set is stopped for it, or
+        # an attempt is journaled.
+        self._admit_create(sandbox_id, allow_eviction=allow_eviction)
         try:
-            # Enforce replicas: only warm-pool containers count toward eviction budget.
-            # Active sandboxes are in use by live threads and must not be forcibly stopped.
-            replicas, total = self._replica_count()
-            if not allow_eviction:
-                # A container still in its readiness wait is neither active
-                # nor warm, so the count above cannot see it -- and several
-                # prewarms can start within one page-load's worth of seconds.
-                # Counting the in-flight starts is what keeps concurrent
-                # prewarms inside the slot budget; a turn's own create keeps
-                # the historical count, since it may evict for its slot.
-                with self._lock:
-                    in_flight = len(self._starting - {sandbox_id})
-                if total + in_flight >= replicas:
-                    raise SandboxSlotsBusyError(sandbox_id)
-            elif total >= replicas:
-                evicted = self._evict_oldest_warm(exclude=sandbox_id)
-                self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
-
             create_kwargs = {}
             if config_mount_exclusion_root is not None and not isinstance(self._backend, RemoteSandboxBackend):
                 create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
@@ -4230,16 +4578,12 @@ class AioSandboxProvider(
             user_id=effective_user_id,
         )
 
-        # Marked first, as on the sync path: refused before eviction or journaling.
-        self._mark_starting(sandbox_id)
+        # The same admission decision the sync path makes, in its cancellable
+        # form. This path used to have no budget at all: it read the count,
+        # evicted if it could and created regardless, so two concurrent async
+        # creates could each find the last slot and each take it.
+        await self._admit_create_async(sandbox_id)
         try:
-            # Enforce replicas: only warm-pool containers count toward eviction budget.
-            # Active sandboxes are in use by live threads and must not be forcibly stopped.
-            replicas, total = self._replica_count()
-            if total >= replicas:
-                evicted = await asyncio.to_thread(self._evict_oldest_warm, exclude=sandbox_id)
-                self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
-
             create_kwargs = {}
             if config_mount_exclusion_root is not None:
                 create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
@@ -4358,6 +4702,11 @@ class AioSandboxProvider(
             if info and sandbox_id not in self._warm_pool:
                 self._warm_pool[sandbox_id] = (info, time.time())
                 self._warm_pool_identity[sandbox_id] = thread_keys_to_remove[0] if thread_keys_to_remove else active_identity
+            # Either way a waiter should look again: a parked container frees
+            # no slot but is the cheapest one to evict, and reaching the else
+            # branch means the active entry that just went away was the last
+            # thing counting this set at all.
+            self._wake_capacity_waiters_locked()
 
         if sandbox is not None:
             # Defense-in-depth: close() already swallows its own errors; this

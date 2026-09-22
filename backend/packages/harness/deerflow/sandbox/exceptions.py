@@ -76,9 +76,19 @@ class SandboxCapacityExceededError(SandboxError):
 
     The reason distinguishes occupied capacity from provider shutdown.
     The caller controls retry scheduling. DeerFlow does not retry automatically.
+
+    This is an operational state, not a tool fault, and the two are told apart
+    by type rather than by wording: ``tool_error_type`` is the category the
+    tool-result contract stamps for anything raised out of a tool call, so a
+    saturated deployment reaches the model as "wait", never as "that call
+    failed, try it again". ``guidance`` replaces the generic retry advice with
+    one sentence that says what is actually true. Both are read by
+    ``deerflow.agents.middlewares`` off the exception object itself; nothing
+    matches on the message text.
     """
 
     CODE = "SANDBOX_CAPACITY_EXCEEDED"
+    tool_error_type = "capacity"
 
     def __init__(
         self,
@@ -90,6 +100,7 @@ class SandboxCapacityExceededError(SandboxError):
         replicas: int = 0,
         retry_after_seconds: float = 5.0,
         reason: str = "capacity",
+        guidance: str | None = None,
     ) -> None:
         details: dict[str, object] = {
             "code": self.CODE,
@@ -111,6 +122,10 @@ class SandboxCapacityExceededError(SandboxError):
         self.replicas = replicas
         self.retry_after_seconds = retry_after_seconds
         self.reason = reason
+        self.guidance = guidance or (
+            "This workspace is already running as much sandboxed work as it has room for, so no environment could be started for this call. "
+            "Say so and continue with what you already have, or wait for the other work to finish; repeating the call now will not free a slot."
+        )
 
 
 class SandboxAuthorizationError(SandboxError):
