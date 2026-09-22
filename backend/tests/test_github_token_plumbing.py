@@ -18,13 +18,12 @@ concurrent runs on different repos from clobbering each other's token.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import httpx
-import re
-
 import pytest
 from langgraph_sdk.errors import ConflictError
 
