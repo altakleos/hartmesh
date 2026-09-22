@@ -102,9 +102,16 @@ export function capMarkdownNesting(markdown: string): string {
   return capListNesting(capBlockquoteNesting(markdown));
 }
 
+// Both LaTeX forms normalize to `$$`, because single-dollar text math is off
+// (see plugins.ts: one `$` is currency). What separates inline from display is
+// then position, not delimiter length: `$$` that begins a line opens a display
+// fence, and `$$` mid-line is inline. `\[...\]` already placed its markers on
+// their own lines, so it is unaffected; `\(...\)` is kept inline by joining a
+// span that crosses lines onto one (see normalizeLatexMathDelimiters).
+const MATH_DELIMITER = "$$";
+
 type MathDelimiter = {
   close: "\\)" | "\\]";
-  replacement: "$" | "$$";
 };
 
 type DelimiterState = {
@@ -158,7 +165,7 @@ function convertLatexDelimitersInLine(
 
     // Close an open math block
     if (!inInlineCode && currentBlock?.close === two) {
-      result += currentBlock.replacement;
+      result += MATH_DELIMITER;
       currentBlock = null;
       i += 2;
       continue;
@@ -166,12 +173,8 @@ function convertLatexDelimitersInLine(
 
     // Open a new math block
     if (!inInlineCode && !currentBlock && (two === "\\(" || two === "\\[")) {
-      const isDisplay = two === "\\[";
-      currentBlock = {
-        close: isDisplay ? "\\]" : "\\)",
-        replacement: isDisplay ? "$$" : "$",
-      };
-      result += currentBlock.replacement;
+      currentBlock = { close: two === "\\[" ? "\\]" : "\\)" };
+      result += MATH_DELIMITER;
       i += 2;
       continue;
     }
@@ -210,24 +213,54 @@ export function normalizeLatexMathDelimiters(markdown: string): string {
     inlineCodeDelimiterLength: null,
   };
 
-  return markdown
-    .split("\n")
-    .map((line) => {
-      if (CODE_FENCE_RE.test(line) && !mathState.openBlock) {
-        insideFence = !insideFence;
-        return line;
+  // An inline `\(...\)` span that crosses a line break is still inline math,
+  // but `$$` is only inline when it does not begin a line: at the start of one
+  // it opens a display fence. Left alone, `\(` on its own line emitted an
+  // orphan `$$` that opened a fence, swallowed the formula as fence meta, and
+  // then paired with the *opening* `$$` of the next genuine display block,
+  // destroying an unrelated formula further down the message. Inline spans are
+  // therefore joined onto a single line, which LaTeX permits — a newline inside
+  // math mode is whitespace — and which keeps both `$$` markers mid-line.
+  // Display spans are untouched: `\[...\]` wants its markers on their own lines.
+  const output: string[] = [];
+  let pendingInline: string[] | null = null;
+
+  for (const line of markdown.split("\n")) {
+    if (CODE_FENCE_RE.test(line) && !mathState.openBlock) {
+      insideFence = !insideFence;
+      output.push(line);
+      continue;
+    }
+    if (insideFence || (INDENTED_CODE_RE.test(line) && !mathState.openBlock)) {
+      output.push(line);
+      continue;
+    }
+
+    const converted = convertLatexDelimitersInLine(line, mathState);
+    mathState = converted.state;
+    const inlineStillOpen = mathState.openBlock?.close === "\\)";
+
+    if (pendingInline) {
+      pendingInline.push(converted.line);
+      if (!inlineStillOpen) {
+        output.push(pendingInline.join(" "));
+        pendingInline = null;
       }
-      if (
-        insideFence ||
-        (INDENTED_CODE_RE.test(line) && !mathState.openBlock)
-      ) {
-        return line;
-      }
-      const converted = convertLatexDelimitersInLine(line, mathState);
-      mathState = converted.state;
-      return converted.line;
-    })
-    .join("\n");
+      continue;
+    }
+    if (inlineStillOpen) {
+      pendingInline = [converted.line];
+      continue;
+    }
+    output.push(converted.line);
+  }
+
+  // A span the model never closed: emit what was held rather than drop it.
+  if (pendingInline) {
+    output.push(pendingInline.join(" "));
+  }
+
+  return output.join("\n");
 }
 
 function hasUnescapedTexComment(line: string): boolean {

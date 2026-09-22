@@ -84,6 +84,44 @@ any tool name, so a new producer needs no client change; the present-files
 group renders its first message's prose above the files, which is what keeps a
 tagged answer readable rather than replaced by its own chips.
 
+One `$` is money, two are mathematics. `core/streamdown/plugins.ts` sets
+`singleDollarTextMath: false`, because with it on, remark-math read the span
+between any two currency amounts in a sentence as an equation: a released build
+printed "August 2026: $201,487.04 in revenue across 502 jobs, an average of
+$401.37 per job." as an italic serif formula with both dollar signs and every
+space between them gone. One amount in a sentence was safe and two were not, an
+odd count left a stray dollar sign behind, and neither a comma, a decimal point
+nor a following space prevented it — which is why it survived a release. Every
+figure in a business report is currency, so that is the ordinary sentence, not
+an edge case.
+
+Two dollar signs are now the only way to ask for mathematics, and they still
+render both inline and display, because what separates the two is where the
+delimiters sit rather than how many there are: a marker that begins a line
+opens a display fence, one mid-line is inline. `normalizeLatexMathDelimiters`
+in `preprocess.ts` therefore rewrites `\(...\)` as well as `\[...\]`, and
+dropping that second half would silently turn every `\(...\)` a model emits
+into plain text. Because an inline span is only inline when its markers stay
+mid-line, a `\(...\)` that crosses a line break is joined onto one line; left
+alone it opened a fence, ate its own formula as fence meta, and then paired
+with the next genuine display block and destroyed that one too.
+
+The accepted cost is that a model emitting a single-dollar formula prints it
+literally. That is the price of keeping currency intact, and a bug report about
+literal LaTeX must not be closed by turning the flag back on — doing so
+restores the defect for every business report. Promoting a single-dollar span
+to a double when it contains a backslash is not a safe recovery either: an
+ordinary sentence whose text between two amounts holds a Windows path or an
+escaped asterisk would be promoted straight back into an equation.
+
+The regression for this has to assert the render, never `textContent`. The
+released capture's extracted DOM text was correct — dollar signs and spaces
+intact — while the pixels showed an equation, so a `textContent` assertion over
+a KaTeX render is a control that cannot fail.
+`tests/unit/core/streamdown-currency.test.ts` and the assistant-bubble case in
+`tests/e2e/user-message-plain-text.spec.ts` assert the absence of a `katex`
+class instead.
+
 The chat mode is one dial, read in one place: `core/threads/run-context.ts`
 answers which modes a model can offer (`offersReasoningMode`), which mode a
 stored choice resolves to on it (`resolveChatMode`), the effort a picked mode
