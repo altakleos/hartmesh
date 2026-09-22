@@ -44,7 +44,7 @@ under `present` is delivered whether or not the user wants it. Never call
 shell variables the next command needs), and never write your own Python to
 find out what a run did — the run that made the draft already printed it.
 
-Exit codes: `0` done; `1` a problem the user must hear about (stderr says what), including a withheld report or a period with no rows; `2` this sandbox is not the image the skill is built for (do not install anything; tell the user); `3` one decision is needed before building (stderr carries the question and the candidates).
+Exit codes: `0` done; `1` a problem the user must hear about (stderr says what), including a withheld report or a period with no rows; `2` this sandbox is not the image the skill is built for (do not install anything; tell the user), or a command line the script refused, which stderr names with its fix; `3` one decision is needed before building (stderr carries the question and the candidates).
 
 ## Workflow
 
@@ -60,18 +60,13 @@ A period the user did not name is not a reason to read the file either: leave
 `--period` off and the build covers the month holding most of the rows and
 says so in its checks, for the user to correct in one sentence.
 
-```bash
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/report.py" build \
-  /mnt/user-data/uploads/export.xlsx \
-  --period 2026-08 \
-  --out /mnt/user-data/outputs/reports/2026-08-business-review \
-  --render pdf,docx,xlsx
-```
-
-with the `bash` tool's `present` argument naming the four files this run writes:
+That is one `bash` call, and `present` sits beside `command` in it, never
+inside the command line (`report.py` refuses `--present`, runs nothing, and
+says so):
 
 ```json
-{"present": [
+{"command": "python \"${SKILL_DIR:?set it to this skill's directory}/scripts/report.py\" build /mnt/user-data/uploads/export.xlsx --period 2026-08 --out /mnt/user-data/outputs/reports/2026-08-business-review --render pdf,docx,xlsx",
+ "present": [
   "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json",
   "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.pdf",
   "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.docx",

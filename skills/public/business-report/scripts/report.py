@@ -1586,7 +1586,35 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+# argparse's own status for a command line it refuses. It shares 2 with
+# EXIT_MISSING_LIBRARY; stderr tells the two apart, and SKILL.md says so.
+EXIT_USAGE = 2
+
+PRESENT_REFUSAL = "report.py: error: --present is not an option of this script, and nothing was run: name the files in the bash tool's `present` argument, beside `command`, and run the same command without --present.\n"
+
+
+def _misplaced_present(argv: list[str]) -> bool:
+    """Whether the command line carries ``present``, which belongs to the bash tool.
+
+    Checked before parsing, because argparse's own refusal says only that the
+    option is unknown -- and before the subcommand it does not even say that,
+    since the next word is taken as the subcommand. Words after ``--`` are
+    file names.
+    """
+    for arg in argv:
+        if arg == "--":
+            return False
+        if arg == "--present" or arg.startswith("--present="):
+            return True
+    return False
+
+
 def main(argv: list[str] | None = None) -> int:
+    if argv is None:
+        argv = sys.argv[1:]
+    if _misplaced_present(argv):
+        sys.stderr.write(PRESENT_REFUSAL)
+        return EXIT_USAGE
     args = build_parser().parse_args(argv)
     try:
         return args.handler(args)

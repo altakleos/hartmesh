@@ -1765,3 +1765,100 @@ def test_a_bundled_profile_replaces_the_skill_s_own_by_name(report, capsys, tmp_
     assert built["meta"]["profile"] == "services-generic", "same name, the tenant's file"
     _default_dir, default = small_report
     assert "Tenant Review" not in json.dumps(default) and "Business Review" in json.dumps(default)
+
+
+# `present` is an argument of the bash tool, not of this script. On the .30
+# report turns the model wrote it on the command line; argparse refused it
+# without saying where it belongs, and the retry dropped it altogether, so no
+# file was presented and the model listed the directory to find out. The
+# refusal has to name the fix, and has to be sure nothing ran.
+PRESENT_PLACEMENTS = {
+    "after the subcommand, with values": lambda cmd, rest, paths: [cmd, *rest, "--present", *paths],
+    "after the subcommand, bare": lambda cmd, rest, paths: [cmd, *rest, "--present"],
+    "after the subcommand, joined": lambda cmd, rest, paths: [cmd, *rest, f"--present={paths[0]}"],
+    "before the subcommand, with values": lambda cmd, rest, paths: ["--present", *paths, cmd, *rest],
+    "before the subcommand, bare": lambda cmd, rest, paths: ["--present", cmd, *rest],
+    "in the middle, with values": lambda cmd, rest, paths: [cmd, rest[0], "--present", *paths, *rest[1:]],
+}
+
+
+def _assert_present_refused(err: str) -> None:
+    lines = [line for line in err.splitlines() if line.strip()]
+    assert len(lines) == 1, err
+    line = lines[0]
+    assert "--present" in line and "nothing was run" in line
+    assert "bash tool's `present` argument" in line
+
+
+@pytest.mark.parametrize("placement", sorted(PRESENT_PLACEMENTS))
+def test_present_on_a_build_command_line_is_refused_with_the_fix(report, tmp_path, capsys, placement) -> None:
+    out_dir = tmp_path / "2026-08-business-review"
+    paths = [str(out_dir / "2026-08-business-review.report.json"), str(out_dir / "2026-08-business-review.pdf")]
+    rest = [str(SMALL_CSV), "--period", "2026-08", "--out", str(out_dir), "--render", "pdf"]
+
+    code, out, err = _run(report, capsys, *PRESENT_PLACEMENTS[placement]("build", rest, paths))
+
+    assert code == 2
+    _assert_present_refused(err)
+    assert out == ""
+    assert not out_dir.exists(), "the run must not have happened"
+
+
+@pytest.mark.parametrize("placement", sorted(PRESENT_PLACEMENTS))
+def test_present_on_a_render_command_line_is_refused_with_the_fix(report, small_report, capsys, placement) -> None:
+    out_dir, _built = small_report
+    path = _report_path(out_dir)
+    before = sorted(p.name for p in out_dir.iterdir())
+    stamp = path.stat().st_mtime_ns
+    rest = [str(path), "--to", "pdf,docx,xlsx"]
+
+    code, out, err = _run(report, capsys, *PRESENT_PLACEMENTS[placement]("render", rest, [str(path)]))
+
+    assert code == 2
+    _assert_present_refused(err)
+    assert out == ""
+    assert sorted(p.name for p in out_dir.iterdir()) == before, "no render was written"
+    assert path.stat().st_mtime_ns == stamp, "the report was not re-saved"
+
+
+def test_present_after_the_end_of_options_marker_is_a_file_name(report) -> None:
+    # After `--` every token is positional, so the refusal must not fire there;
+    # argparse then treats it as the file it is.
+    assert report._misplaced_present(["build", "--out", "x", "--", "--present"]) is False
+    assert report._misplaced_present(["build", "--out", "x", "--present"]) is True
+    # A value that merely contains the word is not the option.
+    assert report._misplaced_present(["build", "--title", "--presentation", "--out", "x"]) is False
+
+
+def test_an_unrelated_unknown_option_keeps_argparses_refusal(report, tmp_path, capsys) -> None:
+    out_dir = tmp_path / "out"
+
+    with pytest.raises(SystemExit) as raised:
+        report.main(["build", str(SMALL_CSV), "--out", str(out_dir), "--attach", "x.pdf"])
+
+    err = capsys.readouterr().err
+    assert raised.value.code == 2
+    assert "unrecognized arguments: --attach x.pdf" in err
+    assert "present" not in err
+    assert not out_dir.exists()
+
+
+def test_the_doc_shows_present_beside_command_in_one_call(report) -> None:
+    """The .29 turns placed `present` correctly and the .30 turns, reading the
+    same text, put it on the command line: the example showed the command and
+    the file list as two separate blocks, and joining them was left to the
+    model. The example is the one tool call as it is made, so there is no join."""
+    doc = SKILL_DOC.read_text(encoding="utf-8")
+    calls = [json.loads(block) for block in re.findall(r"```json\n(\{.*?\})\n```", doc, flags=re.S)]
+    call = next(block for block in calls if "command" in block)
+
+    assert set(call) == {"command", "present"}
+    assert " build " in call["command"] and "--render pdf,docx,xlsx" in call["command"]
+    assert "--present" not in call["command"]
+    assert [Path(p).name for p in call["present"]] == [
+        "2026-08-business-review.report.json",
+        "2026-08-business-review.pdf",
+        "2026-08-business-review.docx",
+        "2026-08-business-review.xlsx",
+    ]
+    assert "`--present`" in doc, "the doc names the mistake the script refuses"
