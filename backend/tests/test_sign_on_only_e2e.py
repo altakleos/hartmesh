@@ -262,6 +262,22 @@ class TestServedGateway:
             assert landed.headers["location"] == "/login?error=sso_account_exists"
         assert _account_row(gateway, OWNER)[1:3] == ("sso", "sub-owner")
 
+    def test_an_address_no_account_can_hold_is_refused_in_its_own_words(self, gateway: e2e._Gateway, provider: OIDCTestProvider, journal: _Journal) -> None:
+        """A first sign-in for an address the record will not hold: its own code, and no account claimed to be in the way."""
+        base = gateway.loopback_url
+        unusable = "someone@example.invalid"
+        with _client(base) as client:
+            landed = _sign_in(client, base, provider, subject="sub-unusable", email=unusable)
+            assert landed.status_code == 302 and landed.headers["location"] == "/login?error=sso_email_unusable", landed.text
+            assert "access_token" not in client.cookies
+        assert _account_row(gateway, unusable) is None, "nothing was created"
+        refusals = [line for line in journal.lines if "sub-unusable" in line]
+        # The provisioning line, by its own words: the callback's line carries
+        # the subject and the issuer too, so matching only those would pass
+        # against the refusal this change replaced.
+        assert any("is not one an account can hold" in line and provider.issuer_url("a") in line for line in refusals), refusals
+        assert not any("already exists" in line for line in refusals), refusals
+
     # ── Evidence 2, 4, 5: the doors through the served Gateway ───────────────
 
     def test_the_local_doors_are_closed_and_setup_status_is_constant(self, gateway: e2e._Gateway) -> None:

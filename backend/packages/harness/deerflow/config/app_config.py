@@ -499,6 +499,16 @@ class AppConfig(BaseModel):
 
     @classmethod
     def _apply_singleton_configs(cls, config: Self, acp_agents: dict[str, ACPAgentConfig]) -> None:
+        """Bring the per-section singletons into step with *config*.
+
+        Every section lives twice: as a field here, and as a module singleton
+        that its ``get_*_config()`` reads. This is the only thing that keeps
+        the two in step, so it must run wherever a config becomes the process's
+        config -- a file load and ``set_app_config`` alike. A direct
+        ``load_*_config_from_dict`` writes only the singleton, and the next
+        config that arrives here overwrites it; it is plumbing for this
+        function and for tests, never the way to configure a process.
+        """
         from deerflow.config.checkpointer_config import get_checkpointer_config
 
         previous_checkpointer_config = get_checkpointer_config()
@@ -759,14 +769,40 @@ def reload_app_config(config_path: str | None = None) -> AppConfig:
     return _load_and_cache_app_config(config_path)
 
 
+def _reset_singleton_configs() -> None:
+    """Put the per-section singletons back to their defaults.
+
+    The partner of :meth:`AppConfig._apply_singleton_configs`. Without it, a
+    config that is no longer installed keeps deciding what every
+    ``get_*_config()`` answers, which is the same two-representation problem
+    from the other end.
+    """
+    load_title_config_from_dict({})
+    load_summarization_config_from_dict({})
+    load_memory_config_from_dict({})
+    load_agents_api_config_from_dict({})
+    load_subagents_config_from_dict({})
+    load_tool_search_config_from_dict({})
+    load_guardrails_config_from_dict({})
+    load_authorization_config_from_dict({})
+    load_checkpointer_config_from_dict(None)
+    load_stream_bridge_config_from_dict(None)
+    load_acp_config_from_dict({})
+
+
 def reset_app_config() -> None:
     """Reset the cached config instance.
 
     This clears the singleton cache, causing the next call to
     `get_app_config()` to reload from file. Useful for testing
     or when switching between different configurations.
+
+    The per-section singletons go back to their defaults with it: they are
+    written by whichever config was installed, so leaving them behind would
+    let a config that is no longer installed keep answering for the process.
     """
     global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
+    _reset_singleton_configs()
     _app_config = None
     _app_config_path = None
     _app_config_mtime = None
@@ -779,6 +815,12 @@ def set_app_config(config: AppConfig) -> None:
 
     This allows injecting a custom or mock config for testing purposes.
 
+    The per-section singletons are brought into step with it, exactly as a
+    file load does: without that, the caller gets a process whose two
+    representations of a section disagree -- ``get_app_config().subagents``
+    carrying a custom agent that ``get_subagents_app_config()``, and so the
+    registry reading it, cannot see.
+
     Args:
         config: The AppConfig instance to use.
     """
@@ -788,6 +830,7 @@ def set_app_config(config: AppConfig) -> None:
     _app_config_mtime = None
     _app_config_signature = None
     _app_config_is_custom = True
+    AppConfig._apply_singleton_configs(config, config.acp_agents)
 
 
 def peek_current_app_config() -> AppConfig | None:

@@ -32,6 +32,27 @@ def _reset_subagents_config(**kwargs) -> None:
     load_subagents_config_from_dict(kwargs)
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _app_config_already_initialised() -> None:
+    """Materialise the app config before any test installs an override.
+
+    A registry read resolves the managed-subagent store, and the first such
+    read in a process loads ``config.yaml``, whose load re-applies every
+    singleton section -- subagents included. A test that installs an override
+    and *then* makes the first read has its override discarded mid-call and
+    sees the file's subagents instead. Production never meets this because the
+    file is loaded at startup; a checkout without a ``config.yaml`` never meets
+    it either, which is why it surfaces only where one exists. Doing the load
+    here once puts every test in this module on production's side of it.
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        get_app_config()
+    except FileNotFoundError:
+        pass  # No config.yaml to load, so nothing can clobber an override.
+
+
 # ---------------------------------------------------------------------------
 # SubagentConfig.skills field
 # ---------------------------------------------------------------------------

@@ -577,6 +577,66 @@ def test_get_app_config_resets_singleton_configs_when_sections_removed(tmp_path,
         _reset_config_singletons()
 
 
+def test_set_app_config_brings_the_section_singletons_into_step() -> None:
+    """The injection point must not leave two representations disagreeing.
+
+    A section lives twice: as a field on ``AppConfig`` and as the module
+    singleton its getter reads. A file load keeps the two in step; a caller
+    who installs a config programmatically got a process where they did not,
+    so ``get_app_config().subagents`` carried a custom agent the registry
+    could not see.
+    """
+    from deerflow.subagents.registry import list_subagents
+
+    _reset_config_singletons()
+    try:
+        config = AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "title": {"enabled": False, "max_words": 3},
+                "memory": {"enabled": False},
+                "subagents": {"timeout_seconds": 42, "custom_agents": {"analysis": {"description": "Analysis", "system_prompt": "Analyze."}}},
+                "guardrails": {"enabled": True, "fail_closed": False},
+            }
+        )
+        app_config_module.set_app_config(config)
+
+        assert get_app_config() is config
+        assert get_title_config().enabled is False
+        assert get_memory_config().enabled is False
+        assert get_guardrails_config().enabled is True
+        assert get_subagents_app_config().timeout_seconds == 42
+        assert "analysis" in get_subagents_app_config().custom_agents
+        # The reader that goes through the singleton, not the field.
+        assert "analysis" in {subagent.name for subagent in list_subagents()}
+    finally:
+        _reset_config_singletons()
+
+
+def test_a_config_set_programmatically_is_not_overwritten_by_a_later_read() -> None:
+    """No file load can come along afterwards and discard it.
+
+    This is the half that made the old behaviour non-deterministic rather
+    than merely wrong: whether the caller's sections survived depended on
+    whether anything had already taken the lazy ``config.yaml`` load.
+    """
+    _reset_config_singletons()
+    try:
+        config = AppConfig.model_validate(
+            {
+                "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                "subagents": {"custom_agents": {"analysis": {"description": "Analysis", "system_prompt": "Analyze."}}},
+            }
+        )
+        app_config_module.set_app_config(config)
+
+        for _ in range(3):
+            assert get_app_config() is config
+            assert "analysis" in get_subagents_app_config().custom_agents
+    finally:
+        _reset_config_singletons()
+
+
 def test_get_app_config_resets_persistence_runtime_singletons_when_checkpointer_removed(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     extensions_path = tmp_path / "extensions_config.json"

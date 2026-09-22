@@ -49,6 +49,7 @@ Browser                      Gateway                    OIDC Provider
 - **State via signed cookie** — No server-side session store or Redis needed. The OIDC state (provider, nonce, code_verifier, next path) is signed with the JWT secret and stored in an HttpOnly cookie.
 - **PKCE + nonce enabled by default** — Even though confidential clients could use `client_secret`, PKCE provides an extra layer of security.
 - **No email auto-linking** — a pre-existing local (email/password) account is never auto-linked to an SSO identity. If the IdP-reported email collides with an existing local account, the SSO login is blocked with a 409 so an SSO login can never seize a password account.
+- **An unusable address is its own refusal** — the IdP-reported email becomes the account's address, and the account record holds only an address that parses as one (a special-use or single-label domain is refused; no name is looked up, so a plausible domain is held whether or not mail reaches it). An address it refuses blocks the login with `sso_email_unusable` and creates nothing; it is never reported as a collision with an account, because there is none to collide with.
 - **Existing DeerFlow JWT** — After successful OIDC authentication, DeerFlow creates its own JWT session cookie. The OIDC provider's tokens are never exposed to the browser.
 
 ## Configuration
