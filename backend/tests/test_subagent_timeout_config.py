@@ -26,6 +26,24 @@ from deerflow.subagents.config import SubagentConfig
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _no_checkout_config(monkeypatch):
+    """Keep the checkout's ``config.yaml`` out of the singleton these tests set.
+
+    The registry resolves managed definitions through ``get_app_config()``, and
+    its first load re-applies the file's ``subagents`` section over the process
+    singleton. In a developer checkout that has a ``config.yaml`` a test that
+    happened to run first then read the file's overrides instead of its own. The
+    store falls back to its file store when no app config resolves, which is
+    what an environment without ``config.yaml`` -- CI -- already sees.
+    """
+
+    def _unavailable():
+        raise FileNotFoundError("config.yaml is not part of these tests")
+
+    monkeypatch.setattr("deerflow.config.app_config.get_app_config", _unavailable)
+
+
 def _reset_subagents_config(
     timeout_seconds: int = 900,
     *,

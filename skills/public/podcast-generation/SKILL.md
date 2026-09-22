@@ -49,7 +49,7 @@ The JSON structure:
 
 Call the Python script:
 ```bash
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/generate.py" \
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/generate.py" \
   --script-file /mnt/user-data/workspace/script-file.json \
   --output-file /mnt/user-data/outputs/generated-podcast.mp3 \
   --transcript-file /mnt/user-data/outputs/generated-podcast-transcript.md
@@ -138,7 +138,7 @@ Step 1: Create script file `/mnt/user-data/workspace/ai-history-script.json`:
 
 Step 2: Execute generation:
 ```bash
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/generate.py" \
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/generate.py" \
   --script-file /mnt/user-data/workspace/ai-history-script.json \
   --output-file /mnt/user-data/outputs/ai-history-podcast.mp3 \
   --transcript-file /mnt/user-data/outputs/ai-history-transcript.md

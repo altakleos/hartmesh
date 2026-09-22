@@ -51,7 +51,7 @@ This is commonly used in signup flows, admin dashboards, or when importing users
 
 
 ```bash
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/generate.py" \
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/generate.py" \
   --script-file /mnt/user-data/workspace/tech-explainer-script.json \
   --output-file /mnt/user-data/outputs/tech-explainer-podcast.mp3 \
   --transcript-file /mnt/user-data/outputs/tech-explainer-transcript.md

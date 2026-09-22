@@ -49,7 +49,7 @@ If the user says "50+ papers", politely cap it at 50 and explain that synthesis 
 Call the bundled search script. Do **not** try to scrape arXiv by other means and do **not** write your own HTTP client — this script handles URL encoding, Atom XML parsing, and id normalization correctly.
 
 ```bash
-python "${SKILL_DIR:?set it to this skill's directory}/scripts/arxiv_search.py" \
+python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/arxiv_search.py" \
   "<topic>" \
   --max-results <N> \
   [--category <cat>] \

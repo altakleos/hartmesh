@@ -15,7 +15,13 @@ from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal
 from pathlib import Path
 
-import pandas as pd
+try:
+    import pandas as pd
+except ImportError:
+    # report.py checks the libraries first and, when one is missing, imports
+    # this module only for MISSING_LIBRARY_MESSAGE and the exit code. Failing
+    # here as well turned that one plain line into a traceback and exit 1.
+    pd = None
 
 MISSING_LIBRARY_MESSAGE = (
     "business-report needs pandas, python-docx, jinja2, xlsxwriter, openpyxl and matplotlib, "
