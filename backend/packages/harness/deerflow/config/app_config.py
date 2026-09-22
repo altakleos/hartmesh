@@ -769,14 +769,40 @@ def reload_app_config(config_path: str | None = None) -> AppConfig:
     return _load_and_cache_app_config(config_path)
 
 
+def _reset_singleton_configs() -> None:
+    """Put the per-section singletons back to their defaults.
+
+    The partner of :meth:`AppConfig._apply_singleton_configs`. Without it, a
+    config that is no longer installed keeps deciding what every
+    ``get_*_config()`` answers, which is the same two-representation problem
+    from the other end.
+    """
+    load_title_config_from_dict({})
+    load_summarization_config_from_dict({})
+    load_memory_config_from_dict({})
+    load_agents_api_config_from_dict({})
+    load_subagents_config_from_dict({})
+    load_tool_search_config_from_dict({})
+    load_guardrails_config_from_dict({})
+    load_authorization_config_from_dict({})
+    load_checkpointer_config_from_dict(None)
+    load_stream_bridge_config_from_dict(None)
+    load_acp_config_from_dict({})
+
+
 def reset_app_config() -> None:
     """Reset the cached config instance.
 
     This clears the singleton cache, causing the next call to
     `get_app_config()` to reload from file. Useful for testing
     or when switching between different configurations.
+
+    The per-section singletons go back to their defaults with it: they are
+    written by whichever config was installed, so leaving them behind would
+    let a config that is no longer installed keep answering for the process.
     """
     global _app_config, _app_config_path, _app_config_mtime, _app_config_signature, _app_config_is_custom
+    _reset_singleton_configs()
     _app_config = None
     _app_config_path = None
     _app_config_mtime = None
