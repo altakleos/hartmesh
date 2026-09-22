@@ -493,18 +493,73 @@ class TestMembership:
             assert _landed(_sign_in(admin, base, provider, subject="sub-root", email="root@example.com", claims={CLAIM: ["admin"]}))
             assert _me(admin, base).json()["system_role"] == "admin"
             paths = list(admin.get(f"{base}/openapi.json").json()["paths"])
-            suspects = [path for path in paths if any(word in path.lower() for word in ("disable", "enable", "end-sessions", "end_sessions", "accounts", "sessions"))]
+            suspects = [path for path in paths if any(word in path.lower() for word in ("disable", "enable", "end-sessions", "end_sessions", "accounts", "sessions", "release"))]
             assert suspects == [], suspects
             guesses = (
                 ("POST", "/api/v1/auth/accounts/disable"),
                 ("POST", "/api/v1/auth/accounts/sub-root/disable"),
                 ("POST", "/api/v1/auth/accounts/sub-root/enable"),
+                ("POST", "/api/v1/auth/accounts/release-email"),
+                ("POST", "/api/v1/auth/accounts/sub-root/release-email"),
+                ("DELETE", "/api/v1/auth/accounts/sub-root/email"),
                 ("DELETE", "/api/v1/auth/sessions"),
                 ("POST", "/api/v1/auth/users/sub-root/sessions/end"),
             )
             for method, path in guesses:
                 answer = admin.request(method, f"{base}{path}", headers=_csrf(admin))
                 assert answer.status_code in {404, 405}, (method, path, answer.status_code)
+
+    def test_a_recreated_person_signs_in_once_the_deployer_releases_the_address(self, gateway: e2e._Gateway, provider: OIDCTestProvider) -> None:
+        """The provider's own remedy for a mis-sent invitation: delete the person, invite them again.
+
+        The new subject carries the same address, which the old account still
+        holds. Through the served Gateway, with the deployer's command run as
+        a subprocess the way a deployer runs it.
+        """
+        base = gateway.loopback_url
+        issuer = provider.issuer_url("a")
+        address = "recreated@example.com"
+
+        with _client(base) as first:
+            assert _landed(_sign_in(first, base, provider, subject="sub-first", email=address, claims={CLAIM: ["member"]}))
+        assert _accounts(gateway, "disable", "--issuer", issuer, "--subject", "sub-first")[1]["verdict"] == "disabled"
+
+        # The same person, a new subject, the same address: refused, and told why.
+        with _client(base) as again:
+            landed = _sign_in(again, base, provider, subject="sub-second", email=address, claims={CLAIM: ["member"]})
+            assert landed.headers["location"] == "/login?error=sso_email_taken", landed.text
+            assert "access_token" not in again.cookies
+
+        # Releasing is for an account nobody can use; while it is on, refused.
+        assert _accounts(gateway, "enable", "--issuer", issuer, "--subject", "sub-first")[1]["verdict"] == "enabled"
+        code, refused = _accounts(gateway, "release-email", "--issuer", issuer, "--subject", "sub-first")
+        assert code == 1 and "not turned off" in refused["error"], refused
+        assert _accounts(gateway, "disable", "--issuer", issuer, "--subject", "sub-first")[1]["verdict"] == "disabled"
+
+        code, released = _accounts(gateway, "release-email", "--issuer", issuer, "--subject", "sub-first")
+        assert code == 0 and released["verdict"] == "released" and released["released"] == address, released
+        assert _accounts(gateway, "release-email", "--issuer", issuer, "--subject", "sub-first")[1]["verdict"] == "already_released"
+
+        with _client(base) as again:
+            assert _landed(_sign_in(again, base, provider, subject="sub-second", email=address, claims={CLAIM: ["member"]}))
+            assert _me(again, base).json()["email"] == address
+
+        listed = {entry["subject"]: entry for entry in _accounts(gateway, "list")[1]["accounts"]}
+        assert listed["sub-first"]["released"] is True and listed["sub-first"]["released_from"] == address
+        assert listed["sub-first"]["disabled"] is True, "the old account is still there, still off"
+        assert listed["sub-second"]["email"] == address and listed["sub-second"]["released"] is False
+
+    def test_an_address_the_provider_changes_follows_the_person(self, gateway: e2e._Gateway, provider: OIDCTestProvider) -> None:
+        """One subject, a corrected address, through the real flow."""
+        base = gateway.loopback_url
+        with _client(base) as client:
+            assert _landed(_sign_in(client, base, provider, subject="sub-moves", email="before@example.com", claims={CLAIM: ["member"]}))
+            assert _me(client, base).json()["email"] == "before@example.com"
+        with _client(base) as client:
+            assert _landed(_sign_in(client, base, provider, subject="sub-moves", email="after@example.com", claims={CLAIM: ["member"]}))
+            assert _me(client, base).json()["email"] == "after@example.com"
+        listed = {entry["subject"]: entry for entry in _accounts(gateway, "list")[1]["accounts"]}
+        assert listed["sub-moves"]["email"] == "after@example.com"
 
     def test_zz_the_client_secret_appears_in_no_log_line(self, gateway: e2e._Gateway, journal: _Journal) -> None:
         assert journal.lines and [line for line in journal.lines if CLIENT_SECRET in line] == []

@@ -243,7 +243,7 @@ class TestServedGateway:
         # above recorded that the check ran.
         assert all(exchange["pkce_verified"] for exchange in provider.issuers["a"].exchanges if exchange["ok"])
 
-    def test_the_second_provider_uses_basic_client_authentication_and_keeps_its_own_accounts(self, gateway: e2e._Gateway, provider: OIDCTestProvider) -> None:
+    def test_the_second_provider_uses_basic_client_authentication_and_keeps_its_own_accounts(self, gateway: e2e._Gateway, provider: OIDCTestProvider, journal: _Journal) -> None:
         base = gateway.loopback_url
         with _client(base) as client:
             landed = _sign_in(client, base, provider, subject="sub-basic", email="basic@example.com", provider_id="sso-basic")
@@ -259,8 +259,17 @@ class TestServedGateway:
             assert _sign_in(client, base, provider, subject="sub-owner", email=OWNER).headers["location"].startswith("/auth/callback")
         with _client(base) as client:
             landed = _sign_in(client, base, provider, subject="sub-owner", email=OWNER, provider_id="sso-basic")
-            assert landed.headers["location"] == "/login?error=sso_account_exists"
+            # The holder is a provider account, not a password account: telling
+            # this person to sign in with a password would send them to a door
+            # that does not exist for them.
+            assert landed.headers["location"] == "/login?error=sso_email_taken"
         assert _account_row(gateway, OWNER)[1:3] == ("sso", "sub-owner")
+        # Both providers point at one issuer here, so the holder is named by its
+        # provider too -- otherwise the line would read as the account holding
+        # its own address.
+        held = [line for line in journal.lines if "sub-owner" in line and "held by" in line]
+        assert held, journal.lines[-5:]
+        assert any("of provider sso-basic" in line and "of provider sso at issuer" in line for line in held), held
 
     def test_an_address_no_account_can_hold_is_refused_in_its_own_words(self, gateway: e2e._Gateway, provider: OIDCTestProvider, journal: _Journal) -> None:
         """A first sign-in for an address the record will not hold: its own code, and no account claimed to be in the way."""

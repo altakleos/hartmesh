@@ -32,6 +32,9 @@ class User(BaseModel):
     needs_setup: bool = Field(default=False, description="True when a reset account must complete setup")
     token_version: int = Field(default=0, description="Incremented on password change to invalidate old JWTs")
     last_sign_in_at: datetime | None = Field(None, description="When the account last signed in through its identity provider; None if never, or for a local account")
+    email_released_from: str | None = Field(
+        None, description="The address this account held before the deployer released it; None while its email is its own. Not an EmailStr: it records what was, and a legacy row may hold an address the validator would now refuse"
+    )
     # Derived at every read from ``disabled_identities`` (the account's
     # issuer and subject have a row there); never stored on the user row.
     disabled_at: datetime | None = Field(None, description="When the deployer turned the account off; None while it is on")

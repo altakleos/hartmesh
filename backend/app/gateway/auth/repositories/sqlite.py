@@ -164,6 +164,7 @@ class SQLiteUserRepository(UserRepository):
             needs_setup=row.needs_setup,
             token_version=row.token_version,
             last_sign_in_at=_aware(row.last_sign_in_at),
+            email_released_from=row.email_released_from,
             disabled_at=_aware(disabled_at),
         )
 
@@ -202,6 +203,7 @@ class SQLiteUserRepository(UserRepository):
             needs_setup=user.needs_setup,
             token_version=user.token_version,
             last_sign_in_at=user.last_sign_in_at,
+            email_released_from=user.email_released_from,
         )
 
     # ── CRUD ──────────────────────────────────────────────────────────
@@ -310,6 +312,12 @@ class SQLiteUserRepository(UserRepository):
             row.needs_setup = user.needs_setup
             row.token_version = user.token_version
             row.last_sign_in_at = user.last_sign_in_at
+            # Carried like every other field, and for the same reason the
+            # sign-in write clears it: an account that changes its address
+            # through here and kept the column set would read as released
+            # while holding a real address, and ``release-email`` would then
+            # refuse to give that address up.
+            row.email_released_from = user.email_released_from
             await session.commit()
         return user
 
@@ -332,21 +340,32 @@ class SQLiteUserRepository(UserRepository):
     async def get_user_by_identity(self, issuer: str, subject: str) -> User | None:
         """The account an identity provider's ``(issuer, subject)`` created, if any.
 
-        A row linked before the issuer was recorded (NULL) is that account
-        when no row records this issuer for the subject: the deployer names
-        the issuer the provider is configured for, which is the one the row
-        will adopt at its next sign-in.
+        Usually exactly one; see :meth:`list_users_by_identity` for when it is
+        not, and for the order the first is picked in.
         """
-        stmt = select(UserRow).where(UserRow.oauth_id == subject, UserRow.oauth_provider.is_not(None))
+        accounts = await self.list_users_by_identity(issuer, subject)
+        return accounts[0] if accounts else None
+
+    async def list_users_by_identity(self, issuer: str, subject: str) -> list[User]:
+        """Every account an identity provider's ``(issuer, subject)`` created.
+
+        The uniqueness the schema enforces is ``(oauth_provider, oauth_id)``,
+        not ``(issuer, subject)``: two configured providers may point at one
+        issuer, and then one person at that issuer has two accounts, one per
+        provider name. A caller that acts on a single row has to say so rather
+        than take whichever came back first.
+
+        Rows that record this issuer come first; a row linked before the issuer
+        was recorded (NULL) follows, because the deployer names the issuer the
+        provider is configured for, which is the one that row will adopt at its
+        next sign-in.
+        """
+        stmt = select(UserRow).where(UserRow.oauth_id == subject, UserRow.oauth_provider.is_not(None)).order_by(UserRow.created_at, UserRow.id)
         async with self._sf() as session:
             rows = (await session.execute(stmt)).scalars().all()
-            for row in rows:
-                if row.oauth_issuer and issuer_key(row.oauth_issuer) == issuer_key(issuer):
-                    return await self._load(session, row)
-            for row in rows:
-                if not row.oauth_issuer:
-                    return await self._load(session, row)
-            return None
+            recorded = [row for row in rows if row.oauth_issuer and issuer_key(row.oauth_issuer) == issuer_key(issuer)]
+            adopting = [row for row in rows if not row.oauth_issuer]
+            return [self._row_to_user(row, await self._disabled_at(session, row)) for row in (*recorded, *adopting)]
 
     async def end_sessions(self, user_id: str) -> bool:
         """Invalidate every session of the account: one atomic increment of ``token_version``.
@@ -359,16 +378,72 @@ class SQLiteUserRepository(UserRepository):
             await session.commit()
             return bool(result.rowcount)
 
-    async def record_sign_in(self, user_id: str, *, system_role: str, oauth_issuer: str | None, last_sign_in_at: datetime) -> None:
+    async def record_sign_in(self, user_id: str, *, system_role: str, oauth_issuer: str | None, last_sign_in_at: datetime, email: str | None = None) -> bool:
         """What a provider sign-in writes to an existing account, and nothing else.
+
+        Returns whether the address followed: ``False`` when none was offered,
+        and when one was but another account holds it by the time of the write.
 
         A targeted update rather than ``update_user``: the sign-in must not
         carry a ``token_version`` it read a moment ago back over an
         ``end_sessions`` that landed in between.
+
+        ``email`` is written only when the caller decided the address follows
+        this sign-in; omitted, the stored one is untouched. It is canonicalised
+        here like every other write, so the unique index keeps enforcing
+        case-insensitive uniqueness.
+
+        Writing an address also clears ``email_released_from``, because that
+        column *is* what "released" means: an account that holds a real
+        address again is not one whose address is going spare, and it must be
+        releasable again if the deployer later turns it off. Leaving the
+        column set would make a release a once-per-account act and re-open the
+        lock-out this exists to end.
+        """
+        stamp: dict[str, object] = {"system_role": system_role, "oauth_issuer": oauth_issuer, "last_sign_in_at": last_sign_in_at}
+        async with self._sf() as session:
+            if email is not None:
+                try:
+                    await session.execute(update(UserRow).where(UserRow.id == user_id).values(**stamp, email=_normalize_email(email), email_released_from=None))
+                    await session.commit()
+                    return True
+                except IntegrityError as exc:
+                    if not _is_email_violation(exc):
+                        raise
+                    # Another account took the address between the caller's
+                    # holder check and this write. Stamping the sign-in is not
+                    # optional, and the address not following is the same
+                    # outcome the caller already has a path for.
+                    await session.rollback()
+            await session.execute(update(UserRow).where(UserRow.id == user_id).values(**stamp))
+            await session.commit()
+            return False
+
+    async def release_email(self, user_id: str, *, replacement: str) -> str | None:
+        """Give up the account's address, recording what it held. Returns that address.
+
+        ``None`` when the account is gone or is already holding a released
+        address, so the caller can say which of the two happened without a
+        second read.
+
+        The write is a compare-and-swap on the address it read: two runs at
+        once release once, and a sign-in that changed the address in between
+        cannot have the older one recorded as what was given up. An account
+        that took a real address again at a later sign-in has the column
+        cleared (:meth:`record_sign_in`), so it can be released again --
+        a release is not a once-per-account act, or the lock-out this exists
+        to end would simply come back.
         """
         async with self._sf() as session:
-            await session.execute(update(UserRow).where(UserRow.id == user_id).values(system_role=system_role, oauth_issuer=oauth_issuer, last_sign_in_at=last_sign_in_at))
+            row = await session.get(UserRow, user_id)
+            if row is None or row.email_released_from is not None:
+                return None
+            held = row.email
+            result = await session.execute(
+                update(UserRow).where(UserRow.id == user_id, UserRow.email == held, UserRow.email_released_from.is_(None)).values(email=_normalize_email(replacement), email_released_from=held),
+            )
             await session.commit()
+            return held if result.rowcount else None
 
     async def list_users(self) -> list[User]:
         """Every account, oldest first, each with its derived disabled state."""

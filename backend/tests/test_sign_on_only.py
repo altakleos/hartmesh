@@ -397,8 +397,11 @@ class _Users:
         self.updated.append(user)
         return user
 
-    async def record_sign_in(self, user):
+    async def record_sign_in(self, user, *, email: str | None = None) -> bool:
+        if email is not None:
+            user.email = email
         self.updated.append(user)
+        return email is not None
 
     async def create_oauth_user(self, **kwargs):
         user = SimpleNamespace(id=uuid4(), needs_setup=False, token_version=0, password_hash=None, **kwargs)
