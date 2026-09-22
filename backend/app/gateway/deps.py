@@ -1293,6 +1293,12 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         stack.push_async_callback(app.state.run_manager.stop_heartbeat)
         await app.state.run_manager.start_heartbeat()
 
+        # Where no lease heartbeat observes them, cancellations written by
+        # another process -- the deployer's `accounts disable`, ending a
+        # removed person's running work -- are observed here instead.
+        stack.push_async_callback(app.state.run_manager.stop_cancellation_watch)
+        await app.state.run_manager.start_cancellation_watch()
+
         # Startup recovery: mark inflight runs whose lease has expired as error.
         # In single-worker mode (SQLite / backend=memory), no run has a lease, so
         # all inflight rows are reclaimed (unchanged behaviour). In multi-worker

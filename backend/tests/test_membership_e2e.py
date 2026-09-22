@@ -208,7 +208,11 @@ def _accounts(gateway: e2e._Gateway, *args: str) -> tuple[int, dict[str, Any]]:
     lines = [line for line in completed.stdout.splitlines() if line.strip()]
     assert len(lines) == 1, f"one JSON document on stdout, got: {completed.stdout!r} / {completed.stderr[-800:]!r}"
     document = json.loads(lines[0])
-    assert (completed.returncode != 0) == ("error" in document), (completed.returncode, document)
+    # A non-zero status means either a refusal (``error``) or a run the command
+    # could not confirm stopped (``runs_unconfirmed``); one of the two must say
+    # why, and a zero status must claim neither.
+    failed = "error" in document or bool(document.get("runs_unconfirmed"))
+    assert (completed.returncode != 0) == failed, (completed.returncode, document)
     return completed.returncode, document
 
 
@@ -327,12 +331,14 @@ class TestMembership:
             assert created.status_code == 200, created.text
             task_id = created.json()["id"]
 
-            # A stream open: the run's bash call sleeps, so the disable lands mid-run.
+            # A stream open: the run's bash call sleeps far longer than the
+            # command's whole wait, so nothing about the timing below can be
+            # explained by the command finishing on its own.
             stream: dict[str, Any] = {}
 
             def _run_stream() -> None:
                 try:
-                    stream["observed"] = e2e._observe_stream(client, base, thread_id, _csrf(client)["X-CSRF-Token"], "probe:bash sleep 6; echo stream-ran-to-its-end", timeout=120.0, recursion_limit=100)
+                    stream["observed"] = e2e._observe_stream(client, base, thread_id, _csrf(client)["X-CSRF-Token"], "probe:bash sleep 240; printf 'stream-ran-to-its-%s\\n' end", timeout=120.0, recursion_limit=100)
                 except BaseException as exc:  # noqa: BLE001 - reported below
                     stream["error"] = exc
 
@@ -353,11 +359,17 @@ class TestMembership:
                     return connection.execute("SELECT status FROM runs WHERE thread_id = ?", (thread_id,)).fetchone()
 
             assert _run_status() == ("running",), "the run is in flight when the command runs"
+            t_command = time.monotonic()
             code, document = _accounts(gateway, "disable", "--issuer", issuer, "--subject", "sub-off")
-            assert code == 0, document
-            assert _run_status() == ("running",), "the command did not interrupt the run"
             t_disabled = time.monotonic()
+            assert code == 0, document
             assert document["verdict"] == "disabled" and document["sessions_ended"] is True and document["tokens_revoked"] == 1 and document["schedules_held"] == 1, document
+            # The run: ended, and the command waited to say so rather than
+            # reporting a write as a stopped run.
+            assert document["runs_found"] == 1 and document["runs_cancelled"] == 1, document
+            assert document["runs_unconfirmed"] == [] and document["returncode"] == 0, document
+            assert _run_status() == ("interrupted",), "the command returned before the run was terminal"
+            assert t_disabled - t_command < 120, "the command took longer than the run it was ending"
             assert document["account"]["email"] == "off@example.com" and document["account"]["disabled"] is True and document["account"]["subject"] == "sub-off"
 
             # The session: refused at its next request. Disable ended the sessions
@@ -368,13 +380,17 @@ class TestMembership:
             assert refused.status_code == 401 and refused.json()["detail"]["code"] in {"token_invalid", "account_disabled"}, refused.text
             # The token: refused, with the same answer as any dead token.
             assert not _pat_works(base, token, thread_id)
-            # The stream: a run already executing finishes, and the stream ends with it; nothing new starts.
+            # The stream: it closes with the run, and the bash call never
+            # reached the line after its sleep -- the work stopped, not just
+            # the output.
             worker.join(timeout=120)
             assert not worker.is_alive() and "error" not in stream, stream.get("error")
             observed = stream["observed"]
-            assert observed.t_end is not None and observed.events[-1] == "end", "the stream ran to its end frame"
-            assert observed.t_end > t_disabled, "and ended after the command had returned"
-            assert "stream-ran-to-its-end" in "".join(str(payload) for _, payload in observed.frames)
+            assert observed.t_end is not None, "the stream never closed"
+            # The command's own output, which only exists if the sleep
+            # returned. The prompt above carries the format string, never the
+            # finished line, so this cannot match the echo of the request.
+            assert "stream-ran-to-its-end" not in "".join(str(payload) for _, payload in observed.frames)
             with httpx.Client(base_url=base, timeout=30.0) as internal:
                 pair = generate_csrf_token()
                 # An internal caller acting for the owner (a channel bound to the account) is refused too --
@@ -386,8 +402,7 @@ class TestMembership:
                 assert internal.post(f"{base}/api/threads/search", json={}, headers=nobody).status_code == 200
             with sqlite3.connect(_db(gateway)) as connection:
                 status = connection.execute("SELECT status FROM runs WHERE run_id = ?", (observed.run_id,)).fetchone()
-            assert status == ("success",), status
-            assert observed.text_frames >= 1
+            assert status == ("interrupted",), status
 
             # A fresh sign-in, although the claim admits: refused, and the journal names issuer and subject.
             with _client(base) as again:

@@ -197,6 +197,11 @@ def release_command_scope(self, scope_id: str) -> None:
 
 
 @sandbox_operation
+def abort_running_commands(self) -> int:
+    """Stop every command in flight and return how many there were."""
+
+
+@sandbox_operation
 def read_file(
     self,
     path: str,

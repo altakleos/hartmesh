@@ -976,6 +976,20 @@ class RunStore(abc.ABC):
         """Return persisted runs that are still ``pending`` or ``running``."""
         pass
 
+    async def list_active_by_user(self, user_id: str) -> list[dict[str, Any]]:
+        """Return the runs one account owns that have not reached a terminal status.
+
+        The deployer's ``accounts disable`` asks this to end a removed
+        person's work: the refusal it records stops the next request and the
+        next launch, but a run already executing is the one path left, and it
+        has to be named before it can be cancelled.
+
+        Concrete by default so a store outside this repository keeps working:
+        the default filters :meth:`list_inflight`, which every store
+        implements, and a store with an index on the owner overrides it.
+        """
+        return [row for row in await self.list_inflight() if row.get("user_id") == user_id and (row.get("operation_kind") or "run") == "run"]
+
     @abc.abstractmethod
     async def aggregate_tokens_by_thread(self, thread_id: str, *, include_active: bool = False) -> dict[str, Any]:
         """Aggregate token usage for completed runs in a thread.

@@ -11,6 +11,14 @@ from deerflow.sandbox.search import GrepMatch
 # forwards it as the SDK's ``envs``. The check is defense-in-depth for the
 # contract: a future shell-splicing implementation must not have to re-derive
 # its own rule.
+#: Exported into every command a sandbox runs, so ``abort_running_commands``
+#: can recognize a process as that sandbox's own. The value is per sandbox
+#: instance, never per command: ending a person's work means ending whatever
+#: any of their commands started, including a server one left in the
+#: background. Implementations that cannot mark their commands simply never
+#: set it.
+ABORT_TOKEN_ENV = "DEERFLOW_SANDBOX_ABORT_TOKEN"
+
 _ENV_NAME_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
@@ -127,6 +135,28 @@ class Sandbox(ABC):
     def release_command_scope(self, scope_id: str) -> None:
         """Release provider-specific command state for one execution scope."""
         del scope_id
+
+    def abort_running_commands(self) -> int:
+        """Stop every command this sandbox is running now, and return how many.
+
+        A cancelled run must stop its work, not only the graph around it.
+        ``asyncio.to_thread`` cannot interrupt the worker that is blocked on a
+        command, so cancellation reaches the command only if something kills
+        it: the tool wrapper calls this the moment a sandbox tool call is
+        cancelled, and the drain that follows then returns as soon as the
+        command dies instead of waiting out a ``sleep 541``.
+
+        The contract is the command *and its descendants*, including a child
+        that detached itself -- work that keeps writing files or calling out
+        after its owner was removed is exactly what an operator is ending.
+        The scope is this sandbox: one sandbox serves one person's thread, and
+        a run's cancellation ends that thread's work.
+
+        Implementations that cannot reach their commands return 0 and leave
+        cancellation as it was; the hook is additive, and a custom provider
+        loaded by class path never has to implement it.
+        """
+        return 0
 
     @abstractmethod
     def read_file(

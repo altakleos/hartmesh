@@ -361,7 +361,14 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
                 except Exception:
                     # Cancellation is the caller's primary control signal. A
                     # failed best-effort terminal write must never replace it.
-                    logger.warning("Failed to record durable tool cancellation outcome")
+                    # It is still worth knowing which write failed and why: a
+                    # cancelled tool attempt with no terminal receipt is the
+                    # indeterminate state recovery fails closed on, and this
+                    # line was the only trace of it. (A durable cancellation
+                    # advances the run's lifecycle epoch, which the sink's
+                    # per-receipt fence does not follow, so the terminal write
+                    # is refused as `tool_receipt_ownership_lost`.)
+                    logger.warning("Failed to record durable tool cancellation outcome", exc_info=True)
                 raise
             except Exception as exc:
                 policy = self._policy_references(context, tool_call_id)

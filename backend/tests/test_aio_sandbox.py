@@ -341,7 +341,9 @@ class TestScopedShellSessions:
         for thread in threads:
             thread.join()
 
-        assert sorted(outputs) == ["subagent-a", "subagent-b"]
+        # Each command carries the sandbox's abort marker in front of it, so
+        # compare what the caller actually asked to run.
+        assert sorted(output.rsplit("; ", 1)[-1] for output in outputs) == ["subagent-a", "subagent-b"]
         assert max_active == 2
         assert len(set(session_ids)) == 2
 
@@ -447,7 +449,7 @@ class TestScopedShellSessions:
         assert not teardown_thread.is_alive()
         assert queued_results == ["Error: sandbox command scope is no longer active"]
         assert len(created_ids) == 1
-        assert executed_commands == ["initial"]
+        assert [command.rsplit("; ", 1)[-1] for command in executed_commands] == ["initial"]
         assert cleaned_ids == created_ids
 
     def test_queued_command_cannot_restart_session_while_sandbox_closes(self, sandbox):
@@ -483,7 +485,7 @@ class TestScopedShellSessions:
         assert not teardown_thread.is_alive()
         assert queued_results == ["Error: sandbox command scope is no longer active"]
         assert len(created_ids) == 1
-        assert executed_commands == ["initial"]
+        assert [command.rsplit("; ", 1)[-1] for command in executed_commands] == ["initial"]
         assert cleaned_ids == created_ids
 
     def test_env_command_keeps_fresh_bash_exec_semantics(self, sandbox):

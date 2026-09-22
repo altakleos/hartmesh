@@ -15,6 +15,7 @@ Usage:
     python -m app.gateway.auth.accounts disable --email who@example.com
     python -m app.gateway.auth.accounts enable --issuer URL --subject SUB
     python -m app.gateway.auth.accounts end-sessions --issuer URL --subject SUB
+    python -m app.gateway.auth.accounts end-sessions --email who@example.com --end-running-work
     python -m app.gateway.auth.accounts release-email --issuer URL --subject SUB
 
 Every form is idempotent and prints one JSON document on stdout, with the
@@ -34,9 +35,23 @@ owner -- a due scheduled task, a channel message, an MCP task notification
 an account is created or returned (``user_provisioning``). On top of the
 derived refusal the command ends the account's sessions (``token_version``)
 and revokes its personal access tokens, so ``enable`` cannot revive them.
-A run already executing is not interrupted: the Gateway reads the fact at
-the next credential resolution or launch, and the command is a database
-write. Its stream ends when the run does.
+
+It also ends the account's running work. The refusal stops the next request
+and the next launch, but a run already executing was the one path left: a
+tool call can run for minutes, keep writing files and calling out through
+the sandbox's network, and deliver its result into a thread after the
+person was removed. Every non-terminal run the account owns is cancelled
+through the same durable request a person's own cancel makes, which the
+owning worker applies -- including a run owned by another worker. The
+command then waits, bounded, for each to reach a terminal status and
+reports what it saw: ``runs_found``, ``runs_cancelled``, and the ids under
+``runs_unconfirmed`` of any that did not stop, which is a failure with a
+non-zero ``returncode`` and never a silent success. ``--wait-seconds``
+moves the bound.
+
+``end-sessions`` does the same only when asked, with
+``--end-running-work``: demoting an administrator is not removing them, and
+their run keeps going unless the deployer says otherwise.
 
 What ``release-email`` is for: ``users.email`` is unique, so one address
 belongs to one account for good. That is right while the account is
@@ -54,14 +69,18 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import logging
 import os
 import sys
+import time
 from datetime import datetime
 from typing import Any
 
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from deerflow.persistence.user.access import issuer_key
+
+logger = logging.getLogger(__name__)
 
 COMMANDS = ("list", "disable", "enable", "end-sessions", "release-email")
 
@@ -80,6 +99,21 @@ def released_email_for(user_id: str) -> str:
 
 
 ACTIVE_SCHEDULE_STATUSES = frozenset({"enabled", "running"})
+
+#: A run has stopped once its row reads one of these.
+TERMINAL_RUN_STATUSES = frozenset({"success", "error", "timeout", "interrupted"})
+
+#: How long to wait for the runs this command cancelled to reach a terminal
+#: status. The owning worker applies a durable cancellation on its next
+#: observation -- every five seconds without a lease heartbeat, every
+#: ``lease_seconds / 3`` with one -- and then has to unwind the graph and the
+#: tool call around it. Sixty seconds leaves room for both without leaving the
+#: deployer waiting on a Gateway that is not answering; ``--wait-seconds``
+#: moves it.
+DEFAULT_RUN_WAIT_SECONDS = 60.0
+
+#: How often the command re-reads the rows it is waiting on.
+RUN_WAIT_POLL_SECONDS = 0.5
 
 
 class CommandError(Exception):
@@ -109,14 +143,32 @@ def _account_document(user: User) -> dict[str, Any]:
 
 
 class AccountsCommand:
-    """The five forms over one users repository, a token store and a schedule store."""
+    """The five forms over one users repository, a token store, a schedule store and the run store."""
 
-    def __init__(self, users: SQLiteUserRepository, *, tokens: Any | None, schedules: Any | None) -> None:
+    def __init__(
+        self,
+        users: SQLiteUserRepository,
+        *,
+        tokens: Any | None,
+        schedules: Any | None,
+        runs: Any | None = None,
+        wait_seconds: float = DEFAULT_RUN_WAIT_SECONDS,
+    ) -> None:
         self._users = users
         self._tokens = tokens
         self._schedules = schedules
+        self._runs = runs
+        self._wait_seconds = wait_seconds
 
-    async def run(self, command: str, *, issuer: str | None = None, subject: str | None = None, email: str | None = None) -> dict[str, Any]:
+    async def run(
+        self,
+        command: str,
+        *,
+        issuer: str | None = None,
+        subject: str | None = None,
+        email: str | None = None,
+        end_running_work: bool = False,
+    ) -> dict[str, Any]:
         if command == "list":
             return await self.list()
         identity, account = await self._resolve(issuer=issuer, subject=subject, email=email)
@@ -125,7 +177,7 @@ class AccountsCommand:
         if command == "enable":
             return await self.enable(identity, account)
         if command == "end-sessions":
-            return await self.end_sessions(identity, account)
+            return await self.end_sessions(identity, account, end_running_work=end_running_work)
         if command == "release-email":
             return await self.release_email(identity, account)
         raise CommandError(f"unknown command {command!r}; one of {', '.join(COMMANDS)}")
@@ -186,6 +238,10 @@ class AccountsCommand:
             "sessions_ended": False,
             "tokens_revoked": 0,
             "schedules_held": 0,
+            "runs_found": 0,
+            "runs_cancelled": 0,
+            "runs_unconfirmed": [],
+            "returncode": 0,
         }
         # The refusal is keyed by (issuer, subject): it is the person at the
         # provider who is turned off, so it covers every account that identity
@@ -203,8 +259,12 @@ class AccountsCommand:
         document["sessions_ended"] = await self._users.end_sessions(str(account.id))
         document["tokens_revoked"] = await self._revoke_tokens(account)
         document["schedules_held"] = await self._count_schedules(account)
+        document.update(await self._end_running_work(account))
         document["account"] = _account_document(await self._users.get_user_by_id(str(account.id)) or account)
-        document["note"] = "sessions are refused at their next request; a run already executing finishes and its stream ends with it; no new run starts for this account"
+        if document["runs_unconfirmed"]:
+            document["note"] = "sessions are refused at their next request and no new run starts for this account, but the runs named in `runs_unconfirmed` did not stop within the wait: check the Gateway is running and re-run this command"
+        else:
+            document["note"] = "sessions are refused at their next request; every run this account had executing was cancelled and its stream ended with it; no new run starts for this account"
         return document
 
     async def enable(self, identity: tuple[str, str], account: User | None) -> dict[str, Any]:
@@ -219,20 +279,35 @@ class AccountsCommand:
             "note": "the person may sign in again; sessions ended and tokens revoked by disable stay ended and revoked",
         }
 
-    async def end_sessions(self, identity: tuple[str, str], account: User | None) -> dict[str, Any]:
+    async def end_sessions(self, identity: tuple[str, str], account: User | None, *, end_running_work: bool = False) -> dict[str, Any]:
+        """End an account's sessions, and its running work only when asked.
+
+        The default leaves a run alone on purpose. This form is what a demoted
+        administrator gets, and demoting someone is not removing them: their
+        work is still theirs to finish, at the role the next sign-in reads.
+        ``--end-running-work`` is for the deployer who means the other thing.
+        """
         issuer, subject = identity
         if account is None:
             raise CommandError(f"no account exists for subject {subject!r} at issuer {issuer!r}; there are no sessions to end")
         await self._users.end_sessions(str(account.id))
-        return {
+        document: dict[str, Any] = {
             "command": "end-sessions",
             "identity": {"issuer": issuer, "subject": subject},
             "verdict": "sessions_ended",
             "account": _account_document(account),
             "sessions_ended": True,
             "tokens_revoked": 0,
-            "note": "every open session is refused at its next request; personal access tokens are untouched; the next sign-in re-reads the claim",
+            "note": "every open session is refused at its next request; personal access tokens are untouched; a run already executing keeps going (pass --end-running-work to cancel it); the next sign-in re-reads the claim",
         }
+        if not end_running_work:
+            return document
+        document.update(await self._end_running_work(account))
+        if document["runs_unconfirmed"]:
+            document["note"] = "every open session is refused at its next request, but the runs named in `runs_unconfirmed` did not stop within the wait: check the Gateway is running and re-run this command"
+        else:
+            document["note"] = "every open session is refused at its next request; every run this account had executing was cancelled; personal access tokens are untouched and the next sign-in re-reads the claim"
+        return document
 
     async def release_email(self, identity: tuple[str, str], account: User | None) -> dict[str, Any]:
         """Give up the address of an account that is turned off, so a person may hold it again.
@@ -268,6 +343,67 @@ class AccountsCommand:
 
     # ── What disable reaches beyond the row ──────────────────────────────
 
+    async def _end_running_work(self, account: User) -> dict[str, Any]:
+        """Cancel every run this account has executing, then wait for them to stop.
+
+        The cancellation is the durable request a person's own cancel makes,
+        so the owning worker applies it through its normal abort and terminal
+        handling -- the same path, whichever worker owns the run. This process
+        holds the database and nothing else; it cannot reach into a worker,
+        and it must not pretend a write is a stopped run.
+
+        So it waits and then says what it saw. A run that did not reach a
+        terminal status inside the bound is named, not rounded down: an
+        operator who is told "cancelled" while a sandbox command is still
+        writing files has been told the wrong thing.
+        """
+        result: dict[str, Any] = {"runs_found": 0, "runs_cancelled": 0, "runs_unconfirmed": [], "returncode": 0}
+        if self._runs is None:
+            return result
+        user_id = str(account.id)
+        active = await self._runs.list_active_by_user(user_id)
+        run_ids = [str(row["run_id"]) for row in active if row.get("run_id")]
+        result["runs_found"] = len(run_ids)
+        if not run_ids:
+            return result
+        for run_id in run_ids:
+            try:
+                await self._runs.request_cancel_compat(run_id, action="interrupt", user_id=user_id)
+            except Exception as exc:  # noqa: BLE001 - one run that refuses the request must not hide the others
+                logger.warning("Failed to request cancellation of run %s: %s", run_id, exc)
+        stopped = await self._wait_for_terminal(run_ids, user_id)
+        result["runs_cancelled"] = len(stopped)
+        result["runs_unconfirmed"] = sorted(set(run_ids) - stopped)
+        result["returncode"] = 1 if result["runs_unconfirmed"] else 0
+        return result
+
+    async def _wait_for_terminal(self, run_ids: list[str], user_id: str) -> set[str]:
+        """Poll until every named run is terminal or the wait runs out; return the ones that stopped."""
+        stopped: set[str] = set()
+        pending = list(run_ids)
+        deadline = time.monotonic() + max(0.0, self._wait_seconds)
+        while True:
+            still_running: list[str] = []
+            for run_id in pending:
+                try:
+                    # Scoped to the owner: this command only ever waits on a
+                    # run it named from that account's own active rows.
+                    row = await self._runs.get(run_id, user_id=user_id)
+                except Exception as exc:  # noqa: BLE001 - a read that fails is not a stopped run
+                    logger.warning("Failed to read run %s while waiting for it to stop: %s", run_id, exc)
+                    still_running.append(run_id)
+                    continue
+                # A row that is gone cannot still be executing; a row whose
+                # status is terminal has stopped. Anything else is pending.
+                if row is None or row.get("status") in TERMINAL_RUN_STATUSES:
+                    stopped.add(run_id)
+                else:
+                    still_running.append(run_id)
+            pending = still_running
+            if not pending or time.monotonic() >= deadline:
+                return stopped
+            await asyncio.sleep(min(RUN_WAIT_POLL_SECONDS, max(0.0, deadline - time.monotonic())))
+
     async def _revoke_tokens(self, account: User) -> int:
         if self._tokens is None:
             return 0
@@ -287,10 +423,11 @@ class AccountsCommand:
 # ── Running it inside the deployment ────────────────────────────────────
 
 
-async def _run(command: str, *, issuer: str | None, subject: str | None, email: str | None) -> dict[str, Any]:
+async def _run(command: str, *, issuer: str | None, subject: str | None, email: str | None, end_running_work: bool = False, wait_seconds: float = DEFAULT_RUN_WAIT_SECONDS) -> dict[str, Any]:
     from deerflow.config import get_app_config
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
+    from deerflow.persistence.run import RunRepository
     from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
     from deerflow.runtime.tenant_identity import TenantIdentityV1
 
@@ -298,7 +435,8 @@ async def _run(command: str, *, issuer: str | None, subject: str | None, email: 
     if config.database.backend == "memory":
         raise CommandError("the memory database backend keeps no accounts between processes; this command needs config.database on sqlite or postgres")
     # The same tenant the Gateway resolves at construction: the token store
-    # filters rows by it.
+    # and the run store both filter rows by it, so a run this command cancels
+    # is one this deployment owns.
     tenant = TenantIdentityV1.resolve(deployment_config=config.deployment, environ=os.environ).to_persisted_reference()
     await init_engine_from_config(config.database)
     try:
@@ -309,8 +447,10 @@ async def _run(command: str, *, issuer: str | None, subject: str | None, email: 
             SQLiteUserRepository(session_factory),
             tokens=PersonalAccessTokenRepository(session_factory, tenant=tenant),
             schedules=ScheduledTaskRepository(session_factory),
+            runs=RunRepository(session_factory, tenant=tenant),
+            wait_seconds=wait_seconds,
         )
-        return await command_runner.run(command, issuer=issuer, subject=subject, email=email)
+        return await command_runner.run(command, issuer=issuer, subject=subject, email=email, end_running_work=end_running_work)
     finally:
         await close_engine()
 
@@ -321,9 +461,35 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--issuer", help="the identity provider's issuer URL, as configured")
     parser.add_argument("--subject", help="the person's subject at that issuer")
     parser.add_argument("--email", help="convenience: the account's email, when it resolves to exactly one provider account")
+    parser.add_argument(
+        "--end-running-work",
+        action="store_true",
+        help="end-sessions only: also cancel the runs this account has executing (disable always does)",
+    )
+    parser.add_argument(
+        "--wait-seconds",
+        type=float,
+        default=DEFAULT_RUN_WAIT_SECONDS,
+        help=f"how long to wait for cancelled runs to reach a terminal status before reporting them unconfirmed (default {DEFAULT_RUN_WAIT_SECONDS:g})",
+    )
     args = parser.parse_args(argv)
+    if args.end_running_work and args.command != "end-sessions":
+        print(json.dumps({"command": args.command, "error": "--end-running-work belongs to end-sessions; disable always ends the account's running work"}, sort_keys=True), flush=True)
+        return 1
+    if args.wait_seconds < 0:
+        print(json.dumps({"command": args.command, "error": "--wait-seconds cannot be negative"}, sort_keys=True), flush=True)
+        return 1
     try:
-        document = asyncio.run(_run(args.command, issuer=args.issuer, subject=args.subject, email=args.email))
+        document = asyncio.run(
+            _run(
+                args.command,
+                issuer=args.issuer,
+                subject=args.subject,
+                email=args.email,
+                end_running_work=args.end_running_work,
+                wait_seconds=args.wait_seconds,
+            )
+        )
     except CommandError as exc:
         print(json.dumps({"command": args.command, "error": str(exc)}, sort_keys=True), flush=True)
         return 1
@@ -331,7 +497,9 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"command": args.command, "error": f"{type(exc).__name__}: {exc}"}, sort_keys=True), flush=True)
         return 1
     print(json.dumps(document, sort_keys=True), flush=True)
-    return 0
+    # A run this command could not confirm stopped is a failure the exit
+    # status has to carry, not a detail buried in the document.
+    return int(document.get("returncode", 0))
 
 
 if __name__ == "__main__":

@@ -4,6 +4,32 @@ Scoped guide for `runtime/runs/` — the run manager, the worker, the run and
 event stores, and the delivery verdict they commit. Split out of
 [`../AGENTS.md`](../AGENTS.md), which owns the rest of the runtime.
 
+### Cancellations written by another process (`runs/manager.py`)
+
+`RunManager.cancel` is the in-process path. A cancellation from outside the
+process -- the deployer's `python -m app.gateway.auth.accounts disable`, which
+holds the database and no run manager -- is a durable request on the row
+(`request_cancel_compat`), and the worker that owns the run has to observe it.
+
+With `run_ownership.heartbeat_enabled`, `_renew_leases` already reads
+`cancel_action` on every renewal. Without it -- the single-Gateway deployment a
+tenant runs -- nothing read the column at all and the request sat there until
+the run ended by itself. `start_cancellation_watch` / `stop_cancellation_watch`
+fill exactly that gap and are a no-op wherever the heartbeat runs, so one row
+never has two observers. A tick costs one `list_inflight` query, and only while
+this process owns an active run, so an idle Gateway asks the database nothing;
+the interval is `OUT_OF_BAND_CANCELLATION_POLL_SECONDS` and sets the floor on
+how fast the deployer's command can confirm a run stopped. Both paths end in
+`_signal_local_cancel`, so the worker's own abort and terminal handling are
+unchanged. The Gateway starts and stops the watch alongside the heartbeat in
+`app/gateway/deps.py`.
+
+A run whose row carries a cancellation is never resumed by an execution
+takeover: `GatewayExecutionRecoveryCoordinator` refuses with
+`recovery_takeover_cancelled` at both its attachment and safe-point checks, and
+the manager detaches the takeover without executing anything, so no effect is
+replayed and no cancelled tool attempt is reattached.
+
 ### Run Delivery Receipts (`runtime/journal.py` + `runs/worker.py`)
 
 `RunJournal` records each non-empty artifact update once per tool `Command` for

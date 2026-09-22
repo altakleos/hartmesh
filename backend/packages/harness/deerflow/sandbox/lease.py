@@ -74,6 +74,57 @@ async def run_sync_lifecycle_operation[T](func: Callable[..., T], /, *args: Any,
         raise cancellation
 
 
+async def run_sync_sandbox_command[T](sandbox: object, func: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+    """Run a blocking sandbox tool body, and stop its command if the call is cancelled.
+
+    ``run_sync_lifecycle_operation`` guarantees the worker thread has finished
+    before the fence around it is released, which is what keeps sandbox cleanup
+    correct. On its own, though, that guarantee means a cancelled run waits for
+    whatever the command was doing: on a deployment an operator turned an
+    account off while its ``sleep 541`` was running, and the sandbox process and
+    the stream ran on for another 537 s after the refusal was recorded.
+
+    So cancellation is delivered to the command first. The abort runs off the
+    event loop -- it makes network calls, and the accepted session refuses a
+    synchronous call made on its owner loop -- and every request it makes is
+    bounded by the sandbox implementation, so a container that stops answering
+    leaves the command's own timeout as the fallback rather than a second hang.
+    The drain then returns as soon as the command dies.
+    """
+    operation_task = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    try:
+        return await asyncio.shield(operation_task)
+    except asyncio.CancelledError as cancellation:
+        await _abort_sandbox_commands(sandbox)
+        try:
+            await _drain_task_after_cancellation(operation_task)
+        except Exception:
+            logger.warning(
+                "Cancelled sandbox command failed while draining",
+                exc_info=True,
+            )
+        raise cancellation
+
+
+async def _abort_sandbox_commands(sandbox: object) -> None:
+    """Ask one sandbox to kill what it is running, tolerating a provider that cannot.
+
+    The hook is additive: custom providers are loaded by class path, and one
+    that does not implement it keeps the previous behaviour rather than
+    failing a cancellation.
+    """
+    abort = getattr(sandbox, "abort_running_commands", None)
+    if not callable(abort):
+        return
+    try:
+        await _drain_task_after_cancellation(asyncio.create_task(asyncio.to_thread(abort)))
+    except Exception:
+        logger.warning(
+            "Failed to abort sandbox commands for a cancelled call; its command may run to its own timeout",
+            exc_info=True,
+        )
+
+
 @dataclass(slots=True)
 class SandboxClientLease:
     """One bounded caller's process-local hold on a sandbox client."""
