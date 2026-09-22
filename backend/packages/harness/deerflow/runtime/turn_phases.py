@@ -223,6 +223,14 @@ class TurnPhase(StrEnum):
     GRAPH_START = "graph_start"
     SANDBOX_ACQUIRE = "sandbox_acquire"
     SANDBOX_LOOKUP = "sandbox_lookup"
+    # Waiting for a replica slot before any container work begins. The budget
+    # is hard, so a turn that arrives while every slot is in active use waits
+    # here and is then refused -- and without this member that wait was
+    # residual nobody could account for, which is the whole reason the phase
+    # exists. Opened once per turn even when the admission loop goes round
+    # several times (evict, recheck, wait again): a name opened twice has its
+    # second span measured and dropped, per the note above.
+    SANDBOX_CAPACITY_WAIT = "sandbox_capacity_wait"
     SANDBOX_EVICTION = "sandbox_eviction"
     SANDBOX_CREATE = "sandbox_create"
     SANDBOX_READINESS = "sandbox_readiness"
@@ -379,6 +387,12 @@ class TurnPhaseSnapshot:
     teardown_refusals: int
     teardown_failures: int
     evictions: int
+    #: Turns that had to wait for a replica slot, and turns the hard budget
+    #: refused. Kept apart because they say different things to an operator: a
+    #: tenant that waits routinely is sized close to its limit, one that is
+    #: refused routinely is sized under it.
+    capacity_waits: int
+    capacity_refusals: int
     queue_ms: float
     failed_attempts: int
     #: How many tool calls the turn made, and how much of its wall clock the
@@ -504,6 +518,8 @@ class TurnPhaseSnapshot:
             ("teardown_refusals", self.teardown_refusals),
             ("teardown_failures", self.teardown_failures),
             ("evictions", self.evictions),
+            ("capacity_waits", self.capacity_waits),
+            ("capacity_refusals", self.capacity_refusals),
             ("failed_attempts", self.failed_attempts),
             ("dropped_records", self.dropped_records),
         ):
@@ -543,7 +559,7 @@ class TurnPhaseSnapshot:
                 "steps": [{"step": name, "ms": round(ms, 3)} for name, ms in self.launch_steps],
             }
         return {
-            "version": 6,
+            "version": 7,
             "correlation_id": self.correlation_id,
             "launch": launch,
             "run_id": self.run_id,
@@ -564,6 +580,8 @@ class TurnPhaseSnapshot:
             "teardown_refusals": self.teardown_refusals,
             "teardown_failures": self.teardown_failures,
             "evictions": self.evictions,
+            "capacity_waits": self.capacity_waits,
+            "capacity_refusals": self.capacity_refusals,
             "queue_ms": round(self.queue_ms, 3),
             "tool_calls": self.tool_calls,
             "tool_ms": round(self.tool_ms, 3),
@@ -698,6 +716,8 @@ class TurnPhaseJournal:
         "_correlation_id",
         "_create_attempts",
         "_dropped",
+        "_capacity_refusals",
+        "_capacity_waits",
         "_evictions",
         "_failed_attempts",
         "_launch",
@@ -748,6 +768,8 @@ class TurnPhaseJournal:
         self._teardown_refusals = 0
         self._teardown_failures = 0
         self._evictions = 0
+        self._capacity_waits = 0
+        self._capacity_refusals = 0
         self._queue_ms = 0.0
         self._failed_attempts = 0
         self._tools = _Occupancy()
@@ -935,6 +957,22 @@ class TurnPhaseJournal:
         with self._lock:
             self._evictions += 1
 
+    def record_capacity_wait(self) -> None:
+        """This turn had to wait for a replica slot before it could create one.
+
+        Counted once per turn, on the first wait, for the same reason
+        ``SANDBOX_CAPACITY_WAIT`` is one span: a turn that goes round the
+        admission loop several times waited once, and counting each pass would
+        report a busier deployment than the one that exists.
+        """
+        with self._lock:
+            self._capacity_waits += 1
+
+    def record_capacity_refusal(self) -> None:
+        """The budget refused this turn a slot after its wait ran out."""
+        with self._lock:
+            self._capacity_refusals += 1
+
     def record_tool_start(self, call_id: object, *, name: str | None = None) -> None:
         """A tool call began: *call_id* identifies it, *name* says which tool.
 
@@ -1058,6 +1096,8 @@ class TurnPhaseJournal:
                 teardown_refusals=self._teardown_refusals,
                 teardown_failures=self._teardown_failures,
                 evictions=self._evictions,
+                capacity_waits=self._capacity_waits,
+                capacity_refusals=self._capacity_refusals,
                 queue_ms=self._queue_ms,
                 failed_attempts=self._failed_attempts,
                 tool_calls=self._tools.calls,
@@ -1238,6 +1278,18 @@ def record_eviction() -> None:
     journal = _current_journal.get()
     if journal is not None:
         journal.record_eviction()
+
+
+def record_capacity_wait() -> None:
+    journal = _current_journal.get()
+    if journal is not None:
+        journal.record_capacity_wait()
+
+
+def record_capacity_refusal() -> None:
+    journal = _current_journal.get()
+    if journal is not None:
+        journal.record_capacity_refusal()
 
 
 def record_failed_attempt() -> None:

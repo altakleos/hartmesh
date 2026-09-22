@@ -67,11 +67,12 @@ sandbox:
   # Concurrent-sandbox ceiling from the memory budget (README: "Memory
   # budget"): two 1 GiB slim sandboxes with their relays sit on the 5.0 GiB
   # line (a 512 MiB slot had no headroom over the sandbox's own idle
-  # footprint; README: "Two 1 GiB slots"). This is a soft maximum with LRU
-  # eviction of warm sandboxes: a third acquisition evicts the
-  # least-recently-used idle sandbox instead of failing; with both in active
-  # use the provider logs a soft-cap breach and creates a third, which the
-  # guest's unallocated memory absorbs once (README: "Memory budget").
+  # footprint; README: "Two 1 GiB slots"). This is a **hard** budget with LRU
+  # eviction of warm sandboxes in front of it: a third acquisition evicts the
+  # least-recently-used idle sandbox instead of failing, and with both in
+  # active use it waits capacity_wait_timeout and is then refused. It is not a
+  # ceiling the guest's spare memory absorbs -- the sum above leaves none
+  # (README: "Memory budget").
   replicas: 2
   # How long an idle sandbox keeps one of the two slots. The budget reserves
   # every slot whether or not it is used, and a cold start of the sandbox
@@ -122,6 +123,16 @@ sandbox:
   # candidate the estate is evaluating, not a qualified fleet-wide bound; the
   # optional .env key SANDBOX_READY_TIMEOUT overrides it (60 to 600).
   ready_timeout: 120
+  # How long an acquisition waits for one of the two slots when both are in
+  # active use and nothing is parked to evict. The budget above is exact
+  # (README: "Memory budget"), so the wait ends in a refusal rather than a
+  # third container. Five seconds is the overlap at the edges of two turns --
+  # one parking its sandbox while another asks for one; a slot still held
+  # after that is held by work measured in minutes, and waiting longer trades
+  # a refusal the person can act on for a spinner they cannot. The optional
+  # .env key SANDBOX_CAPACITY_WAIT_TIMEOUT overrides it (0 to 60; 0 refuses
+  # immediately).
+  capacity_wait_timeout: 5
   network:
     mode: allowlist
     approval: prompt

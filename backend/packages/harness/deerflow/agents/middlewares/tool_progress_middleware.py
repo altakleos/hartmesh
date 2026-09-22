@@ -178,6 +178,9 @@ def _format_hint(meta: ToolResultMeta) -> str:
         "no_results": "[PROGRESS HINT] Your search returned no results.",
         "not_found": "[PROGRESS HINT] The resource was not found repeatedly.",
         "rate_limited": "[PROGRESS HINT] The tool is being rate-limited.",
+        # Not a tool fault: the deployment has no room to start another
+        # environment, so the hint says that rather than inviting a rewrite.
+        "capacity": "[PROGRESS HINT] This workspace is running all the sandboxed work it has room for.",
         "transient": "[PROGRESS HINT] The tool encountered repeated transient failures.",
         "partial_success": "[PROGRESS HINT] The tool has returned incomplete results multiple times.",
         # Jaccard near-duplicate success: the tool is returning the same content repeatedly.
@@ -195,6 +198,7 @@ def _block_reason(meta: ToolResultMeta) -> str:
         "no_results": "Repeated no-results — rewrite your query or try a different tool.",
         "not_found": "Repeated not-found — rewrite your query or try a different resource.",
         "rate_limited": "Repeated rate-limiting — summarize current findings and proceed.",
+        "capacity": "No sandbox capacity — this workspace is running all the sandboxed work it has room for; summarize and proceed.",
         "transient": "Repeated transient failures — try a different approach.",
         "auth": "Authentication failure — this tool cannot be used.",
         "config": "Tool is not configured — this tool cannot be used.",

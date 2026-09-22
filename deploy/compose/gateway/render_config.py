@@ -22,7 +22,10 @@ absent) keeps the template block, ``open`` reduces it to ``mode: open``, any
 other value refuses to render. ``sandbox.ready_timeout`` is the template's
 value unless the optional ``SANDBOX_READY_TIMEOUT`` names a whole number of
 seconds from 60 to 600; anything else refuses to render, so no value can
-disable the cold-start deadline. The rendered document is checked so that no
+disable the cold-start deadline. ``sandbox.capacity_wait_timeout`` works the
+same way through ``SANDBOX_CAPACITY_WAIT_TIMEOUT`` (0 to 60): it is how long
+an acquisition waits for one of the two slots before the hard budget refuses
+it, and no value makes that wait unbounded. The rendered document is checked so that no
 ``$NAME`` reference remains for a variable that is absent or empty.
 
 The sign-in mode is selected by the tenant ``.env`` and nothing is assumed:
@@ -94,6 +97,12 @@ READY_TIMEOUT_ENV = "SANDBOX_READY_TIMEOUT"
 # nginx proxy_read_timeout window (600 s) so a waiting turn is not cut off by
 # the front door before the sandbox answers.
 READY_TIMEOUT_RANGE = (60, 600)
+CAPACITY_WAIT_ENV = "SANDBOX_CAPACITY_WAIT_TIMEOUT"
+# Whole seconds, inclusive. Zero is a legitimate setting -- refuse at once
+# rather than wait -- and the ceiling is a minute because the wait ends in a
+# refusal either way: past that a tenant is watching a spinner instead of
+# being told the deployment is busy.
+CAPACITY_WAIT_RANGE = (0, 60)
 _WHOLE_SECONDS = re.compile(r"\A[0-9]+\Z")
 MODELS_ENV = "HARTMESH_MODELS_FILE"
 # ── Sign-in mode ────────────────────────────────────────────────────────────
@@ -456,6 +465,18 @@ def select_ready_timeout(environ: Mapping[str, str]) -> int | None:
     return int(raw)
 
 
+def select_capacity_wait_timeout(environ: Mapping[str, str]) -> int | None:
+    """Return the operator's slot-wait override, or None when unset."""
+
+    raw = environ.get(CAPACITY_WAIT_ENV, "").strip()
+    if not raw:
+        return None
+    low, high = CAPACITY_WAIT_RANGE
+    if not _WHOLE_SECONDS.match(raw) or not low <= int(raw) <= high:
+        raise RenderError(f"{CAPACITY_WAIT_ENV} must be a whole number of seconds from {low} to {high} (or absent)")
+    return int(raw)
+
+
 def open_runsc_resolver_mount(environ: Mapping[str, str]) -> dict[str, object]:
     """Validate the host resolver view before handing its source to Docker.
 
@@ -734,6 +755,13 @@ def render(
     override = select_ready_timeout(environ)
     if override is not None:
         sandbox["ready_timeout"] = override
+    low, high = CAPACITY_WAIT_RANGE
+    wait = sandbox.get("capacity_wait_timeout")
+    if isinstance(wait, bool) or not isinstance(wait, int) or not low <= wait <= high:
+        raise RenderError(f"template `sandbox.capacity_wait_timeout` must be a whole number of seconds from {low} to {high}")
+    wait_override = select_capacity_wait_timeout(environ)
+    if wait_override is not None:
+        sandbox["capacity_wait_timeout"] = wait_override
     if mode == "open" and environ.get("DEER_FLOW_SANDBOX_RUNTIME") == "runsc":
         mounts = list(sandbox.get("mounts") or [])
         if any(mount.get("container_path") == "/etc/resolv.conf" for mount in mounts):
@@ -812,6 +840,7 @@ def main(argv: list[str] | None = None) -> int:
     source = f"operator file {os.environ[MODELS_ENV].strip()}" if os.environ.get(MODELS_ENV, "").strip() else "bundled catalog"
     document = yaml.safe_load(rendered)
     budget = document["sandbox"]["ready_timeout"]
+    slot_wait = document["sandbox"]["capacity_wait_timeout"]
     bundle_line, bundle_problems = bundle_report(document)
     for problem in bundle_problems:
         print(f"render_config: warning: tenant bundle: {problem}", file=sys.stderr)
@@ -821,7 +850,7 @@ def main(argv: list[str] | None = None) -> int:
         access = sign_on_access(os.environ)
         membership = (", admission by claim" if access.get("access_claim") else "") + (", roles from claim" if access.get("access_roles") else "")
         sign_in_line += f" (provider {SIGN_ON_PROVIDER_ID}, callback https://{os.environ[PUBLIC_HOST_ENV].strip()}/api/v1/auth/callback/{SIGN_ON_PROVIDER_ID}{membership})"
-    summary = f"models from {source}; egress={select_egress(os.environ)}; {sign_in_line}; provider keys found: {providers}; sandbox ready_timeout={budget}s; {bundle_line}"
+    summary = f"models from {source}; egress={select_egress(os.environ)}; {sign_in_line}; provider keys found: {providers}; sandbox ready_timeout={budget}s, capacity_wait_timeout={slot_wait}s; {bundle_line}"
     if args.check:
         print(f"render_config: {args.template} renders ({summary})")
         return 0

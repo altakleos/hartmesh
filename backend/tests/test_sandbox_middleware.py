@@ -322,6 +322,63 @@ def test_explicit_skill_policy_eagerly_acquires_and_syncs_existing_thread(
     assert provider.skill_syncs == [("sync-sandbox", "thread-policy", "owner-policy", projection)]
 
 
+def test_an_eager_acquisition_at_capacity_defers_instead_of_killing_the_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A full deployment must not end a turn that may never touch a sandbox.
+
+    An explicit skill policy is projected before the first model so a
+    restricted agent cannot see the shared view -- but at this point nothing
+    has been handed out, so not acquiring leaks nothing. Letting the refusal
+    out instead ends the turn with an unhandled exception: `before_agent` runs
+    inside the graph, outside every tool-result layer, so a member asking
+    "what did we decide yesterday?" would stall for the wait budget and then
+    die, for a question that needed no sandbox at all.
+    """
+    from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+
+    provider = _AgentSkillSyncProvider()
+    middleware = SandboxMiddleware(lazy_init=True, available_skills=set())
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *_a, **_k: object())
+
+    def _refuse(*_args, **_kwargs):
+        raise SandboxCapacityExceededError(active=2, replicas=2)
+
+    monkeypatch.setattr(middleware, "_acquire_sandbox", _refuse)
+    set_sandbox_provider(provider)
+    try:
+        result = middleware.before_agent({}, Runtime(context={"thread_id": "thread-full", "user_id": "owner-full"}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None, "the turn continues; its first sandbox-backed tool call decides"
+    assert provider.skill_syncs == [], "nothing was projected into a sandbox that was never acquired"
+
+
+@pytest.mark.anyio
+async def test_an_eager_async_acquisition_at_capacity_defers_too(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+
+    provider = _AgentSkillSyncProvider()
+    middleware = SandboxMiddleware(lazy_init=True, available_skills=set())
+    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *_a, **_k: object())
+
+    async def _refuse(*_args, **_kwargs):
+        raise SandboxCapacityExceededError(active=2, replicas=2)
+
+    monkeypatch.setattr(middleware, "_acquire_sandbox_async", _refuse)
+    set_sandbox_provider(provider)
+    try:
+        result = await middleware.abefore_agent({}, Runtime(context={"thread_id": "thread-full-async", "user_id": "owner-full"}))
+    finally:
+        reset_sandbox_provider()
+
+    assert result is None
+    assert provider.skill_syncs == []
+
+
 def test_explicit_skill_policy_fails_closed_for_unsupported_provider(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

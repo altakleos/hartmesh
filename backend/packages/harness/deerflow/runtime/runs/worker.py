@@ -109,6 +109,7 @@ from deerflow.runtime.stream_modes import (
 from deerflow.runtime.tenant_identity import TENANT_REFERENCE_CONTEXT_KEY
 from deerflow.runtime.turn_phases import TurnPhase, TurnPhaseCallbackHandler, current_turn_phases, mark_phase, phase_span
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id, resolve_trace_id
 from deerflow.tracing import inject_langfuse_metadata
@@ -145,6 +146,13 @@ if TYPE_CHECKING:
     from deerflow.sandbox.sandbox_provider import SandboxProvider
 
 logger = logging.getLogger(__name__)
+
+# What a person sees when the deployment has no room to start their sandbox.
+# A constant, not the exception's message: the terminal handler's disclosure
+# rule is that nothing untrusted reaches a run row, and "chosen by type" is how
+# this stays inside it while still saying something true.
+SANDBOX_CAPACITY_MESSAGE = "This workspace is already running as many sandboxes as it has room for. Your turn did not start; try again once the other work finishes."
+SANDBOX_CAPACITY_STOP_REASON = "sandbox_capacity_exceeded"
 
 
 class _ExecutionRecoveryTerminalized(RuntimeError):
@@ -3829,6 +3837,43 @@ async def _run_agent(
                     "message": error_msg,
                     "name": "ExecutionPolicyError",
                     "stop_reason": exc.code,
+                },
+            )
+
+    except SandboxCapacityExceededError as exc:
+        # Not a crash, and it must not read like one. On the released tenant
+        # profile the sandbox is acquired *here*, before the model runs, so a
+        # refusal never passes a tool boundary and the generic handler below
+        # would give the person "Runtime operation failed (reference: <hex>)"
+        # -- indistinguishable from a real fault, and nothing an operator or a
+        # tenant can act on. The message is a first-party constant chosen from
+        # the exception's type, never its text, so the disclosure discipline
+        # the generic handler exists for is unchanged.
+        error_msg = SANDBOX_CAPACITY_MESSAGE
+        logger.warning(
+            "Run %s could not start: every sandbox slot is in use (replicas=%s, retry after %.0fs)",
+            run_id,
+            exc.replicas,
+            exc.retry_after_seconds,
+        )
+        await _ensure_finalizing_before_edit_failure(run_manager, record)
+        cancel_action = await run_manager.set_status_if_not_cancelled(
+            run_id,
+            RunStatus.error,
+            error=error_msg,
+            stop_reason=SANDBOX_CAPACITY_STOP_REASON,
+            **terminal_status_kwargs,
+        )
+        if cancel_action is not None:
+            await _finish_cancellation(cancel_action)
+        else:
+            await bridge.publish(
+                run_id,
+                "error",
+                {
+                    "message": error_msg,
+                    "name": "SandboxCapacityExceededError",
+                    "stop_reason": SANDBOX_CAPACITY_STOP_REASON,
                 },
             )
 

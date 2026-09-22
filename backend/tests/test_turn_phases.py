@@ -749,10 +749,10 @@ def test_the_wire_record_carries_the_working_turn_fields_at_a_new_version():
     journal.record_tool_end("t")
 
     wire = journal.snapshot().to_wire()
-    assert wire["version"] == 6
+    assert wire["version"] == 7
     assert wire["tool_calls"] == 1
     assert wire["model_calls"] == 0
-    for field in ("tool_ms", "tool_open", "tool_open_ms", "model_ms", "model_open", "model_open_ms", "busy_ms"):
+    for field in ("tool_ms", "tool_open", "tool_open_ms", "model_ms", "model_open", "model_open_ms", "busy_ms", "capacity_waits", "capacity_refusals"):
         assert field in wire
 
 

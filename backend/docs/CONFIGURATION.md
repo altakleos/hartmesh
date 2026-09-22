@@ -620,7 +620,24 @@ sandbox:
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
    # ready_timeout: 60                # cold-start readiness budget in seconds (see below)
+   # replicas: 3                      # hard concurrent-sandbox budget (see below)
+   # capacity_wait_timeout: 5         # seconds an acquisition waits for a slot (see below)
 ```
+
+`replicas` is a **hard budget** on AioSandboxProvider, counted per Gateway
+process. Active containers, parked ones, sets whose teardown did not confirm
+absence, and in-flight reservations all count against it; reuse of a container
+that is already counted (in-process, warm reclaim, backend discovery) never
+spends a second slot. An acquisition that finds the budget full first evicts
+the oldest parked container, which is the ordinary case and costs the evicted
+thread a cold start on its next turn. A live turn's sandbox is never evicted,
+so when every slot is in active use the acquisition waits up to
+`capacity_wait_timeout` seconds (default 5, maximum 300; 0 refuses at once)
+and is then refused with `SANDBOX_CAPACITY_EXCEEDED` — a typed, retryable
+outcome the agent is told not to retry immediately, rather than a container
+the host has no memory for. The wait is bounded everywhere,
+interruptible on the async create path, and appears in the turn journal as the `sandbox_capacity_wait` phase
+alongside the `capacity_waits` and `capacity_refusals` counters.
 
 `ready_timeout` is the cold-start readiness budget: after `docker run` returns,
 the provider polls the new container's `/v1/sandbox` for this many seconds and,

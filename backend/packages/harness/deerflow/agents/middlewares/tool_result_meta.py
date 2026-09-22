@@ -108,6 +108,31 @@ _PAGE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch"})
 # never drift from the recoverable/next-action contract of its own category.
 _ATTRS_BY_ERROR_TYPE: dict[str, dict[str, object]] = {str(attrs["error_type"]): attrs for _keywords, attrs in _ERROR_RULES}
 
+# Categories no keyword rule can reach, because the only thing that knows them
+# is the raiser. ``capacity`` is the deployment saying it has no room to run
+# this call: the tool is fine, the arguments are fine, and the one thing the
+# model must not do is call it again -- which is exactly what every recoverable
+# category invites. Declared by the exception (``tool_error_type``) rather than
+# recognised in its message, so the behaviour cannot drift with the wording.
+_DECLARED_ATTRS: dict[str, dict[str, object]] = {
+    "capacity": {"error_type": "capacity", "recoverable_by_model": False, "recommended_next_action": "summarize"},
+}
+
+
+def declared_error_attrs(exc: BaseException) -> dict[str, object] | None:
+    """The result category *exc* declares for itself, if it declares one.
+
+    The contract is one attribute, ``tool_error_type``, naming a category this
+    module knows. An unknown name is ignored rather than trusted: a category
+    decides whether the model may retry, so it stays this module's vocabulary.
+    """
+    declared = getattr(exc, "tool_error_type", None)
+    if not isinstance(declared, str):
+        return None
+    attrs = _DECLARED_ATTRS.get(declared) or _ATTRS_BY_ERROR_TYPE.get(declared)
+    return dict(attrs) if attrs is not None else None
+
+
 # Reason phrases (RFC 9110 §15 plus the wording real servers ship) mapped onto the
 # error_type they already have in _ERROR_RULES. Restricted to the statuses a fetch
 # actually lands on as a rendered page. The 5xx split mirrors _ERROR_RULES' own:
@@ -240,14 +265,19 @@ def _make_meta(*, status: str, source: str, error_type: str | None = None, recov
     }
 
 
-def stamp_exception_meta(msg: ToolMessage, exc_info: str) -> ToolMessage:
+def stamp_exception_meta(msg: ToolMessage, exc_info: str, *, exc: BaseException | None = None) -> ToolMessage:
     """Stamp deerflow_tool_meta with source='exception' onto an exception-derived ToolMessage.
 
     Unlike normalize_tool_message (which preserves existing stamps), this function always
     overwrites any pre-existing TOOL_META_KEY entry.  Exception-derived classification is
     more authoritative than a tool's own return-time stamp.
+
+    An exception that declares its own category (``tool_error_type``) is taken
+    at its word and the text is not read at all. Keyword classification is the
+    fallback for the raisers that say nothing about themselves, not the rule a
+    declaring raiser has to phrase its message around.
     """
-    attrs = _classify_error_text(exc_info)
+    attrs = (None if exc is None else declared_error_attrs(exc)) or _classify_error_text(exc_info)
     updated_kwargs = dict(msg.additional_kwargs or {})
     updated_kwargs[TOOL_META_KEY] = _make_meta(status="error", source="exception", **attrs)
     msg.additional_kwargs = updated_kwargs

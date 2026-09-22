@@ -60,6 +60,7 @@ OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
 PASSTHROUGH_KEYS = {
     "HARTMESH_MODELS_FILE",
     "SANDBOX_READY_TIMEOUT",
+    "SANDBOX_CAPACITY_WAIT_TIMEOUT",
     "HARTMESH_SIGN_ON_ADMINS",
     "HARTMESH_SIGN_ON_SCOPES",
     "HARTMESH_SIGN_ON_CLIENT_AUTH",
@@ -977,6 +978,40 @@ def test_check_mode_refuses_a_bad_readiness_budget_and_writes_nothing(render_con
     assert "SANDBOX_READY_TIMEOUT must be a whole number of seconds from 60 to 600" in captured.err
     assert output.read_bytes() == before, "a refused render must leave the last valid file in place"
     assert sorted(child.name for child in output.parent.iterdir()) == ["config.yaml"], "no temporary output may survive a refusal"
+
+
+def test_render_takes_the_slot_wait_from_the_template_or_the_optional_key(render_config: ModuleType) -> None:
+    """`replicas` is a hard budget, so the wait in front of it is configurable.
+
+    Zero is a real setting here, unlike the readiness budget: refusing at once
+    is a legitimate choice for a tenant that would rather be told than waited
+    at.
+    """
+    fragments = render_config.load_catalog(CATALOG)
+    template = TEMPLATE.read_text(encoding="utf-8")
+    for environ in (_base_environ(), {**_base_environ(), "SANDBOX_CAPACITY_WAIT_TIMEOUT": ""}, {**_base_environ(), "SANDBOX_CAPACITY_WAIT_TIMEOUT": "   "}):
+        rendered, _ = render_config.render_text(template, fragments, environ)
+        assert yaml.safe_load(rendered)["sandbox"]["capacity_wait_timeout"] == 5
+    for raw, expected in (("0", 0), ("5", 5), (" 20 ", 20), ("60", 60)):
+        rendered, _ = render_config.render_text(template, fragments, {**_base_environ(), "SANDBOX_CAPACITY_WAIT_TIMEOUT": raw})
+        assert yaml.safe_load(rendered)["sandbox"]["capacity_wait_timeout"] == expected
+
+
+@pytest.mark.parametrize("bad", ["-5", "61", "5.5", "abc", "inf", "nan", "true", "+5", "5s"])
+def test_render_refuses_a_slot_wait_that_is_not_a_whole_number_of_seconds_in_range(render_config: ModuleType, bad: str) -> None:
+    with pytest.raises(render_config.RenderError, match=r"SANDBOX_CAPACITY_WAIT_TIMEOUT must be a whole number of seconds from 0 to 60"):
+        render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), {**_base_environ(), "SANDBOX_CAPACITY_WAIT_TIMEOUT": bad})
+
+
+@pytest.mark.parametrize("bad", [-1, 61, "5", 5.5, True, None, "absent"])
+def test_render_refuses_a_template_whose_slot_wait_is_out_of_range(render_config: ModuleType, bad: object) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    if bad == "absent":
+        del template["sandbox"]["capacity_wait_timeout"]
+    else:
+        template["sandbox"]["capacity_wait_timeout"] = bad
+    with pytest.raises(render_config.RenderError, match=r"template `sandbox.capacity_wait_timeout` must be a whole number of seconds from 0 to 60"):
+        render_config.render(template, (), _base_environ())
 
 
 def test_render_refuses_a_template_reference_to_an_unset_variable(render_config: ModuleType) -> None:
