@@ -257,3 +257,93 @@ def test_sandbox_smoke_runs_the_slim_services_profile_at_the_tenant_limits() -> 
     # ignored switch; the process count can (about 11 slim, 31 full).
     assert '[ "$slim_processes" -gt 16 ]' in slim and "a DISABLE_* switch was ignored" in slim
     assert "::error::slim sandbox" in slim
+
+
+def _duration_minutes(value: str) -> float:
+    """Minutes for a GNU ``timeout`` duration (``600``, ``600s``, ``12m``, ``1h``)."""
+    text = str(value).strip()
+    scale = {"s": 1 / 60, "m": 1.0, "h": 60.0, "d": 1440.0}.get(text[-1:], None)
+    if scale is None:
+        return float(text) / 60
+    return float(text[:-1]) * scale
+
+
+def _smoke_job() -> dict:
+    import yaml
+
+    return yaml.safe_load(SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["sandbox-image-smoke"]
+
+
+def _resolve_step() -> dict:
+    step = next(
+        (s for s in _smoke_job()["steps"] if str(s.get("name", "")).startswith("Resolve immutable image references")),
+        None,
+    )
+    assert step is not None, "the smoke job no longer has a step that resolves the image references"
+    return step
+
+
+def test_sandbox_smoke_bounds_every_registry_pull_and_retries_it() -> None:
+    """The pull is the job, and an unbounded pull takes the job down with it.
+
+    Both source images come from a Beijing registry, and on the last green run
+    before this budget existed the two pulls were 16m03s of a 17m06s job. That
+    left about 1.5x headroom against the job's own timeout, and on 2026-09-22
+    it ran out: the pull passed 25 minutes, the runner cancelled the job inside
+    that step, and no test in it ever ran -- the PR read as a red check with
+    nothing to do with its diff.
+
+    A larger job timeout alone only moves that cliff, because a stalled
+    transfer is unbounded and the job timeout is the only thing that ever
+    stops it. So each attempt carries its own bound and is retried; docker
+    keeps the layers an interrupted pull already fetched, so a retry resumes
+    rather than starting over.
+    """
+    run_script = _resolve_step()["run"]
+
+    assert 'timeout "$SANDBOX_PULL_ATTEMPT_TIMEOUT" docker pull' in run_script, "an unbounded docker pull can only be stopped by the job timeout, which cancels the job mid-step instead of failing the pull"
+    assert int(_smoke_job()["env"]["SANDBOX_PULL_ATTEMPTS"]) >= 2, "one bounded attempt turns a slow registry into a failed PR check; a retry resumes from the layers already fetched"
+    assert "docker pull" in run_script and ">/dev/null" not in run_script, "discarding the pull's progress is why a 25-minute pull could not be told apart from a stalled one"
+
+
+def test_sandbox_smoke_pull_budget_fits_inside_the_step_and_job_timeouts() -> None:
+    """The three timeouts are one piece of arithmetic, not three numbers.
+
+    Worst-case pulling is images x attempts x the per-attempt bound. If that
+    exceeds the step's timeout, the retry budget is unreachable and the step
+    dies mid-attempt; if the step's timeout leaves no room under the job's,
+    the job is cancelled rather than the step failing, which is the illegible
+    outcome this budget exists to prevent.
+    """
+    job = _smoke_job()
+    step = _resolve_step()
+
+    images = sum(1 for line in step["run"].splitlines() if line.startswith("resolve_image "))
+    attempts = int(job["env"]["SANDBOX_PULL_ATTEMPTS"])
+    per_attempt = _duration_minutes(job["env"]["SANDBOX_PULL_ATTEMPT_TIMEOUT"])
+    step_timeout = float(step["timeout-minutes"])
+    job_timeout = float(job["timeout-minutes"])
+
+    assert images == 2, "the job resolves the baseline image and the 1.11.0 regression image"
+    # 8 minutes an image is what the last green run measured; an attempt bound
+    # under that would kill healthy pulls and retry them forever.
+    assert per_attempt >= 10, f"a {per_attempt:g}-minute attempt bound is tighter than the ~8 minutes each image measured, so ordinary slow pulls would be killed and restarted"
+    assert images * attempts * per_attempt <= step_timeout, f"worst-case pulling is {images * attempts * per_attempt:g} min but the step is capped at {step_timeout:g} min, so the last retry can never run"
+    assert job_timeout - step_timeout >= 5, f"the job leaves {job_timeout - step_timeout:g} min over the pull step for setup and the live suite; too little and the job is cancelled instead of the step failing"
+
+
+def test_every_smoke_job_is_bounded_at_all() -> None:
+    """A job with no ``timeout-minutes`` inherits GitHub's six-hour default.
+
+    Both jobs here wait on the same Beijing registry -- one pulls the source
+    images, the other builds ``docker/sandbox`` from a base pinned there -- and
+    a transfer that stops answering has nothing else to stop it. Six hours of
+    that is a held runner and a PR whose checks never resolve, for a job that
+    measures three to five minutes.
+    """
+    import yaml
+
+    jobs = yaml.safe_load(SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8"))["jobs"]
+
+    unbounded = sorted(name for name, job in jobs.items() if "timeout-minutes" not in job)
+    assert not unbounded, f"these jobs wait on a remote registry with GitHub's 6-hour default timeout: {unbounded}"

@@ -44,6 +44,12 @@ permissions:
 jobs:
   restricted-profile:
     runs-on: ubuntu-latest
+    # This job builds docker/sandbox, whose base is pinned in the same Beijing
+    # registry the job below pulls from, so it waits on the same transfer. It
+    # measures three to five minutes; the bound is here so a registry that
+    # stops answering fails it instead of holding a runner -- and this PR's
+    # checks -- for GitHub's default six hours.
+    timeout-minutes: 45
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
@@ -251,10 +257,30 @@ jobs:
 
   sandbox-image-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # A budget, not a number someone raised. Both source images come from a
+    # Beijing registry and the transfer is effectively the whole job: 16m03s
+    # of the last green 17m06s run. Against the 25-minute job timeout this
+    # used to carry, that is about 1.5x headroom on a transfer nobody here
+    # controls, and on 2026-09-22 it ran out -- the pull passed 25 minutes,
+    # the runner cancelled the job inside that step, and no test in it ran.
+    # The PR read as a red check that had nothing to do with its diff.
+    #
+    # Raising this alone would only move the same cliff, because a stalled
+    # transfer is unbounded and the job timeout is then the only thing that
+    # ever stops it. So the pull bounds itself instead, and the three numbers
+    # are one piece of arithmetic: 2 images x 2 attempts x 12 min = 48 min of
+    # worst-case pulling, inside the 50-minute step timeout, inside this
+    # 60-minute job -- which the last green run finished in 17.
+    # backend/tests/test_sandbox_image_contract.py pins that arithmetic.
+    timeout-minutes: 60
     env:
       SANDBOX_SMOKE_IMAGE_REF: ${{ vars.SANDBOX_SMOKE_IMAGE || 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest' }}
       FOWNER_SMOKE_IMAGE_REF: ${{ vars.SANDBOX_FOWNER_SMOKE_IMAGE || 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0' }}
+      # Bounds one `docker pull`. Generous against the ~8 minutes each image
+      # measured, so an ordinary slow pull is never killed and restarted;
+      # tight enough that both attempts on both images still fit the step.
+      SANDBOX_PULL_ATTEMPT_TIMEOUT: "12m"
+      SANDBOX_PULL_ATTEMPTS: "2"
 
     steps:
       - name: Checkout
@@ -264,6 +290,17 @@ jobs:
         # Pull on the runner's platform, then pass only immutable repo@sha256
         # references to pytest. This keeps both the baseline and the 1.11.0
         # regression run reproducible even if either source tag moves later.
+        #
+        # Each attempt is bounded and retried rather than left to run into the
+        # job's timeout: docker keeps the layers an interrupted pull already
+        # fetched, so a retry resumes instead of starting over, and a registry
+        # that has stopped answering fails this step by name instead of
+        # cancelling the job mid-stream. The pull's progress stays in the log
+        # (it used to go to /dev/null) because "slow" and "stalled" are exactly
+        # the two cases worth telling apart, and the elapsed seconds reach the
+        # job summary so the margin is visible on every green run rather than
+        # discovered at the cliff.
+        timeout-minutes: 50
         run: |
           set -euo pipefail
 
@@ -271,12 +308,24 @@ jobs:
             local source_ref="$1"
             local output_var="$2"
             local label="$3"
-            local repo_digest
+            local repo_digest attempt started elapsed
 
-            docker pull "$source_ref" >/dev/null
+            for attempt in $(seq 1 "$SANDBOX_PULL_ATTEMPTS"); do
+              started=$SECONDS
+              if timeout "$SANDBOX_PULL_ATTEMPT_TIMEOUT" docker pull "$source_ref"; then
+                break
+              fi
+              elapsed=$((SECONDS - started))
+              if [ "$attempt" -ge "$SANDBOX_PULL_ATTEMPTS" ]; then
+                echo "::error::docker pull $source_ref gave up after $attempt attempts of up to $SANDBOX_PULL_ATTEMPT_TIMEOUT (${elapsed}s on the last one)"
+                return 1
+              fi
+              echo "::warning::docker pull $source_ref did not finish within $SANDBOX_PULL_ATTEMPT_TIMEOUT (attempt $attempt, ${elapsed}s); retrying from the layers already fetched"
+            done
+
             repo_digest="$(docker image inspect "$source_ref" --format '{{index .RepoDigests 0}}')"
             echo "$output_var=$repo_digest" >> "$GITHUB_ENV"
-            printf '%s: `%s`\n' "$label" "$repo_digest" | tee -a "$GITHUB_STEP_SUMMARY"
+            printf '%s: `%s` (pulled in %ss)\n' "$label" "$repo_digest" "$((SECONDS - started))" | tee -a "$GITHUB_STEP_SUMMARY"
           }
 
           resolve_image "$SANDBOX_SMOKE_IMAGE_REF" DEER_FLOW_SANDBOX_SMOKE_IMAGE "Configured/default smoke image"
