@@ -499,6 +499,16 @@ class AppConfig(BaseModel):
 
     @classmethod
     def _apply_singleton_configs(cls, config: Self, acp_agents: dict[str, ACPAgentConfig]) -> None:
+        """Bring the per-section singletons into step with *config*.
+
+        Every section lives twice: as a field here, and as a module singleton
+        that its ``get_*_config()`` reads. This is the only thing that keeps
+        the two in step, so it must run wherever a config becomes the process's
+        config -- a file load and ``set_app_config`` alike. A direct
+        ``load_*_config_from_dict`` writes only the singleton, and the next
+        config that arrives here overwrites it; it is plumbing for this
+        function and for tests, never the way to configure a process.
+        """
         from deerflow.config.checkpointer_config import get_checkpointer_config
 
         previous_checkpointer_config = get_checkpointer_config()
@@ -779,6 +789,12 @@ def set_app_config(config: AppConfig) -> None:
 
     This allows injecting a custom or mock config for testing purposes.
 
+    The per-section singletons are brought into step with it, exactly as a
+    file load does: without that, the caller gets a process whose two
+    representations of a section disagree -- ``get_app_config().subagents``
+    carrying a custom agent that ``get_subagents_app_config()``, and so the
+    registry reading it, cannot see.
+
     Args:
         config: The AppConfig instance to use.
     """
@@ -788,6 +804,7 @@ def set_app_config(config: AppConfig) -> None:
     _app_config_mtime = None
     _app_config_signature = None
     _app_config_is_custom = True
+    AppConfig._apply_singleton_configs(config, config.acp_agents)
 
 
 def peek_current_app_config() -> AppConfig | None:
