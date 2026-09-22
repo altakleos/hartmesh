@@ -135,6 +135,23 @@ class OIDCAuthConfig(BaseModel):
         default_factory=dict,
         description="Map of provider IDs to their configuration (e.g. keycloak, google, azure)",
     )
+    clock_skew_leeway_seconds: float = Field(
+        default=60.0,
+        ge=0,
+        le=300,
+        allow_inf_nan=False,
+        description=(
+            "How far this Gateway's clock may disagree with the identity provider's before an "
+            "ID token is refused, applied to iat, nbf and exp. The product used to allow none, "
+            "so a VM a second or two behind the provider between NTP polls refused every sign-in "
+            "by everyone -- the ordinary state of a guest after a hypervisor snapshot, and a "
+            "whole-company outage showing only a generic sso_failed. It is one number rather "
+            "than one per provider because it describes this host's clock, not any provider's. "
+            "Bounded at 300: beyond a few minutes it stops being a clock tolerance and starts "
+            "accepting tokens that have genuinely expired. 0 restores the old no-tolerance "
+            "behaviour."
+        ),
+    )
 
 
 class LocalAuthConfig(BaseModel):

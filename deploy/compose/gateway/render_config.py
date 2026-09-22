@@ -103,6 +103,13 @@ CAPACITY_WAIT_ENV = "SANDBOX_CAPACITY_WAIT_TIMEOUT"
 # refusal either way: past that a tenant is watching a spinner instead of
 # being told the deployment is busy.
 CAPACITY_WAIT_RANGE = (0, 60)
+# How far the Gateway's clock may disagree with the provider's on an ID
+# token's timestamps. A tenant VM between NTP polls is routinely a second or
+# two out, and with no tolerance that refuses every sign-in by everyone. The
+# upper bound is where a clock tolerance would start accepting tokens that
+# have genuinely expired.
+SIGN_ON_CLOCK_SKEW_RANGE = (0, 300)
+SIGN_ON_DEFAULT_CLOCK_SKEW = 60
 _WHOLE_SECONDS = re.compile(r"\A[0-9]+\Z")
 MODELS_ENV = "HARTMESH_MODELS_FILE"
 # ── Sign-in mode ────────────────────────────────────────────────────────────
@@ -119,6 +126,7 @@ SIGN_ON_NAME_ENV = "HARTMESH_SIGN_ON_NAME"
 SIGN_ON_ACCESS_CLAIM_ENV = "HARTMESH_SIGN_ON_ACCESS_CLAIM"
 SIGN_ON_ACCESS_VALUES_ENV = "HARTMESH_SIGN_ON_ACCESS_VALUES"
 SIGN_ON_ROLES_ENV = "HARTMESH_SIGN_ON_ROLES"
+SIGN_ON_CLOCK_SKEW_ENV = "HARTMESH_SIGN_ON_CLOCK_SKEW"
 SIGN_ON_OPTIONAL_KEYS = (SIGN_ON_ADMINS_ENV, SIGN_ON_SCOPES_ENV, SIGN_ON_CLIENT_AUTH_ENV, SIGN_ON_NAME_ENV, SIGN_ON_ACCESS_CLAIM_ENV, SIGN_ON_ACCESS_VALUES_ENV, SIGN_ON_ROLES_ENV)
 SIGN_ON_ROLE_NAMES = ("admin", "user")
 PUBLIC_HOST_ENV = "HARTMESH_PUBLIC_HOST"
@@ -477,6 +485,18 @@ def select_capacity_wait_timeout(environ: Mapping[str, str]) -> int | None:
     return int(raw)
 
 
+def select_sign_on_clock_skew(environ: Mapping[str, str]) -> int:
+    """The tolerance between this Gateway's clock and the provider's."""
+
+    raw = environ.get(SIGN_ON_CLOCK_SKEW_ENV, "").strip()
+    if not raw:
+        return SIGN_ON_DEFAULT_CLOCK_SKEW
+    low, high = SIGN_ON_CLOCK_SKEW_RANGE
+    if not _WHOLE_SECONDS.match(raw) or not low <= int(raw) <= high:
+        raise RenderError(f"{SIGN_ON_CLOCK_SKEW_ENV} must be a whole number of seconds from {low} to {high} (or absent)")
+    return int(raw)
+
+
 def open_runsc_resolver_mount(environ: Mapping[str, str]) -> dict[str, object]:
     """Validate the host resolver view before handing its source to Docker.
 
@@ -663,6 +683,7 @@ def sign_on_auth(template_auth: Mapping[str, Any], environ: Mapping[str, str]) -
         "oidc": {
             "enabled": True,
             "frontend_base_url": f"https://{host}",
+            "clock_skew_leeway_seconds": select_sign_on_clock_skew(environ),
             "providers": {
                 SIGN_ON_PROVIDER_ID: {
                     "display_name": name,

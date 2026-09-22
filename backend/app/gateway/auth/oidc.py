@@ -25,6 +25,11 @@ OIDC_DISCOVERY_PATH = "/.well-known/openid-configuration"
 METADATA_CACHE_TTL = 300  # 5 minutes
 JWKS_CACHE_TTL = 300
 
+# How far this Gateway's clock may disagree with the provider's, when the
+# caller names no bound. Callers that have the configuration pass
+# ``auth.oidc.clock_skew_leeway_seconds``; this is what the rest get.
+DEFAULT_CLOCK_SKEW_LEEWAY_SECONDS = 60.0
+
 
 @dataclass(frozen=True)
 class OIDCMetadata:
@@ -67,6 +72,37 @@ class OIDCValidationError(OIDCError):
 
 class OIDCUserInfoMismatch(OIDCError):
     """UserInfo sub does not match ID token sub."""
+
+
+def _clock_skew_note(id_token: str, leeway: float) -> str:
+    """Where the token's own timestamps sit relative to this Gateway's clock.
+
+    Written for the operator reading a refusal in the Gateway log. "Not yet
+    valid" on its own cannot be told apart from a replayed token; the number
+    of seconds and its direction can, and it points at the host whose clock
+    is wrong. PyJWT verifies the signature before any timestamp, so a token
+    that reaches here has a signature this provider's JWKS vouches for --
+    reading its claims back for a log line adds no trust that was not already
+    established.
+    """
+    try:
+        claims = jwt.decode(id_token, options={"verify_signature": False})
+    except jwt.PyJWTError:
+        return f"its timestamps could not be read; leeway is {leeway:g}s"
+
+    now = time.time()
+    parts: list[str] = []
+    for name in ("iat", "nbf"):
+        value = claims.get(name)
+        if isinstance(value, int | float) and not isinstance(value, bool):
+            parts.append(f"{name} is {value - now:+.1f}s from this Gateway's clock")
+    expires_at = claims.get("exp")
+    if isinstance(expires_at, int | float) and not isinstance(expires_at, bool):
+        age = now - expires_at
+        parts.append(f"exp passed {age:.1f}s ago" if age >= 0 else f"exp is {-age:.1f}s away")
+    if not parts:
+        return f"it carries no readable timestamp; leeway is {leeway:g}s"
+    return f"{', '.join(parts)}; leeway is {leeway:g}s (check this host's clock against the provider's)"
 
 
 # ── Service ────────────────────────────────────────────────────────────────
@@ -280,11 +316,20 @@ class OIDCService:
         client_id: str,
         id_token: str,
         nonce: str | None = None,
+        leeway: float = DEFAULT_CLOCK_SKEW_LEEWAY_SECONDS,
     ) -> dict[str, Any]:
         """Validate the ID token and return its claims.
 
         Validates: signature (via JWKS), issuer, audience, expiration,
         issued-at, and nonce (if provided).
+
+        ``leeway`` is how far this Gateway's clock may disagree with the
+        provider's on ``iat``, ``nbf`` and ``exp``. Two clocks that have not
+        yet converged is the normal state of a VM between NTP polls, and with
+        no tolerance at all a lag of a second or two refuses every sign-in by
+        everyone. Outside the bound the token is still refused, and the
+        refusal carries the measured distance so an operator can tell a clock
+        that needs NTP from a token that needs refusing.
         """
         jwks_data = await self._load_jwks(metadata.jwks_uri)
 
@@ -312,14 +357,17 @@ class OIDCService:
                 algorithms=allowed_algorithms,
                 audience=client_id,
                 issuer=metadata.issuer,
+                leeway=leeway,
                 options={
                     "verify_exp": True,
                     "verify_iat": True,
                     "require": ["exp", "iss", "sub", "aud"],
                 },
             )
+        except jwt.ImmatureSignatureError:
+            raise OIDCValidationError(f"ID token is not yet valid: {_clock_skew_note(id_token, leeway)}")
         except jwt.ExpiredSignatureError:
-            raise OIDCValidationError("ID token has expired")
+            raise OIDCValidationError(f"ID token has expired: {_clock_skew_note(id_token, leeway)}")
         except jwt.InvalidIssuerError:
             raise OIDCValidationError("ID token has an invalid issuer")
         except jwt.InvalidAudienceError:
@@ -376,6 +424,7 @@ class OIDCService:
         code_verifier: str | None = None,
         nonce: str | None = None,
         auth_method: str = "client_secret_post",
+        leeway: float = DEFAULT_CLOCK_SKEW_LEEWAY_SECONDS,
     ) -> OIDCIdentity:
         """Orchestrate the full OIDC callback: token exchange, ID token validation, userinfo.
 
@@ -402,6 +451,7 @@ class OIDCService:
             client_id=client_id,
             id_token=id_token,
             nonce=nonce,
+            leeway=leeway,
         )
 
         # Fetch userinfo for email/name if not present in ID token

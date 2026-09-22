@@ -3152,6 +3152,15 @@ authorization:
 #     # In production behind a reverse proxy, set this to the public frontend URL
 #     # (e.g. https://deerflow.example.com). In development, leave unset.
 #     # frontend_base_url: http://localhost:3000
+#     # How far this Gateway's clock may disagree with the identity
+#     # provider's before an ID token is refused (iat, nbf and exp).
+#     # Default 60 seconds; 0 to 300. A VM between NTP polls is routinely a
+#     # second or two out, and with no tolerance that refuses every sign-in
+#     # by everyone until the clock catches up. One number for the
+#     # deployment, not one per provider: it describes this host's clock.
+#     # A refusal outside the tolerance logs the measured skew, so a clock
+#     # problem reads differently from a bad token.
+#     # clock_skew_leeway_seconds: 60
 #     providers:
 #       keycloak:
 #         display_name: Keycloak
