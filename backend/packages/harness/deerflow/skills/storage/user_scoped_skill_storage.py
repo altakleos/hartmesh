@@ -39,7 +39,6 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.skills.permissions import make_skill_written_path_sandbox_readable
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
 from deerflow.skills.storage.skill_storage import SKILL_MD_FILE
 from deerflow.skills.types import SkillCategory
@@ -356,31 +355,6 @@ class UserScopedSkillStorage(LocalSkillStorage):
             "skill_name": skill_name,
             "message": f"Skill '{skill_name}' installed successfully for user '{self._user_id}'",
         }
-
-    # ------------------------------------------------------------------
-    # Write — ensure user custom dir exists before writing
-    # ------------------------------------------------------------------
-
-    def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
-        # Ensure user custom skills directory exists
-        self._user_custom_root.mkdir(parents=True, exist_ok=True)
-        target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(target.parent),
-        ) as tmp_file:
-            tmp_file.write(content)
-            tmp_path = Path(tmp_file.name)
-        try:
-            with self._skill_projection_mutation():
-                tmp_path.replace(target)
-                make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
 
     # ------------------------------------------------------------------
     # Public helpers

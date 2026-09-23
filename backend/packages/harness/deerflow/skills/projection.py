@@ -292,6 +292,7 @@ def _update_tree_digest(
     label: str,
     *,
     follow_package_directory_symlinks: bool = False,
+    skip_root_dot_dirs: bool = False,
 ) -> None:
     """Hash directory metadata (inode/mode/size/mtime), not file contents.
 
@@ -301,6 +302,11 @@ def _update_tree_digest(
     projection stale until the next explicit rebuild. Runtime writes through
     this codebase are covered regardless: the mutation path rebuilds under
     lock, and atomic-rename always changes the inode.
+
+    ``skip_root_dot_dirs`` is for source trees only: the loaders never read a
+    skill from a dot directory, and ``.history`` is appended to after every
+    edit outside the projection lock. A view keeps hashing them, so anything
+    planted at a view's root is still drift.
 
     Custom skill roots may contain an operator-managed package directory
     symlink. Follow only those links directly below the category root so
@@ -319,6 +325,8 @@ def _update_tree_digest(
             ordered = sorted(entries, key=lambda entry: entry.name)
         child_dirs: list[tuple[Path, Path]] = []
         for entry in ordered:
+            if skip_root_dot_dirs and relative_root == Path(".") and entry.name.startswith(".") and entry.is_dir(follow_symlinks=True):
+                continue
             relative = relative_root / entry.name
             metadata = entry.stat(follow_symlinks=False)
             if entry.is_symlink():
@@ -346,7 +354,7 @@ def _source_signature(storage: SkillStorage, scope: str) -> str:
     digest = hashlib.sha256()
     host_root = storage.get_skills_root_path()
     if scope == "public":
-        _update_tree_digest(digest, host_root / SkillCategory.PUBLIC.value, "public")
+        _update_tree_digest(digest, host_root / SkillCategory.PUBLIC.value, "public", skip_root_dot_dirs=True)
         state = {"extensions": _extensions_state()}
     elif scope == "user":
         user_custom_root = storage.get_user_custom_root()
@@ -356,14 +364,16 @@ def _source_signature(storage: SkillStorage, scope: str) -> str:
             user_custom_root,
             "custom",
             follow_package_directory_symlinks=True,
+            skip_root_dot_dirs=True,
         )
         _update_tree_digest(
             digest,
             host_root / SkillCategory.CUSTOM.value,
             "legacy",
             follow_package_directory_symlinks=True,
+            skip_root_dot_dirs=True,
         )
-        _update_tree_digest(digest, integration_root, "integrations")
+        _update_tree_digest(digest, integration_root, "integrations", skip_root_dot_dirs=True)
         # CUSTOM/LEGACY/INTEGRATION visibility is the intersection of the
         # per-user state and the global extensions default, so both belong in
         # this signature.
