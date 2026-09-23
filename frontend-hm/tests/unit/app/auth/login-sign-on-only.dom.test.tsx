@@ -22,7 +22,7 @@ rs.mock("@/components/ui/flickering-grid", () => ({
 
 import LoginPage from "@/app/(auth)/login/page";
 import { I18nContext } from "@/core/i18n/context";
-import { enUS } from "@/core/i18n/locales/en-US";
+import { createEnUS, enUS } from "@/core/i18n/locales/en-US";
 
 type SetupStatus = {
   needs_setup: boolean;
@@ -57,10 +57,10 @@ function installGateway(
   );
 }
 
-function renderLogin() {
+function renderLogin(t = enUS) {
   return render(
     <I18nContext.Provider
-      value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      value={{ locale: "en-US", setLocale: () => undefined, t }}
     >
       <LoginPage />
     </I18nContext.Provider>,
@@ -303,5 +303,20 @@ describe("the login page in sign-on-only mode", () => {
     // account in the way is somebody else's.
     expect(message).not.toBe(enUS.login.errors.sso_account_exists);
     expect(message.toLowerCase()).not.toContain("your password");
+  });
+
+  it("is headed by the deployment's product name", async () => {
+    // Why the name's route is public: this page has it before anyone signs in.
+    installGateway(
+      { needs_setup: false, registration_enabled: false, sign_on_only: true },
+      [{ id: "sso", display_name: "Single sign-on", type: "oidc" }],
+    );
+
+    renderLogin(createEnUS("Acme Assist"));
+
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "Acme Assist" }),
+    ).toBeTruthy();
+    expect(screen.queryByText("HartMesh")).toBeNull();
   });
 });

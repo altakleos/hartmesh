@@ -1188,6 +1188,7 @@ What the web workspace shows before anyone has asked for anything:
 
 ```yaml
 ui:
+  product_name: HartMesh   # optional; this is the default
   profile: developer   # or: business
   starters:
     - id: business-review
@@ -1196,6 +1197,13 @@ ui:
         Build a monthly business review from the spreadsheet I am about to
         attach, and give me the PDF, Word and Excel versions.
 ```
+
+`product_name` is what the product is called wherever a person sees it: the
+sign-in and setup pages, the browser tab, the workspace when the tenant bundle
+names no company, the assistant's own name and DingTalk's message title. One
+line, at most 40 characters; unset, HartMesh. It is served before sign-in by
+the public `GET /api/product`, so treat it as public. Chat-app channels take
+it when they start, so a new name reaches DingTalk after a restart.
 
 `profile: business` keeps the skills, tools, subagents and integrations
 settings screens, and the scheduled-task recipe chips, for administrators, and
@@ -1225,7 +1233,7 @@ person, so keep secrets out of them; note that any config string beginning with
 strings have no per-locale form, so a multi-language deployment gets whichever
 language the operator wrote.
 
-Both fields are read per request, so an edit to `config.yaml` reaches the next
+Every field is read per request, so an edit to `config.yaml` reaches the next
 page load without a restart — but a malformed `ui:` block makes the Gateway
 return 503 on every route until it is fixed.
 

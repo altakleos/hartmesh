@@ -1050,7 +1050,7 @@ class FeishuChannel(Channel):
             },
             status="connected",
         )
-        await self._reply_card(message_id, "Feishu connected to DeerFlow.")
+        await self._reply_card(message_id, "Feishu is connected to your account.")
         return True
 
     def _on_message(self, event) -> None:

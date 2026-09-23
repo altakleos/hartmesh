@@ -45,6 +45,7 @@ from app.gateway.routers import (
     mcp_tasks,
     memory,
     models,
+    product,
     provider_keys,
     runs,
     runtime_api,
@@ -1341,6 +1342,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Branding API (the tenant bundle's logo) is mounted at /api/branding
     app.include_router(branding.router)
+
+    # The product's name, public for the sign-in page, at /api/product
+    app.include_router(product.router)
 
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)

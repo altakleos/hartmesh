@@ -569,7 +569,6 @@ def test_extension_routes_cannot_enter_host_public_namespaces(path):
         "/api",
         "/heal",
         "/api/{item_id:int}",
-        "/api/{item_id}",
     ],
 )
 def test_extension_routes_that_cannot_enter_a_public_namespace_are_allowed(path):
@@ -591,6 +590,29 @@ def test_extension_routes_that_cannot_enter_a_public_namespace_are_allowed(path)
 
     assert diagnostics == []
     assert any(getattr(route, "path", None) == path for route in app.routes)
+
+
+def test_an_extension_route_that_would_answer_the_public_product_name_is_refused():
+    """`/api/{item_id}` also matches `/api/product`, which the auth middleware lets through unauthenticated."""
+    from fastapi import APIRouter, FastAPI
+
+    from deerflow.extensions.gateway import include_contributed_routers
+
+    async def endpoint():
+        return {"ok": True}
+
+    router = APIRouter()
+    router.add_api_route("/api/{item_id}", endpoint, methods=["POST"])
+    registry = ExtensionRegistry()
+    with registry.attributed_to("product:install"):
+        registry.routers((router,))
+
+    app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
+    diagnostics = include_contributed_routers(app, registry.build())
+
+    assert [diagnostic.source for diagnostic in diagnostics] == ["product:install"]
+    assert "host-reserved exact path" in diagnostics[0].message
+    assert not any(getattr(route, "path", None) == "/api/{item_id}" for route in app.routes)
 
 
 def test_unknown_convertor_near_a_public_namespace_fails_closed(monkeypatch):

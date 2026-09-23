@@ -34,12 +34,12 @@ import {
   companyMark,
 } from "@/components/workspace/workspace-header";
 import { I18nContext } from "@/core/i18n/context";
-import { enUS } from "@/core/i18n/locales/en-US";
+import { createEnUS, enUS } from "@/core/i18n/locales/en-US";
 
-function renderHeader() {
+function renderHeader(t = enUS) {
   return render(
     <I18nContext.Provider
-      value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+      value={{ locale: "en-US", setLocale: () => undefined, t }}
     >
       <WorkspaceHeader />
     </I18nContext.Provider>,
@@ -69,7 +69,7 @@ describe("WorkspaceHeader", () => {
     renderHeader();
 
     expect(screen.getByText("Example Services Co.")).toBeTruthy();
-    expect(screen.queryByText("DeerFlow")).toBeNull();
+    expect(screen.queryByText("HartMesh")).toBeNull();
     expect(screen.getByTestId("tenant-logo").getAttribute("src")).toBe(
       "/api/branding/logo",
     );
@@ -87,8 +87,14 @@ describe("WorkspaceHeader", () => {
   it("is the product's own where no company is named", () => {
     renderHeader();
 
-    expect(screen.getByText("DeerFlow")).toBeTruthy();
+    expect(screen.getByText("HartMesh")).toBeTruthy();
     expect(screen.queryByTestId("tenant-logo")).toBeNull();
+  });
+
+  it("is the product the deployment named", () => {
+    renderHeader(createEnUS("Acme Assist"));
+
+    expect(screen.getByText("Acme Assist")).toBeTruthy();
   });
 
   it("shows neither name until the deployment has answered", () => {
@@ -96,7 +102,7 @@ describe("WorkspaceHeader", () => {
 
     renderHeader();
 
-    expect(screen.queryByText("DeerFlow")).toBeNull();
+    expect(screen.queryByText("HartMesh")).toBeNull();
     expect(screen.getByText(enUS.sidebar.newChat)).toBeTruthy();
   });
 
@@ -116,7 +122,11 @@ describe("WorkspaceHeader", () => {
 
     branding.companyName = null;
     renderHeader();
-    expect(screen.getByText("DF")).toBeTruthy();
+    expect(screen.getByText("H")).toBeTruthy();
+    cleanup();
+
+    renderHeader(createEnUS("Acme Assist"));
+    expect(screen.getByText("AA")).toBeTruthy();
   });
 });
 

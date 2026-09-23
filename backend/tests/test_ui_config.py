@@ -8,13 +8,14 @@ has no permission covering them; `system_role` is what limits a person.
 """
 
 import json
+from types import SimpleNamespace
 
 import pytest
 import yaml
 from pydantic import ValidationError
 
 from deerflow.config.app_config import AppConfig
-from deerflow.config.ui_config import MAX_STARTER_TITLE_CHARS, MAX_STARTERS, StarterConfig, UiConfig
+from deerflow.config.ui_config import DEFAULT_PRODUCT_NAME, MAX_PRODUCT_NAME_CHARS, MAX_STARTER_TITLE_CHARS, MAX_STARTERS, StarterConfig, UiConfig, product_name
 
 
 def test_a_deployment_that_says_nothing_keeps_every_surface() -> None:
@@ -165,3 +166,30 @@ def test_a_config_without_a_ui_block_still_has_one(tmp_path, monkeypatch) -> Non
 
     assert ui.profile == "developer"
     assert ui.starters == []
+
+
+def test_the_product_is_hartmesh_until_the_operator_names_it() -> None:
+    assert UiConfig().product_name == DEFAULT_PRODUCT_NAME == "HartMesh"
+
+
+def test_an_operator_can_name_the_product() -> None:
+    assert UiConfig(product_name="  Acme Assist ").product_name == "Acme Assist"
+    # The spaces around a name are not part of it, so they do not count toward its length.
+    padded = f"  {'x' * MAX_PRODUCT_NAME_CHARS}  "
+    assert UiConfig(product_name=padded).product_name == "x" * MAX_PRODUCT_NAME_CHARS
+
+
+def test_a_product_name_is_a_short_line_of_words() -> None:
+    # It is the heading on the sign-in page and the browser tab's title: blank
+    # would leave both empty, and a newline or a reordering mark makes it read
+    # as something other than what was typed.
+    for bad in ("", "   ", "Acme\nAssist", "Acme\u202eAssist", "x" * (MAX_PRODUCT_NAME_CHARS + 1)):
+        with pytest.raises(ValidationError):
+            UiConfig(product_name=bad)
+
+
+def test_product_name_follows_the_live_config() -> None:
+    assert product_name(SimpleNamespace(ui=UiConfig(product_name="Acme Assist"))) == "Acme Assist"
+    assert product_name(SimpleNamespace(ui=UiConfig())) == "HartMesh"
+    assert product_name(None) == "HartMesh"
+    assert product_name(SimpleNamespace(sandbox=None)) == "HartMesh"

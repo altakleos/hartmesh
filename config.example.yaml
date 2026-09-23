@@ -1213,12 +1213,20 @@ suggestions:
 # words first. At most 6. Unset takes the profile's default (`business` opens
 # on a small built-in set, `developer` on none); an empty list shows no grid.
 #
-# These two strings are served verbatim to every signed-in person, so keep
-# secrets out of them - a value beginning with `$` is replaced from the
-# environment before this block is validated. A malformed `ui:` block makes
-# the Gateway return 503 on every route until it is fixed.
+# product_name is what the product is called wherever a person sees it: the
+# sign-in and setup pages, the browser tab, the workspace when the tenant
+# bundle names no company, the assistant's own name and DingTalk's message
+# title. One line, at most 40 characters. Unset, HartMesh. It is served
+# before sign-in (GET /api/product), so it is public.
+#
+# These strings are served verbatim (the starters to every signed-in person,
+# the product name to anyone), so keep secrets out of them - a value beginning
+# with `$` is replaced from the environment before this block is validated. A
+# malformed `ui:` block makes the Gateway return 503 on every route until it
+# is fixed.
 
 ui:
+  # product_name: HartMesh
   profile: developer
   # starters:
   #   - id: business-review

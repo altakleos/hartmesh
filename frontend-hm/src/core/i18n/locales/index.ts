@@ -1,3 +1,3 @@
-export { enUS } from "./en-US";
-export { zhCN } from "./zh-CN";
+export { createEnUS, enUS } from "./en-US";
+export { createZhCN, zhCN } from "./zh-CN";
 export type { Translations } from "./types";

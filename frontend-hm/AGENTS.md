@@ -64,14 +64,12 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (landing), `/showcase/[thread_id]` (allowlisted public read-only demos), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/workspace/files` (the person's own files, kept across conversations), `/artifacts/view` (chrome-free window that renders one markdown artifact with the panel's own renderer), `/blog/…`, the `(auth)/{login,setup,auth/callback}` flow, `/[lang]/docs/…`, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`app/`** — Next.js App Router. Routes include `/` (a redirect to the workspace, which sends someone signed out to sign-in), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/workspace/files` (the person's own files, kept across conversations), `/artifacts/view` (chrome-free window that renders one markdown artifact with the panel's own renderer), the `(auth)/{login,setup,auth/callback}` flow, and `/api/…` route handlers (e.g. `/api/memory`).
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
   - `workspace/` — Chat page components (messages, artifacts, settings)
-  - `landing/` — Landing page sections
-  - `docs/` — Docs / MDX rendering components
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `artifact-delivery/` (run-scoped undelivered-file verdicts, from the stream while the page that heard them is open and from `GET .../runs/{run_id}/delivery` afterwards, so the correction survives a reload), `business-report/` (the `report.json` contract, its formatting and its companion paths), `files/` (the person's own files: list, open, remove, and keeping a conversation's file there), `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `tool-plane/` (governance status/history client and legacy-mutation ceiling), `turn-progress/` (the stage a running turn reports, and the activity row's label from it; a client-made upload placeholder never counts as model output), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `blog/`, plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `artifact-delivery/` (run-scoped undelivered-file verdicts, from the stream while the page that heard them is open and from `GET .../runs/{run_id}/delivery` afterwards, so the correction survives a reload), `business-report/` (the `report.json` contract, its formatting and its companion paths), `files/` (the person's own files: list, open, remove, and keeping a conversation's file there), `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `tool-plane/` (governance status/history client and legacy-mutation ceiling), `turn-progress/` (the stage a running turn reports, and the activity row's label from it; a client-made upload placeholder never counts as model output), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `product/` (the deployment's product name), plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
 
 A presentation — the chips and archive action under an answer — is drawn from
 `additional_kwargs.presented_files` on whichever message carries it, or from a
@@ -210,8 +208,8 @@ next one's disk. Keeping copies exact bytes and never overwrites (a taken name
 gets the next `_N`). Two places offer it: the report card's _Save to my files_
 keeps the renders it is offering — the documents, not the JSON — and the
 artifact panel's action keeps the open file, for anything under uploads or
-outputs (`canKeepInMyFiles`); neither is offered on the showcase, which has no
-files to keep them in. Both go through `useSaveToMyFiles`, which keeps each
+outputs (`canKeepInMyFiles`); neither is offered on a static demo thread, which
+has no files to keep them in. Both go through `useSaveToMyFiles`, which keeps each
 path and then says so once, naming the folder when there is one, with a way to
 the page; a failure part-way names the failure and leaves what already landed.
 Where a file lands is asked of the file (`filingFolderFor`): a report's renders
@@ -269,15 +267,23 @@ it from and what the agent remembers about them are theirs, not the
 deployment's. Hiding is presentation, not authorization — the routes are
 unchanged and `authorization` has no permission covering these APIs;
 `system_role` is what limits a person, and the API already checks it.
+The product's name is the deployment's too (`ui.product_name`, HartMesh when
+unset). Each route layout reads it from the public `GET /api/product`
+(`core/product/server.ts`) and hands it to `I18nProvider`, which builds the
+dictionary with it, so every string that names the product says the
+configured name and `useProductName()` reads it back from that dictionary —
+one copy, never a second one to keep in step. The same read titles the tab
+(`generateMetadata`) and heads the sign-in and setup pages; a Gateway that
+does not answer leaves HartMesh. No copy names the framework under the
+product, and nothing links to it (a unit test reads the locale sources).
 `branding` (`useBranding`) is the tenant bundle's company name, colours and
 whether `/api/branding/logo` has a picture: a named company replaces the
 product's name in the sidebar header, the tab title (`useDocumentTitle`) and
-About, takes the product's own links and GitHub icon out of the menu and page
-header, and turns the composer disclaimer and the Settings blurb neutral.
-"Unknown" (still loading, or the fetch failed and will retry) is
-`isLoading`, and every one of those surfaces shows neither name nor the
-product's links until it is false. The login page stays the product's own —
-the brand is delivered after sign-in.
+About, and turns the composer disclaimer and the Settings blurb neutral.
+About is that name and the version, nothing else. "Unknown" (still loading,
+or the fetch failed and will retry) is `isLoading`, and every one of those
+surfaces shows neither name until it is false. The sign-in page shows the
+product's name, never the company's: the brand is delivered after sign-in.
 
 One rule governs what happens while the answer is unknown: a control someone
 might need stays offered, and copy the deployment authors waits. So the screens
@@ -287,9 +293,8 @@ deployment has answered. Starters default to the profile — `business` opens on
 a small built-in set, `developer` on none — so an untouched deployment gains
 nothing it did not ask for, and when a grid exists the legacy suggestion row
 under the composer steps aside rather than sitting beside it. `InputBox` also
-mounts on the public showcase route, so that gate lives inside
-`SuggestionList`: asking for `/api/features` from `InputBox` would 401 and
-bounce a showcase visitor to the login page.
+mounts on static demo threads, so that gate lives inside `SuggestionList`,
+which a demo thread never reaches.
 
 Skill, MCP, and managed-integration settings are governance-aware. When
 `GET /api/tool-plane/status` succeeds, these existing screens render the safe
@@ -304,10 +309,9 @@ stay fail-closed. See [the governed tool-plane contract](../docs/GOVERNED_TOOL_P
 
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
-- **`content/`** — MDX content (blog posts, docs) rendered by the app
 - **`styles/`** — Global CSS with Tailwind v4 `@import` syntax and CSS variables for theming
 - **`typings/`** — Ambient TypeScript declarations
-- Root files: `env.js` (env validation), `mdx-components.ts` (MDX component map)
+- Root files: `env.js` (env validation)
 
 More specific `AGENTS.md` files under `src/` contain the frontend sections split from this file.
 

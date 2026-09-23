@@ -34,9 +34,8 @@ const TERMINAL_VERDICT_STALE_TIME = 5 * 60 * 1000;
  * frame keeps the notice from flickering through a second identical value.
  *
  * Gated on `runId` exactly like the workspace-changes card this sits beside,
- * which is what keeps every one of these reads off the public showcase: its
- * static threads carry no run id, and an authorized call there would meet a 401
- * and send a reader who is not signed in to the login page.
+ * which is what keeps every one of these reads off the static demo threads:
+ * they carry no run id, and there is no run to ask about.
  */
 export function useRunArtifactDelivery(
   threadId: string | undefined,

@@ -13,9 +13,6 @@ function getInternalServiceURL(envKey, fallbackURL) {
     ? configured.replace(/\/+$/, "")
     : fallbackURL;
 }
-import nextra from "nextra";
-
-const withNextra = nextra({});
 
 /** @type {import("next").NextConfig} */
 const config = {
@@ -23,10 +20,6 @@ const config = {
     process.env.NEXT_CONFIG_BUILD_OUTPUT === "standalone"
       ? "standalone"
       : undefined,
-  i18n: {
-    locales: ["en", "zh"],
-    defaultLocale: "en",
-  },
   turbopack: {
     root: fileURLToPath(new URL(".", import.meta.url)),
   },
@@ -85,4 +78,4 @@ const config = {
   },
 };
 
-export default withNextra(config);
+export default config;

@@ -1,3 +1,4 @@
+import { type Metadata } from "next";
 import { redirect } from "next/navigation";
 import { type ReactNode } from "react";
 
@@ -7,16 +8,25 @@ import { getServerSideUser } from "@/core/auth/server";
 import { assertNever } from "@/core/auth/types";
 import { I18nProvider } from "@/core/i18n/context";
 import { detectLocaleServer } from "@/core/i18n/server";
+import { getServerSideProductName } from "@/core/product/server";
 
 export const dynamic = "force-dynamic";
+
+/** The tab title until a page sets its own: the deployment's product name. */
+export async function generateMetadata(): Promise<Metadata> {
+  return { title: await getServerSideProductName() };
+}
 
 export default async function AuthLayout({
   children,
 }: {
   children: ReactNode;
 }) {
-  const locale = await detectLocaleServer();
-  const result = await getServerSideUser();
+  const [locale, result, productName] = await Promise.all([
+    detectLocaleServer(),
+    getServerSideUser(),
+    getServerSideProductName(),
+  ]);
 
   let content: ReactNode;
 
@@ -53,5 +63,9 @@ export default async function AuthLayout({
       assertNever(result);
   }
 
-  return <I18nProvider initialLocale={locale}>{content}</I18nProvider>;
+  return (
+    <I18nProvider initialLocale={locale} productName={productName}>
+      {content}
+    </I18nProvider>
+  );
 }

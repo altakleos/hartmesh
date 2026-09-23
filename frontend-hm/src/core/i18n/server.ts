@@ -1,5 +1,7 @@
 import { cookies } from "next/headers";
 
+import { getServerSideProductName } from "../product/server";
+
 import { normalizeLocale, type Locale } from "./locale";
 import { loadTranslations } from "./translations";
 
@@ -33,7 +35,7 @@ export async function getI18n(localeOverride?: string | Locale) {
   const locale = localeOverride
     ? normalizeLocale(localeOverride)
     : await detectLocaleServer();
-  const t = await loadTranslations(locale);
+  const t = await loadTranslations(locale, await getServerSideProductName());
   return {
     locale,
     t,

@@ -436,7 +436,7 @@ class WeComChannel(Channel):
             },
             status="connected",
         )
-        await self._send_connection_reply(frame, "WeCom connected to DeerFlow.")
+        await self._send_connection_reply(frame, "WeCom is connected to your account.")
         return True
 
     async def _send_connection_reply(self, frame: dict[str, Any], text: str) -> None:

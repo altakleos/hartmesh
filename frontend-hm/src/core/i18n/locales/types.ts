@@ -642,12 +642,7 @@ export interface Translations {
 
   // Workspace
   workspace: {
-    officialWebsite: string;
-    githubTooltip: string;
     settingsAndMore: string;
-    visitGithub: string;
-    reportIssue: string;
-    contactUs: string;
     about: string;
     /** About, for a workspace that carries a company's name. */
     aboutCompany: (companyName: string) => string;

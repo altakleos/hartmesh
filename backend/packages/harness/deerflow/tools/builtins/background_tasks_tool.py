@@ -80,5 +80,5 @@ async def cancel_background_task(
     return {
         "cancelled": public["status"] == "cancelled",
         "task": public,
-        "message": "Cancellation requested. DeerFlow will keep retrying safely if the remote server is temporarily unavailable.",
+        "message": "Cancellation requested. It will keep being retried safely if the remote server is temporarily unavailable.",
     }

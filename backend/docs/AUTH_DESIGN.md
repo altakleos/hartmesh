@@ -188,6 +188,7 @@ enum UserScope:
 - `/api/v1/auth/setup-status`
 - `/api/v1/auth/initialize`
 - `/api/v1/auth/providers`
+- `/api/product`（产品名称，登录页在登录前显示）
 - `/api/v1/auth/oauth/` (所有子路径)
 - `/api/v1/auth/callback/` (所有子路径)
 

@@ -63,6 +63,7 @@ COMMAND_ENVIRONMENT_KEYS = {"HARTMESH_PROVIDER_KEYS_SECRET", "HARTMESH_PROVIDER_
 # scripts. See tests/test_compose_operator_models.py.
 PASSTHROUGH_KEYS = {
     "HARTMESH_MODELS_FILE",
+    "HARTMESH_PRODUCT_NAME",
     "SANDBOX_READY_TIMEOUT",
     "SANDBOX_CAPACITY_WAIT_TIMEOUT",
     "HARTMESH_SIGN_ON_ADMINS",
@@ -738,7 +739,7 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     keys = {line.split("=", 1)[0] for line in lines if line and not line.startswith("#")}
     assert keys == CONTRACT_KEYS | SIGN_ON_KEYS, "the example shows sign-on-only mode"
     comments = [line for line in lines if line.startswith("#")]
-    assert len(comments) == 8
+    assert len(comments) == 10
     assert "sign-on-only" in comments[0] and LOCAL_PASSWORDS_KEY in comments[0] and "callback" in comments[0]
     assert "Membership follows the claim" in comments[1] and "HARTMESH_SIGN_ON_ROLES" in comments[1]
     assert [line.split("=", 1)[0] for line in comments[2:5]] == ["#HARTMESH_SIGN_ON_ACCESS_CLAIM", "#HARTMESH_SIGN_ON_ACCESS_VALUES", "#HARTMESH_SIGN_ON_ROLES"], "the optional access keys are shown commented out"
@@ -747,7 +748,10 @@ def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
     # having to set it.
     assert "clock" in comments[5] and "0 to 300" in comments[5]
     assert comments[6] == "#HARTMESH_SIGN_ON_CLOCK_SKEW=60"
-    assert "verbatim" in comments[7] and "subset" in comments[7]
+    assert "Optional keys" in comments[7] and "HartMesh" in comments[7]
+    assert comments[8] == "#HARTMESH_PRODUCT_NAME=HartMesh", "optional, shown commented out with the name it already has"
+    # Last: the provider keys onboarding appends follow it directly.
+    assert "verbatim" in comments[9] and "subset" in comments[9]
     values = dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
     assert values["HARTMESH_TRUSTED_PROXIES"] == "192.0.2.10,192.0.2.11"
     assert values["HARTMESH_PUBLIC_HOST"] == "tenant.example.com"

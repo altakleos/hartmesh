@@ -13,12 +13,8 @@ import {
   BreadcrumbSeparator,
 } from "@/components/ui/breadcrumb";
 import { SidebarTrigger } from "@/components/ui/sidebar";
-import { useBranding } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
-
-import { GithubIcon } from "./github-icon";
-import { Tooltip } from "./tooltip";
 
 export function WorkspaceContainer({
   className,
@@ -39,8 +35,6 @@ export function WorkspaceHeader({
 }: React.ComponentProps<"header">) {
   const { t } = useI18n();
   const pathname = usePathname();
-  const { companyName, isLoading } = useBranding();
-  const isProductWorkspace = !isLoading && companyName === null;
   const segments = useMemo(() => {
     const parts = pathname?.split("/") || [];
     if (parts.length > 0) {
@@ -95,20 +89,6 @@ export function WorkspaceHeader({
           </BreadcrumbList>
         </Breadcrumb>
       </div>
-      {isProductWorkspace && (
-        <div className="pr-4">
-          <Tooltip content={t.workspace.githubTooltip}>
-            <a
-              href="https://github.com/bytedance/deer-flow"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="opacity-75 transition hover:opacity-100"
-            >
-              <GithubIcon className="size-6" />
-            </a>
-          </Tooltip>
-        </div>
-      )}
     </header>
   );
 }

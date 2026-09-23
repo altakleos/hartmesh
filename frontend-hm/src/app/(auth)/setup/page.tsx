@@ -16,6 +16,7 @@ import {
   isSystemAlreadyInitializedError,
 } from "@/core/auth/setup";
 import { parseAuthError } from "@/core/auth/types";
+import { useProductName } from "@/core/i18n/context";
 import { useI18n } from "@/core/i18n/hooks";
 
 type SetupMode = "loading" | "init_admin" | "change_password" | "unavailable";
@@ -25,6 +26,7 @@ export default function SetupPage() {
   const { user, isAuthenticated } = useAuth();
   const { theme, resolvedTheme } = useTheme();
   const { t } = useI18n();
+  const productName = useProductName();
   const [mode, setMode] = useState<SetupMode>("loading");
   const [setupStatusAttempt, setSetupStatusAttempt] = useState(0);
 
@@ -222,7 +224,7 @@ export default function SetupPage() {
         />
         <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
           <div className="text-center">
-            <h1 className="font-serif text-3xl">DeerFlow</h1>
+            <h1 className="font-serif text-3xl">{productName}</h1>
             <p className="text-muted-foreground mt-2">Create admin account</p>
             <p className="text-muted-foreground mt-1 text-xs">
               Set up the administrator account to get started.
@@ -300,7 +302,7 @@ export default function SetupPage() {
       />
       <div className="border-border/20 bg-background/5 w-full max-w-md space-y-6 rounded-3xl border p-8 backdrop-blur-sm">
         <div className="text-center">
-          <h1 className="font-serif text-3xl">DeerFlow</h1>
+          <h1 className="font-serif text-3xl">{productName}</h1>
           <p className="text-muted-foreground mt-2">
             {addedPerson
               ? "Finish setting up your account"

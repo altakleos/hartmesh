@@ -1,18 +1,8 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { cleanup, render, screen } from "@testing-library/react";
-import type { ReactNode } from "react";
-
-const branding: { companyName: string | null; isLoading: boolean } = {
-  companyName: null,
-  isLoading: false,
-};
 
 rs.mock("next/navigation", () => ({ usePathname: () => "/workspace/chats" }));
-rs.mock("@/core/features", () => ({ useBranding: () => branding }));
 rs.mock("@/components/ui/sidebar", () => ({ SidebarTrigger: () => null }));
-rs.mock("@/components/workspace/tooltip", () => ({
-  Tooltip: ({ children }: { children?: ReactNode }) => <>{children}</>,
-}));
 
 import { WorkspaceHeader } from "@/components/workspace/workspace-container";
 import { I18nContext } from "@/core/i18n/context";
@@ -28,49 +18,18 @@ function renderHeader() {
   );
 }
 
-afterEach(() => {
-  cleanup();
-  branding.companyName = null;
-  branding.isLoading = false;
-});
+afterEach(cleanup);
 
 /**
- * The product's repository link belongs in the product's own workspace. In
- * a company's workspace it is a link to someone else's project.
+ * The page header leads only to places in the workspace. The framework's
+ * repository is not a place someone using the product has any reason to go.
  */
 describe("workspace page header", () => {
-  it("links to the product's repository where no company is named", () => {
+  it("links nowhere outside the workspace", () => {
     renderHeader();
 
-    const link = screen.getByRole("link", {
-      name: (name) => name.length === 0 || name.includes("GitHub"),
-    });
-    expect(link.getAttribute("href")).toBe(
-      "https://github.com/bytedance/deer-flow",
-    );
-  });
-
-  it("offers it only once the deployment has answered", () => {
-    branding.isLoading = true;
-
-    renderHeader();
-
-    expect(
-      screen
-        .queryAllByRole("link")
-        .some((link) => link.getAttribute("href")?.includes("github.com")),
-    ).toBe(false);
-  });
-
-  it("drops it in a company's workspace", () => {
-    branding.companyName = "Example Services Co.";
-
-    renderHeader();
-
-    expect(
-      screen
-        .queryAllByRole("link")
-        .some((link) => link.getAttribute("href")?.includes("github.com")),
-    ).toBe(false);
+    for (const link of screen.queryAllByRole("link")) {
+      expect(link.getAttribute("href")).toMatch(/^\//);
+    }
   });
 });
