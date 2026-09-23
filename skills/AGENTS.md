@@ -53,8 +53,9 @@ answers an earlier run had computed but not printed. So:
 ## Paths, review and tests
 
 - No absolute skill path in any skill text: address scripts through
-  `${SKILL_DIR:?…}`, which `describe_skill` reports as each skill's
-  `Directory`. The rule, why the guarded form specifically, and the test that
+  `SKILL_DIR="<Directory>"; python "${SKILL_DIR:?…}/scripts/…"`, the
+  assignment its own statement in every example, where `Directory` is what
+  `describe_skill` reports. The rule, why the guarded form specifically, and the test that
   pins it are in
   [the harness skills guide](../backend/packages/harness/deerflow/skills/AGENTS.md).
 - Changed public skills are reviewed in CI by

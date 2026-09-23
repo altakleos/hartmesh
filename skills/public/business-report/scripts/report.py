@@ -72,6 +72,7 @@ try:
         is_color,
         is_missing,
         load_brand,
+        month_period,
         one_line,
         parse_period,
         plural,
@@ -789,6 +790,23 @@ def apply_mapping(frame: pd.DataFrame, roles: dict[str, str | None]) -> CleanFra
 # --- building the report -------------------------------------------------------
 
 
+#: A period with no rows names this many of the latest months, each with its row count.
+MONTHS_LISTED = 24
+
+
+def _rows_per_month(dates, counted: str = "") -> str:
+    """The rows in each month ``dates`` covers, oldest first; ``counted`` qualifies the heading."""
+    counts = dates.dropna().dt.strftime("%Y-%m").value_counts().sort_index()
+    if counts.empty:
+        return f", no rows {counted}".rstrip() if counted else ""
+    listed = counts.iloc[-MONTHS_LISTED:]
+    earlier = len(counts) - len(listed)
+    heading = " ".join(part for part in ("rows per month", counted) if part)
+    if earlier:
+        heading += f" (the latest {len(listed)}; {earlier} earlier {plural(earlier, 'month', 'months')} not listed)"
+    return f", {heading}: " + ", ".join(f"{month}: {int(count)}" for month, count in listed.items())
+
+
 def prepare(sources: list[str], period_text: str | None, options: BuildOptions, mapping_override: dict | None, profile: dict) -> BuildContext:
     """Read, map, clean and filter the inputs; raises DecisionNeeded when a question is due.
 
@@ -872,8 +890,14 @@ def prepare(sources: list[str], period_text: str | None, options: BuildOptions, 
     kept = all_rows.loc[~excluded_mask].reset_index(drop=True)
     if not int(in_period(kept["date"], period).sum()):
         valid = all_rows["date"].dropna()
-        covered = f"the files cover {valid.min().strftime('%Y-%m-%d')} to {valid.max().strftime('%Y-%m-%d')}" if len(valid) else "no row has a usable date"
-        raise InputError(f"No rows fall in {period.label}; {covered}.")
+        span = f"the files cover {valid.min().strftime('%Y-%m-%d')} to {valid.max().strftime('%Y-%m-%d')}" if len(valid) else "no row has a usable date"
+        if excluded_in_period:
+            # The period is in the files; the exclusions emptied it. The months
+            # listed are the ones another period could still be built from.
+            excluded = f"{excluded_in_period} {plural(excluded_in_period, record, records)} in {period.label} {'was' if excluded_in_period == 1 else 'were'} excluded"
+            raise InputError(f"No rows are left in {period.label}: {excluded}; {span}{_rows_per_month(kept['date'], 'after the exclusions')}.")
+        # The files have no row in the period at all: count every row, as reading the file would.
+        raise InputError(f"No rows fall in {period.label}; {span}{_rows_per_month(all_rows['date'])}.")
     return BuildContext(
         tables=tables,
         mappings=mappings,
@@ -911,6 +935,30 @@ def _like(examples: list[str]) -> str:
     return f" (like {', '.join(chr(34) + example + chr(34) for example in examples)})" if examples else ""
 
 
+def _months_beyond_the_files(dates, period) -> list[str]:
+    """Whole months of a longer period that lie before the files' first date or after their last.
+
+    Whole months, not days: a file whose last job fell on the 30th covers its
+    month, and a warning for that day would be one the user learns to ignore.
+    """
+    valid = dates.dropna()
+    if valid.empty or period.start.replace(day=1) == period.end.replace(day=1):
+        return []
+    first, last = valid.min().date(), valid.max().date()
+    beyond: list[str] = []
+    year, month = period.start.year, period.start.month
+    while (year, month) <= (period.end.year, period.end.month):
+        whole = month_period(year, month)
+        if whole.end < first or whole.start > last:
+            beyond.append(whole.label)
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return beyond
+
+
+def _join_words(items: list[str]) -> str:
+    return items[0] if len(items) == 1 else ", ".join(items[:-1]) + " and " + items[-1]
+
+
 def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count: int, sections: list[dict]) -> list[dict]:
     profile, period, currency = ctx.profile, ctx.period, ctx.currency
     records, record = vocab(profile, "records", "rows"), vocab(profile, "record", "row")
@@ -928,6 +976,18 @@ def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count:
                 "id": "period_choice",
                 "status": "warn",
                 "text": f"No period was asked for, so this report covers {period.label}, where most of the {records} in the file fall. Say another period to change it.",
+            }
+        )
+
+    beyond = _months_beyond_the_files(ctx.all_rows["date"], period)
+    if beyond:
+        dates = ctx.all_rows["date"].dropna()
+        run = f"{dates.min().strftime('%Y-%m-%d')} to {dates.max().strftime('%Y-%m-%d')}"
+        checks.append(
+            {
+                "id": "period_coverage",
+                "status": "warn",
+                "text": f"{period.label} includes {_join_words(beyond)}, which the files do not reach (they run {run}); its figures and comparisons cover the rest of the period only.",
             }
         )
 
