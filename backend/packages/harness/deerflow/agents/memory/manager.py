@@ -854,23 +854,42 @@ def _host_default_should_keep_hidden_message(additional_kwargs: Any) -> bool:
     return read_human_input_response(additional_kwargs) is not None
 
 
+class _HostDefaultModel:
+    """The host's default chat model as it is configured at each call.
+
+    ``create_chat_model(name=None)`` -> app default, ``attach_tracing=True`` so
+    memory LLM calls surface in langfuse via the callbacks'
+    ``on_memory_llm_call`` metadata merge. Built per call rather than once:
+    the memory manager lives as long as the process and the updater keeps
+    what it is handed, so a model built at construction would carry that
+    moment's key for good -- past a ``config.yaml`` edit, and past a provider
+    key an administrator replaced or removed in the product, which would go
+    on being billed for every memory update until a restart. The updater
+    only calls ``invoke``.
+    """
+
+    def invoke(self, input: Any, config: Any = None, **kwargs: Any) -> Any:
+        from deerflow.models import create_chat_model
+
+        return create_chat_model(name=None).invoke(input, config=config, **kwargs)
+
+
 def _host_default_llm() -> Any:
     """deer-flow default for DeerMem's ``host_llm`` slot (zero-config extraction).
 
-    Builds the host's default chat model (``create_chat_model(name=None)`` ->
-    app default, ``attach_tracing=True`` so memory LLM calls surface in langfuse
-    via the callbacks' ``on_memory_llm_call`` metadata merge), mirroring pre-abstraction
-    ``model_name: null``. Returns ``None`` if no model is available (no models
-    configured) so DeerMem no-ops extraction with a clear error rather than
-    crashing startup.
+    The host's default chat model, mirroring pre-abstraction
+    ``model_name: null``, resolved at every call (``_HostDefaultModel``). With
+    no model configured now, a warning says memory extraction cannot run yet;
+    an update then fails with the reason until a model exists, and works from
+    the first update after one does.
     """
     try:
         from deerflow.models import create_chat_model
 
-        return create_chat_model(name=None)
+        create_chat_model(name=None)
     except Exception:  # noqa: BLE001 - no default model is a config state, not a crash
-        logger.warning("Could not build host default model for DeerMem memory extraction; memory extraction will be disabled", exc_info=True)
-        return None
+        logger.warning("Could not build host default model for DeerMem memory extraction; memory extraction will fail until a model is configured", exc_info=True)
+    return _HostDefaultModel()
 
 
 def _host_default_extraction_callback(payload: Any) -> None:

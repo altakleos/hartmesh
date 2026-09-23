@@ -31,6 +31,13 @@ operator's onboarding verb. The stack is started with:
 docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env up -d
 ```
 
+Once a tenant uses provider keys set in the product, this command and every
+other `up` in this README also need `HARTMESH_PROVIDER_KEYS_SECRET` in the
+command's own environment, for example
+`HARTMESH_PROVIDER_KEYS_SECRET="$(cat /path/off/the/data/disk)" docker compose ... up -d`;
+an `up` without it leaves those providers with no key (§ "Provider keys in
+the product").
+
 Nothing in the bundle relies on being executable: every script `compose.yaml`
 runs is invoked as `sh /opt/hartmesh/...`, and the operator tools under
 `scripts/` are invoked as `bash scripts/...` (their headers say so).
@@ -82,6 +89,8 @@ get explicit `environment:` entries and never see a provider key.
 | --- | --- |
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
+| `HARTMESH_PROVIDER_KEYS_SECRET` | The wrapping key for provider keys an administrator sets in the product, at least 32 characters (`openssl rand -base64 32`). Absent -- which is what every existing tenant `.env` is -- nothing changes and the product refuses to store a key, saying why. Best supplied from the environment of the `docker compose` command rather than this file, which shares a disk with the database it protects (§ "Provider keys in the product"). |
+| `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` | Only while rotating that key: the old value, so keys wrapped under it are read and rewrapped under the new one at the next start (§ "Provider keys in the product"). |
 | `SANDBOX_READY_TIMEOUT` | The cold-start readiness budget, `sandbox.ready_timeout` in the rendered `config.yaml`: whole seconds from 60 to 600. Absent -- which is what every existing tenant `.env` is -- the template's 120 applies. Anything else (zero, a negative or fractional number, text, a value outside the range) refuses to render and the Gateway does not start, so no value can turn the deadline off (§ "Sandbox readiness budget"). |
 | `SANDBOX_CAPACITY_WAIT_TIMEOUT` | How long an acquisition waits for one of the two sandbox slots when both are in active use and nothing is parked to evict, `sandbox.capacity_wait_timeout` in the rendered `config.yaml`: whole seconds from 0 to 60, where 0 refuses at once. Absent, the template's 5 applies. Anything else refuses to render, so no value makes the wait unbounded (§ "Memory budget"). |
 | `HARTMESH_SIGN_ON_ADMINS` | Sign-on only. Comma-separated email addresses that become the provider's `admin_emails`: an address on it is created as `admin` at its first sign-in, every other address as `user`. Absent, the deployment has **no administrator** (§ "Sign-in"). |
@@ -112,6 +121,11 @@ they reach the Gateway through `env_file` and are read inside the container by
 rather than a hole in the rendered Compose document.
 The resolver source and its Gateway environment value share the same
 interpolation, so validation reads the file Docker will bind into the sandbox.
+`HARTMESH_PROVIDER_KEYS_SECRET` and its `_PREVIOUS` are interpolated by
+`compose.yaml` with an empty default and reach only the Gateway, so they may
+come from the environment of the `docker compose` command itself: the shell's
+value wins over the `--env-file` one, and absent from both they are simply
+unset.
 
 ## Sign-in
 
@@ -1861,7 +1875,9 @@ default by name and is the supported path. Everything else in the profile —
 uploaded documents, the sandbox, reports — works without one.
 
 A tenant with **no** model key starts, logs `provider keys found: none`, and
-serves a frontend that reports no model configured. That is the correct
+serves a frontend that reports no model configured (unless an administrator
+has since set one in the product: that line is the `.env` view, § "Provider
+keys in the product"). That is the correct
 failure for the profile; refusing such a tenant belongs in the operator's
 onboarding verb.
 
@@ -2333,6 +2349,132 @@ substitutes for it. Accepting an entry here means the shape is valid and the
 client class exists, not that the provider will honour the id or the setting;
 that answer comes from the provider, on the first message.
 
+### Provider keys in the product
+
+The key in `.env` is where a tenant starts. An administrator can add,
+replace or remove the key of any provider in the catalog above -- the eleven
+model providers under `providers/models/` and the nine search and fetch
+providers under `providers/tools/` -- from **Settings → Account → Provider keys**, so
+the company rotates its own key or changes provider without anyone editing
+`.env`. **With no key set in the product, nothing changes**: the Gateway
+serves the `config.yaml` `gateway/run.sh` rendered, writes no second file,
+and `.env` is the only source of keys, exactly as before.
+
+**Precedence.** A key set in the product outranks the `.env` key for its
+provider, and the Gateway applies it at every start, before anything is
+built from the configuration. So it keeps winning:
+
+| After | The provider uses |
+| --- | --- |
+| a Gateway restart | the product's key |
+| a `.env` re-render and `up -d` with the original key still in it | the product's key |
+| a database restore taken after the key was set | the product's key |
+| a database restore taken *before* the key was set | the `.env` key again, if `.env` carries one: the restored database holds no product key |
+| a restore under a different `HARTMESH_PROVIDER_KEYS_SECRET` | **no key**: the stored one cannot be read, and the `.env` key is never used in its place |
+| an administrator removing the key | the `.env` key if there is one, otherwise none |
+
+**How a change takes effect, without a restart.** The config loader and the
+search tools read keys from the Gateway's process environment
+(`api_key: $OPENAI_API_KEY`). On every change, and at start, the Gateway
+puts the product's keys into that environment, over the `.env` values, and
+renders the configuration again with this profile's own
+`gateway/render_config.py` -- so a provider that had no key gains its
+models and one whose key is gone loses them, by the same rules as `.env`.
+The result goes to `home/config.effective.yaml` beside `home/config.yaml`,
+and the Gateway points its own `DEER_FLOW_CONFIG_PATH` at it and reloads.
+`home/config.yaml` stays what `.env` alone renders, so every command run
+with `docker compose exec` still loads it; neither file holds a key, only
+`$NAME` references. A run already going keeps the configuration it started
+with -- its models and their keys -- to its end; the next run uses the new
+key, and so does a search tool's next call, since the search tools read their
+variable when they are called.
+
+**Nothing reads a key back.** The key is write-only: the page, every route
+(`GET /api/provider-keys` shows each provider's source, whether a key is
+set and when and by whom it last changed), every error and every log line
+leave it out. A write is refused unless it comes from an administrator's
+interactive session; a personal access token is refused even for reading.
+
+**Where each key comes from, for the deployer.** Inside the deployment:
+
+```bash
+docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
+  exec --user 1000 gateway \
+  sh -c 'cd /app/backend && PYTHONPATH=. uv run --no-sync python -m app.gateway.provider_keys.status'
+```
+
+prints one JSON document: every catalog provider with `source` --
+`product`, `environment` or `none` -- plus `product_key` (`absent`, `set`,
+or `unreadable`), `wrapped_with` (`current` or `previous`), `changed_at`
+and `changed_by`, and `refusal`, the reason an administrator cannot set
+keys now (null when they can), and `wrapping_key`: `set`, `absent` (the
+Gateway started with no `HARTMESH_PROVIDER_KEYS_SECRET`: an `up` that did
+not carry it) or `invalid` (one shorter than 32 characters). `absent` or
+`invalid` beside an `unreadable` key means the key is intact and the secret
+is what is missing; `set` beside one means the secret is not the one it was
+stored under. It never prints a key. It exits `1` with
+`error` and `message` when it cannot answer; the document is the answer
+either way. `environment` means the `.env` key is in use; once a provider
+says `product`, the `.env` copy of its key is no longer used and can be
+deleted. The `render_config: wrote ... provider keys found: ...` start line
+is still the `.env` view alone; the line after it, `provider keys: set in
+the product for ...`, and this command give what the Gateway actually uses.
+
+**At rest.** A key set in the product is stored in PostgreSQL
+(`provider_keys`), Fernet-encrypted (AES-128-CBC with HMAC-SHA256) under a
+key derived (HKDF-SHA256) from `HARTMESH_PROVIDER_KEYS_SECRET`, together with its
+variable name, so a row copied onto another provider does not become its
+key. A database backup therefore holds only ciphertext. Without the secret
+the product refuses to store a key and says why; with one shorter than 32
+characters it refuses too. The secret must not live on the disk the
+database does: `/srv/hartmesh/.env` shares the data disk with
+`/srv/hartmesh/postgres`, so a snapshot of that disk would carry both the
+ciphertext and the key that opens it. Supply it from the environment of the
+`docker compose` command instead (`compose.yaml` interpolates it, and the
+shell's value wins); Docker keeps a container's environment with the
+container, so a restart keeps it, but **every** later `up` must carry it
+too, or the Gateway starts with no secret and the providers with stored
+keys have no key (the start log names them, and the command says
+`unreadable` with `wrapping_key: "absent"`). An administrator's page says
+the saved key is intact and asks for the host to restore the setting;
+**Remove** there discards the key, so do not use it to recover from a
+missing secret. Keep the secret durably somewhere other than the data disk:
+losing it is the "different `HARTMESH_PROVIDER_KEYS_SECRET`" row above for
+every stored key, and the only remedy is setting each key again.
+
+**Rotating the secret.** Start the stack with the new value in
+`HARTMESH_PROVIDER_KEYS_SECRET` and the old one in
+`HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS`. The Gateway reads under either and
+rewraps every stored key under the new one at start; when the command shows
+`wrapped_with: current` for every stored key, drop the previous value. A
+start with the new value and without the previous one leaves every stored
+key `unreadable` with `wrapping_key: "set"`; start again with both.
+
+**The record.** Every add, replace and remove is kept in
+`provider_key_events` -- which provider, which action, the administrator's
+id and address, when -- and shown under the list (`GET
+/api/provider-keys/events`). The value is never part of it.
+
+**What is refused.** A provider outside the release's catalog (`404
+unknown_provider`); a body that is anything but `{"key": "..."}`, so there
+is no way to supply a base URL or a model entry here (those belong in
+`HARTMESH_MODELS_FILE`); a key that is not one printable token. With
+`HARTMESH_MODELS_FILE` set the deployer curates the models, so every write
+is refused with a message saying so and nothing stored is applied: the
+operator file's `$NAME` references resolve against `.env` alone, as they
+always did.
+
+**Rolling back, and a stored key that stops rendering.** A release earlier
+than the one that added this has no record of its database table, so its
+Gateway does not start on a database this release migrated; roll back by
+restoring a backup taken before the upgrade, which is the "restore taken
+*before*" row above. A key is rendered before it is stored, so a stored key
+that no longer renders at start takes a release that changed the catalog;
+the Gateway then logs the refusal and does not start. Start it once without
+`HARTMESH_PROVIDER_KEYS_SECRET` -- the stored keys are then unreadable and
+not rendered -- remove the key in the product, and start it again with the
+secret.
+
 ### Login lockout
 
 The rendered `config.yaml` departs from the Gateway defaults in exactly two
@@ -2505,7 +2647,14 @@ the move when the tenant is idle: any turn in flight dies with the stack.
 
 ## Applying a `.env` re-render
 
-Rotating a provider key is a re-render of `.env` followed by the same `up -d`.
+Rotating a provider key is a re-render of `.env` followed by the same `up -d`
+-- unless an administrator has set that provider's key in the product, which
+outranks the `.env` one until they remove it (§ "Provider keys in the
+product"; `python -m app.gateway.provider_keys.status` says which applies).
+Where any key is stored in the product, that `up -d` carries
+`HARTMESH_PROVIDER_KEYS_SECRET` in its environment like every other `up`;
+without it Compose sees the value change to empty, recreates the Gateway,
+and the stored keys are not applied.
 Setting or unsetting `HARTMESH_MODELS_FILE` is the same operation (the file it
 names is not `.env` and needs only the Gateway restart § "Operator-managed
 models" describes). Compose recreates only the services whose configuration

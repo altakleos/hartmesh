@@ -588,6 +588,48 @@ GET /api/models/{model_name}
 }
 ```
 
+### Provider keys
+
+Where the deployment's `config.yaml` is rendered from a provider catalog (the
+compose profile, `HARTMESH_PROFILE_DIR`), an administrator manages each
+catalog provider's key in the product. A key set here outranks the
+environment's for that provider, takes effect without a restart, and is
+never returned. Every route requires an administrator's interactive
+session; a personal access token is refused (`403`). Elsewhere the list
+answers `available: false`, and the record and every write
+`409 not_available`. A write checks the `refusal` before the provider name,
+so while one stands even an unknown provider gets the `409`.
+
+- `GET /api/provider-keys` lists every catalog provider:
+  `{"available", "refusal", "wrapping_key", "providers": [...]}`, where each
+  provider carries `provider` (`openai`), `variable` (`OPENAI_API_KEY`),
+  `kind` (`models` or `tools`), `source` (`product`, `environment` or
+  `none`), `product_key` (`absent`, `set` or `unreadable`), `wrapped_with`,
+  `changed_at` and `changed_by`. `refusal` (`{code, message}` or null) says
+  why a write would be refused now: `operator_model_file`,
+  `no_wrapping_key` or `wrapping_key_invalid`. `wrapping_key` is `set`,
+  `absent` or `invalid`; beside an `unreadable` key, `absent` or `invalid`
+  means the secret is missing, `set` that it is not the one the key was
+  stored under.
+- `PUT /api/provider-keys/{provider}` with exactly `{"key": "..."}` adds or
+  replaces the key: `{"action": "added" | "replaced", "provider": {...}}`,
+  `Cache-Control: no-store`. `404 unknown_provider` outside the catalog,
+  `422 body_invalid` for any other body (the body is never quoted back),
+  `422 key_invalid` for a key that is not one printable token,
+  `422 render_refused` when the configuration would not render with it, and
+  `409` with the `refusal` code.
+- `DELETE /api/provider-keys/{provider}` removes it (`action: "removed"`, or
+  `"none"` when nothing was stored); the provider falls back to the
+  environment's key, or to none. Allowed without a wrapping key, so an
+  unreadable key can be removed; `404 unknown_provider` outside the
+  catalog and `409 operator_model_file` as for a write.
+- `GET /api/provider-keys/events?limit=50` (1 to 200) is the record, newest
+  first: `event_id`, `variable`, `action`, `actor_id`, `actor_email`,
+  `occurred_at`; `422 limit_invalid` outside the range.
+
+The same reading for the deployer, inside the deployment:
+`python -m app.gateway.provider_keys.status` (one JSON document, never a key).
+
 ### MCP Configuration
 
 These endpoints are the legacy direct configuration surface. With the default

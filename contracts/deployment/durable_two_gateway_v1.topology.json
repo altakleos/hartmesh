@@ -201,7 +201,7 @@
       "required_adapter": "Helm migration Job with PostgreSQL advisory lock; Gateways verify head only",
       "config_fields": ["database", "deployment", "log_level", "logging"],
       "service_registrations": ["migration_verifier", "configuration_snapshot"],
-      "runtime_state_fields": ["deployment_reporter", "runtime_readiness"],
+      "runtime_state_fields": ["deployment_reporter", "provider_keys", "provider_keys_applied", "runtime_readiness"],
       "requirement": "Mixed heads, binaries, or config digests cannot register or become ready."
     },
     {

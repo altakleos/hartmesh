@@ -1581,6 +1581,48 @@ export const enUS: Translations = {
       addPersonCopied: "Copied",
       addPersonAnother: "Add another person",
     },
+    providerKeys: {
+      title: "Provider keys",
+      description:
+        "The keys your AI models and web search use. A key you set here replaces the one your workspace was set up with, from the next message on. Once saved, a key is never shown again. Keys aren't checked with the provider when you save them, so a mistyped key shows up as a reply that fails.",
+      groupModels: "AI models",
+      groupTools: "Web search and fetch",
+      sourceProduct: "Your key",
+      sourceEnvironment: "Set up for you",
+      sourceNone: "No key",
+      unreadable: "Saved key can't be read",
+      unreadableHint:
+        "The key saved here can't be opened with this workspace's encryption key, so this provider has no key until you set it again. Removing it goes back to the key your workspace was set up with, if there is one.",
+      unreadableHintHostSetting:
+        "Your saved key is still stored, but this workspace can't open it right now, so this provider has no key. It works again once whoever hosts your workspace restores its key encryption setting. Removing it discards it for good.",
+      refusalNoWrappingKey:
+        "Keys can't be saved here right now: this workspace's key encryption isn't set up. Whoever hosts your workspace needs to set it.",
+      refusalWrappingKeyInvalid:
+        "Keys can't be saved here right now: this workspace's key encryption setting isn't valid. Whoever hosts your workspace needs to fix it.",
+      refusalOperatorModelFile:
+        "Whoever hosts your workspace chooses its AI models, so provider keys are managed there, not here.",
+      renderRefused:
+        "This key couldn't be saved: your workspace's setup doesn't accept it. Nothing was changed.",
+      removeConfirm:
+        "Remove the {provider} key? It can't be shown again, so using it later means pasting it again.",
+      changed: "Changed {date} by {who}",
+      set: "Add key",
+      replace: "Replace key",
+      remove: "Remove",
+      save: "Save key",
+      saving: "Saving...",
+      cancel: "Cancel",
+      keyLabel: "{provider} key",
+      keyPlaceholder: "Paste the key",
+      saved: "Saved. Your next message uses your {provider} key.",
+      removedToEnvironment:
+        "Removed. {provider} is back on the key your workspace was set up with.",
+      removedToNone: "Removed. {provider} has no key now.",
+      recentChanges: "Recent changes",
+      eventAdded: "{who} added the {provider} key",
+      eventReplaced: "{who} replaced the {provider} key",
+      eventRemoved: "{who} removed the {provider} key",
+    },
     acknowledge: {
       emptyTitle: "Acknowledgements",
       emptyDescription: "Credits and acknowledgements will show here.",
