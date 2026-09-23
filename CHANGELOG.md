@@ -5,6 +5,14 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.32] — 2026-09-23
+
+- hartmesh#149 — an administrator adds, replaces and removes provider keys in the product, under Settings → Account → Provider keys, and a change takes effect without a restart. A key set there outranks the `.env` key for its provider across restarts, `.env` rewrites and restores taken after it was set. Keys are stored encrypted under `HARTMESH_PROVIDER_KEYS_SECRET`, which the tenant VM compose profile takes from the environment of the `docker compose` command, never from the data disk. **Every `up` must carry it once a key is stored**: without it the stored keys read as unreadable and their providers have no key, never the `.env` one, and without it no key can be saved. A tenant that stores no key in the product changes nothing. `python -m app.gateway.provider_keys.status` names each provider's key source. Memory updates now use a replaced key at once instead of after a restart.
+
+- hartmesh#150 — a report turn no longer loses round trips before building. The skills' command examples assign `SKILL_DIR` as a statement of its own, the form bash expands, so a model copying them no longer runs `python /scripts/report.py`. A named period goes straight to the build: a period the files do not cover stops it with the rows in each month the files do cover, a period they cover only part of is built with a check naming the months they miss, and a period emptied by exclusions says so.
+
+- hartmesh#151 — saving a custom skill while another save or edit is under way no longer fails with "User skills changed repeatedly while rebuilding the sandbox projection" and empties the user's skills in running sandboxes. A save that fails leaves the sandbox's view in place, and an edit no longer makes the next sandbox start copy all of the user's skills again.
+
 ## [2.1.0+hartmesh.31] — 2026-09-23
 
 - hartmesh#147 — a local-password deployment says whether visitors may create their own account, and an administrator can add a person when they may not. The tenant VM compose profile now requires `HARTMESH_LOCAL_REGISTRATION=open` or `closed` beside `HARTMESH_LOCAL_PASSWORDS=allowed`; **a local-password tenant whose `.env` lacks it stops at start** and the refusal names the key, so add `=open` to keep sign-up exactly as it was before moving to this release. The renderer owns `auth.local.enabled` and `allow_registration` in both modes and refuses a template naming either; `/health` and the start line name the choice. An administrator adds a person under Settings → Account, or the deployer with `python -m app.gateway.auth.add_user --email`: the account is an ordinary user with a one-time password shown once and stored only as a hash, and until the person chooses their own password its sessions reach nothing but setup. Sign-on-only tenants change nothing.
@@ -344,6 +352,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.32]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.32
 [2.1.0+hartmesh.31]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.31
 [2.1.0+hartmesh.30]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.30
 [2.1.0+hartmesh.29]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.29
