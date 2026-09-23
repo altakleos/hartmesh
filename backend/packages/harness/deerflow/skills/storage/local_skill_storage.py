@@ -99,22 +99,32 @@ class LocalSkillStorage(SkillStorage):
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
         target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
-        target.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.NamedTemporaryFile(
-            "w",
-            encoding="utf-8",
-            delete=False,
-            dir=str(target.parent),
-        ) as tmp_file:
-            tmp_file.write(content)
-            tmp_path = Path(tmp_file.name)
-        try:
-            with self._skill_projection_mutation():
+        # Every change to the source tree happens under the projection lock:
+        # the rebuild hashes that tree before and after, and a directory or
+        # temporary file appearing in between makes it give up. A failed write
+        # is raised only after the rebuild, so it leaves the view in place
+        # rather than clearing it.
+        failure: Exception | None = None
+        with self._skill_projection_mutation():
+            tmp_path: Path | None = None
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(
+                    "w",
+                    encoding="utf-8",
+                    delete=False,
+                    dir=str(target.parent),
+                ) as tmp_file:
+                    tmp_path = Path(tmp_file.name)
+                    tmp_file.write(content)
                 tmp_path.replace(target)
                 make_skill_written_path_sandbox_readable(self.get_custom_skill_dir(name), target)
-        except Exception:
-            tmp_path.unlink(missing_ok=True)
-            raise
+            except Exception as error:
+                if tmp_path is not None:
+                    tmp_path.unlink(missing_ok=True)
+                failure = error
+        if failure is not None:
+            raise failure
 
     def remove_custom_skill_file(self, name: str, relative_path: str) -> str:
         removal = ((SkillCategory.CUSTOM, Path(name)),)

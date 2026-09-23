@@ -6,7 +6,7 @@ import shutil
 import zipfile
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from threading import Barrier, Event
+from threading import Barrier, Event, Thread
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -16,6 +16,8 @@ from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.config.paths import Paths
 from deerflow.sandbox.middleware import SandboxMiddleware
 from deerflow.skills.projection import (
+    _source_signature,
+    _view_signature,
     ensure_public_skill_projection,
     ensure_skill_projections,
     ensure_thread_skill_projection,
@@ -903,6 +905,97 @@ def test_concurrent_custom_skill_writes_do_not_lose_projected_entries(projection
 
     projected_names = {path.name for path in env.paths.user_custom_skills_view_dir("alice").iterdir()}
     assert projected_names == set(names)
+
+
+def _source_entries(root: Path) -> list[str]:
+    return sorted(str(path.relative_to(root)) for path in root.rglob("*")) if root.exists() else []
+
+
+def test_a_custom_skill_write_touches_the_source_tree_only_under_the_projection_lock(projection_env) -> None:
+    """A rebuild hashes the source tree before and after; a writer must not change it in between.
+
+    The write used to create the skill's directory and its temporary file
+    before taking the lock, so concurrent writers changed the tree under a
+    rebuild on every attempt: the rebuild gave up with "User skills changed
+    repeatedly" and cleared the user's projection.
+    """
+    env = projection_env
+    source = env.storage.get_user_custom_root()
+    before = _source_entries(source)
+    written = Event()
+
+    def _write() -> None:
+        env.storage.write_custom_skill("skill-a", "SKILL.md", _skill_content("skill-a"))
+        written.set()
+
+    writer = Thread(target=_write, daemon=True)
+    with skill_projection_mutation(env.storage, "user"):
+        writer.start()
+        assert not written.wait(0.5), "the write finished while another mutation held the lock"
+        assert _source_entries(source) == before, "the write changed the source tree before it held the lock"
+    writer.join(10)
+
+    assert written.is_set()
+    assert (env.paths.user_custom_skills_view_dir("alice") / "skill-a" / "SKILL.md").is_file()
+
+
+def test_edit_history_is_not_part_of_what_the_projection_is_built_from(projection_env) -> None:
+    """``skill_manage`` and the skills router append history after an edit, outside the lock.
+
+    ``.history`` is never a skill and never projected, so an append must not
+    look like a source change: it made a concurrent rebuild give up, and the
+    next sandbox acquire rebuild a projection nothing had changed.
+    """
+    env = projection_env
+    env.storage.write_custom_skill("skill-a", "SKILL.md", _skill_content("skill-a"))
+    before = _source_signature(env.storage, "user")
+
+    env.storage.append_history("skill-a", {"action": "edit"})
+
+    assert env.storage.get_skill_history_file("skill-a").is_file()
+    assert _source_signature(env.storage, "user") == before
+
+
+def test_a_dot_directory_inside_a_skill_package_is_still_source(projection_env) -> None:
+    """Only dot directories at a category root are skipped; the projection copies a package's own."""
+    env = projection_env
+    env.storage.write_custom_skill("skill-a", "SKILL.md", _skill_content("skill-a"))
+    env.storage.write_custom_skill("skill-a", ".data/a.md", "a\n")
+    assert (env.paths.user_custom_skills_view_dir("alice") / "skill-a" / ".data" / "a.md").is_file()
+    before = _source_signature(env.storage, "user")
+
+    (env.storage.get_custom_skill_dir("skill-a") / ".data" / "b.md").write_text("b\n", encoding="utf-8")
+
+    assert _source_signature(env.storage, "user") != before
+
+
+def test_a_failed_custom_skill_write_leaves_the_projection_in_place(projection_env) -> None:
+    """The write runs under the projection lock; its failure must not clear the user's view."""
+    env = projection_env
+    env.storage.write_custom_skill("skill-a", "SKILL.md", _skill_content("skill-a"))
+    env.storage.write_custom_skill("skill-a", "references/a.md", "a\n")
+    source = env.storage.get_custom_skill_dir("skill-a")
+    before = _source_entries(source)
+
+    with pytest.raises(OSError):
+        env.storage.write_custom_skill("skill-a", "references/a.md/b.md", "b\n")
+
+    view = env.paths.user_custom_skills_view_dir("alice") / "skill-a"
+    assert (view / "SKILL.md").is_file()
+    assert (view / "references" / "a.md").read_text(encoding="utf-8") == "a\n"
+    assert _source_entries(source) == before, "no temporary file is left behind"
+
+
+def test_a_dot_directory_planted_at_a_view_root_is_still_drift(projection_env) -> None:
+    """Only source trees skip root dot directories; a view that gains one no longer matches its manifest."""
+    env = projection_env
+    env.storage.write_custom_skill("skill-a", "SKILL.md", _skill_content("skill-a"))
+    projected = rebuild_skill_projections(env.storage)
+    before = _view_signature(projected, "user")
+
+    (projected.custom / ".planted").mkdir()
+
+    assert _view_signature(projected, "user") != before
 
 
 def test_concurrent_custom_skill_toggles_do_not_lose_state(projection_env) -> None:
