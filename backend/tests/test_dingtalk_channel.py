@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -1102,6 +1103,7 @@ class TestGroupMessageMarkdownFormat:
 
             param = json.loads(payload["msgParam"])
             assert param["text"] == "hello"
+            assert param["title"] == "HartMesh"
             assert "@" not in json.dumps(param)
 
         _run(go())
@@ -1139,10 +1141,17 @@ class TestGroupMessageMarkdownFormat:
 
             with patch("app.channels.dingtalk.httpx.AsyncClient", return_value=FakeClient()):
                 await channel._send_group_message("bot", "conv1", "hello")
+                channel.config["product_name"] = "Acme Assist"
+                await channel._send_group_message("bot", "conv1", "hello")
+                await channel._send_p2p_message("bot", "user1", "hello")
 
-            assert len(captured_json) == 1
+            assert len(captured_json) == 3
             payload = captured_json[0]
             assert payload["msgKey"] == "sampleMarkdown"
+            # The notification's title is the product's name, as the service hands it to the
+            # channel, in a group and in a private chat alike.
+            titles = [json.loads(sent["msgParam"])["title"] for sent in captured_json]
+            assert titles == ["HartMesh", "Acme Assist", "Acme Assist"]
 
         _run(go())
 

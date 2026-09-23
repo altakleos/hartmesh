@@ -1,18 +1,18 @@
 "use client";
 
 import { useBranding } from "@/core/features";
+import { useProductName } from "@/core/i18n/context";
 import { SafeStreamdown } from "@/core/streamdown/components";
 
-import { aboutMarkdown, brandedAboutMarkdown } from "./about-content";
+import { aboutMarkdown } from "./about-content";
 
 export function AboutSettingsPage() {
   const { companyName, isLoading } = useBranding();
+  const productName = useProductName();
   if (isLoading) {
     return null;
   }
   return (
-    <SafeStreamdown>
-      {companyName === null ? aboutMarkdown : brandedAboutMarkdown(companyName)}
-    </SafeStreamdown>
+    <SafeStreamdown>{aboutMarkdown(companyName ?? productName)}</SafeStreamdown>
   );
 }

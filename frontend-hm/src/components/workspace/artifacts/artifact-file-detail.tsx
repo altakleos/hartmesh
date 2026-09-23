@@ -396,7 +396,7 @@ export function ArtifactFileDetail({
   ]);
 
   // Keeping is for what the conversation was given and what it made; the
-  // showcase has nowhere to keep them. A report is kept from its card, which
+  // demo thread has nowhere to keep them. A report is kept from its card, which
   // offers the documents rather than the JSON they were rendered from.
   const myFiles = useSaveToMyFiles(threadId);
   const canKeep =

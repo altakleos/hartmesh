@@ -5,7 +5,6 @@ import {
   ARTIFACT_VIEWER_ROUTE,
   artifactViewerTitle,
   buildArtifactViewerURL,
-  requiresAuthenticatedViewer,
   parseArtifactViewerParams,
   parseArtifactViewerQuery,
   resolveArtifactOpenURL,
@@ -158,13 +157,13 @@ describe("parseArtifactViewerQuery", () => {
 
 describe("artifactViewerTitle", () => {
   test("names the window after the artifact file", () => {
-    expect(artifactViewerTitle("/mnt/user-data/outputs/report.md")).toBe(
-      "report.md - DeerFlow",
-    );
+    expect(
+      artifactViewerTitle("/mnt/user-data/outputs/report.md", "Acme Assist"),
+    ).toBe("report.md - Acme Assist");
   });
 
   test("falls back to the product name without a target", () => {
-    expect(artifactViewerTitle(undefined)).toBe("DeerFlow");
+    expect(artifactViewerTitle(undefined, "Acme Assist")).toBe("Acme Assist");
   });
 });
 
@@ -201,52 +200,5 @@ describe("returning to the viewer after re-authentication", () => {
     // containing a raw colon — which would strand the window on /workspace.
     expect(validateAuthNextPath(nextPath)).toBe(nextPath);
     expect(parseArtifactViewerParams(viewerParams(nextPath!))).toEqual(target);
-  });
-});
-
-describe("requiresAuthenticatedViewer", () => {
-  // A real allowlisted showcase artifact — see STATIC_DEMO_ARTIFACTS.
-  const demoThreadId = "3823e443-4e2b-4679-b496-a9506eae462b";
-  const demoFilepath = "/mnt/user-data/outputs/fei-fei-li-podcast-timeline.md";
-
-  test("lets a logged-out visitor read a public showcase artifact", () => {
-    expect(
-      requiresAuthenticatedViewer({
-        filepath: demoFilepath,
-        threadId: demoThreadId,
-        isMock: true,
-      }),
-    ).toBe(false);
-  });
-
-  test("gates a mock target the public demo route does not serve", () => {
-    // `mock=true` is caller-supplied, so the allowlist has to be the authority.
-    expect(
-      requiresAuthenticatedViewer({
-        filepath: "/mnt/user-data/outputs/private-notes.md",
-        threadId: demoThreadId,
-        isMock: true,
-      }),
-    ).toBe(true);
-  });
-
-  test("gates a mock target on a thread that is not a demo thread", () => {
-    expect(
-      requiresAuthenticatedViewer({
-        filepath: demoFilepath,
-        threadId: "7cfa5f8f-0000-0000-0000-000000000000",
-        isMock: true,
-      }),
-    ).toBe(true);
-  });
-
-  test("gates the same artifact when the mock flag is absent", () => {
-    expect(
-      requiresAuthenticatedViewer({
-        filepath: demoFilepath,
-        threadId: demoThreadId,
-        isMock: false,
-      }),
-    ).toBe(true);
   });
 });

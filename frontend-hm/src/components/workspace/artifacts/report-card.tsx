@@ -334,7 +334,7 @@ export function ReportCard({
     [report.charts],
   );
   // The downloads are what a person keeps: the documents, not the JSON the
-  // card is drawn from. The showcase has no files to keep them in.
+  // card is drawn from. A demo thread has no files to keep them in.
   const myFiles = useSaveToMyFiles(threadId);
   // Sharing hands the same documents to everyone at the company.
   const everyone = useShareWithEveryone(threadId);

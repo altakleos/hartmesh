@@ -801,7 +801,7 @@ test.describe("Thread history", () => {
       },
     );
 
-    await page.goto(`/showcase/${DEMO_THREAD_ID}`);
+    await page.goto(`/workspace/chats/${DEMO_THREAD_ID}?mock=true`);
 
     await expect(
       page.getByText("What might be the trends and opportunities in 2026?"),
@@ -812,8 +812,8 @@ test.describe("Thread history", () => {
     expect(backendRunHistoryUrls).toEqual([]);
   });
 
-  test("public showcase rejects unknown thread IDs", async ({ page }) => {
-    const response = await page.goto("/showcase/not-a-bundled-demo");
+  test("the upstream showcase is not served", async ({ page }) => {
+    const response = await page.goto(`/showcase/${DEMO_THREAD_ID}`);
 
     expect(response?.status()).toBe(404);
   });

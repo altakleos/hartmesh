@@ -739,3 +739,39 @@ def test_apply_prompt_template_deferred_path_mentions_describe_skill(monkeypatch
     assert "describe_skill(name)" in prompt
     # Must NOT contain the legacy wording
     assert "Always load the relevant skill" not in prompt
+
+
+def _prompt_for(monkeypatch, app_config, **kwargs) -> str:
+    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
+    monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_custom_mounts_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_user_files_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_memory_tool_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+    return prompt_module.apply_prompt_template(app_config=app_config, **kwargs)
+
+
+def test_the_assistant_answers_to_the_product_name(monkeypatch):
+    """Asked what it is, the default agent names the product the person is using, not the framework under it."""
+    from deerflow.config.ui_config import UiConfig
+
+    named = _prompt_for(monkeypatch, SimpleNamespace(ui=UiConfig(product_name="Acme Assist")))
+    assert "You are Acme Assist," in named
+    assert "visible and editable in Acme Assist)" in named
+    assert "DeerFlow 2.0" not in named
+    assert "DeerFlow UI" not in named
+    # The tenant's product is not described as the framework's tagline.
+    assert "You are Acme Assist, an AI assistant." in named
+    assert "open-source super agent" not in named
+
+    assert "You are HartMesh," in _prompt_for(monkeypatch, SimpleNamespace(ui=UiConfig()))
+
+
+def test_a_custom_agent_keeps_its_own_name(monkeypatch):
+    from deerflow.config.ui_config import UiConfig
+
+    prompt = _prompt_for(monkeypatch, SimpleNamespace(ui=UiConfig(product_name="Acme Assist")), agent_name="bookkeeper")
+    assert "You are bookkeeper," in prompt
+    assert "visible and editable in Acme Assist)" in prompt

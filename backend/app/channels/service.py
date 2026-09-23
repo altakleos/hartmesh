@@ -15,6 +15,7 @@ from app.channels.manager import DEFAULT_CHANNEL_MAX_CONCURRENCY, DEFAULT_CHANNE
 from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore
+from deerflow.config.ui_config import product_name
 from deerflow.deployment import coerce_deployment_profile
 
 logger = logging.getLogger(__name__)
@@ -149,6 +150,7 @@ class ChannelService:
         self.store = ChannelStore()
         self._connection_repo = connection_repo
         self._get_stream_bridge = get_stream_bridge
+        self._product_name = product_name(app_config)
         deployment = getattr(app_config, "deployment", None)
         self._durable_profile = coerce_deployment_profile(
             getattr(deployment, "profile", None),
@@ -483,6 +485,9 @@ class ChannelService:
         try:
             config = dict(config)
             config["channel_store"] = self.store
+            # What a channel calls the product where a platform wants a name
+            # (DingTalk's message title); fixed for the channel's lifetime.
+            config["product_name"] = self._product_name
             if name == "buzz" and "seen_event_store_path" not in config:
                 # Durable processed-event ids for the Buzz connector's replay
                 # guard. Wired here (like channel_store) rather than defaulted

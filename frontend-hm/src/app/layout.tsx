@@ -4,10 +4,12 @@ import { type Metadata } from "next";
 
 import { ThemeProvider } from "@/components/theme-provider";
 import { DEFAULT_LOCALE } from "@/core/i18n/locale";
+import { DEFAULT_PRODUCT_NAME } from "@/core/product";
 
+// Static on purpose: the route layouts replace the title with the
+// deployment's own name, read per request (`generateMetadata`).
 export const metadata: Metadata = {
-  title: "DeerFlow",
-  description: "A LangChain-based framework for building super agents.",
+  title: DEFAULT_PRODUCT_NAME,
 };
 
 export default function RootLayout({

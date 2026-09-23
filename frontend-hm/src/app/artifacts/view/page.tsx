@@ -6,12 +6,12 @@ import {
   artifactViewerTitle,
   buildArtifactViewerURL,
   parseArtifactViewerQuery,
-  requiresAuthenticatedViewer,
   type ArtifactViewerTarget,
 } from "@/core/artifacts/viewer";
 import { getServerSideUser } from "@/core/auth/server";
 import { assertNever, buildLoginUrl } from "@/core/auth/types";
 import { getI18n } from "@/core/i18n/server";
+import { getServerSideProductName } from "@/core/product/server";
 
 const POST_LOGIN_FALLBACK = "/workspace";
 
@@ -23,7 +23,12 @@ export async function generateMetadata({
   searchParams,
 }: ArtifactViewerPageProps): Promise<Metadata> {
   const target = parseArtifactViewerQuery(await searchParams);
-  return { title: artifactViewerTitle(target?.filepath) };
+  return {
+    title: artifactViewerTitle(
+      target?.filepath,
+      await getServerSideProductName(),
+    ),
+  };
 }
 
 /**
@@ -35,9 +40,6 @@ export async function generateMetadata({
  * document they opened.
  */
 async function requireViewerAccess(target: ArtifactViewerTarget | null) {
-  if (target && !requiresAuthenticatedViewer(target)) {
-    return;
-  }
   const result = await getServerSideUser();
   switch (result.tag) {
     case "authenticated":

@@ -138,7 +138,7 @@ describe("UndeliveredFilesNotice", () => {
       container.querySelector("[data-testid='undelivered-files-notice']"),
     ).toBeNull();
     // No run id is also no authorized call, which is what keeps this component
-    // inert on the public showcase's static threads.
+    // inert on static demo threads.
     expect(fetchRunDelivery).not.toHaveBeenCalled();
   });
 

@@ -1,11 +1,8 @@
 "use client";
 
 import {
-  BugIcon,
   ChevronsUpDown,
-  GlobeIcon,
   InfoIcon,
-  MailIcon,
   Settings2Icon,
   SettingsIcon,
 } from "lucide-react";
@@ -28,7 +25,6 @@ import {
 import { useBranding } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 
-import { GithubIcon } from "./github-icon";
 import { useSettingsDialog } from "./settings";
 
 function NavMenuButtonContent({
@@ -56,11 +52,8 @@ export function WorkspaceNavMenu() {
   const [mounted, setMounted] = useState(false);
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
-  // A named company's workspace carries that company's name on About and none
-  // of the product's own links; a deployment that names none stays the
-  // product, and one that has not answered yet offers neither.
-  const { companyName, isLoading } = useBranding();
-  const isProductWorkspace = !isLoading && companyName === null;
+  // About is the company's when the tenant bundle names one, else the product's.
+  const { companyName } = useBranding();
 
   useEffect(() => {
     setMounted(true);
@@ -94,48 +87,6 @@ export function WorkspaceNavMenu() {
                     <Settings2Icon />
                     {t.common.settings}
                   </DropdownMenuItem>
-                  {isProductWorkspace && (
-                    <>
-                      <DropdownMenuSeparator />
-                      <a
-                        href="https://deerflow.tech/"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        <DropdownMenuItem>
-                          <GlobeIcon />
-                          {t.workspace.officialWebsite}
-                        </DropdownMenuItem>
-                      </a>
-                      <a
-                        href="https://github.com/bytedance/deer-flow"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        <DropdownMenuItem>
-                          <GithubIcon />
-                          {t.workspace.visitGithub}
-                        </DropdownMenuItem>
-                      </a>
-                      <DropdownMenuSeparator />
-                      <a
-                        href="https://github.com/bytedance/deer-flow/issues"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                      >
-                        <DropdownMenuItem>
-                          <BugIcon />
-                          {t.workspace.reportIssue}
-                        </DropdownMenuItem>
-                      </a>
-                      <a href="mailto:support@deerflow.tech">
-                        <DropdownMenuItem>
-                          <MailIcon />
-                          {t.workspace.contactUs}
-                        </DropdownMenuItem>
-                      </a>
-                    </>
-                  )}
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem

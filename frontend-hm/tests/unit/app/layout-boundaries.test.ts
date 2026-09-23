@@ -24,12 +24,6 @@ describe("layout performance boundaries", () => {
     expect(source("src/app/workspace/layout.tsx")).toContain(
       'import "streamdown/styles.css"',
     );
-    expect(source("src/app/[lang]/docs/layout.tsx")).toContain(
-      'import "katex/dist/katex.min.css"',
-    );
-    expect(source("src/app/blog/layout.tsx")).toContain(
-      'import "katex/dist/katex.min.css"',
-    );
     const artifactViewerLayout = source("src/app/artifacts/view/layout.tsx");
     expect(artifactViewerLayout).toContain('import "streamdown/styles.css"');
     expect(artifactViewerLayout).toContain('import "katex/dist/katex.min.css"');

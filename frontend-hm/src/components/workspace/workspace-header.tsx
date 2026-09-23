@@ -12,14 +12,12 @@ import {
   useSidebar,
 } from "@/components/ui/sidebar";
 import { logoURL, useBranding } from "@/core/features";
+import { useProductName } from "@/core/i18n/context";
 import { useI18n } from "@/core/i18n/hooks";
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
-const PRODUCT_NAME = "DeerFlow";
-const PRODUCT_MARK = "DF";
-
-/** The first letters of the first two words: what a collapsed sidebar shows for a company without a logo. */
+/** The first letters of the first two words: what a collapsed sidebar shows without a logo. */
 export function companyMark(companyName: string): string {
   return companyName
     .split(/\s+/)
@@ -34,14 +32,11 @@ export function WorkspaceHeader({ className }: { className?: string }) {
   const { state } = useSidebar();
   const pathname = usePathname();
   const branding = useBranding();
+  const productName = useProductName();
   // Nothing until the deployment has answered: the wrong name is worse than
   // a beat with none.
-  const name = branding.isLoading ? "" : (branding.companyName ?? PRODUCT_NAME);
-  const mark = branding.isLoading
-    ? ""
-    : branding.companyName
-      ? companyMark(branding.companyName)
-      : PRODUCT_MARK;
+  const name = branding.isLoading ? "" : (branding.companyName ?? productName);
+  const mark = name ? companyMark(name) : "";
   const logo = branding.hasLogo ? (
     <img
       src={logoURL()}

@@ -77,7 +77,7 @@ does not need egress to a package registry to resolve its toolchain.
 ## Site Map
 
 ```
-├── /                    # Landing page
+├── /                    # Redirects to the workspace (sign-in when signed out)
 ├── /chats               # Chat list
 ├── /chats/new           # New chat page
 └── /chats/[thread_id]   # A specific chat page
@@ -105,13 +105,11 @@ tests/
 src/
 ├── app/                    # Next.js App Router pages
 │   ├── api/                # API routes
-│   ├── showcase/           # Allowlisted public read-only demos
 │   ├── workspace/          # Main workspace pages
 │   └── mock/               # Mock/demo pages
 ├── components/             # React components
 │   ├── ui/                 # Reusable UI components
 │   ├── workspace/          # Workspace-specific components
-│   ├── landing/            # Landing page components
 │   └── ai-elements/        # AI-related UI elements
 ├── core/                   # Core business logic
 │   ├── api/                # API client & data fetching

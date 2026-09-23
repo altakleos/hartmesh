@@ -136,6 +136,7 @@ SIGN_ON_CLOCK_SKEW_ENV = "HARTMESH_SIGN_ON_CLOCK_SKEW"
 SIGN_ON_OPTIONAL_KEYS = (SIGN_ON_ADMINS_ENV, SIGN_ON_SCOPES_ENV, SIGN_ON_CLIENT_AUTH_ENV, SIGN_ON_NAME_ENV, SIGN_ON_ACCESS_CLAIM_ENV, SIGN_ON_ACCESS_VALUES_ENV, SIGN_ON_ROLES_ENV)
 SIGN_ON_ROLE_NAMES = ("admin", "user")
 PUBLIC_HOST_ENV = "HARTMESH_PUBLIC_HOST"
+PRODUCT_NAME_ENV = "HARTMESH_PRODUCT_NAME"
 TOKEN_EXPIRY_DAYS_ENV = "AUTH_TOKEN_EXPIRY_DAYS"
 TOKEN_EXPIRY_DAYS_RANGE = (1, 30)
 SIGN_IN_MODES = ("sign_on_only", "local")
@@ -592,6 +593,28 @@ def select_local_registration(environ: Mapping[str, str]) -> str:
     return raw
 
 
+def select_product_name(environ: Mapping[str, str]) -> str | None:
+    """The product's name for ``ui.product_name``, or None for the Gateway's default.
+
+    Checked here by the Gateway's own validator, so a name it would refuse
+    stops the start naming the key rather than leaving every route a 503.
+    """
+
+    raw = environ.get(PRODUCT_NAME_ENV, "").strip()
+    if not raw:
+        return None
+    if raw.startswith("$"):
+        # The Gateway reads a config value beginning with `$` as the name of
+        # an environment variable and serves what it finds before sign-in.
+        raise RenderError(f"{PRODUCT_NAME_ENV} must not begin with `$`: the Gateway would read it as an environment variable and show that variable's value on the sign-in page")
+    ui_config = import_module("deerflow.config.ui_config")
+    try:
+        return ui_config.UiConfig(product_name=raw).product_name
+    except ValueError as exc:
+        reasons = "; ".join(error["msg"] for error in exc.errors())
+        raise RenderError(f"{PRODUCT_NAME_ENV} is not a usable product name: {reasons}. It is one line of at most {ui_config.MAX_PRODUCT_NAME_CHARS} characters; unset it for HartMesh") from None
+
+
 def select_token_expiry_days(environ: Mapping[str, str]) -> int | None:
     """Validate the optional session lifetime the Gateway reads from its environment."""
 
@@ -832,6 +855,14 @@ def render(
         document["auth"] = sign_on_auth(template_auth, environ)
     else:
         document["auth"] = {**template_auth, "local": {**template_local, "enabled": True, "allow_registration": select_local_registration(environ) == "open"}}
+
+    ui = dict(_mapping(document.get("ui", {}), "template `ui`"))
+    if "product_name" in ui:
+        raise RenderError(f"template `ui.product_name` must be absent; {PRODUCT_NAME_ENV} names the product")
+    name = select_product_name(environ)
+    if name is not None:
+        ui["product_name"] = name
+    document["ui"] = ui
 
     problems: list[str] = []
     _credential_problems(document, (), problems)

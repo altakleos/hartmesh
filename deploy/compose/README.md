@@ -88,6 +88,7 @@ get explicit `environment:` entries and never see a provider key.
 | Key | Consumed by |
 | --- | --- |
 | `HARTMESH_APP_SUBNET` | The `app` bridge's IPAM subnet **and** the Gateway's `AUTH_TRUSTED_PROXIES`, which are the same reference. Absent -- which is what every existing tenant `.env` is -- both take the shipped default, `10.201.26.0/24`. Set it only when that range collides with something the guest must still reach (§ "Network model"). |
+| `HARTMESH_PRODUCT_NAME` | What the product is called: the heading on the sign-in and setup pages, the browser tab, the workspace when the tenant bundle names no company, the assistant's own name, and DingTalk's message title. Rendered into `ui.product_name` (the template must not carry it); one line of at most 40 characters, surrounding spaces trimmed. Absent -- which is what every existing tenant `.env` is -- `HartMesh`. A name the Gateway would refuse (a control or reordering character, over 40 characters), or one beginning with `$` (the Gateway would read it as an environment variable), refuses to render. It is read at Gateway start: a new name takes a restart. Quote a name containing `#` (`HARTMESH_PRODUCT_NAME="Acme #1"`), or `.env` reads the rest as a comment. A company name from the tenant bundle still wins inside the workspace after sign-in (§ "Tenant bundle"). |
 | `HARTMESH_MODELS_FILE` | The path of the operator's own model file, read by `gateway/render_config.py` at every Gateway start. Absent -- which is what every existing tenant `.env` is -- the rendered `models:` section comes from the bundled provider catalog exactly as before. Set, that one file is the whole model list (§ "Operator-managed models"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET` | The wrapping key for provider keys an administrator sets in the product, at least 32 characters (`openssl rand -base64 32`). Absent -- which is what every existing tenant `.env` is -- nothing changes and the product refuses to store a key, saying why. Best supplied from the environment of the `docker compose` command rather than this file, which shares a disk with the database it protects (§ "Provider keys in the product"). |
 | `HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS` | Only while rotating that key: the old value, so keys wrapped under it are read and rewrapped under the new one at the next start (§ "Provider keys in the product"). |
@@ -113,7 +114,7 @@ creating an empty directory in its place.
 They reach the stack by different routes, on purpose. Both `HARTMESH_APP_SUBNET`
 uses are the same `${HARTMESH_APP_SUBNET:-...}` reference, so an override
 cannot move the network without moving the Gateway's trust with it.
-`HARTMESH_MODELS_FILE`, `SANDBOX_READY_TIMEOUT`,
+`HARTMESH_MODELS_FILE`, `HARTMESH_PRODUCT_NAME`, `SANDBOX_READY_TIMEOUT`,
 `SANDBOX_CAPACITY_WAIT_TIMEOUT`, the sign-in keys and the
 `HARTMESH_SIGN_ON_*` options are not interpolated by `compose.yaml` at all:
 they reach the Gateway through `env_file` and are read inside the container by

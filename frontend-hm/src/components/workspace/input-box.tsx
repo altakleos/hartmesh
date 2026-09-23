@@ -2809,10 +2809,9 @@ function SuggestionList({
   const { textInput } = usePromptInputController();
   // A deployment that named its own starters has said what Home offers; this
   // row is the default it replaced, not a second one to sit beside it. The
-  // hook belongs here and not on `InputBox`: `InputBox` also mounts on the
-  // public showcase route, where an unauthenticated `/api/features` would
-  // 401 and bounce the visitor to the login page. `SuggestionList` mounts
-  // only in welcome mode, which showcase never reaches.
+  // hook belongs here and not on `InputBox`: `InputBox` also mounts on
+  // static demo threads, which have no deployment to ask. `SuggestionList`
+  // mounts only in welcome mode, which a demo thread never reaches.
   const { starters, isLoading } = useWorkspacePresentation();
   const handleSuggestionClick = useCallback(
     (prompt: string | undefined) => {

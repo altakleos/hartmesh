@@ -1,22 +1,29 @@
 """What the workspace shows before anyone has asked for anything.
 
-Two presentation settings the deployment owns: which starters Home offers, and
-whether the developer-facing screens are offered to people who are not
-administrators. `profile` hides those screens and changes no route. The
+Three presentation settings the deployment owns: the product's name, which
+starters Home offers, and whether the developer-facing screens are offered to
+people who are not administrators. `profile` hides those screens and changes no route. The
 endpoints behind them allow exactly what they allowed before: `authorization`
 has no permission covering these APIs, so it is not the lever that closes them.
 What limits a person there is their `system_role`, which the API already checks.
 
-Both fields are read through ``get_config`` on each request, so an edit to
-``config.yaml`` reaches the next page load without a Gateway restart.
+Every field is read through ``get_config`` on each request, so an edit to
+``config.yaml`` reaches the next page load without a Gateway restart. Chat-app
+channels are the exception: they take the product name when they start.
 """
 
-from typing import Literal
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 #: How many starters Home will offer. Past this a grid stops being a choice.
 MAX_STARTERS = 6
+
+#: The product a deployment that names none is.
+DEFAULT_PRODUCT_NAME = "HartMesh"
+
+#: A heading on the sign-in page and a browser tab's title, not a sentence.
+MAX_PRODUCT_NAME_CHARS = 40
 
 MAX_STARTER_TITLE_CHARS = 60
 MAX_STARTER_PROMPT_CHARS = 2000
@@ -104,6 +111,11 @@ class UiConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    product_name: str = Field(
+        default=DEFAULT_PRODUCT_NAME,
+        max_length=MAX_PRODUCT_NAME_CHARS,
+        description=("What the product is called wherever a person sees it: the sign-in page, the browser tab, the workspace when no company name is set, the assistant's own name, and chat-app replies. One line."),
+    )
     profile: Literal["business", "developer"] = Field(
         default="developer",
         description=(
@@ -118,6 +130,21 @@ class UiConfig(BaseModel):
         description="What Home offers before anyone types. Unset takes the profile's default; an empty list shows no grid.",
     )
 
+    @field_validator("product_name", mode="before")
+    @classmethod
+    def _product_name_is_one_line_of_words(cls, value: Any) -> Any:
+        # Before the length check, so the surrounding spaces of a quoted YAML
+        # value do not count against it.
+        if not isinstance(value, str):
+            return value
+        value = value.strip()
+        if not value:
+            raise ValueError("must not be blank")
+        char = first_control_or_reordering_character(value, allow_newlines=False)
+        if char is not None:
+            raise ValueError(f"must not contain the control or reordering character {char!r}")
+        return value
+
     @model_validator(mode="after")
     def _resolve_starters(self) -> "UiConfig":
         # Unset is not empty: a `developer` deployment that said nothing keeps
@@ -129,3 +156,15 @@ class UiConfig(BaseModel):
         if len(seen) != len(self.starters):
             raise ValueError("every starter needs its own id")
         return self
+
+
+def product_name(app_config: Any) -> str:
+    """The product's name as ``app_config`` configures it.
+
+    Takes the config rather than loading it, so every caller names the config
+    it already acts on and a request never reads two versions of the name. A
+    config without a ``ui`` section (``None``, or a partial one built for an
+    embedded client) is a deployment that named nothing.
+    """
+    ui = getattr(app_config, "ui", None)
+    return ui.product_name if isinstance(ui, UiConfig) else DEFAULT_PRODUCT_NAME

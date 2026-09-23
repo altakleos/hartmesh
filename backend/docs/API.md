@@ -1778,6 +1778,7 @@ DeerFlow enforces authentication for all non-public HTTP routes. Public routes a
 - `POST /api/v1/auth/register` creates a regular `user` account and sets the session cookie; `403 registration_disabled` when `auth.local.allow_registration` is false.
 - `POST /api/v1/auth/logout` clears the session cookie.
 - `GET /api/v1/auth/setup-status` reports whether the first admin still needs to be created.
+- `GET /api/product` returns `{"name": ...}`, the product's name (`ui.product_name`, HartMesh when unset), which the sign-in page shows before anyone signs in.
 
 The authenticated auth endpoints are:
 
