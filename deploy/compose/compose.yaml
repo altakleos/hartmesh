@@ -106,6 +106,19 @@ services:
       DEER_FLOW_HOST_BASE_DIR: ${HARTMESH_DATA_DIR}/home
       # Rendered at every start by gateway/run.sh from config.yaml + providers/.
       DEER_FLOW_CONFIG_PATH: ${HARTMESH_DATA_DIR}/home/config.yaml
+      # Where the Gateway finds that renderer and catalog again when an
+      # administrator sets a provider key in the product: it renders
+      # config.effective.yaml beside config.yaml and serves that one, leaving
+      # config.yaml to what .env alone renders (README: "Provider keys in the
+      # product").
+      HARTMESH_PROFILE_DIR: /opt/hartmesh
+      # The key a provider key set in the product is stored encrypted under.
+      # Interpolated rather than left to env_file so it can come from the
+      # environment of the `docker compose` command itself and stay off the
+      # data disk the database lives on; absent, keys cannot be set in the
+      # product (README: "Provider keys in the product").
+      HARTMESH_PROVIDER_KEYS_SECRET: ${HARTMESH_PROVIDER_KEYS_SECRET:-}
+      HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS: ${HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS:-}
       # Seeded once from extensions_config.json; the Gateway edits it at runtime.
       DEER_FLOW_EXTENSIONS_CONFIG_PATH: ${HARTMESH_DATA_DIR}/home/extensions_config.json
       DEER_FLOW_TENANT_ID: ${HARTMESH_TENANT:?HARTMESH_TENANT is a required .env key}

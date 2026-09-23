@@ -54,6 +54,10 @@ SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis", "searxng"}
 # Optional keys compose.yaml itself interpolates; each must carry its own
 # default so an existing tenant .env that never heard of it still renders.
 OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
+# Optional secrets compose.yaml interpolates with an empty default, so they can
+# come from the environment of the `docker compose` command and stay off the
+# data disk the .env lives on (README: "Provider keys in the product").
+COMMAND_ENVIRONMENT_KEYS = {"HARTMESH_PROVIDER_KEYS_SECRET", "HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS"}
 # Optional keys compose.yaml never interpolates: they reach the Gateway
 # through the tenant .env (`env_file`) and are read by the profile's own
 # scripts. See tests/test_compose_operator_models.py.
@@ -779,7 +783,11 @@ def test_compose_renders_one_subnet_into_both_places_with_and_without_the_overri
 def test_profile_consumes_no_key_outside_the_contract() -> None:
     source = COMPOSE.read_text(encoding="utf-8")
     referenced = set(_ENV_REFERENCE.findall(source))
-    assert referenced <= CONTRACT_KEYS | OPTIONAL_KEYS, referenced - CONTRACT_KEYS - OPTIONAL_KEYS
+    assert referenced <= CONTRACT_KEYS | OPTIONAL_KEYS | COMMAND_ENVIRONMENT_KEYS, referenced - CONTRACT_KEYS - OPTIONAL_KEYS - COMMAND_ENVIRONMENT_KEYS
+    for key in COMMAND_ENVIRONMENT_KEYS:
+        # Absent is a supported state (keys cannot be set in the product), so
+        # the only default is empty, and the Gateway is the only reader.
+        assert len(re.findall(r"\$\{" + key + r"\b", source)) == source.count("${" + key + ":-}") == 1, key
     assert referenced >= CONTRACT_KEYS - {"SANDBOX_EGRESS"}, "every fixed key but SANDBOX_EGRESS is interpolated by compose.yaml"
     for key in OPTIONAL_KEYS:
         # An optional key is one an existing tenant .env does not carry, so every

@@ -123,6 +123,13 @@ on installs that never enabled it. The convention is:
   one provisioned by `create_all`) is left alone; downgrade blocks once any
   publication exists, because the table is the only account of what was shared.
   Tests: `tests/test_migration_0038_shared_publications.py`
+- `migrations/versions/0042_provider_keys.py` — adds `provider_keys` (one
+  wrapped key per catalog variable, set by an administrator in the product)
+  and `provider_key_events` (who added, replaced or removed which, and when;
+  never the value). Tables a fresh `create_all` already made are left alone;
+  downgrade blocks while any key is stored, because dropping one puts its
+  provider back on the environment's key. Tests:
+  `tests/test_provider_keys_store.py`
 - `persistence/bootstrap.py` — `bootstrap_schema(engine, backend=...)`, the three-branch decision + locking
 - `extensions/loader.py::load_extensions` — registers each spec's `table_prefix` with `register_extension_table_prefix()`
 - Tests: `tests/test_persistence_bootstrap.py` (branches), `tests/test_persistence_bootstrap_concurrency.py` (concurrency), `tests/test_persistence_bootstrap_regression.py` (issue #3682), `tests/test_persistence_migrations_env.py` (filter, including extension-owned tables), `tests/test_extension_loader.py::TestTablePrefixRegistration` (spec-to-filter wiring), `tests/blocking_io/test_persistence_bootstrap.py` (asyncio.to_thread anchor), `tests/test_migration_0004_run_ownership_dedupe.py` + `tests/test_migration_0007_scheduled_run_active_dedupe.py` (dedupe-before-unique-index pre-steps)

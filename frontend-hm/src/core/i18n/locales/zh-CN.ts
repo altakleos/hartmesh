@@ -1504,6 +1504,47 @@ export const zhCN: Translations = {
       addPersonCopied: "已复制",
       addPersonAnother: "再添加一位",
     },
+    providerKeys: {
+      title: "服务商密钥",
+      description:
+        "AI 模型和网页搜索使用的密钥。在这里设置的密钥会替换工作区初始配置的密钥，从下一条消息开始生效。密钥保存后不会再显示。保存时不会向服务商验证密钥，因此输错的密钥会表现为回复失败。",
+      groupModels: "AI 模型",
+      groupTools: "网页搜索与抓取",
+      sourceProduct: "你的密钥",
+      sourceEnvironment: "初始配置",
+      sourceNone: "无密钥",
+      unreadable: "已保存的密钥无法读取",
+      unreadableHint:
+        "这里保存的密钥无法用本工作区的加密密钥打开，因此在你重新设置之前，该服务商没有密钥。移除它将恢复使用工作区初始配置的密钥（如有）。",
+      unreadableHintHostSetting:
+        "你保存的密钥仍然存储着，但本工作区目前无法打开它，因此该服务商没有密钥。托管你工作区的人恢复其密钥加密设置后，它会重新生效。移除它会永久丢弃该密钥。",
+      refusalNoWrappingKey:
+        "目前无法在这里保存密钥：本工作区尚未设置密钥加密。需要由托管你工作区的人进行设置。",
+      refusalWrappingKeyInvalid:
+        "目前无法在这里保存密钥：本工作区的密钥加密设置无效。需要由托管你工作区的人进行修复。",
+      refusalOperatorModelFile:
+        "托管你工作区的人负责选择 AI 模型，因此服务商密钥在那里管理，而不是在这里。",
+      renderRefused: "无法保存此密钥：你的工作区配置不接受它。没有做任何更改。",
+      removeConfirm:
+        "移除 {provider} 密钥？密钥无法再次显示，以后要使用需要重新粘贴。",
+      changed: "{who} 于 {date} 修改",
+      set: "添加密钥",
+      replace: "替换密钥",
+      remove: "移除",
+      save: "保存密钥",
+      saving: "保存中...",
+      cancel: "取消",
+      keyLabel: "{provider} 密钥",
+      keyPlaceholder: "粘贴密钥",
+      saved: "已保存。你的下一条消息将使用你的 {provider} 密钥。",
+      removedToEnvironment:
+        "已移除。{provider} 已恢复使用工作区初始配置的密钥。",
+      removedToNone: "已移除。{provider} 现在没有密钥。",
+      recentChanges: "最近的修改",
+      eventAdded: "{who} 添加了 {provider} 密钥",
+      eventReplaced: "{who} 替换了 {provider} 密钥",
+      eventRemoved: "{who} 移除了 {provider} 密钥",
+    },
     acknowledge: {
       emptyTitle: "致谢",
       emptyDescription: "相关的致谢信息会展示在这里。",

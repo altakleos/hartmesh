@@ -861,6 +861,22 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
             )
             legacy_redis_prefixes = app.state.tenant_schema_binding.legacy_redis_prefixes
 
+        # Provider keys set in the product (the compose profile only) outrank
+        # the environment's, so they are applied before anything below is
+        # built from the config; everything after this reads the reloaded one.
+        app.state.provider_keys = None
+        app.state.provider_keys_applied = False
+        if sf is not None and not is_multi_gateway_profile:
+            from app.gateway.provider_keys.service import ProviderKeyService
+            from deerflow.persistence.provider_keys import ProviderKeyRepository
+
+            app.state.provider_keys = ProviderKeyService.from_environ(ProviderKeyRepository(sf))
+            if app.state.provider_keys is not None and await app.state.provider_keys.start():
+                from deerflow.config.app_config import get_app_config
+
+                app.state.provider_keys_applied = True
+                config = get_app_config()
+
         if is_multi_gateway_profile:
             if sf is None:
                 raise RuntimeError("topology_dependency_not_shared")
