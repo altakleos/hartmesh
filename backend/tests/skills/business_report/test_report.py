@@ -205,7 +205,7 @@ def test_profile_and_skill_doc_stay_in_lockstep_with_the_script(report) -> None:
     # mount point the package cannot know. A durable accepted invocation mounts
     # the snapshot and nothing else, so the absolute form this once pinned was
     # a path its reader did not have.
-    assert '"${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py"' in doc
+    assert 'SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py"' in doc
     assert "/mnt/skills" not in doc
     assert "`$SKILL_DIR` is this skill's own directory" in doc
     assert report.DEFAULT_REPORTS_DIR in doc
@@ -1914,3 +1914,87 @@ def test_a_sandbox_without_the_libraries_gets_exit_2_and_the_plain_message(tmp_p
     assert completed.returncode == 2, completed.stderr
     assert "not the image this skill is built for" in completed.stderr
     assert "Traceback" not in completed.stderr
+
+
+def test_a_named_period_the_files_do_not_cover_stops_the_build_with_what_a_look_at_the_file_would_find(report, tmp_path, capsys) -> None:
+    """A named period goes straight to ``--period``: checking the file first can only cost a call.
+
+    Every inspection a model ran before building was the same question -- which
+    months does this file cover, and how many rows in each -- asked about the
+    period the user named. The build answers it in its refusal, so the check a
+    model would make first is the one this failure already is.
+    """
+    by_month: dict[str, int] = {}
+    with LARGE_CSV.open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            month = row["Completed On"][:7]
+            by_month[month] = by_month.get(month, 0) + 1
+
+    out_dir = tmp_path / "2031-01-business-review"
+    code, out, err = _build(report, capsys, out_dir, str(LARGE_CSV), "--period", "2031-01")
+
+    assert code == 1
+    assert not out_dir.exists() or not any(out_dir.iterdir()), "nothing is written for a period with no rows"
+    assert len(err.strip().splitlines()) == 1, err
+    assert "January 2031" in err
+    listed = ", ".join(f"{month}: {count}" for month, count in sorted(by_month.items()))
+    assert f"rows per month: {listed}." in err, err
+
+
+def test_a_file_spanning_many_months_names_the_latest_ones_and_counts_the_rest(report, tmp_path, capsys) -> None:
+    source = tmp_path / "long.csv"
+    rows = ["Job #,Completed On,Customer Name,Service Type,Total"]
+    months = [dt.date(2020 + index // 12, index % 12 + 1, 15) for index in range(40)]
+    # Later months are busier, so the busiest months and the latest ones differ.
+    rows += [f"J-{index}-{job},{day.isoformat()},Customer {index},Repair,100.00" for index, day in enumerate(months) for job in range(index + 1)]
+    source.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(source), "--period", "2031-01")
+
+    assert code == 1
+    expected = ", ".join(f"{day:%Y-%m}: {index + 1}" for index, day in enumerate(months) if index >= 16)
+    assert f"(the latest 24; 16 earlier months not listed): {expected}." in err, err
+
+    single = tmp_path / "twenty-five.csv"
+    single.write_text("\n".join(rows[: 1 + sum(range(1, 26))]) + "\n", encoding="utf-8")
+    code, out, err = _build(report, capsys, tmp_path / "out25", str(single), "--period", "2031-01")
+    assert "1 earlier month not listed" in err, err
+
+
+def test_a_period_the_files_cover_only_part_of_is_built_and_says_which_part(report, tmp_path, capsys) -> None:
+    """The check a model ran before building would have seen September missing from Q3; the build says so instead."""
+    out_dir = tmp_path / "2026-q3-business-review"
+    code, out, err = _build(report, capsys, out_dir, str(LARGE_CSV), "--period", "2026-Q3")
+    assert code == 0, err
+    coverage = [check for check in _read_report(out_dir)["checks"] if check["id"] == "period_coverage"]
+    assert [check["status"] for check in coverage] == ["warn"]
+    assert "September 2026" in coverage[0]["text"] and "2026-08-31" in coverage[0]["text"], coverage
+    assert coverage[0]["text"] in out, "printed with the other checks, for the model to repeat"
+
+    whole = tmp_path / "2026-08-business-review"
+    code, out, err = _build(report, capsys, whole, str(LARGE_CSV), "--period", "2026-08")
+    assert code == 0, err
+    assert not [check for check in _read_report(whole)["checks"] if check["id"] == "period_coverage"]
+
+
+def test_a_period_whose_rows_are_all_excluded_is_not_reported_as_one_the_files_miss(report, tmp_path, capsys) -> None:
+    source = tmp_path / "excluded.csv"
+    source.write_text(
+        "Job #,Completed On,Customer Name,Service Type,Total\nJ-1,2026-07-10,Customer A,Repair,100.00\nJ-2,2026-08-10,Customer B,Warranty,0.00\nJ-3,2026-08-20,Customer C,Warranty,0.00\n",
+        encoding="utf-8",
+    )
+    code, out, err = _build(report, capsys, tmp_path / "out", str(source), "--period", "2026-08", "--exclude", "category=Warranty")
+    assert code == 1
+    # In the profile's own word for a row, with the months another period could still be built from.
+    assert "2 jobs in August 2026 were excluded" in err, err
+    assert "rows per month after the exclusions: 2026-07: 1." in err, err
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(source), "--period", "2026-09", "--exclude", "category=Warranty")
+    assert code == 1
+    # A month the files do not have: every row counts, as reading the file would show.
+    assert "No rows fall in September 2026" in err, err
+    assert "rows per month: 2026-07: 1, 2026-08: 2." in err, err
+
+    code, out, err = _build(report, capsys, tmp_path / "out", str(source), "--period", "2026-07", "--exclude", "category=Repair", "--exclude", "category=Warranty")
+    assert code == 1
+    assert err.rstrip().endswith("no rows after the exclusions."), err

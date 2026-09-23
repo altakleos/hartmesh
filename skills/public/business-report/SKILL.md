@@ -9,15 +9,15 @@ description: Use this skill when the user uploads a tabular business export (CSV
 
 One script turns an export into a report draft: `report.json` plus PNG charts, then renders that one document to HTML, PDF, DOCX and XLSX. Every number in every render comes from `report.json`, so the formats agree by construction. The script runs on the libraries the sandbox image ships, installs nothing, calls no network service (the PDF printer refuses every URL that is not inline data) and never modifies an input file.
 
-**Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here.
+**Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Assign it in every command that runs one of these scripts, as a statement of its own ahead of the script, the way each example below does (`SKILL_DIR="<Directory>"; python …`). Written in front of the script without the `;`, it is not set yet when bash expands that command's own words: the guard stops the command, and without the guard the path is `/scripts/…`. Where a skill is mounted differs between deployments, so no absolute path can be written here.
 
 ```
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" inspect <files…>
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" build   <files…> [--period 2026-08] --out REPORTDIR [--render pdf,docx,xlsx]
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" show    REPORTDIR/<dirname>.report.json
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" prose   REPORTDIR/<dirname>.report.json --from prose.json [--render pdf,docx,xlsx]
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" render  REPORTDIR/<dirname>.report.json --to pdf,docx,xlsx
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" checks  REPORTDIR/<dirname>.report.json <files…>
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" inspect <files…>
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" build   <files…> [--period 2026-08] --out REPORTDIR [--render pdf,docx,xlsx]
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" show    REPORTDIR/<dirname>.report.json
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" prose   REPORTDIR/<dirname>.report.json --from prose.json [--render pdf,docx,xlsx]
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" render  REPORTDIR/<dirname>.report.json --to pdf,docx,xlsx
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" checks  REPORTDIR/<dirname>.report.json <files…>
 ```
 
 **A whole report is one run** — `build … --render pdf,docx,xlsx` — and a
@@ -40,8 +40,8 @@ those files, and do not list the directory to see that they exist. Name only
 the report and its renders: never `checks.json`, `renders.json` or anything
 under `charts/` — the report carries what matters in them, and a file named
 under `present` is delivered whether or not the user wants it. Never call
-`render` once per format, never put renders in the background (`&` drops the
-shell variables the next command needs), and never write your own Python to
+`render` once per format, never put renders in the background (`&` returns before the
+files exist, and its output never reaches you), and never write your own Python to
 find out what a run did — the run that made the draft already printed it.
 
 Exit codes: `0` done; `1` a problem the user must hear about (stderr says what), including a withheld report or a period with no rows; `2` a command line the script refused, when stderr names the mistake (correct it and run again; there is nothing to tell the user), otherwise this sandbox is not the image the skill is built for (do not install anything; tell the user); `3` one decision is needed before building (stderr carries the question and the candidates).
@@ -60,12 +60,20 @@ A period the user did not name is not a reason to read the file either: leave
 `--period` off and the build covers the month holding most of the rows and
 says so in its checks, for the user to correct in one sentence.
 
+A period the user did name goes straight to `--period`, without checking the
+file for it first. If the files have no rows in it, the build stops before it
+writes anything (exit `1`) and its one line on stderr is what a check would
+have found: the dates the files cover and the rows in each of the latest
+months; tell the user which months the file does cover. If the files cover
+only part of it, the build runs and its checks name the months they do not
+reach. Either way a check first costs a call and finds nothing more.
+
 That is one `bash` call, and `present` sits beside `command` in it, never
 inside the command line (`report.py` refuses `--present`, runs nothing, and
 says so):
 
 ```json
-{"command": "python \"${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py\" build /mnt/user-data/uploads/export.xlsx --period 2026-08 --out /mnt/user-data/outputs/reports/2026-08-business-review --render pdf,docx,xlsx",
+{"command": "SKILL_DIR=\"<Directory>\"; python \"${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py\" build /mnt/user-data/uploads/export.xlsx --period 2026-08 --out /mnt/user-data/outputs/reports/2026-08-business-review --render pdf,docx,xlsx",
  "present": [
   "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json",
   "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.pdf",
@@ -74,7 +82,7 @@ says so):
 ]}
 ```
 
-Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `charts/*.png`, `checks.json` and `renders.json` (which renders belong to this draft) in `--out`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the directory, one directory per report; a second build into the same directory becomes the next draft, removes its own renders of the previous draft (they no longer match) and says so. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`; leave `--period` off when the user named none. A period with no rows is an error that names the dates the files do cover; build a period the files have.
+Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `charts/*.png`, `checks.json` and `renders.json` (which renders belong to this draft) in `--out`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the directory, one directory per report; a second build into the same directory becomes the next draft, removes its own renders of the previous draft (they no longer match) and says so. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`; leave `--period` off when the user named none. A period with no rows is an error that names the dates the files cover and the rows in each of the latest months, for the user to hear; build another period only when the user picks one.
 
 Options: `--exclude category=Warranty` (repeatable; a role or an exact column name, matched case-insensitively), `--company "Name"`, `--title "..."`, `--currency EUR`, `--short` for a one-sentence summary, `--prefs preferences.json`, `--profile <name>` (a tenant profile from `/mnt/tenant/report-profiles/` wins over the skill's `profiles/`).
 
@@ -91,7 +99,7 @@ cat > /tmp/prose.json <<'JSON'
 {"summary": ["August was the strongest month since March: $52,310.40 across 178 jobs, 6.4% above July."],
  "actions": ["Collect the $4,120.00 still unpaid across 21 jobs.", "Book the two technicians below 20 jobs onto the September installs."]}
 JSON
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" prose /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json --from /tmp/prose.json --render pdf,docx,xlsx
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" prose /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json --from /tmp/prose.json --render pdf,docx,xlsx
 ```
 
 again with `present` naming the report and the three renders. That one run makes the next draft without recomputing anything, renders all three formats and prints the same figures-checks-inputs digest the build printed — summary and actions included, as the report now carries them. So there is nothing to look up afterwards and Step 3 is already done. Run `show` only for a report built in an earlier turn, whose figures are no longer in front of you. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
@@ -104,7 +112,7 @@ format, and re-saves the report beside them, so in a later turn the report
 and its new renders are named together under `present`.
 
 ```bash
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" render <report.json> --to pdf,docx,xlsx
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" render <report.json> --to pdf,docx,xlsx
 ```
 
 Renders land next to the report as `<name>.pdf`, `.docx` and `.xlsx`; `--to html` also works but HTML is the sheet the PDF is printed from, not a format the user is offered. Rendering reads only `report.json` and the pictures inside the report directory (and the tenant bundle); it never rebuilds. The DOCX has real headings and tables so the user can edit it; the XLSX has a Summary sheet whose revenue, count and average are live formulas over the Rows sheet, one sheet per table with live `SUM` totals and a live ratio for average columns, and the cleaned rows.
@@ -155,7 +163,7 @@ Every check is labelled "checked by the report script"; that is what it is.
 everything it returns about a file that builds is in what the build prints.
 
 ```bash
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/report.py" inspect /mnt/user-data/uploads/export.xlsx
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" inspect /mnt/user-data/uploads/export.xlsx
 ```
 
 Per file and sheet it gives the columns with their type and samples, the suggested roles with a confidence, `ambiguous` roles with their candidates, `missing` required roles, the months present, a `period_suggestion` (the busiest month), `date_order`, a `currency` guess and a ready-made `question` covering every open role at once. When `question` is set, ask exactly that, once, even when it names two roles; put every answer in one mapping file, `{"date": "Completed On", "amount": "Invoice Total"}`, and pass `--mapping` to the build. A column you name explicitly displaces any role the script guessed for it; `{"id": null}` clears a role. A workbook sheet is addressed as `export.xlsx::Sheet name`, never by sheet name alone.

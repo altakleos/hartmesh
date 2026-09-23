@@ -9,7 +9,7 @@ description: Use this skill when the user requests to generate, create, or produ
 
 This skill generates high-quality podcast audio from text content. The workflow includes creating a structured JSON script (conversational dialogue) and executing audio generation through text-to-speech synthesis.
 
-**Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Set `SKILL_DIR` to that directory at the start of each command that runs one of these scripts. Where a skill is mounted differs between deployments, so no absolute path can be written here.
+**Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Assign it in every command that runs one of these scripts, as a statement of its own ahead of the script, the way each example below does (`SKILL_DIR="<Directory>"; python …`). Written in front of the script without the `;`, it is not set yet when bash expands that command's own words: the guard stops the command, and without the guard the path is `/scripts/…`. Where a skill is mounted differs between deployments, so no absolute path can be written here.
 
 ## Core Capabilities
 
@@ -49,7 +49,7 @@ The JSON structure:
 
 Call the Python script:
 ```bash
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/generate.py" \
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/generate.py" \
   --script-file /mnt/user-data/workspace/script-file.json \
   --output-file /mnt/user-data/outputs/generated-podcast.mp3 \
   --transcript-file /mnt/user-data/outputs/generated-podcast-transcript.md
@@ -138,7 +138,7 @@ Step 1: Create script file `/mnt/user-data/workspace/ai-history-script.json`:
 
 Step 2: Execute generation:
 ```bash
-python "${SKILL_DIR:?set SKILL_DIR to this skill directory}/scripts/generate.py" \
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/generate.py" \
   --script-file /mnt/user-data/workspace/ai-history-script.json \
   --output-file /mnt/user-data/outputs/ai-history-podcast.mp3 \
   --transcript-file /mnt/user-data/outputs/ai-history-transcript.md

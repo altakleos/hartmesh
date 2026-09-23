@@ -19,6 +19,7 @@ relative to its own directory, and the runtime is what reports where that is.
 
 from __future__ import annotations
 
+import json
 import re
 import shutil
 import subprocess
@@ -123,7 +124,7 @@ def test_public_skill_text_defines_every_directory_variable_it_uses(path: Path) 
 @pytest.mark.parametrize("path", SKILL_TEXT_FILES, ids=lambda p: str(p.relative_to(PUBLIC_SKILLS)))
 def test_every_command_example_fails_loudly_when_the_variable_is_unset(path: Path) -> None:
     """A copied-verbatim command must say what is missing, not resolve to ``/``."""
-    offenders = [line for line in path.read_text(encoding="utf-8").splitlines() if "$SKILL_DIR/" in line or "${SKILL_DIR}/" in line]
+    offenders = [line for line in path.read_text(encoding="utf-8").splitlines() if re.search(r"\$\{?(?:[A-Z][A-Z0-9_]*_)?SKILL_DIR\}?/", line)]
     assert not offenders, f"{path.relative_to(REPO_ROOT)} uses an unguarded expansion; write ${{SKILL_DIR:?…}}: {offenders}"
 
 
@@ -147,3 +148,69 @@ def test_every_path_guard_parses_in_bash(path: Path) -> None:
     for guard in guards:
         parsed = subprocess.run(["bash", "-n", "-c", f'python "{guard}/scripts/x.py"'], capture_output=True, text=True, timeout=10)
         assert parsed.returncode == 0, f"{guard}: {parsed.stderr.strip()}"
+
+
+#: A script run through a skill-directory variable: ``python "${SKILL_DIR:?…}/…"``,
+#: also as a JSON-escaped ``command`` string (``\"``). Group 1 is the variable.
+_GUARDED_RUN = re.compile(r'\b(?:python3?|bash|sh)\s+\\?"\$\{((?:[A-Z][A-Z0-9_]*_)?SKILL_DIR):\?')
+
+#: The assignment written as a prefix of the command that expands it:
+#: ``SKILL_DIR=… python "${SKILL_DIR}/…"``. The shell expands the command's
+#: own words before the prefix takes effect, so the path comes out as
+#: ``/scripts/…`` (or, guarded, an "unset" error for a variable just set).
+_PREFIX_ASSIGNMENT = re.compile(r'\b((?:[A-Z][A-Z0-9_]*_)?SKILL_DIR)=(?:\\?"[^"\\]*\\?"|[^\s;"\\]+)[ \t]+(?:python3?|bash|sh)\b')
+
+#: Any path through a skill-directory variable, guarded or not, whatever runs it.
+#: Group 1 is the variable.
+_PATH_THROUGH_VARIABLE = re.compile(r"\$\{?((?:[A-Z][A-Z0-9_]*_)?SKILL_DIR)(?::\?[^}]*)?\}?/")
+
+#: What must come just before such a path: the variable assigned as its own
+#: statement, then one command word and the path's opening quote.
+_OWN_STATEMENT = r'\b{name}=\\?"<[^"\\>]+>\\?";\s*[\w.]+\s+\\?"$'
+
+
+@pytest.mark.parametrize("path", SKILL_TEXT_FILES, ids=lambda p: str(p.relative_to(PUBLIC_SKILLS)))
+def test_every_command_example_assigns_its_directory_as_a_statement_of_its_own(path: Path) -> None:
+    """The examples, not the prose, are what a model copies.
+
+    The text used to say "set ``SKILL_DIR`` … at the start of each command"
+    while no example showed the assignment, so a model composed it itself --
+    as ``SKILL_DIR="…" python "${SKILL_DIR}/scripts/report.py" …``, which bash
+    runs as ``python /scripts/report.py``: a released report turn failed on
+    exactly that and spent three more calls finding out why. Each example now
+    carries ``NAME="<…>"; `` ahead of the run, the one shape that expands; any
+    path through the variable, whatever command takes it, is held to the same.
+    """
+    text = path.read_text(encoding="utf-8")
+    missing = []
+    for line in text.splitlines():
+        for match in _PATH_THROUGH_VARIABLE.finditer(line):
+            if not re.search(_OWN_STATEMENT.format(name=re.escape(match.group(1))), line[: match.start()]):
+                missing.append(line.strip())
+    assert not missing, f"{path.relative_to(REPO_ROOT)}: an example runs a script without assigning its directory first: {missing}"
+    prefixed = [match.group(0) for match in _PREFIX_ASSIGNMENT.finditer(text)]
+    assert not prefixed, f"{path.relative_to(REPO_ROOT)} shows the assignment as a prefix, which bash expands too late: {prefixed}"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is the sandbox shell; without it there is nothing to run with")
+@pytest.mark.parametrize("path", SKILL_TEXT_FILES, ids=lambda p: str(p.relative_to(PUBLIC_SKILLS)))
+def test_every_command_example_resolves_its_script_under_the_directory_it_assigns(path: Path, tmp_path: Path) -> None:
+    """Run each example's assignment and script path in bash, with the placeholder filled in as a model fills it."""
+    shape = re.compile(r'\b((?:[A-Z][A-Z0-9_]*_)?SKILL_DIR)="<[^">]+>";\s*(?:python3?|bash|sh)\s+("\$\{\1:\?[^}]*\}/[^"]+")')
+    text = path.read_text(encoding="utf-8").replace('\\"', '"')
+    runs = shape.findall(text)
+    for name, script in sorted(set(runs)):
+        command = f'{name}="{tmp_path}"; printf "%s" {script}'
+        ran = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=10)
+        assert ran.returncode == 0, f"{command}: {ran.stderr.strip()}"
+        assert ran.stdout.startswith(f"{tmp_path}/scripts/"), f"{command} resolved to {ran.stdout!r}"
+    assert len(runs) >= len(_GUARDED_RUN.findall(text)), f"{path.relative_to(REPO_ROOT)}: an example did not match the runnable shape"
+
+
+@pytest.mark.parametrize("path", SKILL_TEXT_FILES, ids=lambda p: str(p.relative_to(PUBLIC_SKILLS)))
+def test_every_json_example_that_runs_a_script_still_parses(path: Path) -> None:
+    """A tool-call example escapes its quotes; one left unescaped is a call a model cannot copy."""
+    blocks = re.findall(r"```json\n(.*?)```", path.read_text(encoding="utf-8"), flags=re.DOTALL)
+    for block in blocks:
+        if "SKILL_DIR" in block:
+            json.loads(block)
