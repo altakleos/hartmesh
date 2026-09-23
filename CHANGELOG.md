@@ -5,6 +5,10 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.33] — 2026-09-23
+
+- hartmesh#153 — the product is called HartMesh wherever a person sees its name: the sign-in and setup pages, the browser tab, the workspace header when no company name is set, About, the agent's own introduction and the chat-app channels' replies and notification titles. An operator can give a deployment its own name with `ui.product_name` in `config.yaml`, or `HARTMESH_PRODUCT_NAME` in the tenant VM compose profile's `.env` (at most 40 characters on one line; a value starting with `$` is refused); a deployment that sets neither is HartMesh, so **a tenant that sets nothing changes nothing but the name it shows**. The web app shows a new name on the next page load; chat-app channels take it at Gateway start. The name is public at `GET /api/product`, because the sign-in page is headed by it. `/` now opens the workspace, or sign-in, and the landing page, blog, `/en/docs` and `/zh/docs`, the showcase and the upstream links are gone; About is the name and the version. The artifact window now always needs a session.
+
 ## [2.1.0+hartmesh.32] — 2026-09-23
 
 - hartmesh#149 — an administrator adds, replaces and removes provider keys in the product, under Settings → Account → Provider keys, and a change takes effect without a restart. A key set there outranks the `.env` key for its provider across restarts, `.env` rewrites and restores taken after it was set. Keys are stored encrypted under `HARTMESH_PROVIDER_KEYS_SECRET`, which the tenant VM compose profile takes from the environment of the `docker compose` command, never from the data disk. **Every `up` must carry it once a key is stored**: without it the stored keys read as unreadable and their providers have no key, never the `.env` one, and without it no key can be saved. A tenant that stores no key in the product changes nothing. `python -m app.gateway.provider_keys.status` names each provider's key source. Memory updates now use a replaced key at once instead of after a restart.
@@ -352,6 +356,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.33]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.33
 [2.1.0+hartmesh.32]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.32
 [2.1.0+hartmesh.31]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.31
 [2.1.0+hartmesh.30]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.30
