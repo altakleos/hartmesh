@@ -608,15 +608,15 @@ The same confinement applies to an account `reset_admin` resets, and to
 sessions only: the reset account's personal access tokens, channels and
 scheduled tasks keep working, since the reset exposed none of them.
 
-**Upgrade note.** `HARTMESH_LOCAL_REGISTRATION` is honoured from the first
-release after `v2.1.0+hartmesh.30`, and from that release on a
+**Upgrade note.** `HARTMESH_LOCAL_REGISTRATION` is honoured from
+`v2.1.0+hartmesh.31`, and from that release on a
 local-password tenant whose `.env` lacks it **stops at start**, with
 `render_config: refusing to render: HARTMESH_LOCAL_PASSWORDS=allowed selects
 local passwords, and HARTMESH_LOCAL_REGISTRATION must then say …` in the
 Gateway's journal. Add `HARTMESH_LOCAL_REGISTRATION=open` to keep the
 sign-up form exactly as it was, or `=closed` to close it, before the pin
 moves; check the render with the new bundle's renderer as in the sign-in
-upgrade note above. A release that old ignores the key. A bundle whose
+upgrade note above. `.30` and earlier ignore the key. A bundle whose
 template was edited to name `allow_registration` must drop that edit: from
 that release on the renderer refuses it in both modes. Sign-on-only tenants
 change nothing.

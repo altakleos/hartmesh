@@ -5,6 +5,28 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.31] — 2026-09-23
+
+- hartmesh#147 — a local-password deployment says whether visitors may create their own account, and an administrator can add a person when they may not. The tenant VM compose profile now requires `HARTMESH_LOCAL_REGISTRATION=open` or `closed` beside `HARTMESH_LOCAL_PASSWORDS=allowed`; **a local-password tenant whose `.env` lacks it stops at start** and the refusal names the key, so add `=open` to keep sign-up exactly as it was before moving to this release. The renderer owns `auth.local.enabled` and `allow_registration` in both modes and refuses a template naming either; `/health` and the start line name the choice. An administrator adds a person under Settings → Account, or the deployer with `python -m app.gateway.auth.add_user --email`: the account is an ordinary user with a one-time password shown once and stored only as a hash, and until the person chooses their own password its sessions reach nothing but setup. Sign-on-only tenants change nothing.
+
+- hartmesh#144, hartmesh#146 — turning an account off ends its running work. `accounts disable` used to stop the next request and the next launch while a run already executing ran on to the end of its tool call; now the account's running runs are cancelled, their sandbox commands are interrupted within seconds, and the command reports any run it could not confirm stopped. A cancelled tool call now closes its receipt as cancelled instead of leaving the attempt indeterminate.
+
+- hartmesh#138 — the address follows the sign-in. At every sign-in of a linked account the account's address becomes the identity provider's, so a person the company deleted and invited again, or a departed person's address given to someone new, is no longer locked out for good. The deployer can release a turned-off account's address with `accounts release-email`, and a person whose address another account holds is told so (`sso_email_taken`) instead of being sent to find an account.
+
+- hartmesh#137 — a first sign-in whose address the account record cannot hold (an on-premises `company.local` address, a single-label domain) says the organization's sign-in did not provide a usable address, instead of claiming an account with that address already exists when none does.
+
+- hartmesh#141 — sign-in survives a Gateway clock a little behind the identity provider's. The ID token is now checked with a small leeway; a tenant VM that fell 1.5 s behind after a snapshot stall refused every sign-in for as long as the lag lasted.
+
+- hartmesh#142 — the first start after restoring a tenant backed up mid-run works. Reconciling the run that was executing when the backup was taken no longer fails the Gateway's startup.
+
+- hartmesh#139 — the sandbox replica budget is one the provider holds. With every slot in use a new sandbox now waits for one and is refused after the capacity wait, instead of being created past the budget the deployment's memory arithmetic depends on; concurrent creates can no longer take the same last slot.
+
+- hartmesh#143 — two dollar amounts in one sentence stay money. The span between them was typeset as mathematics, dropping both `$` signs and the spaces between, which is the ordinary case in a business report's summary.
+
+- hartmesh#145 — the business-report command refuses a `--present` flag with the fix, naming where the files go, and the skill shows the call as it is made, so a report turn stops losing a round trip to a misplaced argument and its files are presented.
+
+- hartmesh#140 — CI only: the sandbox image smoke job bounds its image pull instead of timing out the whole job.
+
 ## [2.1.0+hartmesh.30] — 2026-09-21
 
 - hartmesh#131 — a deployment can be signed in through its identity provider and no other way. `auth.local.enabled: false` closes every local-password path, for a new account and for one restored from before, and the tenant VM compose profile selects that mode from three `HARTMESH_SIGN_ON_*` keys. An account with no provider identity is refused on every path that turns a credential into a person: the auth middleware, personal access tokens, the browser WebSocket, the LangGraph hook, and an internal caller acting for that owner. An owner migrating a live tenant from local passwords meets `sso_account_exists` until the deployer clears the local row; linking in place was deliberately not built, because a deployment that signs people in through one provider should not also have a second way to become an account.
@@ -322,6 +344,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.31]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.31
 [2.1.0+hartmesh.30]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.30
 [2.1.0+hartmesh.29]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.29
 [2.1.0+hartmesh.28]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.28
