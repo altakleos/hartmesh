@@ -1,4 +1,11 @@
-import { afterEach, beforeEach, describe, expect, rs, test } from "@rstest/core";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  rs,
+  test,
+} from "@rstest/core";
 
 const ENV_KEYS = [
   "DEER_FLOW_INTERNAL_GATEWAY_BASE_URL",
@@ -66,9 +73,7 @@ describe("getServerSideProductName", () => {
     rs.stubGlobal(
       "fetch",
       rs.fn(() =>
-        Promise.resolve(
-          Response.json({ name: "Error Page" }, { status: 503 }),
-        ),
+        Promise.resolve(Response.json({ name: "Error Page" }, { status: 503 })),
       ),
     );
 

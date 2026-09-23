@@ -55,7 +55,9 @@ test.describe("a business workspace", () => {
     ).toBeVisible();
     // The product blurb names agents, skills and artifacts; this workspace
     // opens on the work instead.
-    await expect(page.getByText("an open source super agent")).toHaveCount(0);
+    await expect(
+      page.getByText("Welcome to HartMesh.", { exact: false }),
+    ).toHaveCount(0);
     // And the row this one replaced steps aside rather than sitting under it.
     await expect(page.getByRole("button", { name: "Surprise" })).toHaveCount(0);
 
@@ -80,7 +82,9 @@ test.describe("a business workspace", () => {
       timeout: 15_000,
     });
     await expect(page.getByTestId("welcome-starters")).toHaveCount(0);
-    await expect(page.getByText("an open source super agent")).toBeVisible();
+    await expect(
+      page.getByText("Welcome to HartMesh.", { exact: false }),
+    ).toBeVisible();
   });
 });
 
