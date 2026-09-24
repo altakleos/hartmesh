@@ -5,6 +5,12 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.34] — 2026-09-24
+
+- hartmesh#155 — a chat opened while both of the tenant's sandbox slots are busy is answered instead of failing with "Runtime operation failed". A turn with skills now takes its sandbox at the first tool call that needs one, not before the model is asked, so a plain chat, or one that calls only tools outside the sandbox, answers at once. A turn that does need the sandbox has that call refused, and the agent says the workspace is busy; a scheduled task that meets a full workspace is marked failed with that reason. Stop during the wait for a slot ends the turn in under a second instead of about five, leaving no slot or queued start behind. A skill turn's log line now shows `acquire_reason=lazy_deferred`, and a chat that only talks for longer than `prewarm_claim_timeout` loses its prewarmed sandbox.
+
+- hartmesh#156 — a report chat goes straight to the build. A tool call the agent chooses in the same step as its first read of a skill's instructions is not run: its result says it was chosen before the instructions arrived, and the agent chooses again with them in hand. The workbook inspection that report chats ran beside reading the business-report skill no longer costs the person its wait. Reads of the skill's own files still run beside that read, and a skill already read in the chat holds nothing back. The business-report skill now shows the build as its first command.
+
 ## [2.1.0+hartmesh.33] — 2026-09-23
 
 - hartmesh#153 — the product is called HartMesh wherever a person sees its name: the sign-in and setup pages, the browser tab, the workspace header when no company name is set, About, the agent's own introduction and the chat-app channels' replies and notification titles. An operator can give a deployment its own name with `ui.product_name` in `config.yaml`, or `HARTMESH_PRODUCT_NAME` in the tenant VM compose profile's `.env` (at most 40 characters on one line; a value starting with `$` is refused); a deployment that sets neither is HartMesh, so **a tenant that sets nothing changes nothing but the name it shows**. The web app shows a new name on the next page load; chat-app channels take it at Gateway start. The name is public at `GET /api/product`, because the sign-in page is headed by it. `/` now opens the workspace, or sign-in, and the landing page, blog, `/en/docs` and `/zh/docs`, the showcase and the upstream links are gone; About is the name and the version. The artifact window now always needs a session.
@@ -356,6 +362,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.34]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.34
 [2.1.0+hartmesh.33]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.33
 [2.1.0+hartmesh.32]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.32
 [2.1.0+hartmesh.31]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.31
