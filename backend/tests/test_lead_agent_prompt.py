@@ -775,3 +775,16 @@ def test_a_custom_agent_keeps_its_own_name(monkeypatch):
     prompt = _prompt_for(monkeypatch, SimpleNamespace(ui=UiConfig(product_name="Acme Assist")), agent_name="bookkeeper")
     assert "You are bookkeeper," in prompt
     assert "visible and editable in Acme Assist)" in prompt
+
+
+def test_legacy_skill_section_says_a_skill_file_is_read_on_its_own():
+    """Calls chosen beside a skill's first read are not run (SkillToolPolicyMiddleware); the step says so."""
+    section = prompt_module._get_cached_skills_prompt_section(
+        (("business-report", "Monthly business review from an export.", "public", "/mnt/skills/public/business-report/SKILL.md"),),
+        (),
+        None,
+        "/mnt/skills",
+        "",
+    )
+
+    assert "on its own: other calls in the same message are not run" in " ".join(section.split())

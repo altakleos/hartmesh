@@ -13,14 +13,19 @@ from typing import TYPE_CHECKING, override
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
-from langchain_core.messages import ToolMessage
+from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
+from deerflow.agents.middlewares.skill_context import extract_skills, is_skill_file, skill_name_from_path, skill_read_target
+from deerflow.agents.middlewares.tool_result_meta import stamp_declared_error_meta
+from deerflow.config.summarization_config import DEFAULT_SKILL_FILE_READ_TOOL_NAMES
+from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import SKILL_TOOL_POLICY_DECISION_CONTEXT_KEY, read_slash_skill_source_path
 from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 from deerflow.skills.tool_policy import ALWAYS_AVAILABLE_BUILTIN_TOOL_NAMES, allowed_tool_names_for_skills
 from deerflow.skills.types import Skill
+from deerflow.subagents.status_contract import make_subagent_additional_kwargs
 
 if TYPE_CHECKING:
     from deerflow.config.app_config import AppConfig
@@ -35,6 +40,10 @@ _POLICY_SOURCE_SKILL_CONTEXT = "skill_context"
 _POLICY_SOURCES = frozenset({_POLICY_SOURCE_PASSIVE, _POLICY_SOURCE_SLASH, _POLICY_SOURCE_SKILL_CONTEXT})
 _MISSING_POLICY_DECISION = object()
 _TOOL_SEARCH_NAME = "tool_search"
+_TASK_TOOL_NAME = "task"
+# Discovery returns catalog metadata and runs nothing, so it cannot act on a
+# skill's subject before the skill's instructions arrive.
+_DISCOVERY_TOOL_NAMES = frozenset({"describe_skill", _TOOL_SEARCH_NAME})
 
 type _PolicySignature = tuple[str, tuple[str, ...]]
 
@@ -47,6 +56,16 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
     it for the run or after the model loads it into ``skill_context``. Explicit
     slash activation dominates for the rest of that run: passively reading a
     second skill cannot widen the slash skill's authority.
+
+    A skill governs from the message that loads it, not the one after. Tool
+    calls run in parallel, so a call chosen in the same assistant message as
+    a skill's first ``SKILL.md`` read was selected before those instructions
+    could reach the model, and before its ``allowed-tools`` became active.
+    Such a call is not run; its result says why and names the instructions,
+    so the next selection is made with them in hand. Reads of skill material
+    and metadata-only discovery in that message run, and a skill already read
+    in the conversation (including one summarization compacted into
+    ``skill_context``) or slash-activated holds nothing back.
     """
 
     def __init__(
@@ -65,6 +84,15 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         self._user_id = user_id
         self._slash_source_owner_token = slash_source_owner_token
         self._decision_owner_token = secrets.token_urlsafe(24)
+        # The same definition of "a skill was read" that DurableContextMiddleware
+        # captures into skill_context: a configured read tool on a path under
+        # the configured skills root.
+        if app_config is None:
+            self._skills_root = posixpath.normpath(DEFAULT_SKILLS_CONTAINER_PATH)
+            self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES)
+        else:
+            self._skills_root = posixpath.normpath(app_config.skills.container_path or DEFAULT_SKILLS_CONTAINER_PATH)
+            self._skill_read_tool_names = frozenset(app_config.summarization.skill_file_read_tool_names)
 
     def _storage(self) -> SkillStorage:
         if self._user_id is not None:
@@ -263,6 +291,50 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
             status="error",
         )
 
+    def _skill_read(self, tool_call: Mapping) -> str | None:
+        return skill_read_target(dict(tool_call), skills_root=self._skills_root, read_tool_names=self._skill_read_tool_names)
+
+    def _chosen_before_instructions(self, request: ToolCallRequest) -> ToolMessage | None:
+        """Refuse a call selected alongside a skill's first load; see the class docstring."""
+        if self._skill_read(request.tool_call) is not None or request.tool_call.get("name") in _DISCOVERY_TOOL_NAMES:
+            return None
+        call_id = request.tool_call.get("id")
+        state = getattr(request, "state", None)
+        messages = state.get("messages") if isinstance(state, Mapping) else getattr(state, "messages", None)
+        captured = state.get("skill_context") if isinstance(state, Mapping) else getattr(state, "skill_context", None)
+        if not call_id or not isinstance(messages, list):
+            return None
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            if isinstance(message, AIMessage) and any(call.get("id") == call_id for call in message.tool_calls or []):
+                break
+        else:
+            return None
+
+        loads = [path for call in messages[index].tool_calls if (path := self._skill_read(call)) is not None and is_skill_file(path)]
+        if not loads:
+            return None
+        in_hand = {entry["path"] for entry in extract_skills(messages[:index], skills_root=self._skills_root, read_tool_names=self._skill_read_tool_names)}
+        # A read that summarization compacted away still governed the calls
+        # chosen after it; its skill_context reference is what asks for the re-read.
+        in_hand.update(posixpath.normpath(entry["path"]) for entry in captured or () if isinstance(entry, Mapping) and isinstance(entry.get("path"), str))
+        slash_path = read_slash_skill_source_path(self._runtime_context(request), owner_token=self._slash_source_owner_token)
+        if slash_path is not None:
+            in_hand.add(posixpath.normpath(slash_path))
+        unread = list(dict.fromkeys(path for path in loads if path not in in_hand))
+        if not unread:
+            return None
+
+        named = ", ".join(f"the {skill_name_from_path(path)} skill's instructions ({path})" for path in unread)
+        name = str(request.tool_call.get("name") or "")
+        content = f"Not run: this call was chosen in the same message that loads {named}, before they could shape it. Choose the next step from those instructions once that read has returned them."
+        message = ToolMessage(content=content, tool_call_id=str(call_id), name=name, status="error")
+        if name == _TASK_TOOL_NAME:
+            # A delegation that never started still needs a final status, or
+            # the subtask it announced is shown as running for good.
+            message.additional_kwargs = make_subagent_additional_kwargs("failed", error=content)
+        return stamp_declared_error_meta(message, "not_run")
+
     @staticmethod
     def _tool_search_policy_error(request: ToolCallRequest) -> ToolMessage:
         return ToolMessage(
@@ -366,6 +438,9 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
+        refused = self._chosen_before_instructions(request)
+        if refused is not None:
+            return refused
         policy = self._active_policy(request)
         if not policy[1]:
             return handler(request)
@@ -381,6 +456,9 @@ class SkillToolPolicyMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
+        refused = self._chosen_before_instructions(request)
+        if refused is not None:
+            return refused
         policy = self._active_policy(request)
         if not policy[1]:
             return await handler(request)

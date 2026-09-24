@@ -1701,6 +1701,24 @@ def test_the_doc_sends_a_known_period_straight_to_build(report) -> None:
     assert "`--render pdf,docx,xlsx` renders in the same run and is the normal first report" in doc
 
 
+def test_the_first_command_the_doc_shows_is_the_build(report) -> None:
+    """A released-profile chat that had read this file still inspected the workbook with
+    openpyxl and listed this skill's scripts before building. The doc's opening command block
+    led with `inspect`, so the first command a reader met was the one the workflow says not to
+    run. The opening now names the build as the first call, and `inspect` is shown only where
+    an export does not load cleanly."""
+    doc = SKILL_DOC.read_text(encoding="utf-8")
+    overview = doc[doc.index("## Overview") : doc.index("## Workflow")]
+    first_command = re.search(r'report\.py" (\w+)', doc)
+
+    assert first_command is not None and first_command.group(1) == "build"
+    assert 'report.py" inspect' not in overview
+    assert 'report.py" inspect' in doc[doc.index("## When an export does not load cleanly") :]
+    flat = " ".join(overview.split())
+    assert "The first call for a report is the `build` in Step 1" in flat
+    assert "neither the upload, its sheets nor this directory needs looking at first" in flat
+
+
 # ── The tenant bundle (family 10): the skill's half ──────────────────────────
 
 

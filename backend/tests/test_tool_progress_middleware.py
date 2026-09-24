@@ -1477,3 +1477,19 @@ def test_tool_progress_and_loop_detection_coexist_without_interfering():
     # comparison would be trivially True and would not detect accidental modifications.
     assert tp_mw._pending.get(("t1", "r1"), []) == []
     assert ld_mw._pending_warnings.get(("ld-thread", "ld-run"), []) == ld_warnings_snapshot
+
+
+def test_a_call_held_back_before_it_ran_is_not_a_tool_problem():
+    """A call the skill policy held back never reached the tool, so it neither counts toward stagnation nor resets it."""
+    mw = _make_mw(stagnation_threshold=2)
+    rt = _make_runtime()
+    req = _make_tool_request("bash", runtime=rt)
+    held_back = _make_error_message("Not run: chosen beside a skill load.", tool_name="bash", error_type="not_run", recommended_next_action="continue")
+
+    mw.wrap_tool_call(req, lambda _r: _make_error_message(tool_name="bash"))
+    mw.wrap_tool_call(req, lambda _r: held_back)
+    mw.wrap_tool_call(req, lambda _r: held_back)
+
+    state = mw._phase_states["t1"]["bash"]
+    assert state.consecutive_problems == 1
+    assert state.phase == "active"

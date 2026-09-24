@@ -339,6 +339,10 @@ class ToolProgressMiddleware(AgentMiddleware[AgentState]):
                     tool_name,
                 )
             return result
+        if meta.error_type == "not_run":
+            # Held back before it reached the tool (SkillToolPolicyMiddleware):
+            # says nothing about whether the tool is making progress.
+            return result
         content = _message_content_str(message)
         thread_id = self._thread_id(runtime)
         with self._lock:

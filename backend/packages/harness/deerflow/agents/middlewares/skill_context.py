@@ -58,11 +58,30 @@ def _normalize_under_root(path: str, normalized_root: str) -> str | None:
     return None
 
 
-def _is_skill_file(path: str) -> bool:
+def is_skill_file(path: str) -> bool:
     return posixpath.basename(path) == _SKILL_FILE_NAME
 
 
-def _skill_name_from_path(skill_md_path: str) -> str:
+def skill_read_target(
+    tool_call: dict[str, Any],
+    *,
+    skills_root: str,
+    read_tool_names: Collection[str],
+) -> str | None:
+    """The normalized skills-tree path a read-tool call targets, or None.
+
+    Any file under the root counts (a skill's ``SKILL.md`` or one of its
+    resources); ``is_skill_file`` narrows it to the instructions.
+    """
+    if _tool_call_name(tool_call) not in read_tool_names:
+        return None
+    raw_path = _tool_call_path(tool_call)
+    if not raw_path:
+        return None
+    return _normalize_under_root(raw_path, posixpath.normpath(skills_root.rstrip("/") or "/"))
+
+
+def skill_name_from_path(skill_md_path: str) -> str:
     """Derive the skill name from the directory containing SKILL.md."""
     return posixpath.basename(posixpath.dirname(skill_md_path))
 
@@ -96,7 +115,7 @@ def build_skill_entry_metadata_from_read(
 ) -> SkillEntryMetadata | None:
     normalized_root = posixpath.normpath(skills_root.rstrip("/") or "/")
     normalized_path = _normalize_under_root(path, normalized_root)
-    if normalized_path is None or not _is_skill_file(normalized_path) or _is_tool_error_text(content):
+    if normalized_path is None or not is_skill_file(normalized_path) or _is_tool_error_text(content):
         return None
     return {
         "path": normalized_path,
@@ -139,12 +158,9 @@ def extract_skills(
         if not isinstance(message, AIMessage):
             continue
         for tool_call in message.tool_calls or []:
-            if _tool_call_name(tool_call) not in read_names:
-                continue
             tool_call_id = _tool_call_id(tool_call)
-            raw_path = _tool_call_path(tool_call)
-            path = _normalize_under_root(raw_path, normalized_root) if raw_path else None
-            if tool_call_id and path and _is_skill_file(path):
+            path = skill_read_target(tool_call, skills_root=normalized_root, read_tool_names=read_names)
+            if tool_call_id and path and is_skill_file(path):
                 skill_paths_by_id[tool_call_id] = path
 
     entries: list[SkillEntry] = []
@@ -173,7 +189,7 @@ def extract_skills(
             continue
         entries.append(
             {
-                "name": _skill_name_from_path(expected_path),
+                "name": skill_name_from_path(expected_path),
                 "path": expected_path,
                 "description": metadata["description"],
                 "loaded_at": index,

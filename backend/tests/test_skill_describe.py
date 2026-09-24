@@ -293,3 +293,10 @@ def test_describe_tool_select_uncapped(tmp_path):
     content = result.update["messages"][0].content
     for s in many_skills:
         assert s.name in content, f"select: truncated — {s.name} missing from result"
+
+
+def test_skill_index_says_a_skill_file_is_read_on_its_own():
+    """Calls chosen beside a skill's first read are not run (SkillToolPolicyMiddleware); the step says so."""
+    section = get_skill_index_prompt_section(skill_names=frozenset({"business-report"}))
+
+    assert "on its own: other calls in the same message are not run" in " ".join(section.split())
