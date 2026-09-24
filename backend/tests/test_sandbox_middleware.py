@@ -474,6 +474,73 @@ def test_explicit_skill_policy_does_not_reuse_checkpointed_sandbox_after_auth_de
     assert provider.skill_syncs == []
 
 
+async def _first_sandbox_tool_call(provider, runtime: Runtime):
+    """Where accepted material reaches a sandbox: the turn's first sandbox tool call.
+
+    The agent's ``before_agent`` defers it (an accepted turn that calls no
+    sandbox tool never takes a slot), so it must acquire nothing; the checks
+    the material is subject to then run in ``ensure_sandbox_initialized_async``.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from deerflow.sandbox.tools import ensure_sandbox_initialized_async
+
+    middleware = SandboxMiddleware(lazy_init=True)
+    with (
+        patch.object(middleware, "_acquire_sandbox_async", side_effect=AssertionError("before_agent acquired for an accepted turn")),
+        patch("deerflow.sandbox.middleware.provision_runtime_accepted_skill_projection_async", side_effect=AssertionError("before_agent provisioned for an accepted turn")),
+        patch("deerflow.sandbox.middleware.bind_runtime_accepted_skill_projection_async", side_effect=AssertionError("before_agent bound for an accepted turn")),
+    ):
+        # Outside any ``pytest.raises`` of the caller's: an assertion here is
+        # a failure of the test, not the refusal it expects.
+        try:
+            await middleware.abefore_agent({}, runtime)
+        except AssertionError as exc:
+            pytest.fail(str(exc))
+    return await ensure_sandbox_initialized_async(SimpleNamespace(context=runtime.context, state={}, config={}))
+
+
+def test_each_delegated_execution_holds_its_own_projection_consumer() -> None:
+    """A task the lead delegates before touching the sandbox must not borrow the lead's consumer.
+
+    The projection is acquired at the first sandbox tool call, so a lead that
+    delegates first hands its children no token. Each child's first sandbox
+    call activates one, and the projection is cleared only when the last
+    consumer goes: were they all the lead's ``run:<id>:lead``, the first child
+    to finish would empty the skills and park the sandbox under its siblings.
+    """
+    from types import SimpleNamespace
+
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+    from deerflow.sandbox.accepted_projection import ensure_accepted_skill_binding
+
+    material = ResolvedAgentMaterialV1(
+        agent_id="lead-agent",
+        storage_source="test",
+        storage_version="1",
+        agent_config=None,
+        soul="",
+        model_profile={},
+    )
+    identity = {"thread_id": "thread-delegated", "run_id": "run-delegated", "user_id": "owner-delegated", RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material}
+
+    def _child(task_id: str) -> SimpleNamespace:
+        return SimpleNamespace(context={**identity, "is_subagent": True, "sandbox_lease_owner_id": f"subagent:{task_id}"})
+
+    coordinator = get_skill_projection_coordinator()
+    try:
+        _, first, _ = ensure_accepted_skill_binding(_child("a"), sandbox_id="sandbox-delegated", user_id="owner-delegated")
+        _, second, _ = ensure_accepted_skill_binding(_child("b"), sandbox_id="sandbox-delegated", user_id="owner-delegated")
+        _, lead, _ = ensure_accepted_skill_binding(SimpleNamespace(context=dict(identity)), sandbox_id="sandbox-delegated", user_id="owner-delegated")
+
+        assert (first.consumer_id, second.consumer_id, lead.consumer_id) == ("subagent:a", "subagent:b", "run:run-delegated:lead")
+        assert coordinator.release(first) is None, "the first child to finish cleared the projection under the others"
+        assert coordinator.owns(second) and coordinator.owns(lead)
+    finally:
+        release_thread_projection(user_id="owner-delegated", thread_id="thread-delegated", run_id="run-delegated")
+
+
 @pytest.mark.anyio
 async def test_accepted_empty_skill_set_fails_closed_for_unsupported_provider() -> None:
     provider = _AsyncOnlyProvider()
@@ -499,7 +566,7 @@ async def test_accepted_empty_skill_set_fails_closed_for_unsupported_provider() 
             AcceptedSkillSandboxBindingError,
             match="accepted_skill_snapshot_projection_unsupported",
         ):
-            await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+            await _first_sandbox_tool_call(provider, runtime)
     finally:
         reset_sandbox_provider()
         release_thread_projection(user_id="owner-accepted", thread_id="thread-accepted", run_id="run-accepted")
@@ -536,7 +603,7 @@ async def test_accepted_acquisition_requires_provider_isolation_advertisement() 
             AcceptedSkillSandboxBindingError,
             match="accepted_skill_snapshot_isolation_unverified",
         ):
-            await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+            await _first_sandbox_tool_call(provider, runtime)
     finally:
         reset_sandbox_provider()
         release_thread_projection(user_id="owner-incomplete", thread_id="thread-incomplete", run_id="run-incomplete")
@@ -570,7 +637,7 @@ async def test_bind_failure_before_publication_releases_after_absence_proof() ->
     coordinator = get_skill_projection_coordinator()
     try:
         with pytest.raises(RuntimeError, match="bind failed before publication"):
-            await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+            await _first_sandbox_tool_call(provider, runtime)
 
         assert provider.released_ids == ["async-sandbox"]
         assert not coordinator.is_busy(
@@ -617,7 +684,7 @@ async def test_bind_failure_without_absence_proof_does_not_release_sandbox(caplo
     coordinator = get_skill_projection_coordinator()
     try:
         with caplog.at_level(logging.WARNING, logger="deerflow.sandbox.accepted_projection"), pytest.raises(RuntimeError, match="unproven bind failure"):
-            await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+            await _first_sandbox_tool_call(provider, runtime)
 
         assert provider.released_ids == []
         assert coordinator.is_busy(
@@ -695,7 +762,7 @@ async def test_nonempty_accepted_material_requires_hard_read_only_provider(
             AcceptedSkillSandboxBindingError,
             match="accepted_skill_snapshot_immutability_unsupported",
         ):
-            await SandboxMiddleware(lazy_init=True).abefore_agent({}, runtime)
+            await _first_sandbox_tool_call(provider, runtime)
     finally:
         reset_sandbox_provider()
         release_thread_projection(user_id="owner-read-only", thread_id="thread-read-only", run_id="run-read-only")

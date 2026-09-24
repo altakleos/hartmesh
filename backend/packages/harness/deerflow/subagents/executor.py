@@ -822,6 +822,28 @@ def _filter_tools(
     return filtered
 
 
+async def _release_own_projection_consumer(context: dict[str, Any], consumer_id: str, *, trace_id: str | None) -> None:
+    """Drop the projection consumer this execution activated for itself.
+
+    A child that reaches the sandbox before its lead activates a consumer under
+    its own lease identity (a retained parent token is released separately).
+    Its middleware drops it on a normal finish; a child that fails, times out
+    or is cancelled does not get there, and the consumer would keep the
+    thread's projection busy after the run.
+    """
+    from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY, SkillProjectionConsumerToken
+
+    token = context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
+    if not isinstance(token, SkillProjectionConsumerToken) or token.consumer_id != consumer_id:
+        return
+    from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
+
+    try:
+        await asyncio.to_thread(release_accepted_skill_consumer, token)
+    except Exception:
+        logger.warning("[trace=%s] Failed to release the subagent's skill projection consumer", trace_id, exc_info=True)
+
+
 class SubagentExecutor:
     """Executor for running subagents."""
 
@@ -1984,6 +2006,8 @@ class SubagentExecutor:
             )
 
         finally:
+            if execution_context is not None:
+                await _release_own_projection_consumer(execution_context, sandbox_lease_owner_id, trace_id=self.trace_id)
             if execution_context is not None and execution_context.get("sandbox_id") is not None:
                 try:
                     from deerflow.sandbox import get_sandbox_provider

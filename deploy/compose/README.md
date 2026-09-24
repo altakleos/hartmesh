@@ -862,8 +862,8 @@ Gateway log says how many and which names were excluded.
 
 **Per-turn material.** A chat never mounts this library directly: each
 admission snapshots the effective skills into a content-addressed, read-only
-tree under `home/runtime/skill-snapshots/<subject>/<digest>/` and binds it
-into the thread's view at
+tree under `home/runtime/skill-snapshots/<subject>/<digest>/`, and the turn's
+first sandbox-backed tool call binds it into the thread's view at
 `home/runtime/skill-snapshot-active-views/<subject>/<thread>/`, which is what
 the sandbox sees at `/mnt/skills/.accepted/<digest>`. Until 2026-09-17 both
 were deleted when the run ended and staged again, with a `fsync` per file, on
@@ -1374,9 +1374,11 @@ says what a prewarmed first turn looks like), because the tenant-class runs
 measured the container -- 4 to 19 s to create and 5 to 10 s to answer its
 readiness probe -- as the whole of the first turn's pre-model wait, paid while
 the person watched "workspace starting". The prewarm takes a free slot or
-nothing: it never evicts a parked sandbox some thread will reclaim, and one
-nobody sends a message to is stopped about 300 s later rather than holding the
-slot for the 1800 s idle timeout. So with one thread active and one chat freshly
+nothing: it never evicts a parked sandbox some thread will reclaim, and one no
+sandbox-backed tool call claims within about 300 s is stopped rather than
+holding the slot for the 1800 s idle timeout. After `.33` only a sandbox-backed
+tool call claims it, so a chat that only talks for five minutes loses its
+prewarm and pays the cold start at its first tool call. So with one thread active and one chat freshly
 opened, both slots are in use, and a third thread pays the same eviction it
 paid before; what changes is who pays the cold start -- nobody, when the
 prewarm lands -- not how many containers fit.
@@ -1396,9 +1398,8 @@ sandbox container) followed by the Gateway polling the new sandbox's
 `/v1/sandbox` through the authenticated relay. The polling has a budget,
 `sandbox.ready_timeout`, and a sandbox that has not answered `200` by the end
 of it is destroyed under the ownership fences and the acquisition fails: the
-turn gets an error, never a hang. Both acquisition paths (the synchronous one
-tools use and the asynchronous one the run middleware uses) enforce the same
-value. The harness default is 60 seconds and, until 2026-09-12, it was a
+turn gets an error, never a hang. Every acquisition path, synchronous or
+asynchronous, enforces the same value. The harness default is 60 seconds and, until 2026-09-12, it was a
 constant. This profile sets **120** in `config.yaml`.
 
 **Why.** On the four-vCPU tenant VM class, with the released image
@@ -1417,11 +1418,15 @@ at readiness completed a public hello (streamed output, one model call, a
 stored answer) in 46.963 s. Nothing about the model, keys, egress, runtime or
 Gateway configuration was involved. These figures compared CPU quotas on one
 installed runtime; they say nothing about any particular `runsc` release.
-Since the seeded library makes every turn's skill snapshot nonempty, the
-sandbox is bound before the model is called, so a new chat's first text waits
-out the whole cold start (80 to 91 s measured on one CPU, 9.0 to 11.7 s on the
-slim profile) and a chat whose sandbox was evicted pays it again; a reused
-sandbox does not (§ "Public skills").
+The seeded library makes every turn's skill snapshot nonempty, and the
+sandbox that snapshot is bound into is acquired by the turn's first
+sandbox-backed tool call. A turn that calls none answers without one; a new
+chat's first tool call waits out the whole cold start (80 to 91 s measured on
+one CPU, 9.0 to 11.7 s on the slim profile), unless the thread's prewarm has
+already started it, and a chat whose sandbox was evicted pays it again; a
+reused sandbox does not (§ "Public skills"). Through `.33` the sandbox was
+bound before the model was called on every turn, so the first text of every
+new chat waited for the cold start.
 
 **The setting.** `SANDBOX_READY_TIMEOUT` in the tenant `.env` overrides the
 template: whole seconds, 60 to 600 inclusive, absent means 120. The floor is
@@ -1663,19 +1668,26 @@ provider logged `All 2 replica slots are in active use; creating sandbox ...
 beyond the soft limit` and created the third anyway, and nothing refused a
 fourth.
 
-A refusal is customer-visible and deliberately so. Where it surfaces depends
-on when the sandbox was asked for. On this profile every turn projects the
-accepted skill snapshot before the model runs, so a refusal ends that turn
-before it says anything: the person is told "This workspace is already
-running as many sandboxes as it has room for", with `sandbox_capacity_exceeded`
-as the run's stop reason (§ "Reading a turn's timing"). A refusal raised later,
-from inside a tool call, reaches the model instead, which is told to finish
-with what it has rather than call the tool again. The control UI is unaffected
-either way; nothing queues behind the budget. Eviction is
+A refusal is customer-visible and deliberately so. On this profile a turn
+asks for its sandbox at its first sandbox-backed tool call, so the refusal is
+raised from inside that call and reaches the model, which is told the
+workspace is running as much sandboxed work as it has room for and to finish
+with what it has rather than call the tool again. The run records
+`sandbox_capacity_exceeded` as its stop reason when the lead agent's tool call
+was refused (a refusal inside a delegated task is reported in that task's
+result; § "Reading a turn's timing"), and a scheduled task's occurrence with
+that stop reason is recorded as failed, since nobody reads an unattended
+answer. A turn that calls no sandbox-backed tool (a plain chat, or one that
+only asks a clarifying question) never acquires, waits for or evicts a
+sandbox, and answers while both slots are busy. Stop during the wait ends it
+at once and the turn is recorded as cancelled, holding no slot. The control UI
+is unaffected; nothing queues behind the budget. Eviction is
 customer-visible too: a thread whose sandbox was evicted
-gets a fresh one on its next turn (its files persist under `home/`, and that
-turn waits a cold start before its first text).
-`idle_timeout: 1800` keeps an idle sandbox warm for thirty minutes: the budget
+gets a fresh one at its next sandbox-backed tool call (its files persist under
+`home/`, and that call waits a cold start; a plain reply does not).
+`idle_timeout: 1800` keeps an idle sandbox warm for thirty minutes (only a
+sandbox-backed tool call refreshes that clock, so a long stretch of plain chat
+can let it lapse): the budget
 reserves every slot whether or not it is used, and a cold start of the
 sandbox image under gVisor takes tens of seconds, so idle slots are kept
 rather than freed; eviction still reclaims one when a third thread needs it.
@@ -2711,7 +2723,9 @@ reads in milliseconds. It stays here because reading the line is the point.
 A *first* turn on a new chat should read the same way. The web client asks
 the Gateway to build the thread's sandbox the moment the chat opens (`POST
 /api/threads/{id}/workspace/prewarm`), seconds before the first message, so
-the turn's `sandbox_lookup` finds it parked: `acquisition=accepted_warm_reclaim`
+the first sandbox-backed tool call's `sandbox_lookup` finds it parked (after
+`.33` the lookup is inside that call, after `model_request`; through `.33` it
+ran before the model): `acquisition=accepted_warm_reclaim`
 with no `sandbox_create` or `sandbox_readiness` span at all, and the Gateway
 log carries `Accepted sandbox <id> was built <n>s ahead of this turn and
 reclaimed warm`. A first turn that still shows `acquisition=created` with
@@ -2719,14 +2733,18 @@ reclaimed warm`. A first turn that still shows `acquisition=created` with
 happen or was not claimed in time: both slots were taken (a prewarm never evicts;
 `Not prewarming a sandbox … every slot is taken`), or the chat sat idle past
 `sandbox.prewarm_claim_timeout` and the container was stopped
-(`Prewarmed sandbox <id> was not claimed within 300s`; the reaper looks every 30 s, so an abandoned slot comes back at up to 330 s). A person who sends
+(`Prewarmed sandbox <id> was not claimed within 300s`; the reaper looks every 30 s, so an abandoned slot comes back at up to 330 s),
+or the chat's first sandbox-backed tool call came more than
+`prewarm_claim_timeout` after it opened. A person who sends
 within a few seconds of opening the chat, while the build is still running,
 waits for it on that same turn -- the acquisition serialises on the thread --
 and then reclaims it. That wait is the line's top-level
 `queue=<n>ms` field, which is printed only when it is not zero, and it falls
-inside the `skill_projection` phase, not a `sandbox_create` span: the progress
-label stays at "preparing" rather than "workspace starting", and the phase
-reads long even though its own work took milliseconds. So read `queue=`
+inside the `skill_projection` phase, not a `sandbox_create` span, and the
+phase reads long even though its own work took milliseconds. Through `.33`
+the progress label stayed at "preparing" meanwhile; after `.33` the wait falls
+inside the first sandbox tool call, and the person sees that call's card
+running. So read `queue=`
 before concluding that projection is slow. Until `v2.1.0+hartmesh.27` the
 prewarm also published the thread's skill view under that same lock, which
 added its staging to the wait: the released `.26` tenant-class run measured
@@ -2742,8 +2760,11 @@ nothing parked to evict gives the turn a `sandbox_capacity_wait@…+<n>ms`
 phase and `capacity_waits=1`; a wait that ran out adds `capacity_refusals=1`,
 and the Gateway log carries `Refusing to create sandbox <id>: all 2 replica
 slots are in use (active=2 parked=0 starting=0) and none came free in 5.0s`.
-The person's turn then ends with "This workspace is already running as many
-sandboxes as it has room for" rather than a reference code. Waits without
+On this profile the refusal is a tool result: the line still reads
+`outcome=success`, the run record carries `stop_reason=sandbox_capacity_exceeded`,
+and the person reads the agent saying the workspace is busy. The fixed message
+"This workspace is already running as many sandboxes as it has room for" is
+what a refusal before the run starts shows, on a durable profile. Waits without
 refusals are a tenant that keeps finding its slot in time; refusals arriving
 routinely are the signal to move to the 8 GiB VM class (§ "Memory budget"),
 not a defect to chase. Neither counter is printed when it is zero, so an
@@ -2755,9 +2776,10 @@ other turn parked its container.
 `rediscovered`, `discovered`, `warm_reclaim`, `accepted_warm_reclaim` and
 `unknown_provenance` are **origins** — they name how the container came to be;
 `accepted_active` and `in_process` are **observations** that it was already in
-hand, which any turn can make. A turn acquires in stages (the worker projects
-the accepted skills before the graph runs; the sandbox middleware binds later
-against whatever is now active), so `acquisition=` is the turn's origin
+hand, which any turn can make. A turn acquires in stages (through `.33` the
+worker projected the accepted skills before the graph ran and the sandbox
+middleware bound later against whatever was then active; after `.33` the
+first sandbox-backed tool call does both, and later calls find it active), so `acquisition=` is the turn's origin
 whenever a stage reported one, and a later stage that merely found the
 container active is reported beside it as `reused=`. `acquisition=created
 reused=accepted_active` is one turn that created its sandbox and bound to it
@@ -2766,6 +2788,10 @@ reports `acquisition=accepted_active`. A bare `acquisition=accepted_active` or
 `acquisition=in_process` with no `reused=` is a turn that found its container
 already there and no stage said how it got there. (A counter prints only when
 non-zero, so the warm turn above carries no `creates=`.)
+The example line's `acquire_reason=accepted_binding` is the `.33` shape; after
+`.33` an accepted turn reads `acquire_reason=lazy_deferred`, meaning the
+middleware left the acquisition to the first sandbox-backed tool call. That is
+the expected value, not a regression.
 
 Four phases name the work that used to sit unattributed between the sandbox
 lookup and the binding, which on a warm turn is most of the wait.
@@ -2784,7 +2810,11 @@ separately. Then `agent_build` (building the graph; with
 checkpoint lock — so a wait behind a concurrent turn on the same thread falls
 between it and `sandbox_binding`). `graph_start` is marked per attempt, so a
 resumed or retried stream shows two. `skill_materialization` is recorded only
-on `kind=accepted` turns; an ordinary turn has the other three.
+on `kind=accepted` turns; an ordinary turn has the other three. After `.33`
+it holds only `accepted_authorization` on this profile: the sandbox is
+acquired by the turn's first sandbox-backed tool call, after `graph_start`,
+and `skill_projection` and `skill_snapshot_bind` are recorded there. A turn
+that calls no sandbox tool records neither.
 
 `launch=` is what happened *before* the journal opened, and it is **outside**
 `total=` and every `@` offset: the journal's zero is the worker's admission,

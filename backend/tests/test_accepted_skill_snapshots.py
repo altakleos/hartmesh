@@ -2943,7 +2943,6 @@ async def test_worker_materialization_follows_the_deployment_profile(
     revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
     material = revision.material
     assert material is not None and material.skill_snapshot is not None
-    snapshot_id = material.skill_snapshot.snapshot_id
     accepted = _accepted(revision)
     provider = _ProjectionOnlyProvider()
     monkeypatch.setattr("deerflow.sandbox.get_sandbox_provider", lambda: provider)
@@ -2992,16 +2991,19 @@ async def test_worker_materialization_follows_the_deployment_profile(
                 record=record,
                 claim_validator=validate_claim,
             )
-            assert result.sandbox_id == "sandbox-projection"
+            # Deferred: the projection is acquired by the turn's first
+            # sandbox-backed tool call, so a turn that calls none never takes
+            # a slot. Nothing is provisioned or bound before the model.
+            assert result.sandbox_id is None
             assert result.materializer is None
             assert result.lease is None
             assert result.evidence is None
-            assert runtime.context["sandbox_id"] == "sandbox-projection"
-            assert provider.provisioned == [(thread_id, "user-1", snapshot_id)]
-            assert provider.bound == [("sandbox-projection", snapshot_id)]
+            assert "sandbox_id" not in runtime.context
+            assert provider.provisioned == []
+            assert provider.bound == []
             assert claim_validations == 0
             token = runtime.context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
-            assert token is not None
+            assert token is None
         else:
             with (
                 caplog.at_level(logging.ERROR, logger="deerflow.runtime.runs.worker"),
@@ -3029,6 +3031,68 @@ async def test_worker_materialization_follows_the_deployment_profile(
             thread_id=thread_id,
             run_id=f"run-profile-{profile}",
         )
+        material.release_process_material()
+
+
+@pytest.mark.asyncio
+async def test_a_capacity_refusal_during_durable_materialization_keeps_its_type(
+    monkeypatch,
+    tmp_path: Path,
+    snapshot_paths: Paths,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A full deployment is not a materialization fault, on any profile.
+
+    A durable profile acquires its sandbox inside the materialization boundary,
+    which turns every other failure into one opaque binding error. A capacity
+    refusal must pass through typed, so the run ends with the capacity state
+    (or the Stop that raced it) instead of "Runtime operation failed".
+    """
+    from deerflow.config.deployment_config import DeploymentConfig
+    from deerflow.runtime.runs.store.base import RecoveryPolicy
+    from deerflow.runtime.runs.worker import _materialize_accepted_skill_projection
+    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
+    from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+    from deerflow.subagents.batch_acceptance import PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY
+
+    skill_file = _write_skill(tmp_path, body="Durable capacity")
+    revision = _resolve_revision(monkeypatch, _parsed_skill(skill_file))
+    material = revision.material
+    assert material is not None
+    provider = _ProjectionOnlyProvider()
+    monkeypatch.setattr("deerflow.sandbox.get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr("deerflow.authz.sandbox_authz.authorize_sandbox_execution_async", AsyncMock(return_value=None))
+
+    async def _deployment_full(*_args, **_kwargs):
+        raise SandboxCapacityExceededError(replicas=2, active=2)
+
+    monkeypatch.setattr("deerflow.sandbox.accepted_material.resolve_accepted_materializer", _deployment_full)
+    thread_id = "thread-durable-capacity"
+    runtime = SimpleNamespace(
+        context={
+            "thread_id": thread_id,
+            "run_id": "run-durable-capacity",
+            "app_config": AppConfig(sandbox=SandboxConfig(use="test"), deployment=DeploymentConfig(profile="durable_production")),
+            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
+            TENANT_REFERENCE_CONTEXT_KEY: _TEST_TENANT,
+            PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY: _accepted(revision),
+            "accepted_agent_revision_digest": revision.digest,
+        },
+    )
+    record = SimpleNamespace(
+        owner_worker_id="worker-pending",
+        state_version=3,
+        execution_takeover=False,
+        execution_evidence_json=None,
+        recovery_policy=RecoveryPolicy.terminalize_v1,
+    )
+    try:
+        with caplog.at_level(logging.ERROR, logger="deerflow.runtime.runs.worker"), pytest.raises(SandboxCapacityExceededError):
+            await _materialize_accepted_skill_projection(runtime, user_id="user-1", record=record, claim_validator=AsyncMock(return_value=True))
+        assert "Accepted skill materialization failed" not in caplog.text
+    finally:
+        get_skill_projection_coordinator().release_unactivated_run(user_id="user-1", thread_id=thread_id, run_id="run-durable-capacity")
         material.release_process_material()
 
 
@@ -3092,6 +3156,9 @@ async def test_the_accepted_preparation_says_where_its_own_time_went(
         def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
             return sandbox_id == "sandbox-attributed"
 
+        def release(self, sandbox_id: str) -> None:
+            raise AssertionError(f"a bound sandbox was released: {sandbox_id}")
+
     async def authorize(**_kwargs):
         await asyncio.sleep(AUTHORIZE)
 
@@ -3113,9 +3180,20 @@ async def test_the_accepted_preparation_says_where_its_own_time_went(
         },
     )
 
+    from deerflow.sandbox.accepted_projection import provision_runtime_accepted_skill_projection_async
+
     try:
-        with turn_phases(correlation_id="trace-attributed", run_id="run-attributed") as journal, journal.span(TurnPhase.SKILL_MATERIALIZATION):
-            await _materialize_accepted_skill_projection(runtime, user_id="user-1")
+        with turn_phases(correlation_id="trace-attributed", run_id="run-attributed") as journal:
+            # Before the model: the authorization, and nothing else. The
+            # projection is acquired by the turn's first sandbox tool call.
+            with journal.span(TurnPhase.SKILL_MATERIALIZATION):
+                deferred = await _materialize_accepted_skill_projection(runtime, user_id="user-1")
+            assert deferred.sandbox_id is None and deferred.evidence is None
+            assert bound_snapshots == [], "nothing was provisioned before the model"
+            # The first sandbox tool call, which pays for the provision and
+            # the bind and names each.
+            with journal.span(TurnPhase.SANDBOX_ACQUIRE):
+                await provision_runtime_accepted_skill_projection_async(provider, runtime, thread_id="thread-attributed", user_id="user-1")
     finally:
         # A consumer activated here, so the unactivated release alone answers
         # False and drops nothing.
@@ -3124,13 +3202,20 @@ async def test_the_accepted_preparation_says_where_its_own_time_went(
 
     assert bound_snapshots == ["sandbox-attributed"]
     snapshot = journal.snapshot()
-    whole = snapshot.phase_ms(TurnPhase.SKILL_MATERIALIZATION)
-    assert whole is not None
+    before_model = snapshot.phase_ms(TurnPhase.SKILL_MATERIALIZATION)
+    first_tool = snapshot.phase_ms(TurnPhase.SANDBOX_ACQUIRE)
+    assert before_model is not None and first_tool is not None
+    whole = before_model + first_tool
 
     expected = {
         TurnPhase.ACCEPTED_AUTHORIZATION: AUTHORIZE,
         TurnPhase.SKILL_PROJECTION: PROVISION,
         TurnPhase.SKILL_SNAPSHOT_BIND: BIND,
+    }
+    parents = {
+        TurnPhase.ACCEPTED_AUTHORIZATION: TurnPhase.SKILL_MATERIALIZATION,
+        TurnPhase.SKILL_PROJECTION: TurnPhase.SANDBOX_ACQUIRE,
+        TurnPhase.SKILL_SNAPSHOT_BIND: TurnPhase.SANDBOX_ACQUIRE,
     }
     # One record per name: a phase is read back by its first record, so a name
     # opened twice would hide whichever span it opened second.
@@ -3146,13 +3231,13 @@ async def test_the_accepted_preparation_says_where_its_own_time_went(
         # The span holds its own step's cost, and only its own.
         assert cost * 1000 <= record.duration_ms < cost * 1000 + 250, (phase, record.duration_ms)
         # And it happened inside the phase it explains.
-        parent = next(record for record in snapshot.phases if record.phase == TurnPhase.SKILL_MATERIALIZATION)
+        parent = next(record for record in snapshot.phases if record.phase == parents[phase])
         assert parent.duration_ms is not None
         assert parent.started_ms <= record.started_ms
         assert record.started_ms + record.duration_ms <= parent.started_ms + parent.duration_ms + 1
 
-    # The steps account for the phase: what is left is the binding lookup and
-    # the isolation assertions, which do no I/O on this path.
+    # The steps account for both phases: what is left is the binding lookup
+    # and the isolation assertions, which do no I/O on this path.
     assert sum(measured.values()) > whole * 0.8, (measured, whole)
 
     line = snapshot.to_log_line()

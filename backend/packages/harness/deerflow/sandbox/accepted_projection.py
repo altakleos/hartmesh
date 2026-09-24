@@ -203,6 +203,24 @@ def require_runtime_accepted_skill_isolation(
             )
 
 
+def _projection_consumer_id(context: dict, run_id: str) -> str:
+    """The execution a projection consumer belongs to: the lead, or one delegated task.
+
+    A delegated task that reaches the sandbox before its lead holds no parent
+    token to retain, so it activates its own, under the same identity as its
+    sandbox lease. Sharing the lead's would let the first task to finish clear
+    the projection under its siblings and the lead.
+    """
+    if context.get("is_subagent") is not True:
+        return f"run:{run_id}:lead"
+    from deerflow.sandbox.lease import sandbox_lease_owner
+
+    owner_id = sandbox_lease_owner(context)
+    if owner_id is None:
+        raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_runtime_identity_missing")
+    return owner_id
+
+
 def ensure_accepted_skill_binding(
     runtime: object,
     *,
@@ -220,6 +238,7 @@ def ensure_accepted_skill_binding(
     run_id = context.get("run_id")
     if not isinstance(thread_id, str) or not isinstance(run_id, str):
         raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_runtime_identity_missing")
+    consumer_id = _projection_consumer_id(context, run_id)
     from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
     from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
     from deerflow.runtime.skill_projection import (
@@ -258,7 +277,7 @@ def ensure_accepted_skill_binding(
             sandbox_id=sandbox_id,
             run_id=run_id,
             snapshot_id=snapshot_id,
-            consumer_id=f"run:{run_id}:lead",
+            consumer_id=consumer_id,
         )
     except Exception as exc:
         raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_binding_conflict") from exc
@@ -577,12 +596,22 @@ async def provision_runtime_accepted_skill_projection_async(
     thread_id: str,
     user_id: str,
 ) -> str:
-    """Async counterpart of :func:`provision_runtime_accepted_skill_projection`."""
+    """Async counterpart of :func:`provision_runtime_accepted_skill_projection`.
+
+    On the tenant profile this is where an accepted turn's sandbox is acquired
+    (its first sandbox-backed tool call), so it records the same two phases the
+    worker recorded when it did this before the model: ``skill_projection``
+    and ``skill_snapshot_bind``.
+    """
+    from deerflow.runtime.turn_phases import TurnPhase, phase_span
+
     binding = _material_binding(runtime, user_id=user_id)
     projection = require_accepted_skill_projection(provider)
-    sandbox_id = await projection.provision_accepted_skills_async(thread_id, user_id=user_id, binding=binding)
+    with phase_span(TurnPhase.SKILL_PROJECTION):
+        sandbox_id = await projection.provision_accepted_skills_async(thread_id, user_id=user_id, binding=binding)
     release = getattr(provider, "release")
-    bound = await _bind_runtime_async(provider, runtime, sandbox_id=sandbox_id, user_id=user_id, release_unbound=lambda: release(sandbox_id))
+    with phase_span(TurnPhase.SKILL_SNAPSHOT_BIND):
+        bound = await _bind_runtime_async(provider, runtime, sandbox_id=sandbox_id, user_id=user_id, release_unbound=lambda: release(sandbox_id))
     if not bound:
         await asyncio.to_thread(release, sandbox_id)
         raise AcceptedSkillSandboxBindingError("accepted_skill_snapshot_binding_missing")

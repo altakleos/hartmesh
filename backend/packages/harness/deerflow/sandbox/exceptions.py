@@ -84,11 +84,14 @@ class SandboxCapacityExceededError(SandboxError):
     failed, try it again". ``guidance`` replaces the generic retry advice with
     one sentence that says what is actually true. Both are read by
     ``deerflow.agents.middlewares`` off the exception object itself; nothing
-    matches on the message text.
+    matches on the message text. ``run_stop_reason`` is the structured reason
+    the run record carries when a refusal ends or shapes a turn, whether it
+    was raised before the model or out of a tool call.
     """
 
     CODE = "SANDBOX_CAPACITY_EXCEEDED"
     tool_error_type = "capacity"
+    run_stop_reason = "sandbox_capacity_exceeded"
 
     def __init__(
         self,

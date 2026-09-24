@@ -636,7 +636,9 @@ so when every slot is in active use the acquisition waits up to
 and is then refused with `SANDBOX_CAPACITY_EXCEEDED` — a typed, retryable
 outcome the agent is told not to retry immediately, rather than a container
 the host has no memory for. The wait is bounded everywhere,
-interruptible on the async create path, and appears in the turn journal as the `sandbox_capacity_wait` phase
+ends at once when the person presses Stop (on every acquisition path a run awaits, the
+accepted projection's worker-thread wait included; a purely synchronous
+caller is bounded by the budget alone), and appears in the turn journal as the `sandbox_capacity_wait` phase
 alongside the `capacity_waits` and `capacity_refusals` counters.
 
 `ready_timeout` is the cold-start readiness budget: after `docker run` returns,

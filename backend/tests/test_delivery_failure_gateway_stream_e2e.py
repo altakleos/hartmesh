@@ -35,17 +35,25 @@ def delivery_gateway(tmp_path_factory: pytest.TempPathFactory) -> Iterator[e2e._
 
 
 def _outputs_dir(home: Path, thread_id: str) -> Path | None:
-    """This thread's outputs directory once the run has laid it down.
+    """This thread's outputs directory, laid down as a producing tool call would.
 
-    The host path is user-scoped or legacy depending on the deployment, so it is
-    resolved by search rather than constructed, and never fabricated: a
-    directory this helper invented would sit outside the roots the worker scans
-    and the turn would look like it simply passed the fence.
+    An agent writes a file through a sandbox-backed tool, and that call's
+    acquisition creates the thread's directories; the probe issues none, so
+    this does what that acquisition does, for the run's own user, through the
+    same path resolution. Called inside the agent loop, where the run's user is
+    the effective one. The host path is user-scoped or legacy depending on the
+    deployment, which is why it is resolved by that code rather than built
+    here: a directory this helper invented would sit outside the roots the
+    worker scans and the turn would look like it simply passed the fence.
     """
-    for candidate in home.rglob(f"threads/{thread_id}/user-data/outputs"):
-        if candidate.is_dir():
-            return candidate
-    return None
+    from deerflow.config.paths import get_paths
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    paths = get_paths()
+    user_id = get_effective_user_id()
+    paths.ensure_thread_dirs(thread_id, user_id=user_id)
+    outputs = paths.sandbox_outputs_dir(thread_id, user_id=user_id)
+    return outputs if outputs.is_relative_to(home) and outputs.is_dir() else None
 
 
 def _produce_one_artifact_mid_turn(home: Path, thread_id: str) -> Any:

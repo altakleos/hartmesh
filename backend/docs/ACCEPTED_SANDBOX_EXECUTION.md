@@ -130,7 +130,7 @@ deployment profile's decision, not the record's:
 
 | Profile | Nonempty snapshot | Empty snapshot |
 | --- | --- | --- |
-| `local_development` | Accepted-skills projection: the provider's own parked `(user, thread)` sandbox with `.accepted` as its only skills mount, bound before the model is called, released at the run's end with its verified read-only view retained (the next bind of the same digest verifies it in place, a different digest replaces it, teardown clears it) | Accepted-skills projection with no snapshot bound: no materialization before the model, the sandbox is provisioned at the first tool call, `.accepted` is empty and every skills path is refused |
+| `local_development` | Accepted-skills projection: the provider's own parked `(user, thread)` sandbox with `.accepted` as its only skills mount, acquired and bound by the turn's first sandbox-backed tool call (a turn that calls none takes no slot), released at the run's end with its verified read-only view retained (the next bind of the same digest verifies it in place, a different digest replaces it, teardown clears it) | Accepted-skills projection with no snapshot bound: no materialization before the model, the sandbox is provisioned at the first tool call, `.accepted` is empty and every skills path is refused |
 | `durable_production`, `durable_two_gateway_v1` | A qualified materializer, or `sandbox_provider_unqualified` before any sandbox exists | Accepted-skills projection with no snapshot bound: no materialization before the model, the sandbox is provisioned at the first tool call, `.accepted` is empty and every skills path is refused |
 
 The ordinary thread sandbox, which mounts the Gateway's `skills_view/public`
@@ -151,8 +151,10 @@ turn with `AcceptedSkillSandboxBindingError` (reason
 `sandbox_provider_unqualified`) on a healthy stack, and no earlier release had
 noticed because no tenant had a skill, so every snapshot was empty. Two
 properties of the projection path matter when reading timings and paths: the
-sandbox is provisioned before the model runs, so on a new thread the cold
-start precedes first text; and the model-visible skill path is
+sandbox is provisioned by the turn's first sandbox-backed tool call (before
+the model ran, through `.33`), so on a new thread the cold start precedes that
+call's result and a turn that calls no sandbox tool never pays it; and the
+model-visible skill path is
 `/mnt/skills/.accepted/<snapshot digest>/<category>/<name>`, the live
 `/mnt/skills/public` mount is absent from such a sandbox, and the sandbox
 tools refuse skill paths outside the snapshot. A provider that cannot declare
@@ -247,7 +249,8 @@ at creation, which the fingerprint records, so a container without one is not
 the container the turn needs. The route answers `scheduled: false` for a
 provider without the capability and 202 either way; a build failure is the
 provider's log, never the client's error. The evidence contract is untouched:
-materialization still completes before `try_start`, it just binds into a
+on durable profiles materialization still completes before `try_start`, and on
+the projection profile the first sandbox-backed tool call binds into the
 container that is already ready.
 
 **The view, not only the container.** On the released `.25` profile a tenant's
@@ -681,14 +684,30 @@ tree), `skill_projection` (the provider putting the material in a sandbox;
 nest inside it) and `skill_snapshot_bind`. On the released projection profile
 what is left over is the binding lookup and the isolation assertions; a durable
 profile also leaves `validate_accepted_materialization` and two execution-fence
-round trips there.
+round trips there. After `.33` the projection profile no longer provisions
+here: the worker authorizes and resolves the materializer, and the turn's first
+sandbox-backed tool call acquires the sandbox and binds the same admitted
+snapshot (`provision_runtime_accepted_skill_projection_async`, behind the same
+authorization, isolation and binding checks), recording `skill_projection` and
+`skill_snapshot_bind` there. A turn that calls no sandbox tool takes no slot,
+so it answers while every slot is busy; durable profiles keep materializing
+before the run starts, because their evidence binds at start. Two things do
+reach them: a capacity refusal from their materializer now keeps its type and
+ends the run with the capacity message rather than the opaque binding error,
+and Stop reaches their capacity wait the same way. Because the lead holds no projection
+consumer until its own first sandbox call, a task it delegates first activates
+one of its own under its sandbox lease identity (`subagent:<task>`) rather than
+the lead's `run:<id>:lead`, and its executor drops it however the task ends: the
+projection is cleared only when the last of them goes, never under a sibling.
 
-Read `skill_snapshot_bind` knowing what it measures. On the released
-local-Docker profile a provider that binds while it provisions -- the AIO
-backend does -- has already published the snapshot inside `skill_projection`
-(which also holds the sandbox lookup), so the worker's later bind and the
-sandbox middleware's `sandbox_binding` are the second and third binds of one
-identity before the first model request; each sandbox tool call binds again.
+Read `skill_snapshot_bind` knowing what it measures. On the local-Docker
+profile a provider that binds while it provisions -- the AIO backend does --
+has already published the snapshot inside `skill_projection` (which also holds
+the sandbox lookup). Through `.33` the worker's later bind and the sandbox
+middleware's `sandbox_binding` were the second and third binds of one identity
+before the first model request. After `.33` the first sandbox-backed tool call
+provisions (binding inside `skill_projection`) and binds once more in
+`skill_snapshot_bind`; each later sandbox tool call binds again.
 Until 2026-09-17 each bind captured the source tree three times and wrote a
 full fsync'd staged copy *before* comparing identities: tenant-class `.18`
 measured 1.2 to 2.1 s in `skill_snapshot_bind` and 1.3 to 1.9 s in

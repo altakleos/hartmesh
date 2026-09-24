@@ -56,6 +56,11 @@ NETWORK_POLICY_HUMAN_INPUT_SOURCE = "sandbox_network"
 _NETWORK_POLICY_DECISIONS = frozenset({"deny", "allow_temporary", "allow_sandbox"})
 
 
+def _holds_run_sandbox(runtime: Runtime) -> bool:
+    """Whether this run was handed a sandbox before the agent started."""
+    return isinstance((runtime.context or {}).get("sandbox_id"), str)
+
+
 def _network_approval_is_non_interactive(context: Mapping[str, object]) -> bool:
     return bool(context.get("disable_clarification") or context.get("non_interactive"))
 
@@ -199,6 +204,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         logger.info(f"Acquiring sandbox {sandbox_id}")
         return sandbox_id
 
+    @staticmethod
     def _borrow_accepted_sandbox(
         sandbox_id: str,
         *,
@@ -335,13 +341,18 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         projection = None if has_accepted_binding else self._prepare_agent_skill_projection(thread_id, user_id=user_id)
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
-        # Durable accepted material and policy-scoped legacy views must be
-        # projected before the first model. Ordinary shared-view runs keep
-        # lazy sandbox initialization and bind the execution lease only when a
-        # sandbox-backed tool actually touches the persisted sandbox: runs that
-        # only answer or return a terminal Command must not leave an unused
-        # owner behind when the graph bypasses after_agent.
-        if self._lazy_init and not has_accepted_binding and projection is None:
+        # Policy-scoped legacy views must be projected before the first model.
+        # Everything else keeps lazy sandbox initialization and binds the
+        # execution lease only when a sandbox-backed tool actually touches the
+        # sandbox: runs that only answer or return a terminal Command must not
+        # leave an unused owner behind when the graph bypasses after_agent.
+        # Accepted material is one of those: the first sandbox-backed tool call
+        # provisions and binds the admitted snapshot behind the same checks
+        # (``ensure_sandbox_initialized``). Durable accepted material never
+        # reaches here; its declared session is handled above.
+        if self._lazy_init and projection is None and not (has_accepted_binding and _holds_run_sandbox(runtime)):
+            if has_accepted_binding:
+                record_acquire_reason("lazy_deferred")
             return super().before_agent(state, runtime)
 
         existing_sandbox_id = self._read_sandbox_id_from_state(state)
@@ -412,9 +423,10 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             # leak by not acquiring: the lazy path re-runs this decision at the
             # first sandbox-backed tool call, where the same refusal becomes a
             # tool result the run survives and a turn that never touches a tool
-            # answers normally. The accepted branch is deliberately not caught: its
-            # material *must* be projected before the model, and that refusal is a
-            # run terminal (`runtime/runs/worker.py`), not a skip.
+            # answers normally. The accepted branch is deliberately not caught: it
+            # runs here only when acquisition is eager or the run already holds a
+            # sandbox, and its refusal is a run terminal
+            # (`runtime/runs/worker.py`), not a skip.
             try:
                 sandbox_id = self._acquire_sandbox(
                     thread_id,
@@ -538,14 +550,16 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         )
         owner_id = ensure_sandbox_lease_owner(runtime.context)
 
-        if self._lazy_init and not has_accepted_binding and projection is None:
+        # Same rule as the sync path: accepted material is bound by the first
+        # sandbox-backed tool call, so a turn that uses none never waits for
+        # a slot. Only a sandbox this run already holds is borrowed here.
+        if self._lazy_init and projection is None and not (has_accepted_binding and _holds_run_sandbox(runtime)):
             record_acquire_reason("lazy_deferred")
             return await super().abefore_agent(state, runtime)
 
         # Why this turn acquires before the model call rather than on first tool
-        # use. Evidence for a later optimization, not a licence to change the
-        # order now: an accepted binding deliberately bypasses lazy
-        # initialization, and flipping that guard is explicitly out of scope.
+        # use: a policy-scoped view, eager initialization, or a sandbox this
+        # accepted run already holds.
         record_acquire_reason(
             "accepted_binding" if has_accepted_binding else ("skill_projection" if projection is not None else "eager_configured"),
         )

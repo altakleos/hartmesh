@@ -180,11 +180,18 @@ def _artifact_writer(home: Any, thread_id_box: dict[str, str]) -> Any:
     def write() -> None:
         if written["done"]:
             return
-        for candidate in home.rglob(f"threads/{thread_id_box['id']}/user-data/outputs"):
-            if candidate.is_dir():
-                (candidate / ARTIFACT_NAME).write_bytes(ARTIFACT_BYTES)
-                written["done"] = True
-                return
+        # A producing sandbox call's acquisition lays the thread's directories
+        # down; this stands in for that call, inside it, for the run's user.
+        from deerflow.config.paths import get_paths
+        from deerflow.runtime.user_context import get_effective_user_id
+
+        paths = get_paths()
+        user_id = get_effective_user_id()
+        paths.ensure_thread_dirs(thread_id_box["id"], user_id=user_id)
+        outputs = paths.sandbox_outputs_dir(thread_id_box["id"], user_id=user_id)
+        if outputs.is_relative_to(home) and outputs.is_dir():
+            (outputs / ARTIFACT_NAME).write_bytes(ARTIFACT_BYTES)
+            written["done"] = True
 
     return write, written
 

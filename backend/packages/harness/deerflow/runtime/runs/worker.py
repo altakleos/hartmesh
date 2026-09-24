@@ -41,6 +41,7 @@ from deerflow.agents.goal_state import GoalEvaluation, GoalState
 from deerflow.agents.middlewares.input_sanitization_middleware import (
     neutralize_untrusted_tags,
 )
+from deerflow.agents.middlewares.tool_error_handling_middleware import TOOL_REFUSAL_REASON_CONTEXT_KEY
 from deerflow.authz.provider import AuthorizationProvider
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
@@ -152,7 +153,7 @@ logger = logging.getLogger(__name__)
 # rule is that nothing untrusted reaches a run row, and "chosen by type" is how
 # this stays inside it while still saying something true.
 SANDBOX_CAPACITY_MESSAGE = "This workspace is already running as many sandboxes as it has room for. Your turn did not start; try again once the other work finishes."
-SANDBOX_CAPACITY_STOP_REASON = "sandbox_capacity_exceeded"
+SANDBOX_CAPACITY_STOP_REASON = SandboxCapacityExceededError.run_stop_reason
 
 
 class _ExecutionRecoveryTerminalized(RuntimeError):
@@ -316,7 +317,9 @@ class AcceptedSkillExecutionFenceError(RuntimeError):
 class _AcceptedMaterializationResult:
     """Process-local adapter state paired with persisted execution evidence."""
 
-    sandbox_id: str
+    # ``None`` when the tenant profile's projection is deferred to the first
+    # sandbox-backed tool call; there is no evidence then either.
+    sandbox_id: str | None
     evidence: AcceptedExecutionEvidence | AcceptedSkillExecutionEvidence | None
     provider: SandboxProvider | None
     materializer: AcceptedMaterializer | None = None
@@ -709,14 +712,16 @@ async def _materialize_accepted_skill_projection(
             # per-thread sandbox with the snapshot bound as its only skills
             # mount. This is the released tenant profile's execution path,
             # not a fallback from a durable one it never promised.
-            projection = require_accepted_skill_projection(provider)
-            with phase_span(TurnPhase.SKILL_PROJECTION):
-                sandbox_id = await projection.provision_accepted_skills_async(
-                    thread_id,
-                    user_id=user_id,
-                    binding=binding,
-                )
-            evidence = projection.accepted_skill_execution_evidence(sandbox_id)
+            #
+            # It is acquired where it is first needed, not here. The first
+            # sandbox-backed tool call binds this same admitted snapshot
+            # through ``provision_runtime_accepted_skill_projection_async``,
+            # behind the same authorization, isolation and binding checks, and
+            # the projection carries no start evidence to bind before running.
+            # A turn that calls no sandbox tool therefore never takes, waits
+            # for or evicts a slot: with every slot busy it still answers.
+            require_accepted_skill_projection(provider)
+            return _AcceptedMaterializationResult(sandbox_id=None, evidence=None, provider=provider)
         else:
             raise AcceptedMaterialError("sandbox_provider_unqualified")
         require_runtime_accepted_skill_isolation(
@@ -802,6 +807,12 @@ async def _materialize_accepted_skill_projection(
                 )
         if deferred_interrupt is not None:
             raise deferred_interrupt
+        if isinstance(exc, SandboxCapacityExceededError):
+            # Not a materialization fault: the deployment is full. The refusal
+            # is typed, carries no internal detail, and has its own terminal
+            # (the capacity state, or the cancellation that raced it), so it
+            # keeps its type instead of becoming the opaque error below.
+            raise exc
         # The boundary error is deliberately opaque to callers; the reason
         # code behind it is what an operator needs to read in the log.
         logger.error(
@@ -2846,8 +2857,10 @@ async def _run_agent(
                     sampled = active
                 return bool(sampled and not record.ownership_lost and not record.abort_event.is_set())
 
-            # The accepted projection is the largest pre-model phase on a turn
-            # that has one, and the sandbox phases it records nest inside it.
+            # The accepted preparation before the model: on a durable profile the
+            # whole materialization, with the sandbox phases it records nested
+            # inside; on the projection profile only the authorization, since
+            # the sandbox is acquired by the first sandbox-backed tool call.
             with phase_span(TurnPhase.SKILL_MATERIALIZATION):
                 raw_materialization = await _materialize_accepted_skill_projection(
                     runtime,
@@ -3600,6 +3613,7 @@ async def _run_agent(
         # turns complete cleanly afterward (#4176 review).
         if isinstance(runtime.context, dict):
             runtime.context.pop("stop_reason", None)
+            runtime.context.pop(TOOL_REFUSAL_REASON_CONTEXT_KEY, None)
         await _stream_once(graph_input, initial_runnable_config)
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
@@ -3656,6 +3670,11 @@ async def _run_agent(
             # collects the most severe / first / all reasons) instead of each
             # guard writing directly to the same key.
             stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
+            if stop_reason is None and runtime_context is not None and runtime_context.get("sandbox_id") is None:
+                # A refused sandbox call the run survived, and no later call got
+                # the sandbox: the turn's sandboxed work never ran. A guard's stop
+                # wins, and a turn whose retry found a slot is not refused.
+                stop_reason = runtime_context.get(TOOL_REFUSAL_REASON_CONTEXT_KEY)
             produced_output_paths = await _produced_output_paths(
                 pre_run_workspace_snapshot,
                 thread_id=thread_id,
@@ -3847,9 +3866,10 @@ async def _run_agent(
             )
 
     except SandboxCapacityExceededError as exc:
-        # Not a crash, and it must not read like one. On the released tenant
-        # profile the sandbox is acquired *here*, before the model runs, so a
-        # refusal never passes a tool boundary and the generic handler below
+        # Not a crash, and it must not read like one. A durable profile
+        # materializes before the run starts, so its refusal never passes a
+        # tool boundary (the tenant profile's is raised from the first sandbox
+        # tool call and ends as a tool result instead), and the generic handler below
         # would give the person "Runtime operation failed (reference: <hex>)"
         # -- indistinguishable from a real fault, and nothing an operator or a
         # tenant can act on. The message is a first-party constant chosen from

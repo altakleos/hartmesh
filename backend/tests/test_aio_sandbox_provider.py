@@ -877,10 +877,19 @@ def test_accepted_snapshot_binding_tracks_cached_sandbox_identity(
 
 
 @pytest.mark.anyio
-async def test_aio_nonempty_accepted_snapshot_passes_pre_model_middleware(
+@pytest.mark.parametrize("mode", ["async", "sync"])
+@pytest.mark.parametrize("held", [False, True], ids=["deferred", "run-holds-its-sandbox"])
+async def test_aio_nonempty_accepted_snapshot_binds_at_the_first_sandbox_tool_call(
     tmp_path,
     monkeypatch,
+    mode: str,
+    held: bool,
 ) -> None:
+    """Before the model an accepted turn binds only a sandbox the run already holds.
+
+    Otherwise the agent defers, on both middleware paths, and the first
+    sandbox-backed tool call binds the admitted snapshot.
+    """
     from pathlib import Path
 
     from langgraph.runtime import Runtime
@@ -950,13 +959,33 @@ async def test_aio_nonempty_accepted_snapshot_passes_pre_model_middleware(
             RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
         }
     )
+    state = {"sandbox": {"sandbox_id": "sandbox-aio-accepted"}}
+    if held:
+        runtime.context["sandbox_id"] = "sandbox-aio-accepted"
     set_sandbox_provider(provider)
     try:
-        await SandboxMiddleware(lazy_init=True).abefore_agent(
-            {"sandbox": {"sandbox_id": "sandbox-aio-accepted"}},
-            runtime,
-        )
-        assert projected == [snapshot.snapshot_id]
+        middleware = SandboxMiddleware(lazy_init=True)
+        if mode == "async":
+            await middleware.abefore_agent(state, runtime)
+        else:
+            middleware.before_agent(state, runtime)
+        # A run that holds its sandbox binds it before the model; otherwise a
+        # turn that calls no sandbox tool binds nothing and holds no slot.
+        assert projected == ([snapshot.snapshot_id] if held else [])
+        # The first sandbox-backed tool call binds the admitted snapshot into
+        # the thread's accepted sandbox.
+        from types import SimpleNamespace
+
+        from deerflow.sandbox.tools import ensure_sandbox_initialized, ensure_sandbox_initialized_async
+
+        tool_runtime = SimpleNamespace(context=runtime.context, state=state, config={})
+        if mode == "async":
+            sandbox = await ensure_sandbox_initialized_async(tool_runtime)
+        else:
+            sandbox = ensure_sandbox_initialized(tool_runtime)
+        assert sandbox.id == "sandbox-aio-accepted"
+        assert projected[-1] == snapshot.snapshot_id
+        assert len(projected) == (2 if held else 1)
     finally:
         token = runtime.context.pop(SKILL_PROJECTION_TOKEN_CONTEXT_KEY, None)
         if token is not None:
