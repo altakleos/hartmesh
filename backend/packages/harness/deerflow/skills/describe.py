@@ -178,7 +178,7 @@ You have access to skills that provide optimized workflows for specific tasks.
 **Skill Discovery:**
 1. Check <skill_index> for a skill name that matches your task
 2. Call describe_skill(name) to fetch its description and capabilities
-3. If the skill matches, call read_file on the returned Location to load full instructions
+3. If the skill matches, call read_file on the returned Location to load full instructions, on its own: other calls in the same message are not run, because they would be chosen before its instructions arrive
 4. Follow the skill's instructions precisely, using the reported Directory wherever they refer to the skill's own files
 
 **Explicit Slash Skill Activation:**

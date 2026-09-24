@@ -9,10 +9,11 @@ description: Use this skill when the user uploads a tabular business export (CSV
 
 One script turns an export into a report draft: `report.json` plus PNG charts, then renders that one document to HTML, PDF, DOCX and XLSX. Every number in every render comes from `report.json`, so the formats agree by construction. The script runs on the libraries the sandbox image ships, installs nothing, calls no network service (the PDF printer refuses every URL that is not inline data) and never modifies an input file.
 
+The first call for a report is the `build` in Step 1. It reads the export itself and prints what it found, so neither the upload, its sheets nor this directory needs looking at first: the scripts it runs are the ones named below.
+
 **Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Assign it in every command that runs one of these scripts, as a statement of its own ahead of the script, the way each example below does (`SKILL_DIR="<Directory>"; python …`). Written in front of the script without the `;`, it is not set yet when bash expands that command's own words: the guard stops the command, and without the guard the path is `/scripts/…`. Where a skill is mounted differs between deployments, so no absolute path can be written here.
 
 ```
-SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" inspect <files…>
 SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" build   <files…> [--period 2026-08] --out REPORTDIR [--render pdf,docx,xlsx]
 SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" show    REPORTDIR/<dirname>.report.json
 SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" prose   REPORTDIR/<dirname>.report.json --from prose.json [--render pdf,docx,xlsx]

@@ -152,7 +152,7 @@ keep:
 #### `skill_file_read_tool_names`
 - **Type**: List of strings
 - **Default**: `["read_file", "read", "view", "cat"]`
-- **Description**: Tool names treated as skill file reads when `DurableContextMiddleware` captures loaded skills into the checkpointed `skill_context` channel. A tool call is captured only when its name appears in this list and its target path is under `skills.container_path`. Set this list to `[]` to disable durable skill-reference capture.
+- **Description**: Tool names treated as skill file reads when `DurableContextMiddleware` captures loaded skills into the checkpointed `skill_context` channel. A tool call is captured only when its name appears in this list and its target path is under `skills.container_path`. Set this list to `[]` to disable durable skill-reference capture. `SkillToolPolicyMiddleware` uses the same list and root to recognize a skill's first load when it holds back calls chosen in the same assistant message.
 
 Legacy `preserve_recent_skill_*` settings are no longer used. Loaded skill retention is handled by the durable `skill_context` reference channel instead of by preserving raw skill-read messages in the summarization window.
 

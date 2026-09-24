@@ -114,8 +114,14 @@ _ATTRS_BY_ERROR_TYPE: dict[str, dict[str, object]] = {str(attrs["error_type"]): 
 # model must not do is call it again -- which is exactly what every recoverable
 # category invites. Declared by the exception (``tool_error_type``) rather than
 # recognised in its message, so the behaviour cannot drift with the wording.
+#
+# ``not_run`` is a call the runtime held back before it ran, because it was
+# chosen in the same message that loads the skill instructions meant to govern
+# it (SkillToolPolicyMiddleware). Nothing failed; the next step is to choose
+# again with those instructions in hand.
 _DECLARED_ATTRS: dict[str, dict[str, object]] = {
     "capacity": {"error_type": "capacity", "recoverable_by_model": False, "recommended_next_action": "summarize"},
+    "not_run": {"error_type": "not_run", "recoverable_by_model": True, "recommended_next_action": "continue"},
 }
 
 
@@ -280,6 +286,18 @@ def stamp_exception_meta(msg: ToolMessage, exc_info: str, *, exc: BaseException 
     attrs = (None if exc is None else declared_error_attrs(exc)) or _classify_error_text(exc_info)
     updated_kwargs = dict(msg.additional_kwargs or {})
     updated_kwargs[TOOL_META_KEY] = _make_meta(status="error", source="exception", **attrs)
+    msg.additional_kwargs = updated_kwargs
+    return msg
+
+
+def stamp_declared_error_meta(msg: ToolMessage, error_type: str) -> ToolMessage:
+    """Stamp a category the producer knows, without reading the message text.
+
+    For a refusal the runtime makes itself, whose text quotes names (a skill,
+    a path) that the keyword fallback would misread.
+    """
+    updated_kwargs = dict(msg.additional_kwargs or {})
+    updated_kwargs[TOOL_META_KEY] = _make_meta(status="error", source="exception", **_DECLARED_ATTRS[error_type])
     msg.additional_kwargs = updated_kwargs
     return msg
 

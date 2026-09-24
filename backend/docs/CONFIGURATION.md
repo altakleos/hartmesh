@@ -1146,6 +1146,7 @@ VM created for another root.
 - Each skill has a `SKILL.md` file with metadata
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
+- A tool call chosen in the same assistant message as a skill's first `SKILL.md` read is not run, because it was selected before those instructions could inform it; its result says so, and the next call is chosen with the instructions in hand
 
 Skill installs and agent-managed skill writes also run through native deterministic SkillScan before the LLM scanner:
 
