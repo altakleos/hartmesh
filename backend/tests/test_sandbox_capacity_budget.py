@@ -959,13 +959,17 @@ def test_the_config_schema_refuses_a_budget_that_is_not_a_number():
 
 @pytest.mark.anyio
 async def test_a_refusal_before_the_model_ends_the_turn_legibly(tmp_path, monkeypatch):
-    """On the released profile the sandbox is acquired before the model runs.
+    """A refusal raised before the model gets the capacity terminal.
 
-    A refusal there never passes a tool boundary, so the typed tool-result
-    contract cannot help: without its own branch the worker's generic handler
-    gives the person ``Runtime operation failed (reference: <hex>)``, which is
-    indistinguishable from a crash and tells neither them nor an operator that
-    the deployment is simply full.
+    Durable profiles materialize before the run starts, so a refusal there
+    never passes a tool boundary and the typed tool-result contract cannot
+    help: without its own branch the worker's generic handler gives the person
+    ``Runtime operation failed (reference: <hex>)``, which is indistinguishable
+    from a crash. This drives the worker's capacity handler with a refusal
+    raised from the run itself; the materialization boundary's own pass-through
+    is pinned in ``test_accepted_skill_snapshots.py``, and the released tenant
+    profile's route, where the sandbox is acquired at the first tool call, is
+    driven end to end in ``test_accepted_capacity_outcomes.py``.
     """
     from types import SimpleNamespace
     from unittest.mock import AsyncMock

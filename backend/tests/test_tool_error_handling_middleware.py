@@ -1264,3 +1264,43 @@ def test_runtime_chains_keep_the_receipt_outer_of_sandbox_middleware():
         assert receipt and sandbox, builder.__name__
         assert max(receipt) < min(sandbox), builder.__name__
         assert_ordering(middlewares, {})
+
+
+def test_a_capacity_refusal_is_recorded_beside_the_guards_stop_reason_not_in_it():
+    """A refused sandbox call is a fact for the run record, not a guard's stop.
+
+    The loop and budget guards read ``context["stop_reason"]`` as the reason
+    that already stopped this turn. Were the refusal written there, a model
+    that kept retrying and tripped the loop cap would be recorded as refused
+    for capacity, and a subagent's result would carry a stop reason its status
+    contract rejects.
+    """
+    from deerflow.agents.middlewares.tool_error_handling_middleware import TOOL_REFUSAL_REASON_CONTEXT_KEY
+    from deerflow.sandbox.exceptions import SandboxCapacityExceededError
+
+    context: dict = {}
+    request = SimpleNamespace(tool_call={"name": "bash", "id": "tc-1"}, runtime=SimpleNamespace(context=context))
+
+    def _refuse(_req):
+        raise SandboxCapacityExceededError(replicas=2, active=2, retry_after_seconds=5)
+
+    ToolErrorHandlingMiddleware().wrap_tool_call(request, _refuse)
+
+    assert "stop_reason" not in context
+    assert context[TOOL_REFUSAL_REASON_CONTEXT_KEY] == SandboxCapacityExceededError.run_stop_reason
+
+
+def test_an_ordinary_tool_error_records_no_run_level_reason():
+    """Only an exception that declares a run-level reason records one."""
+    from deerflow.agents.middlewares.tool_error_handling_middleware import TOOL_REFUSAL_REASON_CONTEXT_KEY
+
+    context: dict = {}
+    request = SimpleNamespace(tool_call={"name": "bash", "id": "tc-1"}, runtime=SimpleNamespace(context=context))
+
+    def _fail(_req):
+        raise RuntimeError("disk full")
+
+    ToolErrorHandlingMiddleware().wrap_tool_call(request, _fail)
+
+    assert TOOL_REFUSAL_REASON_CONTEXT_KEY not in context
+    assert "stop_reason" not in context

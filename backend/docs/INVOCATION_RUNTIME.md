@@ -952,8 +952,9 @@ deferred discovery, skill-derived allowed-tool/secret policy, lead and subagent 
 and sandbox paths under `/mnt/skills/.accepted/<snapshot-digest>/...`. Durable sandbox
 acquisition omits every mutable live skill mount or upload; legacy non-durable execution
 retains those live views. File, list, search, and shell paths are also restricted to the
-exact accepted subtree before sandbox I/O. Before the first model
-call, the sandbox provider binds exactly that accepted digest to a per-user, per-thread active
+exact accepted subtree before sandbox I/O. On durable profiles before the first
+model call, and on the local-Docker projection profile at the turn's first sandbox-backed
+tool call, the sandbox provider binds exactly that accepted digest to a per-user, per-thread active
 view; sibling snapshots are not mounted. An accepted empty skill set binds an empty view and
 never falls back to the live registry. Local Docker-backed AIO mounts nonempty accepted material
 through an OS-enforced read-only boundary. Kubernetes/provisioner AIO advertises the same

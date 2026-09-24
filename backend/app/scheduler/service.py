@@ -18,6 +18,7 @@ from app.runtime.invocation import InternalLaunchIntent, InternalLaunchReceipt, 
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected, ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 from deerflow.runtime import ConflictError, RunRecord
+from deerflow.runtime.runs.worker import SANDBOX_CAPACITY_STOP_REASON
 from deerflow.scheduler.schedules import next_run_at
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -30,6 +31,7 @@ _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
 _RESTART_RECOVERY_ERROR = "interrupted: gateway restarted before the run reached a terminal state"
 _LEASE_RECOVERY_ERROR = "interrupted: the owning gateway stopped renewing its run lease"
 _QUEUE_TIMEOUT_ERROR = "scheduled task queue wait timeout exceeded"
+_SANDBOX_REFUSED_ERROR = "no sandbox was free when the task ran, so its tools did not run"
 
 
 class ScheduledTaskService:
@@ -674,7 +676,12 @@ class ScheduledTaskService:
             return
 
         terminal_status: Literal["success", "failed", "interrupted"] | None
-        if record.status.value == "success":
+        if record.status.value == "success" and record.stop_reason == SANDBOX_CAPACITY_STOP_REASON:
+            # The agent said the workspace was busy and stopped; nobody reads
+            # an unattended answer, so the occurrence says so itself.
+            terminal_status = "failed"
+            error = _SANDBOX_REFUSED_ERROR
+        elif record.status.value == "success":
             terminal_status = "success"
             error = None
         elif record.status.value == "interrupted":

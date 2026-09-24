@@ -117,8 +117,11 @@ root's. Markdown links resolve from this file.
   counted never spends a second slot. A full budget evicts the oldest parked
   container first and never a live turn, then waits up to
   `sandbox.capacity_wait_timeout` (default 5 s, 0 refuses at once, bounded at
-  300; interruptible on the async create path, and elsewhere bounded only by
-  the budget itself, which is why nothing may make it unbounded) and refuses with
+  300; Stop ends it on every path a run awaits: the async create path cancels its awaited
+  wait, and a worker-thread acquisition, such as the accepted projection's,
+  leaves it through a cancel signal the caller sets, before reserving a slot;
+  the budget still bounds work already past the wait and a purely
+  synchronous caller, which no Stop reaches) and refuses with
   `SandboxCapacityExceededError` — a typed retryable outcome whose
   `tool_error_type` tells the model to summarize rather than retry, read off
   the exception rather than matched in its text. The wait is one

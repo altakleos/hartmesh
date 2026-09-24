@@ -170,11 +170,14 @@ class TurnPhase(StrEnum):
 
     ADMISSION = "admission"
     ASSEMBLY = "assembly"
-    # Projecting the accepted skill snapshot into the sandbox: the whole
-    # accepted preparation, so the sandbox phases *it records* nest inside this
+    # The accepted preparation before the model. On a durable profile it is the
+    # whole materialization, so the sandbox phases *it records* nest inside this
     # one (``SANDBOX_LOOKUP``, and on a cold turn ``SANDBOX_CREATE`` and
-    # ``SANDBOX_READINESS``). The middleware's later ``SANDBOX_BINDING`` and
-    # ``SANDBOX_ACQUIRE`` run after the graph starts and do not.
+    # ``SANDBOX_READINESS``). On the projection profile it holds only the
+    # authorization: the first sandbox-backed tool call acquires the sandbox
+    # and records ``SKILL_PROJECTION`` and ``SKILL_SNAPSHOT_BIND`` there. The
+    # middleware's ``SANDBOX_BINDING`` and ``SANDBOX_ACQUIRE`` run after the
+    # graph starts and never nest here.
     SKILL_MATERIALIZATION = "skill_materialization"
     # The steps that phase is made of, so its own figure is attributed rather
     # than being one unexplained block. Tenant-class .17 measured 5 to 6 s

@@ -24,6 +24,7 @@ import time
 import uuid
 from collections.abc import Callable
 from contextlib import ExitStack
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -175,6 +176,27 @@ def resolve_ready_timeout(configured: object) -> float:
     if configured is None:
         return float(SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT)
     return normalize_ready_timeout(configured)
+
+
+# The caller's Stop, carried into a worker-thread acquisition. An async caller
+# that runs a blocking acquisition in a thread (the accepted projection) cannot
+# interrupt the thread, so it sets this event and wakes the capacity gate; the
+# thread's wait sees it and leaves without taking a slot. ``asyncio.to_thread``
+# copies context variables into the thread, which is how the event gets there
+# without threading a parameter through every acquisition layer.
+_ACQUISITION_CANCELLED: ContextVar[threading.Event | None] = ContextVar(
+    "deerflow_aio_acquisition_cancelled",
+    default=None,
+)
+
+
+class _AcquisitionCancelledError(Exception):
+    """A worker-thread acquisition left its capacity wait because its caller stopped."""
+
+
+def _acquisition_cancelled() -> bool:
+    event = _ACQUISITION_CANCELLED.get()
+    return event is not None and event.is_set()
 
 
 def _resolve_capacity_waiter(future: "asyncio.Future[None]") -> None:
@@ -754,6 +776,19 @@ class AioSandboxProvider(
                 # Its loop is closed; the task that registered it is gone.
                 continue
 
+    def _wake_stopped_acquisition(self) -> None:
+        """Wake a worker-thread capacity wait so it reads its caller's Stop.
+
+        A provider assembled without its state has no gate and no waiter, and a
+        Stop must never fail on the way to its cleanup, so there is nothing to
+        wake then.
+        """
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._wake_capacity_waiters_locked()
+
     def _await_capacity_slot(self) -> "asyncio.Future[None]":
         """Register this task's wake-up *before* it checks the count.
 
@@ -856,13 +891,21 @@ class AioSandboxProvider(
         waiting = False
         with ExitStack() as measured:
             while True:
+                if _acquisition_cancelled():
+                    # Checked before reserving, so a stopped caller never
+                    # holds a slot, and a late refusal never replaces the Stop.
+                    raise _AcquisitionCancelledError(sandbox_id)
                 with self._lock:
                     if self._try_reserve_slot_locked(sandbox_id):
                         return
                 if not allow_eviction:
                     raise SandboxSlotsBusyError(sandbox_id)
                 # Outside the lock: a stop is a container round trip, and the
-                # lock guards every acquire path in this process.
+                # lock guards every acquire path in this process. Re-checked
+                # first: a stopped caller must not evict a thread's parked
+                # sandbox for a slot it will never use.
+                if _acquisition_cancelled():
+                    raise _AcquisitionCancelledError(sandbox_id)
                 if self._evict_oldest_warm(exclude=sandbox_id) is not None:
                     continue
                 remaining = deadline - time.monotonic()
@@ -875,6 +918,8 @@ class AioSandboxProvider(
                     # wait: between the check at the top of the loop and this
                     # point a slot may have come free, and sleeping through it
                     # would spend the whole budget for nothing.
+                    if _acquisition_cancelled():
+                        raise _AcquisitionCancelledError(sandbox_id)
                     if self._try_reserve_slot_locked(sandbox_id):
                         return
                     self._capacity_gate().wait(remaining)
@@ -894,10 +939,11 @@ class AioSandboxProvider(
         That is true of callers that reach here, which is the ordinary async
         acquisition. It is **not** true of every async caller of the provider:
         the accepted projection runs its whole acquisition -- and so the sync
-        admission -- in a worker thread, where a cancellation is observed when
-        the wait returns rather than during it. The budget is what bounds the
-        delay there, which is why it is short and why nothing may make it
-        unbounded.
+        admission -- in a worker thread. A Stop reaches it there through the
+        cancel signal ``provision_accepted_skills_async`` sets and wakes, before
+        it reserves or evicts; work already past the wait, and any purely
+        synchronous caller, is bounded by the budgets instead, which is why they
+        are short and why nothing may make them unbounded.
         """
         started = time.monotonic()
         deadline = started + self.sandbox_capacity_wait_timeout()
@@ -3015,25 +3061,37 @@ class AioSandboxProvider(
         resource_scope_ref: str | None = None,
         egress_allowance: EgressAllowanceV1 | None = None,
     ) -> str:
-        acquire_task = asyncio.create_task(
-            asyncio.to_thread(
-                self._provision_accepted_skills_with_claim,
-                thread_id,
-                user_id,
-                binding,
-                execution_claim,
-                resource_scope_ref,
-                egress_allowance,
-            ),
-            name=f"aio-accepted-acquire:{binding.run_id}",
-        )
+        stopped = threading.Event()
+        # Set in this frame's context before the task copies it, so the thread
+        # the task hands the acquisition to sees this caller's event.
+        stop_token = _ACQUISITION_CANCELLED.set(stopped)
+        try:
+            acquire_task = asyncio.create_task(
+                asyncio.to_thread(
+                    self._provision_accepted_skills_with_claim,
+                    thread_id,
+                    user_id,
+                    binding,
+                    execution_claim,
+                    resource_scope_ref,
+                    egress_allowance,
+                ),
+                name=f"aio-accepted-acquire:{binding.run_id}",
+            )
+        finally:
+            _ACQUISITION_CANCELLED.reset(stop_token)
         try:
             sandbox_id, _origin = await asyncio.shield(acquire_task)
             return sandbox_id
         except asyncio.CancelledError as cancellation:
-            # Executor work cannot be cancelled once it starts. Recover the
-            # exact resource identity before propagating cancellation so a
-            # lead or batch caller cannot orphan a newly created sandbox.
+            # Executor work cannot be cancelled once it starts, but a capacity
+            # wait can be ended: the thread leaves it at once, without a slot.
+            # Work past the wait (a create already admitted) still runs to its
+            # end, and the exact resource identity is recovered before the
+            # cancellation propagates so a lead or batch caller cannot orphan
+            # a newly created sandbox.
+            stopped.set()
+            self._wake_stopped_acquisition()
             while not acquire_task.done():
                 try:
                     await asyncio.shield(acquire_task)
@@ -3041,6 +3099,8 @@ class AioSandboxProvider(
                     continue
             try:
                 sandbox_id, origin = acquire_task.result()
+            except _AcquisitionCancelledError:
+                logger.info("Accepted sandbox acquisition left its capacity wait after caller cancellation (run_id=%s)", binding.run_id)
             except Exception:
                 logger.warning(
                     "Accepted sandbox acquisition failed after caller cancellation",

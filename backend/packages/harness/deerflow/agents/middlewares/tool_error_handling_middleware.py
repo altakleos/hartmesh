@@ -53,6 +53,27 @@ def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error:
     return message
 
 
+TOOL_REFUSAL_REASON_CONTEXT_KEY = "tool_refusal_reason"
+"""Where a refused tool call leaves its run-level reason for the worker."""
+
+
+def _record_run_stop_reason(request: ToolCallRequest, exc: Exception) -> None:
+    """Carry an exception's declared run-level reason to the run record.
+
+    A tool-time refusal becomes a result the run survives, so the worker never
+    sees the exception; it reads this off the runtime context. It is kept
+    apart from ``stop_reason``, which the loop and budget guards read as the
+    reason that already stopped the turn: the worker records a guard's stop
+    first and this only when none stopped it. Declared by the exception's type
+    (``run_stop_reason``), never read from its text; the first refusal in a
+    turn is the one kept.
+    """
+    reason = getattr(exc, "run_stop_reason", None)
+    context = getattr(getattr(request, "runtime", None), "context", None)
+    if isinstance(reason, str) and reason and isinstance(context, dict):
+        context.setdefault(TOOL_REFUSAL_REASON_CONTEXT_KEY, reason)
+
+
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Convert tool exceptions into error ToolMessages so the run can continue."""
 
@@ -93,6 +114,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # carry the same structured metadata.
         structured_error = f"{exc.__class__.__name__}: {detail}"
         message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
+        _record_run_stop_reason(request, exc)
         return stamp_exception_meta(message, structured_error, exc=exc)
 
     def _stamp_skill_read_metadata(

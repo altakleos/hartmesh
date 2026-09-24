@@ -1849,6 +1849,56 @@ class TestAsyncExecutionPath:
         provider.release.assert_called_once_with("shared")
 
     @pytest.mark.anyio
+    async def test_aexecute_finally_releases_a_projection_consumer_the_child_activated(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+    ):
+        """A child that reached the sandbox before its lead holds its own consumer, and must drop it.
+
+        Its middleware releases it on a normal finish; a child that fails or
+        times out never gets there, and a consumer left behind keeps the
+        thread's projection busy after the run.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        projection = importlib.import_module("deerflow.runtime.skill_projection")
+        coordinator = projection.get_skill_projection_coordinator()
+        activated = []
+
+        async def failing_stream(*args, context, **kwargs):
+            coordinator.claim_committed_run(user_id="owner-child", thread_id="test-thread", run_id="run-child", snapshot_id=None)
+            token = coordinator.activate(
+                user_id="owner-child",
+                thread_id="test-thread",
+                sandbox_id="shared",
+                run_id="run-child",
+                snapshot_id=None,
+                consumer_id=context["sandbox_lease_owner_id"],
+            )
+            context[projection.SKILL_PROJECTION_TOKEN_CONTEXT_KEY] = token
+            activated.append(token)
+            raise RuntimeError("child failed after its first sandbox call")
+            yield  # pragma: no cover - make this an async generator
+
+        mock_agent.astream = failing_stream
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread", run_id="run-child")
+        try:
+            with patch.object(executor, "_create_agent", return_value=mock_agent):
+                result = await executor._aexecute("Task")
+
+            assert result.status == SubagentStatus.FAILED
+            assert len(activated) == 1
+            assert not coordinator.owns(activated[0]), "the child's consumer outlived it"
+        finally:
+            for token in activated:
+                clear = coordinator.release(token)
+                if clear is not None:
+                    coordinator.finalize_release(clear)
+            coordinator.release_unactivated_run(user_id="owner-child", thread_id="test-thread", run_id="run-child")
+
+    @pytest.mark.anyio
     async def test_aexecute_records_the_scope_release_for_the_run(
         self,
         classes,

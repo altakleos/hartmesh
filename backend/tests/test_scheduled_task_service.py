@@ -526,8 +526,8 @@ def _once_task_row(task_id="task-once", status="running"):
     }
 
 
-def _completion_record(status, *, task_id="task-once", error=None):
-    return RunRecord(
+def _completion_record(status, *, task_id="task-once", error=None, stop_reason=None):
+    record = RunRecord(
         run_id="run-x",
         thread_id="thread-x",
         assistant_id="lead_agent",
@@ -540,6 +540,8 @@ def _completion_record(status, *, task_id="task-once", error=None):
         user_id="user-1",
         error=error,
     )
+    record.stop_reason = stop_reason
+    return record
 
 
 @pytest.mark.asyncio
@@ -566,6 +568,30 @@ async def test_once_task_failed_run_marks_task_failed():
     assert run_repo.updated[-1][1]["error"] == "boom"
     assert task_repo.rows[0]["status"] == "failed"
     assert task_repo.rows[0]["last_error"] == "boom"
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_sandbox_was_refused_is_a_failed_occurrence_not_a_completed_one():
+    """Nobody reads an unattended answer, so a refusal must show in the task list.
+
+    A sandbox tool refused for capacity ends the run as ``success`` with a
+    recorded stop reason: the agent says the workspace is busy and stops. For
+    a scheduled task that answer is the only trace, so the occurrence is failed
+    and says why, instead of reading as a clean completion.
+    """
+    from deerflow.runtime.runs.worker import SANDBOX_CAPACITY_STOP_REASON
+
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+    service = _make_service(task_repo, run_repo)
+
+    await service.handle_run_completion(_completion_record(RunStatus.success, stop_reason=SANDBOX_CAPACITY_STOP_REASON))
+
+    run_update = run_repo.updated[-1][1]
+    assert run_update["status"] == "failed"
+    assert "sandbox" in run_update["error"]
+    assert task_repo.rows[0]["status"] == "failed"
+    assert task_repo.rows[0]["last_error"] == run_update["error"]
 
 
 @pytest.mark.asyncio
