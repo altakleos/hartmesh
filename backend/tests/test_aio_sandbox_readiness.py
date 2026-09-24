@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -325,6 +327,53 @@ def test_wait_for_sandbox_ready_accepts_a_response_that_arrives_on_time(monkeypa
     session = _install_session(monkeypatch, [readiness.requests.exceptions.ConnectionError("refused"), SimpleNamespace(status_code=200)])
 
     assert readiness.wait_for_sandbox_ready("http://sandbox", timeout=30) is True
+    assert session.timeouts == [5.0, 5.0]
+    assert clock.sleeps == [1.0]
+
+
+def test_wait_for_sandbox_ready_leaves_between_probes_once_its_caller_stops(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A Stop ends the readiness wait at the next probe boundary, not at the deadline.
+
+    The wait runs in a worker thread that no cancellation can interrupt, so it
+    watches the caller's stop event instead: the pause between probes is a wait
+    on that event, and a set event ends the loop before another probe is sent.
+    """
+    clock = _Clock()
+    monkeypatch.setattr(readiness, "_monotonic", clock)
+    monkeypatch.setattr(readiness.time, "sleep", clock.sleep)
+    stopped = threading.Event()
+    session = _install_session(monkeypatch, [])
+
+    def refused_then_stopped(url, *, timeout):
+        session.timeouts.append(timeout)
+        stopped.set()  # the person presses Stop while the sandbox is still booting
+        raise readiness.requests.exceptions.ConnectionError("refused")
+
+    session.get = refused_then_stopped  # type: ignore[method-assign]
+
+    started = time.monotonic()
+    assert readiness.wait_for_sandbox_ready("http://sandbox", timeout=120, cancelled=stopped) is False
+    assert time.monotonic() - started < 1.0
+    assert session.timeouts == [5.0], "no probe after the Stop"
+    assert clock.sleeps == [], "the pause is a wait on the stop event, not a sleep"
+
+
+def test_wait_for_sandbox_ready_sends_no_probe_for_a_caller_that_already_stopped(monkeypatch: pytest.MonkeyPatch) -> None:
+    stopped = threading.Event()
+    stopped.set()
+    session = _install_session(monkeypatch, [SimpleNamespace(status_code=200)])
+
+    assert readiness.wait_for_sandbox_ready("http://sandbox", timeout=120, cancelled=stopped) is False
+    assert session.timeouts == []
+
+
+def test_wait_for_sandbox_ready_without_a_stop_event_is_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    clock = _Clock()
+    monkeypatch.setattr(readiness, "_monotonic", clock)
+    monkeypatch.setattr(readiness.time, "sleep", clock.sleep)
+    session = _install_session(monkeypatch, [readiness.requests.exceptions.ConnectionError("refused"), SimpleNamespace(status_code=200)])
+
+    assert readiness.wait_for_sandbox_ready("http://sandbox", timeout=30, cancelled=None) is True
     assert session.timeouts == [5.0, 5.0]
     assert clock.sleeps == [1.0]
 

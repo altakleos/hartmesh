@@ -644,7 +644,13 @@ alongside the `capacity_waits` and `capacity_refusals` counters.
 `ready_timeout` is the cold-start readiness budget: after `docker run` returns,
 the provider polls the new container's `/v1/sandbox` for this many seconds and,
 if it has not answered `200` by then, destroys the container under the
-ownership fences and fails the acquisition. Both the synchronous and the
+ownership fences and fails the acquisition. On an acquisition a run awaits,
+Stop ends the wait for a container the call started the same way: no further
+probe is sent (a probe already in flight can take up to 5 s), the container is
+torn down, and the turn ends cancelled, not failed. The backend's create call
+and the teardown are not interrupted; a container the backend found already
+running is left to the cancellation rule (it is parked, not destroyed); and a
+turn queued behind the chat's prewarm build waits for that build. Both the synchronous and the
 asynchronous acquisition paths use the same value. It is a number of seconds,
 integer or decimal; the default is 60; the supported range is greater than 0
 and at most 3600. Zero, a negative number, `.inf`, `.nan`, a boolean or text

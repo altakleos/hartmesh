@@ -181,7 +181,9 @@ def resolve_ready_timeout(configured: object) -> float:
 # The caller's Stop, carried into a worker-thread acquisition. An async caller
 # that runs a blocking acquisition in a thread (the accepted projection) cannot
 # interrupt the thread, so it sets this event and wakes the capacity gate; the
-# thread's wait sees it and leaves without taking a slot. ``asyncio.to_thread``
+# thread's capacity wait sees it and leaves without taking a slot, and a
+# readiness wait sees it at its next probe and tears the unready container
+# down. ``asyncio.to_thread``
 # copies context variables into the thread, which is how the event gets there
 # without threading a parameter through every acquisition layer.
 _ACQUISITION_CANCELLED: ContextVar[threading.Event | None] = ContextVar(
@@ -191,7 +193,7 @@ _ACQUISITION_CANCELLED: ContextVar[threading.Event | None] = ContextVar(
 
 
 class _AcquisitionCancelledError(Exception):
-    """A worker-thread acquisition left its capacity wait because its caller stopped."""
+    """A worker-thread acquisition left a capacity or readiness wait because its caller stopped."""
 
 
 def _acquisition_cancelled() -> bool:
@@ -941,9 +943,11 @@ class AioSandboxProvider(
         the accepted projection runs its whole acquisition -- and so the sync
         admission -- in a worker thread. A Stop reaches it there through the
         cancel signal ``provision_accepted_skills_async`` sets and wakes, before
-        it reserves or evicts; work already past the wait, and any purely
-        synchronous caller, is bounded by the budgets instead, which is why they
-        are short and why nothing may make them unbounded.
+        it reserves or evicts, and the readiness wait of a create it admitted
+        watches the same signal. The backend's create call itself, the
+        teardown, and any purely synchronous caller are bounded by their
+        budgets instead, which is why they are short and why nothing may make
+        them unbounded.
         """
         started = time.monotonic()
         deadline = started + self.sandbox_capacity_wait_timeout()
@@ -3084,10 +3088,12 @@ class AioSandboxProvider(
             sandbox_id, _origin = await asyncio.shield(acquire_task)
             return sandbox_id
         except asyncio.CancelledError as cancellation:
-            # Executor work cannot be cancelled once it starts, but a capacity
-            # wait can be ended: the thread leaves it at once, without a slot.
-            # Work past the wait (a create already admitted) still runs to its
-            # end, and the exact resource identity is recovered before the
+            # Executor work cannot be cancelled once it starts, but its waits
+            # can be ended: the thread leaves a capacity wait at once, without
+            # a slot, and a readiness wait at the next probe, tearing the
+            # unready container down under the fences. What it cannot leave
+            # (the backend's create call, a bind, a teardown) runs to its end,
+            # and the exact resource identity is recovered before the
             # cancellation propagates so a lead or batch caller cannot orphan
             # a newly created sandbox.
             stopped.set()
@@ -3097,10 +3103,15 @@ class AioSandboxProvider(
                     await asyncio.shield(acquire_task)
                 except asyncio.CancelledError:
                     continue
+                except Exception:
+                    # The thread ended with an error -- most often its own
+                    # ``_AcquisitionCancelledError`` for this Stop. It is read
+                    # from the task below and never replaces the cancellation.
+                    break
             try:
                 sandbox_id, origin = acquire_task.result()
             except _AcquisitionCancelledError:
-                logger.info("Accepted sandbox acquisition left its capacity wait after caller cancellation (run_id=%s)", binding.run_id)
+                logger.info("Accepted sandbox acquisition stopped before it held a sandbox (run_id=%s)", binding.run_id)
             except Exception:
                 logger.warning(
                     "Accepted sandbox acquisition failed after caller cancellation",
@@ -4512,6 +4523,11 @@ class AioSandboxProvider(
                 if egress_allowance is not None:
                     create_kwargs["egress_allowance"] = egress_allowance
             budget = self.sandbox_ready_timeout()
+            if _acquisition_cancelled():
+                # Stopped after the slot was reserved (an eviction runs in
+                # between): send no create, rather than build a set only to
+                # stop it. The ``finally`` below releases the slot.
+                raise _AcquisitionCancelledError(sandbox_id)
             record_create_attempt()
             try:
                 with phase_span(TurnPhase.SANDBOX_CREATE):
@@ -4532,14 +4548,30 @@ class AioSandboxProvider(
 
             # Wait for sandbox to be ready
             readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
+            # A worker-thread acquisition's Stop (see ``_ACQUISITION_CANCELLED``)
+            # ends this wait too, for a container this call started: a cold
+            # start is the longest thing an acquisition waits for, and the
+            # caller that pressed Stop is waiting on this thread. One the
+            # backend found running was not this call's to tear down; it
+            # answers its first probe and the cancelled caller undoes it by
+            # origin, which parks it.
+            stop = _ACQUISITION_CANCELLED.get()
+            if stop is not None and getattr(info, "provenance", "unknown") == PROVENANCE_CREATED:
+                readiness_kwargs["cancelled"] = stop
             with phase_span(TurnPhase.SANDBOX_READINESS):
                 ready = wait_for_sandbox_ready(info.sandbox_url, timeout=budget, **readiness_kwargs)
             if not ready:
+                stopped = "cancelled" in readiness_kwargs and stop.is_set()
+                if not stopped:
+                    record_failed_attempt()
                 # Ours in the store, but never handed out: tear it down under
                 # the same fences as every other reap, and fail closed if a
-                # peer took it over in the meantime (#4248).
-                record_failed_attempt()
+                # peer took it over in the meantime (#4248). A stopped start
+                # is torn down the same way, before its caller's Stop returns,
+                # so no container or slot outlives the turn that asked for it.
                 self._destroy_unready_sandbox(sandbox_id, info)
+                if stopped:
+                    raise _AcquisitionCancelledError(sandbox_id)
                 raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within {budget:g}s at {info.sandbox_url}")
 
             return self._register_created_sandbox(

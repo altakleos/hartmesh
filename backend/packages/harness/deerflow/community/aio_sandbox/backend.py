@@ -6,6 +6,7 @@ import asyncio
 import ipaddress
 import logging
 import math
+import threading
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
@@ -88,6 +89,7 @@ def wait_for_sandbox_ready(
     timeout: float = 30,
     *,
     headers: Mapping[str, str] | None = None,
+    cancelled: threading.Event | None = None,
 ) -> bool:
     """Poll the sandbox health endpoint until it answers 200 or the budget ends.
 
@@ -96,12 +98,20 @@ def wait_for_sandbox_ready(
     passed is not a success -- the caller's next step is to destroy the
     container, and a sandbox accepted late is one the deadline never bounded.
 
+    This wait runs in a worker thread, which no task cancellation reaches, so
+    a caller that can be stopped passes its stop event as *cancelled*: the
+    pause between probes waits on it, and once it is set no further probe is
+    sent. A Stop therefore ends the wait within one probe (at most
+    ``_READY_REQUEST_TIMEOUT``), not at the deadline.
+
     Args:
         sandbox_url: URL of the sandbox (e.g. http://k3s:30001).
         timeout: The budget in seconds; validated by ``normalize_ready_timeout``.
+        cancelled: The caller's stop event, if it can be stopped.
 
     Returns:
-        True if the sandbox answered 200 within the budget, False otherwise.
+        True if the sandbox answered 200 within the budget, False otherwise,
+        including when *cancelled* was set first.
 
     Raises:
         ValueError: ``timeout`` is not a finite positive number of seconds.
@@ -114,7 +124,7 @@ def wait_for_sandbox_ready(
             session.headers.update(headers)
         while True:
             remaining = deadline - _monotonic()
-            if remaining <= 0:
+            if remaining <= 0 or (cancelled is not None and cancelled.is_set()):
                 return False
             try:
                 response = session.get(f"{sandbox_url}/v1/sandbox", timeout=min(_READY_REQUEST_TIMEOUT, remaining))
@@ -125,7 +135,10 @@ def wait_for_sandbox_ready(
             remaining = deadline - _monotonic()
             if remaining <= 0:
                 return False
-            time.sleep(min(1.0, remaining))
+            if cancelled is None:
+                time.sleep(min(1.0, remaining))
+            elif cancelled.wait(min(1.0, remaining)):
+                return False
 
 
 async def wait_for_sandbox_ready_async(

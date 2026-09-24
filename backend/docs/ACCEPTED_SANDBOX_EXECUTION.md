@@ -694,7 +694,9 @@ so it answers while every slot is busy; durable profiles keep materializing
 before the run starts, because their evidence binds at start. Two things do
 reach them: a capacity refusal from their materializer now keeps its type and
 ends the run with the capacity message rather than the opaque binding error,
-and Stop reaches their capacity wait the same way. Because the lead holds no projection
+and Stop reaches their capacity wait the same way, and the readiness wait of a
+container the call started (torn down under the fences before the run ends).
+Because the lead holds no projection
 consumer until its own first sandbox call, a task it delegates first activates
 one of its own under its sandbox lease identity (`subagent:<task>`) rather than
 the lead's `run:<id>:lead`, and its executor drops it however the task ends: the
