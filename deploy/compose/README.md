@@ -1680,7 +1680,12 @@ that stop reason is recorded as failed, since nobody reads an unattended
 answer. A turn that calls no sandbox-backed tool (a plain chat, or one that
 only asks a clarifying question) never acquires, waits for or evicts a
 sandbox, and answers while both slots are busy. Stop during the wait ends it
-at once and the turn is recorded as cancelled, holding no slot. The control UI
+at once and the turn is recorded as cancelled, holding no slot. Stop while a
+container the turn started is still booting ends the turn within seconds too:
+it is torn down at its next readiness probe instead of after `ready_timeout`
+(the `docker run` and the teardown still take their few seconds), and its slot
+is free when the turn ends. A turn waiting on the chat's prewarm build is the
+exception: Stop waits for that build, which the chat keeps. The control UI
 is unaffected; nothing queues behind the budget. Eviction is
 customer-visible too: a thread whose sandbox was evicted
 gets a fresh one at its next sandbox-backed tool call (its files persist under

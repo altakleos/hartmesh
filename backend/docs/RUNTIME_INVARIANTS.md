@@ -119,9 +119,13 @@ root's. Markdown links resolve from this file.
   `sandbox.capacity_wait_timeout` (default 5 s, 0 refuses at once, bounded at
   300; Stop ends it on every path a run awaits: the async create path cancels its awaited
   wait, and a worker-thread acquisition, such as the accepted projection's,
-  leaves it through a cancel signal the caller sets, before reserving a slot;
-  the budget still bounds work already past the wait and a purely
-  synchronous caller, which no Stop reaches) and refuses with
+  leaves it through a cancel signal the caller sets, before reserving a slot
+  or sending a create; the readiness wait of a container that call started
+  watches the same signal and tears it down under the ordinary fences before
+  the run ends. The backend's create call, a bind or teardown under way, a
+  turn queued behind the chat's prewarm build, and a purely synchronous
+  caller, which no Stop reaches, stay bounded by their budgets)
+  and refuses with
   `SandboxCapacityExceededError` — a typed retryable outcome whose
   `tool_error_type` tells the model to summarize rather than retry, read off
   the exception rather than matched in its text. The wait is one

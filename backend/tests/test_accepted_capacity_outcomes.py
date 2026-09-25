@@ -34,6 +34,7 @@ from test_accepted_skill_snapshots import (  # noqa: F401 - the fixture is used 
 )
 from test_sandbox_warm_reuse_latency import _aio_mod, _FakeBackend, _make_provider
 
+from deerflow.community.aio_sandbox import backend as readiness
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import SANDBOX_CAPACITY_STOP_REASON, RunContext, run_agent
@@ -367,6 +368,65 @@ async def test_stop_during_the_capacity_wait_ends_the_turn_as_cancelled_promptly
     assert _live(backend) == sorted(held), "no set was created after Stop"
     assert provider._starting == set(), "no reservation left behind"
     assert not getattr(provider, "_capacity_async_waiters", None), "no queued acquisition left behind"
+
+
+class _BootingSession:
+    """A readiness probe session for a sandbox that is still booting: every probe is refused."""
+
+    def __init__(self, probed: threading.Event) -> None:
+        self._probed = probed
+        self.trust_env = True
+        self.headers: dict[str, str] = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        return None
+
+    def get(self, url, *, timeout):
+        del url, timeout
+        self._probed.set()
+        raise readiness.requests.exceptions.ConnectionError("refused")
+
+
+@pytest.mark.anyio
+async def test_stop_during_a_cold_start_ends_the_turn_without_waiting_for_readiness(tmp_path, monkeypatch, snapshot_paths):  # noqa: F811
+    """Stop after the slot is reserved, while the new container boots.
+
+    Before, the worker thread's readiness wait could not see the Stop: the
+    turn ended only once the container answered or the readiness budget ran
+    out (120 s on the tenant profile), and the person watched a Stop that did
+    not stop. Now the wait watches the same stop signal as the capacity wait,
+    so the unready container is torn down at once, under the ordinary
+    ownership fences, before the turn ends: no slot, reservation or container
+    outlives it.
+    """
+    provider, backend = _make_provider(tmp_path, monkeypatch, replicas=2)
+    provider._config["ready_timeout"] = 10
+    aio = _aio_mod()
+    probed = threading.Event()
+    monkeypatch.setattr(aio, "wait_for_sandbox_ready", readiness.wait_for_sandbox_ready)
+    monkeypatch.setattr(readiness.requests, "Session", lambda: _BootingSession(probed))
+    _install_provider(monkeypatch, provider)
+    manager, record = await _admitted_run(monkeypatch, tmp_path)
+    bridge = _bridge()
+    task = asyncio.create_task(_run(bridge, manager, record, _bash_turn_model()))
+    record.task = task
+
+    assert await asyncio.to_thread(probed.wait, 5), "the turn never started a sandbox"
+
+    stopped = time.monotonic()
+    await manager.cancel(record.run_id)
+    await asyncio.wait_for(task, timeout=15)
+    elapsed = time.monotonic() - stopped
+
+    assert elapsed < 1.0, f"Stop took {elapsed:.2f}s: it waited out the readiness budget"
+    assert record.status is RunStatus.interrupted, (record.status, record.error, _published(bridge, "error"))
+    assert backend.created and backend.destroyed == backend.created, "the unready container was torn down before the turn ended"
+    assert _live(backend) == []
+    assert provider._starting == set(), "no reservation left behind"
+    assert provider._sandboxes == {} and provider._warm_pool == {}
 
 
 def test_a_stop_that_lands_during_admission_evicts_no_parked_sandbox(tmp_path, monkeypatch):

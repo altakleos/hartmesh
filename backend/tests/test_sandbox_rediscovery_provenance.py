@@ -32,7 +32,9 @@ tests assert on the journal's new counters and are the ones that fail by
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
+from types import SimpleNamespace
 
 import pytest
 from test_sandbox_warm_reuse_latency import ACCEPTED_USER, _acquire_accepted, _aio_mod, _binding, _make_provider
@@ -204,6 +206,195 @@ async def test_cleanup_is_awaited_through_repeated_cancellation(tmp_path, monkey
 
     assert foreign in provider._warm_pool, "cleanup ran to completion despite the second cancel"
     assert backend.destroyed == []
+
+
+def _booting(monkeypatch) -> threading.Event:
+    """Readiness never answers, as while a container boots; set once the first probe is sent."""
+    from deerflow.community.aio_sandbox import backend as readiness
+
+    probed = threading.Event()
+
+    class _Session:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            return None
+
+        def get(self, url, *, timeout):
+            probed.set()
+            raise readiness.requests.exceptions.ConnectionError("refused")
+
+    monkeypatch.setattr(_aio_mod(), "wait_for_sandbox_ready", readiness.wait_for_sandbox_ready)
+    monkeypatch.setattr(readiness.requests, "Session", _Session)
+    return probed
+
+
+@pytest.mark.anyio
+async def test_a_stop_during_readiness_rolls_the_start_back_inside_the_turn(tmp_path, monkeypatch, caplog):
+    """The unready container is torn down before the Stop returns, and the turn's record says so.
+
+    It is a stopped attempt, not a failed one: the readiness budget did not
+    run out, so the journal counts the create and its teardown and no failure.
+    """
+    caplog.set_level(logging.INFO, logger="deerflow.community.aio_sandbox")
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    provider._config["ready_timeout"] = 10
+    probed = _booting(monkeypatch)
+
+    with turn_phases(correlation_id="stop-during-readiness") as journal:
+        task = asyncio.create_task(
+            provider.provision_accepted_skills_async("thread-booting", user_id=ACCEPTED_USER, binding=_binding()),
+        )
+        assert await asyncio.to_thread(probed.wait, 5)
+        task.cancel("Stop while the container boots")
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=2)
+
+    assert backend.created and backend.destroyed == backend.created
+    assert provider._starting == set()
+    assert provider._sandboxes == {} and provider._warm_pool == {}
+    snapshot = journal.snapshot()
+    assert (snapshot.create_attempts, snapshot.resource_creates, snapshot.resource_teardowns) == (1, 1, 1)
+    assert snapshot.failed_attempts == 0, "a Stop is not a failed start"
+    assert "stopped before it held a sandbox" in caplog.text
+    assert not [record for record in caplog.records if record.levelname in ("WARNING", "ERROR")], "a Stop is not logged as a failure"
+
+
+@pytest.mark.anyio
+async def test_a_readiness_timeout_with_no_stop_still_fails_the_attempt(tmp_path, monkeypatch):
+    """Every accepted acquisition carries a stop event now; an unset one must not turn a timeout into a Stop."""
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    seen: list[object] = []
+
+    def _timed_out(url, timeout, **kwargs):
+        seen.append(kwargs.get("cancelled"))
+        return False
+
+    monkeypatch.setattr(_aio_mod(), "wait_for_sandbox_ready", _timed_out)
+    with turn_phases(correlation_id="timeout-not-stop") as journal:
+        with pytest.raises(RuntimeError, match="failed to become ready"):
+            await provider.provision_accepted_skills_async("thread-slow", user_id=ACCEPTED_USER, binding=_binding())
+
+    assert len(seen) == 1 and isinstance(seen[0], threading.Event) and not seen[0].is_set(), "the event was carried, unset"
+    assert backend.created and backend.destroyed == backend.created
+    assert journal.snapshot().failed_attempts == 1
+
+
+@pytest.mark.anyio
+async def test_a_stopped_start_a_peer_took_over_is_left_to_the_peer(tmp_path, monkeypatch):
+    """The Stop's teardown is the unready path's, so its ownership fence holds too."""
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    provider._config["ready_timeout"] = 10
+    probed = _booting(monkeypatch)
+    monkeypatch.setattr(provider, "_claim_ownership", lambda *_a, **_k: False)
+
+    task = asyncio.create_task(
+        provider.provision_accepted_skills_async("thread-taken", user_id=ACCEPTED_USER, binding=_binding()),
+    )
+    assert await asyncio.to_thread(probed.wait, 5)
+    task.cancel("Stop while the container boots")
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=2)
+
+    assert backend.destroyed == [], "a container a peer owns is never stopped by this process"
+    assert provider._starting == set()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("provenance", ["rediscovered", "unknown"])
+async def test_a_stop_during_create_leaves_a_container_it_did_not_start_to_the_origin_rule(tmp_path, monkeypatch, provenance):
+    """Stop cuts short the readiness wait of a container this call started, and only that.
+
+    A container the backend rediscovered was already running (the local
+    backend reports it only after probing it healthy), and one whose backend
+    did not say is never presumed created, so neither is this call's to
+    destroy: it answers its first probe and the cancelled caller parks it, as
+    the origin rule says. Letting the Stop end its readiness wait
+    before that probe would tear a healthy container down.
+    """
+    from deerflow.community.aio_sandbox import backend as readiness
+
+    class _Healthy:
+        trust_env = True
+
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc) -> None:
+            return None
+
+        def get(self, url, *, timeout):
+            return SimpleNamespace(status_code=200)
+
+    provider, backend = _make_provider(tmp_path, monkeypatch, adopt_on_conflict=True)
+    provider._config["ready_timeout"] = 10
+    foreign = _seed_foreign_container(backend, provider, "thread-found")
+    monkeypatch.setattr(_aio_mod(), "wait_for_sandbox_ready", readiness.wait_for_sandbox_ready)
+    monkeypatch.setattr(readiness.requests, "Session", _Healthy)
+    in_create = threading.Event()
+    finish_create = threading.Event()
+    real_create = backend.create
+
+    def _slow_create(*args, **kwargs):
+        in_create.set()
+        assert finish_create.wait(timeout=5)
+        info = real_create(*args, **kwargs)
+        info.provenance = provenance
+        return info
+
+    monkeypatch.setattr(backend, "create", _slow_create)
+
+    task = asyncio.create_task(
+        provider.provision_accepted_skills_async("thread-found", user_id=ACCEPTED_USER, binding=_binding(run_id="run-2")),
+    )
+    assert await asyncio.to_thread(in_create.wait, 5)
+    task.cancel("Stop while create is in flight")
+    await asyncio.sleep(0.05)  # the caller's handler sets the stop event
+    finish_create.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+
+    assert backend.adopted == [foreign]
+    assert backend.destroyed == [], "a healthy rediscovered container is parked, never destroyed"
+    assert foreign in provider._warm_pool
+
+
+@pytest.mark.anyio
+async def test_a_stop_after_the_slot_is_reserved_builds_nothing(tmp_path, monkeypatch):
+    """A Stop between admission and create sends no create, rather than build a set only to stop it."""
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    admitted = threading.Event()
+    proceed = threading.Event()
+    real_admit = provider._admit_create
+
+    def _admit_then_pause(*args, **kwargs):
+        real_admit(*args, **kwargs)
+        admitted.set()
+        assert proceed.wait(timeout=5)
+
+    monkeypatch.setattr(provider, "_admit_create", _admit_then_pause)
+
+    task = asyncio.create_task(
+        provider.provision_accepted_skills_async("thread-reserved", user_id=ACCEPTED_USER, binding=_binding()),
+    )
+    assert await asyncio.to_thread(admitted.wait, 5)
+    task.cancel("Stop once the slot is reserved")
+    await asyncio.sleep(0.05)  # the caller's handler sets the stop event
+    proceed.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(task, timeout=5)
+
+    assert backend.created == [], "no container was built for a stopped turn"
+    assert provider._starting == set(), "the reserved slot is released"
 
 
 def test_same_id_input_drift_at_capacity_replaces_our_own_and_spares_the_unrelated_thread(tmp_path, monkeypatch):
