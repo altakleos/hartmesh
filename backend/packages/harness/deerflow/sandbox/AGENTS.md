@@ -123,7 +123,8 @@ the one resolver in tools, middleware, and output budgeting; raw provider
 `tests/test_sandbox_handle_boundary.py` fail that test. `operations.py`
 declares every `Sandbox` verb and generates the fenced facade; it refuses to
 import if a verb is undeclared. `capabilities.py` holds the optional provider
-contracts (`AcceptedSkillProjection`, `AcceptedMaterialization`) negotiated
+contracts (`AcceptedSkillProjection`, `AcceptedMaterialization`,
+`OwnerSandboxEnding`) negotiated
 through `SandboxProvider.capability` / `sandbox_capability`, failing closed on
 `None`; `accepted_projection.py` is the projection Material (provision, then
 bind under the consumer-token coordinator). `accepted_material.py` owns the

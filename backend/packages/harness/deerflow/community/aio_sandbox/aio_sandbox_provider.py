@@ -48,6 +48,7 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATION_ID
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
+from deerflow.runtime.owner_holdings import ANY_OWNER, Ended, get_owner_holdings
 from deerflow.runtime.turn_phases import (
     AcquisitionSource,
     TurnPhase,
@@ -82,6 +83,7 @@ from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.capabilities import (
     AcceptedMaterialization,
     AcceptedSkillProjection,
+    OwnerSandboxEnding,
     WorkspacePrewarm,
     reject_writable_accepted_skill_aliases,
 )
@@ -306,6 +308,7 @@ class AioSandboxProvider(
     AcceptedSkillProjection,
     AcceptedMaterialization,
     WorkspacePrewarm,
+    OwnerSandboxEnding,
 ):
     """Sandbox provider that manages containers running the AIO sandbox.
 
@@ -4782,6 +4785,15 @@ class AioSandboxProvider(
         sandbox = None
         thread_keys_to_remove: list[tuple[str, str]] = []
 
+        # A turn that ends after its owner was turned off -- a cancelled run
+        # unwinding -- must not park the sandbox for a next turn that cannot
+        # come, with whatever it left running inside: stop it instead.
+        identity = self._identity_for_sandbox(sandbox_id)
+        holdings = get_owner_holdings()
+        if identity is not None and holdings.is_refused(identity[0]):
+            holdings.note_late_ending(identity[0], "sandboxes", self._end_sandbox_for_refused_owner(sandbox_id))
+            return
+
         with self._lock:
             sandbox = self._sandboxes.pop(sandbox_id, None)
             info = self._sandbox_infos.pop(sandbox_id, None)
@@ -4824,6 +4836,41 @@ class AioSandboxProvider(
                 self._forget_lost_sandbox(sandbox_id, expected_epoch=epoch)
 
         logger.info(f"Released sandbox {sandbox_id} to warm pool (container still running)")
+
+    def end_sandboxes_for_owners(self, owners: frozenset[str]) -> dict[str, Ended]:
+        """Stop every sandbox tracked for any of ``owners``, in a turn or parked (``OwnerSandboxEnding``).
+
+        Each goes through ``destroy``, with its fences: a set whose stop is
+        refused (another instance owns it, or this one is already tearing it
+        down) or fails stays tracked, and is reported not ended -- a
+        container is ended only once it is no longer tracked here at all.
+        """
+        with self._lock:
+            identities: dict[str, tuple[str, str] | None] = dict(self._warm_pool_identity)
+            identities.update({sandbox_id: key for key, sandbox_id in self._thread_sandboxes.items()})
+            identities.update({sandbox_id: identity for sandbox_id, identity in self._active_sandbox_identity.items() if identity is not None})
+            targets = {sandbox_id: identity[0] for sandbox_id, identity in identities.items() if identity is not None and identity[0] in owners}
+            # Taken over from a previous process without learning whose: any
+            # of them may be a refused owner's, so none is confirmed ended.
+            unattributed = sum(1 for identity in identities.values() if identity is None)
+        outcome: dict[str, Ended] = {}
+        for sandbox_id, owner in sorted(targets.items()):
+            ended = self._end_sandbox_for_refused_owner(sandbox_id)
+            before = outcome.get(owner, Ended())
+            outcome[owner] = Ended(before.count + ended.count, before.failed + ended.failed)
+        if unattributed and owners:
+            outcome[ANY_OWNER] = Ended(0, failed=unattributed)
+        return outcome
+
+    def _end_sandbox_for_refused_owner(self, sandbox_id: str) -> Ended:
+        """Stop one sandbox; ended only once nothing here tracks or is still tearing it down."""
+        try:
+            self.destroy(sandbox_id)
+        except Exception:  # noqa: BLE001 - reported as not ended; the cleanup retry owns it now
+            logger.warning("Stopping sandbox %s for a refused owner failed", sandbox_id, exc_info=True)
+        with self._lock:
+            still_there = sandbox_id in self._sandboxes or sandbox_id in self._sandbox_infos or sandbox_id in self._warm_pool or self._being_torn_down_locally(sandbox_id)
+        return Ended(0, failed=1) if still_there else Ended(1)
 
     def _identity_for_sandbox(self, sandbox_id: str) -> tuple[str, str] | None:
         """Whose sandbox this is, from whichever map currently holds it.

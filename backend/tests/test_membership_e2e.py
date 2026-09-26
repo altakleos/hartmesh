@@ -211,10 +211,11 @@ def _accounts(gateway: e2e._Gateway, *args: str) -> tuple[int, dict[str, Any]]:
     lines = [line for line in completed.stdout.splitlines() if line.strip()]
     assert len(lines) == 1, f"one JSON document on stdout, got: {completed.stdout!r} / {completed.stderr[-800:]!r}"
     document = json.loads(lines[0])
-    # A non-zero status means either a refusal (``error``) or a run the command
-    # could not confirm stopped (``runs_unconfirmed``); one of the two must say
-    # why, and a zero status must claim neither.
-    failed = "error" in document or bool(document.get("runs_unconfirmed"))
+    # A non-zero status means a refusal (``error``), a run the command could
+    # not confirm stopped (``runs_unconfirmed``) or a surface it could not
+    # (``surfaces_unconfirmed``); one of them must say why, and a zero status
+    # must claim none.
+    failed = "error" in document or bool(document.get("runs_unconfirmed")) or bool(document.get("surfaces_unconfirmed"))
     assert (completed.returncode != 0) == failed, (completed.returncode, document)
     return completed.returncode, document
 
@@ -414,12 +415,18 @@ class TestMembership:
             t_command = time.monotonic()
             code, document = _accounts(gateway, "disable", "--issuer", issuer, "--subject", "sub-off")
             t_disabled = time.monotonic()
-            assert code == 0, document
+            # 2, and only for the sandboxes: this Gateway runs bash on the host
+            # (the local provider), which has no way to stop what a run left
+            # running, and says so rather than report nothing held.
+            assert code == 2 and document["surfaces_unconfirmed"] == ["sandboxes"], document
+            sandboxes = document["surfaces"]["sandboxes"]
+            assert sandboxes["action"] == "not_reached" and len(sandboxes["processes_unreached"]) == 1 and sandboxes["stopped_after_ms"] is None, sandboxes
+            assert document["surfaces"]["running_work"]["confirmed_by"] == "run_status", "a run whose sandbox was not confirmed stopped reports only its row"
             assert document["verdict"] == "disabled" and document["sessions_ended"] is True and document["tokens_revoked"] == 1 and document["schedules_held"] == 1, document
             # The run: ended, and the command waited to say so rather than
             # reporting a write as a stopped run.
             assert document["runs_found"] == 1 and document["runs_cancelled"] == 1, document
-            assert document["runs_unconfirmed"] == [] and document["returncode"] == 0, document
+            assert document["runs_unconfirmed"] == [] and document["returncode"] == 2, document
             assert _run_status() == ("interrupted",), "the command returned before the run was terminal"
             assert t_disabled - t_command < 120, "the command took longer than the run it was ending"
             # The work stopped, not only the output: the process is gone, well
@@ -454,7 +461,8 @@ class TestMembership:
             sse = document["surfaces"]["sse_streams"]
             assert sse["action"] == "ended" and sse["count"] == 1 and sse["confirmed_by"] == "gateway_record" and sse["processes"] == 1, document["surfaces"]
             assert document["surfaces"]["sign_in"]["stopped_after_ms"] <= sse["stopped_after_ms"] <= document["elapsed_ms"], document["surfaces"]
-            assert document["surfaces_unconfirmed"] == [], document
+            for retained in ("mcp_sessions", "browser_sessions", "memory_updates"):
+                assert document["surfaces"][retained]["stopped_after_ms"] is not None and document["surfaces"][retained]["processes"] == 1, document["surfaces"][retained]
             observed = stream.get("observed") or stream["so_far"]
             assert "cut" in stream or observed.t_end is not None, "the stream never closed"
             # The command's own output, which only exists if the sleep

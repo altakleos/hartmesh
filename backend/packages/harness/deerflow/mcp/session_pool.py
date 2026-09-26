@@ -61,6 +61,8 @@ from mcp import ClientSession
 from mcp.shared.exceptions import McpError
 from mcp.types import CONNECTION_CLOSED
 
+from deerflow.runtime.owner_holdings import Ended
+
 logger = logging.getLogger(__name__)
 
 _MCP_CLOSED_STREAM_ERRORS = (
@@ -127,6 +129,17 @@ async def call_pooled_session_tool(
             if await _finish_session_cleanup(cleanup, server_name):
                 raise asyncio.CancelledError
         raise
+
+
+def session_scope_key(user_id: str, thread_id: str) -> str:
+    """The scope a pooled session belongs to: one owner's one thread (``session_scope_owner`` reads it back)."""
+    return f"{user_id}:{thread_id}"
+
+
+def session_scope_owner(scope_key: str) -> str | None:
+    """The owner a scope from ``session_scope_key`` belongs to, or ``None`` for a scope without one."""
+    owner, separator, _thread = scope_key.partition(":")
+    return owner if separator and owner else None
 
 
 class MCPSessionPool:
@@ -689,6 +702,26 @@ class MCPSessionPool:
             inflight = [self._inflight.pop(k) for k in inflight_keys]
         await self._close_owners(entries, inflight)
 
+    async def close_for_owners(self, owners: frozenset[str]) -> dict[str, Ended]:
+        """Close every session whose scope belongs to one of ``owners``; how many, by owner.
+
+        A session outlives the run that opened it (there is no idle expiry),
+        so a person turned off would otherwise keep a live connection to each
+        server, holding whatever the server keeps for it, until the process ends.
+        """
+        with self._lock:
+            keys = [key for key in self._entries if session_scope_owner(key[1]) in owners]
+            entries = [self._entries.pop(key) for key in keys]
+            inflight_keys = [key for key in self._inflight if session_scope_owner(key[1]) in owners]
+            inflight = [self._inflight.pop(key) for key in inflight_keys]
+        await self._close_owners(entries, inflight)
+        counts: dict[str, int] = {}
+        for _server, scope_key in keys + inflight_keys:
+            owner = session_scope_owner(scope_key)
+            if owner is not None:
+                counts[owner] = counts.get(owner, 0) + 1
+        return {owner: Ended(count) for owner, count in counts.items()}
+
     async def close_session(self, server_name: str, scope_key: str) -> None:
         """Close one exact server/scope session so a retry reconnects cleanly."""
         key = (server_name, scope_key)
@@ -812,6 +845,12 @@ def get_session_pool() -> MCPSessionPool:
     with _pool_lock:
         if _pool is None:
             _pool = MCPSessionPool()
+        return _pool
+
+
+def get_initialized_session_pool() -> MCPSessionPool | None:
+    """The pool, only when something has already started it."""
+    with _pool_lock:
         return _pool
 
 

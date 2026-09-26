@@ -27,6 +27,12 @@ Contracts:
   selected per run. Only a provider with current external qualification
   evidence answers a selection.
 
+* :class:`OwnerSandboxEnding`: stop every sandbox this process keeps for an
+  owner nothing may act for any more -- in a turn or parked -- and say which
+  it could not confirm stopped. A provider without it cannot end a refused
+  owner's sandboxes, and the account command reports that surface as not
+  reached rather than as nothing held.
+
 Upstream's network policy hooks and skill projection sync stay on the base
 class because upstream's middleware calls them there; they are the next
 candidates for this negotiation once upstream adopts it.
@@ -47,6 +53,7 @@ from deerflow.sandbox.accepted_material import (
 )
 
 if TYPE_CHECKING:
+    from deerflow.runtime.owner_holdings import Ended
     from deerflow.runtime.skill_projection import SkillProjectionClear
     from deerflow.runtime.skill_snapshot import AcceptedSkillSnapshot
     from deerflow.sandbox.accepted_material import AcceptedMaterializerSelection
@@ -254,6 +261,25 @@ def reject_writable_accepted_skill_aliases(
         ) from exc
 
 
+class OwnerSandboxEnding:
+    """End every sandbox this process keeps for the given owners.
+
+    A parked sandbox outlives the run that used it, and so does whatever
+    that run left running inside it: a detached process no run cancel
+    reaches. Stopping the container is what ends it. A provider that
+    inherits this contract stops each sandbox it tracks for any of
+    ``owners``, whether a turn is using it or it is parked, and counts one
+    as ended only once its resources are confirmed absent.
+    """
+
+    def end_sandboxes_for_owners(self, owners: frozenset[str]) -> dict[str, Ended]:
+        """Stop each sandbox kept for any of ``owners``; by owner, how many stopped and how many are not confirmed stopped.
+
+        Blocking: it waits on the container runtime.
+        """
+        raise NotImplementedError
+
+
 class WorkspacePrewarm:
     """Build a thread's accepted-projection sandbox before its first turn.
 
@@ -301,6 +327,7 @@ class WorkspacePrewarm:
 __all__ = [
     "AcceptedMaterialization",
     "AcceptedSkillProjection",
+    "OwnerSandboxEnding",
     "WorkspacePrewarm",
     "reject_writable_accepted_skill_aliases",
     "sandbox_capability",

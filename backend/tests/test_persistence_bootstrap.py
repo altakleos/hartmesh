@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0044_refusal_sweeps"
+HEAD = "0045_refusal_sweep_reach"
 BASELINE = "0001_baseline"
 
 

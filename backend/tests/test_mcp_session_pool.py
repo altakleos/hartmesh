@@ -2909,3 +2909,41 @@ async def test_mcp_tools_routed_to_source_server_with_prefix_overlap():
     routing = dict(routed)
     assert routing["web_scraper_search"] == "web_scraper", f"tool mis-routed to {routing.get('web_scraper_search')!r}, expected 'web_scraper'"
     assert routing["web_open"] == "web"
+
+
+@pytest.mark.asyncio
+async def test_closing_the_sessions_kept_for_refused_owners_closes_theirs_and_no_one_elses():
+    """A pooled session is scoped to its owner and thread (``session_scope_key``), and outlives the run that opened it."""
+    from deerflow.mcp.session_pool import session_scope_key
+    from deerflow.runtime.owner_holdings import Ended
+
+    pool = MCPSessionPool()
+
+    class CmFactory:
+        def __init__(self):
+            self.closed = False
+
+        async def __aenter__(self):
+            return AsyncMock()
+
+        async def __aexit__(self, *args):
+            self.closed = True
+            return False
+
+    cms: dict[str, CmFactory] = {}
+
+    def make_cm(*a, **kw):
+        cm = CmFactory()
+        cms[f"cm-{len(cms)}"] = cm
+        return cm
+
+    connection = {"transport": "stdio", "command": "x", "args": []}
+    with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
+        await pool.get_session("files", session_scope_key("pat", "thread-1"), connection)
+        await pool.get_session("search", session_scope_key("pat", "thread-2"), connection)
+        await pool.get_session("files", session_scope_key("sam", "thread-3"), connection)
+        await pool.get_session("files", session_scope_key("patrick", "thread-4"), connection)
+
+    assert await pool.close_for_owners(frozenset({"pat", "lee"})) == {"pat": Ended(2)}
+    assert [cm.closed for cm in cms.values()] == [True, True, False, False], "the owner, not a prefix of another's"
+    assert await pool.close_for_owners(frozenset({"pat"})) == {}

@@ -133,9 +133,17 @@ The ``disable`` and role-limit documents say when each surface stopped:
 ``stopped_at``, that offset added to ``started_at``. A surface refused or
 limited at its next use reports the commit. A surface a Gateway process
 ends reports when every live process had confirmed (``confirmed_by:
-gateway_record``). A surface the command could not confirm is named under
-``surfaces_unconfirmed`` and makes the exit status 2; ``runs_unconfirmed``
-keeps naming only runs.
+gateway_record``), with how many each could not confirm ended
+(``not_ended``). What a process keeps for a person between requests
+(``app.gateway.retained_state``: sandboxes, pooled MCP sessions, browsers,
+queued memory updates) is confirmed by a second check once the runs are
+over, because a run that is ending parks its sandbox as it goes; a surface
+some process has no way to end at all is ``not_reached``. ``running_work``
+reports when the runs' sandboxes were confirmed stopped (``confirmed_by:
+sandbox_gone``), or, where they were not, only when the run rows went
+terminal (``run_status``). A surface the command could not confirm is named
+under ``surfaces_unconfirmed`` and makes the exit status 2;
+``runs_unconfirmed`` keeps naming only runs.
 """
 
 from __future__ import annotations
@@ -152,7 +160,9 @@ from typing import Any
 
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+from app.gateway.retained_state import RETAINED_SURFACES
 from deerflow.persistence.user.access import LIMIT_ROLES, issuer_key, limited_role
+from deerflow.runtime.owner_holdings import ANY_OWNER
 
 logger = logging.getLogger(__name__)
 
@@ -214,11 +224,18 @@ ACTION_LEFT_ALONE = "left_alone"
 ACTION_LIFTED = "lifted"
 ACTION_REFUSED_AT_NEXT_USE = "refused_at_next_use"
 ACTION_REVOKED = "revoked"
+#: A surface some live Gateway process has no way to end (``gateway_processes.unreached``).
+ACTION_NOT_REACHED = "not_reached"
 
 #: What a ``running_work`` stop time was confirmed from: the run rows reached
 #: a terminal status. The cancellation also attempts to kill the sandbox
 #: command in flight, which this process cannot observe.
 CONFIRMED_BY_RUN_STATUS = "run_status"
+
+#: A ``running_work`` stop time that is also when every live process
+#: confirmed it had stopped the sandboxes the runs used, and with them the
+#: command in flight, its children and anything the runs left running.
+CONFIRMED_BY_SANDBOX_GONE = "sandbox_gone"
 
 #: What a connection surface's stop time was confirmed from: every live
 #: Gateway process recorded that it had looked for refused owners after the
@@ -228,6 +245,11 @@ CONFIRMED_BY_GATEWAY_RECORD = "gateway_record"
 #: The connections a Gateway process holds open for an account after it
 #: authenticated once (``app.gateway.owner_connections``).
 CONNECTION_SURFACES = ("websockets", "sse_streams", "downloads")
+
+#: Surfaces whose state outlives the process that kept it: a sandbox's
+#: container keeps running after its Gateway is gone, so with no live process
+#: to confirm them they are unconfirmed, never "nothing held".
+OUTLIVE_THEIR_PROCESS = ("sandboxes",)
 
 #: How often the command re-reads the processes' record while it waits.
 SWEEP_WAIT_POLL_SECONDS = 0.2
@@ -478,11 +500,12 @@ class AccountsCommand:
             clock.stopped("personal_access_tokens", ACTION_REVOKED, 0, at_ms=committed)
             clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, 0, at_ms=committed)
             clock.stopped("running_work", ACTION_ENDED, 0, at_ms=committed, confirmed_by=CONFIRMED_BY_RUN_STATUS)
-            await self._confirm_connections(check, [], clock)
+            await self._confirm_processes(check, check, [], clock, CONNECTION_SURFACES + RETAINED_SURFACES)
             document.update(clock.document())
+            document["surfaces_not_reached"] = []
             if document["surfaces_unconfirmed"]:
                 document["returncode"] = EXIT_UNCONFIRMED_RUNS
-            document["note"] = "no account existed for this identity; the refusal is recorded and a sign-in that would create one is refused"
+            document["note"] = "no account existed for this identity; the refusal is recorded and a sign-in that would create one is refused" + self._surfaces_note(clock)
             return document
         # The derived refusal already stops every session and token from the
         # commit; ending the sessions and revoking the tokens is what keeps
@@ -496,14 +519,24 @@ class AccountsCommand:
         clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, sum([await self._count_schedules(covered) for covered in accounts]), at_ms=committed)
         # The connections are confirmed while the runs unwind, not after: their
         # stop times are the processes' own, not the run wait's.
-        runs, _ = await asyncio.gather(self._end_running_work(accounts, relook=True), self._confirm_connections(check, accounts, clock))
+        runs, _ = await asyncio.gather(self._end_running_work(accounts, relook=True), self._confirm_processes(check, check, accounts, clock, CONNECTION_SURFACES))
         document.update(runs)
+        runs_ended_at = clock.now_ms()
+        # A run that is ending parks its sandbox, and may leave a pooled
+        # session or a queued memory update, after the first look: ask again
+        # now that the runs are over, and count what either look ended.
+        retained_check = await self._sweeps.request_check() if self._sweeps is not None else None
+        await self._confirm_processes(retained_check, check, accounts, clock, RETAINED_SURFACES)
+        sandboxes = clock.surfaces.get("sandboxes", {})
         if document["runs_unconfirmed"]:
             clock.not_stopped("running_work", ACTION_ENDED, document["runs_found"], unconfirmed=True, confirmed_by=CONFIRMED_BY_RUN_STATUS)
+        elif sandboxes.get("stopped_after_ms") is not None:
+            clock.stopped("running_work", ACTION_ENDED, document["runs_found"], at_ms=sandboxes["stopped_after_ms"], confirmed_by=CONFIRMED_BY_SANDBOX_GONE)
         else:
-            clock.stopped("running_work", ACTION_ENDED, document["runs_found"], confirmed_by=CONFIRMED_BY_RUN_STATUS)
+            clock.stopped("running_work", ACTION_ENDED, document["runs_found"], at_ms=runs_ended_at, confirmed_by=CONFIRMED_BY_RUN_STATUS)
         document["account"] = _account_document(await self._users.get_user_by_id(str(account.id)) or account)
         document.update(clock.document())
+        document["surfaces_not_reached"] = sorted(name for name, entry in clock.surfaces.items() if entry.get("action") == ACTION_NOT_REACHED)
         if document["surfaces_unconfirmed"]:
             document["returncode"] = EXIT_UNCONFIRMED_RUNS
         document["note"] = self._run_note(
@@ -511,23 +544,47 @@ class AccountsCommand:
             done="sessions are refused at their next request; every run this identity had executing was cancelled and its stream ended with it; no new run starts",
             undone="sessions are refused at their next request and no new run starts, but the runs named in `runs_unconfirmed` had not reached a terminal status when the wait ran out; re-run this command to see whether they have since",
         )
-        if clock.unconfirmed and set(clock.unconfirmed) != {"running_work"}:
-            document["note"] += (
+        document["note"] += self._surfaces_note(clock)
+        return document
+
+    @staticmethod
+    def _surfaces_note(clock: SurfaceClock) -> str:
+        """What the unconfirmed process surfaces mean, saying only what the processes' record showed."""
+        entries = {name: clock.surfaces[name] for name in clock.unconfirmed if name != "running_work"}
+        note = ""
+        if any(entry.get("processes_unconfirmed") for entry in entries.values()):
+            note += (
                 "; a Gateway process named under the surfaces in `surfaces_unconfirmed` had not recorded that it looked when the wait ran out, "
                 "so what it holds for this identity is not confirmed ended; re-run this command to see whether it has since"
             )
-        return document
+        not_ended = [name for name, entry in entries.items() if entry.get("not_ended")]
+        if not_ended:
+            note += (
+                f"; what {', '.join(not_ended)} counts under `not_ended` could not be confirmed ended -- it would not stop, or a Gateway keeps one whose owner it does not know, "
+                "such as a sandbox it took over after a restart, which its idle timeout ends; re-run this command to see whether it has since"
+            )
+        if any(name in OUTLIVE_THEIR_PROCESS and entry.get("processes") == 0 and not entry.get("processes_unconfirmed") and entry.get("action") != ACTION_NOT_REACHED for name, entry in entries.items()):
+            note += "; no Gateway process is running to confirm the sandboxes stopped, and a sandbox outlives its Gateway; re-run this command once the Gateway is up"
+        not_reached = [name for name, entry in entries.items() if entry.get("action") == ACTION_NOT_REACHED]
+        if not_reached:
+            note += (
+                f"; {', '.join(not_reached)} is `not_reached` (listed under `surfaces_not_reached`): the processes named under it have no way to end it in this deployment "
+                "(a sandbox provider that cannot stop an owner's sandboxes), so what a run left running there is not confirmed ended, and re-running this command will not change that"
+            )
+        return note
 
-    async def _confirm_connections(self, check: int | None, accounts: list[User], clock: SurfaceClock) -> None:
-        """Wait until every live Gateway process has acted on ``check``, then report what they ended.
+    async def _confirm_processes(self, check: int | None, since_check: int | None, accounts: list[User], clock: SurfaceClock, surfaces: tuple[str, ...]) -> None:
+        """Wait until every live Gateway process has acted on ``check``, then report what they ended of ``surfaces`` since ``since_check``.
 
         This process cannot see into a Gateway's memory; each Gateway looks
-        for refused owners among what it holds and records it. A process that
-        stopped beating holds nothing any more and is not waited on; one that
-        is beating but has not acted when the wait runs out is named, and the
-        connections are unconfirmed rather than assumed closed.
+        for refused owners among what it holds and keeps, and records it. A
+        process that stopped beating holds nothing any more and is not waited
+        on; one that is beating but has not acted when the wait runs out is
+        named, and the surfaces are unconfirmed rather than assumed ended. So
+        is a surface a process tried to end and could not (``not_ended``),
+        and one it has no way to end at all (``not_reached``).
         """
-        if self._sweeps is None or check is None:
+        if self._sweeps is None or check is None or since_check is None:
             return
         deadline = self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
         while True:
@@ -537,15 +594,35 @@ class AccountsCommand:
                 break
             await asyncio.sleep(SWEEP_WAIT_POLL_SECONDS)
         confirmed_at = clock.now_ms()
-        counts = dict.fromkeys(CONNECTION_SURFACES, 0)
-        for ending in await self._sweeps.endings_for([str(covered.id) for covered in accounts], since_check=check):
+        counts = dict.fromkeys(surfaces, 0)
+        not_ended = dict.fromkeys(surfaces, 0)
+        # ``ANY_OWNER`` rows are what a process could not attribute -- a
+        # subsystem that failed outright, or a sandbox it adopted without
+        # learning whose -- and so may be this identity's.
+        owners = [str(covered.id) for covered in accounts] + ([ANY_OWNER] if accounts else [])
+        for ending in await self._sweeps.endings_for(owners, since_check=since_check):
             if ending.surface in counts:
                 counts[ending.surface] += ending.count
-        # ``processes``: the live processes that confirmed; ``processes_unconfirmed``:
-        # the live ones that had not when the wait ran out, whose count is not in ``count``.
-        facts = {"confirmed_by": CONFIRMED_BY_GATEWAY_RECORD, "processes": len(live) - len(waiting), "processes_unconfirmed": waiting}
-        for surface in CONNECTION_SURFACES:
-            if waiting:
+                # Each look tries again what an earlier one could not end, so
+                # what is still there is what the looks on ``check`` could not.
+                if ending.check_id >= check:
+                    not_ended[ending.surface] += ending.failed
+        for surface in surfaces:
+            # Nothing can be kept for an identity with no account, reachable or not.
+            unreached = sorted(process.process_id for process in live if surface in process.unreached) if accounts else []
+            # ``processes``: the live processes that confirmed; ``processes_unconfirmed``:
+            # the live ones that had not when the wait ran out, whose count is not in ``count``.
+            facts = {
+                "confirmed_by": CONFIRMED_BY_GATEWAY_RECORD,
+                "processes": len(live) - len(waiting),
+                "processes_unconfirmed": waiting,
+                "processes_unreached": unreached,
+                "not_ended": not_ended[surface],
+            }
+            unvouched = surface in OUTLIVE_THEIR_PROCESS and not live and bool(accounts)
+            if unreached:
+                clock.not_stopped(surface, ACTION_NOT_REACHED, counts[surface], unconfirmed=True, **facts)
+            elif waiting or not_ended[surface] or unvouched:
                 clock.not_stopped(surface, ACTION_ENDED, counts[surface], unconfirmed=True, **facts)
             else:
                 clock.stopped(surface, ACTION_ENDED, counts[surface], at_ms=confirmed_at, **facts)
