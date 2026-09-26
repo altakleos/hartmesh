@@ -92,6 +92,7 @@ from app.runtime.invocation import (
     InvocationPrincipal,
     InvocationRuntime,
     NotFoundOrInvisible,
+    OwnerRefusedLaunchError,
     PreparedLaunch,
     TaskFactory,
     WorkerCoroutine,
@@ -2073,7 +2074,7 @@ async def _principal_projection_for_intent(
             # task, a channel message, an MCP task notification -- resolves
             # the owner here, so an account nothing may act for starts no run.
             logger.warning("Internal launch refused: owner %s is %s (%s)", sanitize_log_param(owner_user_id), refusal, intent.source_kind.value)
-            raise ValueError(f"trusted internal launch owner's account is {refusal}")
+            raise OwnerRefusedLaunchError(f"trusted internal launch owner's account is {refusal}")
         if intent.source_kind is InternalSourceKind.native_channel:
             facts = intent.native_channel
             if facts is None or not facts.provider:
@@ -2879,6 +2880,10 @@ class _GatewayLaunchNormalizer:
                     self._tenant,
                     external_scope,
                 )
+        except OwnerRefusedLaunchError:
+            # Not a malformed request: its owner is turned off, and the
+            # caller ends the queued work on this rather than retry it.
+            raise
         except ValueError as exc:
             if intent.source_kind is InternalSourceKind.http:
                 raise _keyed_request_error(str(exc)) from exc
@@ -4043,6 +4048,11 @@ async def start_run(
         )
     except ConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except OwnerRefusedLaunchError as exc:
+        # An internal caller launching for an owner who is turned off: a
+        # refusal, not a fault. Kept as the cause, for a caller that ends its
+        # queued work on it.
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except UnsupportedStrategyError as exc:
         raise HTTPException(status_code=501, detail=str(exc)) from exc
     except (CredentialAuditUnavailable, CredentialEvidenceError) as exc:
@@ -4275,6 +4285,8 @@ async def launch_mcp_task_notification_run(
                 trusted_notification_source=source,
             )
     except HTTPException as exc:
+        if isinstance(exc.__cause__, OwnerRefusedLaunchError):
+            raise exc.__cause__ from None
         if exc.status_code == 409:
             if isinstance(exc.__cause__, IdempotencyConflictError):
                 raise McpTaskNotificationLineageConflictError() from exc

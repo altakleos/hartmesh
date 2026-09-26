@@ -531,8 +531,8 @@ class McpTaskRepository:
         async with self._sf() as session:
             return {str(task_id): str(status) for task_id, status in (await session.execute(stmt)).all()}
 
-    async def count_pending_notifications(self, user_ids: list[str], *, tenant_digest: str) -> int:
-        """How many of these users' tasks have an event waiting to be delivered as a run."""
+    async def count_waiting_notifications(self, user_ids: list[str], *, tenant_digest: str) -> int:
+        """How many of these users' task events still wait to be delivered as a run: after ``end_waiting_notifications``, the ones a task loop held."""
         if not user_ids:
             return 0
         stmt = select(func.count()).where(
@@ -543,6 +543,52 @@ class McpTaskRepository:
         )
         async with self._sf() as session:
             return int((await session.execute(stmt)).scalar_one())
+
+    async def end_waiting_notifications(self, user_ids: list[str], *, error: str, tenant_digest: str) -> int:
+        """End every notification of these users' tasks still waiting to launch or to be retried; returns how many.
+
+        What ``disable`` does so that an event waiting while its owner was
+        turned off never launches after ``enable``: each is dead-lettered as
+        its retries running out would, with ``error`` saying why. One a task
+        loop holds right now is left to it -- its launch reads the refusal
+        and ends it the same way. A later event of the same task is new work
+        and pends as usual.
+        """
+        if not user_ids:
+            return 0
+        async with self._sf() as session:
+            database_clock = database_wall_clock_expression(session.get_bind().dialect.name)
+            rows = list(
+                (
+                    await session.execute(
+                        select(McpTaskRow)
+                        .where(
+                            self._tenant_scope(tenant_digest),
+                            McpTaskRow.user_id.in_(user_ids),
+                            McpTaskRow.event_version > McpTaskRow.notified_version,
+                            McpTaskRow.notification_status.in_(("pending", "claimed", "retry", "dispatched")),
+                            or_(
+                                McpTaskRow.notification_lease_expires_at.is_(None),
+                                McpTaskRow.notification_lease_expires_at <= database_clock,
+                            ),
+                        )
+                        .with_for_update(skip_locked=True)
+                    )
+                ).scalars()
+            )
+            database_now = await _database_now(session)
+            for row in rows:
+                row.notification_status = "dead_letter"
+                row.notification_error = error
+                row.next_notification_at = None
+                row.notification_lease_owner = None
+                row.notification_lease_expires_at = None
+                row.dispatch_version = None
+                row.dispatch_attempt = 0
+                row.dispatch_event = None
+                row.updated_at = database_now
+            await session.commit()
+            return len(rows)
 
     async def list_by_parent_run(
         self,

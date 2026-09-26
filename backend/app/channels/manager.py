@@ -56,6 +56,7 @@ from app.runtime import (
     InternalVerifiedNativeBindingKind,
     InvocationRuntime,
 )
+from app.runtime.invocation import OwnerRefusedLaunchError
 from deerflow.config.agents_config import load_agent_config, validate_agent_name
 from deerflow.config.paths import make_safe_user_id
 from deerflow.runtime import END_SENTINEL, StreamBridge
@@ -279,6 +280,8 @@ class _BoundIdentityRejection:
     # channel senders preserve per-connection context without trusting the
     # rejected inbound identity assertion.
     outbound_owner_user_id: str | None = None
+    # What a durable receipt completes as.
+    outcome_code: str = "identity_rejected"
 
 
 @dataclass(slots=True)
@@ -1613,6 +1616,18 @@ class ChannelManager:
                 result = {"run_id": record.run_id}
             else:
                 result = await client.runs.create(thread_id, assistant_id, **run_kwargs)
+        except OwnerRefusedLaunchError:
+            # Its owner is turned off. Kept, it would launch at this thread's
+            # next drain, after they are enabled again. The next entry is
+            # tried now: it may be another owner's, and one of the same
+            # owner's is dropped the same way.
+            logger.warning(
+                "[Manager] dropping a buffered follow-up whose owner is turned off: channel=%s thread_id=%s",
+                entry.channel_name,
+                thread_id,
+            )
+            await self._drain_followups_for_thread(client, thread_id)
+            return
         except IdempotencyConflictError:
             # The same provider identity produced different canonical caller
             # intent. Retrying can never succeed and would create an unbounded
@@ -2201,7 +2216,7 @@ class ChannelManager:
                 return (
                     InboundProcessingResult(
                         disposition=InboundProcessingDisposition.completed,
-                        outcome_code="identity_rejected",
+                        outcome_code=bound_identity_rejection.outcome_code,
                     )
                     if durable_receipt
                     else None
@@ -2251,6 +2266,23 @@ class ChannelManager:
                         disposition=InboundProcessingDisposition.completed,
                         outcome_code="rejected",
                     )
+        except OwnerRefusedLaunchError:
+            # The owner was turned off after the gate above read them as on,
+            # and the launch refused. Retrying would run the message once
+            # they are enabled again, so it ends here, as at the gate.
+            from app.gateway.auth import mode
+
+            logger.warning("Channel message refused at launch: channel=%s owner account is turned off", msg.channel_name)
+            try:
+                refusal = await _owner_refusal(msg) or mode.ACCOUNT_DISABLED
+            except Exception:  # noqa: BLE001 - the launch already said why; only the wording is at stake
+                refusal = mode.ACCOUNT_DISABLED
+            await self._send_error(msg, _owner_refusal_reply(refusal))
+            if durable_receipt:
+                return InboundProcessingResult(
+                    disposition=InboundProcessingDisposition.completed,
+                    outcome_code="owner_refused",
+                )
         except InvalidChannelSessionConfigError as exc:
             logger.warning(
                 "Invalid channel session config for %s (chat=%s): %s",
@@ -2343,7 +2375,7 @@ class ChannelManager:
         has_connection = bool(msg.connection_id)
         has_owner = bool(msg.owner_user_id)
         if not (has_connection and has_owner):
-            return _BoundIdentityRejection()
+            return await self._unbound_rejection(msg)
         if self._connection_repo is None:
             return _BoundIdentityRejection(message=BOUND_IDENTITY_UNAVAILABLE_MESSAGE)
 
@@ -2358,7 +2390,7 @@ class ChannelManager:
             workspace_id=msg.workspace_id or None,
         )
         if connection is None:
-            return _BoundIdentityRejection()
+            return await self._unbound_rejection(msg)
 
         connection_id = connection.get("id")
         owner_user_id = connection.get("owner_user_id")
@@ -2375,6 +2407,40 @@ class ChannelManager:
             )
             return None
         return _BoundIdentityRejection(outbound_connection_id=connection_id, outbound_owner_user_id=owner_user_id)
+
+    async def _unbound_rejection(self, msg: InboundMessage) -> _BoundIdentityRejection:
+        """The rejection for a message no connected binding claims, telling a turned-off owner so rather than to connect.
+
+        ``disable`` holds its owner's bindings, so their messages arrive
+        unclaimed. While the owner is refused they are answered with the words
+        the web app gives the refusal; once the owner is back, a held binding
+        is one to connect again, and the ordinary answer says how.
+        """
+        if self._connection_repo is None:
+            return _BoundIdentityRejection()
+        from deerflow.persistence.channel_connections.sql import HELD_STATUS
+
+        for workspace_id in dict.fromkeys((msg.workspace_id or None, None)):
+            held = await self._connection_repo.find_connection_by_external_identity(
+                provider=msg.channel_name,
+                external_account_id=msg.user_id,
+                workspace_id=workspace_id,
+                status=HELD_STATUS,
+            )
+            if held is None:
+                continue
+            from app.gateway.auth import mode
+
+            refusal = await mode.owner_is_refused(str(held["owner_user_id"]))
+            if refusal is None:
+                break
+            return _BoundIdentityRejection(
+                message=_owner_refusal_reply(refusal),
+                outbound_connection_id=held.get("id"),
+                outbound_owner_user_id=held.get("owner_user_id"),
+                outcome_code="owner_refused",
+            )
+        return _BoundIdentityRejection()
 
     async def _reject_unbound_channel_message(
         self,

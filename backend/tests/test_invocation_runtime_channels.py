@@ -329,7 +329,10 @@ async def test_forged_or_revoked_connection_facts_never_reach_runtime(
     )
 
     assert runtime.intents == []
-    assert len(repository.lookups) == 1
+    # One re-read of the connected binding; an unclaimed message also asks
+    # only whether a binding is held for a turned-off owner.
+    assert [lookup for lookup in repository.lookups if "status" not in lookup] == repository.lookups[:1]
+    assert all(lookup["status"] == "held" for lookup in repository.lookups[1:])
 
 
 @pytest.mark.anyio

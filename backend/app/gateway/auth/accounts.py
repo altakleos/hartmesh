@@ -14,7 +14,7 @@ Usage:
     python -m app.gateway.auth.accounts list
     python -m app.gateway.auth.accounts disable --issuer URL --subject SUB
     python -m app.gateway.auth.accounts disable --email who@example.com
-    python -m app.gateway.auth.accounts enable --issuer URL --subject SUB
+    python -m app.gateway.auth.accounts enable --issuer URL --subject SUB [--restore-held]
     python -m app.gateway.auth.accounts end-sessions --issuer URL --subject SUB
     python -m app.gateway.auth.accounts end-sessions --email who@example.com --end-running-work
     python -m app.gateway.auth.accounts release-email --issuer URL --subject SUB
@@ -147,10 +147,35 @@ under ``surfaces_unconfirmed`` and makes the exit status 2;
 outside itself is stopped through the request a person's own cancel makes,
 attributed to the deployer: ``mcp_tasks`` (cancelled remotely by a Gateway's
 task loop, ``confirmed_by: task_status``) and ``subagent_batches`` (applied at
-once, ``batch_status``), looked for again once the runs are over. A task's
-completion notification and a channel message are refused at their next use
-(``mcp_task_notifications``, ``channel_ingress``), before any work is done
-for the person.
+once, ``batch_status``), looked for again once the runs are over. A channel
+message is refused at its next use (``channel_ingress``), before any work is
+done for the person.
+
+Rejoining revives nothing. ``disable`` holds what could start work for the
+person again -- every covered account's active schedules, paused, and its
+connected channel bindings, which then route nothing -- and names them under
+``held`` (``schedules``, ``channel_bindings``). What it holds is recorded for
+the identity (``identity_holds``, migration 0047) before it is acted on, so a
+command stopped in between leaves a record a re-run completes. It also ends
+the work waiting to run for them, which would otherwise run once they are
+enabled again: queued scheduled occurrences, manual triggers included
+(``scheduled_occurrences``), task notifications waiting to launch or to be
+retried (``mcp_task_notifications``), and channel messages still waiting to
+be processed, dead letters included (``channel_receipts``). A launch already
+in flight is refused for its owner (``OwnerRefusedLaunchError``) and ends the
+same way instead of being retried, and a schedule's pause survives the
+scheduler's bookkeeping after it. Both looks do this, the second once the runs
+and tasks are over. After ``enable`` the held schedules and bindings stay off
+until their owner turns them on; ``enable --restore-held`` turns back on
+exactly what the record names and nothing the owner paused themselves, each
+schedule at its next occurrence from now (a ``once`` schedule whose time
+passed stays paused). Every ``enable`` discards the record -- a plain one
+before it withdraws the refusal, a restoring one target by target as it
+settles each -- so a restore never reaches past the last ``enable``, except
+to what an earlier restore could not turn back on, which stays recorded for
+a re-run. ``list`` shows every record still held (``holds``). ``disable`` also
+forgets the connect codes the person had not used, so none binds a chat
+account or turns a held binding back on.
 """
 
 from __future__ import annotations
@@ -232,6 +257,8 @@ ACTION_LEFT_ALONE = "left_alone"
 ACTION_LIFTED = "lifted"
 ACTION_REFUSED_AT_NEXT_USE = "refused_at_next_use"
 ACTION_REVOKED = "revoked"
+#: Turned off until restored (``enable --restore-held``) or turned on by its owner.
+ACTION_HELD = "held"
 #: A surface some live Gateway process has no way to end (``gateway_processes.unreached``).
 ACTION_NOT_REACHED = "not_reached"
 
@@ -279,6 +306,34 @@ OUTLIVE_THEIR_PROCESS = ("sandboxes",)
 #: How often the command re-reads the processes' record while it waits.
 SWEEP_WAIT_POLL_SECONDS = 0.2
 
+#: What ``disable`` holds, by the surface that reports it and the kind its
+#: record names: an active schedule (paused) and a connected channel binding
+#: (routes nothing). Only ``enable --restore-held`` turns either back on.
+HELD_SURFACES = {"schedules": "schedule", "channel_bindings": "channel_binding"}
+
+#: The work waiting to run for the person that ``disable`` ends, so none of
+#: it runs once they are enabled again: queued scheduled occurrences (manual
+#: triggers included), task notifications, and channel messages still waiting
+#: to be processed (dead letters included).
+QUEUED_WORK_SURFACES = ("scheduled_occurrences", "mcp_task_notifications", "channel_receipts")
+
+#: What an ended occurrence and channel message say.
+SCHEDULED_OCCURRENCE_ENDED_ERROR = "the owner's account was turned off"
+CHANNEL_RECEIPT_OWNER_REFUSED = "owner_refused"
+
+#: What a failed look for what to hold counts as, under each held surface's
+#: ``not_ended``: whatever it would have found.
+HOLD_LOOK_TARGET = "look"
+
+#: What a failure to forget the person's connect codes counts as, under
+#: ``channel_bindings``'s ``not_ended``: a binding one of them could make.
+CONNECT_CODES_TARGET = "connect-codes"
+
+
+def _surface_of(kind: str) -> str:
+    """The surface that reports a held target of ``kind``."""
+    return next(surface for surface, held_kind in HELD_SURFACES.items() if held_kind == kind)
+
 
 def _sealed_role_above(row: dict[str, Any], limit: str) -> bool:
     """Whether a run was admitted with a role above ``limit``; a run whose role is not recorded counts as above."""
@@ -301,6 +356,25 @@ class _DurableWork:
     batches_stopped_ms: int | None = None
     #: Asked and failed: the next look asks again.
     failed: set[str] = field(default_factory=set)
+
+
+@dataclass
+class _Held:
+    """What ``disable`` held and ended of the work waiting to run, across both of its looks."""
+
+    #: Held and could not be: the next look tries again.
+    failed: dict[str, set[str]] = field(default_factory=lambda: {surface: set() for surface in HELD_SURFACES})
+    ended: dict[str, int] = field(default_factory=lambda: dict.fromkeys(QUEUED_WORK_SURFACES, 0))
+    #: What the latest look found still in a Gateway's hands -- a launch in
+    #: flight, a notification a task loop holds, a message being processed:
+    #: its own path reads the refusal, and until it has, it is not ended.
+    left: dict[str, int] = field(default_factory=lambda: dict.fromkeys(QUEUED_WORK_SURFACES, 0))
+    #: Surfaces whose ending raised on the latest look.
+    ended_failed: set[str] = field(default_factory=set)
+    #: When each surface last changed: the look that held or ended something.
+    at_ms: dict[str, int] = field(default_factory=dict)
+    #: Connect codes the person had not used yet, forgotten so none binds.
+    connect_codes: int = 0
 
 
 class SurfaceClock:
@@ -396,6 +470,7 @@ class AccountsCommand:
         mcp_tasks: Any | None = None,
         batches: Any | None = None,
         channel_connections: Any | None = None,
+        receipts: Any | None = None,
     ) -> None:
         from app.gateway.refusal_watch import LIVE_WINDOW_SECONDS
 
@@ -407,6 +482,7 @@ class AccountsCommand:
         self._mcp_tasks = mcp_tasks
         self._batches = batches
         self._channel_connections = channel_connections
+        self._receipts = receipts
         self._deadline: float | None = None
         self._live_window = LIVE_WINDOW_SECONDS if live_window_seconds is None else live_window_seconds
         self._wait_seconds = wait_seconds
@@ -422,6 +498,7 @@ class AccountsCommand:
         email: str | None = None,
         end_running_work: bool = False,
         role: str = LIMIT_ROLES[0],
+        restore_held: bool = False,
     ) -> dict[str, Any]:
         # One bound for the whole command: the run wait, the second look for
         # late runs and the connection wait all end by it, so a caller can
@@ -445,7 +522,7 @@ class AccountsCommand:
         if command == "disable":
             return await self.disable(identity, account, clock=clock)
         if command == "enable":
-            return await self.enable(identity, account)
+            return await self.enable(identity, account, restore_held=restore_held)
         if command == "end-sessions":
             return await self.end_sessions(identity, account, end_running_work=end_running_work)
         if command == "release-email":
@@ -497,7 +574,14 @@ class AccountsCommand:
 
         without = [{"issuer": issuer, "subject": subject, "disabled_at": _iso(disabled_at)} for issuer, subject, disabled_at in await self._users.list_disabled_identities() if not has_account(issuer, subject)]
         limits_without = [{"issuer": issuer, "subject": subject, "role": role, "limited_at": _iso(limited_at)} for issuer, subject, role, limited_at in await self._users.list_role_limits() if not has_account(issuer, subject)]
-        return {"command": "list", "accounts": accounts, "disabled_without_account": without, "role_limits_without_account": limits_without}
+        # What each identity's last disable held, which a restore would turn
+        # back on: so a deployer can see it before lifting a suspension.
+        holds: dict[tuple[str, str], dict[str, list[str]]] = {}
+        for issuer, subject, kind, target_id, _ in await self._users.list_all_holds():
+            entry = holds.setdefault((issuer, subject), {surface: [] for surface in HELD_SURFACES})
+            entry[_surface_of(kind)].append(target_id)
+        held = [{"issuer": issuer, "subject": subject, **entry} for (issuer, subject), entry in holds.items()]
+        return {"command": "list", "accounts": accounts, "disabled_without_account": without, "role_limits_without_account": limits_without, "holds": held}
 
     async def disable(self, identity: tuple[str, str], account: User | None, *, clock: SurfaceClock | None = None) -> dict[str, Any]:
         clock = clock or SurfaceClock()
@@ -546,7 +630,8 @@ class AccountsCommand:
             clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, 0, at_ms=committed)
             clock.stopped("running_work", ACTION_ENDED, 0, at_ms=committed, confirmed_by=CONFIRMED_BY_RUN_STATUS)
             await self._confirm_processes(check, check, [], clock, CONNECTION_SURFACES + RETAINED_SURFACES + DURABLE_PROCESS_SURFACES)
-            await self._report_durable_work(_DurableWork(), clock, committed=committed, notifications=0, channels=0)
+            await self._report_durable_work(_DurableWork(), clock, committed=committed, channels=0)
+            document["held"] = await self._report_held(identity, _Held(), clock, committed=committed)
             document.update(clock.document())
             document["surfaces_not_reached"] = []
             if document["surfaces_unconfirmed"]:
@@ -565,7 +650,11 @@ class AccountsCommand:
         clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, sum([await self._count_schedules(covered) for covered in accounts]), at_ms=committed)
         # The connections are confirmed while the runs unwind, not after: their
         # stop times are the processes' own, not the run wait's.
-        notifications, channels = await self._count_refused_at_next_use(accounts)
+        channels = await self._count_refused_at_next_use(accounts)
+        # Held before the slow part, so no schedule starts and no binding
+        # routes while the runs unwind; the work already waiting ends with it.
+        held = _Held()
+        await self._hold(identity, accounts, held, clock)
         work = _DurableWork()
         runs, _, _ = await asyncio.gather(
             self._end_running_work(accounts, relook=True),
@@ -581,7 +670,13 @@ class AccountsCommand:
         await self._end_durable_work(accounts, work, clock)
         retained_check = await self._sweeps.request_check() if self._sweeps is not None else None
         await asyncio.gather(self._confirm_processes(retained_check, check, accounts, clock, RETAINED_SURFACES + DURABLE_PROCESS_SURFACES), self._wait_for_tasks(work, clock))
-        await self._report_durable_work(work, clock, committed=committed, notifications=notifications, channels=channels)
+        # Looked at again once the runs and tasks are over: a request that
+        # authenticated before the refusal may have made a schedule, a run
+        # being cancelled may have queued a channel reply, and a task that
+        # went terminal has a notification waiting.
+        await self._hold(identity, accounts, held, clock)
+        await self._report_durable_work(work, clock, committed=committed, channels=channels)
+        document["held"] = await self._report_held(identity, held, clock, committed=committed)
         sandboxes = clock.surfaces.get("sandboxes", {})
         if document["runs_unconfirmed"]:
             clock.not_stopped("running_work", ACTION_ENDED, document["runs_found"], unconfirmed=True, confirmed_by=CONFIRMED_BY_RUN_STATUS)
@@ -605,7 +700,7 @@ class AccountsCommand:
     @staticmethod
     def _surfaces_note(clock: SurfaceClock) -> str:
         """What the unconfirmed process surfaces mean, saying only what the processes' record showed."""
-        entries = {name: clock.surfaces[name] for name in clock.unconfirmed if name not in ("running_work", "mcp_tasks", "subagent_batches")}
+        entries = {name: clock.surfaces[name] for name in clock.unconfirmed if name not in ("running_work", "mcp_tasks", "subagent_batches", *HELD_SURFACES, *QUEUED_WORK_SURFACES)}
         note = ""
         if any(entry.get("processes_unconfirmed") for entry in entries.values()):
             note += (
@@ -632,6 +727,12 @@ class AccountsCommand:
     @staticmethod
     def _durable_work_note(clock: SurfaceClock) -> str:
         note = ""
+        not_held = [name for name in HELD_SURFACES if name in clock.unconfirmed]
+        if not_held:
+            note += f"; some of the {' and '.join(not_held)} could not be held (counted under `not_ended`): they are recorded, so a restore still knows them, but may still run or route until this command is re-run, which tries them again"
+        not_ended = [name for name in QUEUED_WORK_SURFACES if name in clock.unconfirmed]
+        if not_ended:
+            note += f"; the work waiting to run under {', '.join(not_ended)} could not be ended and may run once the person is enabled again; re-run this command to try again"
         tasks = clock.surfaces.get("mcp_tasks", {})
         if "mcp_tasks" in clock.unconfirmed and tasks.get("action") == ACTION_NOT_REACHED:
             note += (
@@ -650,15 +751,131 @@ class AccountsCommand:
             )
         return note
 
-    async def _count_refused_at_next_use(self, accounts: list[User]) -> tuple[int, int]:
-        """What waits to act for these accounts and is refused as it tries: MCP task notifications, and channel bindings."""
+    async def _count_refused_at_next_use(self, accounts: list[User]) -> int:
+        """The channel bindings of these accounts that could route a message when the refusal committed; a message is refused as it arrives."""
         ids = [str(covered.id) for covered in accounts]
-        notifications = await self._mcp_tasks.count_pending_notifications(ids, tenant_digest=self._mcp_tasks.tenant.digest) if self._mcp_tasks is not None and ids else 0
         channels = 0
         if self._channel_connections is not None:
             for user_id in ids:
                 channels += sum(1 for row in await self._channel_connections.list_connections(user_id) if row.get("status") != "revoked")
-        return notifications, channels
+        return channels
+
+    async def _hold(self, identity: tuple[str, str], accounts: list[User], held: _Held, clock: SurfaceClock) -> None:
+        """Hold these accounts' active schedules and connected bindings, and end the work waiting to run for them.
+
+        What is held is recorded for the identity *before* it is acted on, so
+        a command stopped in between leaves a record that a re-run completes
+        and a restore can read. Each target is held on its own: one that
+        cannot be is counted and tried again by the next look or re-run.
+        """
+        issuer, subject = identity
+        ids = [str(covered.id) for covered in accounts]
+        targets: list[tuple[str, str, str]] = []
+        now = datetime.now(UTC)
+        try:
+            if self._schedules is not None:
+                now = await self._schedules.authority_now(fallback=now)
+                for user_id in ids:
+                    targets += [(HELD_SURFACES["schedules"], str(task["id"]), user_id) for task in await self._schedules.list_by_user(user_id) if task.get("status") in ACTIVE_SCHEDULE_STATUSES]
+            if self._channel_connections is not None:
+                for user_id in ids:
+                    targets += [(HELD_SURFACES["channel_bindings"], str(row["id"]), user_id) for row in await self._channel_connections.list_connections(user_id) if row.get("status") == "connected"]
+            recorded_before = {(kind, target_id) for kind, target_id, _ in await self._users.list_holds(issuer, subject)}
+            await self._users.record_holds(issuer, subject, targets)
+        except Exception as exc:  # noqa: BLE001 - the runs must still be cancelled; this look is unconfirmed and the next tries again
+            logger.warning("Failed to look for what to hold for a turned-off identity: %s", exc)
+            for surface in HELD_SURFACES:
+                held.failed[surface].add(HOLD_LOOK_TARGET)
+            targets = []
+            recorded_before = set()
+        else:
+            for surface in HELD_SURFACES:
+                held.failed[surface].discard(HOLD_LOOK_TARGET)
+        changed: set[str] = set()
+        for kind, target_id, user_id in targets:
+            surface = "schedules" if kind == HELD_SURFACES["schedules"] else "channel_bindings"
+            try:
+                if surface == "schedules":
+                    newly = await self._schedules.hold(target_id, user_id=user_id, now=now)
+                else:
+                    newly = await self._channel_connections.hold_connection(target_id, owner_user_id=user_id)
+            except Exception as exc:  # noqa: BLE001 - one that cannot be held must not leave the others running
+                logger.warning("Failed to hold %s %s: %s", kind, target_id, exc)
+                held.failed[surface].add(target_id)
+                continue
+            held.failed[surface].discard(target_id)
+            if newly:
+                changed.add(surface)
+            elif (kind, target_id) not in recorded_before:
+                # Active when listed, off by the time it was held: someone
+                # else turned it off meanwhile -- its owner's own pause, say --
+                # so it is theirs to turn on, not a restore's.
+                await self._users.discard_holds(issuer, subject, [(kind, target_id)])
+        if self._channel_connections is not None and ids:
+            # A connect code minted before the refusal would bind the person's
+            # chat account, or turn a held binding back on, once used.
+            try:
+                held.connect_codes += await self._channel_connections.delete_oauth_states_for_owners(ids)
+            except Exception as exc:  # noqa: BLE001 - counted as a binding not held; the next look tries again
+                logger.warning("Failed to forget a turned-off identity's connect codes: %s", exc)
+                held.failed["channel_bindings"].add(CONNECT_CODES_TARGET)
+            else:
+                held.failed["channel_bindings"].discard(CONNECT_CODES_TARGET)
+        for surface in QUEUED_WORK_SURFACES:
+            try:
+                ended, left = await self._end_queued_work(surface, ids, now=now) if ids else (0, 0)
+            except Exception as exc:  # noqa: BLE001 - one queue that fails must not leave the others waiting
+                logger.warning("Failed to end the %s waiting for a turned-off identity: %s", surface, exc)
+                held.ended_failed.add(surface)
+                continue
+            held.ended_failed.discard(surface)
+            held.ended[surface] += ended
+            held.left[surface] = left
+            if ended:
+                changed.add(surface)
+        looked_at = clock.now_ms()
+        for surface in (*HELD_SURFACES, *QUEUED_WORK_SURFACES):
+            if surface in changed or surface not in held.at_ms:
+                held.at_ms[surface] = looked_at
+
+    async def _end_queued_work(self, surface: str, user_ids: list[str], *, now: datetime) -> tuple[int, int]:
+        """End what waits under ``surface`` to run for these accounts; returns how many ended, and how many a Gateway still has in hand."""
+        if surface == "scheduled_occurrences":
+            if self._schedules is None:
+                return 0, 0
+            ended = await self._schedules.end_queued_occurrences(user_ids, error=SCHEDULED_OCCURRENCE_ENDED_ERROR, now=now)
+            return ended, await self._schedules.count_launching_occurrences(user_ids)
+        if surface == "mcp_task_notifications":
+            if self._mcp_tasks is None:
+                return 0, 0
+            from app.mcp_tasks.service import NOTIFICATION_OWNER_REFUSED_ERROR
+
+            digest = self._mcp_tasks.tenant.digest
+            ended = await self._mcp_tasks.end_waiting_notifications(user_ids, error=NOTIFICATION_OWNER_REFUSED_ERROR, tenant_digest=digest)
+            return ended, await self._mcp_tasks.count_waiting_notifications(user_ids, tenant_digest=digest)
+        if self._receipts is None:
+            return 0, 0
+        ended = await self._receipts.end_for_owners(user_ids, outcome_code=CHANNEL_RECEIPT_OWNER_REFUSED)
+        return ended, await self._receipts.count_claimed_for_owners(user_ids)
+
+    async def _report_held(self, identity: tuple[str, str], held: _Held, clock: SurfaceClock, *, committed: int) -> dict[str, list[str]]:
+        """Report the held and ended surfaces; returns the identity's whole hold record, by surface."""
+        record = await self._users.list_holds(*identity)
+        document = {surface: sorted(target_id for kind, target_id, _ in record if kind == held_kind) for surface, held_kind in HELD_SURFACES.items()}
+        for surface in HELD_SURFACES:
+            facts: dict[str, Any] = {"connect_codes_ended": held.connect_codes} if surface == "channel_bindings" else {}
+            if held.failed[surface]:
+                clock.not_stopped(surface, ACTION_HELD, len(document[surface]), unconfirmed=True, not_ended=len(held.failed[surface]), **facts)
+            else:
+                clock.stopped(surface, ACTION_HELD, len(document[surface]), at_ms=held.at_ms.get(surface, committed), not_ended=0, **facts)
+        for surface in QUEUED_WORK_SURFACES:
+            # ``not_ended``: what a Gateway still had in hand at the last look,
+            # whose own path ends it once it reads the refusal; a re-run sees.
+            if surface in held.ended_failed or held.left[surface]:
+                clock.not_stopped(surface, ACTION_ENDED, held.ended[surface], unconfirmed=True, not_ended=held.left[surface])
+            else:
+                clock.stopped(surface, ACTION_ENDED, held.ended[surface], at_ms=held.at_ms.get(surface, committed), not_ended=0)
+        return document
 
     async def _end_durable_work(self, accounts: list[User], work: _DurableWork, clock: SurfaceClock) -> None:
         """Ask each active MCP task and subagent batch of these accounts to stop; one already asked is asked again only if asking failed.
@@ -742,7 +959,7 @@ class AccountsCommand:
                 return
             await asyncio.sleep(SWEEP_WAIT_POLL_SECONDS)
 
-    async def _report_durable_work(self, work: _DurableWork, clock: SurfaceClock, *, committed: int, notifications: int, channels: int) -> None:
+    async def _report_durable_work(self, work: _DurableWork, clock: SurfaceClock, *, committed: int, channels: int) -> None:
         tasks_left = len(set(work.tasks) - work.tasks_ended)
         if tasks_left:
             # Only a task loop carries a cancellation out: where every live
@@ -769,9 +986,7 @@ class AccountsCommand:
             rows_ms = work.batches_stopped_ms if work.batches else committed
             at_ms = max(rows_ms, executions["stopped_after_ms"]) if executions is not None else rows_ms
             clock.stopped("subagent_batches", ACTION_ENDED, len(work.batches), at_ms=at_ms, confirmed_by=CONFIRMED_BY_BATCH_STATUS, items_stopped=items_stopped, not_ended=0, **process_facts)
-        # A task's completion notification would launch a run for the person,
-        # and a channel message would start one: both are refused as they try.
-        clock.stopped("mcp_task_notifications", ACTION_REFUSED_AT_NEXT_USE, notifications, at_ms=committed)
+        # A channel message would start a run for the person: refused as it arrives.
         clock.stopped("channel_ingress", ACTION_REFUSED_AT_NEXT_USE, channels, at_ms=committed)
 
     async def _confirm_processes(self, check: int | None, since_check: int | None, accounts: list[User], clock: SurfaceClock, surfaces: tuple[str, ...]) -> None:
@@ -828,21 +1043,78 @@ class AccountsCommand:
             else:
                 clock.stopped(surface, ACTION_ENDED, counts[surface], at_ms=confirmed_at, **facts)
 
-    async def enable(self, identity: tuple[str, str], account: User | None) -> dict[str, Any]:
+    async def enable(self, identity: tuple[str, str], account: User | None, *, restore_held: bool = False) -> dict[str, Any]:
+        """Withdraw the refusal. What ``disable`` held stays off unless ``restore_held``, and every ``enable`` discards the record of it.
+
+        A plain ``enable`` discards the record before it withdraws the
+        refusal, so a command stopped in between leaves nothing a later
+        restore could revive. With ``restore_held`` the refusal goes first
+        and each held target leaves the record once it is settled, so a
+        re-run finishes a restore that was stopped.
+        """
         issuer, subject = identity
+        record = await self._users.list_holds(issuer, subject)
+        if not restore_held:
+            await self._users.discard_holds(issuer, subject)
         withdrawn = await self._users.enable_identity(issuer, subject)
         if self._sweeps is not None:
             # So each Gateway takes the person off its refused list now,
             # rather than cut what they open for up to its periodic look.
             await self._sweeps.request_check()
+        held = {surface: sorted(target_id for kind, target_id, _ in record if kind == held_kind) for surface, held_kind in HELD_SURFACES.items()}
+        restored: dict[str, list[str]] = {surface: [] for surface in HELD_SURFACES}
+        stayed_off: list[dict[str, str]] = []
+        if restore_held:
+            now = await self._schedules.authority_now(fallback=datetime.now(UTC)) if self._schedules is not None else datetime.now(UTC)
+            for kind, target_id, user_id in record:
+                surface = _surface_of(kind)
+                try:
+                    if surface == "schedules":
+                        outcome = await self._schedules.restore_held(target_id, user_id=user_id, now=now) if self._schedules is not None else "not_reached"
+                    else:
+                        outcome = await self._channel_connections.restore_held_connection(target_id, owner_user_id=user_id) if self._channel_connections is not None else "not_reached"
+                except Exception as exc:  # noqa: BLE001 - one that cannot be restored must not hold back the others
+                    logger.warning("Failed to restore held %s %s: %s", kind, target_id, exc)
+                    stayed_off.append({"surface": surface, "id": target_id, "reason": "restore_failed"})
+                    continue
+                if outcome == "restored":
+                    restored[surface].append(target_id)
+                else:
+                    stayed_off.append({"surface": surface, "id": target_id, "reason": outcome})
+                await self._users.discard_holds(issuer, subject, [(kind, target_id)])
+            restored = {surface: sorted(ids) for surface, ids in restored.items()}
         refreshed = await self._users.get_user_by_id(str(account.id)) if account is not None else None
-        return {
+        failed = [entry for entry in stayed_off if entry["reason"] == "restore_failed"]
+        document: dict[str, Any] = {
             "command": "enable",
             "identity": {"issuer": issuer, "subject": subject},
             "verdict": "enabled" if withdrawn else "already_enabled",
             "account": _account_document(refreshed) if refreshed is not None else None,
-            "note": "the person may sign in again; sessions ended and tokens revoked by disable stay ended and revoked",
+            "restore_held": restore_held,
+            "held": held,
+            "restored": restored,
+            "stayed_off": stayed_off,
+            # A restore that could not turn something back on is unconfirmed,
+            # as in ``disable``: named here, and the exit status is 2.
+            "surfaces_unconfirmed": sorted({entry["surface"] for entry in failed}),
+            "returncode": EXIT_UNCONFIRMED_RUNS if failed else 0,
+            "note": "the person may sign in again; sessions ended and tokens revoked by disable stay ended and revoked; work that was waiting to run for them when they were turned off was ended and does not run",
         }
+        if restore_held:
+            document["note"] += (
+                "; what the disable held is on again, each schedule at its next occurrence from now, except what is named under `stayed_off`: "
+                "a `once` schedule whose time passed during the hold (`time_passed`) stays paused, and one changed or removed since (`changed_since`, `gone`) is left as it is"
+            )
+            if failed:
+                document["note"] += "; the ones whose reason is `restore_failed` could not be turned back on and are still recorded; re-run this command with --restore-held to try them again"
+            if not record:
+                document["note"] += "; no hold was recorded for this identity: its disable held nothing, or an enable without --restore-held has discarded the record since (`list` shows every record still held)"
+        elif any(held.values()):
+            document["note"] += (
+                "; the schedules and channel bindings named under `held` stay off until their owner turns them on again "
+                "(resuming a schedule, or connecting the channel again), and the record of them is discarded, so a later --restore-held cannot turn them on"
+            )
+        return document
 
     async def end_sessions(self, identity: tuple[str, str], account: User | None, *, end_running_work: bool = False) -> dict[str, Any]:
         """End an account's sessions, and its running work only when asked.
@@ -1185,7 +1457,9 @@ async def _run(
     end_running_work: bool = False,
     wait_seconds: float = DEFAULT_RUN_WAIT_SECONDS,
     role: str = LIMIT_ROLES[0],
+    restore_held: bool = False,
 ) -> dict[str, Any]:
+    from app.channels.inbound_receipts import SqlInboundReceiptStore
     from deerflow.config import get_app_config
     from deerflow.persistence.channel_connections import ChannelConnectionRepository
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
@@ -1218,10 +1492,11 @@ async def _run(
             mcp_tasks=McpTaskRepository(session_factory, tenant=tenant),
             batches=SubagentBatchRepository(session_factory, tenant=tenant),
             channel_connections=ChannelConnectionRepository(session_factory),
+            receipts=SqlInboundReceiptStore(session_factory),
             wait_seconds=wait_seconds,
             **deployment_options(config),
         )
-        return await command_runner.run(command, issuer=issuer, subject=subject, email=email, end_running_work=end_running_work, role=role)
+        return await command_runner.run(command, issuer=issuer, subject=subject, email=email, end_running_work=end_running_work, role=role, restore_held=restore_held)
     finally:
         await close_engine()
 
@@ -1267,6 +1542,11 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="end-sessions and limit-role only: also cancel the runs the account has executing (disable always does)",
     )
+    parser.add_argument(
+        "--restore-held",
+        action="store_true",
+        help="enable only: turn back on exactly the schedules and channel bindings the matching disable held, each schedule at its next occurrence from now (a plain enable leaves them off and discards the record)",
+    )
     parser.add_argument("--role", default=None, help=f"limit-role only: the highest role the identity may hold, one of {', '.join(LIMIT_ROLES)} (default {LIMIT_ROLES[0]})")
     parser.add_argument(
         "--wait-seconds",
@@ -1286,6 +1566,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.end_running_work and args.command not in ENDS_WORK_ON_REQUEST:
         print(json.dumps({"command": args.command, "error": "--end-running-work belongs to end-sessions and limit-role; disable always ends the account's running work"}, sort_keys=True), flush=True)
         return 1
+    if args.restore_held and args.command != "enable":
+        print(json.dumps({"command": args.command, "error": "--restore-held belongs to enable"}, sort_keys=True), flush=True)
+        return 1
     if args.role is not None and args.command != "limit-role":
         print(json.dumps({"command": args.command, "error": "--role belongs to limit-role"}, sort_keys=True), flush=True)
         return 1
@@ -1302,6 +1585,7 @@ def main(argv: list[str] | None = None) -> int:
                 end_running_work=args.end_running_work,
                 wait_seconds=args.wait_seconds,
                 role=args.role or LIMIT_ROLES[0],
+                restore_held=args.restore_held,
             )
         )
     except CommandError as exc:

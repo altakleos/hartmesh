@@ -1247,6 +1247,45 @@ async def test_permanently_rejected_notification_is_dead_lettered():
 
 
 @pytest.mark.asyncio
+async def test_a_notification_refused_because_its_owner_is_turned_off_ends_instead_of_retrying():
+    """A retry would launch once the owner is enabled again, and nothing queued before they were turned off may run then."""
+    from app.runtime.invocation import OwnerRefusedLaunchError
+
+    repo = _repo(
+        dead_letter_notification=AsyncMock(return_value=True),
+        release_notification_claim=AsyncMock(return_value=True),
+    )
+    service = McpTaskService(
+        repository=repo,
+        drivers=McpTaskDriverRegistry(),
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_polls=3,
+        launch_notification=AsyncMock(side_effect=OwnerRefusedLaunchError("trusted internal launch owner's account is disabled")),
+        get_run=AsyncMock(return_value=SimpleNamespace(assistant_id="lead_agent")),
+    )
+
+    await service._notify_one(
+        {
+            **_claimed_row(),
+            "notification_status": "claimed",
+            "dispatch_version": 2,
+            "dispatch_attempt": 0,
+            "notification_attempt_count": 0,
+            "dispatch_event": {"status": "completed"},
+        },
+        now=datetime.now(UTC),
+    )
+
+    dead_lettered = repo.dead_letter_notification.await_args.kwargs
+    assert dead_lettered["dispatch_version"] == 2
+    assert dead_lettered["error"] == "mcp_task_notification_owner_refused"
+    # Not a failure of the notification: its owner is off.
+    assert dead_lettered["count_failure"] is False
+    repo.release_notification_claim.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_notification_retry_budget_dead_letters_before_creating_another_run():
     repo = _repo(
         dead_letter_notification=AsyncMock(return_value=True),

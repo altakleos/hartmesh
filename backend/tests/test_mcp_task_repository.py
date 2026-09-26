@@ -1856,7 +1856,7 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_a_persons_active_tasks_are_listed_their_statuses_read_and_their_waiting_notifications_counted(tmp_path):
+async def test_a_persons_active_tasks_are_listed_and_their_statuses_read(tmp_path):
     """What the accounts command reads when it turns a person off."""
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
@@ -1871,9 +1871,6 @@ async def test_a_persons_active_tasks_are_listed_their_statuses_read_and_their_w
         await session.commit()
     assert [row["id"] for row in await repo.list_active_by_user("pat", tenant_digest=digest)] == ["task-pat-1"]
     assert await repo.statuses(["task-pat-1", "task-pat-2", "task-gone"], tenant_digest=digest) == {"task-pat-1": "working", "task-pat-2": "completed"}
-    assert await repo.count_pending_notifications(["pat"], tenant_digest=digest) == 1
-    assert await repo.count_pending_notifications(["sam"], tenant_digest=digest) == 0
-    assert await repo.count_pending_notifications([], tenant_digest=digest) == 0
 
 
 @pytest.mark.asyncio
@@ -1936,3 +1933,43 @@ async def test_asking_again_with_retry_now_brings_a_backed_off_cancel_forward_wi
     assert await _claim("canceller-2") == [], "an ordinary repeat keeps the backoff"
     await _ask(retry_now=True)
     assert await _claim("canceller-2") == ["task-off"]
+
+
+@pytest.mark.asyncio
+async def test_a_turned_off_persons_waiting_notifications_are_ended_and_never_retried(tmp_path):
+    """What ``disable`` does so that a notification waiting when a person was turned off never launches after ``enable``."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    digest = repo.tenant.digest
+    for task_id, user_id in (("task-pending", "pat"), ("task-retry", "pat"), ("task-dispatched", "pat"), ("task-leased", "pat"), ("task-delivered", "pat"), ("task-sam", "sam")):
+        await _create_working_task(repo, task_id=task_id, now=now, user_id=user_id)
+    async with get_session_factory()() as session:
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id.in_(["task-pending", "task-sam"])).values(status="completed", event_version=1, notified_version=0, notification_status="pending"))
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-retry").values(status="completed", event_version=2, notified_version=1, notification_status="retry", next_notification_at=now + timedelta(minutes=10)))
+        dispatched = {"notification_status": "dispatched", "notification_run_id": "run-being-cancelled", "dispatch_version": 1}
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-dispatched").values(status="failed", event_version=1, notified_version=0, **dispatched))
+        # A task loop is launching this one now: its launch reads the refusal.
+        leased = {"notification_status": "claimed", "notification_lease_owner": "loop-1", "notification_lease_expires_at": now + timedelta(minutes=5)}
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-leased").values(status="completed", event_version=1, notified_version=0, **leased))
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-delivered").values(status="completed", event_version=1, notified_version=1, notification_status="delivered"))
+        await session.commit()
+
+    ended = await repo.end_waiting_notifications(["pat"], error="mcp_task_notification_owner_refused", tenant_digest=digest)
+
+    assert ended == 3
+    async with get_session_factory()() as session:
+        rows = {row.id: row for row in (await session.execute(select(McpTaskRow))).scalars()}
+    for task_id in ("task-pending", "task-retry", "task-dispatched"):
+        assert rows[task_id].notification_status == "dead_letter"
+        assert rows[task_id].notification_error == "mcp_task_notification_owner_refused"
+        assert rows[task_id].next_notification_at is None
+    assert rows["task-leased"].notification_status == "claimed"
+    assert rows["task-delivered"].notification_status == "delivered"
+    assert rows["task-sam"].notification_status == "pending"
+    assert await repo.count_waiting_notifications(["pat"], tenant_digest=digest) == 1, "only the one its loop holds"
+    assert await repo.count_waiting_notifications(["sam"], tenant_digest=digest) == 1
+    assert await repo.count_waiting_notifications([], tenant_digest=digest) == 0
+    assert await repo.end_waiting_notifications(["pat"], error="mcp_task_notification_owner_refused", tenant_digest=digest) == 0
+    assert await repo.end_waiting_notifications([], error="mcp_task_notification_owner_refused", tenant_digest=digest) == 0
+    claimed = await repo.claim_notification_work(now=now, lease_owner="loop-2", lease_seconds=30, limit=10, tracking_degraded_after_errors=3, tenant_digest=digest)
+    assert [row["id"] for row in claimed] == ["task-sam"]

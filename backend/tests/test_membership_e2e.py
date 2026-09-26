@@ -490,19 +490,17 @@ class TestMembership:
             lines = [line for line in journal.lines if "access turned off for subject sub-off" in line]
             assert lines and issuer in lines[-1] and CLIENT_SECRET not in lines[-1] and "eyJ" not in lines[-1], "issuer and subject, never a token"
 
-            # The due schedule: not started. The scheduler records the refusal on the task and no run row appears for it.
-            def _held() -> bool:
-                with sqlite3.connect(_db(gateway)) as connection:
-                    row = connection.execute("SELECT last_error, last_run_id FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
-                return row is not None and row[0] is not None
-
-            _wait(_held, timeout=90.0, what="the scheduler to reach the due task")
+            # The due schedule: held, so the scheduler (polling every second)
+            # never takes it up, past its due time -- no occurrence, no run.
+            assert document["held"]["schedules"] == [task_id], document["held"]
+            assert document["surfaces"]["schedules"]["action"] == "held" and document["surfaces"]["schedules"]["count"] == 1
+            due = datetime.fromisoformat(run_at)
+            _wait(lambda: datetime.now(UTC) > due + timedelta(seconds=5), timeout=90.0, what="the schedule's due time to pass")
             with sqlite3.connect(_db(gateway)) as connection:
-                last_error, last_run_id = connection.execute("SELECT last_error, last_run_id FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
-                launched = connection.execute("SELECT count(*) FROM scheduled_task_runs WHERE task_id = ? AND run_id IS NOT NULL", (task_id,)).fetchone()
-            assert "disabled" in last_error and last_run_id is None, (last_error, last_run_id)
-            assert launched == (0,)
-            assert any("Internal launch refused: owner" in line and "disabled" in line for line in journal.lines)
+                status, last_run_id = connection.execute("SELECT status, last_run_id FROM scheduled_tasks WHERE id = ?", (task_id,)).fetchone()
+                occurrences = connection.execute("SELECT count(*) FROM scheduled_task_runs WHERE task_id = ?", (task_id,)).fetchone()
+            assert status == "paused" and last_run_id is None, (status, last_run_id)
+            assert occurrences == (0,)
 
     # ── Evidence 6: turned off before the first sign-in ──────────────────
 

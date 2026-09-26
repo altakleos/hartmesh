@@ -20,7 +20,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Protocol
 
-from sqlalchemy import and_, case, exists, or_, select, update
+from sqlalchemy import and_, case, exists, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import aliased
@@ -1112,6 +1112,70 @@ class SqlInboundReceiptStore:
                     .returning(InboundReceiptRow.receipt_id)
                 )
                 return result.scalar_one_or_none() is not None
+
+    async def end_for_owners(self, owner_user_ids: Sequence[str], *, outcome_code: str) -> int:
+        """End these owners' receipts still waiting to be processed, dead letters included; returns how many.
+
+        What ``disable`` does so that a message received before a person was
+        turned off never runs once they are enabled again: each waiting one
+        completes as the channel manager completes a message whose owner is
+        refused, and a dead letter no longer offers an operator's requeue. A
+        receipt a Gateway has claimed is left to it -- it reads the refusal
+        itself -- and one admitted is the run ``disable`` cancels. The fence
+        advances, so a processor holding an old token cannot write it back.
+        """
+
+        _bounded_text(outcome_code, field_name="outcome_code", max_bytes=64)
+        owners = [owner for owner in owner_user_ids if owner]
+        if not owners:
+            return 0
+        now = self._clock()
+        async with self._session_factory() as session:
+            async with session.begin():
+                result = await session.execute(
+                    update(InboundReceiptRow)
+                    .where(
+                        InboundReceiptRow.state.in_(
+                            (
+                                InboundReceiptState.received.value,
+                                InboundReceiptState.deferred.value,
+                                InboundReceiptState.dead_letter.value,
+                            )
+                        ),
+                        InboundReceiptRow.run_id.is_(None),
+                        InboundReceiptRow.payload_json["owner_user_id"].as_string().in_(owners),
+                    )
+                    .values(
+                        state=InboundReceiptState.completed.value,
+                        lease_owner=None,
+                        lease_expires_at=None,
+                        fencing_token=InboundReceiptRow.fencing_token + 1,
+                        outcome_code=outcome_code,
+                        completed_at=now,
+                        updated_at=now,
+                    )
+                    .returning(InboundReceiptRow.receipt_id)
+                )
+                return len(result.scalars().all())
+
+    async def count_claimed_for_owners(self, owner_user_ids: Sequence[str]) -> int:
+        """How many of these owners' receipts a Gateway has claimed and not settled: after ``end_for_owners``, the ones left to it."""
+
+        owners = [owner for owner in owner_user_ids if owner]
+        if not owners:
+            return 0
+        async with self._session_factory() as session:
+            return int(
+                await session.scalar(
+                    select(func.count())
+                    .select_from(InboundReceiptRow)
+                    .where(
+                        InboundReceiptRow.state == InboundReceiptState.claimed.value,
+                        InboundReceiptRow.payload_json["owner_user_id"].as_string().in_(owners),
+                    )
+                )
+                or 0
+            )
 
     async def cleanup_completed(self, *, older_than: datetime, limit: int) -> int:
         """Delete old completed rows; unresolved dead letters require review."""
