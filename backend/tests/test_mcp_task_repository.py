@@ -1853,3 +1853,86 @@ async def test_cancel_request_stops_polling_and_rejects_stale_poll_result(tmp_pa
     assert stored is not None
     assert stored["status"] == "cancelled"
     assert stored["notification_status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_a_persons_active_tasks_are_listed_their_statuses_read_and_their_waiting_notifications_counted(tmp_path):
+    """What the accounts command reads when it turns a person off."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-pat-1", now=now, user_id="pat")
+    await _create_working_task(repo, task_id="task-pat-2", now=now, user_id="pat")
+    await _create_working_task(repo, task_id="task-sam", now=now, user_id="sam")
+    digest = repo.tenant.digest
+
+    assert sorted(row["id"] for row in await repo.list_active_by_user("pat", tenant_digest=digest)) == ["task-pat-1", "task-pat-2"]
+    async with get_session_factory()() as session:
+        await session.execute(update(McpTaskRow).where(McpTaskRow.id == "task-pat-2").values(status="completed", event_version=3, notified_version=2, notification_status="retry"))
+        await session.commit()
+    assert [row["id"] for row in await repo.list_active_by_user("pat", tenant_digest=digest)] == ["task-pat-1"]
+    assert await repo.statuses(["task-pat-1", "task-pat-2", "task-gone"], tenant_digest=digest) == {"task-pat-1": "working", "task-pat-2": "completed"}
+    assert await repo.count_pending_notifications(["pat"], tenant_digest=digest) == 1
+    assert await repo.count_pending_notifications(["sam"], tenant_digest=digest) == 0
+    assert await repo.count_pending_notifications([], tenant_digest=digest) == 0
+
+
+@pytest.mark.asyncio
+async def test_a_deployer_may_cancel_a_task_for_a_turned_off_account(tmp_path):
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-off", now=now, user_id="pat")
+    requested = await repo.request_cancel(
+        "task-off",
+        user_id="pat",
+        thread_id="thread-1",
+        requested_at=now,
+        actor_ref="b" * 64,
+        reason_code="account_disabled",
+        tenant_digest=repo.tenant.digest,
+    )
+    assert requested is not None and requested["cancel_reason_code"] == "account_disabled"
+
+
+@pytest.mark.asyncio
+async def test_the_disable_reason_migration_will_not_downgrade_over_a_task_that_carries_it(tmp_path):
+    """Rewriting it to another reason would say the person asked."""
+    import asyncio
+
+    from alembic import command
+
+    from deerflow.persistence.bootstrap import _get_alembic_config
+    from deerflow.persistence.engine import get_engine
+
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    await _create_working_task(repo, task_id="task-off", now=now, user_id="pat")
+    await repo.request_cancel("task-off", user_id="pat", thread_id="thread-1", requested_at=now, actor_ref="b" * 64, reason_code="account_disabled", tenant_digest=repo.tenant.digest)
+
+    config = _get_alembic_config(get_engine())
+    with pytest.raises(RuntimeError, match="mcp_task_disable_reason_rollback_blocked"):
+        await asyncio.to_thread(command.downgrade, config, "0045_refusal_sweep_reach")
+
+
+@pytest.mark.asyncio
+async def test_asking_again_with_retry_now_brings_a_backed_off_cancel_forward_without_a_second_canceller(tmp_path):
+    """A re-run of ``disable`` should not wait out the task loop's backoff after a failed remote cancel."""
+    repo = await _make_repo(tmp_path)
+    now = datetime.now(UTC)
+    digest = repo.tenant.digest
+    await _create_working_task(repo, task_id="task-off", now=now, user_id="pat")
+
+    async def _ask(*, retry_now: bool) -> None:
+        await repo.request_cancel("task-off", user_id="pat", thread_id="thread-1", requested_at=now, actor_ref="b" * 64, reason_code="account_disabled", tenant_digest=digest, retry_now=retry_now)
+
+    async def _claim(owner: str) -> list[str]:
+        return [item["id"] for item in await repo.claim_cancel_requests(now=now, lease_owner=owner, lease_seconds=60, limit=1, tenant_digest=digest)]
+
+    await _ask(retry_now=True)
+    assert await _claim("canceller-1") == ["task-off"]
+    await _ask(retry_now=True)
+    assert await _claim("canceller-2") == [], "a live cancel lease is never shared"
+    assert await repo.release_cancel_claim("task-off", lease_owner="canceller-1", retry_after_seconds=300, error="remote_down", tenant_digest=digest)
+    await _ask(retry_now=False)
+    assert await _claim("canceller-2") == [], "an ordinary repeat keeps the backoff"
+    await _ask(retry_now=True)
+    assert await _claim("canceller-2") == ["task-off"]

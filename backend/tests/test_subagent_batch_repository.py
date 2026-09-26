@@ -722,3 +722,20 @@ async def test_duplicate_submission_key_returns_original_batch(tmp_path) -> None
     items = await repo.list_items("batch-1", user_id="user-1", include_prompt=True)
     assert items is not None
     assert [item["item_key"] for item in items] == ["item-0"]
+
+
+@pytest.mark.asyncio
+async def test_a_persons_active_batches_are_listed_and_a_deployers_cancel_says_why(tmp_path) -> None:
+    repo = await _repo(tmp_path)
+    await _create(repo)
+    assert [row["id"] for row in await repo.list_active_by_user("user-1")] == ["batch-1"]
+    assert await repo.list_active_by_user("someone-else") == []
+    paused = await repo.pause_batch("batch-1", user_id="user-1")
+    assert paused is not None and paused["status"] == "paused"
+    assert [row["id"] for row in await repo.list_active_by_user("user-1")] == ["batch-1"], "a paused batch could be resumed: it is stopped too"
+
+    cancelled = await repo.cancel_batch("batch-1", user_id="user-1", reason="Cancelled because the account was turned off")
+    assert cancelled is not None and cancelled["status"] == "cancelled"
+    assert await repo.list_active_by_user("user-1") == []
+    items = await repo.list_items("batch-1", user_id="user-1")
+    assert {item["error"] for item in items} == {"Cancelled because the account was turned off"}

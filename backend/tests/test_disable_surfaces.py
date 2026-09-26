@@ -35,6 +35,7 @@ ISSUER = "https://login.example.com/realms/tenant"
 CONNECTIONS = ("websockets", "sse_streams", "downloads")
 RETAINED = ("sandboxes", "mcp_sessions", "browser_sessions", "memory_updates")
 PROCESS_SURFACES = (*CONNECTIONS, *RETAINED)
+DURABLE = ("mcp_tasks", "subagent_batches", "mcp_task_notifications", "channel_ingress")
 
 
 @pytest.fixture
@@ -96,7 +97,7 @@ async def test_the_document_names_every_surface_with_a_time_and_the_refusal_s_co
 
     started = datetime.fromisoformat(document["started_at"])
     assert before - timedelta(seconds=1) <= started <= datetime.now(UTC)
-    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *PROCESS_SURFACES}
+    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *PROCESS_SURFACES, *DURABLE}
     committed = document["surfaces"]["sign_in"]["stopped_after_ms"]
     for name in ("sign_in", "sessions", "personal_access_tokens", "internal_launches"):
         entry = document["surfaces"][name]
@@ -168,7 +169,8 @@ async def test_a_live_process_that_does_not_confirm_leaves_the_connections_uncon
 
     document = await _command(stores, wait_seconds=0.3).run("disable", issuer=ISSUER, subject="sub-pat")
 
-    assert document["surfaces_unconfirmed"] == list(sorted(PROCESS_SURFACES))
+    # The batch items such a process may be executing are not confirmed stopped either.
+    assert document["surfaces_unconfirmed"] == sorted([*PROCESS_SURFACES, "subagent_batches"])
     for name in PROCESS_SURFACES:
         entry = document["surfaces"][name]
         assert entry["stopped_after_ms"] is None and entry["processes_unconfirmed"] == ["gw-stalled"] and entry["processes"] == 0, name
@@ -243,7 +245,7 @@ async def test_one_wait_bounds_the_whole_command_and_the_connections_are_confirm
     took = asyncio.get_running_loop().time() - started
 
     assert took < 1.5 + 1.0, f"took {took:.1f}s for a 1.5s wait"
-    assert sorted(document["surfaces_unconfirmed"]) == sorted(["running_work", *PROCESS_SURFACES]) and document["returncode"] == EXIT_UNCONFIRMED_RUNS
+    assert sorted(document["surfaces_unconfirmed"]) == sorted(["running_work", *PROCESS_SURFACES, "subagent_batches"]) and document["returncode"] == EXIT_UNCONFIRMED_RUNS
 
 
 @pytest.mark.anyio
@@ -276,7 +278,7 @@ async def test_an_identity_with_no_account_names_every_surface_all_the_same(stor
     document = await _command(stores).run("disable", issuer=ISSUER, subject="sub-nobody")
 
     assert document["account"] is None
-    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *PROCESS_SURFACES}
+    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *PROCESS_SURFACES, *DURABLE}
     assert all(entry["count"] == 0 for entry in document["surfaces"].values())
     assert document["surfaces_unconfirmed"] == [] and document["returncode"] == 0
 

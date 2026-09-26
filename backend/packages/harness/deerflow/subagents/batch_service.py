@@ -19,6 +19,7 @@ from deerflow.runtime.accepted_invocation import (
 )
 from deerflow.runtime.agent_revision import app_config_execution_digest
 from deerflow.runtime.kubernetes_qualification import qualification_service_barrier
+from deerflow.runtime.owner_holdings import Ended, get_owner_holdings
 from deerflow.runtime.skill_projection import (
     SkillProjectionConsumerToken,
     get_skill_projection_coordinator,
@@ -493,6 +494,37 @@ class SubagentBatchService:
         # cancellation within lease_seconds/3. Keeping cancellation durable is
         # what lets another worker own the HTTP control request safely.
         return batch
+
+    async def end_for_owners(self, owners: frozenset[str], *, settle_seconds: float = 10.0) -> dict[str, Ended]:
+        """Stop the items this process is executing for ``owners``; one counts as ended once its execution is terminal.
+
+        A cancelled batch row reaches an executing item only at its next lease
+        renewal (``lease_seconds / 3``); a turned-off person's subagent must not
+        keep calling models and tools until then.
+        """
+        stopping: dict[str, list[str]] = {}
+        for item_id, execution_id in list(self._execution_ids.items()):
+            owner = self._batch_owners.get(self._item_batches.get(item_id, ""))
+            if owner in owners:
+                request_cancel_background_task(execution_id)
+                stopping.setdefault(owner, []).append(execution_id)
+        if not stopping:
+            return {}
+
+        def _running(execution_id: str) -> bool:
+            result = get_background_task_result(execution_id)
+            return result is not None and not result.status.is_terminal
+
+        deadline = asyncio.get_running_loop().time() + settle_seconds
+        while any(_running(execution_id) for executions in stopping.values() for execution_id in executions):
+            if asyncio.get_running_loop().time() >= deadline:
+                break
+            await asyncio.sleep(0.05)
+        ended: dict[str, Ended] = {}
+        for owner, executions in stopping.items():
+            still = sum(1 for execution_id in executions if _running(execution_id))
+            ended[owner] = Ended(len(executions) - still, failed=still)
+        return ended
 
     async def _attempt_mutation_rejection(
         self,
@@ -1006,6 +1038,11 @@ class SubagentBatchService:
                 sandbox_session=(None if accepted_sandbox_session is None else accepted_sandbox_session.declaration),
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
+            # The owner's refusal was seen by this process's last look: the
+            # batch's cancellation is committed or on its way, and nothing the
+            # look stopped may start again behind it.
+            if get_owner_holdings().is_refused(user_id):
+                raise BatchCancelled()
             execution_id = executor.execute_async(prompt, task_id=item_id)
             self._execution_ids[item_id] = execution_id
             renew_every = max(1.0, self._config.lease_seconds / 3)

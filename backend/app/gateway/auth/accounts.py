@@ -143,7 +143,14 @@ reports when the runs' sandboxes were confirmed stopped (``confirmed_by:
 sandbox_gone``), or, where they were not, only when the run rows went
 terminal (``run_status``). A surface the command could not confirm is named
 under ``surfaces_unconfirmed`` and makes the exit status 2;
-``runs_unconfirmed`` keeps naming only runs.
+``runs_unconfirmed`` keeps naming only runs. Durable work a run started
+outside itself is stopped through the request a person's own cancel makes,
+attributed to the deployer: ``mcp_tasks`` (cancelled remotely by a Gateway's
+task loop, ``confirmed_by: task_status``) and ``subagent_batches`` (applied at
+once, ``batch_status``), looked for again once the runs are over. A task's
+completion notification and a channel message are refused at their next use
+(``mcp_task_notifications``, ``channel_ingress``), before any work is done
+for the person.
 """
 
 from __future__ import annotations
@@ -155,6 +162,7 @@ import logging
 import os
 import sys
 import time
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -246,6 +254,23 @@ CONFIRMED_BY_GATEWAY_RECORD = "gateway_record"
 #: authenticated once (``app.gateway.owner_connections``).
 CONNECTION_SURFACES = ("websockets", "sse_streams", "downloads")
 
+#: What a durable MCP task's and a subagent batch's stop time was confirmed
+#: from: the row reached a terminal status. A task's cancellation is carried
+#: out remotely by a Gateway's task loop. A batch's is applied to its rows at
+#: once, and its stop time is also when every live process confirmed it had
+#: stopped the items it was executing (``app.gateway.durable_work``).
+CONFIRMED_BY_TASK_STATUS = "task_status"
+CONFIRMED_BY_BATCH_STATUS = "batch_status"
+
+#: What the Gateway processes end of the durable work, at their look.
+DURABLE_PROCESS_SURFACES = ("subagent_batches",)
+
+#: The cancellation reason a durable MCP task records when ``disable`` stops it.
+MCP_TASK_CANCEL_REASON = "account_disabled"
+
+#: What a cancelled subagent batch's items say, instead of "Cancelled by user".
+BATCH_CANCEL_REASON = "Cancelled because the account was turned off"
+
 #: Surfaces whose state outlives the process that kept it: a sandbox's
 #: container keeps running after its Gateway is gone, so with no live process
 #: to confirm them they are unconfirmed, never "nothing held".
@@ -262,6 +287,20 @@ def _sealed_role_above(row: dict[str, Any], limit: str) -> bool:
     if not isinstance(sealed, str):
         return True
     return limited_role(sealed, limit) != sealed
+
+
+@dataclass
+class _DurableWork:
+    """The MCP tasks and subagent batches ``disable`` asked to stop, by id and owner, across both of its looks."""
+
+    tasks: dict[str, str] = field(default_factory=dict)
+    tasks_ended: set[str] = field(default_factory=set)
+    tasks_stopped_ms: int | None = None
+    batches: dict[str, str] = field(default_factory=dict)
+    batches_ended: set[str] = field(default_factory=set)
+    batches_stopped_ms: int | None = None
+    #: Asked and failed: the next look asks again.
+    failed: set[str] = field(default_factory=set)
 
 
 class SurfaceClock:
@@ -354,6 +393,9 @@ class AccountsCommand:
         setup_opens_without_admin: bool = False,
         sweeps: Any | None = None,
         live_window_seconds: float | None = None,
+        mcp_tasks: Any | None = None,
+        batches: Any | None = None,
+        channel_connections: Any | None = None,
     ) -> None:
         from app.gateway.refusal_watch import LIVE_WINDOW_SECONDS
 
@@ -362,6 +404,9 @@ class AccountsCommand:
         self._schedules = schedules
         self._runs = runs
         self._sweeps = sweeps
+        self._mcp_tasks = mcp_tasks
+        self._batches = batches
+        self._channel_connections = channel_connections
         self._deadline: float | None = None
         self._live_window = LIVE_WINDOW_SECONDS if live_window_seconds is None else live_window_seconds
         self._wait_seconds = wait_seconds
@@ -500,7 +545,8 @@ class AccountsCommand:
             clock.stopped("personal_access_tokens", ACTION_REVOKED, 0, at_ms=committed)
             clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, 0, at_ms=committed)
             clock.stopped("running_work", ACTION_ENDED, 0, at_ms=committed, confirmed_by=CONFIRMED_BY_RUN_STATUS)
-            await self._confirm_processes(check, check, [], clock, CONNECTION_SURFACES + RETAINED_SURFACES)
+            await self._confirm_processes(check, check, [], clock, CONNECTION_SURFACES + RETAINED_SURFACES + DURABLE_PROCESS_SURFACES)
+            await self._report_durable_work(_DurableWork(), clock, committed=committed, notifications=0, channels=0)
             document.update(clock.document())
             document["surfaces_not_reached"] = []
             if document["surfaces_unconfirmed"]:
@@ -519,14 +565,23 @@ class AccountsCommand:
         clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, sum([await self._count_schedules(covered) for covered in accounts]), at_ms=committed)
         # The connections are confirmed while the runs unwind, not after: their
         # stop times are the processes' own, not the run wait's.
-        runs, _ = await asyncio.gather(self._end_running_work(accounts, relook=True), self._confirm_processes(check, check, accounts, clock, CONNECTION_SURFACES))
+        notifications, channels = await self._count_refused_at_next_use(accounts)
+        work = _DurableWork()
+        runs, _, _ = await asyncio.gather(
+            self._end_running_work(accounts, relook=True),
+            self._confirm_processes(check, check, accounts, clock, CONNECTION_SURFACES),
+            self._end_durable_work(accounts, work, clock),
+        )
         document.update(runs)
         runs_ended_at = clock.now_ms()
         # A run that is ending parks its sandbox, and may leave a pooled
         # session or a queued memory update, after the first look: ask again
-        # now that the runs are over, and count what either look ended.
+        # now that the runs are over, and count what either look ended. The
+        # same goes for a batch it accepted or a task it submitted.
+        await self._end_durable_work(accounts, work, clock)
         retained_check = await self._sweeps.request_check() if self._sweeps is not None else None
-        await self._confirm_processes(retained_check, check, accounts, clock, RETAINED_SURFACES)
+        await asyncio.gather(self._confirm_processes(retained_check, check, accounts, clock, RETAINED_SURFACES + DURABLE_PROCESS_SURFACES), self._wait_for_tasks(work, clock))
+        await self._report_durable_work(work, clock, committed=committed, notifications=notifications, channels=channels)
         sandboxes = clock.surfaces.get("sandboxes", {})
         if document["runs_unconfirmed"]:
             clock.not_stopped("running_work", ACTION_ENDED, document["runs_found"], unconfirmed=True, confirmed_by=CONFIRMED_BY_RUN_STATUS)
@@ -550,7 +605,7 @@ class AccountsCommand:
     @staticmethod
     def _surfaces_note(clock: SurfaceClock) -> str:
         """What the unconfirmed process surfaces mean, saying only what the processes' record showed."""
-        entries = {name: clock.surfaces[name] for name in clock.unconfirmed if name != "running_work"}
+        entries = {name: clock.surfaces[name] for name in clock.unconfirmed if name not in ("running_work", "mcp_tasks", "subagent_batches")}
         note = ""
         if any(entry.get("processes_unconfirmed") for entry in entries.values()):
             note += (
@@ -571,7 +626,152 @@ class AccountsCommand:
                 f"; {', '.join(not_reached)} is `not_reached` (listed under `surfaces_not_reached`): the processes named under it have no way to end it in this deployment "
                 "(a sandbox provider that cannot stop an owner's sandboxes), so what a run left running there is not confirmed ended, and re-running this command will not change that"
             )
+        return note + AccountsCommand._durable_work_note(clock)
+
+    @staticmethod
+    def _durable_work_note(clock: SurfaceClock) -> str:
+        note = ""
+        tasks = clock.surfaces.get("mcp_tasks", {})
+        if "mcp_tasks" in clock.unconfirmed and tasks.get("action") == ACTION_NOT_REACHED:
+            note += (
+                "; mcp_tasks is `not_reached`: no live Gateway process runs the task loop that carries a cancellation out at the remote server (`mcp_tasks.enabled` is off), "
+                "so the tasks counted under `not_ended` keep running remotely, and re-running this command will not change that"
+            )
+        elif "mcp_tasks" in clock.unconfirmed:
+            note += (
+                "; the MCP tasks counted under `not_ended` were asked to stop, but a Gateway's task loop had not yet had the remote server cancel them when the wait ran out "
+                "(the server may be unreachable, or no Gateway process is running); re-running this command asks the task loop to try again now"
+            )
+        if "subagent_batches" in clock.unconfirmed:
+            note += (
+                "; a subagent batch counted under `not_ended` could not be cancelled, or a batch item a Gateway was executing did not stop, "
+                "or a Gateway process named under `processes_unconfirmed` had not looked; re-run this command to see whether it has since"
+            )
         return note
+
+    async def _count_refused_at_next_use(self, accounts: list[User]) -> tuple[int, int]:
+        """What waits to act for these accounts and is refused as it tries: MCP task notifications, and channel bindings."""
+        ids = [str(covered.id) for covered in accounts]
+        notifications = await self._mcp_tasks.count_pending_notifications(ids, tenant_digest=self._mcp_tasks.tenant.digest) if self._mcp_tasks is not None and ids else 0
+        channels = 0
+        if self._channel_connections is not None:
+            for user_id in ids:
+                channels += sum(1 for row in await self._channel_connections.list_connections(user_id) if row.get("status") != "revoked")
+        return notifications, channels
+
+    async def _end_durable_work(self, accounts: list[User], work: _DurableWork, clock: SurfaceClock) -> None:
+        """Ask each active MCP task and subagent batch of these accounts to stop; one already asked is asked again only if asking failed.
+
+        The request is the one a person's own cancel makes, attributed to the
+        deployer: a batch's is applied to its rows at once, and each Gateway
+        stops the items it is executing at its look; an MCP task's is carried
+        out remotely by a Gateway's task loop (``_wait_for_tasks``).
+        """
+        from app.mcp_tasks.service import deployer_cancel_actor_ref
+        from deerflow.persistence.subagent_batches.sql import BATCH_TERMINAL_STATUSES
+
+        ids = [str(covered.id) for covered in accounts]
+        if self._batches is not None:
+            for user_id in ids:
+                for row in await self._batches.list_active_by_user(user_id):
+                    batch_id = str(row["id"])
+                    if batch_id in work.batches and batch_id not in work.failed:
+                        continue
+                    work.batches[batch_id] = user_id
+                    try:
+                        result = await self._batches.cancel_batch(batch_id, user_id=user_id, reason=BATCH_CANCEL_REASON)
+                    except Exception as exc:  # noqa: BLE001 - one batch that refuses must not hide the others
+                        logger.warning("Failed to cancel subagent batch %s: %s", batch_id, exc)
+                        work.failed.add(batch_id)
+                        continue
+                    work.failed.discard(batch_id)
+                    # One that finished on its own before the cancel is ended too.
+                    if result is not None and result.get("status") in BATCH_TERMINAL_STATUSES:
+                        work.batches_ended.add(batch_id)
+                        work.batches_stopped_ms = clock.now_ms()
+        if self._mcp_tasks is not None:
+            digest = self._mcp_tasks.tenant.digest
+            actor_ref = deployer_cancel_actor_ref(tenant_digest=digest)
+            for user_id in ids:
+                for row in await self._mcp_tasks.list_active_by_user(user_id, tenant_digest=digest):
+                    task_id = str(row["id"])
+                    if task_id in work.tasks and task_id not in work.failed:
+                        continue
+                    work.tasks[task_id] = user_id
+                    try:
+                        # ``retry_now``: a re-run of the command asks the task
+                        # loop to try a failing remote cancel again now, not
+                        # after its backoff.
+                        await self._mcp_tasks.request_cancel(
+                            task_id,
+                            user_id=user_id,
+                            thread_id=row["thread_id"],
+                            requested_at=datetime.now(UTC),
+                            actor_ref=actor_ref,
+                            reason_code=MCP_TASK_CANCEL_REASON,
+                            tenant_digest=digest,
+                            retry_now=True,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - one task that refuses must not hide the others
+                        logger.warning("Failed to request cancellation of MCP task %s: %s", task_id, exc)
+                        work.failed.add(task_id)
+                        continue
+                    work.failed.discard(task_id)
+
+    async def _wait_for_tasks(self, work: _DurableWork, clock: SurfaceClock) -> None:
+        """Poll until every task asked to stop is terminal or the wait runs out."""
+        if self._mcp_tasks is None or not work.tasks:
+            return
+        from deerflow.mcp.tasks import TERMINAL_TASK_STATUSES
+
+        terminal = {status.value for status in TERMINAL_TASK_STATUSES}
+        deadline = self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
+        while True:
+            pending = sorted(set(work.tasks) - work.tasks_ended)
+            if not pending:
+                work.tasks_stopped_ms = clock.now_ms()
+                return
+            statuses = await self._mcp_tasks.statuses(pending, tenant_digest=self._mcp_tasks.tenant.digest)
+            # A row that went away says nothing about the remote job: not ended.
+            work.tasks_ended.update(task_id for task_id in pending if statuses.get(task_id) in terminal)
+            if work.tasks_ended >= set(work.tasks):
+                work.tasks_stopped_ms = clock.now_ms()
+                return
+            if time.monotonic() >= deadline:
+                return
+            await asyncio.sleep(SWEEP_WAIT_POLL_SECONDS)
+
+    async def _report_durable_work(self, work: _DurableWork, clock: SurfaceClock, *, committed: int, notifications: int, channels: int) -> None:
+        tasks_left = len(set(work.tasks) - work.tasks_ended)
+        if tasks_left:
+            # Only a task loop carries a cancellation out: where every live
+            # process runs none, waiting or re-running will not end the task.
+            live = await self._sweeps.live_processes(window_seconds=self._live_window) if self._sweeps is not None else []
+            unreached = sorted(process.process_id for process in live if "mcp_tasks" in process.unreached)
+            action = ACTION_NOT_REACHED if live and len(unreached) == len(live) else ACTION_ENDED
+            clock.not_stopped("mcp_tasks", action, len(work.tasks), unconfirmed=True, confirmed_by=CONFIRMED_BY_TASK_STATUS, not_ended=tasks_left, processes_unreached=unreached)
+        else:
+            clock.stopped("mcp_tasks", ACTION_ENDED, len(work.tasks), at_ms=work.tasks_stopped_ms if work.tasks else committed, confirmed_by=CONFIRMED_BY_TASK_STATUS, not_ended=0, processes_unreached=[])
+        # The rows' cancel, and what the processes confirmed stopping of the
+        # items they were executing (``_confirm_processes``): an executing item
+        # reads the rows only at its next lease renewal.
+        executions = clock.surfaces.pop("subagent_batches", None)
+        executions_confirmed = executions is None or "subagent_batches" not in clock.unconfirmed
+        if not executions_confirmed:
+            clock.unconfirmed.remove("subagent_batches")
+        process_facts = {key: executions[key] for key in ("processes", "processes_unconfirmed")} if executions is not None else {}
+        items_stopped = executions["count"] if executions is not None else 0
+        not_ended = len(set(work.batches) - work.batches_ended) + (executions["not_ended"] if executions is not None else 0)
+        if not_ended or not executions_confirmed:
+            clock.not_stopped("subagent_batches", ACTION_ENDED, len(work.batches), unconfirmed=True, confirmed_by=CONFIRMED_BY_BATCH_STATUS, items_stopped=items_stopped, not_ended=not_ended, **process_facts)
+        else:
+            rows_ms = work.batches_stopped_ms if work.batches else committed
+            at_ms = max(rows_ms, executions["stopped_after_ms"]) if executions is not None else rows_ms
+            clock.stopped("subagent_batches", ACTION_ENDED, len(work.batches), at_ms=at_ms, confirmed_by=CONFIRMED_BY_BATCH_STATUS, items_stopped=items_stopped, not_ended=0, **process_facts)
+        # A task's completion notification would launch a run for the person,
+        # and a channel message would start one: both are refused as they try.
+        clock.stopped("mcp_task_notifications", ACTION_REFUSED_AT_NEXT_USE, notifications, at_ms=committed)
+        clock.stopped("channel_ingress", ACTION_REFUSED_AT_NEXT_USE, channels, at_ms=committed)
 
     async def _confirm_processes(self, check: int | None, since_check: int | None, accounts: list[User], clock: SurfaceClock, surfaces: tuple[str, ...]) -> None:
         """Wait until every live Gateway process has acted on ``check``, then report what they ended of ``surfaces`` since ``since_check``.
@@ -986,11 +1186,14 @@ async def _run(
     role: str = LIMIT_ROLES[0],
 ) -> dict[str, Any]:
     from deerflow.config import get_app_config
+    from deerflow.persistence.channel_connections import ChannelConnectionRepository
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
+    from deerflow.persistence.mcp_tasks import McpTaskRepository
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
     from deerflow.persistence.refusal_sweeps import RefusalSweepRepository
     from deerflow.persistence.run import RunRepository
     from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+    from deerflow.persistence.subagent_batches import SubagentBatchRepository
     from deerflow.runtime.tenant_identity import TenantIdentityV1
 
     config = get_app_config()
@@ -1011,6 +1214,9 @@ async def _run(
             schedules=ScheduledTaskRepository(session_factory),
             runs=RunRepository(session_factory, tenant=tenant),
             sweeps=RefusalSweepRepository(session_factory),
+            mcp_tasks=McpTaskRepository(session_factory, tenant=tenant),
+            batches=SubagentBatchRepository(session_factory, tenant=tenant),
+            channel_connections=ChannelConnectionRepository(session_factory),
             wait_seconds=wait_seconds,
             **deployment_options(config),
         )

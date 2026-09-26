@@ -76,13 +76,16 @@ def is_provider_account(user: Any) -> bool:
     return getattr(user, "oauth_provider", None) is not None
 
 
+SIGN_ON_REQUIRED_MESSAGE = "This deployment signs people in through its identity provider; local passwords are not used."
+
+
 def sign_on_required(status_code: int = status.HTTP_403_FORBIDDEN) -> HTTPException:
     """The one answer every closed local door gives; it names no account."""
     return HTTPException(
         status_code=status_code,
         detail=AuthErrorResponse(
             code=AuthErrorCode.SIGN_ON_REQUIRED,
-            message="This deployment signs people in through its identity provider; local passwords are not used.",
+            message=SIGN_ON_REQUIRED_MESSAGE,
         ).model_dump(),
     )
 

@@ -386,7 +386,10 @@ notification updates mutate lifecycle columns only. Parent-run cancellation does
 not request remote-task cancellation; use the task cancel route or task management
 tool explicitly. The first task cancellation intent separately records a
 tenant-scoped pseudonymous actor reference and the fixed `user_api` or `agent_tool`
-reason code; retries preserve that original attribution. A completion
+reason code; retries preserve that original attribution. The deployer's
+`accounts disable` cancels a turned-off person's tasks with `account_disabled`,
+attributed to the accounts command rather than to the person (migration
+`0046_mcp_task_disable_reason`). A completion
 notification is a new accepted invocation, not a continuation of the parent. Its
 stable admission key commits to tenant, task, event version, and notification
 kind, while its accepted Origin contains only the task/lineage/parent-receipt and

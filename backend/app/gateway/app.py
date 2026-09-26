@@ -240,8 +240,9 @@ async def _start_refusal_watch(app: FastAPI):
     """Look for accounts turned off among those this process holds a connection or keeps state for (``refusal_watch``).
 
     What the process keeps for a person between requests is added to its
-    holdings (``retained_state``), and a surface it has no way to end is
-    named when it registers. Only with a database: the account command, the watch's only caller, needs
+    holdings (``retained_state``), so are the batch items it executes
+    (``durable_work``), and a surface it has no way to end is named when it
+    registers. Only with a database: the account command, the watch's only caller, needs
     one too, and without one there is nobody to confirm to. A failure to start
     fails startup: a process that never registered would read to the command
     as one holding nothing, and its connections would be reported closed.
@@ -251,6 +252,7 @@ async def _start_refusal_watch(app: FastAPI):
     import uuid
 
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.durable_work import add_durable_work_sources, unreached_durable_work
     from app.gateway.refusal_watch import RefusalWatch
     from app.gateway.retained_state import add_retained_state_sources, thread_owner_from, unreached_surfaces
     from deerflow.persistence.engine import get_session_factory
@@ -263,12 +265,13 @@ async def _start_refusal_watch(app: FastAPI):
 
     holdings = get_owner_holdings()
     add_retained_state_sources(holdings, thread_owner=thread_owner_from(getattr(app.state, "thread_store", None)))
+    add_durable_work_sources(holdings, batches=getattr(app.state, "subagent_batch_service", None))
     watch = RefusalWatch(
         RefusalSweepRepository(session_factory),
         holdings,
         refused_owners=SQLiteUserRepository(session_factory).list_refused_user_ids,
         process_id=f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}",
-        unreached=unreached_surfaces(),
+        unreached=unreached_surfaces() + unreached_durable_work(runs_task_loop=bool(getattr(app.state, "mcp_tasks_available", False))),
     )
     await watch.start()
     return watch
