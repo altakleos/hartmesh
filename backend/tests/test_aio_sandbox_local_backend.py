@@ -2736,3 +2736,79 @@ def test_stop_container_leaves_a_runtime_that_is_not_docker_on_its_own_default(m
     backend._stop_container("sandbox-parked")
 
     assert seen == [["container", "stop", "sandbox-parked"]]
+
+
+def test_a_sandbox_is_labelled_with_whose_it_is_so_a_restarted_gateway_can_attribute_it(monkeypatch):
+    """Adopted after a restart, a sandbox whose owner is unknown cannot be stopped when that owner is turned off."""
+    backend = _backend_for_inspect_tests()
+    captured: dict[str, object] = {}
+
+    def fake_start(*_args, **kwargs):
+        captured.update(kwargs)
+        return "container-id"
+
+    monkeypatch.setattr(backend, "_start_container", fake_start)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    backend.create(thread_id="thread-1", sandbox_id="owned-open", user_id="user-1")
+
+    assert captured["labels"] == {
+        "deerflow.sandbox_id": "owned-open",
+        "deerflow.role": "sandbox",
+        "deerflow.network_mode": "open",
+        "deerflow.owner_user_id": "user-1",
+        "deerflow.thread_id": "thread-1",
+    }
+
+
+def test_a_restricted_sandbox_is_labelled_with_its_owner_and_stays_compatible(monkeypatch):
+    backend = _restricted_backend()
+    started: dict[str, dict] = {}
+
+    def fake_start(container_name, *_args, **kwargs):
+        started[container_name] = kwargs["labels"]
+        return "container-id"
+
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "missing")
+    monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "10.0.0.2")
+    monkeypatch.setattr(backend, "_start_container", fake_start)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    backend.create(thread_id="thread-1", sandbox_id="owned-restricted", user_id="user-1")
+
+    labels = started["sandbox-owned-restricted"]
+    assert labels["deerflow.owner_user_id"] == "user-1" and labels["deerflow.thread_id"] == "thread-1"
+    assert backend._labels_match(labels, backend._restricted_labels("owned-restricted", "sandbox")), "the owner is not part of the policy identity"
+
+
+def test_listing_running_sandboxes_reads_whose_each_is_and_none_for_an_unlabelled_one(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    identity = {"deerflow.role": "sandbox", "deerflow.network_mode": "open"}
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            "sandbox-owned": _ContainerInspection(1.0, 18080, {**identity, "deerflow.sandbox_id": "owned", "deerflow.owner_user_id": "user-1", "deerflow.thread_id": "thread-1"}, "sandbox:latest", frozenset({"bridge"})),
+            "sandbox-older": _ContainerInspection(1.0, 18081, {**identity, "deerflow.sandbox_id": "older"}, "sandbox:latest", frozenset({"bridge"})),
+            "sandbox-half": _ContainerInspection(1.0, 18082, {**identity, "deerflow.sandbox_id": "half", "deerflow.owner_user_id": "user-1"}, "sandbox:latest", frozenset({"bridge"})),
+        },
+    )
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="sandbox-owned\nsandbox-older\nsandbox-half\n", stderr="", returncode=0))
+
+    owners = {info.sandbox_id: info.owner for info in backend.list_running()}
+
+    assert owners == {"owned": ("user-1", "thread-1"), "older": None, "half": None}, "half an owner is no owner: it stays unattributed"
+
+
+def test_a_sandbox_without_a_thread_or_a_user_carries_no_owner_label():
+    assert LocalContainerBackend._owner_labels("user-1", None) == {}
+    assert LocalContainerBackend._owner_labels(None, "thread-1") == {}
+
+
+def test_the_owner_is_not_part_of_a_restricted_sandbox_s_identity_labels():
+    """Older unlabelled sets must stay compatible: the expected set names identity and policy only."""
+    backend = _restricted_backend()
+
+    assert set(backend._restricted_labels("x", "sandbox")) == {"deerflow.sandbox_id", "deerflow.role", "deerflow.network_mode", "deerflow.network_policy_digest"}

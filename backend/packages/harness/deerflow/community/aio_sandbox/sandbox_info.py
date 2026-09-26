@@ -192,6 +192,12 @@ class SandboxInfo:
     # as proof of fresh creation. A lifecycle signal like ``requires_replacement``:
     # never persisted, never compared.
     provenance: str = field(default=PROVENANCE_UNKNOWN, repr=False, compare=False)
+    # Whose sandbox this is, ``(user_id, thread_id)``, as the backend recorded
+    # it on the resource when it created it: what lets a process that adopts
+    # the sandbox after a restart stop it when that owner is turned off.
+    # ``None`` for a resource created before the record existed, or by a
+    # backend that keeps none. Discovery-only: never persisted, never compared.
+    owner: tuple[str, str] | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {
