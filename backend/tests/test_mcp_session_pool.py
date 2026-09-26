@@ -6,6 +6,7 @@ import logging
 import stat
 import sys
 import threading
+import warnings
 import weakref
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -2424,15 +2425,19 @@ def test_get_session_cross_loop_in_flight_does_not_raise_assertion():
     with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
         # First loop creates and registers an entry, then its loop is torn down
         # by asyncio.run, leaving a stale (closed-loop) record behind.
-        t1 = threading.Thread(target=run_in_own_loop)
+        # Daemon threads with bounded joins: a regression fails the test
+        # instead of keeping the interpreter from exiting.
+        t1 = threading.Thread(target=run_in_own_loop, daemon=True)
         t1.start()
-        t1.join()
+        t1.join(10)
+        assert not t1.is_alive(), "the first loop's request must finish"
 
         # Second loop requests the same key. It must evict the stale record and
         # create a fresh session instead of raising AssertionError.
-        t2 = threading.Thread(target=run_in_own_loop)
+        t2 = threading.Thread(target=run_in_own_loop, daemon=True)
         t2.start()
-        t2.join()
+        t2.join(10)
+        assert not t2.is_alive(), "the second loop's request must finish"
 
     assert not errors, f"cross-loop same-key request must not raise: {errors}"
     assert len(results) == 2
@@ -2495,24 +2500,235 @@ def test_cross_loop_preempting_blocked_in_flight_does_not_hang_owner():
         except BaseException as e:  # noqa: BLE001 - capture for assertion
             errors.append((name, e))
 
+    # Daemon threads, and the gate released however the test ends: a failed
+    # assertion must fail the test, never leave A spinning in initialize() and
+    # keep the interpreter (and the CI job running it) from exiting.
     with patch("langchain_mcp_adapters.sessions.create_session", side_effect=make_cm):
-        ta = threading.Thread(target=run_get, args=("A",))
-        ta.start()
-        assert entered.wait(2), "owner A must enter the CM and start initializing"
+        ta = threading.Thread(target=run_get, args=("A",), daemon=True)
+        tb = threading.Thread(target=run_get, args=("B",), daemon=True)
+        try:
+            ta.start()
+            assert entered.wait(2), "owner A must enter the CM and start initializing"
 
-        tb = threading.Thread(target=run_get, args=("B",))
-        tb.start()
-        tb.join(3)
+            tb.start()
+            tb.join(3)
 
-        # B must complete without depending on A's blocked initialize().
-        assert not tb.is_alive(), "foreign-loop request B must not hang"
-        # A must already be unwound (cancelled), not waiting on the dead gate.
-        ta.join(3)
-        assert not ta.is_alive(), "preempted owner A must not hang forever"
+            # B must complete without depending on A's blocked initialize().
+            assert not tb.is_alive(), "foreign-loop request B must not hang"
+            # A must already be unwound (cancelled), not waiting on the dead gate.
+            ta.join(3)
+            assert not ta.is_alive(), "preempted owner A must not hang forever"
+        finally:
+            first_gate.set()
 
     assert [n for n, _ in results] == ["B"], "only B produces a usable session"
     assert any(isinstance(e, asyncio.CancelledError) for _, e in errors), "preempted A must unwind via CancelledError"
     assert "blocking" in closed, "preempted owner's __aexit__ must run on teardown"
+
+
+def _owner_loop_in_thread() -> tuple[asyncio.AbstractEventLoop, threading.Thread]:
+    """A foreign owner loop running ``run_forever`` in its own thread, as a short-lived ``asyncio.run`` loop does."""
+    loop = asyncio.new_event_loop()
+    thread = threading.Thread(target=loop.run_forever, daemon=True)
+    thread.start()
+    started = threading.Event()
+    loop.call_soon_threadsafe(started.set)
+    assert started.wait(2)
+    return loop, thread
+
+
+@pytest.mark.asyncio
+async def test_foreign_teardown_returns_when_the_owner_loop_closes_before_running_it():
+    """A teardown queued onto a loop that then closes is dropped with it; waiting on it must not hang.
+
+    The owner of an in-flight creation lives on another thread's short-lived
+    loop. The foreign caller queues the owner's teardown there, and that loop
+    can finish and close before it runs the queued callback, in which case the
+    callback is discarded and its future never resolves. Closing a loop that
+    way (``asyncio.run``) first cancels and finishes every task it holds, so
+    the owner is gone and the caller must stop waiting.
+    """
+    pool = MCPSessionPool()
+    loop, thread = _owner_loop_in_thread()
+    owner = loop.create_future()  # an owner that would only end when its loop runs
+    in_last_callback = threading.Event()
+    finish = threading.Event()
+
+    def _last_callback() -> None:
+        # The loop's final iteration: anything queued now is never run.
+        in_last_callback.set()
+        assert finish.wait(5)
+        loop.stop()
+
+    loop.call_soon_threadsafe(_last_callback)
+    assert in_last_callback.wait(2)
+
+    gc.collect()  # leftovers from earlier tests warn now, not inside the capture
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        teardown = asyncio.create_task(pool._shutdown_entry(loop, owner, asyncio.Event(), cancel=True))
+        await asyncio.sleep(0.05)  # the teardown is queued onto the owner loop
+        finish.set()
+        await asyncio.to_thread(thread.join, 2)
+        loop.close()
+
+        await asyncio.wait_for(teardown, timeout=2)
+        gc.collect()
+
+    assert not [w for w in caught if "never awaited" in str(w.message) and "_shutdown" in str(w.message)], "the dropped teardown is closed, not left unawaited"
+
+
+@pytest.mark.asyncio
+async def test_foreign_teardown_cancelled_by_the_owner_loop_shutdown_is_not_the_callers_cancellation():
+    """The owner loop's shutdown cancels the teardown it was running; the foreign caller carries on.
+
+    ``asyncio.run`` cancels every task still pending when its main coroutine
+    returns, including a teardown a foreign caller queued. That cancellation
+    belongs to the owner loop, not to the caller: surfacing it made the
+    caller's own ``get_session`` fail with ``CancelledError`` instead of
+    returning its session.
+    """
+    pool = MCPSessionPool()
+    loop, thread = _owner_loop_in_thread()
+
+    async def _waiting_owner() -> None:
+        await asyncio.Event().wait()
+
+    owner = asyncio.run_coroutine_threadsafe(_make_task(_waiting_owner), loop).result(2)
+    try:
+        teardown = asyncio.create_task(pool._shutdown_entry(loop, owner, asyncio.Event(), cancel=False))
+        await asyncio.sleep(0.05)  # the teardown is running on the owner loop, awaiting the owner
+
+        def _shutdown_cancels_everything() -> None:
+            for task in asyncio.all_tasks(loop):
+                task.cancel()
+
+        loop.call_soon_threadsafe(_shutdown_cancels_everything)
+        await asyncio.wait_for(teardown, timeout=2)
+        assert not teardown.cancelled()
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        await asyncio.to_thread(thread.join, 2)
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_foreign_teardown_cancelled_by_the_owner_loop_still_waits_for_the_owner_to_finish():
+    """The owner loop's shutdown cancels the queued teardown, but the owner may still be closing.
+
+    A caller that returned then would start its replacement session while the
+    old one (its MCP server process) is still being torn down on the other
+    loop. It keeps waiting until that owner task has finished.
+    """
+    pool = MCPSessionPool()
+    loop, thread = _owner_loop_in_thread()
+    unwinding = threading.Event()
+
+    async def _slow_to_close_owner() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            unwinding.set()
+            await asyncio.sleep(0.3)  # its __aexit__ takes a moment
+            raise
+
+    owner = asyncio.run_coroutine_threadsafe(_make_task(_slow_to_close_owner), loop).result(2)
+    try:
+        teardown = asyncio.create_task(pool._shutdown_entry(loop, owner, asyncio.Event(), cancel=False))
+        await asyncio.sleep(0.05)  # the teardown is running on the owner loop, awaiting the owner
+
+        def _shutdown_cancels_everything() -> None:
+            for task in asyncio.all_tasks(loop):
+                task.cancel()
+
+        loop.call_soon_threadsafe(_shutdown_cancels_everything)
+        await asyncio.wait_for(teardown, timeout=2)
+        assert unwinding.is_set()
+        assert owner.done(), "the caller returned while the owner was still closing"
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        await asyncio.to_thread(thread.join, 2)
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_a_callers_own_cancellation_propagates_from_a_foreign_teardown_wait():
+    """Only the owner loop's cancellation is absorbed; the caller's own still ends its wait."""
+    pool = MCPSessionPool()
+    loop, thread = _owner_loop_in_thread()
+
+    async def _waiting_owner() -> None:
+        await asyncio.Event().wait()
+
+    owner = asyncio.run_coroutine_threadsafe(_make_task(_waiting_owner), loop).result(2)
+    try:
+        teardown = asyncio.create_task(pool._shutdown_entry(loop, owner, asyncio.Event(), cancel=False))
+        await asyncio.sleep(0.05)
+        teardown.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(teardown, timeout=2)
+    finally:
+        loop.call_soon_threadsafe(owner.cancel)
+        loop.call_soon_threadsafe(loop.stop)
+        await asyncio.to_thread(thread.join, 2)
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_foreign_teardown_that_never_finishes_is_bounded_by_the_close_timeout():
+    """An owner whose loop keeps running but whose teardown never ends is waited for at most ``SESSION_CLOSE_TIMEOUT``."""
+    pool = MCPSessionPool()
+    pool.SESSION_CLOSE_TIMEOUT = 0.2
+    loop, thread = _owner_loop_in_thread()
+
+    async def _stuck_owner() -> None:
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await asyncio.Event().wait()  # its teardown never completes
+
+    owner = asyncio.run_coroutine_threadsafe(_make_task(_stuck_owner), loop).result(2)
+    try:
+        started = loop.time()
+        await asyncio.wait_for(pool._shutdown_entry(loop, owner, asyncio.Event(), cancel=True), timeout=2)
+        assert loop.time() - started < 1.0
+    finally:
+        loop.call_soon_threadsafe(loop.stop)
+        await asyncio.to_thread(thread.join, 2)
+        loop.close()
+
+
+@pytest.mark.asyncio
+async def test_foreign_teardown_for_a_loop_that_closes_as_it_is_scheduled_returns():
+    """The owning loop can close between the running check and the schedule; that is not an error.
+
+    The teardown coroutine that could not be scheduled is closed, not left
+    for the garbage collector to report as never awaited.
+    """
+    pool = MCPSessionPool()
+    closing = MagicMock(spec=asyncio.AbstractEventLoop)
+    closing.is_closed.return_value = False
+    closing.is_running.return_value = True
+
+    def _closed(*_args, **_kwargs):
+        # A fresh error each time: one stored instance would keep its
+        # traceback, and with it the coroutine, alive past the collection.
+        raise RuntimeError("Event loop is closed")
+
+    closing.call_soon_threadsafe.side_effect = _closed
+
+    gc.collect()  # leftovers from earlier tests warn now, not inside the capture
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        await asyncio.wait_for(pool._shutdown_entry(closing, MagicMock(), asyncio.Event(), cancel=True), timeout=2)
+        closing.reset_mock()  # the recorded call would keep the scheduling callback, and the coroutine, alive
+        gc.collect()
+
+    assert not [w for w in caught if "never awaited" in str(w.message) and "_shutdown" in str(w.message)]
+
+
+async def _make_task(factory):
+    return asyncio.get_running_loop().create_task(factory())
 
 
 @pytest.mark.asyncio

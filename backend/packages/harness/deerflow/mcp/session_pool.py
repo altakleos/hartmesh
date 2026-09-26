@@ -36,14 +36,24 @@ resolves the creation's future in one atomic critical section, so callers can
 only ever receive a session the pool already owns (and will retire via LRU
 eviction or the close_* paths) — never one whose lifetime is still tied to a
 single caller that might get cancelled.
+
+A caller on another loop tears a foreign owner down by queueing ``_shutdown``
+onto the owner's loop. That loop is often a short-lived ``asyncio.run`` loop,
+which can close with the teardown still queued (dropping it) or cancel it as
+it shuts down. The caller stops waiting once that loop has closed or the
+owner task has finished, never raises that loop's cancellation as its own,
+and never waits longer than ``SESSION_CLOSE_TIMEOUT``.
 """
 
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import inspect
 import logging
 import threading
 from collections import OrderedDict
+from collections.abc import Coroutine
 from typing import Any
 
 import anyio
@@ -124,6 +134,7 @@ class MCPSessionPool:
 
     MAX_SESSIONS = 256
     SESSION_CLOSE_TIMEOUT = 5.0  # seconds to wait when closing a session on a foreign loop
+    FOREIGN_TEARDOWN_POLL = 0.05  # seconds between checks that a foreign owning loop is still open
 
     def __init__(self) -> None:
         # Each entry: (session, owning_loop, owner_task, close_event).
@@ -559,11 +570,15 @@ class MCPSessionPool:
         if loop is current_loop:
             await self._shutdown(close_evt, task, cancel, ready=ready)
         elif loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self._shutdown(close_evt, task, cancel, ready=ready), loop)
+            teardown = self._shutdown(close_evt, task, cancel, ready=ready)
             try:
-                await asyncio.wrap_future(future)
-            except Exception:
-                logger.warning("Error closing MCP session on owning loop", exc_info=True)
+                future = asyncio.run_coroutine_threadsafe(teardown, loop)
+            except RuntimeError:
+                # Closed between the checks above and the schedule: nothing
+                # more runs there, so there is nothing left to wait for.
+                teardown.close()
+                return
+            await self._await_foreign_teardown(loop, future, teardown, task)
         else:
             # Owning loop exists but is neither the current loop nor running.
             # We are inside an async context here, so run_until_complete() would
@@ -578,6 +593,68 @@ class MCPSessionPool:
             self._signal_close(loop, close_evt)
             if cancel:
                 self._cancel_owner(loop, task, ready)
+
+    async def _await_foreign_teardown(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        future: concurrent.futures.Future[None],
+        teardown: Coroutine[Any, Any, None],
+        owner: asyncio.Task[Any],
+    ) -> None:
+        """Wait for a teardown queued onto another thread's loop, while waiting can still end.
+
+        The owning loop is usually a short-lived ``asyncio.run`` loop in a
+        worker thread, and it can finish while the teardown is queued:
+
+        - it closes before running the queued callback, which leaves *future*
+          pending forever. Nothing more runs on a closed loop, so the wait ends
+          (and the never-started *teardown* is closed);
+        - its shutdown cancels the teardown along with every other pending
+          task. That cancellation is the owner loop's, not this caller's, so it
+          is not raised here; the owner, cancelled in the same sweep, may still
+          be running ``__aexit__``, so the wait continues until *owner* is done
+          or its loop has closed.
+
+        A teardown that simply never ends is bounded by
+        ``SESSION_CLOSE_TIMEOUT``, as the synchronous close is. A cancellation
+        of this caller still propagates.
+        """
+        wrapped = asyncio.wrap_future(future)
+        # Retrieve the outcome whenever it lands, including after this caller
+        # stopped waiting, so a late failure is logged rather than left
+        # unretrieved on this loop.
+        wrapped.add_done_callback(self._log_foreign_teardown_outcome)
+        running = asyncio.get_running_loop()
+        deadline = running.time() + self.SESSION_CLOSE_TIMEOUT
+        while True:
+            if wrapped.done() and not wrapped.cancelled():
+                return
+            if wrapped.cancelled() and owner.done():
+                return
+            if loop.is_closed():
+                if inspect.getcoroutinestate(teardown) == inspect.CORO_CREATED:
+                    logger.debug("Owning loop closed before running the queued MCP session teardown")
+                    teardown.close()
+                return
+            remaining = deadline - running.time()
+            if remaining <= 0:
+                logger.warning("MCP session teardown on its owning loop did not finish within %.1fs; the old session may still be closing", self.SESSION_CLOSE_TIMEOUT)
+                return
+            step = min(self.FOREIGN_TEARDOWN_POLL, remaining)
+            if wrapped.done():
+                # The owner loop cancelled the teardown; the owner is finishing.
+                await asyncio.sleep(step)
+            else:
+                await asyncio.wait({wrapped}, timeout=step)
+
+    @staticmethod
+    def _log_foreign_teardown_outcome(wrapped: asyncio.Future[None]) -> None:
+        if wrapped.cancelled():
+            logger.debug("Owning loop cancelled the queued MCP session teardown during its shutdown")
+            return
+        exc = wrapped.exception()
+        if exc is not None:
+            logger.warning("Error closing MCP session on owning loop", exc_info=exc)
 
     async def _close_owners(
         self,
