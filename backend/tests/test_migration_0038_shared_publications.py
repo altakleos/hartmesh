@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.bootstrap import _get_alembic_config
 
-_REVISION = "0042_provider_keys"
+_REVISION = "0043_role_limits"
 _PREVIOUS = "0037_merge_upstream_0018"
 
 

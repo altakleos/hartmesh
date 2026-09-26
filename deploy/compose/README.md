@@ -380,8 +380,8 @@ HARTMESH_SIGN_ON_ROLES=admin=admin,member=user
   `roles from claim` when the keys are set (`sign-in=sign_on_only (provider
   sso, callback …, admission by claim, roles from claim)`).
 
-**The deployer can turn one account off, or end its sessions, or release
-its address.** An operator
+**The deployer can turn one account off, end its sessions, limit its role,
+or release its address.** An operator
 command, run inside the deployment like `reset_admin` and never a network
 route: nothing reachable over HTTP turns an account off or on or ends
 another account's sessions, with any credential. Accounts are addressed by
@@ -399,6 +399,8 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
 # … enable        --issuer https://login.example.com --subject 3141592
 # … end-sessions  --issuer https://login.example.com --subject 3141592 [--end-running-work]
 # … release-email --issuer https://login.example.com --subject 3141592
+# … limit-role    --issuer https://login.example.com --subject 3141592 [--end-running-work]
+# … lift-role-limit --issuer https://login.example.com --subject 3141592
 # … disable       --email pat@example.com
 ```
 
@@ -450,11 +452,75 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   `disable` stay ended and revoked; the person signs in again.
 - `end-sessions` signs one account out everywhere without turning it off and
   without touching its tokens: every open session is refused at its next
-  request and the next sign-in re-reads the claim. This is how a demotion
-  takes effect at once. A run already executing keeps going, because
-  demoting someone is not removing them and their work is still theirs;
-  `--end-running-work` cancels it too, reporting the same run counts
-  `disable` does.
+  request and the next sign-in re-reads the claim. A run already executing
+  keeps going, because demoting someone is not removing them and their work
+  is still theirs; `--end-running-work` cancels it too, reporting the same
+  run counts `disable` does. Until the person signs in again, their stored
+  role is still the one the last sign-in read; `limit-role` is the form that
+  changes it at once and keeps it changed.
+- `limit-role` holds a person below administrator (`--role user`, the
+  default and today the only limit) until the deployer lifts it, **whatever
+  the provider's claim says** -- including a provider restored from a backup
+  taken before the demotion, whose claim says `admin` again. The limit is
+  one row in `role_limits` (migration `0043_role_limits`), keyed by issuer
+  and subject, so it holds for a subject with no account yet and for every
+  account the identity has here. Every read of an account takes its role
+  from it, so at once: the stored role reads `user`; a session's next
+  request, and what it may see of other people's runs, is a `user`'s; a run
+  a personal access token starts carries `user`; a scheduled or channel
+  launch runs as `user`; and a sign-in whose claim says `admin` stores
+  `user`, applied in the same write that stores the role. The limit, its
+  lift and every sign-in of that identity take turns (on PostgreSQL, one
+  transaction lock per identity), so a sign-in that read `admin` just before
+  the limit cannot store it after. It ends the sessions of every covered
+  account the way `end-sessions` does, in the transaction that records the
+  limit, so a command interrupted after that commit leaves none open, and
+  leaves tokens working at the limited role. A run already executing keeps
+  the role it started with, and is left alone unless `--end-running-work` is
+  given, which cancels only the runs admitted with a role above the limit (or
+  with none recorded): work the person starts afterwards runs as `user` and
+  is theirs to finish. It looks once more when the wait is over, for a run
+  that a request authenticated just before the limit committed inserted
+  meanwhile; a later pass finds anything slower. That
+  run's role matters only where something reads it -- `authorization.enabled`,
+  or `guardrails` with a provider -- and this profile sets neither, so here
+  it can do nothing a `user` could not; the document's `running_work` entry
+  names what reads it (`role_read_by`, empty here). **Re-applying it on every
+  pass is safe, with or without `--end-running-work`**: with nothing to lower
+  it changes nothing (`"changed": false`) and signs nobody out, and the flag
+  finds nothing above the limit to cancel. `lift-role-limit` withdraws the
+  limit and changes nothing else: the stored role stays where the limit held
+  it until a sign-in reads the role again -- the next sign-in where roles
+  follow the claim, and where they come from `admin_emails` instead, only a
+  sign-in that changes the account's address. Personal access tokens never
+  reach an administrator route, whether or not a limit holds. With local
+  passwords on it refuses to limit the **last administrator**: a deployment
+  with none offers first-boot setup to whoever reaches it first. Restoring a
+  database backup taken before a limit was set drops that limit with it;
+  re-apply your record afterwards, as after any restore.
+- The role-limit documents say **when each surface stopped**: `started_at`
+  (UTC), `elapsed_ms` for the whole command, `changed` (whether this run
+  changed anything), and under `surfaces` one entry per surface with its
+  `action`, its `count`, `stopped_after_ms` on a monotonic clock from the
+  command's start and `stopped_at`, that offset added to `started_at`. A
+  surface limited at its next use, and `sessions`, which end in the limit's
+  own transaction, report the limit's commit. A surface the
+  command could not confirm (`running_work`, when a cancelled run did not
+  stop within `--wait-seconds`) is named under `surfaces_unconfirmed` and
+  the exit status is **2**. For `limit-role` the surfaces and their counts
+  are: `stored_role` (stored roles lowered; 0 when every covered account
+  already sat at or below the limit), `sign_in` (covered accounts),
+  `sessions` (covered accounts whose sessions were ended, or would have
+  been), `personal_access_tokens` (live tokens), `internal_launches`
+  (active schedules) and `running_work` (runs admitted above the limit,
+  `role_above` naming the limit; `confirmed_by: run_status` when ended, since
+  the stop time is read from the run rows reaching a terminal status). The
+  actions so far are `lowered`, `ended`, `limited_at_next_use`,
+  `already_limited`, `left_alone` and, for `lift-role-limit`'s one surface
+  `role_limit`, `lifted`; a later form may add surfaces and actions, so a
+  script should treat an unknown one as information, not failure.
+- A malformed command line -- an unknown flag, a missing value -- is refused
+  like any other refusal: one document with `error`, exit **1**.
 - `release-email` gives up the address of an account that is **turned off**,
   so a person may hold it again. `users.email` is unique, so one address
   belongs to one account for good -- right while the account is someone's,
@@ -483,7 +549,8 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   subject at one issuer is normally one account; the uniqueness the schema
   enforces is (provider, subject), so a deployment with **two providers
   configured at the same issuer** can have two accounts for one subject.
-  The command then refuses the pair, names both accounts and their provider,
+  The role-limit verbs act on both, since a limit is the person's. Every
+  other form then refuses the pair, names both accounts and their provider,
   and asks for `--email` -- rather than acting on whichever it found first,
   which would release or sign out the wrong person. In that deployment the
   refusal `disable` records is still keyed by issuer and subject, because it
@@ -494,22 +561,31 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
 - `list` shows every account -- issuer, subject, email, role, whether it is
   off and since when, whether its address was released and which one it held,
   and its last sign-in (`users.last_sign_in_at`, stamped
-  at every provider sign-in) -- plus every identity turned off before it had
-  an account, for the deployer to compare with the provider's list.
+  at every provider sign-in), and its `role_limit` -- plus every identity
+  turned off before it had an account (`disabled_without_account`) and
+  every role limit held for one (`role_limits_without_account`), for the
+  deployer to compare with the provider's list.
 - The account's content stays where it is, owned by the account; nothing is
   exported, reassigned or deleted.
 
 Sample output of `disable`:
 
 ```json
-{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "subject": "3141592"}, "command": "disable", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "schedules_held": 1, "sessions_ended": true, "tokens_revoked": 2, "verdict": "disabled"}
+{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "role_limit": null, "subject": "3141592"}, "command": "disable", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "schedules_held": 1, "sessions_ended": true, "tokens_revoked": 2, "verdict": "disabled"}
 ```
 
 and of `release-email` on that account, then of running it a second time:
 
 ```json
-{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00+00:00", "email": "released-0b5f…@released.example", "id": "0b5f…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": true, "released_from": "pat@example.com", "role": "user", "subject": "3141592"}, "command": "release-email", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "released": "pat@example.com", "verdict": "released"}
+{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00+00:00", "email": "released-0b5f…@released.example", "id": "0b5f…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": true, "released_from": "pat@example.com", "role": "user", "role_limit": null, "subject": "3141592"}, "command": "release-email", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "released": "pat@example.com", "verdict": "released"}
 {"account": {"…": "…"}, "command": "release-email", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "released": "pat@example.com", "verdict": "already_released"}
+```
+
+and of `limit-role` on an administrator with a token, a recurring schedule
+and a run in flight:
+
+```json
+{"accounts": [{"disabled": false, "disabled_at": null, "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-26T09:12:00+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "role_limit": "user", "subject": "3141592"}], "changed": true, "command": "limit-role", "elapsed_ms": 64, "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "returncode": 0, "role": "user", "runs_cancelled": 0, "runs_finished_first": [], "runs_found": 0, "runs_unconfirmed": [], "started_at": "2026-09-26T10:00:00.004210+00:00", "surfaces": {"internal_launches": {"action": "limited_at_next_use", "count": 1, "stopped_after_ms": 21, "stopped_at": "2026-09-26T10:00:00.025210+00:00"}, "personal_access_tokens": {"action": "limited_at_next_use", "count": 1, "stopped_after_ms": 21, "stopped_at": "2026-09-26T10:00:00.025210+00:00"}, "running_work": {"action": "left_alone", "count": 1, "role_above": "user", "role_read_by": [], "stopped_after_ms": null, "stopped_at": null}, "sessions": {"action": "ended", "count": 1, "stopped_after_ms": 21, "stopped_at": "2026-09-26T10:00:00.025210+00:00"}, "sign_in": {"action": "limited_at_next_use", "count": 1, "stopped_after_ms": 21, "stopped_at": "2026-09-26T10:00:00.025210+00:00"}, "stored_role": {"action": "lowered", "count": 1, "stopped_after_ms": 21, "stopped_at": "2026-09-26T10:00:00.025210+00:00"}}, "surfaces_unconfirmed": [], "verdict": "limited"}
 ```
 
 An account that is still on, and a subject with no account, each answer with
@@ -527,6 +603,13 @@ next. An older release ignores the keys at render time and has no command;
 a `.env` carrying them under an older pin renders sign-on-only mode without
 the claim check. Migration `0040_account_access` runs at the first start on
 this release.
+
+The role limit (`limit-role`, `lift-role-limit`, `role_limits` and
+migration `0043_role_limits`) is honoured from the first release cut after
+`v2.1.0+hartmesh.34`. An older release has neither verb: it prints a usage
+error on stderr and exits 2 with no document, so a caller must not read
+that 2 as "unconfirmed". A caller can tell the releases apart first: `list`
+carries `role_limits_without_account` from the release that has the verbs.
 
 ### Local passwords (`HARTMESH_LOCAL_PASSWORDS=allowed`)
 

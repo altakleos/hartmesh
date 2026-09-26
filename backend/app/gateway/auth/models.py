@@ -38,6 +38,10 @@ class User(BaseModel):
     # Derived at every read from ``disabled_identities`` (the account's
     # issuer and subject have a row there); never stored on the user row.
     disabled_at: datetime | None = Field(None, description="When the deployer turned the account off; None while it is on")
+    # Derived at every read from ``role_limits`` like ``disabled_at``; the
+    # role above is already held at it. A plain string on purpose: a value
+    # this model refused would raise on every read and lock the account out.
+    role_limit: str | None = Field(None, description="The highest role the deployer lets this account's identity hold; None while no limit holds")
 
 
 class UserResponse(BaseModel):

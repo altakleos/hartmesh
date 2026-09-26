@@ -630,6 +630,146 @@ class TestMembership:
         listed = {entry["subject"]: entry for entry in _accounts(gateway, "list")[1]["accounts"]}
         assert listed["sub-moves"]["email"] == "after@example.com"
 
+    # ── Evidence 12: the role limit ──────────────────────────────────────
+
+    def test_a_role_limit_holds_a_demoted_administrator_at_user_on_every_path(self, gateway: e2e._Gateway, provider: OIDCTestProvider, request: pytest.FixtureRequest) -> None:
+        """An administrator with a session, a token, a recurring schedule and a run in flight; then the limit, then the lift."""
+        base = gateway.loopback_url
+        issuer = provider.issuer_url("a")
+        admin_claim = {CLAIM: ["admin"]}
+
+        def _run_role(run_id: str) -> str | None:
+            with sqlite3.connect(_db(gateway)) as connection:
+                row = connection.execute("SELECT principal_projection_json FROM runs WHERE run_id = ?", (run_id,)).fetchone()
+            return None if row is None or row[0] is None else json.loads(row[0]).get("role")
+
+        with _client(base) as browser:
+            assert _landed(_sign_in(browser, base, provider, subject="sub-limited", email="limited@example.com", claims=admin_claim))
+            assert _me(browser, base).json()["system_role"] == "admin"
+            busy_thread = _create_thread(browser, base)
+            token_thread = _create_thread(browser, base)
+            minted = browser.post(f"{base}/api/v1/auth/pats", json={"name": "automation", "scopes": ["threads:read", "runs:create", "runs:read"]}, headers=_csrf(browser))
+            assert minted.status_code == 201, minted.text
+            token = minted.json()["token"]
+            scheduled = browser.post(
+                f"{base}/api/scheduled-tasks",
+                json={"title": "every minute", "prompt": "probe:text", "schedule_type": "cron", "schedule_spec": {"cron": "* * * * *"}, "timezone": "UTC"},
+                headers=_csrf(browser),
+            )
+            assert scheduled.status_code == 200, scheduled.text
+            task_id = scheduled.json()["id"]
+
+            def _stop_the_schedule() -> None:
+                # Only matters when an assertion below fails first: the class's Gateway lives on.
+                with sqlite3.connect(_db(gateway)) as connection:
+                    connection.execute("UPDATE scheduled_tasks SET status = 'paused' WHERE id = ?", (task_id,))
+
+            request.addfinalizer(_stop_the_schedule)
+
+            # A run in flight, started as an administrator: its bash call records its pid and sleeps.
+            stream: dict[str, Any] = {}
+
+            def _run_stream() -> None:
+                try:
+                    stream["observed"] = e2e._observe_stream(browser, base, busy_thread, _csrf(browser)["X-CSRF-Token"], "probe:bash echo $$ > /mnt/user-data/workspace/limited.pid; sleep 240", timeout=180.0, recursion_limit=100)
+                except BaseException as exc:  # noqa: BLE001 - reported below
+                    stream["error"] = exc
+
+            worker = threading.Thread(target=_run_stream, name="role-limit-open-stream", daemon=True)
+            worker.start()
+
+            def _pid() -> int | None:
+                for candidate in gateway.tmp_home.rglob("limited.pid"):
+                    text = candidate.read_text().strip()
+                    if text.isdigit():
+                        return int(text)
+                return None
+
+            _wait(lambda: _pid() is not None or "error" in stream, timeout=60.0, what="the administrator's sandbox command to start")
+            assert "error" not in stream, stream.get("error")
+            in_flight_pid = _pid()
+
+            def _stop_the_command() -> None:
+                if in_flight_pid is not None and _process_alive(in_flight_pid):
+                    os.kill(in_flight_pid, 9)
+
+            request.addfinalizer(_stop_the_command)
+            with sqlite3.connect(_db(gateway)) as connection:
+                (in_flight_run,) = connection.execute("SELECT run_id FROM runs WHERE thread_id = ?", (busy_thread,)).fetchone()
+            assert _run_role(in_flight_run) == "admin"
+
+            code, document = _accounts(gateway, "limit-role", "--issuer", issuer, "--subject", "sub-limited")
+            # The limit's commit, not the command's start: a launch in between may still carry admin.
+            limited_at = datetime.fromisoformat(document["surfaces"]["stored_role"]["stopped_at"])
+            assert code == 0 and document["verdict"] == "limited" and document["returncode"] == 0, document
+            assert [(entry["email"], entry["role"], entry["role_limit"]) for entry in document["accounts"]] == [("limited@example.com", "user", "user")]
+            surfaces = document["surfaces"]
+            assert surfaces["stored_role"]["action"] == "lowered" and surfaces["stored_role"]["count"] == 1
+            assert surfaces["sessions"]["action"] == "ended" and surfaces["personal_access_tokens"]["count"] == 1 and surfaces["internal_launches"]["count"] == 1
+            # At least the run in flight; the every-minute schedule may have one of its own going as admin too.
+            assert surfaces["running_work"]["action"] == "left_alone" and surfaces["running_work"]["count"] >= 1 and surfaces["running_work"]["role_read_by"] == [], surfaces["running_work"]
+
+            # The stored role reads user at once, not at the next sign-in.
+            assert _row(gateway, "limited@example.com")[0] == "user"
+            # The session must sign in again.
+            assert _me(browser, base).status_code == 401
+            # The run in flight is left alone: nothing in this deployment reads its role.
+            with sqlite3.connect(_db(gateway)) as connection:
+                assert connection.execute("SELECT status FROM runs WHERE run_id = ?", (in_flight_run,)).fetchone() == ("running",)
+            assert _process_alive(in_flight_pid)
+
+            # A run the token starts carries user.
+            with httpx.Client(base_url=base, timeout=120.0) as automation:
+                started = automation.post(f"{base}/api/threads/{token_thread}/runs/wait", json=e2e._run_body("probe:text"), headers={"Authorization": f"Bearer {token}"})
+            assert started.status_code == 200, started.text
+            with sqlite3.connect(_db(gateway)) as connection:
+                (token_run,) = connection.execute("SELECT run_id FROM runs WHERE thread_id = ?", (token_thread,)).fetchone()
+            assert _run_role(token_run) == "user"
+
+            # The next scheduled launch runs as user.
+            def _scheduled_after_the_limit() -> list[str]:
+                with sqlite3.connect(_db(gateway)) as connection:
+                    rows = connection.execute("SELECT r.run_id, r.created_at FROM scheduled_task_runs s JOIN runs r ON r.run_id = s.run_id WHERE s.task_id = ?", (task_id,)).fetchall()
+                return [run_id for run_id, created in rows if datetime.fromisoformat(created).replace(tzinfo=datetime.fromisoformat(created).tzinfo or UTC) > limited_at]
+
+            _wait(lambda: bool(_scheduled_after_the_limit()), timeout=90.0, what="the recurring schedule's next launch")
+            assert {_run_role(run_id) for run_id in _scheduled_after_the_limit()} == {"user"}
+
+            # A sign-in whose claim says admin yields user.
+            with _client(base) as again:
+                assert _landed(_sign_in(again, base, provider, subject="sub-limited", email="limited@example.com", claims=admin_claim))
+                assert _me(again, base).json()["system_role"] == "user"
+                assert _row(gateway, "limited@example.com")[0] == "user"
+                # A schedule refuses deletion (409) while one of its launches is running; the every-minute one may be.
+                _wait(lambda: again.delete(f"{base}/api/scheduled-tasks/{task_id}", headers=_csrf(again)).status_code in {200, 204}, timeout=60.0, what="the every-minute schedule to be deletable")
+
+                # Re-applied on the deployer's next pass, now ending the work: nothing to lower, so nobody is signed out.
+                code, again_document = _accounts(gateway, "limit-role", "--issuer", issuer, "--subject", "sub-limited", "--end-running-work")
+                assert code == 0 and again_document["verdict"] == "already_limited", again_document
+                assert again_document["surfaces"]["sessions"]["action"] == "already_limited" and _me(again, base).status_code == 200
+                assert in_flight_run not in again_document["runs_unconfirmed"] and again_document["runs_cancelled"] >= 1, again_document
+                assert again_document["surfaces"]["running_work"]["action"] == "ended" and again_document["surfaces"]["running_work"]["stopped_after_ms"] <= again_document["elapsed_ms"]
+                assert _wait_for_exit(in_flight_pid, timeout=30.0), "the administrator's command outlived --end-running-work"
+                worker.join(timeout=120)
+                assert not worker.is_alive() and "error" not in stream, stream.get("error")
+
+                # Lifting changes nothing until the next sign-in reads the claim.
+                code, lifted = _accounts(gateway, "lift-role-limit", "--issuer", issuer, "--subject", "sub-limited")
+                assert code == 0 and lifted["verdict"] == "lifted", lifted
+                assert _row(gateway, "limited@example.com")[0] == "user" and _me(again, base).json()["system_role"] == "user"
+            with _client(base) as after:
+                assert _landed(_sign_in(after, base, provider, subject="sub-limited", email="limited@example.com", claims=admin_claim))
+                assert _me(after, base).json()["system_role"] == "admin"
+
+            # Nothing of this person's left running for the next test: a scheduled launch may have been mid-flight at the delete.
+            account_id = document["accounts"][0]["id"]
+
+            def _idle() -> bool:
+                with sqlite3.connect(_db(gateway)) as connection:
+                    return connection.execute("SELECT count(*) FROM runs WHERE user_id = ? AND status IN ('pending', 'running')", (account_id,)).fetchone() == (0,)
+
+            _wait(_idle, timeout=60.0, what="this person's runs to finish")
+
     def test_zz_the_client_secret_appears_in_no_log_line(self, gateway: e2e._Gateway, journal: _Journal) -> None:
         assert journal.lines and [line for line in journal.lines if CLIENT_SECRET in line] == []
 

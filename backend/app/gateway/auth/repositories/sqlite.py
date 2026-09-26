@@ -15,13 +15,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import func, select, update
+from sqlalchemy import case, delete, func, literal, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
-from deerflow.persistence.user.access import DisabledIdentityRow, issuer_key
+from deerflow.persistence.user.access import LIMIT_ROLES, ROLES, DisabledIdentityRow, RoleLimitRow, identity_lock_key, issuer_key, limited_role
 from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
 
 # ``email`` is ``mapped_column(unique=True, index=True)``, which SQLAlchemy
@@ -149,12 +149,16 @@ class SQLiteUserRepository(UserRepository):
     # ── Converters ────────────────────────────────────────────────────
 
     @staticmethod
-    def _row_to_user(row: UserRow, disabled_at: datetime | None = None) -> User:
+    def _row_to_user(row: UserRow, disabled_at: datetime | None = None, role_limit: str | None = None) -> User:
         return User(
             id=UUID(row.id),
             email=row.email,
             password_hash=row.password_hash,
-            system_role=row.system_role,  # type: ignore[arg-type]
+            # The role every reader sees: the stored one, held at the limit.
+            # The column is kept at or below it too, but a write that carries
+            # a role it read earlier back over the row (``update_user``) can
+            # still land above it; this read is what makes that harmless.
+            system_role=limited_role(row.system_role, role_limit),  # type: ignore[arg-type]
             # SQLite loses tzinfo on read; reattach UTC so downstream
             # code can compare timestamps reliably.
             created_at=_aware(row.created_at),
@@ -166,6 +170,7 @@ class SQLiteUserRepository(UserRepository):
             last_sign_in_at=_aware(row.last_sign_in_at),
             email_released_from=row.email_released_from,
             disabled_at=_aware(disabled_at),
+            role_limit=role_limit,
         )
 
     async def _disabled_at(self, session: AsyncSession, row: UserRow) -> datetime | None:
@@ -184,10 +189,26 @@ class SQLiteUserRepository(UserRepository):
             stmt = stmt.where(DisabledIdentityRow.issuer == issuer_key(row.oauth_issuer))
         return await session.scalar(stmt.limit(1))
 
+    async def _role_limit(self, session: AsyncSession, row: UserRow) -> str | None:
+        """The highest role the deployer lets this identity hold, or ``None``.
+
+        Matched as :meth:`_disabled_at` matches, and failing closed the same
+        way on a row whose issuer was never recorded.
+        """
+        if not row.oauth_id or not row.oauth_provider:
+            return None
+        stmt = select(RoleLimitRow.role).where(RoleLimitRow.subject == row.oauth_id)
+        if row.oauth_issuer:
+            stmt = stmt.where(RoleLimitRow.issuer == issuer_key(row.oauth_issuer))
+        limits = (await session.scalars(stmt)).all()
+        # Only an unrecorded issuer can match more than one; the lowest wins,
+        # and one this code does not know counts lowest of all.
+        return min(limits, key=lambda held: ROLES.index(held) if held in ROLES else -1) if limits else None
+
     async def _load(self, session: AsyncSession, row: UserRow | None) -> User | None:
         if row is None:
             return None
-        return self._row_to_user(row, await self._disabled_at(session, row))
+        return self._row_to_user(row, await self._disabled_at(session, row), await self._role_limit(session, row))
 
     @staticmethod
     def _user_to_row(user: User) -> UserRow:
@@ -220,8 +241,20 @@ class SQLiteUserRepository(UserRepository):
         the returned ``User`` reflects the stored form.
         """
         user.email = _normalize_email(user.email)
-        row = self._user_to_row(user)
         async with self._sf() as session:
+            # A person demoted before their first sign-in is created at the
+            # limit, and the account handed back says so. Read under the
+            # identity's lock, and applied again inside the insert's own
+            # transaction below, so a limit that commits between this read
+            # and the insert still holds.
+            provider_identity = bool(user.oauth_provider and user.oauth_id)
+            if provider_identity:
+                if user.oauth_issuer:
+                    await self._hold_identity(session, user.oauth_issuer, str(user.oauth_id))
+                probe = UserRow(oauth_provider=user.oauth_provider, oauth_id=user.oauth_id, oauth_issuer=user.oauth_issuer)
+                user.role_limit = await self._role_limit(session, probe)
+                user.system_role = limited_role(user.system_role, user.role_limit)  # type: ignore[assignment]
+            row = self._user_to_row(user)
             # The unique constraint is case-sensitive, so it cannot catch a
             # canonical address colliding with a mixed-case legacy row.
             existing = select(UserRow.id).where(func.lower(UserRow.email) == user.email).limit(1)
@@ -229,6 +262,13 @@ class SQLiteUserRepository(UserRepository):
                 raise ValueError(f"Email already registered: {user.email}")
             session.add(row)
             try:
+                if provider_identity:
+                    await session.flush()
+                    await session.execute(update(UserRow).where(UserRow.id == row.id).values(system_role=self._role_within_limit(user.system_role, user.oauth_issuer)))
+                    stored = await session.scalar(select(UserRow.system_role).where(UserRow.id == row.id))
+                    if stored != user.system_role:
+                        user.system_role = stored  # type: ignore[assignment]
+                        user.role_limit = await self._role_limit(session, row)
                 await session.commit()
             except IntegrityError as exc:
                 await session.rollback()
@@ -327,9 +367,11 @@ class SQLiteUserRepository(UserRepository):
             return await session.scalar(stmt) or 0
 
     async def count_admin_users(self) -> int:
-        stmt = select(func.count()).select_from(UserRow).where(UserRow.system_role == "admin")
+        """Accounts whose role reads ``admin``: stored so, and held there by no limit."""
+        stmt = select(UserRow).where(UserRow.system_role == "admin")
         async with self._sf() as session:
-            return await session.scalar(stmt) or 0
+            rows = (await session.execute(stmt)).scalars().all()
+            return sum([limited_role(row.system_role, await self._role_limit(session, row)) == "admin" for row in rows])
 
     async def get_user_by_oauth(self, provider: str, oauth_id: str) -> User | None:
         stmt = select(UserRow).where(UserRow.oauth_provider == provider, UserRow.oauth_id == oauth_id)
@@ -365,7 +407,7 @@ class SQLiteUserRepository(UserRepository):
             rows = (await session.execute(stmt)).scalars().all()
             recorded = [row for row in rows if row.oauth_issuer and issuer_key(row.oauth_issuer) == issuer_key(issuer)]
             adopting = [row for row in rows if not row.oauth_issuer]
-            return [self._row_to_user(row, await self._disabled_at(session, row)) for row in (*recorded, *adopting)]
+            return [await self._load(session, row) for row in (*recorded, *adopting)]  # type: ignore[misc]
 
     async def end_sessions(self, user_id: str) -> bool:
         """Invalidate every session of the account: one atomic increment of ``token_version``.
@@ -399,9 +441,18 @@ class SQLiteUserRepository(UserRepository):
         releasable again if the deployer later turns it off. Leaving the
         column set would make a release a once-per-account act and re-open the
         lock-out this exists to end.
+
+        The role stored is the lower of ``system_role`` and the identity's
+        role limit, read inside this statement rather than before it: a
+        sign-in that read the claim before the deployer's limit committed
+        stores the limit if the limit is there when the write runs.
         """
-        stamp: dict[str, object] = {"system_role": system_role, "oauth_issuer": oauth_issuer, "last_sign_in_at": last_sign_in_at}
+        stamp: dict[str, object] = {"system_role": self._role_within_limit(system_role, oauth_issuer), "oauth_issuer": oauth_issuer, "last_sign_in_at": last_sign_in_at}
         async with self._sf() as session:
+            subject = await session.scalar(select(UserRow.oauth_id).where(UserRow.id == user_id))
+            identity = (oauth_issuer, subject) if oauth_issuer and subject else None
+            if identity is not None:
+                await self._hold_identity(session, *identity)
             if email is not None:
                 try:
                     await session.execute(update(UserRow).where(UserRow.id == user_id).values(**stamp, email=_normalize_email(email), email_released_from=None))
@@ -415,9 +466,41 @@ class SQLiteUserRepository(UserRepository):
                     # optional, and the address not following is the same
                     # outcome the caller already has a path for.
                     await session.rollback()
+                    if identity is not None:
+                        await self._hold_identity(session, *identity)
             await session.execute(update(UserRow).where(UserRow.id == user_id).values(**stamp))
             await session.commit()
             return False
+
+    @staticmethod
+    async def _hold_identity(session: AsyncSession, issuer: str, subject: str) -> None:
+        """Serialise this transaction with every other write of the identity's role, until it ends.
+
+        On PostgreSQL a statement reads other tables as of its own start, so a
+        sign-in whose write began before a limit committed would store the
+        claim's role after it; a transaction-scoped advisory lock taken by the
+        limit, the lift, a sign-in and a first sign-in's insert orders them
+        instead. SQLite has one writer at a time and needs nothing.
+        """
+        connection = await session.connection()
+        if connection.dialect.name != "postgresql":
+            return
+        await session.execute(text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"), {"key": identity_lock_key(issuer, subject)})
+
+    @staticmethod
+    def _role_within_limit(role: str, oauth_issuer: str | None):
+        """``role``, held at the limit of the row being written, as one SQL expression.
+
+        Correlated to the updated row's subject, so it is evaluated in the
+        write itself. A row with no recorded issuer matches on its subject
+        alone, failing closed like every other read.
+        """
+        limit = select(func.min(RoleLimitRow.role)).where(RoleLimitRow.subject == UserRow.oauth_id)
+        if oauth_issuer:
+            limit = limit.where(RoleLimitRow.issuer == issuer_key(oauth_issuer))
+        held = limit.scalar_subquery()
+        # A limit this code does not know holds the lowest role, as every read does.
+        return case((held.is_(None), literal(role)), *((held == ceiling, literal(limited_role(role, ceiling))) for ceiling in LIMIT_ROLES), else_=literal(ROLES[0]))
 
     async def release_email(self, user_id: str, *, replacement: str) -> str | None:
         """Give up the account's address, recording what it held. Returns that address.
@@ -492,3 +575,92 @@ class SQLiteUserRepository(UserRepository):
         async with self._sf() as session:
             rows = (await session.execute(stmt)).scalars().all()
             return [(row.issuer, row.subject, _aware(row.disabled_at)) for row in rows]  # type: ignore[misc]
+
+    # ── Role limits the deployer holds ────────────────────────────────
+
+    async def _covered_rows(self, session: AsyncSession, issuer: str, subject: str) -> list[UserRow]:
+        """The rows :meth:`list_users_by_identity` returns, inside the caller's transaction."""
+        stmt = select(UserRow).where(UserRow.oauth_id == subject, UserRow.oauth_provider.is_not(None))
+        rows = (await session.execute(stmt)).scalars().all()
+        return [row for row in rows if not row.oauth_issuer or issuer_key(row.oauth_issuer) == issuer_key(issuer)]
+
+    async def _lower_to(self, session: AsyncSession, issuer: str, subject: str, role: str) -> int:
+        """Bring every covered row's stored role down to ``role``; returns how many were above it."""
+        ids = [row.id for row in await self._covered_rows(session, issuer, subject)]
+        above = [held for held in ROLES if limited_role(held, role) != held]
+        if not ids or not above:
+            return 0
+        result = await session.execute(update(UserRow).where(UserRow.id.in_(ids), UserRow.system_role.in_(above)).values(system_role=role))
+        return int(result.rowcount or 0)
+
+    async def role_limit_for(self, issuer: str, subject: str) -> tuple[str, datetime] | None:
+        """The limit held for this identity and when it was set, or ``None``."""
+        async with self._sf() as session:
+            row = await session.get(RoleLimitRow, (issuer_key(issuer), subject))
+            return None if row is None else (row.role, _aware(row.limited_at))  # type: ignore[return-value]
+
+    async def limit_role(self, issuer: str, subject: str, role: str) -> tuple[bool, int, int]:
+        """Hold the identity at ``role``, and lower every covered account's stored role in the same transaction.
+
+        Returns whether the limit is new (or changed), how many stored roles
+        were above it, and how many accounts' sessions it ended. Re-running it
+        re-lowers: a role written past the limit is brought down again and
+        counted. When either changed anything, every covered account's
+        sessions end in that same transaction, so a command that dies after
+        the commit cannot leave them open while every later pass reads no
+        change.
+        """
+        if role not in LIMIT_ROLES:
+            raise ValueError(f"a role limit holds an identity below its highest role; one of {', '.join(LIMIT_ROLES)}")
+        key = issuer_key(issuer)
+        async with self._sf() as session:
+            await self._hold_identity(session, key, subject)
+            existing = await session.get(RoleLimitRow, (key, subject))
+            recorded = existing is None or existing.role != role
+            if existing is None:
+                session.add(RoleLimitRow(issuer=key, subject=subject, role=role, limited_at=datetime.now(UTC)))
+            elif existing.role != role:
+                existing.role = role
+                existing.limited_at = datetime.now(UTC)
+            try:
+                await session.flush()
+            except IntegrityError:
+                # Lost a race with another limit of the same identity: the
+                # limit is recorded either way; lower under it all the same.
+                await session.rollback()
+                recorded = False
+                await self._hold_identity(session, key, subject)
+            lowered = await self._lower_to(session, key, subject, role)
+            ended = 0
+            if recorded or lowered:
+                ids = [row.id for row in await self._covered_rows(session, key, subject)]
+                if ids:
+                    result = await session.execute(update(UserRow).where(UserRow.id.in_(ids)).values(token_version=UserRow.token_version + 1))
+                    ended = int(result.rowcount or 0)
+            await session.commit()
+            return recorded, lowered, ended
+
+    async def lift_role_limit(self, issuer: str, subject: str) -> bool:
+        """Withdraw the limit; returns False when there was none (idempotent).
+
+        The stored role stays where the limit held it -- in the same
+        transaction, so a role a racing sign-in wrote past the limit is not
+        handed back by the lift. Only the next sign-in reads the claim again.
+        """
+        key = issuer_key(issuer)
+        async with self._sf() as session:
+            await self._hold_identity(session, key, subject)
+            existing = await session.get(RoleLimitRow, (key, subject))
+            if existing is None:
+                return False
+            await self._lower_to(session, key, subject, existing.role)
+            await session.execute(delete(RoleLimitRow).where(RoleLimitRow.issuer == key, RoleLimitRow.subject == subject))
+            await session.commit()
+            return True
+
+    async def list_role_limits(self) -> list[tuple[str, str, str, datetime]]:
+        """Every limit held, whether or not an account exists for its identity."""
+        stmt = select(RoleLimitRow).order_by(RoleLimitRow.limited_at, RoleLimitRow.issuer, RoleLimitRow.subject)
+        async with self._sf() as session:
+            rows = (await session.execute(stmt)).scalars().all()
+            return [(row.issuer, row.subject, row.role, _aware(row.limited_at)) for row in rows]  # type: ignore[misc]
