@@ -224,11 +224,11 @@ def test_a_disabled_account_is_refused_by_the_browser_websocket_and_the_langgrap
     monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: AppConfig(sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider")))
     account = asyncio.run(_seed(users, tokens, schedules, _provider_account(), pats=0, tasks=0))
     live_cookie = create_access_token(str(account.id), token_version=account.token_version)
-    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": live_cookie}))).email == "pat@example.com"
+    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": live_cookie}, state=SimpleNamespace()))).email == "pat@example.com"
     asyncio.run(users.disable_identity(ISSUER, "sub-pat"))
     current = asyncio.run(users.get_user_by_id(str(account.id)))
     cookie = create_access_token(str(account.id), token_version=current.token_version)
-    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": cookie}))) is None
+    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": cookie}, state=SimpleNamespace()))) is None
     with pytest.raises(Exception, match="turned off"):
         asyncio.run(authenticate(SimpleNamespace(cookies={"access_token": cookie}, headers={}, method="GET", url=SimpleNamespace(path="/api/threads"))))
 
@@ -414,10 +414,11 @@ async def test_one_subject_with_an_account_under_each_of_two_providers_is_refuse
         document = await command.run("disable", email=addressed.email)
         assert document["account"]["provider"] == provider and document["account"]["email"] == addressed.email, provider
         assert (await users.get_user_by_id(str(addressed.id))).token_version == before[addressed.id] + 1, "the addressed account is signed out"
-        assert (await users.get_user_by_id(str(untouched.id))).token_version == before[untouched.id], "the other account's sessions are not"
         # The refusal itself is keyed by (issuer, subject) -- it is the person
         # at the provider who is turned off -- so it covers both accounts, and
-        # the document says which others it reached.
+        # its sessions end on both, so an enable revives neither; the document
+        # says which others it reached.
+        assert (await users.get_user_by_id(str(untouched.id))).token_version == before[untouched.id] + 1, "the other account's sessions end too"
         assert (await users.get_user_by_id(str(untouched.id))).disabled_at is not None
         assert [entry["email"] for entry in document["identity_also_covers"]] == [untouched.email], provider
         await command.run("enable", email=addressed.email)

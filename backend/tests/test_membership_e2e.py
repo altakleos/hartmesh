@@ -363,8 +363,19 @@ class TestMembership:
             def _run_stream() -> None:
                 try:
                     stream["observed"] = e2e._observe_stream(
-                        client, base, thread_id, _csrf(client)["X-CSRF-Token"], "probe:bash echo $$ > /mnt/user-data/workspace/command.pid; sleep 240; printf 'stream-ran-to-its-%s\\n' end", timeout=120.0, recursion_limit=100
+                        client,
+                        base,
+                        thread_id,
+                        _csrf(client)["X-CSRF-Token"],
+                        "probe:bash echo $$ > /mnt/user-data/workspace/command.pid; sleep 240; printf 'stream-ran-to-its-%s\\n' end",
+                        timeout=120.0,
+                        recursion_limit=100,
+                        on_frame=lambda observation: stream.__setitem__("so_far", observation),
                     )
+                except httpx.TransportError as exc:
+                    # The deployment cut it: what the refusal does to a stream
+                    # that authenticated once, rather than wait for the run.
+                    stream["cut"] = exc
                 except BaseException as exc:  # noqa: BLE001 - reported below
                     stream["error"] = exc
 
@@ -434,13 +445,18 @@ class TestMembership:
             assert refused.status_code == 401 and refused.json()["detail"]["code"] in {"token_invalid", "account_disabled"}, refused.text
             # The token: refused, with the same answer as any dead token.
             assert not _pat_works(base, token, thread_id)
-            # The stream: it closes with the run, and the bash call never
-            # reached the line after its sleep -- the work stopped, not just
-            # the output.
+            # The stream: the deployment closed it -- the process holding it
+            # recorded that it did, and the command waited for that record --
+            # and the bash call never reached the line after its sleep: the
+            # work stopped, not just the output.
             worker.join(timeout=120)
             assert not worker.is_alive() and "error" not in stream, stream.get("error")
-            observed = stream["observed"]
-            assert observed.t_end is not None, "the stream never closed"
+            sse = document["surfaces"]["sse_streams"]
+            assert sse["action"] == "ended" and sse["count"] == 1 and sse["confirmed_by"] == "gateway_record" and sse["processes"] == 1, document["surfaces"]
+            assert document["surfaces"]["sign_in"]["stopped_after_ms"] <= sse["stopped_after_ms"] <= document["elapsed_ms"], document["surfaces"]
+            assert document["surfaces_unconfirmed"] == [], document
+            observed = stream.get("observed") or stream["so_far"]
+            assert "cut" in stream or observed.t_end is not None, "the stream never closed"
             # The command's own output, which only exists if the sleep
             # returned. The prompt above carries the format string, never the
             # finished line, so this cannot match the echo of the request.

@@ -250,10 +250,10 @@ def test_every_other_path_that_resolves_a_user_applies_the_same_rule(users_db, m
     provider_cookie = create_access_token(str(provider_user.id), token_version=provider_user.token_version)
 
     monkeypatch.setattr("deerflow.config.app_config.get_app_config", _sign_on_only_config)
-    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": admin_cookie}))) is None
-    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": provider_cookie}))).email == "pat@example.com"
+    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": admin_cookie}, state=SimpleNamespace()))) is None
+    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": provider_cookie}, state=SimpleNamespace()))).email == "pat@example.com"
     monkeypatch.setattr("deerflow.config.app_config.get_app_config", _local_config)
-    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": admin_cookie}))).email == _ADMIN["email"]
+    assert asyncio.run(_authenticate_ws(SimpleNamespace(cookies={"access_token": admin_cookie}, state=SimpleNamespace()))).email == _ADMIN["email"]
 
 
 def test_an_internal_service_may_not_act_as_an_inert_account(users_db, monkeypatch: pytest.MonkeyPatch) -> None:

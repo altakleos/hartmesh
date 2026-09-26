@@ -2043,6 +2043,15 @@ def _effective_execution_projection(
     )
 
 
+async def _owner_refusal(user_id: str | None) -> str | None:
+    """Why nothing may act for the run's owner now, or ``None``: the derivation every request uses."""
+    if not user_id:
+        return None
+    from app.gateway.auth.mode import owner_is_refused
+
+    return await owner_is_refused(str(user_id))
+
+
 async def _principal_projection_for_intent(
     request: Any,
     intent: InternalLaunchIntent,
@@ -3189,6 +3198,22 @@ class _GatewayLaunchNormalizer:
                 if not abort_task.done():
                     abort_task.cancel()
                     abort_task.add_done_callback(_consume_task_result)
+            if startup_failure is None and not abort_before_metadata:
+                # Read again as the run starts: a request that authenticated
+                # just before its owner was turned off can still have admitted
+                # this run, and it must not execute for a person nothing may
+                # act for, whichever process picked it up.
+                try:
+                    refusal = await _owner_refusal(getattr(record, "user_id", None))
+                except Exception as exc:
+                    # Unanswerable is not "allowed": fail the start like any
+                    # other start-up failure rather than leave the run pending.
+                    logger.warning("Run %s not started: its owner's account could not be read (%s)", sanitize_log_param(record.run_id), type(exc).__name__)
+                    startup_failure = "The owner's account could not be read; the run was not started"
+                else:
+                    if refusal is not None:
+                        logger.warning("Run %s refused at start: its owner's account is %s", sanitize_log_param(record.run_id), refusal)
+                        startup_failure = f"The owner's account is {refusal}; the run was not started"
             if startup_failure is not None:
                 failure_retained = await run_mgr.fail_start_if_pending(
                     record.run_id,

@@ -84,7 +84,7 @@ def test_fingerprint_builder_binds_runtime_manifests_and_expected_head() -> None
         execution_policy_keyring_confirmation_version=1,
         execution_policy_keyring_confirmation_digest=f"sha256:{'5' * 64}",
     )
-    assert fingerprint.migration_head == "0043_role_limits"
+    assert fingerprint.migration_head == "0044_refusal_sweeps"
     assert fingerprint.extension_artifact_digest == f"sha256:{'f' * 64}"
     assert fingerprint.redis_namespace_digest == f"sha256:{'3' * 64}"
     assert fingerprint.capability_manifest_digest == "1" * 64

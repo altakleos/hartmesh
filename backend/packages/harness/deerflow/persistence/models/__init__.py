@@ -29,6 +29,7 @@ from deerflow.persistence.mcp_tasks.model import McpTaskRow
 from deerflow.persistence.models.run_event import RunEventRow
 from deerflow.persistence.personal_access_tokens.model import PersonalAccessTokenRow
 from deerflow.persistence.provider_keys.model import ProviderKeyEventRow, ProviderKeyRow
+from deerflow.persistence.refusal_sweeps.model import GatewayProcessRow, RefusalCheckRow, SurfaceEndingRow
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
@@ -59,6 +60,7 @@ __all__ = [
     "ChannelOAuthStateRow",
     "CredentialAuditEventRow",
     "FeedbackRow",
+    "GatewayProcessRow",
     "DeploymentIdentityRow",
     "DisabledIdentityRow",
     "InboundReceiptRow",
@@ -67,12 +69,14 @@ __all__ = [
     "PersonalAccessTokenRow",
     "ProviderKeyEventRow",
     "ProviderKeyRow",
+    "RefusalCheckRow",
     "RoleLimitRow",
     "RunEventRow",
     "RunRow",
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
     "SharedPublicationRow",
+    "SurfaceEndingRow",
     "SubagentBatchAttemptRow",
     "SubagentBatchRow",
     "SubagentBatchItemRow",
