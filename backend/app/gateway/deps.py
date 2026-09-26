@@ -1924,9 +1924,16 @@ async def require_admin_user(request: Request, *, detail: str) -> User:
     """Require the authenticated caller to be an admin user.
 
     ``detail`` is the route-specific 403 message. The shared predicate keeps
-    read-side redaction and write authorization on the same admin definition.
+    read-side redaction and write authorization on the same admin definition,
+    including its refusal of a personal access token: the token route
+    allowlist admits no admin route today, but it must not be the only
+    barrier between an administrator's automation token and one.
     """
 
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+        raise HTTPException(status_code=403, detail=detail)
     user = getattr(request.state, "user", None)
     if user is None:
         user = await get_current_user_from_request(request)

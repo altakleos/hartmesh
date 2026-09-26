@@ -29,6 +29,7 @@ from app.gateway.auth.local_provider import LocalAuthProvider
 from app.gateway.auth.models import User
 from app.gateway.auth.oidc import OIDCIdentity
 from deerflow.config.auth_config import OIDCProviderConfig
+from deerflow.persistence.user.access import limited_role
 
 logger = logging.getLogger(__name__)
 
@@ -153,7 +154,16 @@ async def get_or_provision_oidc_user(
             # without it, the list is read from the address this sign-in
             # settled on -- or a person whose address changed would carry a
             # role their old one earned.
-            role = role_for(provider_config, admitted, existing.email)
+            read = role_for(provider_config, admitted, existing.email)
+            # A role limit the deployer holds for this identity caps what the
+            # claim may grant. The write applies it again in the statement
+            # that stores the role, so a limit that lands between this read
+            # and that write still holds; this is what the log and the
+            # account handed back say.
+            limit = getattr(existing, "role_limit", None)
+            role = limited_role(read, limit)
+            if role != read:
+                logger.info("OIDC sign-in: subject %s at issuer %s is held at %s by a role limit (the %s reads %s)", identity.subject, provider_config.issuer, role, "claim" if provider_config.access_roles else "administrators' list", read)
             if role != existing.system_role:
                 read_from = "the claim" if provider_config.access_roles else "the address it now holds"
                 logger.info("OIDC sign-in: role of subject %s at issuer %s is now %s (was %s), read from %s", identity.subject, provider_config.issuer, role, existing.system_role, read_from)
@@ -269,7 +279,8 @@ async def get_or_provision_oidc_user(
             status_code=status.HTTP_409_CONFLICT,
             detail=("An account with this email already exists. Contact your administrator to link it to your SSO account."),
         ) from None
-    logger.info("Auto-created OIDC user %s (provider=%s, role=%s)", email, provider_id, role)
+    # The role the account was created with, which a role limit may hold below what was read.
+    logger.info("Auto-created OIDC user %s (provider=%s, role=%s)", email, provider_id, user.system_role)
     return {"user": user, "created": True}
 
 

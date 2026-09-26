@@ -1,4 +1,4 @@
-"""Turn one account off or on, end its sessions, release its address, or list every account.
+"""Turn one account off or on, end its sessions, limit its role, release its address, or list every account.
 
 An operator command run inside the deployment, in the manner of
 ``reset_admin``; nothing reachable over HTTP does any of this. Accounts are
@@ -7,7 +7,8 @@ an account does; an email is accepted only when it resolves to exactly one
 provider account. The schema's uniqueness is ``(provider, subject)``, so a
 deployment with two providers configured at one issuer can have two accounts
 for one subject: that pair is then refused, naming both, rather than acting
-on whichever row came back first.
+on whichever row came back first -- except by the role-limit verbs, whose
+limit is the person's and so reaches both.
 
 Usage:
     python -m app.gateway.auth.accounts list
@@ -17,12 +18,18 @@ Usage:
     python -m app.gateway.auth.accounts end-sessions --issuer URL --subject SUB
     python -m app.gateway.auth.accounts end-sessions --email who@example.com --end-running-work
     python -m app.gateway.auth.accounts release-email --issuer URL --subject SUB
+    python -m app.gateway.auth.accounts limit-role --issuer URL --subject SUB [--role user] [--end-running-work]
+    python -m app.gateway.auth.accounts lift-role-limit --issuer URL --subject SUB
 
 Every form is idempotent and prints one JSON document on stdout, with the
 verdict and what was done. Three exit statuses: ``0`` means done; ``1`` means
 the command refused and changed nothing (the document then carries ``error``);
 ``2`` means it did what was asked but could not confirm that every run it
-cancelled had stopped (the document names them under ``runs_unconfirmed``).
+cancelled had stopped (the document names them under ``runs_unconfirmed``,
+and a form that reports its surfaces names ``running_work`` under
+``surfaces_unconfirmed``).
+A malformed command line is a refusal like any other: a document and ``1``,
+never argparse's usage text and the ``2`` that would read as "unconfirmed".
 A caller that runs this through a remote runner may not see its exit status,
 so the document is the answer.
 
@@ -68,6 +75,47 @@ sign-in of theirs is refused and no deployer command could change it. This
 one gives up a turned-off account's address, recording what it held
 (``users.email_released_from``, migration 0041), and leaves everything else
 about the account alone.
+
+What ``limit-role`` is for: demoting an administrator at the provider reaches
+nothing here until they sign in again, and the provider can be restored from
+a backup whose claim says ``admin`` -- so a demotion the next sign-in could
+override would hand the role back between the deployer's passes. The limit
+is one row in ``role_limits`` keyed by ``(issuer, subject)`` (migration
+0043), valid before an account exists and covering every account the
+identity holds. Every read of an account derives its role from it, the way
+the turned-off state is derived, so every path that reads the stored role --
+a session's next request and what it may see of other people's runs, a run a
+personal access token starts, a scheduled or channel launch -- takes the
+limited role at once. The stored column is kept at or below it too: the
+limit lowers it in its own transaction, a sign-in stores the lower of its
+claim and the limit in the statement that stores the role, a first sign-in
+applies it again inside the insert's transaction, and ``lift-role-limit``
+leaves the column where the limit held it, so lifting changes nothing until
+a sign-in reads the role again. On PostgreSQL, whose statements read other
+tables as of their own start, all of these take one transaction lock per
+identity, so none of them can act on a limit it read before another
+committed. The limit ends the sessions of every covered account, as
+``end-sessions`` does but in the transaction that records the limit, so a
+command interrupted after it leaves none open; and it leaves a run already
+executing alone unless
+``--end-running-work`` is given, which cancels only runs admitted with a
+role above the limit: such a run keeps the role it started with, which
+matters only where something reads a run's role -- ``authorization.enabled``,
+or ``guardrails`` with a provider -- and the document names which of those
+this deployment has (``role_read_by``). A re-run with nothing to lower
+changes nothing (``changed`` is false) and signs nobody out, and work the
+person starts afterwards is not above the limit, so a deployer may re-apply
+its record every pass, with or without the flag. With
+local passwords on it refuses to limit the last administrator, because a
+deployment with none offers first-boot setup to whoever reaches it first.
+
+The role-limit documents say when each surface stopped: ``started_at`` (UTC),
+``elapsed_ms`` for the whole command, and under ``surfaces`` one entry per
+surface with its ``action``, its ``count``, ``stopped_after_ms`` on a
+monotonic clock from the command's start, and ``stopped_at``, that offset
+added to ``started_at``. A surface limited at its next use reports the
+limit's commit. A surface the command could not confirm is named under
+``surfaces_unconfirmed`` and makes the exit status 2.
 """
 
 from __future__ import annotations
@@ -79,16 +127,19 @@ import logging
 import os
 import sys
 import time
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-from deerflow.persistence.user.access import issuer_key
+from deerflow.persistence.user.access import LIMIT_ROLES, issuer_key, limited_role
 
 logger = logging.getLogger(__name__)
 
-COMMANDS = ("list", "disable", "enable", "end-sessions", "release-email")
+COMMANDS = ("list", "disable", "enable", "end-sessions", "release-email", "limit-role", "lift-role-limit")
+
+#: The forms that take ``--end-running-work``; ``disable`` always ends the work.
+ENDS_WORK_ON_REQUEST = ("end-sessions", "limit-role")
 
 # Where a released address goes. ``.example`` is reserved by RFC 2606: it can
 # never be registered, so no person can ever hold an address there and nothing
@@ -134,6 +185,81 @@ class CommandError(Exception):
     """A refusal the document reports; the exit status is 1."""
 
 
+#: What a surface entry says was done to it.
+ACTION_LOWERED = "lowered"
+ACTION_ENDED = "ended"
+ACTION_LIMITED_AT_NEXT_USE = "limited_at_next_use"
+ACTION_ALREADY_LIMITED = "already_limited"
+ACTION_LEFT_ALONE = "left_alone"
+ACTION_LIFTED = "lifted"
+
+#: What a ``running_work`` stop time was confirmed from: the run rows reached
+#: a terminal status. The cancellation also attempts to kill the sandbox
+#: command in flight, which this process cannot observe.
+CONFIRMED_BY_RUN_STATUS = "run_status"
+
+
+def _sealed_role_above(row: dict[str, Any], limit: str) -> bool:
+    """Whether a run was admitted with a role above ``limit``; a run whose role is not recorded counts as above."""
+    projection = row.get("principal_projection_json")
+    sealed = projection.get("role") if isinstance(projection, dict) else None
+    if not isinstance(sealed, str):
+        return True
+    return limited_role(sealed, limit) != sealed
+
+
+class SurfaceClock:
+    """When each surface stopped, measured from the command's start.
+
+    One anchor: ``started_at`` is read once, and every entry's wall time is
+    that plus its monotonic offset, so a wall-clock step during the command
+    cannot make two of its own times disagree. The caller anchors them on its
+    own clock with ``elapsed_ms``.
+    """
+
+    def __init__(self) -> None:
+        self._start = time.monotonic()
+        self.started_at = datetime.now(UTC)
+        self.surfaces: dict[str, dict[str, Any]] = {}
+        self.unconfirmed: list[str] = []
+
+    def now_ms(self) -> int:
+        return int((time.monotonic() - self._start) * 1000)
+
+    def stopped(self, surface: str, action: str, count: int, *, at_ms: int | None = None, **facts: Any) -> None:
+        """Record that ``surface`` stopped ``at_ms`` (now when omitted)."""
+        offset = self.now_ms() if at_ms is None else at_ms
+        self.surfaces[surface] = {"action": action, "count": count, "stopped_after_ms": offset, "stopped_at": (self.started_at + timedelta(milliseconds=offset)).isoformat(), **facts}
+
+    def not_stopped(self, surface: str, action: str, count: int, *, unconfirmed: bool, **facts: Any) -> None:
+        """Record a surface with no stop time: left running on purpose, or not confirmed."""
+        self.surfaces[surface] = {"action": action, "count": count, "stopped_after_ms": None, "stopped_at": None, **facts}
+        if unconfirmed:
+            self.unconfirmed.append(surface)
+
+    def document(self) -> dict[str, Any]:
+        return {"started_at": self.started_at.isoformat(), "elapsed_ms": self.now_ms(), "surfaces": self.surfaces, "surfaces_unconfirmed": sorted(self.unconfirmed)}
+
+
+def run_role_readers(config: Any) -> tuple[str, ...]:
+    """What in this deployment reads a run's role while it executes.
+
+    ``authorization`` (``authorization.enabled``) drives the sandbox and tool
+    authorization and fixes the tool set when a run starts; ``guardrails``
+    (enabled, with a provider) passes the role to every tool-call decision.
+    With neither -- the compose profile has neither -- a run's role is carried
+    and read by nothing, so a run started before a demotion can do nothing its
+    owner's new role could not.
+    """
+    readers: list[str] = []
+    if getattr(getattr(config, "authorization", None), "enabled", False):
+        readers.append("authorization")
+    guardrails = getattr(config, "guardrails", None)
+    if getattr(guardrails, "enabled", False) and getattr(guardrails, "provider", None) is not None:
+        readers.append("guardrails")
+    return tuple(readers)
+
+
 def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value is not None else None
 
@@ -153,11 +279,12 @@ def _account_document(user: User) -> dict[str, Any]:
         # parses an email to decide what an account is.
         "released": user.email_released_from is not None,
         "released_from": user.email_released_from,
+        "role_limit": user.role_limit,
     }
 
 
 class AccountsCommand:
-    """The five forms over one users repository, a token store, a schedule store and the run store."""
+    """Every form over one users repository, a token store, a schedule store and the run store."""
 
     def __init__(
         self,
@@ -167,12 +294,16 @@ class AccountsCommand:
         schedules: Any | None,
         runs: Any | None = None,
         wait_seconds: float = DEFAULT_RUN_WAIT_SECONDS,
+        role_readers: tuple[str, ...] = (),
+        setup_opens_without_admin: bool = False,
     ) -> None:
         self._users = users
         self._tokens = tokens
         self._schedules = schedules
         self._runs = runs
         self._wait_seconds = wait_seconds
+        self._role_readers = role_readers
+        self._setup_opens_without_admin = setup_opens_without_admin
 
     async def run(
         self,
@@ -182,9 +313,21 @@ class AccountsCommand:
         subject: str | None = None,
         email: str | None = None,
         end_running_work: bool = False,
+        role: str = LIMIT_ROLES[0],
     ) -> dict[str, Any]:
         if command == "list":
             return await self.list()
+        if command in ("limit-role", "lift-role-limit"):
+            # Started before anything is looked up, so ``elapsed_ms`` is the
+            # whole command.
+            clock = SurfaceClock()
+            # The limit is the person's, so it reaches every account the
+            # identity holds: two accounts for one subject are not a guess
+            # to refuse here, they are both what is meant.
+            identity, _ = await self._resolve(issuer=issuer, subject=subject, email=email, one_account=False)
+            if command == "limit-role":
+                return await self.limit_role(identity, role=role, end_running_work=end_running_work, clock=clock)
+            return await self.lift_role_limit(identity, clock=clock)
         identity, account = await self._resolve(issuer=issuer, subject=subject, email=email)
         if command == "disable":
             return await self.disable(identity, account)
@@ -198,7 +341,7 @@ class AccountsCommand:
 
     # ── Selecting the account ────────────────────────────────────────────
 
-    async def _resolve(self, *, issuer: str | None, subject: str | None, email: str | None) -> tuple[tuple[str, str], User | None]:
+    async def _resolve(self, *, issuer: str | None, subject: str | None, email: str | None, one_account: bool = True) -> tuple[tuple[str, str], User | None]:
         by_identity = issuer is not None or subject is not None
         if by_identity and email is not None:
             raise CommandError("address the account by --issuer and --subject, or by --email, not both")
@@ -211,7 +354,7 @@ class AccountsCommand:
             # Acting on whichever came back first would be a wrong-target
             # write, so say so and let the deployer address one by its email.
             candidates = await self._users.list_users_by_identity(*key)
-            if len(candidates) > 1:
+            if len(candidates) > 1 and one_account:
                 named = ", ".join(sorted(f"{account.oauth_provider} ({account.email})" for account in candidates))
                 raise CommandError(f"{len(candidates)} accounts have subject {key[1]!r} at this issuer, one per configured provider: {named}; address one of them by --email")
             return key, (candidates[0] if candidates else None)
@@ -231,8 +374,17 @@ class AccountsCommand:
     async def list(self) -> dict[str, Any]:
         accounts = [_account_document(user) for user in await self._users.list_users()]
         with_account = {(entry["issuer"], entry["subject"]) for entry in accounts if entry["issuer"]}
-        without = [{"issuer": issuer, "subject": subject, "disabled_at": _iso(disabled_at)} for issuer, subject, disabled_at in await self._users.list_disabled_identities() if (issuer, subject) not in with_account]
-        return {"command": "list", "accounts": accounts, "disabled_without_account": without}
+        # An account linked before its issuer was recorded matches on its
+        # subject alone (every read fails closed that way), so an identity it
+        # would match is not one "without an account".
+        issuerless = {entry["subject"] for entry in accounts if entry["subject"] and not entry["issuer"]}
+
+        def has_account(issuer: str, subject: str) -> bool:
+            return (issuer, subject) in with_account or subject in issuerless
+
+        without = [{"issuer": issuer, "subject": subject, "disabled_at": _iso(disabled_at)} for issuer, subject, disabled_at in await self._users.list_disabled_identities() if not has_account(issuer, subject)]
+        limits_without = [{"issuer": issuer, "subject": subject, "role": role, "limited_at": _iso(limited_at)} for issuer, subject, role, limited_at in await self._users.list_role_limits() if not has_account(issuer, subject)]
+        return {"command": "list", "accounts": accounts, "disabled_without_account": without, "role_limits_without_account": limits_without}
 
     async def disable(self, identity: tuple[str, str], account: User | None) -> dict[str, Any]:
         issuer, subject = identity
@@ -329,6 +481,110 @@ class AccountsCommand:
         )
         return document
 
+    async def limit_role(self, identity: tuple[str, str], *, role: str, end_running_work: bool = False, clock: SurfaceClock | None = None) -> dict[str, Any]:
+        """Hold the identity at ``role`` on every account it has here, now and at every later sign-in."""
+        clock = clock or SurfaceClock()
+        if role not in LIMIT_ROLES:
+            raise CommandError(f"a role limit holds a person below administrator; --role must be one of: {', '.join(LIMIT_ROLES)}")
+        issuer, subject = identity
+        if self._setup_opens_without_admin:
+            # In local mode, a deployment with no administrator offers
+            # first-boot setup to whoever reaches it first. Limiting the last
+            # administrator would open that door to the internet.
+            covered = await self._users.list_users_by_identity(issuer, subject)
+            held_here = sum(account.system_role == "admin" for account in covered)
+            if held_here and await self._users.count_admin_users() <= held_here:
+                raise CommandError("this would leave the deployment with no administrator, and with local passwords on that reopens first-boot setup to whoever reaches it first; make someone else an administrator first")
+        recorded, lowered, ended = await self._users.limit_role(issuer, subject, role)
+        committed = clock.now_ms()
+        # Read after the write: a first sign-in racing the command may have
+        # created an account in between, and it is covered like any other.
+        accounts = await self._users.list_users_by_identity(issuer, subject)
+        changed = recorded or lowered > 0
+        at_next_use = ACTION_LIMITED_AT_NEXT_USE if changed else ACTION_ALREADY_LIMITED
+        clock.stopped("stored_role", ACTION_LOWERED if changed else ACTION_ALREADY_LIMITED, lowered, at_ms=committed)
+        clock.stopped("sign_in", at_next_use, len(accounts), at_ms=committed)
+        clock.stopped("personal_access_tokens", at_next_use, await self._count_live_tokens(accounts), at_ms=committed)
+        clock.stopped("internal_launches", at_next_use, sum([await self._count_schedules(account) for account in accounts]), at_ms=committed)
+        # Ended as ``end-sessions`` ends them, so a page that cached the old
+        # role signs in again, and in the limit's own transaction, so a
+        # command that dies after the commit leaves none open -- but only when
+        # something changed: the deployer re-applies its record every pass,
+        # and a person whose limit already held must not be signed out every
+        # time it does.
+        if changed:
+            clock.stopped("sessions", ACTION_ENDED, ended, at_ms=committed)
+        else:
+            clock.stopped("sessions", ACTION_ALREADY_LIMITED, len(accounts), at_ms=committed)
+        # Only work that still carries a role above the limit: whatever the
+        # person starts afterwards runs at the limited role and is theirs to
+        # finish, however often the deployer re-applies the limit.
+        running = {"role_read_by": list(self._role_readers), "role_above": role}
+        runs: dict[str, Any] = {"runs_found": 0, "runs_cancelled": 0, "runs_finished_first": [], "runs_unconfirmed": [], "returncode": 0}
+        if end_running_work:
+            runs = await self._end_running_work(accounts, above=role)
+            if runs["runs_unconfirmed"]:
+                clock.not_stopped("running_work", ACTION_ENDED, runs["runs_found"], unconfirmed=True, confirmed_by=CONFIRMED_BY_RUN_STATUS, **running)
+            else:
+                clock.stopped("running_work", ACTION_ENDED, runs["runs_found"], confirmed_by=CONFIRMED_BY_RUN_STATUS, **running)
+        else:
+            clock.not_stopped("running_work", ACTION_LEFT_ALONE, len(await self._active_runs(accounts, above=role)), unconfirmed=False, **running)
+        document: dict[str, Any] = {
+            "command": "limit-role",
+            "identity": {"issuer": issuer, "subject": subject},
+            "role": role,
+            "verdict": "limited" if recorded else "already_limited",
+            "changed": changed,
+            "accounts": [_account_document(await self._users.get_user_by_id(str(account.id)) or account) for account in accounts],
+            **runs,
+            **clock.document(),
+        }
+        if document["surfaces_unconfirmed"]:
+            document["returncode"] = EXIT_UNCONFIRMED_RUNS
+        document["note"] = self._limit_note(document, end_running_work=end_running_work)
+        return document
+
+    def _limit_note(self, document: dict[str, Any], *, end_running_work: bool) -> str:
+        if not document["accounts"]:
+            return "no account exists for this identity yet; the limit is recorded and the account a sign-in creates holds this role"
+        note = "the role reads the limit at every request; personal access tokens keep working at the limited role; a sign-in whose claim says more stores the limit"
+        note += "; sessions that held the old role sign in again" if document["changed"] else "; nothing had changed since the limit was set, so no session was ended"
+        if end_running_work:
+            return self._run_note(
+                document,
+                done=note + "; every run these accounts had executing with a role above the limit was cancelled",
+                undone=note + "; the runs named in `runs_unconfirmed` had not reached a terminal status when the wait ran out; re-run this command to see whether they have since",
+            )
+        readers = document["surfaces"]["running_work"]["role_read_by"]
+        if readers:
+            return note + f"; a run already executing keeps the role it started with, and this deployment reads a run's role ({', '.join(readers)}): pass --end-running-work to cancel it"
+        return note + "; a run already executing keeps the role it started with, which nothing in this deployment reads (pass --end-running-work to cancel it anyway)"
+
+    async def lift_role_limit(self, identity: tuple[str, str], *, clock: SurfaceClock | None = None) -> dict[str, Any]:
+        """Withdraw the limit. Nothing changes until a sign-in reads the role again."""
+        clock = clock or SurfaceClock()
+        issuer, subject = identity
+        lifted = await self._users.lift_role_limit(issuer, subject)
+        committed = clock.now_ms()
+        accounts = await self._users.list_users_by_identity(issuer, subject)
+        if lifted:
+            clock.stopped("role_limit", ACTION_LIFTED, len(accounts), at_ms=committed)
+        return {
+            "command": "lift-role-limit",
+            "identity": {"issuer": issuer, "subject": subject},
+            "verdict": "lifted" if lifted else "no_limit",
+            "changed": lifted,
+            "accounts": [_account_document(account) for account in accounts],
+            "note": (
+                "the stored role stays where the limit held it until a sign-in reads the role again: the next sign-in, where roles follow the claim; "
+                "where they come from the administrators' list, only a sign-in that changes the account's address"
+                if lifted
+                else "no role limit was held for this identity"
+            ),
+            "returncode": 0,
+            **clock.document(),
+        }
+
     @staticmethod
     def _run_note(document: dict[str, Any], *, done: str, undone: str) -> str:
         """One sentence about the runs, saying only what the rows showed.
@@ -377,7 +633,7 @@ class AccountsCommand:
 
     # ── What disable reaches beyond the row ──────────────────────────────
 
-    async def _end_running_work(self, accounts: list[User]) -> dict[str, Any]:
+    async def _end_running_work(self, accounts: list[User], *, above: str | None = None) -> dict[str, Any]:
         """Cancel every run these accounts have executing, then wait for them to stop.
 
         The cancellation is the durable request a person's own cancel makes,
@@ -400,6 +656,14 @@ class AccountsCommand:
         ``runs_finished_first`` -- it stopped, but it also delivered its result
         into a thread after the person was removed, which the operator should
         hear rather than read as one more run cancelled.
+
+        ``above`` narrows it to runs whose sealed role is above that role, or
+        unknown: what a role limit ends is work still carrying the role it
+        took away, not work the person started since. A request that
+        authenticated just before the limit committed can still insert such
+        a run after the first look; nothing admitted after the commit can, so
+        one more look once the wait is over finds what arrived meanwhile and
+        nothing the person started since. A later pass finds anything slower.
         """
         result: dict[str, Any] = {
             "runs_found": 0,
@@ -410,27 +674,30 @@ class AccountsCommand:
         }
         if self._runs is None:
             return result
-        owners: dict[str, str] = {}
-        for account in accounts:
-            user_id = str(account.id)
-            for row in await self._runs.list_active_by_user(user_id):
-                run_id = row.get("run_id")
-                if run_id:
-                    owners[str(run_id)] = user_id
-        result["runs_found"] = len(owners)
+        owners = {str(row["run_id"]): user_id for user_id, row in await self._active_runs(accounts, above=above)}
         if not owners:
             return result
-        for run_id, user_id in owners.items():
-            try:
-                await self._runs.request_cancel_compat(run_id, action="interrupt", user_id=user_id)
-            except Exception as exc:  # noqa: BLE001 - one run that refuses the request must not hide the others
-                logger.warning("Failed to request cancellation of run %s: %s", run_id, exc)
-        terminal = await self._wait_for_terminal(owners)
+        terminal = await self._cancel_and_wait(owners)
+        if above is not None:
+            late = {str(row["run_id"]): user_id for user_id, row in await self._active_runs(accounts, above=above) if str(row["run_id"]) not in owners}
+            if late:
+                terminal.update(await self._cancel_and_wait(late))
+                owners.update(late)
+        result["runs_found"] = len(owners)
         result["runs_finished_first"] = sorted(run_id for run_id, status in terminal.items() if status == "success")
         result["runs_cancelled"] = len(terminal) - len(result["runs_finished_first"])
         result["runs_unconfirmed"] = sorted(set(owners) - set(terminal))
         result["returncode"] = EXIT_UNCONFIRMED_RUNS if result["runs_unconfirmed"] else 0
         return result
+
+    async def _cancel_and_wait(self, owners: dict[str, str]) -> dict[str, str]:
+        """Ask for each run's cancellation, then wait; returns the status each run that stopped reached."""
+        for run_id, user_id in owners.items():
+            try:
+                await self._runs.request_cancel_compat(run_id, action="interrupt", user_id=user_id)  # type: ignore[union-attr]
+            except Exception as exc:  # noqa: BLE001 - one run that refuses the request must not hide the others
+                logger.warning("Failed to request cancellation of run %s: %s", run_id, exc)
+        return await self._wait_for_terminal(owners)
 
     async def _wait_for_terminal(self, owners: dict[str, str]) -> dict[str, str]:
         """Poll until every named run is terminal or the wait runs out.
@@ -475,6 +742,22 @@ class AccountsCommand:
                 revoked += 1
         return revoked
 
+    async def _count_live_tokens(self, accounts: list[User]) -> int:
+        if self._tokens is None:
+            return 0
+        return sum([sum(1 for record in await self._tokens.list_for_user(str(account.id)) if record.get("revoked_at") is None) for account in accounts])
+
+    async def _active_runs(self, accounts: list[User], *, above: str | None = None) -> list[tuple[str, dict[str, Any]]]:
+        """Each non-terminal run these accounts own, with its owner; with ``above``, only those sealed above that role."""
+        if self._runs is None:
+            return []
+        found: list[tuple[str, dict[str, Any]]] = []
+        for account in accounts:
+            for row in await self._runs.list_active_by_user(str(account.id)):
+                if row.get("run_id") and (above is None or _sealed_role_above(row, above)):
+                    found.append((str(account.id), row))
+        return found
+
     async def _count_schedules(self, account: User) -> int:
         if self._schedules is None:
             return 0
@@ -485,7 +768,23 @@ class AccountsCommand:
 # ── Running it inside the deployment ────────────────────────────────────
 
 
-async def _run(command: str, *, issuer: str | None, subject: str | None, email: str | None, end_running_work: bool = False, wait_seconds: float = DEFAULT_RUN_WAIT_SECONDS) -> dict[str, Any]:
+def deployment_options(config: Any) -> dict[str, Any]:
+    """What the command reads from the deployment it runs in: what reads a run's role, and whether first-boot setup opens without an administrator."""
+    from app.gateway.auth.mode import sign_on_only
+
+    return {"role_readers": run_role_readers(config), "setup_opens_without_admin": not sign_on_only()}
+
+
+async def _run(
+    command: str,
+    *,
+    issuer: str | None,
+    subject: str | None,
+    email: str | None,
+    end_running_work: bool = False,
+    wait_seconds: float = DEFAULT_RUN_WAIT_SECONDS,
+    role: str = LIMIT_ROLES[0],
+) -> dict[str, Any]:
     from deerflow.config import get_app_config
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
@@ -511,14 +810,45 @@ async def _run(command: str, *, issuer: str | None, subject: str | None, email: 
             schedules=ScheduledTaskRepository(session_factory),
             runs=RunRepository(session_factory, tenant=tenant),
             wait_seconds=wait_seconds,
+            **deployment_options(config),
         )
-        return await command_runner.run(command, issuer=issuer, subject=subject, email=email, end_running_work=end_running_work)
+        return await command_runner.run(command, issuer=issuer, subject=subject, email=email, end_running_work=end_running_work, role=role)
     finally:
         await close_engine()
 
 
+class _Refusal(Exception):
+    """A command line this command will not run; the document says why."""
+
+
+class _ArgumentParser(argparse.ArgumentParser):
+    """Answers a malformed command line with the one document and exit 1, like every other refusal.
+
+    argparse's own answer is usage text on stderr and exit 2, which a caller
+    that reads 2 as "done, but a run is unconfirmed" would misread.
+    """
+
+    def error(self, message: str) -> None:  # type: ignore[override]
+        raise _Refusal(message)
+
+
+#: The options that take a value: the word after one is never the command.
+_VALUED_OPTIONS = ("--issuer", "--subject", "--email", "--role", "--wait-seconds")
+
+
+def _command_word(argv: list[str]) -> str | None:
+    """The command a refused command line named, for its refusal document: never a flag's value."""
+    words = iter(argv)
+    for word in words:
+        if word in _VALUED_OPTIONS:
+            next(words, None)
+        elif word in COMMANDS:
+            return word
+    return None
+
+
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="python -m app.gateway.auth.accounts", description="Turn one account off or on, end its sessions, release its address, or list every account. Not a network route.")
+    parser = _ArgumentParser(prog="python -m app.gateway.auth.accounts", description="Turn one account off or on, end its sessions, limit its role, release its address, or list every account. Not a network route.")
     parser.add_argument("command", choices=COMMANDS)
     parser.add_argument("--issuer", help="the identity provider's issuer URL, as configured")
     parser.add_argument("--subject", help="the person's subject at that issuer")
@@ -526,17 +856,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--end-running-work",
         action="store_true",
-        help="end-sessions only: also cancel the runs this account has executing (disable always does)",
+        help="end-sessions and limit-role only: also cancel the runs the account has executing (disable always does)",
     )
+    parser.add_argument("--role", default=None, help=f"limit-role only: the highest role the identity may hold, one of {', '.join(LIMIT_ROLES)} (default {LIMIT_ROLES[0]})")
     parser.add_argument(
         "--wait-seconds",
         type=float,
         default=DEFAULT_RUN_WAIT_SECONDS,
         help=f"how long to wait for cancelled runs to reach a terminal status before reporting them unconfirmed (default {DEFAULT_RUN_WAIT_SECONDS:g})",
     )
-    args = parser.parse_args(argv)
-    if args.end_running_work and args.command != "end-sessions":
-        print(json.dumps({"command": args.command, "error": "--end-running-work belongs to end-sessions; disable always ends the account's running work"}, sort_keys=True), flush=True)
+    try:
+        args = parser.parse_args(argv)
+    except _Refusal as exc:
+        command = _command_word(argv if argv is not None else sys.argv[1:])
+        print(json.dumps({"command": command, "error": str(exc)}, sort_keys=True), flush=True)
+        return 1
+    if args.end_running_work and args.command not in ENDS_WORK_ON_REQUEST:
+        print(json.dumps({"command": args.command, "error": "--end-running-work belongs to end-sessions and limit-role; disable always ends the account's running work"}, sort_keys=True), flush=True)
+        return 1
+    if args.role is not None and args.command != "limit-role":
+        print(json.dumps({"command": args.command, "error": "--role belongs to limit-role"}, sort_keys=True), flush=True)
         return 1
     if args.wait_seconds < 0:
         print(json.dumps({"command": args.command, "error": "--wait-seconds cannot be negative"}, sort_keys=True), flush=True)
@@ -550,6 +889,7 @@ def main(argv: list[str] | None = None) -> int:
                 email=args.email,
                 end_running_work=args.end_running_work,
                 wait_seconds=args.wait_seconds,
+                role=args.role or LIMIT_ROLES[0],
             )
         )
     except CommandError as exc:

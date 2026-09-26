@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0042_provider_keys"
+HEAD = "0043_role_limits"
 BASELINE = "0001_baseline"
 
 
