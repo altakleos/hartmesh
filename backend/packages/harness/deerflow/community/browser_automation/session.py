@@ -25,6 +25,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import urlparse
 
+from deerflow.runtime.owner_holdings import ANY_OWNER, Ended
+
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page, Playwright
 
@@ -1014,6 +1016,39 @@ class BrowserSessionManager:
         await session.close()
         return True
 
+    async def close_for_owners(self, owners: frozenset[str], *, owner_of: Callable[[str], Coroutine[Any, Any, str | None]]) -> dict[str, Ended]:
+        """Close each browser kept for a thread one of ``owners`` owns; how many, by owner.
+
+        A session is keyed by thread alone, so ``owner_of`` answers whose
+        thread it is. A browser outlives the run that opened it until another
+        thread needs the slot, holding the pages and cookies it was left with.
+        """
+        with self._lock:
+            keys = [key for key in self._sessions if key != "default"]
+        outcome: dict[str, Ended] = {}
+
+        def _add(owner: str, ended: Ended) -> None:
+            before = outcome.get(owner, Ended())
+            outcome[owner] = Ended(before.count + ended.count, before.failed + ended.failed)
+
+        for key in keys:
+            try:
+                owner = await owner_of(key)
+            except Exception:  # noqa: BLE001 - whose it is is unknown, so it is not confirmed ended for anyone; the others still close
+                logger.warning("Could not read whose thread %s is while closing a refused owner's browsers", key, exc_info=True)
+                _add(ANY_OWNER, Ended(0, failed=1))
+                continue
+            if owner not in owners:
+                continue
+            try:
+                await self.close_session(key)
+            except Exception:  # noqa: BLE001 - popped from the pool either way; its browser may still be running
+                logger.warning("Closing the browser of thread %s for a refused owner failed", key, exc_info=True)
+                _add(owner, Ended(0, failed=1))
+                continue
+            _add(owner, Ended(1))
+        return outcome
+
     async def close_all_sessions(self) -> int:
         with self._lock:
             sessions = list(self._sessions.values())
@@ -1034,6 +1069,11 @@ def get_browser_session_manager() -> BrowserSessionManager:
         with _manager_lock:
             if _manager is None:
                 _manager = BrowserSessionManager()
+    return _manager
+
+
+def get_initialized_browser_session_manager() -> BrowserSessionManager | None:
+    """The manager, only when something has already started it."""
     return _manager
 
 

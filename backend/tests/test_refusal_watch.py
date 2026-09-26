@@ -17,7 +17,7 @@ import pytest
 
 from app.gateway.refusal_watch import RefusalWatch
 from deerflow.persistence.refusal_sweeps import RefusalSweepRepository
-from deerflow.runtime.owner_holdings import OwnerHoldings
+from deerflow.runtime.owner_holdings import Ended, OwnerHoldings
 
 
 @pytest.fixture
@@ -127,17 +127,40 @@ async def test_a_process_whose_look_keeps_failing_keeps_beating_and_never_claims
     async def _database_gone() -> set[str]:
         raise RuntimeError("database went away")
 
-    watch = RefusalWatch(sweeps, holdings, refused_owners=_database_gone, process_id="gw-test")
-    await watch.register()
-    registered_at = watch._checked
-    check = await sweeps.request_check()
-    for _ in range(3):
-        with pytest.raises(RuntimeError):
-            await watch.tick()
-        await asyncio.sleep(0.6)
-
-    assert await _checked_through(sweeps, window=1) == [registered_at], "beating within the last second, and still short of the check"
+    watch = RefusalWatch(sweeps, holdings, refused_owners=_database_gone, process_id="gw-test", interval_seconds=0.1)
+    await watch.start()
+    try:
+        registered_at = watch._checked
+        check = await sweeps.request_check()
+        await asyncio.sleep(1.5)
+        assert await _checked_through(sweeps, window=1) == [registered_at], "beating within the last second, and still short of the check"
+    finally:
+        await watch.stop()
     assert registered_at < check and holdings.owners() == {"pat"}
+
+
+@pytest.mark.anyio
+async def test_a_look_waiting_on_a_slow_stop_does_not_stop_the_heartbeat(sweeps) -> None:
+    """A container slow to stop must not make the process read as gone, and what it holds as ended."""
+    import threading
+
+    release = threading.Event()
+
+    def _slow_stop(owners: frozenset[str]) -> dict[str, Ended]:
+        release.wait(5)
+        return {}
+
+    holdings = OwnerHoldings(source_time_limit_seconds=10)
+    holdings.add_source("sandboxes", _slow_stop, blocking=True)
+    watch = _watch(sweeps, holdings, {"pat"}, interval_seconds=0.1)
+    await watch.start()
+    try:
+        await sweeps.request_check()
+        await asyncio.sleep(1.5)
+        assert [live.process_id for live in await sweeps.live_processes(window_seconds=1)] == ["gw-test"], "still beating while the look waits"
+    finally:
+        release.set()
+        await watch.stop()
 
 
 @pytest.mark.anyio
@@ -214,3 +237,25 @@ async def test_a_tick_that_fails_does_not_stop_the_watch(sweeps) -> None:
     finally:
         await watch.stop()
     assert len(calls) >= 2 and holdings.owners() == set(), "the loop went on after the failed tick and ended the stream"
+
+
+@pytest.mark.anyio
+async def test_a_look_ends_what_each_subsystem_keeps_for_a_refused_owner_and_records_what_it_could_not(sweeps) -> None:
+    holdings = OwnerHoldings()
+    holdings.add_source("mcp_sessions", lambda owners: {"pat": Ended(2)} if "pat" in owners else {})
+    holdings.add_source("sandboxes", lambda owners: {"pat": Ended(1, failed=1)} if "pat" in owners else {})
+    watch = _watch(sweeps, holdings, {"pat"})
+    await watch.register()
+    check = await sweeps.request_check()
+    await watch.tick()
+
+    endings = sorted((ending.surface, ending.count, ending.failed) for ending in await sweeps.endings_for(["pat"], since_check=check))
+    assert endings == [("mcp_sessions", 2, 0), ("sandboxes", 1, 1)]
+    assert await _checked_through(sweeps) == [check], "it looked; what it could not end is in the record, not in its silence"
+
+
+@pytest.mark.anyio
+async def test_a_process_names_the_surfaces_it_cannot_reach(sweeps) -> None:
+    watch = _watch(sweeps, OwnerHoldings(), set(), unreached=("sandboxes",))
+    await watch.register()
+    assert [live.unreached for live in await sweeps.live_processes(window_seconds=30)] == [("sandboxes",)]

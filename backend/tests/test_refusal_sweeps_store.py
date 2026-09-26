@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from deerflow.persistence.refusal_sweeps import RefusalSweepRepository
+from deerflow.runtime.owner_holdings import Ended
 
 
 @pytest.fixture
@@ -105,3 +106,37 @@ async def test_pruning_never_forgets_the_latest_check_and_a_pruned_process_that_
 
     await repo.beat("gw-stalled", checked_through=latest)
     assert [(entry.process_id, entry.checked_through) for entry in await repo.live_processes(window_seconds=30)] == [("gw-stalled", latest)]
+
+
+@pytest.mark.anyio
+async def test_what_a_process_could_not_confirm_ended_is_read_back_as_failed(sweeps) -> None:
+    repo = sweeps.repo
+    check = await repo.request_check()
+    await repo.record_endings("gw-1", check, {"user-pat": {"sandboxes": Ended(1, failed=1), "mcp_sessions": Ended(2)}})
+
+    endings = sorted((ending.surface, ending.count, ending.failed) for ending in await repo.endings_for(["user-pat"], since_check=check))
+    assert endings == [("mcp_sessions", 2, 0), ("sandboxes", 1, 1)]
+
+
+@pytest.mark.anyio
+async def test_a_process_names_the_surfaces_it_cannot_reach_and_keeps_naming_them_after_a_prune(sweeps) -> None:
+    """A sandbox provider that cannot end an owner's sandboxes is said to at registration, so the command never reads its silence as none."""
+    repo = sweeps.repo
+    await repo.register("gw-local", unreached=("sandboxes",))
+    await repo.register("gw-aio")
+    assert {entry.process_id: entry.unreached for entry in await repo.live_processes(window_seconds=30)} == {"gw-aio": (), "gw-local": ("sandboxes",)}
+
+    await asyncio.sleep(0.05)
+    await repo.prune(older_than_seconds=0)
+    await repo.beat("gw-local", unreached=("sandboxes",))
+    assert [(entry.process_id, entry.unreached) for entry in await repo.live_processes(window_seconds=30)] == [("gw-local", ("sandboxes",))]
+
+
+@pytest.mark.anyio
+async def test_each_ending_says_which_check_it_acted_on(sweeps) -> None:
+    repo = sweeps.repo
+    first = await repo.request_check()
+    await repo.record_endings("gw-1", first, {"user-pat": {"sandboxes": Ended(0, failed=1)}})
+    second = await repo.request_check()
+    await repo.record_endings("gw-1", second, {"user-pat": {"sandboxes": Ended(1)}})
+    assert [(ending.check_id, ending.count, ending.failed) for ending in await repo.endings_for(["user-pat"], since_check=first)] == [(first, 0, 1), (second, 1, 0)]

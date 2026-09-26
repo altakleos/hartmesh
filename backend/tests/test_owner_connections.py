@@ -29,7 +29,7 @@ from websockets.exceptions import ConnectionClosed
 from websockets.sync.client import connect as ws_connect
 
 from app.gateway.owner_connections import OwnerConnectionsMiddleware
-from deerflow.runtime.owner_holdings import OwnerHoldings
+from deerflow.runtime.owner_holdings import Ended, OwnerHoldings
 
 
 class _StampUser(BaseHTTPMiddleware):
@@ -189,7 +189,7 @@ def test_a_stream_opened_by_an_owner_already_refused_is_cut_at_once(served) -> N
     with httpx.Client(timeout=10) as client, client.stream("GET", served.base + "/sse", headers={"x-user": "pat"}) as sse:
         _read_until_cut(sse, outcome)
     assert outcome["ended"] != "completed"
-    assert served.holdings.drain_late_endings() == {"pat": {"sse_streams": 1}}
+    assert served.holdings.drain_late_endings() == {"pat": {"sse_streams": Ended(1)}}
 
 
 def test_a_stream_that_arrived_after_the_look_read_the_refusals_is_judged_by_its_own_read(served) -> None:

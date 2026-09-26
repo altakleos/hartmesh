@@ -774,6 +774,42 @@ class TestSessionManager:
         # Second close is a no-op because the session was dropped.
         assert await manager.close_session("thread-a") is False
 
+    async def test_closing_the_browsers_kept_for_refused_owners_closes_theirs_and_no_one_elses(self):
+        """A browser is kept per thread with no owner of its own; the thread's owner is asked for."""
+        from deerflow.runtime.owner_holdings import Ended
+
+        manager = BrowserSessionManager()
+        with patch.object(manager, "_ensure_loop", return_value=MagicMock()):
+            sessions = {thread: manager.get_session(thread) for thread in ("thread-pat-1", "thread-pat-2", "thread-sam", None)}
+        for session in sessions.values():
+            session.close = AsyncMock()
+        owners = {"thread-pat-1": "pat", "thread-pat-2": "pat", "thread-sam": "sam"}
+
+        async def _owner_of(thread_id: str) -> str | None:
+            return owners.get(thread_id)
+
+        assert await manager.close_for_owners(frozenset({"pat", "lee"}), owner_of=_owner_of) == {"pat": Ended(2)}
+        assert [session.close.await_count for session in sessions.values()] == [1, 1, 0, 0]
+        assert await manager.close_for_owners(frozenset({"pat"}), owner_of=_owner_of) == {}
+
+    async def test_one_browser_that_cannot_be_closed_or_placed_does_not_keep_the_others_open(self):
+        from deerflow.runtime.owner_holdings import ANY_OWNER, Ended
+
+        manager = BrowserSessionManager()
+        with patch.object(manager, "_ensure_loop", return_value=MagicMock()):
+            sessions = {thread: manager.get_session(thread) for thread in ("thread-lost", "thread-stuck", "thread-pat")}
+        for session in sessions.values():
+            session.close = AsyncMock()
+        sessions["thread-stuck"].close.side_effect = RuntimeError("the browser process is not answering")
+
+        async def _owner_of(thread_id: str) -> str | None:
+            if thread_id == "thread-lost":
+                raise RuntimeError("the thread store is not answering")
+            return "pat"
+
+        assert await manager.close_for_owners(frozenset({"pat"}), owner_of=_owner_of) == {ANY_OWNER: Ended(0, failed=1), "pat": Ended(1, failed=1)}
+        assert sessions["thread-pat"].close.await_count == 1
+
     async def test_idle_sessions_are_evicted_on_next_get(self):
         """A session unused past the idle timeout is dropped + scheduled to close.
 

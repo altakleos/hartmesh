@@ -5,7 +5,11 @@ connections a Gateway process holds -- WebSockets, SSE streams, streaming
 downloads -- report when every live process confirmed it had looked, with
 what it ended. A process that does not confirm within ``--wait-seconds``
 leaves those surfaces unconfirmed, and the exit status is 2; a process that
-stopped beating holds nothing and is not waited on.
+stopped beating holds nothing and is not waited on. What a process keeps for
+the person between requests -- sandboxes, pooled MCP sessions, browsers,
+queued memory updates -- is confirmed by a second check once the runs are
+over, since a run that is ending leaves its sandbox parked; a run reports
+when its sandboxes were confirmed stopped.
 """
 
 from __future__ import annotations
@@ -25,10 +29,12 @@ from app.gateway.auth.accounts import EXIT_UNCONFIRMED_RUNS, AccountsCommand
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from app.gateway.refusal_watch import RefusalWatch
-from deerflow.runtime.owner_holdings import OwnerHoldings
+from deerflow.runtime.owner_holdings import Ended, OwnerHoldings
 
 ISSUER = "https://login.example.com/realms/tenant"
 CONNECTIONS = ("websockets", "sse_streams", "downloads")
+RETAINED = ("sandboxes", "mcp_sessions", "browser_sessions", "memory_updates")
+PROCESS_SURFACES = (*CONNECTIONS, *RETAINED)
 
 
 @pytest.fixture
@@ -90,7 +96,7 @@ async def test_the_document_names_every_surface_with_a_time_and_the_refusal_s_co
 
     started = datetime.fromisoformat(document["started_at"])
     assert before - timedelta(seconds=1) <= started <= datetime.now(UTC)
-    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *CONNECTIONS}
+    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *PROCESS_SURFACES}
     committed = document["surfaces"]["sign_in"]["stopped_after_ms"]
     for name in ("sign_in", "sessions", "personal_access_tokens", "internal_launches"):
         entry = document["surfaces"][name]
@@ -99,11 +105,15 @@ async def test_the_document_names_every_surface_with_a_time_and_the_refusal_s_co
     assert document["surfaces"]["sign_in"]["action"] == "refused_at_next_use"
     assert document["surfaces"]["personal_access_tokens"] == {**document["surfaces"]["personal_access_tokens"], "action": "revoked", "count": 1}
     assert document["surfaces"]["internal_launches"]["action"] == "refused_at_next_use"
-    # No Gateway process is running: nothing holds a connection, and that is confirmed, not assumed.
-    for name in CONNECTIONS:
+    # No Gateway process is running: nothing holds a connection or keeps a
+    # session for them, and that is confirmed, not assumed. A sandbox's
+    # container outlives its Gateway, so nothing is there to vouch for it.
+    for name in PROCESS_SURFACES:
         entry = document["surfaces"][name]
-        assert entry["count"] == 0 and entry["processes"] == 0 and entry["confirmed_by"] == "gateway_record" and entry["stopped_after_ms"] is not None, name
-    assert document["surfaces_unconfirmed"] == [] and document["returncode"] == 0
+        assert entry["count"] == 0 and entry["processes"] == 0 and entry["confirmed_by"] == "gateway_record", name
+        assert (entry["stopped_after_ms"] is None) == (name == "sandboxes"), name
+    assert document["surfaces_unconfirmed"] == ["sandboxes"] and document["returncode"] == EXIT_UNCONFIRMED_RUNS
+    assert document["surfaces_not_reached"] == [] and "no Gateway process is running" in document["note"]
     assert document["tokens_revoked"] == 1 and document["sessions_ended"] is True, "the existing keys keep their meanings"
 
 
@@ -158,8 +168,8 @@ async def test_a_live_process_that_does_not_confirm_leaves_the_connections_uncon
 
     document = await _command(stores, wait_seconds=0.3).run("disable", issuer=ISSUER, subject="sub-pat")
 
-    assert document["surfaces_unconfirmed"] == list(sorted(CONNECTIONS))
-    for name in CONNECTIONS:
+    assert document["surfaces_unconfirmed"] == list(sorted(PROCESS_SURFACES))
+    for name in PROCESS_SURFACES:
         entry = document["surfaces"][name]
         assert entry["stopped_after_ms"] is None and entry["processes_unconfirmed"] == ["gw-stalled"] and entry["processes"] == 0, name
     assert document["returncode"] == EXIT_UNCONFIRMED_RUNS
@@ -175,7 +185,8 @@ async def test_a_process_that_stopped_beating_holds_nothing_and_is_not_waited_on
 
     document = await _command(stores, live_window_seconds=1).run("disable", issuer=ISSUER, subject="sub-pat")
 
-    assert document["surfaces_unconfirmed"] == [] and document["surfaces"]["sse_streams"]["processes"] == 0
+    assert document["surfaces"]["sse_streams"]["processes"] == 0 and document["surfaces"]["sse_streams"]["stopped_after_ms"] is not None
+    assert document["surfaces_unconfirmed"] == ["sandboxes"], "its connections went with it; a container it started may not have"
 
 
 @pytest.mark.anyio
@@ -232,7 +243,7 @@ async def test_one_wait_bounds_the_whole_command_and_the_connections_are_confirm
     took = asyncio.get_running_loop().time() - started
 
     assert took < 1.5 + 1.0, f"took {took:.1f}s for a 1.5s wait"
-    assert sorted(document["surfaces_unconfirmed"]) == sorted(["running_work", *CONNECTIONS]) and document["returncode"] == EXIT_UNCONFIRMED_RUNS
+    assert sorted(document["surfaces_unconfirmed"]) == sorted(["running_work", *PROCESS_SURFACES]) and document["returncode"] == EXIT_UNCONFIRMED_RUNS
 
 
 @pytest.mark.anyio
@@ -265,7 +276,7 @@ async def test_an_identity_with_no_account_names_every_surface_all_the_same(stor
     document = await _command(stores).run("disable", issuer=ISSUER, subject="sub-nobody")
 
     assert document["account"] is None
-    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *CONNECTIONS}
+    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *PROCESS_SURFACES}
     assert all(entry["count"] == 0 for entry in document["surfaces"].values())
     assert document["surfaces_unconfirmed"] == [] and document["returncode"] == 0
 
@@ -289,4 +300,117 @@ async def test_the_check_is_asked_for_only_after_the_refusal_has_committed(store
     stores.users.disable_identity = _disable
     stores.sweeps.request_check = _check
     await _command(stores).run("disable", issuer=ISSUER, subject="sub-pat")
-    assert order == ["refusal committed", "check requested"]
+    assert order[:2] == ["refusal committed", "check requested"]
+
+
+@pytest.mark.anyio
+async def test_what_a_run_leaves_behind_is_confirmed_once_the_run_is_over_and_the_run_reports_when_its_sandbox_stopped(stores) -> None:
+    """A cancelled run parks its sandbox as it ends -- after the first look -- with whatever it left running inside."""
+    account = await stores.users.create_user(_account())
+    run_id = await _seed_run(stores, str(account.id))
+    parked: list[str] = []
+    request_cancel = stores.runs.request_cancel_compat
+
+    async def _run_ends_and_parks_its_sandbox(run_id: str, **kwargs):
+        result = await request_cancel(run_id, **kwargs)
+
+        async def _later() -> None:
+            await asyncio.sleep(0.4)
+            parked.append(str(account.id))
+            await stores.runs.update_status(run_id, "interrupted")
+
+        asyncio.get_running_loop().create_task(_later())
+        return result
+
+    stores.runs.request_cancel_compat = _run_ends_and_parks_its_sandbox
+
+    def _stop_parked(owners: frozenset[str]) -> dict[str, Ended]:
+        stopped = [owner for owner in parked if owner in owners]
+        for owner in stopped:
+            parked.remove(owner)
+        return {owner: Ended(1) for owner in stopped}
+
+    holdings = OwnerHoldings()
+    holdings.add_source("sandboxes", _stop_parked)
+    watch = _watch(stores, holdings)
+    await watch.start()
+    try:
+        document = await _command(stores).run("disable", issuer=ISSUER, subject="sub-pat")
+    finally:
+        await watch.stop()
+
+    surfaces = document["surfaces"]
+    assert document["runs_cancelled"] == 1 and document["runs_unconfirmed"] == [] and run_id
+    assert surfaces["sandboxes"]["count"] == 1 and surfaces["sandboxes"]["action"] == "ended" and surfaces["sandboxes"]["not_ended"] == 0
+    assert surfaces["running_work"]["confirmed_by"] == "sandbox_gone"
+    assert surfaces["running_work"]["stopped_after_ms"] == surfaces["sandboxes"]["stopped_after_ms"]
+    assert document["surfaces_unconfirmed"] == [] and document["returncode"] == 0
+
+
+@pytest.mark.anyio
+async def test_a_sandbox_that_would_not_stop_is_unconfirmed_and_the_run_reports_only_its_row(stores) -> None:
+    account = await stores.users.create_user(_account())
+    holdings = OwnerHoldings()
+    holdings.add_source("sandboxes", lambda owners: {str(account.id): Ended(0, failed=1)} if str(account.id) in owners else {})
+    watch = _watch(stores, holdings)
+    await watch.start()
+    try:
+        document = await _command(stores).run("disable", issuer=ISSUER, subject="sub-pat")
+    finally:
+        await watch.stop()
+
+    entry = document["surfaces"]["sandboxes"]
+    assert entry["stopped_after_ms"] is None and entry["not_ended"] == 1 and entry["processes_unconfirmed"] == []
+    assert document["surfaces_unconfirmed"] == ["sandboxes"] and document["returncode"] == EXIT_UNCONFIRMED_RUNS
+    assert document["surfaces"]["running_work"]["confirmed_by"] == "run_status"
+    assert "sandboxes" in document["note"]
+
+
+@pytest.mark.anyio
+async def test_a_process_whose_sandboxes_cannot_be_ended_makes_them_not_reached_never_none(stores) -> None:
+    """A sandbox provider without the capability says so when it registers; its silence is not read as nothing held."""
+    await stores.users.create_user(_account())
+    watch = RefusalWatch(stores.sweeps, OwnerHoldings(), refused_owners=stores.users.list_refused_user_ids, process_id="gw-local", interval_seconds=0.05, unreached=("sandboxes",))
+    await watch.start()
+    try:
+        document = await _command(stores).run("disable", issuer=ISSUER, subject="sub-pat")
+    finally:
+        await watch.stop()
+
+    entry = document["surfaces"]["sandboxes"]
+    assert entry["action"] == "not_reached" and entry["processes_unreached"] == ["gw-local"] and entry["stopped_after_ms"] is None
+    assert document["surfaces_unconfirmed"] == ["sandboxes"] and document["returncode"] == EXIT_UNCONFIRMED_RUNS
+    assert document["surfaces_not_reached"] == ["sandboxes"], "a retry loop can tell this 2 apart: re-running will not change it"
+    assert document["surfaces"]["mcp_sessions"]["stopped_after_ms"] is not None, "the other surfaces are reached as ever"
+    assert "not_reached" in document["note"]
+
+
+@pytest.mark.anyio
+async def test_an_identity_with_no_account_is_not_reported_unreached_by_a_process_that_cannot_end_sandboxes(stores) -> None:
+    """Nothing can be kept for an account that does not exist, reachable or not."""
+    watch = RefusalWatch(stores.sweeps, OwnerHoldings(), refused_owners=stores.users.list_refused_user_ids, process_id="gw-local", interval_seconds=0.05, unreached=("sandboxes",))
+    await watch.start()
+    try:
+        document = await _command(stores).run("disable", issuer=ISSUER, subject="sub-nobody")
+    finally:
+        await watch.stop()
+
+    assert document["surfaces"]["sandboxes"]["action"] == "ended" and document["surfaces"]["sandboxes"]["processes_unreached"] == []
+    assert document["surfaces_unconfirmed"] == [] and document["surfaces_not_reached"] == [] and document["returncode"] == 0
+
+
+@pytest.mark.anyio
+async def test_a_sandbox_a_process_cannot_attribute_is_not_confirmed_ended_for_the_person(stores) -> None:
+    """Taken over after a restart without learning whose: it may be theirs."""
+    await stores.users.create_user(_account())
+    holdings = OwnerHoldings()
+    holdings.add_source("sandboxes", lambda owners: {"*": Ended(0, failed=1)} if owners else {})
+    watch = _watch(stores, holdings)
+    await watch.start()
+    try:
+        document = await _command(stores).run("disable", issuer=ISSUER, subject="sub-pat")
+    finally:
+        await watch.stop()
+
+    assert document["surfaces"]["sandboxes"]["not_ended"] == 1 and document["surfaces_unconfirmed"] == ["sandboxes"]
+    assert "owner it does not know" in document["note"]

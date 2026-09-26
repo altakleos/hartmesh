@@ -758,4 +758,31 @@ async def test_a_refusal_watch_that_cannot_start_fails_startup(monkeypatch):
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: object())
     monkeypatch.setattr(RefusalWatch, "start", _cannot_register)
     with pytest.raises(RuntimeError, match="gateway_processes"):
-        await gateway_app._start_refusal_watch()
+        await gateway_app._start_refusal_watch(SimpleNamespace(state=SimpleNamespace()))
+
+
+@pytest.mark.asyncio
+async def test_the_refusal_watch_starts_with_what_the_process_keeps_for_people_and_what_it_cannot_reach(monkeypatch):
+    from app.gateway import app as gateway_app
+    from app.gateway import retained_state
+    from app.gateway.refusal_watch import RefusalWatch
+    from deerflow.persistence import engine as engine_module
+    from deerflow.runtime.owner_holdings import get_owner_holdings
+
+    started: list[RefusalWatch] = []
+
+    async def _start(self):
+        started.append(self)
+
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: object())
+    monkeypatch.setattr(RefusalWatch, "start", _start)
+    monkeypatch.setattr(retained_state, "unreached_surfaces", lambda: ("sandboxes",))
+
+    async def _get(thread_id, *, user_id):
+        assert user_id is None, "whoever owns it"
+        return {"thread_id": thread_id, "user_id": "pat"}
+
+    await gateway_app._start_refusal_watch(SimpleNamespace(state=SimpleNamespace(thread_store=SimpleNamespace(get=_get))))
+
+    assert [watch._unreached for watch in started] == [("sandboxes",)]
+    assert set(retained_state.RETAINED_SURFACES) <= set(get_owner_holdings()._sources)

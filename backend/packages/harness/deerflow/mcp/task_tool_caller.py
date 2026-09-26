@@ -18,7 +18,7 @@ from deerflow.mcp.context_headers import build_context_headers_interceptor
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors
 from deerflow.mcp.oauth import OAuthTokenManager, build_oauth_tool_interceptor
-from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import MCPSessionPool, call_pooled_session_tool, get_session_pool, session_scope_key
 from deerflow.mcp.tasks.lineage import (
     McpTaskLineageError,
     McpTaskLineageV1,
@@ -30,7 +30,7 @@ logger = logging.getLogger(__name__)
 
 def mcp_task_session_scope_key(*, user_id: str, thread_id: str) -> str:
     """Keep background calls in the same per-user/per-thread session scope."""
-    return f"{user_id}:{thread_id}"
+    return session_scope_key(user_id, thread_id)
 
 
 def _prepare_stdio_connection(

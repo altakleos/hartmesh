@@ -1097,6 +1097,11 @@ def get_memory_manager(
         return _memory_manager
 
 
+def get_initialized_memory_manager() -> MemoryManager | None:
+    """The manager, only when something has already resolved it."""
+    return _memory_manager
+
+
 def reset_memory_manager() -> None:
     """Clear the cached singleton manager and the backend registry.
 

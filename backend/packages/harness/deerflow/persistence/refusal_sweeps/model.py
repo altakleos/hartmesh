@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Index, Integer, String
+from sqlalchemy import DateTime, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -28,6 +28,8 @@ class GatewayProcessRow(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     heartbeat_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     checked_through: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: JSON list of the surfaces this process has no way to end; ``NULL`` when it reaches them all.
+    unreached: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SurfaceEndingRow(Base):
@@ -40,6 +42,8 @@ class SurfaceEndingRow(Base):
     user_id: Mapped[str] = mapped_column(String(64), nullable=False)
     surface: Mapped[str] = mapped_column(String(64), nullable=False)
     count: Mapped[int] = mapped_column(Integer, nullable=False)
+    #: Of ``count``'s kind, how many the look tried to end and could not confirm ended.
+    failed: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     check_id: Mapped[int] = mapped_column(Integer, nullable=False)
     ended_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

@@ -24,7 +24,7 @@ from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
+from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool, session_scope_key
 from deerflow.mcp.tasks import (
     ORDINARY_MCP_TASK_DRIVER,
     McpTaskLineageBinder,
@@ -506,7 +506,7 @@ def _make_session_pool_tool(
         # Scope the pooled session by user *and* thread. Filesystem isolation is
         # per-(user_id, thread_id), so a thread_id alone could otherwise let two
         # users with a colliding thread_id share one stateful MCP session.
-        scope_key = f"{user_id}:{thread_id}"
+        scope_key = session_scope_key(user_id, thread_id)
         session_connection = dict(connection)
         # cwd/temp pinning and the workspace snapshot only matter for stdio
         # servers, which run as local subprocesses writing to a real filesystem.

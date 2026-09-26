@@ -236,10 +236,12 @@ def _memory_backend_diagnostics(app: FastAPI) -> dict[str, object] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
-async def _start_refusal_watch():
-    """Look for accounts turned off among those this process holds a connection for (``refusal_watch``).
+async def _start_refusal_watch(app: FastAPI):
+    """Look for accounts turned off among those this process holds a connection or keeps state for (``refusal_watch``).
 
-    Only with a database: the account command, the watch's only caller, needs
+    What the process keeps for a person between requests is added to its
+    holdings (``retained_state``), and a surface it has no way to end is
+    named when it registers. Only with a database: the account command, the watch's only caller, needs
     one too, and without one there is nobody to confirm to. A failure to start
     fails startup: a process that never registered would read to the command
     as one holding nothing, and its connections would be reported closed.
@@ -250,6 +252,7 @@ async def _start_refusal_watch():
 
     from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
     from app.gateway.refusal_watch import RefusalWatch
+    from app.gateway.retained_state import add_retained_state_sources, thread_owner_from, unreached_surfaces
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.refusal_sweeps import RefusalSweepRepository
     from deerflow.runtime.owner_holdings import get_owner_holdings
@@ -257,11 +260,15 @@ async def _start_refusal_watch():
     session_factory = get_session_factory()
     if session_factory is None:
         return None
+
+    holdings = get_owner_holdings()
+    add_retained_state_sources(holdings, thread_owner=thread_owner_from(getattr(app.state, "thread_store", None)))
     watch = RefusalWatch(
         RefusalSweepRepository(session_factory),
-        get_owner_holdings(),
+        holdings,
         refused_owners=SQLiteUserRepository(session_factory).list_refused_user_ids,
         process_id=f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}",
+        unreached=unreached_surfaces(),
     )
     await watch.start()
     return watch
@@ -786,7 +793,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             # Inside the try, so a watch that fails to start still shuts the
             # rest down in order.
-            refusal_watch = await _start_refusal_watch()
+            refusal_watch = await _start_refusal_watch(app)
             yield
         finally:
             try:

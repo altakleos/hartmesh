@@ -3594,3 +3594,85 @@ def test_warm_pool_teardown_that_fails_keeps_the_view(tmp_path, monkeypatch) -> 
         assert (view / snapshot.snapshot_id).is_dir(), "a container that is still up keeps its mount"
     finally:
         snapshot.release()
+
+
+def _provider_holding_for_pat_and_sam(tmp_path):
+    """Pat has a sandbox in a turn and one parked; Sam has one parked."""
+    provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "sb-pat-active")
+    provider._active_sandbox_identity = {"sb-pat-active": ("pat", "thread-1")}
+    for sandbox_id, identity in (("sb-pat-warm", ("pat", "thread-2")), ("sb-sam-warm", ("sam", "thread-3"))):
+        provider._warm_pool[sandbox_id] = (aio_mod.SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://sandbox-host"), time.time())
+        provider._warm_pool_identity[sandbox_id] = identity
+    return provider, aio_mod
+
+
+def test_ending_an_owners_sandboxes_stops_the_parked_and_the_active_ones_and_no_one_elses(tmp_path):
+    """A parked sandbox keeps whatever a finished run left running in it; stopping the container is what ends that."""
+    from deerflow.runtime.owner_holdings import Ended
+    from deerflow.sandbox.capabilities import OwnerSandboxEnding, sandbox_capability
+
+    provider, _ = _provider_holding_for_pat_and_sam(tmp_path)
+    assert sandbox_capability(provider, OwnerSandboxEnding) is provider
+
+    assert provider.end_sandboxes_for_owners(frozenset({"pat", "lee"})) == {"pat": Ended(2)}
+
+    assert set(provider._warm_pool) == {"sb-sam-warm"}
+    assert provider._sandboxes == {}
+    assert sorted(call.args[0].sandbox_id for call in provider._backend.destroy.call_args_list) == ["sb-pat-active", "sb-pat-warm"]
+    assert provider.end_sandboxes_for_owners(frozenset({"pat"})) == {}, "nothing left to end"
+
+
+def test_a_sandbox_that_does_not_stop_is_reported_not_ended(tmp_path):
+    from deerflow.runtime.owner_holdings import Ended
+
+    provider, _ = _provider_holding_for_pat_and_sam(tmp_path)
+    provider._backend.destroy.side_effect = RuntimeError("the container runtime is not answering")
+
+    assert provider.end_sandboxes_for_owners(frozenset({"pat"})) == {"pat": Ended(0, failed=2)}
+    assert {"sb-pat-active", "sb-pat-warm"} <= set(provider._warm_pool), "still owned and still counted, for the cleanup to retry"
+
+
+def test_a_sandbox_taken_over_without_its_owner_is_not_confirmed_ended_for_anyone(tmp_path):
+    """Adopted after a restart, it may be the refused person's; nothing here can say it is not."""
+    from deerflow.runtime.owner_holdings import ANY_OWNER, Ended
+
+    provider, aio_mod = _provider_holding_for_pat_and_sam(tmp_path)
+    provider._warm_pool["sb-adopted"] = (aio_mod.SandboxInfo(sandbox_id="sb-adopted", sandbox_url="http://sandbox-host"), time.time())
+    provider._warm_pool_identity["sb-adopted"] = None
+
+    assert provider.end_sandboxes_for_owners(frozenset({"pat"})) == {"pat": Ended(2), ANY_OWNER: Ended(0, failed=1)}
+    assert "sb-adopted" in provider._warm_pool, "left for its owner to reclaim or its idle timeout to end"
+    assert provider.end_sandboxes_for_owners(frozenset()) == {}
+
+
+def test_a_sandbox_another_thread_is_still_tearing_down_is_not_counted_ended(tmp_path):
+    from deerflow.runtime.owner_holdings import Ended
+
+    provider, _ = _provider_holding_for_pat_and_sam(tmp_path)
+    provider._local_teardown.add("sb-pat-warm")  # the idle reaper holds it, and its stop may yet fail
+
+    assert provider.end_sandboxes_for_owners(frozenset({"pat"})) == {"pat": Ended(1, failed=1)}
+
+
+def test_a_turn_that_ends_after_its_owner_was_turned_off_stops_its_sandbox_instead_of_parking_it(tmp_path):
+    """A cancelled run unwinds after the look: its sandbox must not wait in the pool for a turn that cannot come."""
+    from deerflow.runtime.owner_holdings import Ended, get_owner_holdings
+
+    provider, _ = _provider_holding_for_pat_and_sam(tmp_path)
+    holdings = get_owner_holdings()
+    holdings.drain_late_endings()
+    holdings.set_refused({"pat"})
+    try:
+        provider.release("sb-pat-active")
+        assert "sb-pat-active" not in provider._warm_pool and "sb-pat-active" not in provider._sandboxes
+        assert [call.args[0].sandbox_id for call in provider._backend.destroy.call_args_list] == ["sb-pat-active"]
+        assert holdings.drain_late_endings() == {"pat": {"sandboxes": Ended(1)}}, "recorded by the watch at its next tick"
+    finally:
+        holdings.set_refused(set())
+
+
+def test_a_turn_that_ends_for_an_owner_still_on_parks_its_sandbox_as_before(tmp_path):
+    provider, _ = _provider_holding_for_pat_and_sam(tmp_path)
+    provider.release("sb-pat-active")
+    assert "sb-pat-active" in provider._warm_pool
+    provider._backend.destroy.assert_not_called()
