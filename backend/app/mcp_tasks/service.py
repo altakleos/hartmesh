@@ -19,7 +19,7 @@ from app.mcp_tasks.replay_commitment import (
     McpTaskRequestCommitment,
 )
 from deerflow.constants import (
-    MCP_TASK_CANCEL_REASON_CODES,
+    MCP_TASK_OWNER_CANCEL_REASON_CODES,
     MCP_TASK_POLL_AFTER_MAX_SECONDS,
     MCP_TASK_REMOTE_ID_MAX_LENGTH,
     MCP_TASK_RESULT_ARTIFACT_MAX_BYTES,
@@ -91,6 +91,16 @@ def _cancel_actor_ref(*, tenant_digest: str, user_id: str) -> str:
     if not encoded_user_id or len(encoded_user_id) > 128 or any(ord(character) < 32 or ord(character) == 127 for character in user_id):
         raise ValueError("MCP task cancellation user identity is invalid")
     return hashlib.sha256(_CANCEL_ACTOR_REF_DOMAIN + tenant_digest.encode("ascii") + b"\0" + encoded_user_id).hexdigest()
+
+
+#: Who a deployer's cancellation is attributed to: the accounts command, not the person.
+_DEPLOYER_ACTOR = "deployer:accounts-command"
+
+
+def deployer_cancel_actor_ref(*, tenant_digest: str) -> str:
+    """The pseudonymous actor reference the accounts command records when it cancels a person's task."""
+
+    return _cancel_actor_ref(tenant_digest=tenant_digest, user_id=_DEPLOYER_ACTOR)
 
 
 class McpTaskService:
@@ -506,7 +516,7 @@ class McpTaskService:
     ) -> dict[str, Any] | None:
         """Persist the first owner-scoped cancellation intent and attribution."""
 
-        if not isinstance(reason_code, str) or reason_code not in MCP_TASK_CANCEL_REASON_CODES:
+        if not isinstance(reason_code, str) or reason_code not in MCP_TASK_OWNER_CANCEL_REASON_CODES:
             raise ValueError("Unsupported MCP task cancellation reason")
         return await self._repository.request_cancel(
             task_id,

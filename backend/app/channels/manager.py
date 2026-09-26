@@ -879,6 +879,23 @@ def _effective_owner_user_id(msg: InboundMessage) -> str | None:
     return _auth_disabled_owner_user_id() or msg.owner_user_id
 
 
+async def _owner_refusal(msg: InboundMessage) -> str | None:
+    """Why nothing may act for the message's owner, or ``None``: the derivation every request uses."""
+    if not msg.owner_user_id:
+        return None
+    from app.gateway.auth import mode
+
+    return await mode.owner_is_refused(msg.owner_user_id)
+
+
+def _owner_refusal_reply(refusal: str) -> str:
+    """What the person hears back: the words the web app gives the same refusal."""
+    from app.gateway.auth import mode
+    from app.gateway.auth.access import ACCESS_OFF_MESSAGE
+
+    return ACCESS_OFF_MESSAGE if refusal == mode.ACCOUNT_DISABLED else mode.SIGN_ON_REQUIRED_MESSAGE
+
+
 def _apply_effective_owner(msg: InboundMessage) -> InboundMessage:
     owner_user_id = _effective_owner_user_id(msg)
     if owner_user_id:
@@ -2185,6 +2202,24 @@ class ChannelManager:
                     InboundProcessingResult(
                         disposition=InboundProcessingDisposition.completed,
                         outcome_code="identity_rejected",
+                    )
+                    if durable_receipt
+                    else None
+                )
+            # Whose message it is is settled; whether anything may act for
+            # them is read now, before a thread, a credential minted for the
+            # run or the person's attachments -- all in ``_handle_chat``. The
+            # launch would be refused anyway, after that work was done. A read
+            # of the account that fails raises: a durable message is retried,
+            # never run.
+            refusal = await _owner_refusal(msg)
+            if refusal is not None:
+                logger.warning("Channel message refused: channel=%s owner account is %s", msg.channel_name, refusal)
+                await self._send_error(msg, _owner_refusal_reply(refusal))
+                return (
+                    InboundProcessingResult(
+                        disposition=InboundProcessingDisposition.completed,
+                        outcome_code="owner_refused",
                     )
                     if durable_receipt
                     else None

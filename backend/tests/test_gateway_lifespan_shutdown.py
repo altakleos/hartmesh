@@ -782,7 +782,36 @@ async def test_the_refusal_watch_starts_with_what_the_process_keeps_for_people_a
         assert user_id is None, "whoever owns it"
         return {"thread_id": thread_id, "user_id": "pat"}
 
-    await gateway_app._start_refusal_watch(SimpleNamespace(state=SimpleNamespace(thread_store=SimpleNamespace(get=_get))))
+    await gateway_app._start_refusal_watch(SimpleNamespace(state=SimpleNamespace(thread_store=SimpleNamespace(get=_get), mcp_tasks_available=True)))
 
     assert [watch._unreached for watch in started] == [("sandboxes",)]
     assert set(retained_state.RETAINED_SURFACES) <= set(get_owner_holdings()._sources)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("runs_task_loop", [True, False])
+async def test_the_refusal_watch_stops_the_batch_items_the_process_executes_and_names_a_task_loop_it_does_not_run(monkeypatch, runs_task_loop):
+    """A task's cancellation is carried out by a task loop; a process that runs none says so, so a task nobody will cancel reads as not reached."""
+    from app.gateway import app as gateway_app
+    from app.gateway import retained_state
+    from app.gateway.refusal_watch import RefusalWatch
+    from deerflow.persistence import engine as engine_module
+    from deerflow.runtime.owner_holdings import get_owner_holdings
+
+    started: list[RefusalWatch] = []
+
+    async def _start(self):
+        started.append(self)
+
+    async def _end_for_owners(owners):
+        return {}
+
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: object())
+    monkeypatch.setattr(RefusalWatch, "start", _start)
+    monkeypatch.setattr(retained_state, "unreached_surfaces", lambda: ())
+    state = SimpleNamespace(thread_store=None, subagent_batch_service=SimpleNamespace(end_for_owners=_end_for_owners), mcp_tasks_available=runs_task_loop)
+
+    await gateway_app._start_refusal_watch(SimpleNamespace(state=state))
+
+    assert [watch._unreached for watch in started] == [() if runs_task_loop else ("mcp_tasks",)]
+    assert get_owner_holdings()._sources["subagent_batches"][0] is _end_for_owners

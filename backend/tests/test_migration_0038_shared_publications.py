@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.bootstrap import _get_alembic_config
 
-_REVISION = "0045_refusal_sweep_reach"
+_REVISION = "0046_mcp_task_disable_reason"
 _PREVIOUS = "0037_merge_upstream_0018"
 
 

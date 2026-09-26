@@ -2129,3 +2129,14 @@ async def test_stop_is_bounded_when_submit_compensation_resists_cancellation(
         await asyncio.gather(compensation, return_exceptions=True)
         if not stopping.done():
             await asyncio.gather(stopping, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_persons_cancel_cannot_claim_to_be_the_deployers():
+    """``account_disabled`` is recorded only by the accounts command, attributed to the deployer."""
+    repo = _repo(request_cancel=AsyncMock())
+    service = McpTaskService(repository=repo, drivers=McpTaskDriverRegistry(), poll_interval_seconds=5, lease_seconds=120, max_concurrent_polls=3)
+
+    with pytest.raises(ValueError, match="Unsupported MCP task cancellation reason"):
+        await service.cancel_task(task_id="task-1", thread_id="thread-1", user_id="user-1", reason_code="account_disabled")
+    repo.request_cancel.assert_not_awaited()

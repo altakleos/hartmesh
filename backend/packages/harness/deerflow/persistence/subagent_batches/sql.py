@@ -1944,10 +1944,27 @@ class SubagentBatchRepository:
     async def resume_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
         return await self._set_control(batch_id, user_id=user_id, action="resume")
 
-    async def cancel_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
-        return await self._set_control(batch_id, user_id=user_id, action="cancel")
+    async def cancel_batch(self, batch_id: str, *, user_id: str, reason: str = "Cancelled by user") -> dict[str, Any] | None:
+        """Cancel the batch and every item not yet terminal; ``reason`` is what each such item says."""
+        return await self._set_control(batch_id, user_id=user_id, action="cancel", reason=reason)
 
-    async def _set_control(self, batch_id: str, *, user_id: str, action: str) -> dict[str, Any] | None:
+    async def list_active_by_user(self, user_id: str) -> list[dict[str, Any]]:
+        """Every batch of ``user_id`` not yet terminal, in any thread: what turning the person off must stop."""
+        async with self._sf() as session:
+            rows = (
+                await session.execute(
+                    select(SubagentBatchRow)
+                    .where(
+                        SubagentBatchRow.user_id == user_id,
+                        SubagentBatchRow.status.not_in(BATCH_TERMINAL_STATUSES),
+                        self._tenant_visible_clause(),
+                    )
+                    .order_by(SubagentBatchRow.created_at.asc(), SubagentBatchRow.id.asc())
+                )
+            ).scalars()
+            return [self._batch_dict(row) for row in rows]
+
+    async def _set_control(self, batch_id: str, *, user_id: str, action: str, reason: str = "Cancelled by user") -> dict[str, Any] | None:
         async with self._sf() as session:
             batch = await session.get(SubagentBatchRow, batch_id, with_for_update=True)
             if batch is None or batch.user_id != user_id or not self._can_execute(batch):
@@ -1987,7 +2004,7 @@ class SubagentBatchRepository:
                     item.cancel_requested_at = now
                     item.updated_at = now
                     item.status = "cancelled"
-                    item.error = "Cancelled by user"
+                    item.error = reason
                     item.lease_owner = None
                     item.lease_expires_at = None
                     item.active_attempt_id = None

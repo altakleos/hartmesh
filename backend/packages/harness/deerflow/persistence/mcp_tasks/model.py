@@ -157,7 +157,7 @@ class McpTaskRow(Base):
             name="ck_mcp_tasks_writer_cancel_intent",
         ),
         CheckConstraint(
-            "(cancel_actor_ref IS NULL OR length(cancel_actor_ref) = 64) AND (cancel_reason_code IS NULL OR cancel_reason_code IN ('user_api', 'agent_tool'))",
+            "(cancel_actor_ref IS NULL OR length(cancel_actor_ref) = 64) AND (cancel_reason_code IS NULL OR cancel_reason_code IN ('user_api', 'agent_tool', 'account_disabled'))",
             name="ck_mcp_tasks_cancel_intent_shape",
         ),
         CheckConstraint(

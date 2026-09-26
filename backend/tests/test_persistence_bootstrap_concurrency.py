@@ -28,7 +28,7 @@ from deerflow.persistence.bootstrap import bootstrap_schema
 pytestmark = pytest.mark.asyncio
 
 
-HEAD = "0045_refusal_sweep_reach"
+HEAD = "0046_mcp_task_disable_reason"
 
 
 def _url(tmp_path: Path) -> str:

@@ -459,9 +459,13 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   tried to end is still there -- counted under `not_ended` -- or it has no way
   to end it at all, `not_reached`). A surface under
   `surfaces_not_reached` stays unconfirmed on every re-run: this deployment
-  has no way to end it (the local sandbox provider's `sandboxes`), so a
+  has no way to end it (the local sandbox provider's `sandboxes`, or
+  `mcp_tasks` where no Gateway runs the MCP task loop), so a
   script that re-runs until **0** should stop once that list names every
-  surface still unconfirmed. **2 is not
+  surface still unconfirmed. The durable work is unconfirmed too while an
+  MCP task has not been cancelled at its remote server or a batch item has
+  not stopped (`mcp_tasks` or `subagent_batches`, counted under
+  `not_ended`). **2 is not
   "nothing happened"** -- the refusal is recorded, the
   sessions are ended and the tokens are revoked either way, and nothing new
   starts. A run can be unconfirmed because it is still unwinding or because
@@ -566,7 +570,25 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   children and anything the runs left running (`confirmed_by:
   sandbox_gone`), or, where they were not, when the run rows went terminal
   (`confirmed_by: run_status`). A memory update already being written when
-  the process looks is one model call under way, and is not stopped. A process beats every second even when it cannot look, so
+  the process looks is one model call under way, and is not stopped. Durable
+  work a run started outside itself is stopped the way the person's own
+  cancel would, attributed to the deployer: `mcp_tasks` (their durable MCP
+  tasks, cancelled at the remote server by a Gateway's task loop;
+  `confirmed_by: task_status`, with `not_ended` counting the tasks not yet
+  terminal when the wait ran out; a re-run asks the loop to retry a failed
+  remote cancel at once rather than after its backoff; `not_reached`, naming
+  the processes under `processes_unreached`, when no live Gateway runs the
+  task loop, `mcp_tasks.enabled`) and `subagent_batches` (their durable
+  batches, whose rows are cancelled at once, and whose items a Gateway is
+  executing are stopped at its look, `items_stopped`; `confirmed_by:
+  batch_status`, reported once the rows are cancelled and every live process
+  has confirmed, with `processes` and `processes_unconfirmed` as above), both
+  looked for again once the runs are over. `mcp_task_notifications` (task
+  events waiting to be delivered as a run) and `channel_ingress` (the
+  person's live channel bindings) are `refused_at_next_use`: a channel
+  message from them is answered with the words the web app gives the same
+  refusal, before any thread is created, any run credential is minted or any
+  attachment is fetched. A process beats every second even when it cannot look, so
   a live one that cannot confirm -- a database error, say -- leaves the
   connections unconfirmed rather than reported closed; only one that has
   not beaten for 90 s is gone, holding nothing, which is why a Gateway that
@@ -597,11 +619,17 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   process records, which the downgrade drops. A release whose document
   names `sandboxes` also ends what a Gateway keeps for the person between
   requests; its migration `0045_refusal_sweep_reach` adds two columns to
-  those records, which the downgrade drops. Not yet reached, beyond what
-  the refusal already refuses at its next use: durable MCP tasks and
-  subagent batches, and channel attachments fetched before a message is
-  refused. The document names only the surfaces it covers; a surface it
-  does not name is not covered, not confirmed.
+  those records, which the downgrade drops. A release whose document names
+  `mcp_tasks` also stops durable MCP tasks and subagent batches and refuses
+  channel messages before any work; its migration
+  `0046_mcp_task_disable_reason` admits the `account_disabled` cancellation
+  reason, and its downgrade refuses while a task carries it: to roll back
+  after a `disable` has cancelled a task, restore the backup taken before
+  the upgrade. Not yet: a
+  turned-off person's schedules and channel bindings are refused while they
+  are off but not held across a later `enable`. The document names only the
+  surfaces it covers; a surface it does not name is not covered, not
+  confirmed.
 - `release-email` gives up the address of an account that is **turned off**,
   so a person may hold it again. `users.email` is unique, so one address
   belongs to one account for good -- right while the account is someone's,
@@ -650,11 +678,13 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   exported, reassigned or deleted.
 
 Sample output of `disable` on an account with two tokens, a schedule, a run
-in flight and its stream open in a browser, two MCP sessions and a queued
-memory update, on the AIO sandbox provider:
+in flight and its stream open in a browser, two MCP sessions, a queued
+memory update, a durable MCP task and a Slack binding, on the AIO sandbox
+provider (the compose profile turns MCP tasks off and binds no channel by
+default; this deployment turned both on):
 
 ```json
-{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00.018000+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "role_limit": null, "subject": "3141592"}, "command": "disable", "elapsed_ms": 4471, "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "returncode": 0, "runs_cancelled": 1, "runs_finished_first": [], "runs_found": 1, "runs_unconfirmed": [], "schedules_held": 1, "sessions_ended": true, "started_at": "2026-09-21T10:00:00+00:00", "surfaces": {"browser_sessions": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "downloads": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 2380, "stopped_at": "2026-09-21T10:00:02.380000+00:00"}, "internal_launches": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "mcp_sessions": {"action": "ended", "confirmed_by": "gateway_record", "count": 2, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "memory_updates": {"action": "ended", "confirmed_by": "gateway_record", "count": 1, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "personal_access_tokens": {"action": "revoked", "count": 2, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "running_work": {"action": "ended", "confirmed_by": "sandbox_gone", "count": 1, "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "sandboxes": {"action": "ended", "confirmed_by": "gateway_record", "count": 1, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "sessions": {"action": "ended", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "sign_in": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "sse_streams": {"action": "ended", "confirmed_by": "gateway_record", "count": 1, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 2380, "stopped_at": "2026-09-21T10:00:02.380000+00:00"}, "websockets": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 2380, "stopped_at": "2026-09-21T10:00:02.380000+00:00"}}, "surfaces_not_reached": [], "surfaces_unconfirmed": [], "tokens_revoked": 2, "verdict": "disabled"}
+{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00.018000+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "role_limit": null, "subject": "3141592"}, "command": "disable", "elapsed_ms": 4471, "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "returncode": 0, "runs_cancelled": 1, "runs_finished_first": [], "runs_found": 1, "runs_unconfirmed": [], "schedules_held": 1, "sessions_ended": true, "started_at": "2026-09-21T10:00:00+00:00", "surfaces": {"browser_sessions": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "channel_ingress": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "downloads": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 2380, "stopped_at": "2026-09-21T10:00:02.380000+00:00"}, "internal_launches": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "mcp_sessions": {"action": "ended", "confirmed_by": "gateway_record", "count": 2, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "mcp_task_notifications": {"action": "refused_at_next_use", "count": 0, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "mcp_tasks": {"action": "ended", "confirmed_by": "task_status", "count": 1, "not_ended": 0, "processes_unreached": [], "stopped_after_ms": 2890, "stopped_at": "2026-09-21T10:00:02.890000+00:00"}, "memory_updates": {"action": "ended", "confirmed_by": "gateway_record", "count": 1, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "personal_access_tokens": {"action": "revoked", "count": 2, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "running_work": {"action": "ended", "confirmed_by": "sandbox_gone", "count": 1, "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "sandboxes": {"action": "ended", "confirmed_by": "gateway_record", "count": 1, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "sessions": {"action": "ended", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "sign_in": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "sse_streams": {"action": "ended", "confirmed_by": "gateway_record", "count": 1, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 2380, "stopped_at": "2026-09-21T10:00:02.380000+00:00"}, "subagent_batches": {"action": "ended", "confirmed_by": "batch_status", "count": 0, "items_stopped": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "websockets": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 2380, "stopped_at": "2026-09-21T10:00:02.380000+00:00"}}, "surfaces_not_reached": [], "surfaces_unconfirmed": [], "tokens_revoked": 2, "verdict": "disabled"}
 ```
 
 and of `release-email` on that account, then of running it a second time:

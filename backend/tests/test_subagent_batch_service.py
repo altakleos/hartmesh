@@ -1996,3 +1996,94 @@ async def test_live_model_setting_drift_fails_closed_as_unqualified() -> None:
     assert repository.finalized is not None
     assert repository.finalized["succeeded"] is False
     assert repository.finalized["terminal_code"] == "provider_not_qualified"
+
+
+def _executing(service, *, item_id: str, batch_id: str, owner: str, execution_id: str) -> None:
+    service._execution_ids[item_id] = execution_id
+    service._item_batches[item_id] = batch_id
+    service._batch_owners[batch_id] = owner
+
+
+@pytest.mark.asyncio
+async def test_ending_owners_stops_the_items_this_process_executes_for_them_and_no_one_elses(monkeypatch) -> None:
+    """A cancelled batch row is only seen by an executing item at its next lease renewal; ending the owner stops it now."""
+    from deerflow.runtime.owner_holdings import Ended
+
+    results = {"exec-a": SimpleNamespace(status=FakeStatus.RUNNING), "exec-b": SimpleNamespace(status=FakeStatus.RUNNING)}
+    cancelled: list[str] = []
+
+    def _cancel(execution_id: str) -> None:
+        cancelled.append(execution_id)
+        results[execution_id].status = FakeStatus.FAILED
+
+    monkeypatch.setattr(service_module, "request_cancel_background_task", _cancel)
+    monkeypatch.setattr(service_module, "get_background_task_result", results.get)
+    service = SubagentBatchService(repository=SimpleNamespace(), config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig(max_running=2))
+    _executing(service, item_id="item-a", batch_id="batch-a", owner="user-1", execution_id="exec-a")
+    _executing(service, item_id="item-b", batch_id="batch-b", owner="user-2", execution_id="exec-b")
+
+    ended = await service.end_for_owners(frozenset({"user-1"}))
+
+    assert ended == {"user-1": Ended(1)}
+    assert cancelled == ["exec-a"] and results["exec-b"].status is FakeStatus.RUNNING
+
+
+@pytest.mark.asyncio
+async def test_an_item_that_does_not_stop_in_time_is_not_ended(monkeypatch) -> None:
+    from deerflow.runtime.owner_holdings import Ended
+
+    result = SimpleNamespace(status=FakeStatus.RUNNING)
+    monkeypatch.setattr(service_module, "request_cancel_background_task", lambda _execution_id: None)
+    monkeypatch.setattr(service_module, "get_background_task_result", lambda _execution_id: result)
+    service = SubagentBatchService(repository=SimpleNamespace(), config=SubagentBatchesConfig(), runtime_config=SubagentRuntimeConfig(max_running=1))
+    _executing(service, item_id="item-a", batch_id="batch-a", owner="user-1", execution_id="exec-a")
+
+    ended = await service.end_for_owners(frozenset({"user-1"}), settle_seconds=0.2)
+
+    assert ended == {"user-1": Ended(0, failed=1)}
+
+
+@pytest.mark.asyncio
+async def test_an_item_whose_owner_was_turned_off_is_not_started(monkeypatch) -> None:
+    """An item claimed before its batch was cancelled must not start executing after its owner's refusal was seen."""
+    from deerflow.runtime.owner_holdings import get_owner_holdings
+
+    request = make_parent_batch_request(app_config=_app_config())
+    item = _persisted_claimed_item(request)
+    captured: dict[str, object] = {}
+    _install_successful_executor(monkeypatch, captured)
+    started: list[str] = []
+    executor_class = service_module.SubagentExecutor
+
+    class Executor(executor_class):
+        def execute_async(self, prompt, task_id=None):
+            started.append(task_id)
+            return super().execute_async(prompt, task_id=task_id)
+
+    monkeypatch.setattr(service_module, "SubagentExecutor", Executor)
+
+    class Repository:
+        finalized = None
+
+        async def mark_item_running(self, *_args, **_kwargs):
+            return True
+
+        async def finalize_item(self, *_args, **kwargs):
+            self.finalized = kwargs
+            return True
+
+    repository = Repository()
+    service = SubagentBatchService(
+        repository=repository,
+        config=SubagentBatchesConfig(poll_interval_seconds=0.1),
+        runtime_config=SubagentRuntimeConfig(max_running=1),
+        app_config=_app_config(),
+    )
+    holdings = get_owner_holdings()
+    holdings.set_refused({item["batch"]["user_id"]})
+    try:
+        await service._execute_item(item)
+    finally:
+        holdings.set_refused(set())
+
+    assert started == [] and repository.finalized is None

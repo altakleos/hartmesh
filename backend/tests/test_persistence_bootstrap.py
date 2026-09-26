@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0045_refusal_sweep_reach"
+HEAD = "0046_mcp_task_disable_reason"
 BASELINE = "0001_baseline"
 
 

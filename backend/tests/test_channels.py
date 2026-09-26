@@ -5320,6 +5320,116 @@ class TestChannelManagerBoundIdentityPolicy:
                 CHANNEL_RUN_POLICY["webhook-fixture"] = original
 
 
+class TestChannelManagerOwnerRefusal:
+    """A message for an owner turned off is refused before any work is done for them.
+
+    The work a message costs -- a thread, a credential minted for the run,
+    the person's attachments fetched into their uploads -- is all in
+    ``_handle_chat``; the refusal is read before it, where the identity gate
+    has already settled whose message it is.
+    """
+
+    def _message(self, **overrides):
+        values = {
+            "channel_name": "slack",
+            "chat_id": "C123",
+            "user_id": "U-platform",
+            "owner_user_id": "deerflow-user-1",
+            "connection_id": "connection-1",
+            "workspace_id": "T123",
+            "text": "hi",
+        }
+        values.update(overrides)
+        return InboundMessage(**values)
+
+    def _manager(self):
+        from app.channels.manager import ChannelManager
+
+        bus = MessageBus()
+        store = ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json")
+        manager = ChannelManager(bus=bus, store=store)
+        manager._handle_chat = AsyncMock(return_value="run-1")
+        manager._send_error = AsyncMock()
+        return manager
+
+    def test_a_message_for_a_turned_off_owner_does_no_work_and_says_why(self, monkeypatch):
+        from app.channels.inbound_receipts import InboundProcessingDisposition
+        from app.gateway.auth import mode
+
+        asked: list[str] = []
+
+        async def _refused(owner_user_id: str):
+            asked.append(owner_user_id)
+            return "disabled"
+
+        monkeypatch.setattr(mode, "owner_is_refused", _refused)
+        manager = self._manager()
+
+        result = _run(manager._handle_message(self._message(), durable_receipt=True))
+
+        assert asked == ["deerflow-user-1"]
+        manager._handle_chat.assert_not_awaited()
+        manager._send_error.assert_awaited_once()
+        assert manager._send_error.await_args.args[1] == "Your access to this workspace has been turned off. Ask your administrator."
+        assert result.disposition is InboundProcessingDisposition.completed and result.outcome_code == "owner_refused"
+
+    def test_a_local_owner_under_sign_on_only_is_told_that_rather_than_turned_off(self, monkeypatch):
+        from app.gateway.auth import mode
+
+        async def _inert(owner_user_id: str):
+            return mode.ACCOUNT_INERT
+
+        monkeypatch.setattr(mode, "owner_is_refused", _inert)
+        manager = self._manager()
+
+        _run(manager._handle_message(self._message()))
+
+        manager._handle_chat.assert_not_awaited()
+        reply = manager._send_error.await_args.args[1]
+        assert "turned off" not in reply and "identity provider" in reply
+
+    def test_a_command_for_a_turned_off_owner_is_refused_too(self, monkeypatch):
+        from app.gateway.auth import mode
+
+        async def _refused(owner_user_id: str):
+            return "disabled"
+
+        monkeypatch.setattr(mode, "owner_is_refused", _refused)
+        manager = self._manager()
+        manager._handle_command = AsyncMock()
+
+        _run(manager._handle_message(self._message(msg_type=InboundMessageType.COMMAND, text="/new")))
+
+        manager._handle_command.assert_not_awaited()
+
+    def test_a_message_for_an_owner_still_on_is_handled_as_before(self, monkeypatch):
+        from app.gateway.auth import mode
+
+        async def _on(owner_user_id: str):
+            return None
+
+        monkeypatch.setattr(mode, "owner_is_refused", _on)
+        manager = self._manager()
+
+        _run(manager._handle_message(self._message()))
+
+        manager._handle_chat.assert_awaited_once()
+        manager._send_error.assert_not_awaited()
+
+    def test_a_durable_message_whose_owner_cannot_be_read_is_retried_not_run(self, monkeypatch):
+        from app.gateway.auth import mode
+
+        async def _unreadable(owner_user_id: str):
+            raise ConnectionError("the database went away")
+
+        monkeypatch.setattr(mode, "owner_is_refused", _unreadable)
+        manager = self._manager()
+
+        with pytest.raises(ConnectionError):
+            _run(manager._handle_message(self._message(), durable_receipt=True))
+        manager._handle_chat.assert_not_awaited()
+
+
 class TestChannelManagerConnectionRouting:
     def test_connection_scoped_conversations_do_not_share_threads(self, tmp_path, monkeypatch):
         from app.channels.manager import ChannelManager

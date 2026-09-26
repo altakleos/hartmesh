@@ -509,6 +509,41 @@ class McpTaskRepository:
         except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
             raise McpTaskRepositoryError("mcp_task_cursor_invalid") from exc
 
+    async def list_active_by_user(self, user_id: str, *, tenant_digest: str) -> list[dict[str, Any]]:
+        """Every task of ``user_id`` not yet terminal, in any thread: what turning the person off must stop."""
+        stmt = (
+            select(McpTaskRow)
+            .where(
+                McpTaskRow.user_id == user_id,
+                McpTaskRow.status.not_in(_TERMINAL_STATUS_VALUES),
+                self._tenant_scope(tenant_digest),
+            )
+            .order_by(McpTaskRow.created_at.asc(), McpTaskRow.id.asc())
+        )
+        async with self._sf() as session:
+            return [self._row_to_dict(row) for row in (await session.execute(stmt)).scalars()]
+
+    async def statuses(self, task_ids: list[str], *, tenant_digest: str) -> dict[str, str]:
+        """The status of each of ``task_ids`` that still exists."""
+        if not task_ids:
+            return {}
+        stmt = select(McpTaskRow.id, McpTaskRow.status).where(McpTaskRow.id.in_(task_ids), self._tenant_scope(tenant_digest))
+        async with self._sf() as session:
+            return {str(task_id): str(status) for task_id, status in (await session.execute(stmt)).all()}
+
+    async def count_pending_notifications(self, user_ids: list[str], *, tenant_digest: str) -> int:
+        """How many of these users' tasks have an event waiting to be delivered as a run."""
+        if not user_ids:
+            return 0
+        stmt = select(func.count()).where(
+            McpTaskRow.user_id.in_(user_ids),
+            McpTaskRow.event_version > McpTaskRow.notified_version,
+            McpTaskRow.notification_status.in_(("pending", "claimed", "retry", "dispatched")),
+            self._tenant_scope(tenant_digest),
+        )
+        async with self._sf() as session:
+            return int((await session.execute(stmt)).scalar_one())
+
     async def list_by_parent_run(
         self,
         parent_run_id: str,
@@ -774,8 +809,14 @@ class McpTaskRepository:
         actor_ref: str,
         reason_code: str,
         tenant_digest: str,
+        retry_now: bool = False,
     ) -> dict[str, Any] | None:
-        """Persist a user-scoped cancellation request without exposing the remote id."""
+        """Persist a user-scoped cancellation request without exposing the remote id.
+
+        ``retry_now``: a request already recorded, whose remote cancel failed
+        and is backing off, is made due now. It never touches a live cancel
+        lease, so it cannot start a second remote cancellation.
+        """
         self._tenant_digest(tenant_digest)
         if (
             not isinstance(actor_ref, str)
@@ -814,6 +855,13 @@ class McpTaskRepository:
                 row.lease_expires_at = None
                 row.updated_at = database_now
                 await session.commit()
+            elif retry_now and row.status not in _TERMINAL_STATUS_VALUES:
+                database_now = await _database_now(session)
+                # Still in the future: the same comparison a lease expiry takes.
+                if _lease_is_live(row.next_cancel_at, database_now):
+                    row.next_cancel_at = database_now
+                    row.updated_at = database_now
+                    await session.commit()
             return self._row_to_dict(row)
 
     async def claim_cancel_requests(

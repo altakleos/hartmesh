@@ -52,7 +52,10 @@ MCP_TASK_REMOTE_ID_MAX_LENGTH = 255
 MCP_TASK_NAME_MAX_LENGTH = 255
 MCP_TASK_CANCEL_ACTOR_REF_LENGTH = 64
 MCP_TASK_CANCEL_REASON_MAX_LENGTH = 32
-MCP_TASK_CANCEL_REASON_CODES = frozenset({"user_api", "agent_tool"})
+# ``account_disabled``: the deployer turned the owner off (``accounts disable``);
+# never one a person's own cancel may give (``MCP_TASK_OWNER_CANCEL_REASON_CODES``).
+MCP_TASK_OWNER_CANCEL_REASON_CODES = frozenset({"user_api", "agent_tool"})
+MCP_TASK_CANCEL_REASON_CODES = MCP_TASK_OWNER_CANCEL_REASON_CODES | {"account_disabled"}
 MCP_TASK_RESULT_ARTIFACT_MAX_BYTES = 65_536
 MCP_TASK_POLL_AFTER_MAX_SECONDS = 86_400
 
