@@ -1,4 +1,4 @@
-"""ORM models for what the deployer holds against an identity: turned off, or limited in role.
+"""ORM models for what the deployer holds against an identity: turned off, limited in role, and what turning it off held.
 
 Both are keyed by the identity provider's ``(issuer, subject)`` rather than
 by a user row, because a person can be turned off or demoted before their
@@ -68,3 +68,31 @@ class RoleLimitRow(Base):
     subject: Mapped[str] = mapped_column(String(255), primary_key=True)
     role: Mapped[str] = mapped_column(String(16), nullable=False)
     limited_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+#: What ``disable`` holds for an identity, by kind: an active schedule it
+#: paused, and a channel binding it stopped routing.
+HOLD_KINDS = ("schedule", "channel_binding")
+
+
+class IdentityHoldRow(Base):
+    """One schedule or channel binding ``disable`` turned off, which only ``enable --restore-held`` turns back on.
+
+    The record is what makes a restore exact: it names what the disable
+    turned off and nothing the owner had turned off themselves, and every
+    ``enable`` discards it, so a restore never reaches back past the last
+    one -- except to a target an earlier restore could not turn back on,
+    which stays for a re-run. What it names stays off without it; the record
+    only permits.
+    """
+
+    __tablename__ = "identity_holds"
+
+    issuer: Mapped[str] = mapped_column(String(512), primary_key=True)
+    subject: Mapped[str] = mapped_column(String(255), primary_key=True)
+    kind: Mapped[str] = mapped_column(String(32), primary_key=True)
+    target_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    # The account the target belongs to: one identity may hold an account
+    # under each provider configured at its issuer.
+    user_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    held_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

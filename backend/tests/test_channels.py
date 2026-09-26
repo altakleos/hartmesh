@@ -4509,6 +4509,48 @@ class TestGithubFollowupBuffer:
 
         _run(go())
 
+    def test_a_follow_up_whose_owner_was_turned_off_is_dropped_not_kept_for_later(self, caplog):
+        """Kept, it would launch at the thread's next drain -- after the owner is enabled again."""
+        from app.channels.manager import ChannelManager
+        from app.runtime.invocation import OwnerRefusedLaunchError
+
+        async def go():
+            runtime = SimpleNamespace(launch=AsyncMock(side_effect=OwnerRefusedLaunchError("trusted internal launch owner's account is disabled")))
+            manager = ChannelManager(
+                bus=MessageBus(),
+                store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"),
+                invocation_runtime=runtime,
+            )
+            for index in range(3):
+                manager._buffer_followup("thread-turned-off", _github_followup_message(f"delivery-turned-off-{index}", text=f"comment {index}"))
+
+            await manager._drain_followups_for_thread(MagicMock(), "thread-turned-off")
+            await manager._drain_followups_for_thread(MagicMock(), "thread-turned-off")
+
+            # Every one is dropped, not only the first: none is left to launch at a later drain.
+            assert runtime.launch.await_count == 3
+            assert "thread-turned-off" not in manager._followup_buffers
+
+        _run(go())
+
+    def test_a_refused_follow_up_does_not_hold_back_the_next_owners(self):
+        from app.channels.manager import ChannelManager
+        from app.runtime.invocation import InternalLaunchReceipt, OwnerRefusedLaunchError
+
+        async def go():
+            refused = OwnerRefusedLaunchError("trusted internal launch owner's account is disabled")
+            runtime = SimpleNamespace(launch=AsyncMock(side_effect=[refused, InternalLaunchReceipt(record=SimpleNamespace(run_id="run-next", thread_id="thread-shared"))]))
+            manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"), invocation_runtime=runtime)
+            manager._buffer_followup("thread-shared", _github_followup_message("delivery-turned-off", text="from the turned-off owner"))
+            manager._buffer_followup("thread-shared", _github_followup_message("delivery-still-on", text="from someone still on"))
+
+            await manager._drain_followups_for_thread(MagicMock(), "thread-shared")
+
+            assert runtime.launch.await_count == 2
+            assert "thread-shared" not in manager._followup_buffers or not manager._followup_buffers["thread-shared"]
+
+        _run(go())
+
     def test_manager_without_stream_bridge_keeps_buffer_without_watcher(self):
         from app.channels.manager import ChannelManager
 
@@ -5415,6 +5457,81 @@ class TestChannelManagerOwnerRefusal:
 
         manager._handle_chat.assert_awaited_once()
         manager._send_error.assert_not_awaited()
+
+    def _held_binding_manager(self):
+        from app.channels.manager import ChannelManager
+
+        class _HeldRepo:
+            async def find_connection_by_external_identity(self, *, provider, external_account_id, workspace_id=None, status="connected"):
+                if status == "held" and provider == "slack" and external_account_id == "U-platform" and workspace_id == "T123":
+                    return {"id": "connection-1", "owner_user_id": "deerflow-user-1"}
+                return None
+
+        manager = ChannelManager(bus=MessageBus(), store=ChannelStore(path=Path(tempfile.mkdtemp()) / "store.json"), connection_repo=_HeldRepo(), require_bound_identity=True)
+        manager._handle_chat = AsyncMock(return_value="run-1")
+        manager._reject_unbound_channel_message = AsyncMock()
+        return manager
+
+    def test_a_message_through_a_binding_held_for_a_turned_off_owner_is_told_access_is_off(self, monkeypatch):
+        """disable holds the binding, so the message arrives unclaimed; the person hears why, not that they should connect."""
+        from app.channels.inbound_receipts import InboundProcessingDisposition
+        from app.gateway.auth import mode
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def _refused(owner_user_id: str):
+            assert owner_user_id == "deerflow-user-1"
+            return "disabled"
+
+        monkeypatch.setattr(mode, "owner_is_refused", _refused)
+        manager = self._held_binding_manager()
+
+        result = _run(manager._handle_message(self._message(owner_user_id=None, connection_id=None), durable_receipt=True))
+
+        rejection = manager._reject_unbound_channel_message.await_args.kwargs["bound_identity_rejection"]
+        assert rejection.message == "Your access to this workspace has been turned off. Ask your administrator."
+        assert rejection.outbound_connection_id == "connection-1"
+        assert result.disposition is InboundProcessingDisposition.completed and result.outcome_code == "owner_refused"
+        manager._handle_chat.assert_not_awaited()
+
+    def test_a_message_through_a_held_binding_whose_owner_is_back_is_told_to_connect_again(self, monkeypatch):
+        from app.channels.manager import BOUND_IDENTITY_REQUIRED_MESSAGE
+        from app.gateway.auth import mode
+
+        monkeypatch.delenv("DEER_FLOW_AUTH_DISABLED", raising=False)
+
+        async def _on(owner_user_id: str):
+            return None
+
+        monkeypatch.setattr(mode, "owner_is_refused", _on)
+        manager = self._held_binding_manager()
+
+        result = _run(manager._handle_message(self._message(owner_user_id=None, connection_id=None), durable_receipt=True))
+
+        assert manager._reject_unbound_channel_message.await_args.kwargs["bound_identity_rejection"].message == BOUND_IDENTITY_REQUIRED_MESSAGE
+        assert result.outcome_code == "identity_rejected"
+        manager._handle_chat.assert_not_awaited()
+
+    def test_a_durable_message_whose_launch_is_refused_after_the_gate_ends_instead_of_retrying(self, monkeypatch):
+        """The owner was turned off between the gate and the launch; a retry would run it after they are enabled again."""
+        from app.channels.inbound_receipts import InboundProcessingDisposition
+        from app.gateway.auth import mode
+        from app.runtime.invocation import OwnerRefusedLaunchError
+
+        async def _on_at_the_gate(owner_user_id: str):
+            return None
+
+        monkeypatch.setattr(mode, "owner_is_refused", _on_at_the_gate)
+        manager = self._manager()
+        manager._handle_chat = AsyncMock(side_effect=OwnerRefusedLaunchError("trusted internal launch owner's account is disabled"))
+        manager._release_inbound_dedupe_key = AsyncMock()
+
+        result = _run(manager._handle_message(self._message(), durable_receipt=True))
+
+        assert result.disposition is InboundProcessingDisposition.completed and result.outcome_code == "owner_refused"
+        assert manager._send_error.await_args.args[1] == "Your access to this workspace has been turned off. Ask your administrator."
+        # Nothing asks the provider to deliver it again.
+        manager._release_inbound_dedupe_key.assert_not_awaited()
 
     def test_a_durable_message_whose_owner_cannot_be_read_is_retried_not_run(self, monkeypatch):
         from app.gateway.auth import mode

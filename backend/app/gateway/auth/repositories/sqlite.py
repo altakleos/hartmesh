@@ -15,13 +15,13 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from uuid import UUID
 
-from sqlalchemy import case, delete, func, literal, select, text, update
+from sqlalchemy import case, delete, func, literal, select, text, tuple_, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.base import UserNotFoundError, UserRepository
-from deerflow.persistence.user.access import LIMIT_ROLES, ROLES, DisabledIdentityRow, RoleLimitRow, identity_lock_key, issuer_key, limited_role
+from deerflow.persistence.user.access import LIMIT_ROLES, ROLES, DisabledIdentityRow, IdentityHoldRow, RoleLimitRow, identity_lock_key, issuer_key, limited_role
 from deerflow.persistence.user.model import OAUTH_IDENTITY_INDEX_NAME, UserRow
 
 # ``email`` is ``mapped_column(unique=True, index=True)``, which SQLAlchemy
@@ -591,6 +591,57 @@ class SQLiteUserRepository(UserRepository):
         async with self._sf() as session:
             rows = (await session.execute(stmt)).scalars().all()
             return [(row.issuer, row.subject, _aware(row.disabled_at)) for row in rows]  # type: ignore[misc]
+
+    # ── What turning an identity off held ─────────────────────────────
+
+    async def record_holds(self, issuer: str, subject: str, targets: list[tuple[str, str, str]]) -> None:
+        """Record ``(kind, target_id, user_id)`` as held for this identity; a target already recorded stays as it was."""
+        if not targets:
+            return
+        key = issuer_key(issuer)
+        async with self._sf() as session:
+            existing = {(row.kind, row.target_id) for row in (await session.execute(select(IdentityHoldRow).where(IdentityHoldRow.issuer == key, IdentityHoldRow.subject == subject))).scalars()}
+            now = datetime.now(UTC)
+            for kind, target_id, user_id in dict.fromkeys(targets):
+                if (kind, target_id) not in existing:
+                    session.add(IdentityHoldRow(issuer=key, subject=subject, kind=kind, target_id=target_id, user_id=user_id, held_at=now))
+                    existing.add((kind, target_id))
+            try:
+                await session.commit()
+            except IntegrityError:
+                # A concurrent disable of the same identity recorded it first.
+                await session.rollback()
+                await self.record_holds(issuer, subject, targets)
+
+    async def list_holds(self, issuer: str, subject: str) -> list[tuple[str, str, str]]:
+        """``(kind, target_id, user_id)`` for everything held for this identity, oldest first."""
+        stmt = (
+            select(IdentityHoldRow.kind, IdentityHoldRow.target_id, IdentityHoldRow.user_id)
+            .where(IdentityHoldRow.issuer == issuer_key(issuer), IdentityHoldRow.subject == subject)
+            .order_by(IdentityHoldRow.held_at, IdentityHoldRow.kind, IdentityHoldRow.target_id)
+        )
+        async with self._sf() as session:
+            return [(str(kind), str(target_id), str(user_id)) for kind, target_id, user_id in (await session.execute(stmt)).all()]
+
+    async def list_all_holds(self) -> list[tuple[str, str, str, str, str]]:
+        """``(issuer, subject, kind, target_id, user_id)`` for every hold recorded, by identity."""
+        stmt = select(IdentityHoldRow.issuer, IdentityHoldRow.subject, IdentityHoldRow.kind, IdentityHoldRow.target_id, IdentityHoldRow.user_id).order_by(
+            IdentityHoldRow.issuer, IdentityHoldRow.subject, IdentityHoldRow.kind, IdentityHoldRow.target_id
+        )
+        async with self._sf() as session:
+            return [tuple(str(value) for value in row) for row in (await session.execute(stmt)).all()]  # type: ignore[misc]
+
+    async def discard_holds(self, issuer: str, subject: str, targets: list[tuple[str, str]] | None = None) -> int:
+        """Forget ``(kind, target_id)`` from this identity's record, or the whole record; returns how many were forgotten."""
+        stmt = delete(IdentityHoldRow).where(IdentityHoldRow.issuer == issuer_key(issuer), IdentityHoldRow.subject == subject)
+        if targets is not None:
+            if not targets:
+                return 0
+            stmt = stmt.where(tuple_(IdentityHoldRow.kind, IdentityHoldRow.target_id).in_(targets))
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return int(result.rowcount or 0)
 
     # ── Role limits the deployer holds ────────────────────────────────
 

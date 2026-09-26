@@ -36,6 +36,7 @@ CONNECTIONS = ("websockets", "sse_streams", "downloads")
 RETAINED = ("sandboxes", "mcp_sessions", "browser_sessions", "memory_updates")
 PROCESS_SURFACES = (*CONNECTIONS, *RETAINED)
 DURABLE = ("mcp_tasks", "subagent_batches", "mcp_task_notifications", "channel_ingress")
+HELD = ("schedules", "channel_bindings", "scheduled_occurrences", "channel_receipts")
 
 
 @pytest.fixture
@@ -97,7 +98,7 @@ async def test_the_document_names_every_surface_with_a_time_and_the_refusal_s_co
 
     started = datetime.fromisoformat(document["started_at"])
     assert before - timedelta(seconds=1) <= started <= datetime.now(UTC)
-    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *PROCESS_SURFACES, *DURABLE}
+    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *PROCESS_SURFACES, *DURABLE, *HELD}
     committed = document["surfaces"]["sign_in"]["stopped_after_ms"]
     for name in ("sign_in", "sessions", "personal_access_tokens", "internal_launches"):
         entry = document["surfaces"][name]
@@ -278,7 +279,7 @@ async def test_an_identity_with_no_account_names_every_surface_all_the_same(stor
     document = await _command(stores).run("disable", issuer=ISSUER, subject="sub-nobody")
 
     assert document["account"] is None
-    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *PROCESS_SURFACES, *DURABLE}
+    assert set(document["surfaces"]) == {"sign_in", "sessions", "personal_access_tokens", "internal_launches", "running_work", *PROCESS_SURFACES, *DURABLE, *HELD}
     assert all(entry["count"] == 0 for entry in document["surfaces"].values())
     assert document["surfaces_unconfirmed"] == [] and document["returncode"] == 0
 

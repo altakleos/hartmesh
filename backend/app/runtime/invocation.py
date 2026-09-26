@@ -64,6 +64,17 @@ def thaw_host_value(value: Any) -> Any:
     return value
 
 
+class OwnerRefusedLaunchError(ValueError):
+    """The launch's owner is turned off, or is an account nothing may act for.
+
+    Work queued for its owner -- a due scheduled occurrence, a task
+    notification, a channel message -- ends on this instead of being retried:
+    a retry would run after the owner is enabled again, and nothing queued
+    before they were turned off may run then. A ``ValueError`` so every
+    caller that already handles one is unchanged.
+    """
+
+
 class InternalSourceKind(StrEnum):
     http = "http"
     scheduled_task = "scheduled_task"

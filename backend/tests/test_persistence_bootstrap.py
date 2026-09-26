@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0046_mcp_task_disable_reason"
+HEAD = "0047_identity_holds"
 BASELINE = "0001_baseline"
 
 

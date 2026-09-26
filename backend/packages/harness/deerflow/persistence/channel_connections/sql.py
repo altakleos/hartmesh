@@ -32,6 +32,13 @@ logger = logging.getLogger(__name__)
 _UPSERT_MAX_ATTEMPTS = 3
 
 
+#: A binding whose owner was turned off: it routes nothing until its owner
+#: connects the same account again or the hold is restored. Not ``revoked``,
+#: which is the owner's own choice; like any binding, it is revoked when
+#: another person binds the same account.
+HELD_STATUS = "held"
+
+
 class ChannelCredentialCipher:
     """Encrypts provider credentials before they are persisted."""
 
@@ -208,6 +215,48 @@ class ChannelConnectionRepository:
                 await session.delete(credential)
             await session.commit()
             return True
+
+    async def hold_connection(self, connection_id: str, *, owner_user_id: str) -> bool:
+        """Stop routing a connected binding because its owner was turned off; False when it was not connected.
+
+        The row keeps its identity and credentials: the owner connecting the
+        same account again, or the restore of this hold, turns it back on.
+        """
+        async with self.session_factory() as session:
+            row = await session.get(ChannelConnectionRow, connection_id, with_for_update=True)
+            if row is None or row.owner_user_id != owner_user_id or row.status != "connected":
+                await session.rollback()
+                return False
+            row.status = HELD_STATUS
+            await session.commit()
+            return True
+
+    async def restore_held_connection(self, connection_id: str, *, owner_user_id: str) -> str:
+        """Route a held binding again: ``restored``, ``changed_since`` when it is no longer held, or ``gone``."""
+        async with self.session_factory() as session:
+            row = await session.get(ChannelConnectionRow, connection_id, with_for_update=True)
+            if row is None or row.owner_user_id != owner_user_id:
+                await session.rollback()
+                return "gone"
+            if row.status != HELD_STATUS:
+                await session.rollback()
+                return "changed_since"
+            row.status = "connected"
+            await session.commit()
+            return "restored"
+
+    async def delete_oauth_states_for_owners(self, owner_user_ids: list[str]) -> int:
+        """Forget every connect code these owners have not used yet; returns how many.
+
+        A code minted before its owner was turned off would otherwise bind,
+        or turn a held binding back on, once used in the channel.
+        """
+        if not owner_user_ids:
+            return 0
+        async with self.session_factory() as session:
+            result = await session.execute(delete(ChannelOAuthStateRow).where(ChannelOAuthStateRow.owner_user_id.in_(owner_user_ids), ChannelOAuthStateRow.consumed_at.is_(None)))
+            await session.commit()
+            return int(result.rowcount or 0)
 
     async def disconnect_provider_connections(self, *, provider: str) -> int:
         """Revoke all active user connections for an instance-wide provider removal."""
@@ -483,6 +532,7 @@ class ChannelConnectionRepository:
         provider: str,
         external_account_id: str,
         workspace_id: str | None = None,
+        status: str = "connected",
     ) -> dict[str, Any] | None:
         async with self.session_factory() as session:
             result = await session.execute(
@@ -491,7 +541,7 @@ class ChannelConnectionRepository:
                     ChannelConnectionRow.provider == provider,
                     ChannelConnectionRow.external_account_id == self._normalize_optional_identity(external_account_id),
                     ChannelConnectionRow.workspace_id == self._normalize_optional_identity(workspace_id),
-                    ChannelConnectionRow.status == "connected",
+                    ChannelConnectionRow.status == status,
                 )
                 .order_by(ChannelConnectionRow.updated_at.desc(), ChannelConnectionRow.id.desc())
                 .limit(1)

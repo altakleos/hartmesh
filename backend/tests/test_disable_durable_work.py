@@ -67,8 +67,12 @@ class _Tasks:
     async def statuses(self, task_ids: list[str], *, tenant_digest: str) -> dict[str, str]:
         return {task_id: self.rows[task_id]["status"] for task_id in task_ids if task_id in self.rows}
 
-    async def count_pending_notifications(self, user_ids: list[str], *, tenant_digest: str) -> int:
-        return sum(self.pending_notifications.get(user_id, 0) for user_id in user_ids)
+    async def end_waiting_notifications(self, user_ids: list[str], *, error: str, tenant_digest: str) -> int:
+        assert tenant_digest == self.tenant.digest
+        return sum(self.pending_notifications.pop(user_id, 0) for user_id in user_ids)
+
+    async def count_waiting_notifications(self, user_ids: list[str], *, tenant_digest: str) -> int:
+        return 0
 
 
 class _Batches:
@@ -95,7 +99,17 @@ class _Connections:
         self.rows: list[dict] = []
 
     async def list_connections(self, owner_user_id: str) -> list[dict]:
-        return [row for row in self.rows if row["owner_user_id"] == owner_user_id]
+        return [dict(row) for row in self.rows if row["owner_user_id"] == owner_user_id]
+
+    async def hold_connection(self, connection_id: str, *, owner_user_id: str) -> bool:
+        for row in self.rows:
+            if row["id"] == connection_id and row["owner_user_id"] == owner_user_id and row["status"] == "connected":
+                row["status"] = "held"
+                return True
+        return False
+
+    async def delete_oauth_states_for_owners(self, owner_user_ids: list[str]) -> int:
+        return 0
 
 
 @pytest.fixture
@@ -223,7 +237,7 @@ async def test_work_a_dying_run_started_after_the_first_look_is_found_by_the_sec
 
 
 @pytest.mark.anyio
-async def test_notifications_and_channel_messages_are_refused_at_their_next_use_and_counted(stores) -> None:
+async def test_notifications_are_ended_and_channel_messages_are_refused_at_their_next_use(stores) -> None:
     account = await stores.users.create_user(_account())
     stores.tasks.pending_notifications[str(account.id)] = 2
     stores.connections.rows = [
@@ -236,7 +250,8 @@ async def test_notifications_and_channel_messages_are_refused_at_their_next_use_
 
     committed = document["surfaces"]["sign_in"]["stopped_after_ms"]
     notifications, channels = document["surfaces"]["mcp_task_notifications"], document["surfaces"]["channel_ingress"]
-    assert notifications["action"] == "refused_at_next_use" and notifications["count"] == 2 and notifications["stopped_after_ms"] == committed
+    # Ended, not left to be refused: a retry after enable would launch it.
+    assert notifications["action"] == "ended" and notifications["count"] == 2 and notifications["stopped_after_ms"] >= committed
     assert channels["action"] == "refused_at_next_use" and channels["count"] == 1 and channels["stopped_after_ms"] == committed
 
 

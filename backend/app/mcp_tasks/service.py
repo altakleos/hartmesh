@@ -18,6 +18,7 @@ from app.mcp_tasks.replay_commitment import (
     McpTaskReplayKeyring,
     McpTaskRequestCommitment,
 )
+from app.runtime.invocation import OwnerRefusedLaunchError
 from deerflow.constants import (
     MCP_TASK_OWNER_CANCEL_REASON_CODES,
     MCP_TASK_POLL_AFTER_MAX_SECONDS,
@@ -47,6 +48,11 @@ logger = logging.getLogger(__name__)
 _MAX_PERSISTED_ERROR_CHARS = 4_000
 _MAX_INPUT_REQUIRED_BYTES = 65_536
 _MAX_NOTIFICATION_ATTEMPTS = 5
+
+#: Why a notification ended without launching: its owner is turned off. The
+#: accounts command ends the waiting ones with it, and a launch refused for
+#: the same reason ends with it too.
+NOTIFICATION_OWNER_REFUSED_ERROR = "mcp_task_notification_owner_refused"
 _UNTRACKED_TASK_COMPENSATION_WAIT_SECONDS = 5.0
 _CANCEL_ACTOR_REF_DOMAIN = b"deerflow.mcp-task.cancel-actor/v1\0"
 _SAFE_PROPAGATED_ERROR_CODES = frozenset(
@@ -767,6 +773,19 @@ class McpTaskService:
                 source=source,
                 event=event,
             )
+        except OwnerRefusedLaunchError:
+            # Its owner is turned off. A retry would launch once they are
+            # enabled again, and nothing queued before that may run then.
+            await self._repository.dead_letter_notification(
+                task_id,
+                lease_owner=self._lease_owner,
+                dispatch_version=dispatch_version,
+                error=NOTIFICATION_OWNER_REFUSED_ERROR,
+                count_failure=False,
+                now=now,
+                tenant_digest=self._tenant.digest,
+            )
+            return
         except PermanentNotificationError as exc:
             await self._repository.dead_letter_notification(
                 task_id,

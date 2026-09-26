@@ -136,7 +136,9 @@ class ScheduledTaskRunRepository:
             else:
                 task.status = "running"
                 task.last_error = None
-        elif not (row.trigger == "manual" and task.status == "paused"):
+        elif task.status != "paused":
+            # A pause -- the owner's, or a hold while the owner is turned off
+            # -- outlasts the occurrence it did not stop.
             task.status = "enabled"
             task.last_error = candidate.error if candidate.status in {"error", "timeout", "interrupted"} else None
 
@@ -469,9 +471,12 @@ class ScheduledTaskRunRepository:
             row.lease_expires_at = None
 
             if task is not None:
-                if row.trigger == "manual":
+                if row.trigger == "manual" or task.status == "paused":
+                    # Nothing ran. A manual trigger never consumes the
+                    # schedule, and a pause placed while this launch was in
+                    # flight stands.
                     task_status = task.status or "enabled"
-                    next_at = task.next_run_at
+                    next_at = task.next_run_at if row.trigger == "manual" else compute_next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=now)
                 else:
                     task_status = "failed" if task.schedule_type == "once" else "enabled"
                     next_at = compute_next_run_at(
