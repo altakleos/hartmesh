@@ -3676,3 +3676,48 @@ def test_a_turn_that_ends_for_an_owner_still_on_parks_its_sandbox_as_before(tmp_
     provider.release("sb-pat-active")
     assert "sb-pat-active" in provider._warm_pool
     provider._backend.destroy.assert_not_called()
+
+
+def test_a_sandbox_taken_over_after_a_restart_is_attributed_from_its_label_and_ended_with_its_owner(tmp_path, monkeypatch):
+    """The container says whose it is, so a refused owner's adopted sandbox is stopped, not left to its idle timeout."""
+    from deerflow.runtime.owner_holdings import Ended
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, _ = _make_unready_destroy_provider(tmp_path, sandbox_id="unused", base_url="http://unused", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    labelled = aio_mod.SandboxInfo(sandbox_id="sb-labelled", sandbox_url="http://labelled", owner=("pat", "thread-9"))
+    unlabelled = aio_mod.SandboxInfo(sandbox_id="sb-older", sandbox_url="http://older")
+    provider._unowned_since = {}
+    provider._backend.list_running = MagicMock(return_value=[labelled, unlabelled])
+
+    provider._reconcile_orphans()
+
+    assert provider._warm_pool_identity == {"sb-labelled": ("pat", "thread-9"), "sb-older": None}
+    with provider._lock:
+        provider._assert_warm_identity_available_locked("sb-labelled", ("pat", "thread-9"))
+        with pytest.raises(aio_mod.SandboxIdentityCollisionError):
+            provider._assert_warm_identity_available_locked("sb-labelled", ("sam", "thread-9"))
+        provider._assert_warm_identity_available_locked("sb-older", ("sam", "thread-9"))
+    ended = provider.end_sandboxes_for_owners(frozenset({"pat"}))
+    assert ended["pat"] == Ended(1) and "sb-labelled" not in provider._warm_pool
+
+
+def test_stopping_an_ordinary_sandbox_leaves_the_threads_accepted_view_for_the_accepted_one_using_it(tmp_path, monkeypatch):
+    """Only an accepted sandbox mounts the thread's accepted view; stopping the thread's ordinary sandbox must not empty it."""
+    from deerflow.runtime import skill_snapshot
+
+    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
+    provider, _ = _make_unready_destroy_provider(tmp_path, sandbox_id="unused", base_url="http://unused", monkeypatch=monkeypatch, aio_mod=aio_mod)
+    cleared: list[tuple[str, str]] = []
+    monkeypatch.setattr(skill_snapshot, "force_clear_skill_snapshot_active_view", lambda *, user_id, thread_id: cleared.append((user_id, thread_id)))
+    accepted_id = f"sb-accepted{aio_mod.ACCEPTED_SANDBOX_ID_SUFFIX}"
+    provider._unowned_since = {}
+    provider._backend.list_running = MagicMock(return_value=[aio_mod.SandboxInfo(sandbox_id="sb-ordinary", sandbox_url="http://ordinary", owner=("pat", "thread-9"))])
+    provider._reconcile_orphans()
+    provider._warm_pool[accepted_id] = (aio_mod.SandboxInfo(sandbox_id=accepted_id, sandbox_url="http://accepted"), time.time())
+    provider._warm_pool_identity[accepted_id] = ("pat", "thread-9")
+    provider._accepted_only_sandbox_ids = {accepted_id}
+
+    provider.destroy("sb-ordinary")
+    assert cleared == []
+    provider.destroy(accepted_id)
+    assert cleared == [("pat", "thread-9")]

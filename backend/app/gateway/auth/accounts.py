@@ -616,7 +616,8 @@ class AccountsCommand:
         if not_ended:
             note += (
                 f"; what {', '.join(not_ended)} counts under `not_ended` could not be confirmed ended -- it would not stop, or a Gateway keeps one whose owner it does not know, "
-                "such as a sandbox it took over after a restart, which its idle timeout ends; re-run this command to see whether it has since"
+                "such as a sandbox it took over after a restart that carries no owner record (one started by an earlier release, or on a backend that records none), "
+                "which its idle timeout ends; re-run this command to see whether it has since"
             )
         if any(name in OUTLIVE_THEIR_PROCESS and entry.get("processes") == 0 and not entry.get("processes_unconfirmed") and entry.get("action") != ACTION_NOT_REACHED for name, entry in entries.items()):
             note += "; no Gateway process is running to confirm the sandboxes stopped, and a sandbox outlives its Gateway; re-run this command once the Gateway is up"

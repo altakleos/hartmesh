@@ -1502,7 +1502,10 @@ class AioSandboxProvider(
                     logger.debug("Deferring container %s during reconciliation: this instance is tearing it down", info.sandbox_id)
                     continue
                 self._warm_pool[info.sandbox_id] = (info, current_time)
-                self._warm_pool_identity[info.sandbox_id] = None
+                # Whose it is, as the backend recorded it on the container at
+                # creation, so a refused owner's adopted sandbox can be ended;
+                # ``None`` (an older container) stays unattributed.
+                self._warm_pool_identity[info.sandbox_id] = info.owner
             self._unowned_since.pop(info.sandbox_id, None)
             adopted += 1
             logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
@@ -1592,7 +1595,8 @@ class AioSandboxProvider(
         """Fail closed if a warm ID changed tenants during an acquire."""
         if sandbox_id not in self._warm_pool:
             return
-        # Startup-adopted entries have unknown identity until their first reclaim.
+        # A startup-adopted entry from a container with no owner label has
+        # unknown identity until its first reclaim.
         stored_key = self._warm_pool_identity.get(sandbox_id)
         if stored_key is not None and stored_key != requested_key:
             raise SandboxIdentityCollisionError(sandbox_id, stored_key, requested_key)
@@ -2995,7 +2999,7 @@ class AioSandboxProvider(
         # process. Outside the provider lock: the views lock is the snapshot
         # module's, and this is the only ordering between the two.
         try:
-            self._clear_accepted_skill_view_for(cleared_identity)
+            self._clear_accepted_skill_view_for(cleared_identity, sandbox_id=sandbox_id)
         except Exception:
             logger.error(
                 "Could not clear the accepted skill view of destroyed warm-pool sandbox %s",
@@ -4850,8 +4854,9 @@ class AioSandboxProvider(
             identities.update({sandbox_id: key for key, sandbox_id in self._thread_sandboxes.items()})
             identities.update({sandbox_id: identity for sandbox_id, identity in self._active_sandbox_identity.items() if identity is not None})
             targets = {sandbox_id: identity[0] for sandbox_id, identity in identities.items() if identity is not None and identity[0] in owners}
-            # Taken over from a previous process without learning whose: any
-            # of them may be a refused owner's, so none is confirmed ended.
+            # Taken over from a previous process without learning whose (a
+            # container with no owner label): any of them may be a refused
+            # owner's, so none is confirmed ended.
             unattributed = sum(1 for identity in identities.values() if identity is None)
         outcome: dict[str, Ended] = {}
         for sandbox_id, owner in sorted(targets.items()):
@@ -4946,18 +4951,24 @@ class AioSandboxProvider(
     def _clear_bound_accepted_skill_snapshot(self, sandbox_id: str) -> None:
         if isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
             return
-        self._clear_accepted_skill_view_for(self._identity_for_sandbox(sandbox_id))
+        self._clear_accepted_skill_view_for(self._identity_for_sandbox(sandbox_id), sandbox_id=sandbox_id)
 
-    def _clear_accepted_skill_view_for(self, identity: tuple[str, str] | None) -> None:
-        """Remove one thread's accepted view, by identity rather than sandbox.
+    def _clear_accepted_skill_view_for(self, identity: tuple[str, str] | None, *, sandbox_id: str) -> None:
+        """Remove one thread's accepted view, by identity, when the sandbox going away is the one that mounted it.
 
         The view outlives a run on purpose (the next turn verifies it in place
         instead of staging an unchanged tree again), so the container going
         away is what bounds it. A teardown that resolves the identity only
         from the maps it is about to clear cannot ask for it afterwards, so
-        the identity is passed in.
+        the identity is passed in. Only an accepted sandbox mounts the view:
+        the same thread's ordinary sandbox going away (idle, evicted, or
+        stopped for a refused owner) leaves it to the accepted one using it.
         """
         if identity is None or isinstance(getattr(self, "_backend", None), RemoteSandboxBackend):
+            return
+        with self._lock:
+            accepted = sandbox_id in getattr(self, "_accepted_only_sandbox_ids", set())
+        if not accepted and not sandbox_id.endswith(ACCEPTED_SANDBOX_ID_SUFFIX):
             return
         user_id, thread_id = identity
         from deerflow.runtime.skill_snapshot import force_clear_skill_snapshot_active_view

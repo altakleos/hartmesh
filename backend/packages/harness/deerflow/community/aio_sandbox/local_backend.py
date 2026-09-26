@@ -236,6 +236,9 @@ _DEFAULT_SANDBOX_PIDS_LIMIT = "512"
 _DEFAULT_PROXY_MEMORY = "256m"
 _NETWORK_PROXY_CONTAINER_SCRIPT = "/tmp/deerflow-network-proxy.py"
 _NETWORK_POLICY_DIGEST_LABEL = "deerflow.network_policy_digest"
+#: Whose a sandbox is, recorded when it is created (``SandboxInfo.owner``).
+_OWNER_USER_LABEL = "deerflow.owner_user_id"
+_OWNER_THREAD_LABEL = "deerflow.thread_id"
 _NETWORK_GATEWAY_MODE_IPV4 = "com.docker.network.bridge.gateway_mode_ipv4"
 _NETWORK_GATEWAY_MODE_IPV6 = "com.docker.network.bridge.gateway_mode_ipv6"
 _NETWORK_ENABLE_ICC = "com.docker.network.bridge.enable_icc"
@@ -654,6 +657,18 @@ class LocalContainerBackend(SandboxBackend):
         encoded = json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
         return hashlib.sha256(encoded).hexdigest()
 
+    @staticmethod
+    def _owner_labels(user_id: str | None, thread_id: str | None) -> dict[str, str]:
+        """Whose the sandbox is, recorded on the container; not part of its identity or policy, so never compared."""
+        if not user_id or not thread_id:
+            return {}
+        return {_OWNER_USER_LABEL: user_id, _OWNER_THREAD_LABEL: thread_id}
+
+    @staticmethod
+    def _owner_from_labels(labels: dict[str, str]) -> tuple[str, str] | None:
+        user_id, thread_id = labels.get(_OWNER_USER_LABEL), labels.get(_OWNER_THREAD_LABEL)
+        return (user_id, thread_id) if user_id and thread_id else None
+
     def _restricted_labels(self, sandbox_id: str, role: str) -> dict[str, str]:
         return {
             "deerflow.sandbox_id": sandbox_id,
@@ -903,8 +918,9 @@ class LocalContainerBackend(SandboxBackend):
         Raises:
             RuntimeError: If the container fails to start.
         """
-        del user_id, provision_lark_cli_runtime, provision_lark_cli_broker
+        del provision_lark_cli_runtime, provision_lark_cli_broker
         container_name = f"{self._container_prefix}-{sandbox_id}"
+        owner_labels = self._owner_labels(user_id, thread_id)
 
         # Retry loop: if Docker rejects the port (e.g. a stale container still
         # holds the binding after a process restart), skip that port and try the
@@ -924,7 +940,7 @@ class LocalContainerBackend(SandboxBackend):
                         port,
                         extra_mounts,
                         config_mount_exclusion_root=config_mount_exclusion_root,
-                        labels=self._sandbox_labels(sandbox_id),
+                        labels={**self._sandbox_labels(sandbox_id), **owner_labels},
                     )
                 else:
                     relay_token = secrets.token_urlsafe(32)
@@ -935,6 +951,7 @@ class LocalContainerBackend(SandboxBackend):
                         extra_mounts,
                         config_mount_exclusion_root=config_mount_exclusion_root,
                         relay_token=relay_token,
+                        owner_labels=owner_labels,
                     )
                 break
             except _ExistingRestrictedSandbox as exc:
@@ -984,6 +1001,7 @@ class LocalContainerBackend(SandboxBackend):
         *,
         config_mount_exclusion_root: str | None,
         relay_token: str,
+        owner_labels: dict[str, str] | None = None,
     ) -> str:
         proxy_name, network_name = self._resource_names(sandbox_id)
         egress_network_name = self._egress_network_name(sandbox_id)
@@ -1040,7 +1058,7 @@ class LocalContainerBackend(SandboxBackend):
                     "PROXY_SERVER": f"{proxy_name}:3128",
                     "PROXY_EXCLUDE": "localhost,127.0.0.1,::1",
                 },
-                labels=self._restricted_labels(sandbox_id, "sandbox"),
+                labels={**self._restricted_labels(sandbox_id, "sandbox"), **(owner_labels or {})},
             )
         except BaseException as exc:
             message = str(exc).lower()
@@ -1585,6 +1603,7 @@ class LocalContainerBackend(SandboxBackend):
                     created_at=created_at,
                     request_headers=request_headers,
                     requires_replacement=requires_replacement,
+                    owner=self._owner_from_labels(data.labels),
                 )
             )
 

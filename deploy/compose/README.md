@@ -550,9 +550,11 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   Each of those seven is `ended`, with `processes`, the live Gateway
   processes that confirmed, `processes_unconfirmed`, the live ones that had
   not when the wait ran out, `not_ended`, how many the processes tried to
-  end and could not confirm ended (a sandbox that would not stop, one a
-  Gateway took over after a restart without learning whose it is -- its idle
-  timeout ends it -- or a subsystem that failed or took longer than 15 s),
+  end and could not confirm ended (a sandbox that would not stop; a
+  sandbox a Gateway took over after a restart that carries no owner label,
+  which counts against every `disable` because it may be anyone's, until
+  its idle timeout ends it; or a subsystem that failed or took longer than
+  15 s),
   `processes_unreached`, and `confirmed_by: gateway_record`; it reports when
   the last live process had confirmed, and its count is what the confirming
   processes ended for this identity. A process's look stops the person's
@@ -625,7 +627,17 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   `0046_mcp_task_disable_reason` admits the `account_disabled` cancellation
   reason, and its downgrade refuses while a task carries it: to roll back
   after a `disable` has cancelled a task, restore the backup taken before
-  the upgrade. Not yet: a
+  the upgrade. A release that labels each sandbox container with its owner
+  (`deerflow.owner_user_id`, `deerflow.thread_id`: the account and thread
+  ids, which already appear in the container's mount paths) lets a Gateway
+  that takes a container over after a restart attribute it, and stop it
+  when that person is turned off. Without the label, an adopted sandbox may
+  be anyone's, so every `disable` exits **2** until the idle timeout
+  (`sandbox.idle_timeout`, 1800 s on this profile) ends it; after upgrading
+  onto that release this applies only to the containers the previous
+  release started. To see which running sandboxes carry an owner:
+  `docker ps --filter label=deerflow.role=sandbox --format '{{.Names}} {{.Label "deerflow.owner_user_id"}}'`.
+  Not yet: a
   turned-off person's schedules and channel bindings are refused while they
   are off but not held across a later `enable`. The document names only the
   surfaces it covers; a surface it does not name is not covered, not
