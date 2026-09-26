@@ -24,10 +24,11 @@ Usage:
 Every form is idempotent and prints one JSON document on stdout, with the
 verdict and what was done. Three exit statuses: ``0`` means done; ``1`` means
 the command refused and changed nothing (the document then carries ``error``);
-``2`` means it did what was asked but could not confirm that every run it
-cancelled had stopped (the document names them under ``runs_unconfirmed``,
-and a form that reports its surfaces names ``running_work`` under
-``surfaces_unconfirmed``).
+``2`` means it did what was asked but could not confirm all of it: a run it
+cancelled had not stopped (named under ``runs_unconfirmed``), or a surface
+had not been confirmed stopped (named under ``surfaces_unconfirmed`` -- a
+run's ``running_work``, or the connections a Gateway process had not yet
+recorded closing).
 A malformed command line is a refusal like any other: a document and ``1``,
 never argparse's usage text and the ``2`` that would read as "unconfirmed".
 A caller that runs this through a remote runner may not see its exit status,
@@ -42,9 +43,23 @@ the browser WebSocket, the LangGraph auth hook, an internal caller's owner
 header (``owner_is_refused``), and every process-internal launch for the
 owner -- a due scheduled task, a channel message, an MCP task notification
 (``services._principal_projection_for_intent``). Sign-in is refused before
-an account is created or returned (``user_provisioning``). On top of the
-derived refusal the command ends the account's sessions (``token_version``)
-and revokes its personal access tokens, so ``enable`` cannot revive them.
+an account is created or returned (``user_provisioning``), and a run that
+was admitted just before the refusal committed is refused as it starts
+(``services._owner_refusal``). On top of the derived refusal the command ends
+the sessions (``token_version``) and revokes the personal access tokens of
+every account the identity covers, so ``enable`` cannot revive them.
+
+A connection that authenticated once never reads the refusal again: an SSE
+stream, a streaming download, the browser WebSocket. Every Gateway process
+holds each one under its owner (``app.gateway.owner_connections``) and
+closes what a refused owner holds (``app.gateway.refusal_watch``); the
+command asks every live process to look (``refusal_checks``), waits -- while
+the runs unwind, within the same ``--wait-seconds`` -- for each to record
+that it did and what it ended, and reports ``websockets``, ``sse_streams``
+and ``downloads`` from that record. A process beats even when it cannot
+look, so one that is alive and has not recorded its look when the wait runs
+out leaves those surfaces unconfirmed; only one that has not beaten for 90 s
+is gone, holding nothing.
 
 It also ends the account's running work. The refusal stops the next request
 and the next launch, but a run already executing was the one path left: a
@@ -60,7 +75,9 @@ cancellation reached them, and the ids under ``runs_unconfirmed`` of any
 that did not stop -- which is a failure carrying ``returncode`` 2, never a
 silent success. ``--wait-seconds`` moves the bound. What it cancels is
 every account the refusal covers, not only the one named: one identity can
-hold an account under each configured provider, and both are refused.
+hold an account under each configured provider, and both are refused. After
+the wait it looks once more, for a run that a request authenticated just
+before the refusal inserted meanwhile.
 
 ``end-sessions`` does the same only when asked, with
 ``--end-running-work``: demoting an administrator is not removing them, and
@@ -109,13 +126,16 @@ its record every pass, with or without the flag. With
 local passwords on it refuses to limit the last administrator, because a
 deployment with none offers first-boot setup to whoever reaches it first.
 
-The role-limit documents say when each surface stopped: ``started_at`` (UTC),
-``elapsed_ms`` for the whole command, and under ``surfaces`` one entry per
-surface with its ``action``, its ``count``, ``stopped_after_ms`` on a
-monotonic clock from the command's start, and ``stopped_at``, that offset
-added to ``started_at``. A surface limited at its next use reports the
-limit's commit. A surface the command could not confirm is named under
-``surfaces_unconfirmed`` and makes the exit status 2.
+The ``disable`` and role-limit documents say when each surface stopped:
+``started_at`` (UTC), ``elapsed_ms`` for the whole command, and under
+``surfaces`` one entry per surface with its ``action``, its ``count``,
+``stopped_after_ms`` on a monotonic clock from the command's start, and
+``stopped_at``, that offset added to ``started_at``. A surface refused or
+limited at its next use reports the commit. A surface a Gateway process
+ends reports when every live process had confirmed (``confirmed_by:
+gateway_record``). A surface the command could not confirm is named under
+``surfaces_unconfirmed`` and makes the exit status 2; ``runs_unconfirmed``
+keeps naming only runs.
 """
 
 from __future__ import annotations
@@ -192,11 +212,25 @@ ACTION_LIMITED_AT_NEXT_USE = "limited_at_next_use"
 ACTION_ALREADY_LIMITED = "already_limited"
 ACTION_LEFT_ALONE = "left_alone"
 ACTION_LIFTED = "lifted"
+ACTION_REFUSED_AT_NEXT_USE = "refused_at_next_use"
+ACTION_REVOKED = "revoked"
 
 #: What a ``running_work`` stop time was confirmed from: the run rows reached
 #: a terminal status. The cancellation also attempts to kill the sandbox
 #: command in flight, which this process cannot observe.
 CONFIRMED_BY_RUN_STATUS = "run_status"
+
+#: What a connection surface's stop time was confirmed from: every live
+#: Gateway process recorded that it had looked for refused owners after the
+#: refusal committed, and what it ended (``app.gateway.refusal_watch``).
+CONFIRMED_BY_GATEWAY_RECORD = "gateway_record"
+
+#: The connections a Gateway process holds open for an account after it
+#: authenticated once (``app.gateway.owner_connections``).
+CONNECTION_SURFACES = ("websockets", "sse_streams", "downloads")
+
+#: How often the command re-reads the processes' record while it waits.
+SWEEP_WAIT_POLL_SECONDS = 0.2
 
 
 def _sealed_role_above(row: dict[str, Any], limit: str) -> bool:
@@ -296,11 +330,18 @@ class AccountsCommand:
         wait_seconds: float = DEFAULT_RUN_WAIT_SECONDS,
         role_readers: tuple[str, ...] = (),
         setup_opens_without_admin: bool = False,
+        sweeps: Any | None = None,
+        live_window_seconds: float | None = None,
     ) -> None:
+        from app.gateway.refusal_watch import LIVE_WINDOW_SECONDS
+
         self._users = users
         self._tokens = tokens
         self._schedules = schedules
         self._runs = runs
+        self._sweeps = sweeps
+        self._deadline: float | None = None
+        self._live_window = LIVE_WINDOW_SECONDS if live_window_seconds is None else live_window_seconds
         self._wait_seconds = wait_seconds
         self._role_readers = role_readers
         self._setup_opens_without_admin = setup_opens_without_admin
@@ -315,6 +356,10 @@ class AccountsCommand:
         end_running_work: bool = False,
         role: str = LIMIT_ROLES[0],
     ) -> dict[str, Any]:
+        # One bound for the whole command: the run wait, the second look for
+        # late runs and the connection wait all end by it, so a caller can
+        # size its runner's timeout from --wait-seconds alone.
+        self._deadline = time.monotonic() + max(0.0, self._wait_seconds)
         if command == "list":
             return await self.list()
         if command in ("limit-role", "lift-role-limit"):
@@ -328,9 +373,10 @@ class AccountsCommand:
             if command == "limit-role":
                 return await self.limit_role(identity, role=role, end_running_work=end_running_work, clock=clock)
             return await self.lift_role_limit(identity, clock=clock)
+        clock = SurfaceClock()
         identity, account = await self._resolve(issuer=issuer, subject=subject, email=email)
         if command == "disable":
-            return await self.disable(identity, account)
+            return await self.disable(identity, account, clock=clock)
         if command == "enable":
             return await self.enable(identity, account)
         if command == "end-sessions":
@@ -386,9 +432,15 @@ class AccountsCommand:
         limits_without = [{"issuer": issuer, "subject": subject, "role": role, "limited_at": _iso(limited_at)} for issuer, subject, role, limited_at in await self._users.list_role_limits() if not has_account(issuer, subject)]
         return {"command": "list", "accounts": accounts, "disabled_without_account": without, "role_limits_without_account": limits_without}
 
-    async def disable(self, identity: tuple[str, str], account: User | None) -> dict[str, Any]:
+    async def disable(self, identity: tuple[str, str], account: User | None, *, clock: SurfaceClock | None = None) -> dict[str, Any]:
+        clock = clock or SurfaceClock()
         issuer, subject = identity
         recorded = await self._users.disable_identity(issuer, subject)
+        committed = clock.now_ms()
+        # Asked once the refusal has committed, so a Gateway process that acts
+        # on this check reads the refusal too; asked before the slow part, so
+        # the processes look while the runs unwind.
+        check = await self._sweeps.request_check() if self._sweeps is not None else None
         # Looked up again only when there was nothing to address: a first
         # sign-in racing the command may have created the account in between,
         # and its session must be ended like any other. Re-resolving
@@ -412,32 +464,99 @@ class AccountsCommand:
         }
         # The refusal is keyed by (issuer, subject): it is the person at the
         # provider who is turned off, so it covers every account that identity
-        # has here. Only one of them is the account addressed, and only that
-        # one's sessions and tokens are ended -- say so rather than let the
-        # deployer discover it.
+        # has here, and everything below reaches each of them. The document
+        # names the ones besides the account addressed.
         siblings = [other for other in await self._users.list_users_by_identity(issuer, subject) if account is None or str(other.id) != str(account.id)]
         if siblings:
             document["identity_also_covers"] = [{"provider": other.oauth_provider, "email": other.email, "id": str(other.id)} for other in siblings]
+        accounts = ([account] if account is not None else []) + siblings
+        clock.stopped("sign_in", ACTION_REFUSED_AT_NEXT_USE, len(accounts), at_ms=committed)
         if account is None:
+            # Nothing to end, and every surface named all the same, so a
+            # caller reads one shape whatever the identity held.
+            clock.stopped("sessions", ACTION_ENDED, 0, at_ms=committed)
+            clock.stopped("personal_access_tokens", ACTION_REVOKED, 0, at_ms=committed)
+            clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, 0, at_ms=committed)
+            clock.stopped("running_work", ACTION_ENDED, 0, at_ms=committed, confirmed_by=CONFIRMED_BY_RUN_STATUS)
+            await self._confirm_connections(check, [], clock)
+            document.update(clock.document())
+            if document["surfaces_unconfirmed"]:
+                document["returncode"] = EXIT_UNCONFIRMED_RUNS
             document["note"] = "no account existed for this identity; the refusal is recorded and a sign-in that would create one is refused"
             return document
-        # The derived refusal already stops every path; ending the sessions
-        # and revoking the tokens is what keeps them dead after an enable.
-        document["sessions_ended"] = await self._users.end_sessions(str(account.id))
-        document["tokens_revoked"] = await self._revoke_tokens(account)
+        # The derived refusal already stops every session and token from the
+        # commit; ending the sessions and revoking the tokens is what keeps
+        # them dead after an enable.
+        ended = [await self._users.end_sessions(str(covered.id)) for covered in accounts]
+        document["sessions_ended"] = any(ended)
+        document["tokens_revoked"] = sum([await self._revoke_tokens(covered) for covered in accounts])
         document["schedules_held"] = await self._count_schedules(account)
-        document.update(await self._end_running_work([account, *siblings]))
+        clock.stopped("sessions", ACTION_ENDED, len(accounts), at_ms=committed)
+        clock.stopped("personal_access_tokens", ACTION_REVOKED, document["tokens_revoked"], at_ms=committed)
+        clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, sum([await self._count_schedules(covered) for covered in accounts]), at_ms=committed)
+        # The connections are confirmed while the runs unwind, not after: their
+        # stop times are the processes' own, not the run wait's.
+        runs, _ = await asyncio.gather(self._end_running_work(accounts, relook=True), self._confirm_connections(check, accounts, clock))
+        document.update(runs)
+        if document["runs_unconfirmed"]:
+            clock.not_stopped("running_work", ACTION_ENDED, document["runs_found"], unconfirmed=True, confirmed_by=CONFIRMED_BY_RUN_STATUS)
+        else:
+            clock.stopped("running_work", ACTION_ENDED, document["runs_found"], confirmed_by=CONFIRMED_BY_RUN_STATUS)
         document["account"] = _account_document(await self._users.get_user_by_id(str(account.id)) or account)
+        document.update(clock.document())
+        if document["surfaces_unconfirmed"]:
+            document["returncode"] = EXIT_UNCONFIRMED_RUNS
         document["note"] = self._run_note(
             document,
             done="sessions are refused at their next request; every run this identity had executing was cancelled and its stream ended with it; no new run starts",
             undone="sessions are refused at their next request and no new run starts, but the runs named in `runs_unconfirmed` had not reached a terminal status when the wait ran out; re-run this command to see whether they have since",
         )
+        if clock.unconfirmed and set(clock.unconfirmed) != {"running_work"}:
+            document["note"] += (
+                "; a Gateway process named under the surfaces in `surfaces_unconfirmed` had not recorded that it looked when the wait ran out, "
+                "so what it holds for this identity is not confirmed ended; re-run this command to see whether it has since"
+            )
         return document
+
+    async def _confirm_connections(self, check: int | None, accounts: list[User], clock: SurfaceClock) -> None:
+        """Wait until every live Gateway process has acted on ``check``, then report what they ended.
+
+        This process cannot see into a Gateway's memory; each Gateway looks
+        for refused owners among what it holds and records it. A process that
+        stopped beating holds nothing any more and is not waited on; one that
+        is beating but has not acted when the wait runs out is named, and the
+        connections are unconfirmed rather than assumed closed.
+        """
+        if self._sweeps is None or check is None:
+            return
+        deadline = self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
+        while True:
+            live = await self._sweeps.live_processes(window_seconds=self._live_window)
+            waiting = sorted(process.process_id for process in live if process.checked_through < check)
+            if not waiting or time.monotonic() >= deadline:
+                break
+            await asyncio.sleep(SWEEP_WAIT_POLL_SECONDS)
+        confirmed_at = clock.now_ms()
+        counts = dict.fromkeys(CONNECTION_SURFACES, 0)
+        for ending in await self._sweeps.endings_for([str(covered.id) for covered in accounts], since_check=check):
+            if ending.surface in counts:
+                counts[ending.surface] += ending.count
+        # ``processes``: the live processes that confirmed; ``processes_unconfirmed``:
+        # the live ones that had not when the wait ran out, whose count is not in ``count``.
+        facts = {"confirmed_by": CONFIRMED_BY_GATEWAY_RECORD, "processes": len(live) - len(waiting), "processes_unconfirmed": waiting}
+        for surface in CONNECTION_SURFACES:
+            if waiting:
+                clock.not_stopped(surface, ACTION_ENDED, counts[surface], unconfirmed=True, **facts)
+            else:
+                clock.stopped(surface, ACTION_ENDED, counts[surface], at_ms=confirmed_at, **facts)
 
     async def enable(self, identity: tuple[str, str], account: User | None) -> dict[str, Any]:
         issuer, subject = identity
         withdrawn = await self._users.enable_identity(issuer, subject)
+        if self._sweeps is not None:
+            # So each Gateway takes the person off its refused list now,
+            # rather than cut what they open for up to its periodic look.
+            await self._sweeps.request_check()
         refreshed = await self._users.get_user_by_id(str(account.id)) if account is not None else None
         return {
             "command": "enable",
@@ -633,7 +752,7 @@ class AccountsCommand:
 
     # ── What disable reaches beyond the row ──────────────────────────────
 
-    async def _end_running_work(self, accounts: list[User], *, above: str | None = None) -> dict[str, Any]:
+    async def _end_running_work(self, accounts: list[User], *, above: str | None = None, relook: bool = False) -> dict[str, Any]:
         """Cancel every run these accounts have executing, then wait for them to stop.
 
         The cancellation is the durable request a person's own cancel makes,
@@ -659,11 +778,15 @@ class AccountsCommand:
 
         ``above`` narrows it to runs whose sealed role is above that role, or
         unknown: what a role limit ends is work still carrying the role it
-        took away, not work the person started since. A request that
-        authenticated just before the limit committed can still insert such
-        a run after the first look; nothing admitted after the commit can, so
-        one more look once the wait is over finds what arrived meanwhile and
-        nothing the person started since. A later pass finds anything slower.
+        took away, not work the person started since.
+
+        A request that authenticated just before a refusal or a limit
+        committed can still insert a run after the first look. Nothing
+        admitted after the commit can -- a refused owner's run is refused as
+        it starts, and a limited one runs at the limit -- so one more look
+        once the wait is over finds what arrived meanwhile and nothing the
+        person started since. A later pass finds anything slower. ``relook``
+        asks for that look; ``above`` implies it.
         """
         result: dict[str, Any] = {
             "runs_found": 0,
@@ -678,7 +801,7 @@ class AccountsCommand:
         if not owners:
             return result
         terminal = await self._cancel_and_wait(owners)
-        if above is not None:
+        if above is not None or relook:
             late = {str(row["run_id"]): user_id for user_id, row in await self._active_runs(accounts, above=above) if str(row["run_id"]) not in owners}
             if late:
                 terminal.update(await self._cancel_and_wait(late))
@@ -707,7 +830,7 @@ class AccountsCommand:
         """
         terminal: dict[str, str] = {}
         pending = list(owners)
-        deadline = time.monotonic() + max(0.0, self._wait_seconds)
+        deadline = self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
         while True:
             still_running: list[str] = []
             for run_id in pending:
@@ -788,6 +911,7 @@ async def _run(
     from deerflow.config import get_app_config
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
+    from deerflow.persistence.refusal_sweeps import RefusalSweepRepository
     from deerflow.persistence.run import RunRepository
     from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
     from deerflow.runtime.tenant_identity import TenantIdentityV1
@@ -809,6 +933,7 @@ async def _run(
             tokens=PersonalAccessTokenRepository(session_factory, tenant=tenant),
             schedules=ScheduledTaskRepository(session_factory),
             runs=RunRepository(session_factory, tenant=tenant),
+            sweeps=RefusalSweepRepository(session_factory),
             wait_seconds=wait_seconds,
             **deployment_options(config),
         )
@@ -863,7 +988,10 @@ def main(argv: list[str] | None = None) -> int:
         "--wait-seconds",
         type=float,
         default=DEFAULT_RUN_WAIT_SECONDS,
-        help=f"how long to wait for cancelled runs to reach a terminal status before reporting them unconfirmed (default {DEFAULT_RUN_WAIT_SECONDS:g})",
+        help=(
+            f"the one bound on the command's waits -- for cancelled runs to reach a terminal status, and for every Gateway process to record closing "
+            f"the account's connections -- before it reports them unconfirmed (default {DEFAULT_RUN_WAIT_SECONDS:g}; a Gateway looks about once a second)"
+        ),
     )
     try:
         args = parser.parse_args(argv)

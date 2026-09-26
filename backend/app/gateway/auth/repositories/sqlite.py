@@ -569,6 +569,22 @@ class SQLiteUserRepository(UserRepository):
             await session.commit()
             return True
 
+    async def list_refused_user_ids(self) -> set[str]:
+        """Every account a recorded refusal covers, in one read.
+
+        The match :meth:`_disabled_at` makes for one account, made for all:
+        subject, plus the issuer when one is recorded (a row whose issuer was
+        never recorded matches on its subject alone, failing closed).
+        """
+        async with self._sf() as session:
+            refused = {(row.issuer, row.subject) for row in (await session.execute(select(DisabledIdentityRow.issuer, DisabledIdentityRow.subject))).all()}
+            if not refused:
+                return set()
+            subjects = {subject for _, subject in refused}
+            stmt = select(UserRow.id, UserRow.oauth_id, UserRow.oauth_issuer).where(UserRow.oauth_id.in_(subjects), UserRow.oauth_provider.is_not(None))
+            rows = (await session.execute(stmt)).all()
+            return {str(user_id) for user_id, subject, issuer in rows if not issuer or (issuer_key(issuer), subject) in refused}
+
     async def list_disabled_identities(self) -> list[tuple[str, str, datetime]]:
         """Every identity turned off, whether or not an account exists for it."""
         stmt = select(DisabledIdentityRow).order_by(DisabledIdentityRow.disabled_at, DisabledIdentityRow.issuer, DisabledIdentityRow.subject)

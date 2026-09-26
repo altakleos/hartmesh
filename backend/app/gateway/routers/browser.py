@@ -141,10 +141,20 @@ async def _authenticate_ws(websocket: WebSocket):
                     require_live_account(user)
                 except HTTPException:
                     return None
-                return user
+                return _held_by(websocket, user)
     if is_auth_disabled():
-        return get_auth_disabled_user()
+        return _held_by(websocket, get_auth_disabled_user())
     return None
+
+
+def _held_by(websocket: WebSocket, user):
+    """Stamp the socket's owner, so it is held under them once accepted (``owner_connections``).
+
+    Turning the account off then closes the socket instead of waiting for the
+    client; a socket without the stamp is never held and never reported.
+    """
+    websocket.state.user = user
+    return user
 
 
 def _ws_origin_allowed(websocket: WebSocket) -> bool:

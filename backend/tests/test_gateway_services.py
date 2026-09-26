@@ -2044,6 +2044,85 @@ async def test_rival_owner_and_metadata_failure_cannot_reach_graph(
     assert private_failure_marker not in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_a_run_whose_owner_was_turned_off_after_admission_never_reaches_the_graph(
+    _stub_app_config,
+):
+    """A request that authenticated just before the refusal committed can still admit a run.
+
+    The refusal is read again as the run starts, so a run admitted in that
+    moment ends before the graph -- whichever process picks it up -- rather
+    than executing for a person nothing may act for.
+    """
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_agent_called = asyncio.Event()
+    asked: list[str | None] = []
+
+    async def fake_run_agent(*_args, **_kwargs):
+        run_agent_called.set()
+
+    async def refused(user_id):
+        asked.append(user_id)
+        return "disabled"
+
+    run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
+    request = _make_start_run_request(run_manager)
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services._owner_refusal", side_effect=refused),
+    ):
+        record = await start_run(_run_create_request(), "thread-refused-owner", request)
+        assert record.task is not None
+        await asyncio.wait_for(record.task, timeout=1)
+
+    assert not run_agent_called.is_set()
+    assert asked == [record.user_id]
+    assert record.status == RunStatus.error
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_owner_cannot_be_read_as_it_starts_fails_rather_than_stays_pending(
+    _stub_app_config,
+):
+    from unittest.mock import patch
+
+    from app.gateway.services import start_run
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.schemas import RunStatus
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    run_agent_called = asyncio.Event()
+
+    async def fake_run_agent(*_args, **_kwargs):
+        run_agent_called.set()
+
+    async def unreadable(_user_id):
+        raise RuntimeError("database went away")
+
+    run_manager = RunManager(store=MemoryRunStore(), tenant=_TEST_TENANT)
+    request = _make_start_run_request(run_manager)
+
+    with (
+        patch("app.gateway.services.resolve_agent_factory", return_value=object()),
+        patch("app.gateway.services.run_agent", side_effect=fake_run_agent),
+        patch("app.gateway.services._owner_refusal", side_effect=unreadable),
+    ):
+        record = await start_run(_run_create_request(), "thread-unreadable-owner", request)
+        assert record.task is not None
+        await asyncio.wait_for(record.task, timeout=1)
+
+    assert not run_agent_called.is_set()
+    assert record.status == RunStatus.error
+
+
 def test_context_merges_into_configurable():
     """Context values must be merged into config['configurable'] by start_run.
 

@@ -743,3 +743,19 @@ def test_lifespan_preserves_flush_budget_when_retrieval_warm_is_still_running() 
     assert shutdown_elapsed < 1.0
     manager.shutdown_flush.assert_called_once_with(5.0)
     manager.close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_watch_that_cannot_start_fails_startup(monkeypatch):
+    """A process that never registered would read to the account command as holding nothing."""
+    from app.gateway import app as gateway_app
+    from app.gateway.refusal_watch import RefusalWatch
+    from deerflow.persistence import engine as engine_module
+
+    async def _cannot_register(self):
+        raise RuntimeError("gateway_processes is missing")
+
+    monkeypatch.setattr(engine_module, "get_session_factory", lambda: object())
+    monkeypatch.setattr(RefusalWatch, "start", _cannot_register)
+    with pytest.raises(RuntimeError, match="gateway_processes"):
+        await gateway_app._start_refusal_watch()

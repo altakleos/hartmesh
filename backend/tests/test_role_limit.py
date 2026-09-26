@@ -661,3 +661,26 @@ def test_a_role_no_limit_can_hold_is_refused_as_a_document(monkeypatch: pytest.M
     monkeypatch.setattr(accounts, "_run", _refuse_through_the_command)
     assert accounts.main(["limit-role", "--issuer", ISSUER, "--subject", "sub-x", "--role", "admin"]) == 1
     assert "below administrator" in json.loads(capsys.readouterr().out)["error"]
+
+
+# ── The refused accounts, in one read ───────────────────────────────────
+
+
+@pytest.mark.anyio
+async def test_the_refused_accounts_are_every_account_a_refusal_covers_derived_as_each_read_derives_it(stores) -> None:
+    """What a Gateway's refusal watch reads in one query: the same match the per-account read makes."""
+    under_sso = await stores.users.create_user(_account(role="user"))
+    under_basic = await stores.users.create_user(_account("pat.chen@example.com", provider="sso-basic", role="user"))
+    legacy = await stores.users.create_user(_account("legacy@example.com", "sub-legacy", role="user", issuer=None))
+    elsewhere = await stores.users.create_user(_account("pat@other.example.com", provider="other-sso", issuer="https://login.other.example.com", role="user"))
+    await stores.users.create_user(_account("sam@example.com", "sub-sam", role="user"))
+    assert await stores.users.list_refused_user_ids() == set()
+
+    await stores.users.disable_identity(ISSUER + "/", "sub-pat")
+    await stores.users.disable_identity(ISSUER, "sub-legacy")
+
+    refused = await stores.users.list_refused_user_ids()
+    assert refused == {str(under_sso.id), str(under_basic.id), str(legacy.id)}
+    assert str(elsewhere.id) not in refused, "the same subject at another issuer is another person"
+    for user_id in refused:
+        assert (await stores.users.get_user_by_id(user_id)).disabled_at is not None

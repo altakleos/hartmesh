@@ -405,8 +405,9 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
 ```
 
 - `disable` records the refusal (`disabled_identities`, keyed by issuer and
-  subject, migration `0040_account_access`), ends the account's sessions and
-  revokes its personal access tokens. From that row every path that acts for
+  subject, migration `0040_account_access`), and ends the sessions and
+  revokes the personal access tokens of **every account the identity
+  covers**, so `enable` revives none of them. From that row every path that acts for
   the account derives its refusal at the next request: the session cookie
   and personal access tokens (`401`), the browser WebSocket, the LangGraph
   auth hook, an internal caller acting for that owner (an IM channel bound
@@ -415,7 +416,22 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   scheduler records as a failed occurrence naming the refusal, so no run
   starts. A sign-in is refused even when the claim admits, with "Your
   access to this workspace has been turned off. Ask your administrator."
-  (`sso_access_off`) and a journal line naming issuer and subject. It also
+  (`sso_access_off`) and a journal line naming issuer and subject. A run
+  that a request authenticated just before the refusal admitted is refused
+  as it starts, before the model. **A connection that authenticated once is
+  closed by the deployment**, not left for the client to drop: an open SSE
+  stream, a streaming download (an archive, an evidence bundle, batch
+  results) and the browser WebSocket. Every Gateway process holds each open
+  connection under its account, looks for turned-off accounts about once a
+  second after the command asks it to (and every 30 s on its own), and
+  closes what they hold: a stream is cut -- a download cut short never reads
+  as a finished one -- and a socket closes with `4401`. The application sees
+  exactly what it sees when a client goes away and unwinds from that; one
+  that does not is cancelled 5 s later. The server logs "ASGI callable
+  returned without completing response" at ERROR for each connection it
+  cuts: that line is the cut, not a fault, so an alert on ERROR lines will
+  fire once per cut stream. The command waits for every live process to
+  record that it looked, and what it closed, while the runs unwind. It also
   **ends the running work of every account the refusal covers** (a subject
   with an account under each configured provider is refused on both, and both
   have their runs ended): each run is cancelled the way the person's own
@@ -426,15 +442,21 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   has in flight, along with the children and detached processes that command
   started; that reach depends on the sandbox provider, is best-effort on the
   remote one, and a provider that cannot reach its commands leaves them to
-  their own timeout. The output says what was done (`sessions_ended`,
-  `tokens_revoked`, `schedules_held` -- the account's active schedules, each
-  of which is refused while the account is off and resumes untouched when it
-  is on again -- plus `runs_found`, `runs_cancelled`, `runs_finished_first`
-  and `runs_unconfirmed`).
+  their own timeout. After the wait the command looks once more for a run
+  admitted meanwhile. The output says what was done (`sessions_ended`,
+  `tokens_revoked` -- across every covered account -- `schedules_held` --
+  the addressed account's active schedules, each of which is refused while
+  the account is off and resumes untouched when it is on again, where
+  `surfaces.internal_launches.count` counts those of every covered account --
+  plus
+  `runs_found`, `runs_cancelled`, `runs_finished_first` and
+  `runs_unconfirmed`), and when each surface stopped (below).
 - Exit statuses: **0** done; **1** the command refused and changed nothing
   (the document carries `error`); **2** it did what was asked but a run named
   in `runs_unconfirmed` had not reached a terminal status when the wait ran
-  out. **2 is not "nothing happened"** -- the refusal is recorded, the
+  out, or a surface named in `surfaces_unconfirmed` was not confirmed (a
+  Gateway process named under it had not recorded its look). **2 is not
+  "nothing happened"** -- the refusal is recorded, the
   sessions are ended and the tokens are revoked either way, and nothing new
   starts. A run can be unconfirmed because it is still unwinding or because
   the Gateway is not answering, and the command cannot tell those apart from
@@ -498,13 +520,29 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   with none offers first-boot setup to whoever reaches it first. Restoring a
   database backup taken before a limit was set drops that limit with it;
   re-apply your record afterwards, as after any restore.
-- The role-limit documents say **when each surface stopped**: `started_at`
-  (UTC), `elapsed_ms` for the whole command, `changed` (whether this run
-  changed anything), and under `surfaces` one entry per surface with its
-  `action`, its `count`, `stopped_after_ms` on a monotonic clock from the
-  command's start and `stopped_at`, that offset added to `started_at`. A
-  surface limited at its next use, and `sessions`, which end in the limit's
-  own transaction, report the limit's commit. A surface the
+- The `disable` and role-limit documents say **when each surface
+  stopped**: `started_at` (UTC), `elapsed_ms` for the whole command, and
+  under `surfaces` one entry per surface with its `action`, its `count`,
+  `stopped_after_ms` on a monotonic clock from the command's start and
+  `stopped_at`, that offset added to `started_at`; the role-limit documents
+  add `changed` (whether this run changed anything). For `disable` the
+  surfaces are `sign_in` and `internal_launches` (`refused_at_next_use`:
+  covered accounts, active schedules), `sessions` (`ended`: covered
+  accounts), `personal_access_tokens` (`revoked`), `running_work` (`ended`,
+  `confirmed_by: run_status`) and the connections a Gateway process closes,
+  `websockets`, `sse_streams` and `downloads` (`ended`, with `processes`,
+  the live Gateway processes that confirmed, `processes_unconfirmed`, the
+  live ones that had not when the wait ran out, and `confirmed_by:
+  gateway_record`); a connection surface reports when the last live process
+  had confirmed, and its count is what the confirming processes closed for
+  this identity. A process beats every second even when it cannot look, so
+  a live one that cannot confirm -- a database error, say -- leaves the
+  connections unconfirmed rather than reported closed; only one that has
+  not beaten for 90 s is gone, holding nothing, which is why a Gateway that
+  crashed rather than stopped keeps a `disable` at exit 2 for up to 90 s.
+  For an identity with no account every surface is named with a count of 0. A surface refused or limited at its next use, and
+  a role limit's `sessions`, which end in the limit's own transaction,
+  report the commit. A surface the
   command could not confirm (`running_work`, when a cancelled run did not
   stop within `--wait-seconds`) is named under `surfaces_unconfirmed` and
   the exit status is **2**. For `limit-role` the surfaces and their counts
@@ -516,11 +554,21 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   `role_above` naming the limit; `confirmed_by: run_status` when ended, since
   the stop time is read from the run rows reaching a terminal status). The
   actions so far are `lowered`, `ended`, `limited_at_next_use`,
-  `already_limited`, `left_alone` and, for `lift-role-limit`'s one surface
-  `role_limit`, `lifted`; a later form may add surfaces and actions, so a
+  `already_limited`, `left_alone`, `refused_at_next_use`, `revoked` and, for
+  `lift-role-limit`'s one surface `role_limit`, `lifted`; a later form may add surfaces and actions, so a
   script should treat an unknown one as information, not failure.
 - A malformed command line -- an unknown flag, a missing value -- is refused
   like any other refusal: one document with `error`, exit **1**.
+- **What `disable` reaches, and what it does not yet.** A release whose
+  `disable` document carries `surfaces` closes open connections and reports
+  them; its migration `0044_refusal_sweeps` adds three tables of Gateway
+  process records, which the downgrade drops. Not yet reached, beyond what
+  the refusal already refuses at its next use: a sandbox kept idle for reuse
+  and any process a finished run left behind in it, MCP and browser-tool
+  sessions a Gateway keeps for a thread, queued memory updates, durable MCP
+  tasks and subagent batches, and channel attachments fetched before a
+  message is refused. The document names only the surfaces it covers; a
+  surface it does not name is not covered, not confirmed.
 - `release-email` gives up the address of an account that is **turned off**,
   so a person may hold it again. `users.email` is unique, so one address
   belongs to one account for good -- right while the account is someone's,
@@ -568,10 +616,11 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
 - The account's content stays where it is, owned by the account; nothing is
   exported, reassigned or deleted.
 
-Sample output of `disable`:
+Sample output of `disable` on an account with two tokens, a schedule, a run
+in flight and its stream open in a browser:
 
 ```json
-{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "role_limit": null, "subject": "3141592"}, "command": "disable", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "schedules_held": 1, "sessions_ended": true, "tokens_revoked": 2, "verdict": "disabled"}
+{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00.018000+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "role_limit": null, "subject": "3141592"}, "command": "disable", "elapsed_ms": 3471, "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "returncode": 0, "runs_cancelled": 1, "runs_finished_first": [], "runs_found": 1, "runs_unconfirmed": [], "schedules_held": 1, "sessions_ended": true, "started_at": "2026-09-21T10:00:00+00:00", "surfaces": {"downloads": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "processes": 1, "processes_unconfirmed": [], "stopped_after_ms": 1040, "stopped_at": "2026-09-21T10:00:01.040000+00:00"}, "internal_launches": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "personal_access_tokens": {"action": "revoked", "count": 2, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "running_work": {"action": "ended", "confirmed_by": "run_status", "count": 1, "stopped_after_ms": 3412, "stopped_at": "2026-09-21T10:00:03.412000+00:00"}, "sessions": {"action": "ended", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "sign_in": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "sse_streams": {"action": "ended", "confirmed_by": "gateway_record", "count": 1, "processes": 1, "processes_unconfirmed": [], "stopped_after_ms": 1040, "stopped_at": "2026-09-21T10:00:01.040000+00:00"}, "websockets": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "processes": 1, "processes_unconfirmed": [], "stopped_after_ms": 1040, "stopped_at": "2026-09-21T10:00:01.040000+00:00"}}, "surfaces_unconfirmed": [], "tokens_revoked": 2, "verdict": "disabled"}
 ```
 
 and of `release-email` on that account, then of running it a second time:

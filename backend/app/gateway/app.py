@@ -236,6 +236,37 @@ def _memory_backend_diagnostics(app: FastAPI) -> dict[str, object] | None:
     return dict(value) if isinstance(value, dict) else None
 
 
+async def _start_refusal_watch():
+    """Look for accounts turned off among those this process holds a connection for (``refusal_watch``).
+
+    Only with a database: the account command, the watch's only caller, needs
+    one too, and without one there is nobody to confirm to. A failure to start
+    fails startup: a process that never registered would read to the command
+    as one holding nothing, and its connections would be reported closed.
+    """
+    import os
+    import socket
+    import uuid
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from app.gateway.refusal_watch import RefusalWatch
+    from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.refusal_sweeps import RefusalSweepRepository
+    from deerflow.runtime.owner_holdings import get_owner_holdings
+
+    session_factory = get_session_factory()
+    if session_factory is None:
+        return None
+    watch = RefusalWatch(
+        RefusalSweepRepository(session_factory),
+        get_owner_holdings(),
+        refused_owners=SQLiteUserRepository(session_factory).list_refused_user_ids,
+        process_id=f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}",
+    )
+    await watch.start()
+    return watch
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
@@ -751,10 +782,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
             app.state.topology_service_registry = build_multi_gateway_topology_service_registry()
             validate_topology_inventory_runtime_state(app.state)
+        refusal_watch = None
         try:
+            # Inside the try, so a watch that fails to start still shuts the
+            # rest down in order.
+            refusal_watch = await _start_refusal_watch()
             yield
         finally:
-            report = await coordinator.shutdown()
+            try:
+                report = await coordinator.shutdown()
+            finally:
+                if refusal_watch is not None:
+                    await refusal_watch.stop()
             if report.memory_flushed:
                 logger.info("Memory queue flush completed during Gateway graceful shutdown")
             else:
@@ -936,6 +975,15 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # a config.yaml and needs no restart; logging.enhance.enabled only decides
     # whether that id is printed into log records.
     app.add_middleware(TraceMiddleware)
+
+    # Outermost: every open connection is held under the account that
+    # authenticated it, so turning that account off closes it
+    # (``refusal_watch``). Outside every BaseHTTPMiddleware on purpose -- one
+    # outside it would complete a response cut mid-stream, and the client
+    # would read a cut download as a finished one.
+    from app.gateway.owner_connections import OwnerConnectionsMiddleware
+
+    app.add_middleware(OwnerConnectionsMiddleware)
 
     # Python extensions load once while the Gateway app is constructed. Agent
     # middleware builders consume the same immutable set through the process
