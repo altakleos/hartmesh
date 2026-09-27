@@ -2178,8 +2178,10 @@ inside the image reaching for Google, recorded on each run as an
 
 ## Download all my data
 
-Any signed-in person can download all of their own work
-(`POST /api/account/export`). The download covers every conversation as the
+Any signed-in person can download all of their own work from the web app's
+account menu, _Settings and more_ → _Download all my data_
+(`POST /api/account/export`). The dialog follows it while it is prepared and
+links each part. The download covers every conversation as the
 page shows it, every file in its uploads, outputs and workspace, their own
 files and skills, their memory, their schedules and their custom agents.
 Nobody can export someone else's: the routes act only for the session that

@@ -654,6 +654,39 @@ export interface Translations {
     modelLoadRetrying: string;
   };
 
+  // Download all my data
+  accountExport: {
+    menuItem: string;
+    title: string;
+    description: string;
+    onlyYours: string;
+    closeAnytime: string;
+    start: string;
+    preparing: string;
+    conversationsProgress: (done: number, total: number) => string;
+    filesProgress: (done: number, total: number) => string;
+    stop: string;
+    ready: string;
+    includesUpTo: (time: string) => string;
+    download: string;
+    downloadPart: (number: number, count: number) => string;
+    downloaded: string;
+    multiPart: string;
+    availableUntil: (time: string) => string;
+    keptWhileDownloading: string;
+    allDownloaded: string;
+    skipped: (count: number) => string;
+    deleteNow: string;
+    deleteFailed: string;
+    gone: string;
+    noSpace: string;
+    failed: string;
+    tryAgain: string;
+    busy: string;
+    unavailable: string;
+    loadFailed: string;
+  };
+
   // Conversation
   conversation: {
     noMessages: string;

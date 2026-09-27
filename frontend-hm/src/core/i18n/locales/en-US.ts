@@ -847,6 +847,53 @@ export function createEnUS(product: string): Translations {
       modelLoadRetrying: "Retrying…",
     },
 
+    // Download all my data
+    accountExport: {
+      menuItem: "Download all my data",
+      title: "Download all my data",
+      description:
+        "A copy of every conversation, every file you uploaded or the assistant made, My files, the skills you made, your memory, your scheduled tasks and your custom agents.",
+      onlyYours:
+        "It includes only your own work: nothing from anyone else, and none of your saved passwords, keys or connection settings.",
+      closeAnytime:
+        "Preparing can take a while for a large account. You can close this window meanwhile and come back here to download it.",
+      start: "Prepare my download",
+      preparing: "Preparing your download…",
+      conversationsProgress: (done: number, total: number) =>
+        `Conversations: ${done} of ${total}`,
+      filesProgress: (done: number, total: number) =>
+        `Files: ${done} of ${total}`,
+      stop: "Stop preparing",
+      ready: "Your download is ready.",
+      includesUpTo: (time: string) => `It includes everything up to ${time}.`,
+      download: "Download",
+      downloadPart: (number: number, count: number) =>
+        `Download part ${number} of ${count}`,
+      downloaded: "Downloaded",
+      multiPart:
+        "Your download is split into parts. Download each one, then unzip them all into the same folder.",
+      availableUntil: (time: string) =>
+        `Ready to download until ${time}. Starting a download gives you more time.`,
+      keptWhileDownloading: "Kept for as long as a part is downloading.",
+      allDownloaded:
+        "Everything is downloaded. This copy is deleted in a few minutes; until then you can download any part again. Nothing in your account is deleted.",
+      skipped: (count: number) =>
+        count === 1
+          ? "1 item could not be included. README.md in the download says which and why."
+          : `${count} items could not be included. README.md in the download says which and why.`,
+      deleteNow: "Delete this download",
+      deleteFailed: "Couldn't delete this download. Try again.",
+      gone: "Your earlier download has been deleted. You can prepare a new one.",
+      noSpace:
+        "There isn't enough free space to prepare your download. Ask your administrator to make room.",
+      failed: "Your download couldn't be prepared. Try again.",
+      tryAgain: "Try again",
+      busy: "Other people's downloads are being prepared right now. Try again in a few minutes.",
+      unavailable:
+        "Downloading all your data isn't available in this workspace.",
+      loadFailed: "Couldn't check on your download.",
+    },
+
     // Conversation
     conversation: {
       noMessages: "No messages yet",

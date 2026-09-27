@@ -471,6 +471,8 @@ async def test_the_readme_says_what_is_where_and_what_was_left_out(tmp_path, mon
     readme = _archive(await deployment.export(PERSON_A))["README.md"].decode()
 
     assert "2 conversations and 6 of your files" in readme
+    # Whose it is, in the words the page's dialog uses.
+    assert "It includes nothing from anyone else, and none of your saved passwords, keys or connection settings." in readme
     assert "- August numbers: 2026-09-20, 2 messages, in `conversations/a-thread-1/`" in readme
     assert "- Hiring plan: 2026-09-20, 2 messages, in `conversations/a-thread-2/`" in readme
     assert "conversations/a-thread-1/files/outputs/bad:name.txt: a name some computers cannot hold" in readme
