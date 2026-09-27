@@ -452,6 +452,9 @@ def build_subagent_runtime_middlewares(
             app_config=app_config,
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
+            # A subagent sees only its own messages, not a build the lead has
+            # already run and delivered, so it is not held to a first command.
+            first_command_order=False,
         )
     )
 

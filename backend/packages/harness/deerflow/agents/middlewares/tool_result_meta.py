@@ -115,10 +115,11 @@ _ATTRS_BY_ERROR_TYPE: dict[str, dict[str, object]] = {str(attrs["error_type"]): 
 # category invites. Declared by the exception (``tool_error_type``) rather than
 # recognised in its message, so the behaviour cannot drift with the wording.
 #
-# ``not_run`` is a call the runtime held back before it ran, because it was
-# chosen in the same message that loads the skill instructions meant to govern
-# it (SkillToolPolicyMiddleware). Nothing failed; the next step is to choose
-# again with those instructions in hand.
+# ``not_run`` is a call the runtime held back before it ran
+# (SkillToolPolicyMiddleware): chosen in the same message that loads the skill
+# instructions meant to govern it, or sandbox work chosen before the first
+# command a skill loaded in this turn starts with. Nothing failed; the next
+# step is to choose again with those instructions, or that command, in hand.
 _DECLARED_ATTRS: dict[str, dict[str, object]] = {
     "capacity": {"error_type": "capacity", "recoverable_by_model": False, "recommended_next_action": "summarize"},
     "not_run": {"error_type": "not_run", "recoverable_by_model": True, "recommended_next_action": "continue"},

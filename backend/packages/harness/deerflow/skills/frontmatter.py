@@ -17,6 +17,7 @@ ALLOWED_FRONTMATTER_PROPERTIES = {
     "description",
     "license",
     "allowed-tools",
+    "first-command",
     "argument-hint",
     "required-secrets",
     "secrets-autonomous",

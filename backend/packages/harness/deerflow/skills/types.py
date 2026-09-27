@@ -3,6 +3,7 @@ from enum import StrEnum
 from pathlib import Path
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
+from deerflow.skills.first_command import FirstCommand
 
 SKILL_MD_FILE = "SKILL.md"
 
@@ -55,6 +56,9 @@ class Skill:
     # autonomous model load (skill_context), or only on explicit /slash
     # activation. Frontmatter: ``secrets-autonomous`` (default true).
     secrets_autonomous: bool = True
+    # Frontmatter ``first-command``: what the skill's work starts with; nothing
+    # else runs in the sandbox between its first load and a run of it.
+    first_command: FirstCommand | None = None
     # Accepted durable invocations may execute from a host-owned immutable
     # snapshot whose sandbox location is not derived from the live category
     # tree. This value is process-local execution material and is never part of

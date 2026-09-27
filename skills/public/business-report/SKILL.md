@@ -1,6 +1,7 @@
 ---
 name: business-report
 description: Use this skill when the user uploads a tabular business export (CSV, XLSX or XLS of jobs, orders, invoices, appointments or sales) and wants a monthly, quarterly or yearly business review, management report or summary they can download, share or send. Produces one report with KPIs, tables, locally drawn charts and a plain-words checks line, rendered as PDF, Word (DOCX) and Excel (XLSX) with the same numbers in each.
+first-command: scripts/report.py build
 ---
 
 # Business Report Skill
@@ -9,7 +10,7 @@ description: Use this skill when the user uploads a tabular business export (CSV
 
 One script turns an export into a report draft: `report.json` plus PNG charts, then renders that one document to HTML, PDF, DOCX and XLSX. Every number in every render comes from `report.json`, so the formats agree by construction. The script runs on the libraries the sandbox image ships, installs nothing, calls no network service (the PDF printer refuses every URL that is not inline data) and never modifies an input file.
 
-The first call for a report is the `build` in Step 1. It reads the export itself and prints what it found, so neither the upload, its sheets nor this directory needs looking at first: the scripts it runs are the ones named below.
+The first call for a report is the `build` in Step 1. It reads the export itself and prints what it found, so neither the upload, its sheets nor this directory needs looking at first: the scripts it runs are the ones named below. The runtime holds to that order (the `first-command` line above): the first time this file is read in a conversation, nothing else runs in the sandbox until a build has run, whatever its outcome, or until you answer without a tool.
 
 **Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Assign it in every command that runs one of these scripts, as a statement of its own ahead of the script, the way each example below does (`SKILL_DIR="<Directory>"; python …`). Written in front of the script without the `;`, it is not set yet when bash expands that command's own words: the guard stops the command, and without the guard the path is `/scripts/…`. Where a skill is mounted differs between deployments, so no absolute path can be written here.
 
@@ -143,7 +144,7 @@ The report directory under `/mnt/user-data/outputs/reports/` is what the user do
  "comparisons": ["previous_period", "same_period_last_year"]}
 ```
 
-Write it at `/mnt/user-data/outputs/reports/preferences.json` only when the user states a lasting preference ("always drop warranty jobs", "use our green from now on"); a one-off request changes only this report. Pass it to every build in this conversation with `--prefs`; `meta.preferences_applied` in `report.json` lists what applied. The file lives with this conversation's outputs, so tell the user in one sentence that the preference applies to reports in this conversation and that they can download the file and upload it next time to apply it again. Do not promise it will be remembered on its own.
+Write it at `/mnt/user-data/outputs/reports/preferences.json` only when the user states a lasting preference ("always drop warranty jobs", "use our green from now on"); a one-off request changes only this report. When the preference comes with the request that first reads this file, create `reports/` and write the file in the same `bash` command as the build, ahead of it, since nothing else runs in the sandbox before the build. Pass it to every build in this conversation with `--prefs`; `meta.preferences_applied` in `report.json` lists what applied. The file lives with this conversation's outputs, so tell the user in one sentence that the preference applies to reports in this conversation and that they can download the file and upload it next time to apply it again. Do not promise it will be remembered on its own.
 
 ## Branding
 

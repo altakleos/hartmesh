@@ -203,6 +203,8 @@ def test_build_subagent_runtime_middlewares_threads_app_config_to_llm_middleware
     policy_idx = next(i for i, m in enumerate(middlewares) if isinstance(m, SkillToolPolicyMiddleware))
     assert policy_idx == activation_idx + 1
     assert middlewares[activation_idx]._slash_source_owner_token == middlewares[policy_idx]._slash_source_owner_token
+    # A subagent sees only its own messages, not a first command the lead already ran.
+    assert middlewares[policy_idx]._first_command_order is False
     # DurableContextMiddleware is present but not last: the coalescer (#4040) is
     # appended innermost so it can merge the SystemMessage DurableContext injects.
     # The coalescer is appended unconditionally (after the optional summarization
