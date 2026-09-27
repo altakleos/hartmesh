@@ -21,11 +21,11 @@ describe("exportThread in the browser", () => {
     );
     rs.stubGlobal("fetch", fetchMock);
     const saved: { name: string; href: string }[] = [];
-    rs.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(
-      function (this: HTMLAnchorElement) {
-        saved.push({ name: this.download, href: this.href });
-      },
-    );
+    rs.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      saved.push({ name: this.download, href: this.href });
+    });
     const created = rs
       .spyOn(URL, "createObjectURL")
       .mockReturnValue("blob:transcript");
@@ -36,7 +36,9 @@ describe("exportThread in the browser", () => {
     await exportThread("thread-1", "markdown");
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(saved).toEqual([{ name: "月度 review.md", href: "blob:transcript" }]);
+    expect(saved).toEqual([
+      { name: "月度 review.md", href: "blob:transcript" },
+    ]);
     const blob = created.mock.calls[0]![0] as Blob;
     expect(await blob.text()).toBe("# Monthly review\n");
     expect(revoked).toHaveBeenCalledWith("blob:transcript");

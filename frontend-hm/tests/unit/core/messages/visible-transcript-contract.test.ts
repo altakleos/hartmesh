@@ -43,7 +43,8 @@ describe("visible transcript contract", () => {
   for (const testCase of CONTRACT.cases) {
     it(testCase.name, () => {
       const { message } = testCase;
-      const visible = !isHiddenFromUIMessage(message) && message.type !== "tool";
+      const visible =
+        !isHiddenFromUIMessage(message) && message.type !== "tool";
       expect(visible).toBe(testCase.visible);
       expect(extractContentFromMessage(message)).toBe(testCase.content);
     });
