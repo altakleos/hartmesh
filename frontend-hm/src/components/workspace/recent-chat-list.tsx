@@ -45,10 +45,13 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 import { resetThreadChatAfterDelete } from "@/components/workspace/chats/use-thread-chat";
-import { getAPIClient } from "@/core/api";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
-import { exportThread, type ThreadExportFormat } from "@/core/threads/export";
+import {
+  exportThread,
+  ThreadExportEmptyError,
+  type ThreadExportFormat,
+} from "@/core/threads/export";
 import {
   useDeleteThread,
   useInfiniteThreads,
@@ -57,7 +60,7 @@ import {
 } from "@/core/threads/hooks";
 import { flattenThreadBranches } from "@/core/threads/thread-branch-tree";
 import { buildThreadListModel } from "@/core/threads/thread-list-model";
-import type { AgentThread, AgentThreadState } from "@/core/threads/types";
+import type { AgentThread } from "@/core/threads/types";
 import {
   channelSourceOfThread,
   isThreadPinned,
@@ -256,19 +259,14 @@ export function RecentChatList() {
   const handleExport = useCallback(
     async (thread: AgentThread, format: ThreadExportFormat) => {
       try {
-        const apiClient = getAPIClient();
-        const state = await apiClient.threads.getState<AgentThreadState>(
-          thread.thread_id,
-        );
-        const messages = state.values?.messages ?? [];
-        if (messages.length === 0) {
-          toast.error(t.conversation.noMessages);
-          return;
-        }
-        exportThread(thread, messages, format);
+        await exportThread(thread.thread_id, format);
         toast.success(t.common.exportSuccess);
-      } catch {
-        toast.error(t.common.exportFailed);
+      } catch (error) {
+        toast.error(
+          error instanceof ThreadExportEmptyError
+            ? t.conversation.noMessages
+            : t.common.exportFailed,
+        );
       }
     },
     [t],
