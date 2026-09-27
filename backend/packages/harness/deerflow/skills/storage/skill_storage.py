@@ -72,7 +72,7 @@ class SkillStorage(ABC):
             temp_skill_dir = Path(tmp_dir) / SkillStorage.validate_skill_name(name)
             temp_skill_dir.mkdir(parents=True, exist_ok=True)
             (temp_skill_dir / SKILL_MD_FILE).write_text(content, encoding="utf-8")
-            is_valid, message, parsed_name = _validate_skill_frontmatter(temp_skill_dir)
+            is_valid, message, parsed_name = _validate_skill_frontmatter(temp_skill_dir, package=False)
             if not is_valid:
                 raise ValueError(message)
             if parsed_name != name:

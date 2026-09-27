@@ -64,6 +64,7 @@ from deerflow.sandbox.sandbox_provider import (
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.security import LOCAL_HOST_BASH_DISABLED_MESSAGE, is_host_bash_allowed
 from deerflow.sandbox.session import declared_sandbox
+from deerflow.sandbox.tool_metadata import tag_sandbox_tool
 from deerflow.tools.presentation import with_presentation
 from deerflow.tools.types import Runtime
 
@@ -3023,3 +3024,7 @@ async def _str_replace_tool_async(
 
 
 str_replace_tool.coroutine = _str_replace_tool_async
+
+
+for _sandbox_tool in (bash_tool, ls_tool, glob_tool, grep_tool, read_file_tool, write_file_tool, str_replace_tool):
+    tag_sandbox_tool(_sandbox_tool)

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import yaml
 
+from .first_command import FIRST_COMMAND_PROPERTY, is_package_file, parse_first_command
 from .types import SKILL_MD_FILE, SecretRequirement, Skill, SkillCategory
 
 logger = logging.getLogger(__name__)
@@ -254,6 +255,12 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
 
         secrets_autonomous = parse_secrets_autonomous(metadata.get("secrets-autonomous"), skill_file)
 
+        try:
+            first_command = parse_first_command(metadata.get(FIRST_COMMAND_PROPERTY), lambda script: is_package_file(skill_file.parent, script))
+        except ValueError as exc:
+            logger.error("Invalid %s in %s: %s", FIRST_COMMAND_PROPERTY, skill_file, exc)
+            return None
+
         return Skill(
             name=name,
             description=description,
@@ -266,6 +273,7 @@ def parse_skill_file(skill_file: Path, category: SkillCategory, relative_path: P
             enabled=True,  # Actual state comes from the extensions config file.
             required_secrets=required_secrets,
             secrets_autonomous=secrets_autonomous,
+            first_command=first_command,
         )
 
     except Exception:
