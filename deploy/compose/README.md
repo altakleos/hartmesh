@@ -402,6 +402,7 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
 # … limit-role    --issuer https://login.example.com --subject 3141592 [--end-running-work]
 # … lift-role-limit --issuer https://login.example.com --subject 3141592
 # … disable       --email pat@example.com
+# … disable       --issuer https://login.example.com --subjects 3141592 2718281 1414213
 ```
 
 - `disable` records the refusal (`disabled_identities`, keyed by issuer and
@@ -452,7 +453,8 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   `runs_found`, `runs_cancelled`, `runs_finished_first` and
   `runs_unconfirmed`), and when each surface stopped (below).
 - Exit statuses: **0** done; **1** the command refused and changed nothing
-  (the document carries `error`; an `error` from an unexpected failure, such
+  (with `--subjects`, some identity was refused or failed: see *Many people
+  in one call*; the document carries `error`; an `error` from an unexpected failure, such
   as a database fault, may leave the command part-done, and re-running it is
   safe); **2** it did what was asked but a run named
   in `runs_unconfirmed` had not reached a terminal status when the wait ran
@@ -476,7 +478,10 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   the Gateway is not answering, and the command cannot tell those apart from
   the database, so it does not guess: re-run it to see whether the run has
   since stopped, and only investigate the Gateway if it stays unconfirmed.
-  `--wait-seconds` moves the bound (default 120). Ids under
+  `--wait-seconds` moves the bound (default 120). `disable`'s run wait stops
+  up to 5 s short of it (a quarter of a wait under 20 s), so the Gateway
+  processes' second look, which confirms what the runs left behind, has
+  time even when a run does not stop. Ids under
   `runs_finished_first` are runs that completed on their own before the
   cancellation reached them -- they stopped, but their results were
   delivered.
@@ -664,6 +669,58 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   `held`, `not_reached` and, for
   `lift-role-limit`'s one surface `role_limit`, `lifted`; a later form may add surfaces and actions, so a
   script should treat an unknown one as information, not failure.
+- **Many people in one call.** `disable`, `enable`, `limit-role` and
+  `lift-role-limit` take `--subjects` in place of `--subject`: several
+  subjects at the one `--issuer`, each its own word (`--subjects A B C`, or
+  `--subjects=A --subjects=B` -- the `=` form passes a subject that begins
+  with a dash). Every other flag applies to all of them. Each step is taken
+  for every identity before the next: every refusal or limit commits, and
+  every run is asked to stop, before the command waits, and then it waits
+  **once** for them all, so twenty people cost one wait, not twenty. The
+  document carries `identities`, one entry per identity in the order given
+  (a subject named twice is one), each the document the one-subject form
+  prints. An identity the command refused or could not finish has `verdict`
+  `refused` or `failed`, an `error` and `returncode` 1, and **does not stop
+  the others**. `refused` -- a subject that names two accounts, the last
+  administrator in local mode -- comes back the same on every call until
+  that changes (address the account by `--email`, or fix it at the
+  provider). `failed` -- a database fault -- may be part-done; re-run it. A
+  fault in a step every identity shares, such as the wait, fails each
+  identity it left unfinished, every one still with its entry. Those
+  entries carry no `surfaces` or run counts, so read `verdict` first.
+  `totals` counts the `identities` and their `verdicts`, names the
+  `subjects_refused`, `subjects_failed` and `subjects_unconfirmed`, and sums
+  the runs (`runs_found`, `runs_cancelled`, and the ids under
+  `runs_finished_first` and `runs_unconfirmed`), with every surface some
+  identity left unconfirmed (`surfaces_unconfirmed`) or not reached
+  (`surfaces_not_reached`). One person's run that does not stop leaves that
+  person unconfirmed, not the others. The exit status is the worst: **1** if
+  some identity was refused or failed -- which here means *some*, not that
+  nothing changed; the others were done -- else **2** if any was
+  unconfirmed, else **0**. A re-run is safe, as always, and re-checks
+  everyone. A document without `identities` means nothing was done: the
+  call was refused as a whole (more than 100 subjects, a malformed command
+  line, a lookup that failed before anything changed), or the release has no
+  `--subjects` (see the upgrade note). **Limits:** at most 100 subjects a
+  call (more is refused before anything changes; split them). Each subject
+  is its own argv word, so the command line is the subjects' own length plus
+  one byte each -- a hundred 255-byte subjects are 26 KB, inside Linux's
+  128 KB per word and 2 MB in all; a runner's own limit may be lower. The
+  `sh -c '…'` form above splices the words into a shell script, where a
+  subject with a quote, a space or a `$` breaks or is interpreted; to keep
+  each one a word, pass them after the script:
+  `sh -c 'cd /app/backend && PYTHONPATH=. exec uv run --no-sync python -m app.gateway.auth.accounts "$@"' accounts disable --issuer … --subjects …`.
+  The document is one line of about 5 KB an identity for `disable` and 1-2
+  KB for the others (a hundred people's `disable` printed 500 KB), so size
+  a batch to the runner's output limit too. The waits end `--wait-seconds`
+  after the command starts, and the work done for each identity in turn
+  comes on top: on SQLite on a development machine, under 100 ms an identity
+  for `disable` and under 60 ms for the other three (a hundred people's
+  `disable`, each with a token, a schedule and a chat binding, took 5 to 10
+  s plus the wait); PostgreSQL was not measured. Size the runner's timeout
+  at `--wait-seconds`, plus 0.25 s an identity, plus what a one-subject call
+  with `--wait-seconds 0` takes through the runner; and give a large batch a
+  longer wait, since the work before the wait comes out of it.
 - A malformed command line -- an unknown flag, a missing value -- is refused
   like any other refusal: one document with `error`, exit **1**.
 - **What `disable` reaches, and what it does not yet.** A release whose
@@ -774,6 +831,14 @@ suspension is lifted:
 {"account": {"disabled": false, "…": "…"}, "command": "enable", "held": {"channel_bindings": ["…"], "schedules": ["…"]}, "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "restore_held": true, "restored": {"channel_bindings": ["…"], "schedules": ["…"]}, "returncode": 0, "stayed_off": [], "verdict": "enabled"}
 ```
 
+and of `disable --subjects` on three people -- one done, one whose run had
+not stopped when the wait ran out, one whose subject names two accounts --
+each entry being the document above, shortened here:
+
+```json
+{"command": "disable", "elapsed_ms": 116412, "identities": [{"command": "disable", "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "returncode": 0, "verdict": "disabled", "…": "…"}, {"command": "disable", "identity": {"issuer": "https://login.example.com", "subject": "2718281"}, "returncode": 2, "runs_unconfirmed": ["…"], "surfaces_unconfirmed": ["running_work"], "verdict": "disabled", "…": "…"}, {"command": "disable", "error": "2 accounts have subject '1414213' at this issuer, one per configured provider: sso (sam@example.com), sso-basic (sam.lee@example.com); address one of them by --email", "identity": {"issuer": "https://login.example.com", "subject": "1414213"}, "returncode": 1, "verdict": "refused"}], "issuer": "https://login.example.com", "note": "…", "returncode": 1, "started_at": "2026-09-27T10:00:00+00:00", "totals": {"identities": 3, "runs_cancelled": 1, "runs_finished_first": [], "runs_found": 2, "runs_unconfirmed": ["…"], "subjects_failed": [], "subjects_refused": ["1414213"], "subjects_unconfirmed": ["2718281"], "surfaces_not_reached": [], "surfaces_unconfirmed": ["running_work"], "verdicts": {"disabled": 2, "refused": 1}}}
+```
+
 An account that is still on, and a subject with no account, each answer with
 an `error` and a non-zero exit instead:
 
@@ -804,6 +869,14 @@ usage error on stderr with exit 2 and no document, and nothing changes; a
 caller can tell the releases apart first: `list` carries `holds` from the
 release that has the flag. There `disable` holds nothing,
 and after `enable` a recurring schedule fires at its next due time.
+
+`--subjects` is honoured from the first release cut after
+`v2.1.0+hartmesh.34` that carries it. On `v2.1.0+hartmesh.34` and earlier
+it is a usage error on stderr, exit 2 and no document; a release cut
+between that one and this change answers it as a malformed command line,
+exit 1 with an `error` document. Either way nothing changes, and the answer
+has no `identities`, so a caller that gets none back falls back to one call
+per subject.
 
 ### Local passwords (`HARTMESH_LOCAL_PASSWORDS=allowed`)
 
