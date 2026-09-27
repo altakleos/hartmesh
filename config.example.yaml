@@ -2574,6 +2574,22 @@ agent_storage:
   backend: file
 
 # ============================================================================
+# Download All My Data
+# ============================================================================
+# Any signed-in person can download all of their own work in one archive
+# (POST /api/account/export). It is prepared on the data disk under
+# {base_dir}/exports, and deleted ten minutes after it has been downloaded,
+# when it expires, or when the Gateway stops or starts. Read when an export starts, so a
+# change applies to the next one without a restart. The defaults suit most
+# deployments; uncomment to change them.
+#
+# account_export:
+#   part_bytes: 2147483648         # 2 GiB; a larger account downloads as numbered parts
+#   min_free_bytes: 1073741824     # Free space the data disk keeps; refused before it would fall below
+#   expires_after_seconds: 3600    # Deleted once this long passes with no part downloading
+#   max_concurrent: 2              # Exports this Gateway prepares at once; each person has one at a time
+
+# ============================================================================
 # Scheduled Tasks Configuration
 # ============================================================================
 # Background scheduler for one-time and recurring (cron) agent runs.

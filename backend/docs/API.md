@@ -304,6 +304,103 @@ cost an empty artifact panel, a business-report card offering no downloads under
 a report whose files were present and downloadable, no todo list, and an active
 goal that stayed invisible while it drove hidden continuation turns.
 
+### Download All My Data
+
+```http
+POST   /api/account/export               # start, or answer with the export already in progress
+GET    /api/account/export               # its state and progress, and its parts once ready
+GET    /api/account/export/parts/{n}     # download part n (application/zip)
+DELETE /api/account/export               # stop it and delete it
+```
+
+Every route acts for the person whose browser session calls it; none takes a
+user id. A personal access token, an internal caller and an unauthenticated
+deployment get 403, and a person turned off is refused as everywhere else, so
+nobody, an administrator included, can export someone else's. Where more than
+one Gateway process serves the deployment (`durable_two_gateway_v1`, or
+`GATEWAY_WORKERS` above 1) the routes answer 503: an export is kept by the
+process that prepares it. The status:
+
+```json
+{
+  "state": "ready",
+  "started_at": "2026-09-27T10:30:00+00:00",
+  "progress": {"conversations_total": 42, "conversations_done": 42, "files_total": 311, "files_done": 311, "bytes_total": 734003200, "bytes_done": 734003200},
+  "parts": [{"number": 1, "size": 734210048, "downloaded": false}],
+  "skipped": 2,
+  "expires_at": "2026-09-27T11:30:05+00:00"
+}
+```
+
+- `state` is `building`, `ready`, `downloaded` (every part has been
+  downloaded at least once) or `failed`, with `error: {"code", "detail"}`. The code is `no_space` when the
+  data disk would keep less than `account_export.min_free_bytes` after what
+  the other exports being prepared still have to write, and `failed`
+  otherwise. The status answers 404 when there is no export.
+- `progress.files_total` counts the person's files to copy. The manifest's
+  `totals.files` counts every entry it lists, transcripts and documents
+  included. `skipped` counts what was left out.
+- A second `POST` while one is prepared or ready returns it. Past
+  `account_export.max_concurrent` exports being prepared at once, `POST`
+  answers 429 with `Retry-After: 60` and `{"detail": "...", "code": "busy"}`.
+- A part can be downloaded again until the export is deleted: a download that
+  looked complete may not have been saved. The export is deleted ten minutes
+  after every part has been downloaded, once `account_export.expires_after_seconds`
+  passes with no part downloading (`expires_at`, `null` while one is), and
+  when the Gateway stops or starts. After that the status answers 404.
+
+The archive:
+
+```
+README.md                                what is in it, in words: each conversation's title and folder, what was left out and why
+manifest.json                            the machine-readable list below (in the last part)
+conversations/<id>/transcript.md|.json   the transcript GET /api/threads/{id}/export writes
+conversations/<id>/files/uploads|outputs|workspace/...
+my-files/...                             the person's own files
+my-skills/...                            the skills the person made
+memory.json                              what GET /api/memory/export returns, where the memory backend keeps a document
+scheduled-tasks.json                     each schedule's definition
+agents.json                              each custom agent the person made, where agents_api is enabled
+agents/<name>/memory.json                what that agent remembers
+```
+
+The directories the Gateway's own tools keep in a conversation (tool-result
+spill, browser frames, an MCP server's `.mcp/` state) are process state, not
+the person's work, and are never included. A file that cannot be archived
+safely is left out and named in `skipped` with its reason: `link`,
+`hard_link`, `not_a_file`, `unsafe_name` (a name Windows cannot hold),
+`name_collision` (differs from another only by case), `changed`, `vanished`
+or `unreadable` while it was copied, or `too_large` (larger than the data
+disk). A conversation whose transcript cannot be read is listed with
+`"message_count": null` and no transcripts, and its files are still
+exported. `manifest.json`:
+
+```json
+{
+  "format": "account-export",
+  "version": 1,
+  "exported_at": "2026-09-27T10:30:02.114000+00:00",
+  "release": "2.1.0+hartmesh.35",
+  "person": {"id": "1f0c…", "email": "ana@example.com"},
+  "conversations": [
+    {"id": "3f2a…", "title": "Monthly review", "created_at": "2026-09-20T08:15:00+00:00", "updated_at": "2026-09-26T17:02:11+00:00", "message_count": 14, "transcripts": ["conversations/3f2a…/transcript.md", "conversations/3f2a…/transcript.json"]}
+  ],
+  "folders_without_conversation": [],
+  "files": [
+    {"path": "conversations/3f2a…/transcript.md", "size": 5120, "sha256": "9c1e…", "part": 1},
+    {"path": "conversations/3f2a…/files/outputs/august-review.pdf", "size": 184322, "sha256": "4b7d…", "part": 1},
+    {"path": "README.md", "size": 1480, "sha256": "e03a…", "part": 1}
+  ],
+  "skipped": [{"path": "conversations/3f2a…/files/workspace/data.csv", "reason": "changed"}],
+  "parts": 1,
+  "totals": {"conversations": 1, "files": 3, "bytes": 190922, "skipped": 1}
+}
+```
+
+`files` lists every entry but `manifest.json` itself, each with the part it
+is in. `folders_without_conversation` names conversation folders whose
+files were exported but which the conversation list no longer holds.
+
 ### Runs
 
 #### Create Run

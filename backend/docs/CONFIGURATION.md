@@ -500,6 +500,41 @@ Notes:
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
 
+### Download All My Data
+
+Any signed-in person can download all of their own work as one archive
+(`/api/account/export`, [API](API.md#download-all-my-data)). It is prepared
+on the data disk under `{base_dir}/exports` before it is downloaded. The
+section is optional; these are the defaults:
+
+```yaml
+account_export:
+  part_bytes: 2147483648        # 2 GiB, at least 64 MiB
+  min_free_bytes: 1073741824    # 1 GiB
+  expires_after_seconds: 3600   # 60 to 86400
+  max_concurrent: 2             # 1 to 8
+```
+
+- `part_bytes`: past it, the archive comes as numbered parts. A single file
+  larger than it is a part of its own.
+- `min_free_bytes`: the free space the disk keeps. An export is refused before
+  it writes anything when the person's data, plus what the other exports being
+  prepared still have to write, would leave less; it stops and is removed if the
+  disk fills while it runs. So an account larger than the free space minus this
+  cannot be exported until the disk grows. A single file larger than the whole
+  disk (a sparse file, say) is left out and named instead.
+- `expires_after_seconds`: an export is deleted once this long passes with no
+  part downloading, counted from when it is ready and again after each
+  download. Once every part has been downloaded, it goes ten minutes later
+  (or sooner, if this is shorter); until then a part can be downloaded again.
+- `max_concurrent`: exports this Gateway prepares at once. A person has one at
+  a time, and asking again returns it.
+- Read when an export starts, so an edit applies to the next one without a
+  restart.
+- An export lives in the Gateway process that prepares it. Where more than one
+  process serves the deployment (`durable_two_gateway_v1`, or
+  `GATEWAY_WORKERS` above 1), the routes answer 503.
+
 ### Agent Storage
 
 Custom agent **definitions** (`config.yaml` + `SOUL.md`) are stored per-user on

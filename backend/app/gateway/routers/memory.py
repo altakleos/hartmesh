@@ -149,7 +149,7 @@ def _unsupported_501(manager: object, label: str) -> HTTPException:
     )
 
 
-async def _get_memory_or_501(manager: MemoryManager, user_id: str, label: str) -> dict[str, Any]:
+async def _get_memory_or_501(manager: MemoryManager, user_id: str, label: str, *, agent_name: str | None = None) -> dict[str, Any]:
     """Read the full memory doc; 501 if the backend doesn't expose one.
 
     ``get_memory`` is tier-2 (default ``raise NotImplementedError``); a minimal
@@ -160,7 +160,9 @@ async def _get_memory_or_501(manager: MemoryManager, user_id: str, label: str) -
     endpoint's verb, e.g. "get memory" / "export memory" / "reload memory").
     """
     try:
-        return await asyncio.to_thread(manager.get_memory, user_id=user_id)
+        if agent_name is None:
+            return await asyncio.to_thread(manager.get_memory, user_id=user_id)
+        return await asyncio.to_thread(manager.get_memory, user_id=user_id, agent_name=agent_name)
     except NotImplementedError:
         raise _unsupported_501(manager, label) from None
     except (MemoryConflictError, MemoryCorruptionError) as exc:
@@ -440,9 +442,28 @@ async def update_memory_fact_endpoint(fact_id: str, request: FactPatchRequest, h
 )
 async def export_memory(http_request: Request) -> MemoryResponse:
     """Export the current memory data."""
+    return await _memory_export(_resolve_memory_user_id(http_request))
+
+
+async def _memory_export(user_id: str, *, agent_name: str | None = None) -> MemoryResponse:
     manager = await asyncio.to_thread(get_memory_manager)
-    memory_data = await _get_memory_or_501(manager, _resolve_memory_user_id(http_request), "export memory")
+    memory_data = await _get_memory_or_501(manager, user_id, "export memory", agent_name=agent_name)
     return MemoryResponse(**memory_data)
+
+
+async def memory_export_document(user_id: str, *, agent_name: str | None = None) -> dict[str, Any] | None:
+    """The document ``GET /memory/export`` answers for this person, or ``None`` when the backend keeps no full document.
+
+    ``agent_name``: what that custom agent remembers instead of the person's
+    own memory.
+    """
+    try:
+        response = await _memory_export(user_id, agent_name=agent_name)
+    except HTTPException as exc:
+        if exc.status_code == 501:
+            return None
+        raise
+    return response.model_dump(mode="json", exclude_none=True)
 
 
 @router.post(

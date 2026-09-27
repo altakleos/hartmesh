@@ -106,6 +106,9 @@ APP_CONFIG_FACTORY_EXCLUDED_FIELDS = frozenset(
         # agent's copy reaches it through `sandbox.mounts`, which is included
         # above; this path names only the Gateway-side reader.
         "tenant_bundle",
+        # The limits of a person's download of all their data: read by the
+        # Gateway when an export starts, never by an agent.
+        "account_export",
     }
 )
 

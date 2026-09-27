@@ -127,6 +127,10 @@ class AgentStore(abc.ABC):
     def list(self, *, user_id: str | None = None) -> list[AgentConfig]:
         """Return every custom agent owned by ``user_id``, sorted by name."""
 
+    def list_owned(self, *, user_id: str) -> list[AgentConfig]:
+        """Return only the agents ``user_id`` made: never a shared agent another layout offers them."""
+        return self.list(user_id=user_id)
+
     @abc.abstractmethod
     def list_all(self) -> list[tuple[str, AgentConfig]]:
         """Return ``(user_id, config)`` for every agent across all owners.
