@@ -5,6 +5,26 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.35] — 2026-09-27
+
+- hartmesh#158 — Stop pressed while a new sandbox boots ends the turn within seconds. It no longer waits for the sandbox to answer or for `sandbox.ready_timeout` (120 s on the tenant profile) to run out. The container is torn down at its next readiness probe, and the turn's slot is free when it ends. Stop while a chat's prewarm is still building still waits for the build.
+
+- hartmesh#159 — an MCP call on the synchronous tool path no longer hangs or aborts when a second call for the same stdio server and chat replaces its session. The replaced session's teardown ran on another thread's short-lived loop. The caller could wait on it forever, or until `session_init_timeout` (60 s by default) and then report a server timeout the server did not cause, or it could be cancelled by that loop's shutdown. Chats in the web app, chat-app channels and scheduled runs were not exposed.
+
+- hartmesh#160 — the deployer can hold a person below administrator: `accounts limit-role --issuer URL --subject SUB [--role user] [--end-running-work]`, and `lift-role-limit` to remove the limit. While a limit holds, the person is a `user` everywhere at once: the stored role, the next request of every session, a personal access token's runs, and scheduled and channel launches. A sign-in whose claim says `admin` stores `user`, so a provider restored from an old backup cannot bring the role back. The sessions of every covered account end in the limit's own transaction. A run already executing is left alone unless `--end-running-work` is given. `list` shows each account's `role_limit`. A personal access token is now refused on administrator routes by the route guard itself. Migration `0043_role_limits`.
+
+- hartmesh#161 — `disable` closes the person's open connections (SSE streams, streaming downloads, the browser WebSocket) through every Gateway process. It refuses a run admitted just before the refusal, and ends sessions and revokes tokens on every account the identity covers. The document now says, for each surface, what was done, how many, and when it stopped (`surfaces`, `started_at`, `elapsed_ms`). A surface not confirmed stopped is named under `surfaces_unconfirmed`, and the exit status is 2. Migration `0044_refusal_sweeps`.
+
+- hartmesh#162 — `disable` ends what a Gateway keeps for the person between requests: their sandboxes, parked or in use, and anything a finished run left running in them; their pooled MCP sessions; their browser sessions; and their queued memory updates. `running_work` now reports when the runs' sandboxes were confirmed stopped (`confirmed_by: sandbox_gone`). A surface a live process has no way to end is `not_reached`, listed under `surfaces_not_reached`; on the local sandbox provider `sandboxes` is always `not_reached`. Migration `0045_refusal_sweep_reach`.
+
+- hartmesh#163 — `disable` cancels the person's durable MCP tasks at the remote server and their subagent batches, including items a Gateway is executing, and waits for them within the same `--wait-seconds`. A channel message from a turned-off person is answered with the access-off reply before a thread is created, a run credential is minted or an attachment is fetched. New surfaces: `mcp_tasks`, `subagent_batches`, `mcp_task_notifications` and `channel_ingress`. Migration `0046_mcp_task_disable_reason`.
+
+- hartmesh#164 — each sandbox container is labelled with its owner (`deerflow.owner_user_id`, `deerflow.thread_id`) on the Docker runtime. A Gateway that restarts and adopts it can then stop it when its owner is turned off. Before this, an adopted sandbox had no owner, so after a restart any `disable` could exit 2 for up to 30 minutes. Containers started by an earlier release carry no label and stay unattributed until their idle timeout ends them.
+
+- hartmesh#165 — `disable` holds what could start work for the person again: it pauses their active schedules and holds their channel bindings, recorded per identity before anything is paused (`held`; `list` shows it under `holds`). It ends the work already waiting to run (queued scheduled occurrences, task notifications, queued channel messages) and forgets unused connect codes. `enable` now revives nothing: sessions, tokens, schedules and bindings stay off. `enable --restore-held` turns back on exactly what the last `disable` held, and names anything it could not restore under `stayed_off` (exit 2). A launch refused for its owner ends instead of being retried. Migration `0047_identity_holds`.
+
+- hartmesh#166 — `disable`, `enable`, `limit-role` and `lift-role-limit` take `--subjects`: up to 100 people at one `--issuer` in one call. Every refusal or limit commits and every run is asked to stop before the command waits once for all of them. The document carries one entry per person under `identities`, each the document the one-person form prints, plus `totals`. One person's refusal or failure is their own entry and does not stop the others. The exit status is the worst: 1 if someone was refused or failed, else 2 if someone is unconfirmed, else 0. `disable`'s run wait now stops up to 5 s before `--wait-seconds` when Gateway processes are there to look, so one slow run leaves only its own person unconfirmed. The compose README states the limits in argv size, output size and time.
+
 ## [2.1.0+hartmesh.34] — 2026-09-24
 
 - hartmesh#155 — a chat opened while both of the tenant's sandbox slots are busy is answered instead of failing with "Runtime operation failed". A turn with skills now takes its sandbox at the first tool call that needs one, not before the model is asked, so a plain chat, or one that calls only tools outside the sandbox, answers at once. A turn that does need the sandbox has that call refused, and the agent says the workspace is busy; a scheduled task that meets a full workspace is marked failed with that reason. Stop during the wait for a slot ends the turn in under a second instead of about five, leaving no slot or queued start behind. A skill turn's log line now shows `acquire_reason=lazy_deferred`, and a chat that only talks for longer than `prewarm_claim_timeout` loses its prewarmed sandbox.
@@ -362,6 +382,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.35]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.35
 [2.1.0+hartmesh.34]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.34
 [2.1.0+hartmesh.33]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.33
 [2.1.0+hartmesh.32]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.32
