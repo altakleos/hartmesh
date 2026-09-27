@@ -1213,6 +1213,20 @@ async def test_a_person_turned_off_loses_the_export_they_had(tmp_path, monkeypat
     assert "account_exports" in retained_state.RETAINED_SURFACES
 
 
+@pytest.mark.anyio
+async def test_a_process_that_prepares_no_exports_still_answers_for_them() -> None:
+    holdings = OwnerHoldings()
+
+    async def _no_owner(thread_id: str) -> None:
+        return None
+
+    retained_state.add_retained_state_sources(holdings, thread_owner=_no_owner)
+
+    # Every surface the account command names has a source here, so none reads as unasked.
+    assert "account_exports" in holdings._sources
+    assert holdings._sources["account_exports"][0](frozenset({A_ID})) == {}
+
+
 # ── What the logs say ───────────────────────────────────────────────────
 
 

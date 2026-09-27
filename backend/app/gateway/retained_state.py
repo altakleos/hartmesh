@@ -138,9 +138,13 @@ def add_retained_state_sources(holdings: OwnerHoldings, *, thread_owner: ThreadO
     holdings.add_source("sandboxes", _sandboxes, blocking=True)
     holdings.add_source("mcp_sessions", _mcp_sessions)
     holdings.add_source("browser_sessions", _browser_sessions)
+
+    def _account_exports(owners: frozenset[str]) -> dict[str, Ended]:
+        # A process that prepares no exports holds none.
+        return account_exports.end_for_owners(owners) if account_exports is not None else {}
+
     holdings.add_source("memory_updates", _memory_updates)
-    if account_exports is not None:
-        holdings.add_source("account_exports", account_exports.end_for_owners)
+    holdings.add_source("account_exports", _account_exports)
 
 
 __all__ = ["RETAINED_SURFACES", "add_retained_state_sources", "thread_owner_from", "unreached_surfaces"]
