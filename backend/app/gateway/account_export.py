@@ -451,7 +451,8 @@ def _readme(manifest: dict[str, Any], *, own_files: int, own_bytes: int, has: di
         "",
         f"Exported on {exported} for {_markdown_text(manifest['person']['email'] or manifest['person']['id'])}.",
         "",
-        f"This download holds your own work: {len(manifest['conversations'])} conversations and {own_files} of your files ({_size(own_bytes)}). It holds nothing of anyone else's, and no password, key or connection setting.",
+        f"This download holds your own work: {len(manifest['conversations'])} conversations and {own_files} of your files ({_size(own_bytes)}). "
+        "It includes nothing from anyone else, and none of your saved passwords, keys or connection settings.",
         "",
         "If it came as more than one part, unzip every part into the same folder.",
         "`manifest.json` lists every file with its size and SHA-256 checksum, so a program can check the download is whole.",

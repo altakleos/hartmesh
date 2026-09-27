@@ -800,6 +800,48 @@ export function createZhCN(product: string): Translations {
       modelLoadRetrying: "正在重试…",
     },
 
+    // Download all my data
+    accountExport: {
+      menuItem: "下载我的全部数据",
+      title: "下载我的全部数据",
+      description:
+        "包含你的所有对话、你上传或助手生成的全部文件、“我的文件”、你创建的技能、你的记忆、定时任务和自定义智能体。",
+      onlyYours:
+        "仅包含你自己的内容：不含他人的任何数据，也不含已保存的密码、密钥或连接设置。",
+      closeAnytime:
+        "账户数据较多时，准备可能需要一段时间。期间你可以关闭此窗口，稍后回到这里下载。",
+      start: "准备下载",
+      preparing: "正在准备下载…",
+      conversationsProgress: (done: number, total: number) =>
+        `对话 ${done} / ${total}`,
+      filesProgress: (done: number, total: number) => `文件 ${done} / ${total}`,
+      stop: "停止准备",
+      ready: "下载内容已准备好。",
+      includesUpTo: (time: string) => `包含截至 ${time} 的全部内容。`,
+      download: "下载",
+      downloadPart: (number: number, count: number) =>
+        `下载第 ${number} 部分（共 ${count} 部分）`,
+      downloaded: "已下载",
+      multiPart:
+        "下载内容分为多个部分。请逐一下载，然后全部解压到同一个文件夹。",
+      availableUntil: (time: string) =>
+        `可下载至 ${time}。开始下载会延长保留时间。`,
+      keptWhileDownloading: "正在下载，下载期间会一直保留。",
+      allDownloaded:
+        "全部内容已下载。此下载副本将在几分钟后删除，在此之前可以重新下载任一部分。你账户中的数据不会被删除。",
+      skipped: (count: number) =>
+        `有 ${count} 项未能包含在内。下载中的 README.md 列出了具体项目和原因。`,
+      deleteNow: "删除此下载",
+      deleteFailed: "无法删除此下载，请重试。",
+      gone: "之前的下载已被删除。你可以重新准备一个。",
+      noSpace: "可用空间不足，无法准备下载。请联系管理员腾出空间。",
+      failed: "下载未能准备完成，请重试。",
+      tryAgain: "重试",
+      busy: "其他人的下载正在准备中，请几分钟后再试。",
+      unavailable: "此工作区不支持下载全部数据。",
+      loadFailed: "无法获取下载状态。",
+    },
+
     // Conversation
     conversation: {
       noMessages: "还没有消息",

@@ -2,6 +2,7 @@
 
 import {
   ChevronsUpDown,
+  DownloadIcon,
   InfoIcon,
   Settings2Icon,
   SettingsIcon,
@@ -24,7 +25,9 @@ import {
 } from "@/components/ui/sidebar";
 import { useBranding } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
+import { AccountExportDialog } from "./account-export-dialog";
 import { useSettingsDialog } from "./settings";
 
 function NavMenuButtonContent({
@@ -50,6 +53,7 @@ function NavMenuButtonContent({
 export function WorkspaceNavMenu() {
   const { openSettings } = useSettingsDialog();
   const [mounted, setMounted] = useState(false);
+  const [exportOpen, setExportOpen] = useState(false);
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
   // About is the company's when the tenant bundle names one, else the product's.
@@ -87,6 +91,13 @@ export function WorkspaceNavMenu() {
                     <Settings2Icon />
                     {t.common.settings}
                   </DropdownMenuItem>
+                  {/* A static demo has no Gateway to prepare it. */}
+                  {!isStaticWebsiteOnly() && (
+                    <DropdownMenuItem onClick={() => setExportOpen(true)}>
+                      <DownloadIcon />
+                      {t.accountExport.menuItem}
+                    </DropdownMenuItem>
+                  )}
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
@@ -108,6 +119,8 @@ export function WorkspaceNavMenu() {
           )}
         </SidebarMenuItem>
       </SidebarMenu>
+      {/* Mounted only while open, so it never shows what an earlier opening saw. */}
+      {exportOpen && <AccountExportDialog open onOpenChange={setExportOpen} />}
     </>
   );
 }
