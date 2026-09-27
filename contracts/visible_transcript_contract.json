@@ -1,0 +1,491 @@
+{
+  "version": 1,
+  "description": "Cross-language contract fixture for a conversation's transcript. The Gateway writes every transcript a person downloads (backend/app/gateway/transcript.py); the page draws the same conversation (frontend-hm/src/core/messages/utils.ts). For each message, `visible` is whether the page draws it at all (not hidden from the UI, not a tool result), `content` is the text the page draws for it (inline reasoning removed), and `text` is what the transcript carries: that content with every backend-injected context marker removed as well, so no server path or memory leaves in a file. The page is tested on `visible` and `content`, the Gateway on all three. `internal_marker_tags` are the tags whose blocks the transcript removes; the page's `INTERNAL_MARKER_TAGS` and the Gateway's list both equal it.",
+  "internal_marker_tags": [
+    "current_uploads",
+    "uploaded_files",
+    "slash_skill_activation",
+    "system-reminder",
+    "memory",
+    "current_date"
+  ],
+  "cases": [
+    {
+      "name": "plain user text",
+      "message": {
+        "id": "h-1",
+        "type": "human",
+        "content": "hello"
+      },
+      "visible": true,
+      "content": "hello",
+      "text": "hello"
+    },
+    {
+      "name": "plain assistant text",
+      "message": {
+        "id": "a-1",
+        "type": "ai",
+        "content": "hi there"
+      },
+      "visible": true,
+      "content": "hi there",
+      "text": "hi there"
+    },
+    {
+      "name": "hidden from the UI",
+      "message": {
+        "id": "h-2",
+        "type": "human",
+        "content": "internal system reminder",
+        "additional_kwargs": {
+          "hide_from_ui": true
+        }
+      },
+      "visible": false,
+      "content": "internal system reminder",
+      "text": "internal system reminder"
+    },
+    {
+      "name": "a summary control message",
+      "message": {
+        "id": "a-2",
+        "type": "ai",
+        "name": "summary",
+        "content": "summary of earlier turns"
+      },
+      "visible": false,
+      "content": "summary of earlier turns",
+      "text": "summary of earlier turns"
+    },
+    {
+      "name": "a loop warning control message",
+      "message": {
+        "id": "h-3",
+        "type": "human",
+        "name": "loop_warning",
+        "content": "you are repeating yourself"
+      },
+      "visible": false,
+      "content": "you are repeating yourself",
+      "text": "you are repeating yourself"
+    },
+    {
+      "name": "a todo reminder control message",
+      "message": {
+        "id": "h-4",
+        "type": "human",
+        "name": "todo_reminder",
+        "content": "remember the list"
+      },
+      "visible": false,
+      "content": "remember the list",
+      "text": "remember the list"
+    },
+    {
+      "name": "a todo completion reminder control message",
+      "message": {
+        "id": "h-5",
+        "type": "human",
+        "name": "todo_completion_reminder",
+        "content": "finish the list"
+      },
+      "visible": false,
+      "content": "finish the list",
+      "text": "finish the list"
+    },
+    {
+      "name": "a tool result",
+      "message": {
+        "id": "t-1",
+        "type": "tool",
+        "name": "task",
+        "tool_call_id": "call-1",
+        "content": "Task Succeeded. Result: confidential"
+      },
+      "visible": false,
+      "content": "Task Succeeded. Result: confidential",
+      "text": "Task Succeeded. Result: confidential"
+    },
+    {
+      "name": "reasoning in additional_kwargs stays out",
+      "message": {
+        "id": "a-3",
+        "type": "ai",
+        "content": "final answer",
+        "additional_kwargs": {
+          "reasoning_content": "secret chain of thought"
+        }
+      },
+      "visible": true,
+      "content": "final answer",
+      "text": "final answer"
+    },
+    {
+      "name": "tool calls stay out",
+      "message": {
+        "id": "a-4",
+        "type": "ai",
+        "content": "ok",
+        "tool_calls": [
+          {
+            "id": "1",
+            "name": "task",
+            "args": {
+              "description": "do work"
+            }
+          }
+        ]
+      },
+      "visible": true,
+      "content": "ok",
+      "text": "ok"
+    },
+    {
+      "name": "inline think pair",
+      "message": {
+        "id": "a-5",
+        "type": "ai",
+        "content": "<think>internal monologue</think>visible answer"
+      },
+      "visible": true,
+      "content": "visible answer",
+      "text": "visible answer"
+    },
+    {
+      "name": "only inline reasoning",
+      "message": {
+        "id": "a-6",
+        "type": "ai",
+        "content": "<think>only thinking, no answer</think>"
+      },
+      "visible": true,
+      "content": "",
+      "text": ""
+    },
+    {
+      "name": "an unclosed think opener takes the rest",
+      "message": {
+        "id": "a-7",
+        "type": "ai",
+        "content": "answer<think>still streaming"
+      },
+      "visible": true,
+      "content": "answer",
+      "text": "answer"
+    },
+    {
+      "name": "a think tag quoted in inline code stays",
+      "message": {
+        "id": "a-8",
+        "type": "ai",
+        "content": "use `<think>x</think>` tags"
+      },
+      "visible": true,
+      "content": "use `<think>x</think>` tags",
+      "text": "use `<think>x</think>` tags"
+    },
+    {
+      "name": "a lone think opener quoted in inline code stays",
+      "message": {
+        "id": "a-9",
+        "type": "ai",
+        "content": "type `<think>` literally"
+      },
+      "visible": true,
+      "content": "type `<think>` literally",
+      "text": "type `<think>` literally"
+    },
+    {
+      "name": "a think tag in a user message is the user's text",
+      "message": {
+        "id": "h-6",
+        "type": "human",
+        "content": "what does <think>x</think> do?"
+      },
+      "visible": true,
+      "content": "what does <think>x</think> do?",
+      "text": "what does <think>x</think> do?"
+    },
+    {
+      "name": "content-array thinking block",
+      "message": {
+        "id": "a-10",
+        "type": "ai",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "hidden reasoning step"
+          },
+          {
+            "type": "text",
+            "text": "final visible text"
+          }
+        ]
+      },
+      "visible": true,
+      "content": "final visible text",
+      "text": "final visible text"
+    },
+    {
+      "name": "text and image parts",
+      "message": {
+        "id": "a-11",
+        "type": "ai",
+        "content": [
+          {
+            "type": "thinking",
+            "thinking": "internal reasoning"
+          },
+          {
+            "type": "text",
+            "text": "user-visible answer"
+          },
+          {
+            "type": "image_url",
+            "image_url": {
+              "url": "https://example.invalid/cat.png"
+            }
+          }
+        ]
+      },
+      "visible": true,
+      "content": "user-visible answer\n![image](https://example.invalid/cat.png)",
+      "text": "user-visible answer\n![image](https://example.invalid/cat.png)"
+    },
+    {
+      "name": "an image part given as a string",
+      "message": {
+        "id": "h-7",
+        "type": "human",
+        "content": [
+          {
+            "type": "image_url",
+            "image_url": "https://example.invalid/dog.png"
+          }
+        ]
+      },
+      "visible": true,
+      "content": "![image](https://example.invalid/dog.png)",
+      "text": "![image](https://example.invalid/dog.png)"
+    },
+    {
+      "name": "plain string parts",
+      "message": {
+        "id": "h-8",
+        "type": "human",
+        "content": [
+          "plain part",
+          {
+            "type": "text",
+            "text": "second part"
+          }
+        ]
+      },
+      "visible": true,
+      "content": "plain part\nsecond part",
+      "text": "plain part\nsecond part"
+    },
+    {
+      "name": "current uploads marker",
+      "message": {
+        "id": "h-9",
+        "type": "human",
+        "content": "real prompt\n<current_uploads>\n/mnt/user-data/uploads/secret.pdf\n</current_uploads>"
+      },
+      "visible": true,
+      "content": "real prompt\n<current_uploads>\n/mnt/user-data/uploads/secret.pdf\n</current_uploads>",
+      "text": "real prompt"
+    },
+    {
+      "name": "legacy uploaded files marker",
+      "message": {
+        "id": "h-10",
+        "type": "human",
+        "content": "real prompt\n<uploaded_files>\n/mnt/user-data/uploads/secret.pdf\n</uploaded_files>"
+      },
+      "visible": true,
+      "content": "real prompt\n<uploaded_files>\n/mnt/user-data/uploads/secret.pdf\n</uploaded_files>",
+      "text": "real prompt"
+    },
+    {
+      "name": "system reminder, memory and date leak through",
+      "message": {
+        "id": "h-11",
+        "type": "human",
+        "content": "<system-reminder>\n<memory>secret fact A</memory>\n<current_date>2026-01-01, Tuesday</current_date>\n</system-reminder>\nreal user text"
+      },
+      "visible": true,
+      "content": "<system-reminder>\n<memory>secret fact A</memory>\n<current_date>2026-01-01, Tuesday</current_date>\n</system-reminder>\nreal user text",
+      "text": "real user text"
+    },
+    {
+      "name": "a skill activation with the user's task",
+      "message": {
+        "id": "h-12",
+        "type": "human",
+        "content": "<slash_skill_activation>\n<skill_content># Secret SKILL.md\nUse internal source.</skill_content>\n</slash_skill_activation>\nreal user task"
+      },
+      "visible": true,
+      "content": "<slash_skill_activation>\n<skill_content># Secret SKILL.md\nUse internal source.</skill_content>\n</slash_skill_activation>\nreal user task",
+      "text": "real user task"
+    },
+    {
+      "name": "a skill activation alone",
+      "message": {
+        "id": "h-13",
+        "type": "human",
+        "content": "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>\n<current_uploads>\n(empty)\n</current_uploads>"
+      },
+      "visible": false,
+      "content": "<slash_skill_activation>\n<skill_content># Secret SKILL.md</skill_content>\n</slash_skill_activation>\n<current_uploads>\n(empty)\n</current_uploads>",
+      "text": ""
+    },
+    {
+      "name": "a memory marker in an assistant answer",
+      "message": {
+        "id": "a-12",
+        "type": "ai",
+        "content": "I noted it.<memory>secret fact B</memory>"
+      },
+      "visible": true,
+      "content": "I noted it.<memory>secret fact B</memory>",
+      "text": "I noted it."
+    },
+    {
+      "name": "no content at all",
+      "message": {
+        "id": "a-13",
+        "type": "ai",
+        "content": ""
+      },
+      "visible": true,
+      "content": "",
+      "text": ""
+    },
+    {
+      "name": "a byte-order mark alone is whitespace",
+      "message": {
+        "id": "a-14",
+        "type": "ai",
+        "content": "﻿"
+      },
+      "visible": true,
+      "content": "",
+      "text": ""
+    },
+    {
+      "name": "a no-break space around words is whitespace",
+      "message": {
+        "id": "h-14",
+        "type": "human",
+        "content": " hello　"
+      },
+      "visible": true,
+      "content": "hello",
+      "text": "hello"
+    },
+    {
+      "name": "a file separator is not whitespace",
+      "message": {
+        "id": "h-15",
+        "type": "human",
+        "content": "\u001chello"
+      },
+      "visible": true,
+      "content": "\u001chello",
+      "text": "\u001chello"
+    },
+    {
+      "name": "cut-off reasoning alone",
+      "message": {
+        "id": "a-15",
+        "type": "ai",
+        "content": "<think>reasoning that never closed"
+      },
+      "visible": true,
+      "content": "",
+      "text": ""
+    },
+    {
+      "name": "two reasoning pairs around the answer",
+      "message": {
+        "id": "a-16",
+        "type": "ai",
+        "content": "<think>one</think>first part <think>two</think>second part"
+      },
+      "visible": true,
+      "content": "first part second part",
+      "text": "first part second part"
+    },
+    {
+      "name": "reasoning at the start of an answer that ends in code",
+      "message": {
+        "id": "a-17",
+        "type": "ai",
+        "content": "<think>plan</think>run `ls`"
+      },
+      "visible": true,
+      "content": "run `ls`",
+      "text": "run `ls`"
+    },
+    {
+      "name": "two markers around the person's words",
+      "message": {
+        "id": "h-16",
+        "type": "human",
+        "content": "keep<memory>fact one</memory> this <memory>fact two</memory>too"
+      },
+      "visible": true,
+      "content": "keep<memory>fact one</memory> this <memory>fact two</memory>too",
+      "text": "keep this too"
+    },
+    {
+      "name": "a date marker alone before the words",
+      "message": {
+        "id": "h-17",
+        "type": "human",
+        "content": "<current_date>2026-09-27, Sunday</current_date>hi"
+      },
+      "visible": true,
+      "content": "<current_date>2026-09-27, Sunday</current_date>hi",
+      "text": "hi"
+    },
+    {
+      "name": "a skill activation in an assistant message is not a control message",
+      "message": {
+        "id": "a-18",
+        "type": "ai",
+        "content": "<slash_skill_activation>x</slash_skill_activation>"
+      },
+      "visible": true,
+      "content": "<slash_skill_activation>x</slash_skill_activation>",
+      "text": ""
+    },
+    {
+      "name": "a skill activation beside legacy uploads alone",
+      "message": {
+        "id": "h-18",
+        "type": "human",
+        "content": "<slash_skill_activation>x</slash_skill_activation>\n<uploaded_files>\ny\n</uploaded_files>"
+      },
+      "visible": false,
+      "content": "<slash_skill_activation>x</slash_skill_activation>\n<uploaded_files>\ny\n</uploaded_files>",
+      "text": ""
+    },
+    {
+      "name": "hide_from_ui must be true itself",
+      "message": {
+        "id": "h-19",
+        "type": "human",
+        "content": "still shown",
+        "additional_kwargs": {
+          "hide_from_ui": "true"
+        }
+      },
+      "visible": true,
+      "content": "still shown",
+      "text": "still shown"
+    }
+  ]
+}

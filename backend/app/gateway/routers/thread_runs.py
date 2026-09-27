@@ -75,6 +75,8 @@ from app.gateway.services import (
     start_run,
     wait_for_run_completion,
 )
+from app.gateway.thread_feed import history_hidden_run_ids, is_history_hidden_row
+from app.gateway.thread_feed import message_type as _message_type
 from app.gateway.utils import sanitize_log_param
 from app.runtime import InternalCancelRequest, InvocationPrincipal, NotFoundOrInvisible
 from deerflow.agents.middlewares.dynamic_context_middleware import strip_injected_user_message_id_suffix
@@ -493,15 +495,6 @@ def _message_id(message: Any) -> str | None:
     return str(value) if value else None
 
 
-def _message_type(message: Any) -> str | None:
-    value = getattr(message, "type", None)
-    if value is None and isinstance(message, dict):
-        value = message.get("type") or message.get("role")
-    if value == "assistant":
-        return "ai"
-    return str(value) if value else None
-
-
 def _message_name(message: Any) -> str | None:
     value = getattr(message, "name", None)
     if value is None and isinstance(message, dict):
@@ -547,11 +540,6 @@ def _is_visible_human_message(message: Any) -> bool:
 
 def _is_visible_ai_message(message: Any) -> bool:
     return _message_type(message) == "ai" and not _is_hidden_or_control_message(message)
-
-
-def _is_thread_history_hidden_message_row(row: dict[str, Any]) -> bool:
-    caller = str((row.get("metadata") or {}).get("caller", ""))
-    return caller.startswith("middleware:") or (caller.startswith("subagent:") and _message_type(row.get("content")) == "ai")
 
 
 def _checkpoint_messages(snapshot: Any) -> list[Any]:
@@ -1001,12 +989,6 @@ async def _prepare_edit_regenerate_payload(
     )
 
 
-async def _default_history_hidden_run_ids(run_mgr: Any, thread_id: str, *, user_id: str | None) -> set[str]:
-    superseded_run_ids = await run_mgr.list_successful_regenerate_sources(thread_id, user_id=user_id)
-    edit_visibility = await run_mgr.list_edit_replay_visibility(thread_id, user_id=user_id)
-    return set(superseded_run_ids) | set(edit_visibility.hidden_source_run_ids) | set(edit_visibility.hidden_attempt_run_ids)
-
-
 # ---------------------------------------------------------------------------
 # Endpoints
 # ---------------------------------------------------------------------------
@@ -1383,7 +1365,7 @@ async def list_thread_messages(
     # below and to list the thread's runs for turn-duration injection.
     user_id = await get_current_user(request)
     run_mgr = get_run_manager(request)
-    hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
+    hidden_run_ids = await history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
     messages, _ = await _scan_visible_thread_messages(
         thread_id,
         limit=limit,
@@ -1474,7 +1456,7 @@ async def _scan_visible_thread_messages(
                 if before_seq is not None and row["seq"] >= before_seq:
                     reached_before_bound = True
                     break
-                if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
+                if (not include_middleware and is_history_hidden_row(row)) or row.get("run_id") in hidden_run_ids:
                     continue
                 visible.append(row)
                 if len(visible) == needed:
@@ -1501,7 +1483,7 @@ async def _scan_visible_thread_messages(
             break
         _validate_message_scan_rows(raw, thread_id=thread_id, scan_before=scan_before, scan_after=None)
         for row in reversed(raw):
-            if (not include_middleware and _is_thread_history_hidden_message_row(row)) or row.get("run_id") in hidden_run_ids:
+            if (not include_middleware and is_history_hidden_row(row)) or row.get("run_id") in hidden_run_ids:
                 continue
             visible_desc.append(row)
             if len(visible_desc) == needed:
@@ -1565,7 +1547,7 @@ async def _scan_thread_message_page(
 ) -> tuple[list[dict[str, Any]], bool]:
     """Select the newest ``limit + 1`` page-eligible rows before a cursor."""
     run_mgr = get_run_manager(request)
-    hidden_run_ids = await _default_history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
+    hidden_run_ids = await history_hidden_run_ids(run_mgr, thread_id, user_id=user_id)
     return await _scan_visible_thread_messages(
         thread_id,
         limit=limit,

@@ -248,6 +248,26 @@ GET /api/langgraph/threads/{thread_id}/state
 }
 ```
 
+#### Download a Conversation
+
+```http
+GET /api/threads/{thread_id}/export?format=markdown
+GET /api/threads/{thread_id}/export?format=json
+```
+
+The conversation's transcript as a file (`Content-Disposition: attachment`,
+named for its title): what the page shows, and nothing internal. It reads the
+conversation's message feed, as the page does, so a conversation that
+summarization compacted still exports every turn. It carries the person's and
+the assistant's words, with no reasoning, tool calls, tool results, hidden
+control messages or injected context markers. Markdown gives a heading per
+turn under the title and the export and creation times (UTC). JSON gives
+`title`, `thread_id`, `created_at`, `exported_at` and `messages` (`type`, `id`,
+`content`). A conversation recorded as another person's, and one with no
+messages, answer 404. A personal access token cannot reach it. The rules are
+`app/gateway/transcript.py`, held to the page's own by
+`contracts/visible_transcript_contract.json`.
+
 #### Get Thread History
 
 ```http

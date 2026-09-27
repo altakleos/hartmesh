@@ -12,8 +12,12 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useI18n } from "@/core/i18n/hooks";
-import { exportThread, type ThreadExportFormat } from "@/core/threads/export";
-import type { AgentThread } from "@/core/threads/types";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
+import {
+  exportThread,
+  ThreadExportEmptyError,
+  type ThreadExportFormat,
+} from "@/core/threads/export";
 
 import { useThread } from "./messages/context";
 import { Tooltip } from "./tooltip";
@@ -25,28 +29,27 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
   const messages = thread.messages;
 
   const handleExport = useCallback(
-    (format: ThreadExportFormat) => {
+    async (format: ThreadExportFormat) => {
       if (messages.length === 0) {
         toast.error(t.conversation.noMessages);
         return;
       }
       try {
-        const agentThread = {
-          thread_id: threadId,
-          updated_at: new Date().toISOString(),
-          values: thread.values,
-        } as AgentThread;
-
-        exportThread(agentThread, messages, format);
+        await exportThread(threadId, format);
         toast.success(t.common.exportSuccess);
-      } catch {
-        toast.error(t.common.exportFailed);
+      } catch (error) {
+        toast.error(
+          error instanceof ThreadExportEmptyError
+            ? t.conversation.noMessages
+            : t.common.exportFailed,
+        );
       }
     },
-    [messages, thread.values, threadId, t],
+    [messages.length, threadId, t],
   );
 
-  if (messages.length === 0) {
+  // The Gateway writes the transcript; a static demo has none to ask.
+  if (messages.length === 0 || isStaticWebsiteOnly()) {
     return null;
   }
 
@@ -65,11 +68,11 @@ export function ExportTrigger({ threadId }: { threadId: string }) {
         </DropdownMenuTrigger>
       </Tooltip>
       <DropdownMenuContent align="end">
-        <DropdownMenuItem onSelect={() => handleExport("markdown")}>
+        <DropdownMenuItem onSelect={() => void handleExport("markdown")}>
           <FileText className="text-muted-foreground" />
           <span>{t.common.exportAsMarkdown}</span>
         </DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => handleExport("json")}>
+        <DropdownMenuItem onSelect={() => void handleExport("json")}>
           <FileJson className="text-muted-foreground" />
           <span>{t.common.exportAsJSON}</span>
         </DropdownMenuItem>

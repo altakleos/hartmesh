@@ -21,7 +21,6 @@ import {
   isAssistantMessageGroupStreaming,
   isHiddenFromUIMessage,
   parseUploadedFiles,
-  stripInternalMarkers,
   stripUploadedFilesTag,
 } from "@/core/messages/utils";
 
@@ -657,13 +656,6 @@ describe("human message internal context stripping", () => {
         path: "/mnt/user-data/uploads/normal.pdf",
       },
     ]);
-  });
-
-  test("stripInternalMarkers removes current_uploads blocks on export", () => {
-    const content =
-      "<current_uploads>\n- paper.docx (177.6 KB)\n  Path: /mnt/user-data/uploads/paper.docx\n</current_uploads>\n\nExport me";
-
-    expect(stripInternalMarkers(content)).toBe("Export me");
   });
 
   test("strips slash skill activation context from display content", () => {

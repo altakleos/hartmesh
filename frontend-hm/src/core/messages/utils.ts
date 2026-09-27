@@ -994,10 +994,11 @@ export function stripUploadedFilesTag(content: string): string {
  *   live in ``hide_from_ui`` HumanMessages, but their inner payload uses
  *   the same tag vocabulary.
  *
- * The primary export filter is {@link isHiddenFromUIMessage}. This list is
- * the defence-in-depth strip for any message that — by middleware bug,
- * provider quirk, or merge-conflict regression — slips through without
- * its ``hide_from_ui`` flag set.
+ * The primary filter is {@link isHiddenFromUIMessage}. The Gateway's
+ * transcript (``backend/app/gateway/transcript.py``) strips the same tags,
+ * as defence in depth for any message that — by middleware bug, provider
+ * quirk, or merge-conflict regression — slips through without its
+ * ``hide_from_ui`` flag set; keep the two lists together.
  */
 export const INTERNAL_MARKER_TAGS = [
   "current_uploads",
@@ -1007,25 +1008,6 @@ export const INTERNAL_MARKER_TAGS = [
   "memory",
   "current_date",
 ] as const;
-
-const INTERNAL_MARKER_RE = new RegExp(
-  `<(${INTERNAL_MARKER_TAGS.join("|")})>[\\s\\S]*?</\\1>`,
-  "g",
-);
-
-/**
- * Strip every known backend-injected marker from message content.
- *
- * Intended for the chat export path where a marker leaking through is a
- * privacy regression. UI render paths should keep using
- * {@link stripUploadedFilesTag} — they receive ``hide_from_ui`` messages
- * via a separate filter and the narrower function avoids stripping content
- * a user might legitimately type into a meta-discussion (e.g. asking the
- * model about its own ``<memory>`` system).
- */
-export function stripInternalMarkers(content: string): string {
-  return content.replace(INTERNAL_MARKER_RE, "").trim();
-}
 
 // The upload context block renders sizes as human-readable strings
 // (uploads_middleware.py::_format_file_entry emits "<n> KB" / "<n> MB",

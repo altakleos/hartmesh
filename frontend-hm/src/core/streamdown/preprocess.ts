@@ -370,8 +370,8 @@ const FENCE_MARKER_RE = /^ {0,3}(`{3,}|~{3,})/;
  * reach the UI renderer (e.g. when a ``hide_from_ui`` reminder leaks through
  * the filter).  React's DOM renderer logs "unrecognized tag" console errors
  * for unknown HTML elements.  This function strips the tag markers while
- * preserving the inner content — unlike {@link stripInternalMarkers} in
- * ``utils.ts``, which removes the entire block.
+ * preserving the inner content — unlike the Gateway's transcript
+ * (``backend/app/gateway/transcript.py``), which removes the entire block.
  *
  * Code-aware: tags inside fenced code blocks (````` `````) and indented code
  * blocks (4-space indent) are left untouched, so user-written meta-discussions
