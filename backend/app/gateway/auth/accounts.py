@@ -20,10 +20,12 @@ Usage:
     python -m app.gateway.auth.accounts release-email --issuer URL --subject SUB
     python -m app.gateway.auth.accounts limit-role --issuer URL --subject SUB [--role user] [--end-running-work]
     python -m app.gateway.auth.accounts lift-role-limit --issuer URL --subject SUB
+    python -m app.gateway.auth.accounts disable --issuer URL --subjects SUB SUB ...   (also enable, limit-role, lift-role-limit)
 
 Every form is idempotent and prints one JSON document on stdout, with the
 verdict and what was done. Three exit statuses: ``0`` means done; ``1`` means
-the command refused and changed nothing (the document then carries ``error``);
+the command refused and changed nothing (the document then carries ``error``;
+with ``--subjects`` it means some identity was refused or failed, below);
 ``2`` means it did what was asked but could not confirm all of it: a run it
 cancelled had not stopped (named under ``runs_unconfirmed``), or a surface
 had not been confirmed stopped (named under ``surfaces_unconfirmed`` -- a
@@ -176,6 +178,23 @@ to what an earlier restore could not turn back on, which stays recorded for
 a re-run. ``list`` shows every record still held (``holds``). ``disable`` also
 forgets the connect codes the person had not used, so none binds a chat
 account or turns a held binding back on.
+
+Many people in one call: ``disable``, ``enable``, ``limit-role`` and
+``lift-role-limit`` take ``--subjects``, several subjects at one issuer, at
+most ``MAX_BATCH_SUBJECTS``. Each step is taken for every identity before
+the next, so every refusal or limit commits and every run is asked to stop
+before the command waits, and then it waits once for them all: a batch
+costs one wait, not one per person. The document carries one entry per
+identity under ``identities`` -- the document the one-subject form prints,
+which is a batch of one -- and ``totals`` across them. An identity the
+command refuses or cannot finish is its own entry (``refused`` or
+``failed``, with ``error``) and does not stop the others; a fault in a step
+they share, such as the one wait, fails every identity it left unfinished,
+each still with its entry. The run wait stops ``SECOND_LOOK_RESERVE_SECONDS``
+short of the deadline, so one person's slow run leaves that person
+unconfirmed, not everyone. The exit status is the worst: 1 if some identity
+was refused or failed, which here means *some*, not that nothing changed;
+else 2 if any was unconfirmed; else 0.
 """
 
 from __future__ import annotations
@@ -200,6 +219,18 @@ from deerflow.runtime.owner_holdings import ANY_OWNER
 logger = logging.getLogger(__name__)
 
 COMMANDS = ("list", "disable", "enable", "end-sessions", "release-email", "limit-role", "lift-role-limit")
+
+#: The forms that take many identities at one issuer in one call (``--subjects``).
+BATCH_COMMANDS = ("disable", "enable", "limit-role", "lift-role-limit")
+
+#: The most identities one call takes. Each is its own argv word, so the
+#: command line is about the subjects' own length plus one byte each -- a
+#: hundred 255-byte subjects are 26 KB, far inside Linux's 128 KB per word and
+#: 2 MB in all; a runner's own limit may be lower. The time is one wait
+#: (``--wait-seconds``) plus the work done for each identity in turn, which is
+#: a few database round trips: the compose profile's README states measured
+#: figures.
+MAX_BATCH_SUBJECTS = 100
 
 #: The forms that take ``--end-running-work``; ``disable`` always ends the work.
 ENDS_WORK_ON_REQUEST = ("end-sessions", "limit-role")
@@ -236,6 +267,13 @@ DEFAULT_RUN_WAIT_SECONDS = 120.0
 
 #: How often the command re-reads the rows it is waiting on.
 RUN_WAIT_POLL_SECONDS = 0.5
+
+#: What ``disable``'s run wait leaves of ``--wait-seconds`` for the Gateway
+#: processes' second look, which confirms what the runs left behind: a run
+#: that outlasts the wait must not leave that look no time, or every
+#: identity in the call reads as unconfirmed for one person's slow run. The
+#: processes look every second; at most a quarter of a short wait.
+SECOND_LOOK_RESERVE_SECONDS = 5.0
 
 #: Exit status when the command did what was asked but could not confirm that
 #: every run it cancelled had stopped. Distinct from 1, which means the command
@@ -377,6 +415,82 @@ class _Held:
     connect_codes: int = 0
 
 
+@dataclass
+class _Disabling:
+    """One identity through ``disable``'s steps; a batch takes every identity through each step before the next."""
+
+    identity: tuple[str, str]
+    account: User | None
+    clock: SurfaceClock
+    recorded: bool = False
+    committed: int = 0
+    document: dict[str, Any] = field(default_factory=dict)
+    accounts: list[User] = field(default_factory=list)
+    channels: int = 0
+    held: _Held = field(default_factory=_Held)
+    work: _DurableWork = field(default_factory=_DurableWork)
+    runs_ended_at: int = 0
+    #: Its document is complete; a fault in a step shared with the others no longer reaches it.
+    finished: bool = False
+    #: What stopped this identity's steps; the others go on.
+    failure: Exception | None = None
+
+
+@dataclass
+class _Limiting:
+    """One identity through ``limit-role``'s steps, as ``_Disabling``."""
+
+    identity: tuple[str, str]
+    clock: SurfaceClock
+    recorded: bool = False
+    changed: bool = False
+    accounts: list[User] = field(default_factory=list)
+    runs: dict[str, Any] = field(default_factory=dict)
+    document: dict[str, Any] = field(default_factory=dict)
+    failure: Exception | None = None
+
+
+@dataclass
+class _RunsEnded:
+    """What ``_end_running_work`` saw of one identity's runs."""
+
+    facts: dict[str, Any]
+    #: When its last run was seen stopped, or, with none, when it was found to have none (``time.monotonic``).
+    ended_at: float
+
+
+@dataclass
+class _ProcessLook:
+    """What the live Gateway processes had done about one check when the command stopped waiting for them."""
+
+    check: int
+    live: list[Any]
+    #: The live processes that had not acted on the check.
+    waiting: list[str]
+    confirmed_at_ms: int
+
+
+async def _each(states: list[Any], step: Any) -> None:
+    """Take every identity not yet stopped through ``step``, in turn; one that fails is stopped and the others go on."""
+    for state in states:
+        if state.failure is not None:
+            continue
+        try:
+            await step(state)
+        except Exception as exc:  # noqa: BLE001 - one identity's failure must not stop the others; its entry says what failed
+            logger.warning("Stopped on %s: %s", state.identity, exc)
+            state.failure = exc
+
+
+async def _together(*steps: Any) -> list[Any]:
+    """Run ``steps`` at once and return their results; the first that raised is raised once every one is done, so none is left running."""
+    results = await asyncio.gather(*steps, return_exceptions=True)
+    for result in results:
+        if isinstance(result, BaseException):
+            raise result
+    return results
+
+
 class SurfaceClock:
     """When each surface stopped, measured from the command's start.
 
@@ -393,7 +507,11 @@ class SurfaceClock:
         self.unconfirmed: list[str] = []
 
     def now_ms(self) -> int:
-        return int((time.monotonic() - self._start) * 1000)
+        return self.ms_at(time.monotonic())
+
+    def ms_at(self, monotonic: float) -> int:
+        """``monotonic`` (a ``time.monotonic`` reading) as an offset from the command's start."""
+        return int((monotonic - self._start) * 1000)
 
     def stopped(self, surface: str, action: str, count: int, *, at_ms: int | None = None, **facts: Any) -> None:
         """Record that ``surface`` stopped ``at_ms`` (now when omitted)."""
@@ -408,6 +526,13 @@ class SurfaceClock:
 
     def document(self) -> dict[str, Any]:
         return {"started_at": self.started_at.isoformat(), "elapsed_ms": self.now_ms(), "surfaces": self.surfaces, "surfaces_unconfirmed": sorted(self.unconfirmed)}
+
+    def fork(self) -> SurfaceClock:
+        """A clock for one identity of a batch: the command's start, its own surfaces."""
+        child = SurfaceClock()
+        child._start = self._start
+        child.started_at = self.started_at
+        return child
 
 
 def run_role_readers(config: Any) -> tuple[str, ...]:
@@ -449,6 +574,61 @@ def _account_document(user: User) -> dict[str, Any]:
         "released": user.email_released_from is not None,
         "released_from": user.email_released_from,
         "role_limit": user.role_limit,
+    }
+
+
+def _failed_entry(command: str, identity: tuple[str, str], exc: Exception) -> dict[str, Any]:
+    """A batch entry for an identity the command refused (``refused``) or could not finish (``failed``); either exits 1, as its single form would."""
+    refused = isinstance(exc, CommandError)
+    return {
+        "command": command,
+        "identity": {"issuer": identity[0], "subject": identity[1]},
+        "verdict": "refused" if refused else "failed",
+        "error": str(exc) if refused else f"{type(exc).__name__}: {exc}",
+        "returncode": 1,
+    }
+
+
+def _batch_document(command: str, issuer: str, entries: list[dict[str, Any]], clock: SurfaceClock) -> dict[str, Any]:
+    """One entry per identity, and totals across them; the exit status is the worst of theirs."""
+    refused = sorted(entry["identity"]["subject"] for entry in entries if entry["verdict"] == "refused")
+    failed = sorted(entry["identity"]["subject"] for entry in entries if entry["verdict"] == "failed")
+    unconfirmed = sorted(entry["identity"]["subject"] for entry in entries if entry["returncode"] == EXIT_UNCONFIRMED_RUNS)
+    verdicts: dict[str, int] = {}
+    for entry in entries:
+        verdicts[entry["verdict"]] = verdicts.get(entry["verdict"], 0) + 1
+    totals = {
+        "identities": len(entries),
+        "verdicts": dict(sorted(verdicts.items())),
+        "subjects_refused": refused,
+        "subjects_failed": failed,
+        "subjects_unconfirmed": unconfirmed,
+        "runs_found": sum(entry.get("runs_found", 0) for entry in entries),
+        "runs_cancelled": sum(entry.get("runs_cancelled", 0) for entry in entries),
+        "runs_finished_first": sorted(run_id for entry in entries for run_id in entry.get("runs_finished_first", [])),
+        "runs_unconfirmed": sorted(run_id for entry in entries for run_id in entry.get("runs_unconfirmed", [])),
+        "surfaces_unconfirmed": sorted({surface for entry in entries for surface in entry.get("surfaces_unconfirmed", [])}),
+        "surfaces_not_reached": sorted({surface for entry in entries for surface in entry.get("surfaces_not_reached", [])}),
+    }
+    returncode = 1 if refused or failed else EXIT_UNCONFIRMED_RUNS if unconfirmed else 0
+    note = f"one entry per identity under `identities`, each the document `{command}` prints for one subject"
+    if refused:
+        note += "; the identities under `totals.subjects_refused` were refused, and their entries say why: the same call refuses them again until that changes"
+    if failed:
+        note += "; the identities under `totals.subjects_failed` could not be finished, and may be part-done: re-run this command for them"
+    if refused or failed:
+        note += "; the others were done all the same, so exit status 1 here means some identity was refused or failed, not that nothing changed"
+    if unconfirmed:
+        note += "; the identities under `totals.subjects_unconfirmed` have runs or surfaces not yet confirmed stopped; re-run this command for them to see whether they have since"
+    return {
+        "command": command,
+        "issuer": issuer,
+        "identities": entries,
+        "totals": totals,
+        "started_at": clock.started_at.isoformat(),
+        "elapsed_ms": clock.now_ms(),
+        "returncode": returncode,
+        "note": note,
     }
 
 
@@ -499,11 +679,14 @@ class AccountsCommand:
         end_running_work: bool = False,
         role: str = LIMIT_ROLES[0],
         restore_held: bool = False,
+        subjects: list[str] | None = None,
     ) -> dict[str, Any]:
         # One bound for the whole command: the run wait, the second look for
         # late runs and the connection wait all end by it, so a caller can
         # size its runner's timeout from --wait-seconds alone.
         self._deadline = time.monotonic() + max(0.0, self._wait_seconds)
+        if subjects is not None:
+            return await self.run_many(command, issuer=issuer, subjects=subjects, end_running_work=end_running_work, role=role, restore_held=restore_held)
         if command == "list":
             return await self.list()
         if command in ("limit-role", "lift-role-limit"):
@@ -528,6 +711,63 @@ class AccountsCommand:
         if command == "release-email":
             return await self.release_email(identity, account)
         raise CommandError(f"unknown command {command!r}; one of {', '.join(COMMANDS)}")
+
+    async def run_many(
+        self,
+        command: str,
+        *,
+        issuer: str | None,
+        subjects: list[str],
+        end_running_work: bool = False,
+        role: str = LIMIT_ROLES[0],
+        restore_held: bool = False,
+    ) -> dict[str, Any]:
+        """One form for many identities at one issuer: one entry each, the document its single-subject form prints.
+
+        Each step is taken for every identity before the next, so every
+        refusal commits and every run is asked to stop before the one wait,
+        and the call costs one wait, not one per person. One identity's
+        refusal or failure is its entry's, and the others go on.
+        """
+        if command not in BATCH_COMMANDS:
+            raise CommandError(f"--subjects belongs to {', '.join(BATCH_COMMANDS[:-1])} and {BATCH_COMMANDS[-1]}")
+        if not (issuer or "").strip():
+            raise CommandError("--subjects addresses identities at one --issuer; give it")
+        names = list(dict.fromkeys(subject.strip() for subject in subjects))
+        if not names:
+            raise CommandError("--subjects names nobody")
+        if len(names) > MAX_BATCH_SUBJECTS:
+            raise CommandError(f"--subjects takes at most {MAX_BATCH_SUBJECTS} identities in one call; {len(names)} were given, so split them across calls")
+        if command == "limit-role" and role not in LIMIT_ROLES:
+            raise CommandError(f"a role limit holds a person below administrator; --role must be one of: {', '.join(LIMIT_ROLES)}")
+        clock = SurfaceClock()
+        key = issuer_key(issuer or "")
+        entries: list[dict[str, Any] | None] = [None] * len(names)
+        resolved: list[tuple[int, tuple[str, str], User | None]] = []
+        for index, subject in enumerate(names):
+            try:
+                if not subject:
+                    raise CommandError("an empty subject names nobody")
+                identity, account = await self._resolve(issuer=issuer, subject=subject, email=None, one_account=command in ("disable", "enable"))
+            except CommandError as exc:
+                entries[index] = _failed_entry(command, (key, subject), exc)
+                continue
+            resolved.append((index, identity, account))
+        if command == "disable":
+            outcomes: list[dict[str, Any] | Exception] = await self._disable_many([(identity, account, clock.fork()) for _, identity, account in resolved])
+        elif command == "limit-role":
+            outcomes = await self._limit_many([(identity, clock.fork()) for _, identity, _ in resolved], role=role, end_running_work=end_running_work)
+        else:
+            outcomes = []
+            for _, identity, account in resolved:
+                try:
+                    outcomes.append(await self.enable(identity, account, restore_held=restore_held) if command == "enable" else await self.lift_role_limit(identity, clock=clock.fork()))
+                except Exception as exc:  # noqa: BLE001 - one identity's failure must not stop the others
+                    logger.warning("Stopped on %s: %s", identity, exc)
+                    outcomes.append(exc)
+        for (index, identity, _), outcome in zip(resolved, outcomes, strict=True):
+            entries[index] = _failed_entry(command, identity, outcome) if isinstance(outcome, Exception) else outcome
+        return _batch_document(command, key, [entry for entry in entries if entry is not None], clock)
 
     # ── Selecting the account ────────────────────────────────────────────
 
@@ -584,25 +824,101 @@ class AccountsCommand:
         return {"command": "list", "accounts": accounts, "disabled_without_account": without, "role_limits_without_account": limits_without, "holds": held}
 
     async def disable(self, identity: tuple[str, str], account: User | None, *, clock: SurfaceClock | None = None) -> dict[str, Any]:
-        clock = clock or SurfaceClock()
-        issuer, subject = identity
-        recorded = await self._users.disable_identity(issuer, subject)
-        committed = clock.now_ms()
-        # Asked once the refusal has committed, so a Gateway process that acts
-        # on this check reads the refusal too; asked before the slow part, so
+        [outcome] = await self._disable_many([(identity, account, clock or SurfaceClock())])
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    async def _disable_many(self, items: list[tuple[tuple[str, str], User | None, SurfaceClock]]) -> list[dict[str, Any] | Exception]:
+        """Turn each identity off, taking every one through each step before the next, so the waits are shared.
+
+        Returns each identity's document, or what stopped it.
+        """
+        states = [_Disabling(identity, account, clock) for identity, account, clock in items]
+        await _each(states, self._disable_refuse)
+        if all(state.failure is not None for state in states):
+            return [state.failure for state in states]  # type: ignore[misc]
+        try:
+            await self._disable_together(states)
+        except Exception as exc:  # noqa: BLE001 - every refusal has committed, so each identity's entry must still say how far it got
+            logger.warning("Stopped disabling %d identities: %s", len(states), exc)
+            for state in states:
+                if state.failure is None and not state.finished:
+                    state.failure = exc
+        return [state.failure if state.failure is not None else state.document for state in states]
+
+    async def _disable_together(self, states: list[_Disabling]) -> None:
+        """Every step after the refusals: each identity's own steps in turn, and the waits shared across them."""
+        # Asked once the refusals have committed, so a Gateway process that
+        # acts on this check reads them too; asked before the slow part, so
         # the processes look while the runs unwind.
         check = await self._sweeps.request_check() if self._sweeps is not None else None
+        await _each(states, self._disable_reach)
+        covered = [state for state in states if state.failure is None and state.accounts]
+        clock = states[0].clock
+        # Every run is asked to stop, for every identity, before the one wait;
+        # the connections are confirmed while the runs unwind, not after:
+        # their stop times are the processes' own, not the run wait's. Both
+        # stop short of the deadline, so the second look below has time.
+        until = self._deadline_before_second_look()
+        runs, look, _ = await _together(
+            self._end_running_work([state.accounts for state in covered], relook=True, until=until),
+            self._await_processes(check, clock, until=until),
+            _each(covered, lambda state: self._end_durable_work(state.accounts, state.work, state.clock)),
+        )
+        for state, result in zip(covered, runs, strict=True):
+            if isinstance(result, Exception):
+                logger.warning("Stopped on %s: %s", state.identity, result)
+                state.failure = state.failure or result
+                continue
+            state.document.update(result.facts)
+            # Its own runs' stop, not the slowest identity's.
+            state.runs_ended_at = state.clock.ms_at(result.ended_at)
+        covered = [state for state in covered if state.failure is None]
+        await _each(covered, lambda state: self._report_processes(look, check, state.accounts, state.clock, CONNECTION_SURFACES))
+        # Nothing to end for an identity with no account, and every surface
+        # named all the same, so a caller reads one shape whatever it held.
+        await _each([state for state in states if not state.accounts], lambda state: self._disable_finish_without_account(state, look, check))
+        covered = [state for state in covered if state.failure is None]
+        if not covered:
+            return
+        # A run that is ending parks its sandbox, and may leave a pooled
+        # session or a queued memory update, after the first look: ask
+        # again now that the runs are over, and count what either look
+        # ended. The same goes for a batch it accepted or a task it submitted.
+        await _each(covered, lambda state: self._end_durable_work(state.accounts, state.work, state.clock))
+        retained_check = await self._sweeps.request_check() if self._sweeps is not None else None
+        retained, _ = await _together(self._await_processes(retained_check, clock), self._wait_for_tasks([(state.work, state.clock) for state in covered if state.failure is None]))
+        await _each(covered, lambda state: self._report_processes(retained, check, state.accounts, state.clock, RETAINED_SURFACES + DURABLE_PROCESS_SURFACES))
+        await _each(covered, self._disable_finish)
+
+    def _deadline_before_second_look(self) -> float:
+        """The command's deadline less ``SECOND_LOOK_RESERVE_SECONDS``, at most a quarter of the wait; the whole of it with no processes to look."""
+        deadline = self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
+        if self._sweeps is None:
+            return deadline
+        return deadline - min(SECOND_LOOK_RESERVE_SECONDS, max(0.0, self._wait_seconds) / 4)
+
+    async def _disable_refuse(self, state: _Disabling) -> None:
+        state.recorded = await self._users.disable_identity(*state.identity)
+        state.committed = state.clock.now_ms()
+
+    async def _disable_reach(self, state: _Disabling) -> None:
+        """What ends at the refusal's commit: sessions and tokens, and the schedules and bindings held before the runs unwind."""
+        issuer, subject = state.identity
+        clock, committed = state.clock, state.committed
         # Looked up again only when there was nothing to address: a first
         # sign-in racing the command may have created the account in between,
         # and its session must be ended like any other. Re-resolving
         # unconditionally would throw away the account the deployer actually
         # named -- with --email, the one whose address they typed.
-        if account is None:
-            account = await self._users.get_user_by_identity(issuer, subject)
-        document: dict[str, Any] = {
+        if state.account is None:
+            state.account = await self._users.get_user_by_identity(issuer, subject)
+        account = state.account
+        state.document = {
             "command": "disable",
             "identity": {"issuer": issuer, "subject": subject},
-            "verdict": "disabled" if recorded else "already_disabled",
+            "verdict": "disabled" if state.recorded else "already_disabled",
             "account": None,
             "sessions_ended": False,
             "tokens_revoked": 0,
@@ -613,6 +929,7 @@ class AccountsCommand:
             "runs_unconfirmed": [],
             "returncode": 0,
         }
+        document = state.document
         # The refusal is keyed by (issuer, subject): it is the person at the
         # provider who is turned off, so it covers every account that identity
         # has here, and everything below reaches each of them. The document
@@ -623,21 +940,7 @@ class AccountsCommand:
         accounts = ([account] if account is not None else []) + siblings
         clock.stopped("sign_in", ACTION_REFUSED_AT_NEXT_USE, len(accounts), at_ms=committed)
         if account is None:
-            # Nothing to end, and every surface named all the same, so a
-            # caller reads one shape whatever the identity held.
-            clock.stopped("sessions", ACTION_ENDED, 0, at_ms=committed)
-            clock.stopped("personal_access_tokens", ACTION_REVOKED, 0, at_ms=committed)
-            clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, 0, at_ms=committed)
-            clock.stopped("running_work", ACTION_ENDED, 0, at_ms=committed, confirmed_by=CONFIRMED_BY_RUN_STATUS)
-            await self._confirm_processes(check, check, [], clock, CONNECTION_SURFACES + RETAINED_SURFACES + DURABLE_PROCESS_SURFACES)
-            await self._report_durable_work(_DurableWork(), clock, committed=committed, channels=0)
-            document["held"] = await self._report_held(identity, _Held(), clock, committed=committed)
-            document.update(clock.document())
-            document["surfaces_not_reached"] = []
-            if document["surfaces_unconfirmed"]:
-                document["returncode"] = EXIT_UNCONFIRMED_RUNS
-            document["note"] = "no account existed for this identity; the refusal is recorded and a sign-in that would create one is refused" + self._surfaces_note(clock)
-            return document
+            return
         # The derived refusal already stops every session and token from the
         # commit; ending the sessions and revoking the tokens is what keeps
         # them dead after an enable.
@@ -648,42 +951,45 @@ class AccountsCommand:
         clock.stopped("sessions", ACTION_ENDED, len(accounts), at_ms=committed)
         clock.stopped("personal_access_tokens", ACTION_REVOKED, document["tokens_revoked"], at_ms=committed)
         clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, sum([await self._count_schedules(covered) for covered in accounts]), at_ms=committed)
-        # The connections are confirmed while the runs unwind, not after: their
-        # stop times are the processes' own, not the run wait's.
-        channels = await self._count_refused_at_next_use(accounts)
+        state.channels = await self._count_refused_at_next_use(accounts)
         # Held before the slow part, so no schedule starts and no binding
         # routes while the runs unwind; the work already waiting ends with it.
-        held = _Held()
-        await self._hold(identity, accounts, held, clock)
-        work = _DurableWork()
-        runs, _, _ = await asyncio.gather(
-            self._end_running_work(accounts, relook=True),
-            self._confirm_processes(check, check, accounts, clock, CONNECTION_SURFACES),
-            self._end_durable_work(accounts, work, clock),
-        )
-        document.update(runs)
-        runs_ended_at = clock.now_ms()
-        # A run that is ending parks its sandbox, and may leave a pooled
-        # session or a queued memory update, after the first look: ask again
-        # now that the runs are over, and count what either look ended. The
-        # same goes for a batch it accepted or a task it submitted.
-        await self._end_durable_work(accounts, work, clock)
-        retained_check = await self._sweeps.request_check() if self._sweeps is not None else None
-        await asyncio.gather(self._confirm_processes(retained_check, check, accounts, clock, RETAINED_SURFACES + DURABLE_PROCESS_SURFACES), self._wait_for_tasks(work, clock))
+        await self._hold(state.identity, accounts, state.held, clock)
+        state.accounts = accounts
+
+    async def _disable_finish_without_account(self, state: _Disabling, look: _ProcessLook | None, check: int | None) -> None:
+        clock, committed, document = state.clock, state.committed, state.document
+        clock.stopped("sessions", ACTION_ENDED, 0, at_ms=committed)
+        clock.stopped("personal_access_tokens", ACTION_REVOKED, 0, at_ms=committed)
+        clock.stopped("internal_launches", ACTION_REFUSED_AT_NEXT_USE, 0, at_ms=committed)
+        clock.stopped("running_work", ACTION_ENDED, 0, at_ms=committed, confirmed_by=CONFIRMED_BY_RUN_STATUS)
+        await self._report_processes(look, check, [], clock, CONNECTION_SURFACES + RETAINED_SURFACES + DURABLE_PROCESS_SURFACES)
+        await self._report_durable_work(_DurableWork(), clock, committed=committed, channels=0)
+        document["held"] = await self._report_held(state.identity, _Held(), clock, committed=committed)
+        document.update(clock.document())
+        document["surfaces_not_reached"] = []
+        if document["surfaces_unconfirmed"]:
+            document["returncode"] = EXIT_UNCONFIRMED_RUNS
+        document["note"] = "no account existed for this identity; the refusal is recorded and a sign-in that would create one is refused" + self._surfaces_note(clock)
+        state.finished = True
+
+    async def _disable_finish(self, state: _Disabling) -> None:
+        clock, committed, document, account = state.clock, state.committed, state.document, state.account
+        assert account is not None
         # Looked at again once the runs and tasks are over: a request that
         # authenticated before the refusal may have made a schedule, a run
         # being cancelled may have queued a channel reply, and a task that
         # went terminal has a notification waiting.
-        await self._hold(identity, accounts, held, clock)
-        await self._report_durable_work(work, clock, committed=committed, channels=channels)
-        document["held"] = await self._report_held(identity, held, clock, committed=committed)
+        await self._hold(state.identity, state.accounts, state.held, clock)
+        await self._report_durable_work(state.work, clock, committed=committed, channels=state.channels)
+        document["held"] = await self._report_held(state.identity, state.held, clock, committed=committed)
         sandboxes = clock.surfaces.get("sandboxes", {})
         if document["runs_unconfirmed"]:
             clock.not_stopped("running_work", ACTION_ENDED, document["runs_found"], unconfirmed=True, confirmed_by=CONFIRMED_BY_RUN_STATUS)
         elif sandboxes.get("stopped_after_ms") is not None:
             clock.stopped("running_work", ACTION_ENDED, document["runs_found"], at_ms=sandboxes["stopped_after_ms"], confirmed_by=CONFIRMED_BY_SANDBOX_GONE)
         else:
-            clock.stopped("running_work", ACTION_ENDED, document["runs_found"], at_ms=runs_ended_at, confirmed_by=CONFIRMED_BY_RUN_STATUS)
+            clock.stopped("running_work", ACTION_ENDED, document["runs_found"], at_ms=state.runs_ended_at, confirmed_by=CONFIRMED_BY_RUN_STATUS)
         document["account"] = _account_document(await self._users.get_user_by_id(str(account.id)) or account)
         document.update(clock.document())
         document["surfaces_not_reached"] = sorted(name for name, entry in clock.surfaces.items() if entry.get("action") == ACTION_NOT_REACHED)
@@ -695,7 +1001,7 @@ class AccountsCommand:
             undone="sessions are refused at their next request and no new run starts, but the runs named in `runs_unconfirmed` had not reached a terminal status when the wait ran out; re-run this command to see whether they have since",
         )
         document["note"] += self._surfaces_note(clock)
-        return document
+        state.finished = True
 
     @staticmethod
     def _surfaces_note(clock: SurfaceClock) -> str:
@@ -936,26 +1242,32 @@ class AccountsCommand:
                         continue
                     work.failed.discard(task_id)
 
-    async def _wait_for_tasks(self, work: _DurableWork, clock: SurfaceClock) -> None:
-        """Poll until every task asked to stop is terminal or the wait runs out."""
-        if self._mcp_tasks is None or not work.tasks:
+    async def _wait_for_tasks(self, works: list[tuple[_DurableWork, SurfaceClock]]) -> None:
+        """Poll until every task asked to stop, of every identity, is terminal or the wait runs out."""
+        waiting = [(work, clock) for work, clock in works if work.tasks]
+        if self._mcp_tasks is None or not waiting:
             return
         from deerflow.mcp.tasks import TERMINAL_TASK_STATUSES
 
         terminal = {status.value for status in TERMINAL_TASK_STATUSES}
         deadline = self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
-        while True:
-            pending = sorted(set(work.tasks) - work.tasks_ended)
-            if not pending:
-                work.tasks_stopped_ms = clock.now_ms()
-                return
+
+        def settle() -> None:
+            nonlocal waiting
+            for work, clock in waiting:
+                if work.tasks_ended >= set(work.tasks):
+                    work.tasks_stopped_ms = clock.now_ms()
+            waiting = [(work, clock) for work, clock in waiting if not work.tasks_ended >= set(work.tasks)]
+
+        settle()
+        while waiting:
+            pending = sorted({task_id for work, _ in waiting for task_id in set(work.tasks) - work.tasks_ended})
             statuses = await self._mcp_tasks.statuses(pending, tenant_digest=self._mcp_tasks.tenant.digest)
             # A row that went away says nothing about the remote job: not ended.
-            work.tasks_ended.update(task_id for task_id in pending if statuses.get(task_id) in terminal)
-            if work.tasks_ended >= set(work.tasks):
-                work.tasks_stopped_ms = clock.now_ms()
-                return
-            if time.monotonic() >= deadline:
+            for work, _ in waiting:
+                work.tasks_ended.update(task_id for task_id in set(work.tasks) - work.tasks_ended if statuses.get(task_id) in terminal)
+            settle()
+            if not waiting or time.monotonic() >= deadline:
                 return
             await asyncio.sleep(SWEEP_WAIT_POLL_SECONDS)
 
@@ -989,27 +1301,36 @@ class AccountsCommand:
         # A channel message would start a run for the person: refused as it arrives.
         clock.stopped("channel_ingress", ACTION_REFUSED_AT_NEXT_USE, channels, at_ms=committed)
 
-    async def _confirm_processes(self, check: int | None, since_check: int | None, accounts: list[User], clock: SurfaceClock, surfaces: tuple[str, ...]) -> None:
-        """Wait until every live Gateway process has acted on ``check``, then report what they ended of ``surfaces`` since ``since_check``.
+    async def _await_processes(self, check: int | None, clock: SurfaceClock, *, until: float | None = None) -> _ProcessLook | None:
+        """Wait until every live Gateway process has acted on ``check``, or the wait runs out.
 
         This process cannot see into a Gateway's memory; each Gateway looks
         for refused owners among what it holds and keeps, and records it. A
         process that stopped beating holds nothing any more and is not waited
         on; one that is beating but has not acted when the wait runs out is
-        named, and the surfaces are unconfirmed rather than assumed ended. So
-        is a surface a process tried to end and could not (``not_ended``),
-        and one it has no way to end at all (``not_reached``).
+        named (``_report_processes``).
         """
-        if self._sweeps is None or check is None or since_check is None:
-            return
-        deadline = self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
+        if self._sweeps is None or check is None:
+            return None
+        deadline = until if until is not None else self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
         while True:
             live = await self._sweeps.live_processes(window_seconds=self._live_window)
             waiting = sorted(process.process_id for process in live if process.checked_through < check)
             if not waiting or time.monotonic() >= deadline:
-                break
+                return _ProcessLook(check=check, live=live, waiting=waiting, confirmed_at_ms=clock.now_ms())
             await asyncio.sleep(SWEEP_WAIT_POLL_SECONDS)
-        confirmed_at = clock.now_ms()
+
+    async def _report_processes(self, look: _ProcessLook | None, since_check: int | None, accounts: list[User], clock: SurfaceClock, surfaces: tuple[str, ...]) -> None:
+        """Report what the processes ended of ``surfaces`` for these accounts since ``since_check``, as of ``look``.
+
+        A surface is unconfirmed rather than assumed ended when a live process
+        had not acted on the look's check, when a process tried to end it and
+        could not (``not_ended``), and when one has no way to end it at all
+        (``not_reached``).
+        """
+        if look is None or since_check is None:
+            return
+        live, waiting, check = look.live, look.waiting, look.check
         counts = dict.fromkeys(surfaces, 0)
         not_ended = dict.fromkeys(surfaces, 0)
         # ``ANY_OWNER`` rows are what a process could not attribute -- a
@@ -1041,7 +1362,7 @@ class AccountsCommand:
             elif waiting or not_ended[surface] or unvouched:
                 clock.not_stopped(surface, ACTION_ENDED, counts[surface], unconfirmed=True, **facts)
             else:
-                clock.stopped(surface, ACTION_ENDED, counts[surface], at_ms=confirmed_at, **facts)
+                clock.stopped(surface, ACTION_ENDED, counts[surface], at_ms=look.confirmed_at_ms, **facts)
 
     async def enable(self, identity: tuple[str, str], account: User | None, *, restore_held: bool = False) -> dict[str, Any]:
         """Withdraw the refusal. What ``disable`` held stays off unless ``restore_held``, and every ``enable`` discards the record of it.
@@ -1142,7 +1463,10 @@ class AccountsCommand:
             # this document without knowing which form produced it.
             document.update({"runs_found": 0, "runs_cancelled": 0, "runs_finished_first": [], "runs_unconfirmed": [], "returncode": 0})
             return document
-        document.update(await self._end_running_work([account]))
+        [runs] = await self._end_running_work([[account]])
+        if isinstance(runs, Exception):
+            raise runs
+        document.update(runs.facts)
         document["note"] = self._run_note(
             document,
             done="every open session is refused at its next request; every run this account had executing was cancelled; personal access tokens are untouched and the next sign-in re-reads the claim",
@@ -1152,10 +1476,69 @@ class AccountsCommand:
 
     async def limit_role(self, identity: tuple[str, str], *, role: str, end_running_work: bool = False, clock: SurfaceClock | None = None) -> dict[str, Any]:
         """Hold the identity at ``role`` on every account it has here, now and at every later sign-in."""
-        clock = clock or SurfaceClock()
         if role not in LIMIT_ROLES:
             raise CommandError(f"a role limit holds a person below administrator; --role must be one of: {', '.join(LIMIT_ROLES)}")
-        issuer, subject = identity
+        [outcome] = await self._limit_many([(identity, clock or SurfaceClock())], role=role, end_running_work=end_running_work)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    async def _limit_many(self, items: list[tuple[tuple[str, str], SurfaceClock]], *, role: str, end_running_work: bool) -> list[dict[str, Any] | Exception]:
+        """Limit each identity, then end the running work above the limit for all of them with one wait; returns each document, or what stopped it."""
+        states = [_Limiting(identity, clock) for identity, clock in items]
+        await _each(states, lambda state: self._limit_one(state, role))
+        limited = [state for state in states if state.failure is None]
+        # Only work that still carries a role above the limit: whatever the
+        # person starts afterwards runs at the limited role and is theirs to
+        # finish, however often the deployer re-applies the limit.
+        running = {"role_read_by": list(self._role_readers), "role_above": role}
+        if end_running_work:
+            try:
+                ended = await self._end_running_work([state.accounts for state in limited], above=role)
+            except Exception as exc:  # noqa: BLE001 - every limit has committed, so each identity's entry must still say how far it got
+                logger.warning("Stopped ending the running work of %d identities: %s", len(limited), exc)
+                ended = [exc] * len(limited)
+            for state, result in zip(limited, ended, strict=True):
+                if isinstance(result, Exception):
+                    state.failure = result
+                    continue
+                runs = state.runs = result.facts
+                if runs["runs_unconfirmed"]:
+                    state.clock.not_stopped("running_work", ACTION_ENDED, runs["runs_found"], unconfirmed=True, confirmed_by=CONFIRMED_BY_RUN_STATUS, **running)
+                else:
+                    state.clock.stopped("running_work", ACTION_ENDED, runs["runs_found"], confirmed_by=CONFIRMED_BY_RUN_STATUS, **running)
+        else:
+
+            async def left_alone(state: _Limiting) -> None:
+                state.runs = {"runs_found": 0, "runs_cancelled": 0, "runs_finished_first": [], "runs_unconfirmed": [], "returncode": 0}
+                state.clock.not_stopped("running_work", ACTION_LEFT_ALONE, len(await self._active_runs(state.accounts, above=role)), unconfirmed=False, **running)
+
+            await _each(limited, left_alone)
+
+        async def finish(state: _Limiting) -> None:
+            issuer, subject = state.identity
+            document: dict[str, Any] = {
+                "command": "limit-role",
+                "identity": {"issuer": issuer, "subject": subject},
+                "role": role,
+                "verdict": "limited" if state.recorded else "already_limited",
+                "changed": state.changed,
+                "accounts": [_account_document(await self._users.get_user_by_id(str(account.id)) or account) for account in state.accounts],
+                **state.runs,
+                **state.clock.document(),
+            }
+            if document["surfaces_unconfirmed"]:
+                document["returncode"] = EXIT_UNCONFIRMED_RUNS
+            document["note"] = self._limit_note(document, end_running_work=end_running_work)
+            state.document = document
+
+        await _each(limited, finish)
+        return [state.failure if state.failure is not None else state.document for state in states]
+
+    async def _limit_one(self, state: _Limiting, role: str) -> None:
+        """Record the limit and lower the stored role in one transaction, ending the sessions there, and say what that did."""
+        issuer, subject = state.identity
+        clock = state.clock
         if self._setup_opens_without_admin:
             # In local mode, a deployment with no administrator offers
             # first-boot setup to whoever reaches it first. Limiting the last
@@ -1185,33 +1568,7 @@ class AccountsCommand:
             clock.stopped("sessions", ACTION_ENDED, ended, at_ms=committed)
         else:
             clock.stopped("sessions", ACTION_ALREADY_LIMITED, len(accounts), at_ms=committed)
-        # Only work that still carries a role above the limit: whatever the
-        # person starts afterwards runs at the limited role and is theirs to
-        # finish, however often the deployer re-applies the limit.
-        running = {"role_read_by": list(self._role_readers), "role_above": role}
-        runs: dict[str, Any] = {"runs_found": 0, "runs_cancelled": 0, "runs_finished_first": [], "runs_unconfirmed": [], "returncode": 0}
-        if end_running_work:
-            runs = await self._end_running_work(accounts, above=role)
-            if runs["runs_unconfirmed"]:
-                clock.not_stopped("running_work", ACTION_ENDED, runs["runs_found"], unconfirmed=True, confirmed_by=CONFIRMED_BY_RUN_STATUS, **running)
-            else:
-                clock.stopped("running_work", ACTION_ENDED, runs["runs_found"], confirmed_by=CONFIRMED_BY_RUN_STATUS, **running)
-        else:
-            clock.not_stopped("running_work", ACTION_LEFT_ALONE, len(await self._active_runs(accounts, above=role)), unconfirmed=False, **running)
-        document: dict[str, Any] = {
-            "command": "limit-role",
-            "identity": {"issuer": issuer, "subject": subject},
-            "role": role,
-            "verdict": "limited" if recorded else "already_limited",
-            "changed": changed,
-            "accounts": [_account_document(await self._users.get_user_by_id(str(account.id)) or account) for account in accounts],
-            **runs,
-            **clock.document(),
-        }
-        if document["surfaces_unconfirmed"]:
-            document["returncode"] = EXIT_UNCONFIRMED_RUNS
-        document["note"] = self._limit_note(document, end_running_work=end_running_work)
-        return document
+        state.recorded, state.changed, state.accounts = recorded, changed, accounts
 
     def _limit_note(self, document: dict[str, Any], *, end_running_work: bool) -> str:
         if not document["accounts"]:
@@ -1302,8 +1659,8 @@ class AccountsCommand:
 
     # ── What disable reaches beyond the row ──────────────────────────────
 
-    async def _end_running_work(self, accounts: list[User], *, above: str | None = None, relook: bool = False) -> dict[str, Any]:
-        """Cancel every run these accounts have executing, then wait for them to stop.
+    async def _end_running_work(self, groups: list[list[User]], *, above: str | None = None, relook: bool = False, until: float | None = None) -> list[_RunsEnded | Exception]:
+        """Cancel every run each group of accounts has executing, then wait once for them all to stop, until ``until`` at the latest; returns one result per group, or what stopped it.
 
         The cancellation is the durable request a person's own cancel makes,
         so the owning worker applies it through its normal abort and terminal
@@ -1337,50 +1694,79 @@ class AccountsCommand:
         once the wait is over finds what arrived meanwhile and nothing the
         person started since. A later pass finds anything slower. ``relook``
         asks for that look; ``above`` implies it.
-        """
-        result: dict[str, Any] = {
-            "runs_found": 0,
-            "runs_cancelled": 0,
-            "runs_finished_first": [],
-            "runs_unconfirmed": [],
-            "returncode": 0,
-        }
-        if self._runs is None:
-            return result
-        owners = {str(row["run_id"]): user_id for user_id, row in await self._active_runs(accounts, above=above)}
-        if not owners:
-            return result
-        terminal = await self._cancel_and_wait(owners)
-        if above is not None or relook:
-            late = {str(row["run_id"]): user_id for user_id, row in await self._active_runs(accounts, above=above) if str(row["run_id"]) not in owners}
-            if late:
-                terminal.update(await self._cancel_and_wait(late))
-                owners.update(late)
-        result["runs_found"] = len(owners)
-        result["runs_finished_first"] = sorted(run_id for run_id, status in terminal.items() if status == "success")
-        result["runs_cancelled"] = len(terminal) - len(result["runs_finished_first"])
-        result["runs_unconfirmed"] = sorted(set(owners) - set(terminal))
-        result["returncode"] = EXIT_UNCONFIRMED_RUNS if result["runs_unconfirmed"] else 0
-        return result
 
-    async def _cancel_and_wait(self, owners: dict[str, str]) -> dict[str, str]:
-        """Ask for each run's cancellation, then wait; returns the status each run that stopped reached."""
+        A group is one identity's accounts. Every group's runs are asked to
+        stop before any wait, and the waits are shared, so many identities
+        cost one wait, not one each.
+        """
+        # Listed one identity at a time: a fault reading one identity's runs
+        # is that identity's failure, and the others' runs are still asked to stop.
+        found: list[dict[str, str] | Exception] = []
+        listed_at: list[float] = []
+        for accounts in groups:
+            try:
+                found.append({str(row["run_id"]): user_id for user_id, row in await self._active_runs(accounts, above=above)})
+            except Exception as exc:  # noqa: BLE001 - one identity's fault must not stop the others
+                found.append(exc)
+            listed_at.append(time.monotonic())
+        terminal: dict[str, tuple[str, float]] = {}
+        if any(isinstance(owners, dict) and owners for owners in found):
+            terminal = await self._cancel_and_wait({run_id: user_id for owners in found if isinstance(owners, dict) for run_id, user_id in owners.items()}, until=until)
+            if above is not None or relook:
+                # Every identity is looked at again, not only one that had
+                # runs: the wait is its too, and a late run arrives during it.
+                late: list[dict[str, str]] = []
+                for index, (accounts, owners) in enumerate(zip(groups, found, strict=True)):
+                    arrived: dict[str, str] = {}
+                    if isinstance(owners, dict):
+                        try:
+                            arrived = {str(row["run_id"]): user_id for user_id, row in await self._active_runs(accounts, above=above) if str(row["run_id"]) not in owners}
+                        except Exception as exc:  # noqa: BLE001 - as above
+                            found[index] = exc
+                    late.append(arrived)
+                if any(late):
+                    terminal.update(await self._cancel_and_wait({run_id: user_id for arrived in late for run_id, user_id in arrived.items()}, until=until))
+                    for owners, arrived in zip(found, late, strict=True):
+                        if isinstance(owners, dict):
+                            owners.update(arrived)
+        results: list[_RunsEnded | Exception] = []
+        for owners, at in zip(found, listed_at, strict=True):
+            if isinstance(owners, Exception):
+                results.append(owners)
+                continue
+            stopped = {run_id: terminal[run_id] for run_id in owners if run_id in terminal}
+            finished_first = sorted(run_id for run_id, (status, _) in stopped.items() if status == "success")
+            unconfirmed = sorted(set(owners) - set(stopped))
+            facts = {
+                "runs_found": len(owners),
+                "runs_cancelled": len(stopped) - len(finished_first),
+                "runs_finished_first": finished_first,
+                "runs_unconfirmed": unconfirmed,
+                "returncode": EXIT_UNCONFIRMED_RUNS if unconfirmed else 0,
+            }
+            results.append(_RunsEnded(facts=facts, ended_at=max([at, *(seen for _, seen in stopped.values())])))
+        return results
+
+    async def _cancel_and_wait(self, owners: dict[str, str], *, until: float | None = None) -> dict[str, tuple[str, float]]:
+        """Ask for each run's cancellation, then wait until ``until`` at the latest; returns the status each run that stopped reached, and when it was seen."""
         for run_id, user_id in owners.items():
             try:
                 await self._runs.request_cancel_compat(run_id, action="interrupt", user_id=user_id)  # type: ignore[union-attr]
             except Exception as exc:  # noqa: BLE001 - one run that refuses the request must not hide the others
                 logger.warning("Failed to request cancellation of run %s: %s", run_id, exc)
-        return await self._wait_for_terminal(owners)
+        return await self._wait_for_terminal(owners, until=until)
 
-    async def _wait_for_terminal(self, owners: dict[str, str]) -> dict[str, str]:
+    async def _wait_for_terminal(self, owners: dict[str, str], *, until: float | None = None) -> dict[str, tuple[str, float]]:
         """Poll until every named run is terminal or the wait runs out.
 
         Returns the status each run that stopped reached, so the caller can
-        tell a run it ended from one that finished on its own first.
+        tell a run it ended from one that finished on its own first, and the
+        ``time.monotonic`` it was seen stopped at, so each identity's stop
+        time is its own runs'.
         """
-        terminal: dict[str, str] = {}
+        terminal: dict[str, tuple[str, float]] = {}
         pending = list(owners)
-        deadline = self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
+        deadline = until if until is not None else self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
         while True:
             still_running: list[str] = []
             for run_id in pending:
@@ -1396,9 +1782,9 @@ class AccountsCommand:
                 # A row that is gone cannot still be executing; a row whose
                 # status is terminal has stopped. Anything else is pending.
                 if row is None:
-                    terminal[run_id] = "absent"
+                    terminal[run_id] = ("absent", time.monotonic())
                 elif status in TERMINAL_RUN_STATUSES:
-                    terminal[run_id] = str(status)
+                    terminal[run_id] = (str(status), time.monotonic())
                 else:
                     still_running.append(run_id)
             pending = still_running
@@ -1458,6 +1844,7 @@ async def _run(
     wait_seconds: float = DEFAULT_RUN_WAIT_SECONDS,
     role: str = LIMIT_ROLES[0],
     restore_held: bool = False,
+    subjects: list[str] | None = None,
 ) -> dict[str, Any]:
     from app.channels.inbound_receipts import SqlInboundReceiptStore
     from deerflow.config import get_app_config
@@ -1496,7 +1883,7 @@ async def _run(
             wait_seconds=wait_seconds,
             **deployment_options(config),
         )
-        return await command_runner.run(command, issuer=issuer, subject=subject, email=email, end_running_work=end_running_work, role=role, restore_held=restore_held)
+        return await command_runner.run(command, issuer=issuer, subject=subject, email=email, end_running_work=end_running_work, role=role, restore_held=restore_held, subjects=subjects)
     finally:
         await close_engine()
 
@@ -1523,10 +1910,14 @@ _VALUED_OPTIONS = ("--issuer", "--subject", "--email", "--role", "--wait-seconds
 def _command_word(argv: list[str]) -> str | None:
     """The command a refused command line named, for its refusal document: never a flag's value."""
     words = iter(argv)
+    # ``--subjects`` takes every word up to the next option.
+    in_subjects = False
     for word in words:
-        if word in _VALUED_OPTIONS:
-            next(words, None)
-        elif word in COMMANDS:
+        if word.startswith("-"):
+            in_subjects = word == "--subjects"
+            if word in _VALUED_OPTIONS:
+                next(words, None)
+        elif not in_subjects and word in COMMANDS:
             return word
     return None
 
@@ -1537,6 +1928,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--issuer", help="the identity provider's issuer URL, as configured")
     parser.add_argument("--subject", help="the person's subject at that issuer")
     parser.add_argument("--email", help="convenience: the account's email, when it resolves to exactly one provider account")
+    parser.add_argument(
+        "--subjects",
+        nargs="+",
+        action="extend",
+        metavar="SUB",
+        help=(
+            f"{', '.join(BATCH_COMMANDS)} only: many people at one --issuer in one call, at most {MAX_BATCH_SUBJECTS}; repeatable, and "
+            "--subjects=SUB passes a subject that begins with a dash. The document then carries one entry per identity and totals"
+        ),
+    )
     parser.add_argument(
         "--end-running-work",
         action="store_true",
@@ -1563,6 +1964,17 @@ def main(argv: list[str] | None = None) -> int:
         command = _command_word(argv if argv is not None else sys.argv[1:])
         print(json.dumps({"command": command, "error": str(exc)}, sort_keys=True), flush=True)
         return 1
+    if args.subjects is not None:
+        refusal = None
+        if args.command not in BATCH_COMMANDS:
+            refusal = f"--subjects belongs to {', '.join(BATCH_COMMANDS[:-1])} and {BATCH_COMMANDS[-1]}"
+        elif args.subject is not None:
+            refusal = "give --subjects or --subject, not both"
+        elif args.email is not None or not args.issuer:
+            refusal = "--subjects addresses identities at one --issuer; give it, and not --email"
+        if refusal is not None:
+            print(json.dumps({"command": args.command, "error": refusal}, sort_keys=True), flush=True)
+            return 1
     if args.end_running_work and args.command not in ENDS_WORK_ON_REQUEST:
         print(json.dumps({"command": args.command, "error": "--end-running-work belongs to end-sessions and limit-role; disable always ends the account's running work"}, sort_keys=True), flush=True)
         return 1
@@ -1586,6 +1998,7 @@ def main(argv: list[str] | None = None) -> int:
                 wait_seconds=args.wait_seconds,
                 role=args.role or LIMIT_ROLES[0],
                 restore_held=args.restore_held,
+                subjects=args.subjects,
             )
         )
     except CommandError as exc:
