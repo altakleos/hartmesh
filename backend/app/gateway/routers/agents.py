@@ -202,6 +202,25 @@ def _agent_config_to_response(agent_cfg: AgentConfig, include_soul: bool = False
     )
 
 
+def owned_agent_documents(user_id: str) -> list[dict] | None:
+    """Each custom agent this person made, as ``GET /agents`` describes it; ``None`` where the feature is off.
+
+    Blocking IO (the agent store); call it off the event loop.
+    """
+    if not get_agents_api_config().enabled:
+        return None
+    documents = []
+    unreadable = 0
+    for agent in get_agent_store().list_owned(user_id=user_id):
+        try:
+            documents.append(_agent_config_to_response(agent, include_soul=True, user_id=user_id).model_dump(mode="json"))
+        except Exception:  # noqa: BLE001 - one agent that cannot be read must not keep the rest from the person; its message can quote the file
+            unreadable += 1
+    if unreadable:
+        logger.warning("Left %d unreadable custom agents out of a listing", unreadable)
+    return documents
+
+
 @router.get(
     "/agents",
     response_model=AgentsListResponse,

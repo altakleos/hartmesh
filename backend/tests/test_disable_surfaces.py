@@ -33,7 +33,7 @@ from deerflow.runtime.owner_holdings import Ended, OwnerHoldings
 
 ISSUER = "https://login.example.com/realms/tenant"
 CONNECTIONS = ("websockets", "sse_streams", "downloads")
-RETAINED = ("sandboxes", "mcp_sessions", "browser_sessions", "memory_updates")
+RETAINED = ("sandboxes", "mcp_sessions", "browser_sessions", "memory_updates", "account_exports")
 PROCESS_SURFACES = (*CONNECTIONS, *RETAINED)
 DURABLE = ("mcp_tasks", "subagent_batches", "mcp_task_notifications", "channel_ingress")
 HELD = ("schedules", "channel_bindings", "scheduled_occurrences", "channel_receipts")

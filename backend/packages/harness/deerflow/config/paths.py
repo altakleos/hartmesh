@@ -292,6 +292,15 @@ class Paths:
         shared.chmod(0o755)
         return shared
 
+    def exports_dir(self) -> Path:
+        """Prepared account exports: `{base_dir}/exports/`.
+
+        On the data disk beside the data it copies, and mounted in no sandbox.
+        Nothing here outlives its download or its expiry; the Gateway empties
+        it when it starts.
+        """
+        return self.base_dir / "exports"
+
     def user_memory_file(self, user_id: str) -> Path:
         """Per-user memory file: `{base_dir}/users/{user_id}/memory.json`."""
         return self.user_dir(user_id) / "memory.json"

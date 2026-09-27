@@ -9,6 +9,7 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
+from deerflow.config.account_export_config import AccountExportConfig
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
@@ -319,6 +320,10 @@ class AppConfig(BaseModel):
             "agent_storage",
             field_doc="Custom-agent and managed-subagent definition storage backend ('file' for on-disk layouts, 'db' to share definitions across nodes via SQL).",
         ),
+    )
+    account_export: AccountExportConfig = Field(
+        default_factory=AccountExportConfig,
+        description="Limits for a person's download of all their own data: part size, free space kept, expiry and how many are prepared at once.",
     )
     scheduler: SchedulerConfig = Field(
         default_factory=SchedulerConfig,

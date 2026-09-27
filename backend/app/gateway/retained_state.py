@@ -12,6 +12,9 @@ something needs the room:
   and cookies until another thread needs the slot.
 - ``memory_updates``: a conversation queued to be written to the owner's
   memory after the debounce.
+- ``account_exports``: the owner's download of all their data, being
+  prepared or waiting on the data disk to be downloaded; ending it deletes
+  it.
 
 Each subsystem already records whose each entry is, so none is copied into
 the process's holdings: each is added as a source
@@ -37,7 +40,7 @@ from deerflow.runtime.owner_holdings import Ended, OwnerHoldings
 logger = logging.getLogger(__name__)
 
 #: The surfaces this module adds, in the order the account command names them.
-RETAINED_SURFACES = ("sandboxes", "mcp_sessions", "browser_sessions", "memory_updates")
+RETAINED_SURFACES = ("sandboxes", "mcp_sessions", "browser_sessions", "memory_updates", "account_exports")
 
 ThreadOwner = Callable[[str], Awaitable[str | None]]
 
@@ -101,11 +104,12 @@ def unreached_surfaces() -> tuple[str, ...]:
     return ("sandboxes",)
 
 
-def add_retained_state_sources(holdings: OwnerHoldings, *, thread_owner: ThreadOwner) -> None:
+def add_retained_state_sources(holdings: OwnerHoldings, *, thread_owner: ThreadOwner, account_exports: Any | None = None) -> None:
     """Add each subsystem that keeps state for a person as a source of ``holdings``.
 
     ``thread_owner`` answers whose a thread is: a browser is kept per thread
-    with no owner of its own.
+    with no owner of its own. ``account_exports`` is this process's
+    ``AccountExportService``, where it runs one.
     """
     from deerflow.sandbox.capabilities import OwnerSandboxEnding, sandbox_capability
 
@@ -134,7 +138,13 @@ def add_retained_state_sources(holdings: OwnerHoldings, *, thread_owner: ThreadO
     holdings.add_source("sandboxes", _sandboxes, blocking=True)
     holdings.add_source("mcp_sessions", _mcp_sessions)
     holdings.add_source("browser_sessions", _browser_sessions)
+
+    def _account_exports(owners: frozenset[str]) -> dict[str, Ended]:
+        # A process that prepares no exports holds none.
+        return account_exports.end_for_owners(owners) if account_exports is not None else {}
+
     holdings.add_source("memory_updates", _memory_updates)
+    holdings.add_source("account_exports", _account_exports)
 
 
 __all__ = ["RETAINED_SURFACES", "add_retained_state_sources", "thread_owner_from", "unreached_surfaces"]

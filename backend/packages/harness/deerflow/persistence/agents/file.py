@@ -142,6 +142,26 @@ class FileAgentStore(AgentStore):
         agents.sort(key=lambda a: a.name)
         return agents
 
+    def list_owned(self, *, user_id: str) -> list[AgentConfig]:
+        # Only the person's own directory: the legacy shared layout is offered
+        # to everyone and owned by no one.
+        root = _ac.get_paths().user_agents_dir(user_id)
+        if not root.is_dir():
+            return []
+        agents: list[AgentConfig] = []
+        unreadable = 0
+        for entry in sorted(root.iterdir()):
+            if entry.is_symlink() or not entry.is_dir() or not (entry / "config.yaml").is_file():
+                continue
+            try:
+                agents.append(self.get(entry.name, user_id=user_id))
+            except Exception:  # noqa: BLE001 - one bad agent must not hide the rest; its message can quote the person's file
+                unreadable += 1
+        if unreadable:
+            logger.warning("Skipped %d unreadable agents of one owner", unreadable)
+        agents.sort(key=lambda a: a.name)
+        return agents
+
     def list_all(self) -> list[tuple[str, AgentConfig]]:
         result: list[tuple[str, AgentConfig]] = []
         for user_id, name in self._discover():
