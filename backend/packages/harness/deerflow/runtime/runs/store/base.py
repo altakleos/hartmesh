@@ -29,30 +29,20 @@ from deerflow.runtime.runs.lifecycle_query import (
 )
 
 _LIFECYCLE_EVIDENCE_KEY = re.compile(r"^[A-Za-z_][A-Za-z0-9_.-]{0,63}$")
-_LIFECYCLE_SAFE_REASONS = {
-    "agent_assembly_drift",
-    "agent_revision_drift",
-    "artifact_delivery_incomplete",
-    "assembly_evidence_unavailable",
-    "accepted_skill_execution_fence_failed",
-    "accepted_skill_execution_lease_unavailable",
-    "constraint_evidence_mismatch",
-    "constraint_expired_before_start",
-    "delivery_receipt_failed",
-    "loop_capped",
-    "model_length_capped",
-    "orphan_recovered",
-    "recovery_checkpoint_unavailable",
-    "recovery_tool_attempt_indeterminate",
-    "replacement",
-    "rollback",
-    "safety_capped",
-    "scheduled_task_orphan_recovered",
-    "subagent_limit_capped",
-    "tenant_identity_mismatch",
-    "token_capped",
-    "worker_attachment_failed",
-}
+# A lifecycle reason is a host-owned code: a lowercase identifier chosen by the
+# runtime, never text from a prompt, a model, a tool or an exception. Its shape
+# is what is checked. A closed list here fenced every turn that ended for a
+# reason added after it, leaving the durable run ``running`` with no end on its
+# stream, because the rejected terminal write reads as a lost ownership race.
+# The same code is the run's ``stop_reason``, so it fits that column.
+LIFECYCLE_REASON_MAX_LENGTH = 50
+_LIFECYCLE_REASON = re.compile(rf"^[a-z][a-z0-9_]{{0,{LIFECYCLE_REASON_MAX_LENGTH - 1}}}$")
+
+
+def is_lifecycle_reason(value: object) -> bool:
+    """Whether ``value`` has the shape of a host reason code a terminal may record."""
+
+    return isinstance(value, str) and _LIFECYCLE_REASON.fullmatch(value) is not None
 
 
 def tenant_store_columns(
@@ -369,8 +359,8 @@ def build_lifecycle_payload(transition: LifecycleTransition) -> dict[str, Any]:
             raise ValueError("execution evidence digest mismatch")
         payload["execution_evidence_digest"] = evidence_digest
     if transition.reason is not None:
-        if transition.reason not in _LIFECYCLE_SAFE_REASONS:
-            raise ValueError(f"unsupported lifecycle reason: {transition.reason!r}")
+        if not is_lifecycle_reason(transition.reason):
+            raise ValueError("unsupported lifecycle reason: not a host reason code")
         payload["reason"] = transition.reason
     if transition.evidence:
         if transition.lifecycle_type != LifecycleType.cancellation_requested:

@@ -2181,21 +2181,24 @@ async def _run_agent(
         accepted_tenant = accepted_for_cleanup.tenant if accepted_for_cleanup is not None else None
         if accepted_for_cleanup is not None and accepted_tenant != ctx.tenant:
             error = "Accepted invocation tenant does not match this deployment"
-            await run_manager.set_status_if_not_cancelled(
+            cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error,
                 error=error,
                 stop_reason="tenant_identity_mismatch",
                 **terminal_status_kwargs,
             )
-            await bridge.publish(
-                run_id,
-                "error",
-                {
-                    "message": error,
-                    "name": "TenantIdentityMismatchError",
-                },
-            )
+            if cancel_action is not None:
+                await _finish_cancellation(cancel_action, restore_checkpoint=False)
+            else:
+                await bridge.publish(
+                    run_id,
+                    "error",
+                    {
+                        "message": error,
+                        "name": "TenantIdentityMismatchError",
+                    },
+                )
             return
 
         if accepted_for_cleanup is not None and accepted_for_cleanup.extension_artifact_manifest_digest is not None:
@@ -2213,21 +2216,24 @@ async def _run_agent(
             )
             if process_tuple != accepted_tuple:
                 error = "Accepted extension provenance does not match this process"
-                await run_manager.set_status_if_not_cancelled(
+                cancel_action = await run_manager.set_status_if_not_cancelled(
                     run_id,
                     RunStatus.error,
                     error=error,
                     stop_reason="extension_provenance_mismatch",
                     **terminal_status_kwargs,
                 )
-                await bridge.publish(
-                    run_id,
-                    "error",
-                    {
-                        "message": error,
-                        "name": "ExtensionProvenanceMismatchError",
-                    },
-                )
+                if cancel_action is not None:
+                    await _finish_cancellation(cancel_action, restore_checkpoint=False)
+                else:
+                    await bridge.publish(
+                        run_id,
+                        "error",
+                        {
+                            "message": error,
+                            "name": "ExtensionProvenanceMismatchError",
+                        },
+                    )
                 return
 
         # Keep cancellable preflight work under the worker's terminal guard so
@@ -2411,21 +2417,24 @@ async def _run_agent(
 
         async def _fail_unavailable_subagent_catalog() -> None:
             error = "Accepted subagent catalog is unavailable"
-            await run_manager.set_status_if_not_cancelled(
+            cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error,
                 error=error,
                 stop_reason="subagent_catalog_unavailable",
                 **terminal_status_kwargs,
             )
-            await bridge.publish(
-                run_id,
-                "error",
-                {
-                    "message": error,
-                    "name": "SubagentCatalogUnavailableError",
-                },
-            )
+            if cancel_action is not None:
+                await _finish_cancellation(cancel_action, restore_checkpoint=False)
+            else:
+                await bridge.publish(
+                    run_id,
+                    "error",
+                    {
+                        "message": error,
+                        "name": "SubagentCatalogUnavailableError",
+                    },
+                )
 
         accepted = record.accepted_invocation
         if accepted is not None:
@@ -2488,37 +2497,43 @@ async def _run_agent(
                         stop_reason = "agent_revision_drift"
                         error = "Accepted skill snapshot no longer matches captured material"
                         error_name = "AgentRevisionDriftError"
-                    await run_manager.set_status_if_not_cancelled(
+                    cancel_action = await run_manager.set_status_if_not_cancelled(
                         run_id,
                         RunStatus.error,
                         error=error,
                         stop_reason=stop_reason,
                         **terminal_status_kwargs,
                     )
-                    await bridge.publish(
-                        run_id,
-                        "error",
-                        {
-                            "message": error,
-                            "name": error_name,
-                        },
-                    )
+                    if cancel_action is not None:
+                        await _finish_cancellation(cancel_action, restore_checkpoint=False)
+                    else:
+                        await bridge.publish(
+                            run_id,
+                            "error",
+                            {
+                                "message": error,
+                                "name": error_name,
+                            },
+                        )
                     return
             actual_revision = ResolvedAgentRevision.from_material(pinned_material) if isinstance(pinned_material, ResolvedAgentMaterialV1) else None
             if actual_revision is None or actual_revision.digest != accepted.agent_revision.digest:
                 error = "Accepted agent revision no longer matches current resolved material"
-                await run_manager.set_status_if_not_cancelled(
+                cancel_action = await run_manager.set_status_if_not_cancelled(
                     run_id,
                     RunStatus.error,
                     error=error,
                     stop_reason="agent_revision_drift",
                     **terminal_status_kwargs,
                 )
-                await bridge.publish(
-                    run_id,
-                    "error",
-                    {"message": error, "name": "AgentRevisionDriftError"},
-                )
+                if cancel_action is not None:
+                    await _finish_cancellation(cancel_action, restore_checkpoint=False)
+                else:
+                    await bridge.publish(
+                        run_id,
+                        "error",
+                        {"message": error, "name": "AgentRevisionDriftError"},
+                    )
                 return
             # Bind the exact object that passed the digest check. The factory
             # consumes it directly and never performs a second mutable read.
@@ -2578,21 +2593,24 @@ async def _run_agent(
                     if execution_budget.equivalence_normalizer_manifest_digest != normalizer_manifest_digest():
                         raise ExecutionPolicyError("policy_equivalence_normalizer_unavailable")
                 except ExecutionPolicyError as exc:
-                    await run_manager.set_status_if_not_cancelled(
+                    cancel_action = await run_manager.set_status_if_not_cancelled(
                         run_id,
                         RunStatus.error,
                         error="Accepted execution policy is unavailable",
                         stop_reason=exc.code,
                         **terminal_status_kwargs,
                     )
-                    await bridge.publish(
-                        run_id,
-                        "error",
-                        {
-                            "message": "Accepted execution policy is unavailable",
-                            "name": "ExecutionPolicyUnavailableError",
-                        },
-                    )
+                    if cancel_action is not None:
+                        await _finish_cancellation(cancel_action, restore_checkpoint=False)
+                    else:
+                        await bridge.publish(
+                            run_id,
+                            "error",
+                            {
+                                "message": "Accepted execution policy is unavailable",
+                                "name": "ExecutionPolicyUnavailableError",
+                            },
+                        )
                     return
                 runtime_ctx["accepted_execution_budget"] = execution_budget
                 runtime_ctx["execution_policy_keyring"] = policy_keyring
@@ -2661,21 +2679,24 @@ async def _run_agent(
                     if policy_state.terminal_reason is not None:
                         raise ExecutionPolicyError(policy_state.terminal_reason)
                 except ExecutionPolicyError as exc:
-                    await run_manager.set_status_if_not_cancelled(
+                    cancel_action = await run_manager.set_status_if_not_cancelled(
                         run_id,
                         RunStatus.error,
                         error="Accepted execution policy state is unavailable",
                         stop_reason=exc.code,
                         **terminal_status_kwargs,
                     )
-                    await bridge.publish(
-                        run_id,
-                        "error",
-                        {
-                            "message": "Accepted execution policy state is unavailable",
-                            "name": "ExecutionPolicyStateError",
-                        },
-                    )
+                    if cancel_action is not None:
+                        await _finish_cancellation(cancel_action, restore_checkpoint=False)
+                    else:
+                        await bridge.publish(
+                            run_id,
+                            "error",
+                            {
+                                "message": "Accepted execution policy state is unavailable",
+                                "name": "ExecutionPolicyStateError",
+                            },
+                        )
                     return
 
                 policy_lock = asyncio.Lock()
@@ -2718,18 +2739,21 @@ async def _run_agent(
             trusted_context = accepted.trusted_context
             if trusted_context is not None and trusted_context.runtime_reference_count and not trusted_context.runtime_state_complete:
                 error = "Accepted runtime-only contributor context is unavailable after process recovery"
-                await run_manager.set_status_if_not_cancelled(
+                cancel_action = await run_manager.set_status_if_not_cancelled(
                     run_id,
                     RunStatus.error,
                     error=error,
                     stop_reason="trusted_context_unavailable",
                     **terminal_status_kwargs,
                 )
-                await bridge.publish(
-                    run_id,
-                    "error",
-                    {"message": error, "name": "TrustedRunContextUnavailableError"},
-                )
+                if cancel_action is not None:
+                    await _finish_cancellation(cancel_action, restore_checkpoint=False)
+                else:
+                    await bridge.publish(
+                        run_id,
+                        "error",
+                        {"message": error, "name": "TrustedRunContextUnavailableError"},
+                    )
                 return
             bound_trusted_context = trusted_context.bind_run(run_id) if trusted_context is not None else None
             if bound_trusted_context is not None:

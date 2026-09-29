@@ -50,6 +50,7 @@ from .store.base import (
     ThreadOperationReleaseOutcome,
     ThreadOperationReleaseResult,
     build_lifecycle_payload,
+    is_lifecycle_reason,
     lifecycle_type_for_status,
     validate_execution_evidence_run,
 )
@@ -304,6 +305,20 @@ class PersistenceRetryPolicy:
     backoff_factor: float = 2.0
 
 
+def _terminal_reason(run_id: str, stop_reason: str | None) -> str | None:
+    """The reason a terminal may record: a host reason code, or none.
+
+    Guards, tools (extension tools among them) and error types supply these. A
+    terminal write whose reason the lifecycle journal refuses fences the worker
+    and leaves the run ``running``, so a reason of the wrong shape is dropped
+    here, once, for every terminal path, and the run keeps its status.
+    """
+    if stop_reason is None or is_lifecycle_reason(stop_reason):
+        return stop_reason
+    logger.warning("Run %s dropped a stop reason that is not a host reason code", run_id)
+    return None
+
+
 @dataclass
 class RunRecord:
     """Mutable record for a single run."""
@@ -332,6 +347,10 @@ class RunRecord:
     start_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
     abort_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     abort_action: str = "interrupt"
+    # A cancellation someone asked for (Stop, a durable or out-of-band request,
+    # a replacement) and this process accepted. ``abort_event`` alone is also
+    # set by fences, quarantine and shutdown, and ``abort_action`` has a default.
+    cancellation_accepted: bool = field(default=False, repr=False)
     error: str | None = None
     model_name: str | None = None
     store_only: bool = False
@@ -964,6 +983,7 @@ class RunManager:
         if previous is None or previous.finalizing:
             return
         previous.abort_action = action
+        previous.cancellation_accepted = True
         previous.abort_event.set()
         task_active = previous.task is not None and not previous.task.done()
         previous.finalizing = task_active
@@ -2867,6 +2887,7 @@ class RunManager:
                                 self._sync_record_from_store_row(record, stored)
                                 if stored.get("cancel_action") is not None:
                                     record.abort_action = stored["cancel_action"]
+                                    record.cancellation_accepted = True
                             record.abort_event.set()
                             record.updated_at = _now_iso()
                     if record.execution_takeover:
@@ -3462,6 +3483,7 @@ class RunManager:
         lifecycle_type: LifecycleType | None = None,
     ) -> None:
         """Transition a run to a new status."""
+        stop_reason = _terminal_reason(run_id, stop_reason)
         async with self._lock:
             record = self._runs.get(run_id)
             if record is None:
@@ -3570,6 +3592,7 @@ class RunManager:
             record.state_version = row["state_version"]
             record.lease_expires_at = row.get("lease_expires_at")
             record.abort_action = action
+            record.cancellation_accepted = True
             record.abort_event.set()
         return action
 
@@ -3624,6 +3647,21 @@ class RunManager:
         persist: bool = True,
     ) -> str | None:
         """Set a terminal status unless a durable cancellation won first."""
+        stop_reason = _terminal_reason(run_id, stop_reason)
+        if not persist:
+            # A staged terminal is committed later without asking the store
+            # who won, so a cancellation this process accepted
+            # (``cancellation_accepted``) is what won. Without this, an error raised while the turn unwinds
+            # from a Stop would be staged over it and reach the person as a
+            # crash. Shutdown and fences are not cancellations anyone asked
+            # for, and a fenced worker may not finalize at all.
+            async with self._lock:
+                record = self._runs.get(run_id)
+                accepted_stop = None
+                if record is not None and record.cancellation_accepted and not record.ownership_lost and record.abort_action in ("interrupt", "rollback"):
+                    accepted_stop = record.abort_action
+            if accepted_stop is not None:
+                return accepted_stop
         if not persist or self._store is None or (not self._store.durable_lifecycle and not self.heartbeat_enabled):
             await self.set_status(
                 run_id,
@@ -3699,6 +3737,7 @@ class RunManager:
                         # for a stale worker.
                         self._sync_record_from_store_row(record, stored)
                     record.abort_action = result.cancel_action
+                    record.cancellation_accepted = True
                     record.abort_event.set()
             return result.cancel_action
 
@@ -4127,6 +4166,7 @@ class RunManager:
                 return
 
             record.abort_action = action
+            record.cancellation_accepted = True
             record.abort_event.set()
             task_active = record.task is not None and not record.task.done()
             record.finalizing = task_active
@@ -4171,6 +4211,7 @@ class RunManager:
                     winning_action = result.row.get("cancel_action")
                     if winning_action in ("interrupt", "rollback") and local_record.status in (RunStatus.pending, RunStatus.running):
                         local_record.abort_action = winning_action
+                        local_record.cancellation_accepted = True
                         local_record.abort_event.set()
                         task_active = local_record.task is not None and not local_record.task.done()
                         local_record.finalizing = task_active
@@ -4277,6 +4318,7 @@ class RunManager:
                 if record.status not in (RunStatus.pending, RunStatus.running):
                     return CancelOutcome.cancelled if durable_cancel_won else CancelOutcome.not_cancellable
                 record.abort_action = action
+                record.cancellation_accepted = True
                 record.abort_event.set()
                 task_active = record.task is not None and not record.task.done()
                 record.finalizing = task_active
@@ -4808,6 +4850,7 @@ class RunManager:
                 record.attachment_supervised = True
             winning_action = record.abort_action if record.abort_event.is_set() and record.abort_action in ("interrupt", "rollback") else action
             record.abort_action = winning_action
+            record.cancellation_accepted = True
             record.abort_event.set()
             record.finalizing = True
             candidate = self._known_candidate_for_record(
@@ -5469,6 +5512,7 @@ class RunManager:
                     if r.finalizing:
                         continue
                     r.abort_action = multitask_strategy
+                    r.cancellation_accepted = True
                     r.abort_event.set()
                     task_active = r.task is not None and not r.task.done()
                     r.finalizing = task_active

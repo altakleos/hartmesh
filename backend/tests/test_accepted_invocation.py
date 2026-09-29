@@ -868,6 +868,40 @@ async def test_tenant_mismatch_fails_before_resolution_graph_or_model_work() -> 
 
 
 @pytest.mark.asyncio
+async def test_a_preflight_failure_after_an_accepted_stop_ends_as_the_stop() -> None:
+    """With run events stored, a preflight failure after a Stop finishes as the Stop."""
+    accepted = _accepted(_material())
+    accepted = replace(
+        accepted,
+        tenant=TenantIdentityV1.from_canonical_id("other-tenant").to_persisted_reference(),
+    )
+    manager = RunManager(tenant=accepted.tenant)
+    record = await manager.create_or_reject(
+        "thread-worker-tenant-mismatch-stopped",
+        accepted_invocation=accepted,
+    )
+    # A Stop accepted while the worker is past its start: the manager's own
+    # bookkeeping for one, without cancelling a task that does not exist yet.
+    record.abort_action = "interrupt"
+    record.cancellation_accepted = True
+    record.abort_event.set()
+    bridge = _bridge()
+
+    await run_agent(
+        bridge,
+        manager,
+        record,
+        ctx=RunContext(checkpointer=None, tenant=_TEST_TENANT, event_store=MemoryRunEventStore()),
+        agent_factory=AsyncMock(side_effect=AssertionError("a failed preflight must not construct a graph")),
+        graph_input={},
+        config={},
+    )
+
+    assert record.status is RunStatus.interrupted
+    assert "error" not in [call.args[1] for call in bridge.publish.await_args_list]
+
+
+@pytest.mark.asyncio
 async def test_missing_worker_tenant_fails_before_resolution_graph_or_model_work() -> None:
     accepted = _accepted(_material())
     manager = RunManager(tenant=_TEST_TENANT)

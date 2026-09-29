@@ -75,8 +75,11 @@ admission fail closed. This deliberately validates maintained structural boundar
 scanning conversation or lifecycle history.
 
 The lifecycle payload never stores prompts, messages, reasoning, tool payloads,
-credentials, artifact contents, or the rich bodies below. Reasons are selected
-from host-owned safe codes; v1 evidence accepts only the cancellation `action`
+credentials, artifact contents, or the rich bodies below. A reason is a
+host-owned code, checked by its shape rather than against a list: a lowercase
+identifier that fits the run's 50-character `stop_reason`, so a terminal
+carrying a code added later is recorded like any other; v1 evidence accepts
+only the cancellation `action`
 reference (`interrupt` or `rollback`). Lifecycle type/resulting-status pairs are
 validated before a row can change. A host-independent in-process API can query
 this journal, and the Gateway exposes the same access-filtered query through
