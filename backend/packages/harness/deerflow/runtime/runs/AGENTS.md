@@ -24,6 +24,19 @@ how fast the deployer's command can confirm a run stopped. Both paths end in
 unchanged. The Gateway starts and stops the watch alongside the heartbeat in
 `app/gateway/deps.py`.
 
+### A Stop decides how its turn ends (`set_status_if_not_cancelled`)
+
+With an event store the worker stages its terminal (`persist=False`) and
+commits it after the receipt. The staged call returns a cancellation this
+process accepted (`RunRecord.cancellation_accepted`: a Stop, a durable or
+out-of-band request, a replacement; never shutdown or a fence), and every
+failure handler finishes as that cancellation, so an exception raised while a
+turn unwinds from a Stop cannot stage `error` over it. The terminal `reason` is
+checked by shape, not a list ([RUN_EVENT_STREAM.md](../../../../../docs/RUN_EVENT_STREAM.md)),
+and `set_status` / `set_status_if_not_cancelled` drop a reason of the wrong
+shape (`_terminal_reason`): a refused terminal write fences the worker and
+leaves its row `running`.
+
 ### Cancellation reaches the command (`sandbox/lease.py` + `sandbox/sandbox.py`)
 
 `asyncio.to_thread` cannot interrupt the worker blocked on a sandbox command,

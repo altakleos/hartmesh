@@ -15,10 +15,12 @@ from deerflow.persistence.base import Base
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.run.sql import RunRepository
 from deerflow.runtime.runs.store.base import (
+    LIFECYCLE_REASON_MAX_LENGTH,
     CancellationRequestOutcome,
     LifecycleTransition,
     LifecycleType,
     RunStore,
+    is_lifecycle_reason,
 )
 from deerflow.runtime.runs.store.memory import MemoryRunStore
 
@@ -456,20 +458,85 @@ async def test_lifecycle_payload_rejects_rich_or_oversize_evidence() -> None:
             ),
         )
 
-    with pytest.raises(ValueError, match="unsupported lifecycle reason"):
-        await store.transition_run_atomic(
-            "run-1",
-            expected_state_version=1,
-            expected_statuses=("pending",),
-            transition=LifecycleTransition(
-                lifecycle_type=LifecycleType.failed,
-                status="error",
-                reason="secret",
-            ),
-        )
+    for free_text in ("Traceback: token sk-live-123", "Sandbox capacity", "reason\nsecret", "x" * 51, "1st_reason", "_private", ""):
+        with pytest.raises(ValueError, match="unsupported lifecycle reason") as rejected:
+            await store.transition_run_atomic(
+                "run-1",
+                expected_state_version=1,
+                expected_statuses=("pending",),
+                transition=LifecycleTransition(
+                    lifecycle_type=LifecycleType.failed,
+                    status="error",
+                    reason=free_text,
+                ),
+            )
+        # The refusal never repeats the text it refused.
+        assert free_text not in str(rejected.value) or not free_text
 
     assert (await store.get("run-1"))["status"] == "pending"
     assert len(await store.list_lifecycle_events(run_id="run-1")) == 1
+
+
+# Host reason codes added after the lifecycle journal was: a refused sandbox
+# call, extension and context fences, and accepted execution policy. Each
+# ended a turn whose terminal write the journal rejected, which fenced the
+# worker and left the durable run ``running``.
+_LATER_HOST_REASONS = (
+    ("success", "sandbox_capacity_exceeded"),
+    ("error", "sandbox_capacity_exceeded"),
+    ("error", "extension_provenance_mismatch"),
+    ("error", "subagent_catalog_unavailable"),
+    ("error", "trusted_context_unavailable"),
+    ("error", "execution_policy_state_invalid"),
+    ("success", "sandbox_operation_budget_exhausted"),
+    ("error", "repeated_tool_loop"),
+    ("error", "no_progress_loop"),
+)
+
+
+def test_a_reason_code_fits_the_run_stop_reason_column() -> None:
+    """The terminal's reason is also the row's ``stop_reason``; a longer one fails the row write."""
+    assert LIFECYCLE_REASON_MAX_LENGTH == RunRow.__table__.c.stop_reason.type.length
+    assert is_lifecycle_reason("x" * LIFECYCLE_REASON_MAX_LENGTH)
+    assert not is_lifecycle_reason("x" * (LIFECYCLE_REASON_MAX_LENGTH + 1))
+
+
+async def _finalizes_with_reason(store: RunStore, run_id: str, status: str, reason: str) -> None:
+    await store.put(run_id, thread_id=f"thread-{run_id}", user_id=None)
+    await store.transition_run_atomic(
+        run_id,
+        expected_state_version=1,
+        expected_statuses=("pending",),
+        transition=LifecycleTransition(lifecycle_type=LifecycleType.started, status="running"),
+    )
+
+    result = await store.finalize_if_not_cancelled(run_id, status=status, stop_reason=reason)
+
+    assert result.finalized and result.cancel_action is None, reason
+    row = await store.get(run_id, user_id=None)
+    assert (row["status"], row["stop_reason"]) == (status, reason)
+    events = await store.list_lifecycle_events(run_id=run_id)
+    assert events[-1]["payload"] == {"version": 1, "reason": reason}
+
+
+@pytest.mark.anyio
+async def test_memory_terminal_write_accepts_every_host_reason_code() -> None:
+    store = MemoryRunStore()
+    for index, (status, reason) in enumerate(_LATER_HOST_REASONS):
+        await _finalizes_with_reason(store, f"run-{index}", status, reason)
+
+
+@pytest.mark.anyio
+async def test_sql_terminal_write_accepts_every_host_reason_code(tmp_path) -> None:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'lifecycle.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    try:
+        store = RunRepository(async_sessionmaker(engine, expire_on_commit=False))
+        for index, (status, reason) in enumerate(_LATER_HOST_REASONS):
+            await _finalizes_with_reason(store, f"run-{index}", status, reason)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.anyio

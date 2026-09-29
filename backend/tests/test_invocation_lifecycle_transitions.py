@@ -518,3 +518,78 @@ async def test_shutdown_interruption_is_not_misclassified_as_user_cancellation()
     await manager.shutdown(timeout=1.0)
     repeated = await store.list_lifecycle_events(run_id=record.run_id)
     assert repeated == events
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("action", ["interrupt", "rollback"])
+@pytest.mark.parametrize("status", [RunStatus.error, RunStatus.success])
+async def test_a_staged_terminal_yields_to_a_stop_this_process_accepted(status: RunStatus, action: str) -> None:
+    """A worker that stages its terminal (``persist=False``) after Stop ends as that Stop.
+
+    With run events in the database the worker stages every terminal and
+    commits it later, so the store is not asked who won. A Stop this process
+    accepted is the cancellation that won; an error raised while the turn
+    unwinds from it, or a completion racing it, must not replace it.
+    """
+    manager, _store, record = await _manager_and_run()
+    record.task = asyncio.create_task(asyncio.sleep(30))
+    try:
+        assert await manager.cancel(record.run_id, action=action) == CancelOutcome.cancelled
+
+        returned = await manager.set_status_if_not_cancelled(
+            record.run_id,
+            status,
+            error="Runtime operation failed" if status is RunStatus.error else None,
+            persist=False,
+        )
+
+        assert returned == action
+        if action == "interrupt":
+            assert (record.status, record.error) == (RunStatus.interrupted, None)
+        else:
+            assert (record.status, record.error) == (RunStatus.error, "Rolled back by user")
+    finally:
+        record.task.cancel()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("abort", ["none", "shutdown", "quarantine", "fence"])
+async def test_a_staged_terminal_without_an_accepted_stop_is_staged(abort: str) -> None:
+    """Only a cancellation someone asked for wins: shutdown and fences abort too."""
+    manager, store, record = await _manager_and_run()
+    if abort == "shutdown":
+        # What ``shutdown`` does to an in-flight run.
+        record.abort_action = "interrupt"
+        record.abort_event.set()
+    elif abort == "quarantine":
+        async with manager._lock:
+            manager._fence_quarantined_local_locked(record.run_id)
+    elif abort == "fence":
+        record.cancellation_accepted = True
+        record.ownership_lost = True
+        record.abort_event.set()
+
+    action = await manager.set_status_if_not_cancelled(record.run_id, RunStatus.error, error="Runtime operation failed", persist=False)
+
+    assert action is None
+    assert (await store.get(record.run_id))["status"] == "running"
+    if abort != "fence":
+        assert record.status == RunStatus.error
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("persist", [True, False])
+async def test_a_stop_reason_that_is_not_a_host_code_costs_the_reason_not_the_run(persist: bool) -> None:
+    """A terminal the journal would refuse fences the worker; its reason is dropped instead."""
+    too_long = "execution_budget_max_no_progress_observations_invalid"  # an ExecutionPolicyError code
+    for reason in (too_long, "Rate Limited"):
+        manager, store, record = await _manager_and_run()
+        action = await manager.set_status_if_not_cancelled(record.run_id, RunStatus.error, error="Accepted execution policy stopped this run", stop_reason=reason, persist=persist)
+        if not persist:
+            await manager.persist_current_status(record.run_id)
+
+        assert action is None, reason
+        assert record.ownership_lost is False
+        assert (record.status, record.stop_reason) == (RunStatus.error, None)
+        row = await store.get(record.run_id)
+        assert (row["status"], row["stop_reason"]) == ("error", None)
