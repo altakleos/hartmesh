@@ -176,7 +176,16 @@ root's. Markdown links resolve from this file.
   all active states), recovery locks task/run pairs in deterministic order and
   reconstructs live fields before releasing a claim, launch/failure/timeout
   update parent and occurrence atomically (timeout also advances cadence), and
-  repositories coerce serialized timestamps before SQL binding.
+  repositories coerce serialized timestamps before SQL binding. An occurrence
+  is ended once, by a compare-and-set on its status (`end_active_run`): the
+  run's completion hook, or the scheduler when the occurrence has been
+  `running` past `scheduler.max_run_seconds` (unset by default; five minutes to
+  a day). The scheduler ends it `failed` first and only then asks the run to
+  stop, once, so the outcome does not depend on the run reporting a reason, on
+  which process owns it, or on it stopping; whoever loses the compare-and-set
+  changes neither the occurrence nor its task. A run that ends `success` with a
+  guard or execution-budget `stop_reason` is a `failed` occurrence whose error
+  is plain words, never the code.
 - Durable MCP tasks (`McpTaskService`, `mcp_tasks`; details in the MCP guide):
   submission persists the remote handle before returning a local ID, the
   database stays authoritative with only a bounded `ThreadState` projection,

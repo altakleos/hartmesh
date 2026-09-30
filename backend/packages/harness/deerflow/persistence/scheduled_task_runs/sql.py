@@ -239,6 +239,26 @@ class ScheduledTaskRunRepository:
             result = await session.execute(stmt)
             return int(result.scalar() or 0)
 
+    async def list_overdue_running(self, *, started_before: datetime, limit: int) -> list[dict[str, Any]]:
+        """Occurrences still ``running`` that started before the cutoff, oldest first.
+
+        ``started_at`` is written when the run is launched, so a row without it
+        (one whose launch bookkeeping failed) is never overdue here.
+        """
+        stmt = (
+            select(ScheduledTaskRunRow)
+            .where(
+                ScheduledTaskRunRow.status == "running",
+                ScheduledTaskRunRow.started_at.is_not(None),
+                ScheduledTaskRunRow.started_at < started_before,
+            )
+            .order_by(ScheduledTaskRunRow.started_at.asc(), ScheduledTaskRunRow.id.asc())
+            .limit(limit)
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(row) for row in result.scalars()]
+
     async def list_queued_runs(self, *, limit: int) -> list[dict[str, Any]]:
         older = aliased(ScheduledTaskRunRow)
         older_same_thread = exists(
@@ -649,6 +669,38 @@ class ScheduledTaskRunRepository:
                 row.finished_at = finished_at
             await session.commit()
             return True
+
+    async def end_active_run(
+        self,
+        run_record_id: str,
+        *,
+        status: str,
+        run_id: str | None,
+        error: str | None,
+        finished_at: datetime,
+    ) -> bool:
+        """End an occurrence that has not ended yet, once, and say whether this call did.
+
+        A compare-and-set on the row's status: the occurrence is ended by
+        whoever gets there first (the run's completion, or the scheduler at the
+        run's time limit), and the other is told it lost and changes nothing.
+        ``update_status`` overwrites whatever is there; this never rewrites a
+        terminal occurrence. ``run_id`` is recorded only when given.
+        """
+        values: dict[str, Any] = {
+            "status": status,
+            "error": error,
+            "finished_at": finished_at,
+            "lease_owner": None,
+            "lease_expires_at": None,
+        }
+        if run_id is not None:
+            values["run_id"] = run_id
+        stmt = update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == run_record_id, ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)).values(**values)
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            await session.commit()
+            return bool(result.rowcount)
 
     async def has_active_runs(self, task_id: str) -> bool:
         stmt = (
