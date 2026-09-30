@@ -896,3 +896,138 @@ async def test_expired_launch_claim_attaches_existing_run_instead_of_relaunching
         assert (await task_repo.get("task-attached", user_id="user-1"))["run_count"] == 1
     finally:
         await close_engine()
+
+
+async def _seed_occurrence(run_repo: ScheduledTaskRunRepository, occurrence_id: str, *, status: str, started_at: datetime | None, run_id: str | None = None) -> None:
+    await run_repo.create(run_record_id=occurrence_id, task_id=f"task-of-{occurrence_id}", thread_id=f"thread-of-{occurrence_id}", scheduled_for=datetime.now(UTC), trigger="manual", status=status)
+    if status != "queued":
+        await run_repo.update_status(occurrence_id, status=status, run_id=run_id, started_at=started_at)
+
+
+async def test_the_occurrences_past_their_time_limit_are_the_running_ones_that_started_before_the_cutoff(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        long_ago, cutoff = now - timedelta(hours=2), now - timedelta(minutes=15)
+        await _seed_occurrence(run_repo, "running-newest-overdue", status="running", started_at=now - timedelta(minutes=30), run_id="run-c")
+        await _seed_occurrence(run_repo, "running-oldest-overdue", status="running", started_at=long_ago, run_id="run-a")
+        await _seed_occurrence(run_repo, "running-overdue", status="running", started_at=now - timedelta(hours=1), run_id="run-b")
+        await _seed_occurrence(run_repo, "running-recent", status="running", started_at=now - timedelta(minutes=5), run_id="run-d")
+        await _seed_occurrence(run_repo, "running-no-start-recorded", status="running", started_at=None, run_id="run-e")
+        await _seed_occurrence(run_repo, "launching-old", status="launching", started_at=long_ago)
+        await _seed_occurrence(run_repo, "queued-old", status="queued", started_at=None)
+        await _seed_occurrence(run_repo, "finished-old", status="success", started_at=long_ago, run_id="run-f")
+
+        overdue = await run_repo.list_overdue_running(started_before=cutoff, limit=10)
+
+        # Oldest first, running only, and never a row whose start was not recorded.
+        assert [row["id"] for row in overdue] == ["running-oldest-overdue", "running-overdue", "running-newest-overdue"]
+        assert [row["id"] for row in await run_repo.list_overdue_running(started_before=cutoff, limit=2)] == ["running-oldest-overdue", "running-overdue"]
+    finally:
+        await close_engine()
+
+
+async def test_an_occurrence_is_ended_once_by_whoever_gets_there_first_and_never_rewritten(tmp_path):
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await _seed_occurrence(run_repo, "live", status="running", started_at=now, run_id="run-live")
+        await _seed_occurrence(run_repo, "launching", status="launching", started_at=None)
+        await _seed_occurrence(run_repo, "already-done", status="success", started_at=now, run_id="run-done")
+
+        assert await run_repo.end_active_run("live", status="failed", run_id="run-live", error="ran too long", finished_at=now) is True
+        assert await run_repo.end_active_run("live", status="interrupted", run_id="run-live", error="run was interrupted before completion", finished_at=now) is False
+        assert await run_repo.end_active_run("launching", status="success", run_id="run-l", error=None, finished_at=now) is True
+        assert await run_repo.end_active_run("already-done", status="failed", run_id="run-done", error="too late", finished_at=now) is False
+        assert await run_repo.end_active_run("no-such-occurrence", status="failed", run_id=None, error="x", finished_at=now) is False
+
+        rows = {row["id"]: row for occurrence in ("live", "launching", "already-done") for row in await run_repo.list_by_task(f"task-of-{occurrence}")}
+        assert (rows["live"]["status"], rows["live"]["error"], rows["live"]["run_id"]) == ("failed", "ran too long", "run-live")
+        assert rows["live"]["finished_at"] is not None
+        assert (rows["launching"]["status"], rows["launching"]["run_id"]) == ("success", "run-l")
+        assert (rows["already-done"]["status"], rows["already-done"]["error"]) == ("success", None)
+    finally:
+        await close_engine()
+
+
+async def test_a_run_past_its_time_limit_ends_its_occurrence_first_and_the_runs_own_completion_changes_nothing(tmp_path):
+    """The real occurrence and task stores: the limit decides the outcome, whichever order the run reports in."""
+    from deerflow.runtime import RunRecord, RunStatus
+    from deerflow.runtime.runs.schemas import DisconnectMode
+
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="task-once",
+            user_id="user-1",
+            thread_id=None,
+            context_mode="fresh_thread_per_run",
+            assistant_id="lead_agent",
+            title="One-off",
+            prompt="Build it",
+            schedule_type="once",
+            schedule_spec={"run_at": (now + timedelta(days=1)).isoformat()},
+            timezone="UTC",
+            next_run_at=now + timedelta(days=1),
+        )
+        task = await task_repo.get("task-once", user_id="user-1")
+        assert task is not None
+        stopped: list[str] = []
+
+        async def stop_run(run_id: str) -> None:
+            stopped.append(run_id)
+
+        async def launch_run(**kwargs):
+            return {"run_id": "run-long", "thread_id": kwargs["thread_id"]}
+
+        service = ScheduledTaskService(
+            task_repo=task_repo,
+            task_run_repo=run_repo,
+            invocation_runtime=CallbackInvocationRuntime(launch_run),
+            poll_interval_seconds=5,
+            lease_seconds=120,
+            max_concurrent_runs=1,
+            max_run_seconds=900,
+            stop_run=stop_run,
+        )
+        assert (await service.dispatch_task(task, now=now, trigger="manual"))["outcome"] == "launched"
+
+        await service.run_once(now=now + timedelta(seconds=899))
+        assert stopped == [], "not yet past its limit"
+
+        await service.run_once(now=now + timedelta(seconds=901))
+        assert stopped == ["run-long"]
+        [occurrence] = await run_repo.list_by_task("task-once")
+        assert (occurrence["status"], occurrence["error"]) == ("failed", "the task did not finish within 15 minutes, so it was stopped")
+        assert (await task_repo.get("task-once", user_id="user-1"))["status"] == "failed"
+
+        # The Stop lands and the run reports how it ended: nothing about the occurrence or the task changes.
+        record = RunRecord(
+            run_id="run-long",
+            thread_id="thread-1",
+            assistant_id="lead_agent",
+            status=RunStatus.interrupted,
+            on_disconnect=DisconnectMode.continue_,
+            metadata={"scheduled_task_id": "task-once", "scheduled_task_run_id": occurrence["id"]},
+            user_id="user-1",
+        )
+        await service.handle_run_completion(record)
+
+        [after] = await run_repo.list_by_task("task-once")
+        assert (after["status"], after["error"]) == ("failed", "the task did not finish within 15 minutes, so it was stopped")
+        finished = await task_repo.get("task-once", user_id="user-1")
+        assert (finished["status"], finished["last_error"]) == ("failed", "the task did not finish within 15 minutes, so it was stopped")
+        assert await run_repo.list_overdue_running(started_before=now + timedelta(days=1), limit=10) == []
+    finally:
+        await close_engine()

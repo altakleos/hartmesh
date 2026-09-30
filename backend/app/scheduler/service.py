@@ -8,6 +8,7 @@ import re
 import socket
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
@@ -33,6 +34,41 @@ _LEASE_RECOVERY_ERROR = "interrupted: the owning gateway stopped renewing its ru
 _QUEUE_TIMEOUT_ERROR = "scheduled task queue wait timeout exceeded"
 _SANDBOX_REFUSED_ERROR = "no sandbox was free when the task ran, so its tools did not run"
 
+# How many overdue occurrences one poll ends. Each ended occurrence leaves the
+# overdue set, so the rest are ended by the next poll.
+_OVERDUE_ENDS_PER_POLL = 16
+# How long the poll waits for the run manager to accept one Stop. The occurrence
+# is ended before the Stop is asked, so a slow Stop costs the poll time, not the
+# outcome.
+_STOP_REQUEST_TIMEOUT_SECONDS = 10.0
+
+# What the task list tells its owner when a run ended ``success`` yet a guard or
+# an execution budget had cut it short, keyed by the typed stop reason. The
+# reason itself stays on the run record and in the log. A reason with no phrase
+# of its own, an extension's included, reads as the generic ``_STOPPED_EARLY_ERROR``.
+_STOPPED_EARLY_ERROR = "the task stopped before it finished"
+_STOPPED_EARLY_ERRORS: dict[str, str] = {
+    "turn_budget_exhausted": "the task used up the number of steps it is allowed, so it stopped before it finished",
+    "tool_attempt_budget_exhausted": "the task used up the number of actions it is allowed, so it stopped before it finished",
+    "sandbox_operation_budget_exhausted": "the task used up the number of workspace operations it is allowed, so it stopped before it finished",
+    "sandbox_runtime_budget_exhausted": "the task used up the workspace time it is allowed, so it stopped before it finished",
+    "retrieval_budget_exhausted": "the task used up the number of lookups it is allowed, so it stopped before it finished",
+    "repeated_tool_loop": "the task kept repeating the same action, so it was stopped before it finished",
+    "loop_capped": "the task kept repeating the same action, so it was stopped before it finished",
+    "no_progress_loop": "the task stopped making progress, so it was stopped before it finished",
+    "token_capped": "the task used up the amount of text it is allowed, so it stopped before it finished",
+    "safety_capped": "the model declined to go on, so the task stopped before it finished",
+    "model_length_capped": "the model's answer was cut off at its length limit, so the task stopped before it finished",
+}
+
+
+def _duration_words(seconds: int) -> str:
+    for unit, size in (("hour", 3600), ("minute", 60)):
+        if seconds % size == 0:
+            count = seconds // size
+            return f"{count} {unit}" if count == 1 else f"{count} {unit}s"
+    return f"{seconds} seconds"
+
 
 class ScheduledTaskService:
     def __init__(
@@ -48,6 +84,8 @@ class ScheduledTaskService:
         multi_instance: bool = False,
         run_lease_grace_seconds: int = 10,
         tenant_digest: str | None = None,
+        max_run_seconds: int | None = None,
+        stop_run: Callable[[str], Awaitable[object]] | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -58,6 +96,11 @@ class ScheduledTaskService:
         self._queue_timeout_seconds = queue_timeout_seconds
         self._multi_instance = multi_instance
         self._run_lease_grace_seconds = run_lease_grace_seconds
+        # A bound on one occurrence's wall time, enforced by ending the
+        # occurrence and asking its run to stop (``stop_run(run_id)``): a run
+        # holds its concurrency slot until it ends, and nobody is watching it.
+        self._max_run_seconds = max_run_seconds
+        self._stop_run = stop_run
         if (
             tenant_digest is not None
             and re.fullmatch(
@@ -132,6 +175,7 @@ class ScheduledTaskService:
                 now=now,
             )
         await self._expire_waiting_runs(now=now)
+        await self._stop_overdue_runs(now=now)
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
         # persisted even when all execution slots are busy; claim_queued_run()
@@ -667,6 +711,78 @@ class ScheduledTaskService:
             now=now,
         )
 
+    async def _stop_overdue_runs(self, *, now: datetime) -> None:
+        """End every occurrence that has run past its time limit, then stop its run.
+
+        The occurrence's own ``started_at`` is the clock. The occurrence ends
+        ``failed`` first, in one compare-and-set, and only then is the run asked
+        to stop, so the outcome is decided before the Stop lands and by the
+        scheduler's own row: it does not depend on the run reporting a reason,
+        on which process owns the run, or on the run stopping at all. A run that
+        finished first keeps its own outcome and is left alone.
+        """
+        if self._max_run_seconds is None or self._stop_run is None:
+            return
+        error = f"the task did not finish within {_duration_words(self._max_run_seconds)}, so it was stopped"
+        try:
+            overdue = await self._task_run_repo.list_overdue_running(
+                started_before=now - timedelta(seconds=self._max_run_seconds),
+                limit=_OVERDUE_ENDS_PER_POLL,
+            )
+        except Exception:
+            logger.exception("Scheduled task poll could not look for runs past their time limit; retrying next poll")
+            return
+        for occurrence in overdue:
+            occurrence_id, run_id = occurrence.get("id"), occurrence.get("run_id")
+            if not run_id:
+                continue
+            try:
+                ended = await self._task_run_repo.end_active_run(occurrence_id, status="failed", run_id=run_id, error=error, finished_at=now)
+            except Exception:
+                logger.exception("Scheduled task-run %s: could not end it past its time limit; retrying next poll", occurrence_id)
+                continue
+            if not ended:
+                continue
+            logger.warning("Scheduled task-run %s ran past %s; ended it and stopping run %s", occurrence_id, _duration_words(self._max_run_seconds), run_id)
+            await self._record_task_outcome(occurrence.get("task_id"), None, "failed", error)
+            try:
+                outcome = await asyncio.wait_for(self._stop_run(run_id), timeout=_STOP_REQUEST_TIMEOUT_SECONDS)
+            except Exception:
+                logger.exception("Scheduled task-run %s: run %s was not confirmed stopped after its occurrence ended at the time limit", occurrence_id, run_id)
+            else:
+                # The Stop is asked once. Whether it took is the run manager's
+                # answer, so a refusal is at least visible to an operator.
+                logger.info("Scheduled task-run %s: stop of run %s at the time limit answered %s", occurrence_id, run_id, getattr(outcome, "value", outcome))
+
+    async def _record_task_outcome(
+        self,
+        task_id: object,
+        user_id: str | None,
+        terminal_status: Literal["success", "failed", "interrupted"],
+        error: str | None,
+    ) -> None:
+        """Write how an occurrence ended onto its task: ``last_error``, and a ``once`` task's single outcome."""
+        if not isinstance(task_id, str):
+            return
+        try:
+            task = await self._task_repo.get(task_id, user_id=user_id) if user_id else await self._task_repo.get_internal(task_id)
+            if task is None:
+                return
+            updates: dict[str, Any] = {"last_error": error}
+            if task["schedule_type"] == "once":
+                # The single occurrence is consumed either way (the run did launch,
+                # so re-arming risks duplicate side effects), but an interrupt ends
+                # as "cancelled", not "failed".
+                if terminal_status == "success":
+                    updates["status"] = "completed"
+                elif terminal_status == "interrupted":
+                    updates["status"] = "cancelled"
+                else:
+                    updates["status"] = "failed"
+            await self._task_repo.update(task_id, user_id=user_id or task.get("user_id"), updates=updates)
+        except Exception:
+            logger.exception("Scheduled task %s: could not record how its occurrence ended", task_id)
+
     async def handle_run_completion(self, record: RunRecord) -> None:
         metadata = record.metadata or {}
         task_id = metadata.get("scheduled_task_id")
@@ -681,6 +797,14 @@ class ScheduledTaskService:
             # an unattended answer, so the occurrence says so itself.
             terminal_status = "failed"
             error = _SANDBOX_REFUSED_ERROR
+        elif record.status.value == "success" and record.stop_reason:
+            # A guard or execution budget cut the run short and it still ended
+            # ``success``: the model answered in words. Nobody reads an
+            # unattended answer, so the occurrence says the task did not finish,
+            # in words. The typed reason stays on the run and in the log.
+            terminal_status = "failed"
+            error = _STOPPED_EARLY_ERRORS.get(record.stop_reason, _STOPPED_EARLY_ERROR)
+            logger.info("Scheduled task-run %s: run %s ended success but stopped early (%s)", task_run_id, record.run_id, record.stop_reason)
         elif record.status.value == "success":
             terminal_status = "success"
             error = None
@@ -698,30 +822,21 @@ class ScheduledTaskService:
         if terminal_status is None:
             return
 
-        await self._task_run_repo.update_status(
+        ended = await self._task_run_repo.end_active_run(
             task_run_id,
             status=terminal_status,
             run_id=record.run_id,
             error=error,
             finished_at=datetime.now(UTC),
         )
-
-        task = await self._task_repo.get(task_id, user_id=user_id)
-        if task is None:
+        if not ended:
+            # The occurrence was already ended, by the scheduler at its time
+            # limit or by recovery, and the first ending stands: this
+            # completion rewrites neither the occurrence nor its task.
+            logger.info("Scheduled task-run %s was already ended; run %s's completion (%s) changes nothing", task_run_id, record.run_id, terminal_status)
             return
 
-        updates: dict[str, Any] = {"last_error": error}
-        if task["schedule_type"] == "once":
-            # The single occurrence is consumed either way (the run did launch,
-            # so re-arming risks duplicate side effects), but an interrupt ends
-            # as "cancelled", not "failed".
-            if terminal_status == "success":
-                updates["status"] = "completed"
-            elif terminal_status == "interrupted":
-                updates["status"] = "cancelled"
-            else:
-                updates["status"] = "failed"
-        await self._task_repo.update(task_id, user_id=user_id, updates=updates)
+        await self._record_task_outcome(task_id, user_id, terminal_status, error)
 
     async def start(self) -> None:
         if self._task is not None:

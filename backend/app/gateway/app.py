@@ -560,6 +560,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from app.gateway.services import build_scheduled_invocation_runtime
             from app.scheduler import ScheduledTaskService
 
+            async def _stop_scheduled_run(run_id: str) -> object:
+                # The run manager is resolved when a run is stopped, not when
+                # the scheduler is built, like the other closures over `app`.
+                return await app.state.run_manager.cancel(run_id, action="interrupt")
+
             if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
                 scheduled_task_service = ScheduledTaskService(
                     task_repo=app.state.scheduled_task_repo,
@@ -572,6 +577,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     multi_instance=startup_config.scheduler.multi_instance,
                     run_lease_grace_seconds=startup_config.run_ownership.grace_seconds,
                     tenant_digest=app.state.tenant_identity.digest,
+                    max_run_seconds=startup_config.scheduler.max_run_seconds,
+                    stop_run=_stop_scheduled_run,
                 )
                 app.state.scheduled_task_service = scheduled_task_service
                 if startup_config.scheduler.enabled:
