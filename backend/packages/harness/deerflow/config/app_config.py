@@ -9,6 +9,7 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
+from deerflow.config.account_export_config import AccountExportConfig
 from deerflow.config.acp_config import ACPAgentConfig, load_acp_config_from_dict
 from deerflow.config.agent_storage_config import AgentStorageConfig
 from deerflow.config.agents_api_config import AgentsApiConfig, load_agents_api_config_from_dict
@@ -307,6 +308,10 @@ class AppConfig(BaseModel):
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
     ui: UiConfig = Field(default_factory=UiConfig, description="Workspace presentation: the Home starters and which screens non-administrators are offered.")
     tenant_bundle: TenantBundleConfig = Field(default_factory=TenantBundleConfig, description="Where the deployment's brand, starter list and report profiles are read from; the same directory sandboxes mount at /mnt/tenant.")
+    account_export: AccountExportConfig = Field(
+        default_factory=AccountExportConfig,
+        description="Limits for a person's download of all their own data: part size, free space kept, expiry and how many are prepared at once.",
+    )
     model_config = ConfigDict(extra="allow")
     database: DatabaseConfig = Field(
         default_factory=DatabaseConfig,

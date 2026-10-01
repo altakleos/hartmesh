@@ -84,6 +84,8 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
         user = self._user_factory()
         request.state.user = user
         request.state.auth = AuthContext(user=user, permissions=list(_STUB_PERMISSIONS))
+        # A stub user is signed in as a person in a browser unless it is the internal caller.
+        request.state.auth_source = "internal" if getattr(user, "system_role", None) == "internal" else "session"
         if not self._bind_current_user:
             return await call_next(request)
         token = set_current_user(user)

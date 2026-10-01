@@ -21,6 +21,7 @@ from app.gateway.csrf_middleware import CORS_EXPOSED_HEADERS, CSRFMiddleware, ge
 from app.gateway.deps import langgraph_runtime
 from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, readiness_payload
 from app.gateway.routers import (
+    account_export,
     agents,
     artifacts,
     assistants_compat,
@@ -684,7 +685,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 set_subagent_batch_submitter(batch_service)
                 app.state.subagent_batches_available = True
 
-        yield
+        from app.gateway.account_export import AccountExportService, remove_left_exports, runs_in_this_process
+        from deerflow.config.paths import get_paths
+
+        app.state.account_export = None
+        if runs_in_this_process(multi_gateway=False):
+            # Also empties what an earlier Gateway left prepared: nothing outlives its download.
+            app.state.account_export = AccountExportService(
+                app,
+                paths=get_paths(),
+                config=lambda: get_app_config().account_export,
+                spill_dir_name=lambda: getattr(getattr(get_app_config(), "tool_output", None), "storage_subdir", None),
+            )
+        else:
+            # No export is prepared here, but one an earlier single-process run left still goes.
+            remove_left_exports(get_paths())
+
+        try:
+            yield
+        finally:
+            if app.state.account_export is not None:
+                await app.state.account_export.close()
 
         await _shutdown_startup_trash_sweep(app)
 
@@ -1060,6 +1081,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Features API is mounted at /api/features
     app.include_router(features.router)
+
+    # A person's download of all their own data at /api/account/export
+    app.include_router(account_export.router)
 
     # Branding API (the tenant bundle's logo) is mounted at /api/branding
     app.include_router(branding.router)
