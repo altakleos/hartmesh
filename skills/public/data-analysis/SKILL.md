@@ -1,6 +1,6 @@
 ---
 name: data-analysis
-description: Use this skill when the user uploads Excel (.xlsx/.xls) or CSV files and wants to perform data analysis, generate statistics, create summaries, pivot tables, SQL queries, or any form of structured data exploration. Supports multi-sheet Excel workbooks, aggregation, filtering, joins, and exporting results to CSV/JSON/Markdown.
+description: Use this skill when the user uploads Excel (.xlsx/.xlsm/.xls) or CSV files and wants to perform data analysis, generate statistics, create summaries, pivot tables, SQL queries, or any form of structured data exploration. Supports multi-sheet Excel workbooks, aggregation, filtering, joins, and exporting results to CSV/JSON/Markdown.
 ---
 
 # Data Analysis Skill
@@ -14,9 +14,10 @@ This skill analyzes user-uploaded Excel/CSV files using DuckDB — an in-process
 - Inspect Excel/CSV file structure (sheets, columns, types, row counts)
 - Execute arbitrary SQL queries against uploaded data
 - Generate statistical summaries (mean, median, stddev, percentiles, nulls)
-- Support multi-sheet Excel workbooks (each sheet becomes a table)
+- Support multi-sheet Excel workbooks (each non-empty sheet becomes a table; empty or unreadable sheets are skipped with a warning and do not appear in `inspect`)
 - Export query results to CSV, JSON, or Markdown
-- Handle large files efficiently with DuckDB's columnar engine
+- Handle large CSV files efficiently with DuckDB's columnar engine
+- Need no network access: the script installs nothing at runtime. If it exits saying `duckdb` is missing, the sandbox image is not the one this skill is built for; tell the user and do not install packages inside the sandbox
 
 ## Workflow
 
@@ -104,6 +105,15 @@ Supported output formats (auto-detected from extension):
 - **CSV files**: Table name is the filename without extension (e.g., `data.csv` → `data`)
 - **Multiple files**: All tables from all files are available in the same query context, enabling cross-file joins
 - **Special characters**: Sheet/file names with spaces or special characters are auto-sanitized (spaces → underscores). Use double quotes for names that start with numbers or contain special characters, e.g., `"2024_Sales"`
+
+## When an Export Does Not Load Cleanly
+
+- **The script prints `Failed to read workbook` and exits 1.** The file is not a spreadsheet, whatever its extension says. Check `head -c 8 <file>`: `<html` or `<!DOCTYPE` means the tool exported an HTML table (load it with `pandas.read_html`, save each table as CSV under `/mnt/user-data/workspace/`, then analyze the CSV); plain delimited text is CSV/TSV (copy it to a `.csv` name in the workspace). Tell the user what the file really was.
+- **`inspect` shows columns named `Unnamed: 1`, `Unnamed: 2`, ...** The header row is not the first row; tool exports often start with a title. Convert that sheet first, then analyze the CSV:
+
+```bash
+python -c "import pandas as pd; pd.read_excel('/mnt/user-data/uploads/<file>', sheet_name='<sheet>', header=<row>).to_csv('/mnt/user-data/workspace/<sheet>.csv', index=False)"
+```
 
 ## Analysis Patterns
 
@@ -233,7 +243,8 @@ After analysis:
 
 The script automatically caches loaded data to avoid re-parsing files on every call:
 
-- On first load, files are parsed and stored in a persistent DuckDB database under `/mnt/user-data/workspace/.data-analysis-cache/`
+- On first load, files are parsed and stored in a persistent DuckDB database under `/mnt/user-data/workspace/.cache/data-analysis/` (the chat's workspace, so the cache survives a sandbox restart and stays private to the chat; `DATA_ANALYSIS_CACHE_DIR` overrides the location)
+- Older caches in the same chat are removed automatically (the newest three are kept); nothing there needs cleaning up
 - The cache key is a SHA256 hash of all input file contents — if files change, a new cache is created
 - Subsequent calls with the same files will use the cached database directly (near-instant startup)
 - Cache is transparent — no extra parameters needed
@@ -244,5 +255,6 @@ This is especially useful when running multiple queries against the same data fi
 
 - DuckDB supports full SQL including window functions, CTEs, subqueries, and advanced aggregations
 - Excel date columns are automatically parsed; use DuckDB date functions (`DATE_TRUNC`, `EXTRACT`, etc.)
-- For very large files (100MB+), DuckDB handles them efficiently without loading everything into memory
+- Legacy `.xls` workbooks are read with xlrd and `.xlsx`/`.xlsm` workbooks with openpyxl, chosen from the file's content rather than its name; each sheet is copied into DuckDB, so a whole workbook is read into memory once. The sandbox has a fixed memory limit: for a workbook of tens of MB, convert only the sheets you need to CSV in the workspace first (see the header-row note above) or ask the user for a CSV export
+- For very large CSV files (100MB+), DuckDB streams them efficiently without loading everything into memory
 - Column names with spaces are accessible using double quotes: `"Column Name"`

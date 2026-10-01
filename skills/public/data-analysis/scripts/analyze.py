@@ -1,9 +1,16 @@
 """
 Data Analysis Script using DuckDB.
 
-Analyzes Excel (.xlsx/.xls) and CSV files using DuckDB's in-process SQL engine.
+Analyzes Excel (.xlsx/.xlsm/.xls) and CSV files using DuckDB's in-process SQL engine.
 Supports schema inspection, SQL queries, statistical summaries, and result export.
+
+Everything this script imports (duckdb, pandas, openpyxl, xlrd) ships in the
+sandbox image built from docker/sandbox/Dockerfile; nothing is installed or
+downloaded at runtime, so a fresh sandbox answers its first query without
+network access.
 """
+
+from __future__ import annotations
 
 import argparse
 import hashlib
@@ -11,28 +18,54 @@ import json
 import logging
 import os
 import re
-import subprocess
 import sys
 import tempfile
+from collections.abc import Mapping
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 logger = logging.getLogger(__name__)
 
+MISSING_DUCKDB_MESSAGE = (
+    "duckdb is not installed in this sandbox image. The data-analysis skill needs the sandbox image "
+    "built from docker/sandbox/Dockerfile (see backend/docs/CONFIGURATION.md, 'Building a Custom AIO "
+    "Sandbox Image'); nothing is installed at runtime."
+)
+
 try:
     import duckdb
 except ImportError:
-    logger.error("duckdb is not installed. Installing...")
-    subprocess.run([sys.executable, "-m", "pip", "install", "duckdb", "openpyxl", "-q"], check=True)
-    import duckdb
+    sys.stderr.write(MISSING_DUCKDB_MESSAGE + "\n")
+    sys.exit(2)
 
-try:
-    import openpyxl  # noqa: F401
-except ImportError:
-    subprocess.run([sys.executable, "-m", "pip", "install", "openpyxl", "-q"], check=True)
-
-# Cache directory for persistent DuckDB databases
-CACHE_DIR = os.path.join(tempfile.gettempdir(), ".data-analysis-cache")
+# Parsed data is cached next to the chat's other working files. The workspace
+# is a per-chat bind mount that outlives the sandbox container, whereas the
+# sandbox's temporary directory is container-scoped and discarded with it
+# (under gVisor it may also be an in-memory tmpfs). The cache sits under
+# ``.cache`` so the workspace-change scanner never reports it as an edited
+# file. Outside a sandbox (tests, local runs) it falls back to the temporary
+# directory.
+DEFAULT_WORKSPACE_DIR = "/mnt/user-data/workspace"
+CACHE_DIR_NAME = ".cache/data-analysis"
+CACHE_DIR_ENV = "DATA_ANALYSIS_CACHE_DIR"
 TABLE_MAP_SUFFIX = ".table_map.json"
+# Older cache entries in the same chat are pruned down to this many.
+CACHE_ENTRIES_KEPT = 3
+
+EXCEL_EXTENSIONS = (".xlsx", ".xlsm", ".xls")
+
+
+def resolve_cache_dir(env: Mapping[str, str] | None = None, workspace_dir: str = DEFAULT_WORKSPACE_DIR) -> str:
+    """Pick the cache directory: explicit override, else the chat workspace, else the temp dir."""
+    env = os.environ if env is None else env
+    override = env.get(CACHE_DIR_ENV)
+    if override:
+        return override
+    if os.path.isdir(workspace_dir):
+        return os.path.join(workspace_dir, CACHE_DIR_NAME)
+    return os.path.join(tempfile.gettempdir(), CACHE_DIR_NAME)
+
+
+CACHE_DIR = resolve_cache_dir()
 
 
 def compute_files_hash(files: list[str]) -> str:
@@ -50,7 +83,7 @@ def compute_files_hash(files: list[str]) -> str:
 
 
 def get_cache_db_path(files_hash: str) -> str:
-    """Get the path to the cached DuckDB database file."""
+    """Get the path to the cached DuckDB database file, creating the cache directory."""
     os.makedirs(CACHE_DIR, exist_ok=True)
     return os.path.join(CACHE_DIR, f"{files_hash}.duckdb")
 
@@ -61,10 +94,16 @@ def get_table_map_path(files_hash: str) -> str:
 
 
 def save_table_map(files_hash: str, table_map: dict[str, str]) -> None:
-    """Save table map to a JSON file alongside the cached DB."""
+    """Save the table map atomically alongside the cached DB.
+
+    The map is what marks an entry as complete, so it is written last and in
+    one step: a half-written map would make a partial database look valid.
+    """
     path = get_table_map_path(files_hash)
-    with open(path, "w", encoding="utf-8") as f:
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(table_map, f, ensure_ascii=False)
+    os.replace(tmp_path, path)
 
 
 def load_table_map(files_hash: str) -> dict[str, str] | None:
@@ -73,10 +112,90 @@ def load_table_map(files_hash: str) -> dict[str, str] | None:
     if not os.path.exists(path):
         return None
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
+
+
+def discard_cache_entry(files_hash: str) -> None:
+    """Remove one cache entry: database, write-ahead log and table map, whichever exist."""
+    db_path = os.path.join(CACHE_DIR, f"{files_hash}.duckdb")
+    map_path = get_table_map_path(files_hash)
+    for path in (db_path, f"{db_path}.wal", map_path, f"{map_path}.tmp"):
+        try:
+            os.remove(path)
+        except FileNotFoundError:
+            pass
+
+
+def prune_cache(keep_hash: str) -> None:
+    """Keep the newest CACHE_ENTRIES_KEPT entries, always including keep_hash; discard the rest."""
+    try:
+        names = os.listdir(CACHE_DIR)
+    except OSError:
+        return
+    entries = []
+    for name in names:
+        if not name.endswith(".duckdb"):
+            continue
+        files_hash = name[: -len(".duckdb")]
+        try:
+            mtime = os.path.getmtime(os.path.join(CACHE_DIR, name))
+        except OSError:
+            continue
+        entries.append((files_hash == keep_hash, mtime, files_hash))
+    entries.sort(reverse=True)
+    for _, _, files_hash in entries[CACHE_ENTRIES_KEPT:]:
+        discard_cache_entry(files_hash)
+        logger.info(f"Removed an older cache entry ({files_hash[:12]}...)")
+
+
+def open_cache(files: list[str]) -> tuple[duckdb.DuckDBPyConnection, dict[str, str]]:
+    """Return a connection with the files loaded, reusing the chat's cache when it is intact.
+
+    A cache hit reopens the stored database read-only. A miss, or an entry
+    whose database is damaged or has no table map (the leftover of an
+    interrupted load), is rebuilt from nothing so no partial table survives.
+    If the cache directory cannot be used at all, the files are loaded into
+    memory for this call only.
+    """
+    files_hash = compute_files_hash(files)
+    db_path: str | None = None
+    try:
+        db_path = get_cache_db_path(files_hash)
+        cached_table_map = load_table_map(files_hash)
+        if cached_table_map and os.path.exists(db_path):
+            try:
+                con = duckdb.connect(db_path, read_only=True)
+            except duckdb.Error as e:
+                logger.warning(f"Cached database unusable ({e}); rebuilding it")
+            else:
+                logger.info(f"Cache hit! Using cached database: {db_path}")
+                logger.info(f"Loaded {len(cached_table_map)} table(s) from cache: {', '.join(cached_table_map.keys())}")
+                return con, cached_table_map
+        discard_cache_entry(files_hash)
+        con = duckdb.connect(db_path)
+    except (OSError, duckdb.Error) as e:
+        logger.warning(f"Cache unavailable ({e}); loading files without a cache")
+        db_path = None
+        con = duckdb.connect(":memory:")
+
+    logger.info("Loading files (first time, will cache for future use)...")
+    table_map = load_files(con, files)
+    if not table_map:
+        logger.error("No tables were loaded. Check file paths and formats.")
+        con.close()
+        if db_path is not None:
+            discard_cache_entry(files_hash)
+        sys.exit(1)
+
+    logger.info(f"\nLoaded {len(table_map)} table(s): {', '.join(table_map.keys())}")
+    if db_path is not None:
+        save_table_map(files_hash, table_map)
+        prune_cache(files_hash)
+        logger.info(f"Cached database saved to: {db_path}")
+    return con, table_map
 
 
 def sanitize_table_name(name: str) -> str:
@@ -87,13 +206,22 @@ def sanitize_table_name(name: str) -> str:
     return sanitized
 
 
+def _unique_table_name(table_name: str, table_map: dict[str, str]) -> str:
+    """Suffix a table name until it no longer collides with an already loaded table."""
+    original_table_name = table_name
+    counter = 1
+    while table_name in table_map.values():
+        table_name = f"{original_table_name}_{counter}"
+        counter += 1
+    return table_name
+
+
 def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, str]:
     """
     Load Excel/CSV files into DuckDB tables.
 
     Returns a mapping of original_name -> sanitized_table_name.
     """
-    con.execute("INSTALL spatial; LOAD spatial;")
     table_map: dict[str, str] = {}
 
     for file_path in files:
@@ -103,7 +231,7 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
 
         ext = os.path.splitext(file_path)[1].lower()
 
-        if ext in (".xlsx", ".xls"):
+        if ext in EXCEL_EXTENSIONS:
             _load_excel(con, file_path, table_map)
         elif ext == ".csv":
             _load_csv(con, file_path, table_map)
@@ -116,34 +244,31 @@ def load_files(con: duckdb.DuckDBPyConnection, files: list[str]) -> dict[str, st
 def _load_excel(
     con: duckdb.DuckDBPyConnection, file_path: str, table_map: dict[str, str]
 ) -> None:
-    """Load all sheets from an Excel file into DuckDB tables."""
-    import openpyxl
+    """Load all sheets from an Excel file into DuckDB tables.
 
-    wb = openpyxl.load_workbook(file_path, read_only=True, data_only=True)
-    sheet_names = wb.sheetnames
-    wb.close()
+    pandas picks the reader from the file's content (xlrd for the legacy BIFF
+    format, openpyxl for OOXML), so a mislabelled export still loads, and
+    DuckDB copies each sheet into a table; no DuckDB extension is needed.
+    """
+    import pandas as pd
 
-    for sheet_name in sheet_names:
-        table_name = sanitize_table_name(sheet_name)
+    try:
+        sheets = pd.read_excel(file_path, sheet_name=None)
+    except Exception as e:
+        logger.warning(f"  Failed to read workbook '{file_path}': {e}")
+        return
 
-        # Handle duplicate table names
-        original_table_name = table_name
-        counter = 1
-        while table_name in table_map.values():
-            table_name = f"{original_table_name}_{counter}"
-            counter += 1
+    for sheet_name, frame in sheets.items():
+        if frame.shape[1] == 0:
+            logger.warning(f"  Skipped empty sheet '{sheet_name}'")
+            continue
+
+        table_name = _unique_table_name(sanitize_table_name(sheet_name), table_map)
 
         try:
-            con.execute(
-                f"""
-                CREATE TABLE "{table_name}" AS
-                SELECT * FROM st_read(
-                    '{file_path}',
-                    layer = '{sheet_name}',
-                    open_options = ['HEADERS=FORCE', 'FIELD_TYPES=AUTO']
-                )
-            """
-            )
+            con.register("sheet_source", frame)
+            con.execute(f'CREATE TABLE "{table_name}" AS SELECT * FROM sheet_source')
+            con.unregister("sheet_source")
             table_map[sheet_name] = table_name
             row_count = con.execute(f'SELECT COUNT(*) FROM "{table_name}"').fetchone()[
                 0
@@ -160,20 +285,14 @@ def _load_csv(
 ) -> None:
     """Load a CSV file into a DuckDB table."""
     base_name = os.path.splitext(os.path.basename(file_path))[0]
-    table_name = sanitize_table_name(base_name)
-
-    # Handle duplicate table names
-    original_table_name = table_name
-    counter = 1
-    while table_name in table_map.values():
-        table_name = f"{original_table_name}_{counter}"
-        counter += 1
+    table_name = _unique_table_name(sanitize_table_name(base_name), table_map)
+    quoted_path = file_path.replace("'", "''")
 
     try:
         con.execute(
             f"""
             CREATE TABLE "{table_name}" AS
-            SELECT * FROM read_csv_auto('{file_path}')
+            SELECT * FROM read_csv_auto('{quoted_path}')
         """
         )
         table_map[base_name] = table_name
@@ -251,9 +370,11 @@ def action_query(
         table_map.items(), key=lambda x: len(x[0]), reverse=True
     ):
         if original_name != table_name:
-            # Replace occurrences not already quoted
+            # A quoted original name (such as "Payments 2026") becomes the quoted
+            # SQL name; a bare one is quoted as it is replaced.
+            modified_sql = modified_sql.replace(f'"{original_name}"', f'"{table_name}"')
             modified_sql = re.sub(
-                rf"\b{re.escape(original_name)}\b",
+                rf'(?<!")\b{re.escape(original_name)}\b(?!")',
                 f'"{table_name}"',
                 modified_sql,
             )
@@ -483,7 +604,7 @@ def main():
         "--files",
         nargs="+",
         required=True,
-        help="Paths to Excel (.xlsx/.xls) or CSV files",
+        help="Paths to Excel (.xlsx/.xlsm/.xls) or CSV files",
     )
     parser.add_argument(
         "--action",
@@ -517,39 +638,7 @@ def main():
     if args.action == "summary" and not args.table:
         parser.error("--table is required for 'summary' action")
 
-    # Compute file hash for caching
-    files_hash = compute_files_hash(args.files)
-    db_path = get_cache_db_path(files_hash)
-    cached_table_map = load_table_map(files_hash)
-
-    if cached_table_map and os.path.exists(db_path):
-        # Cache hit: connect to existing DB
-        logger.info(f"Cache hit! Using cached database: {db_path}")
-        con = duckdb.connect(db_path, read_only=True)
-        table_map = cached_table_map
-        logger.info(
-            f"Loaded {len(table_map)} table(s) from cache: {', '.join(table_map.keys())}"
-        )
-    else:
-        # Cache miss: load files and persist to DB
-        logger.info("Loading files (first time, will cache for future use)...")
-        con = duckdb.connect(db_path)
-        table_map = load_files(con, args.files)
-
-        if not table_map:
-            logger.error("No tables were loaded. Check file paths and formats.")
-            # Clean up empty DB file
-            con.close()
-            if os.path.exists(db_path):
-                os.remove(db_path)
-            sys.exit(1)
-
-        # Save table map for future cache lookups
-        save_table_map(files_hash, table_map)
-        logger.info(
-            f"\nLoaded {len(table_map)} table(s): {', '.join(table_map.keys())}"
-        )
-        logger.info(f"Cached database saved to: {db_path}")
+    con, table_map = open_cache(args.files)
 
     # Perform action
     if args.action == "inspect":

@@ -854,7 +854,7 @@ class DingTalkChannel(Channel):
             conversation_type,
             sender_staff_id,
             conversation_id,
-            "DingTalk connected to DeerFlow.",
+            "DingTalk is connected to your account.",
         )
         return True
 
