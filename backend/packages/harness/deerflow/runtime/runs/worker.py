@@ -92,7 +92,8 @@ from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
-from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id
+from deerflow.runtime.turn_phases import TurnPhase, TurnPhaseCallbackHandler, current_turn_phases, mark_phase, phase_span
+from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id, resolve_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
@@ -889,7 +890,52 @@ async def _await_task_stop_after_host_cancellation(
             deferred = _defer_finalization_interrupt(deferred, exc)
 
 
-async def run_agent(
+async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRecord, **kwargs: Any) -> None:
+    """Execute an agent in the background, publishing events to *bridge*.
+
+    This wrapper exists only to measure the turn. It opens the phase journal
+    before any run work so assembly is inside the same monotonic window as the
+    model call, registers it under the run id so the SSE consumer -- which
+    runs in the Gateway request task, not this one -- can mark the first
+    outgoing assistant text, and emits it once when the run is over. Every
+    argument is passed through to :func:`_run_agent` as given.
+    """
+
+    from deerflow.runtime.turn_phases import turn_phases
+    from deerflow.runtime.turn_progress import TurnProgressPublisher
+
+    with turn_phases(correlation_id=resolve_trace_id(), run_id=record.run_id) as journal:
+        # The person waiting hears the phases they can act on as they begin,
+        # before any model token, as one advisory ``custom`` frame per stage
+        # (``turn_progress.py``). Registered before the first mark so
+        # admission itself is announced.
+        progress = TurnProgressPublisher(
+            loop=asyncio.get_running_loop(),
+            run_id=record.run_id,
+            publish=lambda payload: bridge.publish(record.run_id, "custom", payload),
+        )
+        journal.observe(progress)
+        journal.mark(TurnPhase.ADMISSION)
+        # Submit-to-first-rendered-text belongs to the browser: it includes
+        # ingress, transfer and render, none of which a server timestamp can
+        # stand in for. Recorded as a limitation rather than approximated.
+        journal.unobservable("browser_first_text", "requires a browser measurement through public ingress")
+        try:
+            await _run_agent(bridge, run_manager, record, progress=progress, **kwargs)
+        finally:
+            progress.close()
+            journal.mark(TurnPhase.TERMINAL)
+            journal.set_outcome(str(getattr(record, "status", "unknown")))
+            # The SSE mark is per-process and live-window only. If the
+            # provider produced text and no consumer here marked it, say so
+            # rather than let the missing phase read as "no visible text".
+            _snapshot = journal.snapshot()
+            if _snapshot.phase_at_ms(TurnPhase.FIRST_PROVIDER_TEXT) is not None and _snapshot.phase_at_ms(TurnPhase.FIRST_STREAM_TEXT) is None:
+                journal.unobservable(TurnPhase.FIRST_STREAM_TEXT, "no SSE consumer in this process marked it before terminal")
+            journal.emit()
+
+
+async def _run_agent(
     bridge: StreamBridge,
     run_manager: RunManager,
     record: RunRecord,
@@ -904,6 +950,7 @@ async def run_agent(
     interrupt_before: list[str] | Literal["*"] | None = None,
     interrupt_after: list[str] | Literal["*"] | None = None,
     knowledge_scope: dict[str, Any] | None = None,
+    progress: Any | None = None,
 ) -> None:
     """Execute an agent in the background, publishing events to *bridge*."""
 
@@ -1155,6 +1202,10 @@ async def run_agent(
                 "thread_id": thread_id,
             },
         )
+        # The client can place a progress label only once it has the ids:
+        # the stages held since admission go out now, in order.
+        if progress is not None:
+            await progress.open()
 
         # 3. Build the agent
         from langchain_core.runnables import RunnableConfig
@@ -1208,6 +1259,14 @@ async def run_agent(
         if journal is not None:
             config.setdefault("callbacks", []).append(journal)
 
+        # Model-side phases ride the same callback seam, on the turn journal's
+        # monotonic clock, so the model request and the provider's first text
+        # are comparable with the other phases rather than with a wall clock.
+        _turn_phases = current_turn_phases()
+        if _turn_phases is not None:
+            _turn_phases.mark(TurnPhase.ASSEMBLY)
+            config.setdefault("callbacks", []).append(TurnPhaseCallbackHandler(_turn_phases))
+
         # Resolve after runtime context installation so context/configurable reflect
         # the agent name that this run will actually execute.
         config.setdefault("run_name", resolve_root_run_name(config, record.assistant_id))
@@ -1235,7 +1294,8 @@ async def run_agent(
             # get_available_tools(), which may block on MCP cache
             # initialization — it must not stall the calling event loop
             # (issue #5172).
-            agent_result = await run_assembly(agent_factory, **agent_factory_kwargs)
+            with phase_span(TurnPhase.AGENT_BUILD):
+                agent_result = await run_assembly(agent_factory, **agent_factory_kwargs)
             agent = _agent_graph(agent_result)
 
         # Assembly resolves request, agent, and authorization fallbacks. Trace the
@@ -1252,6 +1312,7 @@ async def run_agent(
                 deerflow_trace_id=deerflow_trace_id,
             )
 
+        mark_phase(TurnPhase.CHECKPOINT_PREFLIGHT)
         accessor = CheckpointStateAccessor.bind(
             agent,
             checkpointer,
@@ -1349,6 +1410,9 @@ async def run_agent(
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
             nonlocal llm_error_fallback_message
+            # Marked per attempt rather than once: a retried or resumed stream
+            # is a second graph start, and a turn that paid for two says so.
+            mark_phase(TurnPhase.GRAPH_START)
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):

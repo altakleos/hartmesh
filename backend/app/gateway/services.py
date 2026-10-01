@@ -92,6 +92,7 @@ from deerflow.runtime.secret_context import (
     validate_run_metadata_secrets,
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
+from deerflow.runtime.turn_phases import mark_first_stream_text
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
@@ -2413,6 +2414,7 @@ async def sse_consumer(
                 yield format_sse("end", None, event_id=entry.id or None)
                 return
 
+            mark_first_stream_text(record.run_id, entry.event, entry.data)
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
         if not disconnect_observed:

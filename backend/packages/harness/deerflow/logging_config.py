@@ -454,6 +454,11 @@ class JsonTraceFormatter(logging.Formatter):
             "trace_id": record.trace_id,
             "message": record.getMessage(),
         }
+        # The version stamp is the journal's own (``TurnPhaseSnapshot.to_wire``),
+        # so only a record this process wrote travels under that name.
+        turn_phases = getattr(record, "turn_phases", None)
+        if isinstance(turn_phases, dict) and isinstance(turn_phases.get("version"), int):
+            payload["turn_phases"] = turn_phases
         if record.exc_info:
             # Follow logging.Formatter in caching and reusing exc_text: a filter
             # that already redacted it (UrlRedactionFilter, for urllib3's

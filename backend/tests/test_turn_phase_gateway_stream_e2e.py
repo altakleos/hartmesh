@@ -425,3 +425,349 @@ def _observe_stream(
 
 
 # ── Tests over loopback ──────────────────────────────────────────────────
+
+
+def test_text_is_delivered_incrementally_and_the_phases_line_up(gateway: _Gateway) -> None:
+    """Model request, first provider text, first outgoing text, completion, terminal.
+
+    The client must see the first answer text well before the end frame (a
+    buffered response would collapse the three timestamps together), and the
+    journal must place the same events in the same order on its own clock.
+    """
+    with httpx.Client() as client:
+        csrf, thread_id = _register_and_create_thread(client, gateway.loopback_url)
+        observed = _observe_stream(client, gateway.loopback_url, thread_id, csrf, "probe:text please")
+
+    assert observed.t_first_byte is not None and observed.t_first_text is not None and observed.t_end is not None
+    assert observed.text_frames >= 1 and observed.reasoning_frames >= 1
+    assert observed.events[-1] == "end"
+    client_first_text = observed.t_first_text - observed.t_first_byte
+    client_tail = observed.t_end - observed.t_first_text
+    assert client_first_text >= FIRST_TEXT_DELAY_S * TOLERANCE, f"first text arrived {client_first_text:.3f}s after the first byte: the body was buffered or reasoning counted as text"
+    assert client_tail >= (TAIL_DELAY_S + SLOW_CLEANUP_S) * TOLERANCE, f"end arrived {client_tail:.3f}s after first text: streaming did not precede completion"
+
+    wire = gateway.journals.wait_for(observed.run_id)
+    model_request = _phase_at(wire, "model_request")
+    provider_text = _phase_at(wire, "first_provider_text")
+    stream_text = _phase_at(wire, "first_stream_text")
+    completion = _phase_at(wire, "model_completion")
+    terminal = _phase_at(wire, "terminal")
+    admission = _phase_at(wire, "admission")
+    assert None not in (admission, model_request, provider_text, stream_text, completion, terminal), wire
+    assert admission <= model_request < provider_text <= stream_text < completion < terminal, wire
+    assert provider_text - model_request >= FIRST_TEXT_DELAY_S * 1000 * TOLERANCE, "the provider's first text was credited to the reasoning chunk"
+    assert stream_text - provider_text < FIRST_TEXT_DELAY_S * 1000, "the outgoing text mark drifted away from the provider mark"
+    assert completion - stream_text >= TAIL_DELAY_S * 1000 * TOLERANCE
+    assert terminal - completion >= SLOW_CLEANUP_S * 1000 * TOLERANCE, "cleanup after the model was not separated from completion"
+    assert wire["outcome"] == "success"
+    assert wire["acquisition_source"] is None, "no tool ran, so no sandbox was acquired"
+    unobservable = {entry["phase"] for entry in wire["unobservable"]}
+    assert "browser_first_text" in unobservable
+    assert "first_stream_text" not in unobservable
+    print(
+        "turn-phase e2e (loopback, uvicorn+httpx, probe model): "
+        f"client first_text={client_first_text:.3f}s tail={client_tail:.3f}s; "
+        f"journal model_request={model_request:.0f}ms provider_text={provider_text:.0f}ms stream_text={stream_text:.0f}ms "
+        f"completion={completion:.0f}ms terminal={terminal:.0f}ms total={wire['total_ms']:.0f}ms"
+    )
+
+
+def test_the_emitted_line_carries_the_turn_timing_a_deployment_can_read(gateway: _Gateway) -> None:
+    """One line, one turn: the offsets an operator needs without a second source.
+
+    A deployment prints ``%(message)s``. Reading a turn's timing from a
+    released Gateway therefore has to be possible from the message alone --
+    including the outgoing-text offset, which no SSE body timestamps and no
+    other log line records.
+    """
+    with httpx.Client() as client:
+        csrf, thread_id = _register_and_create_thread(client, gateway.loopback_url)
+        observed = _observe_stream(client, gateway.loopback_url, thread_id, csrf, "probe:text please")
+
+    wire = gateway.journals.wait_for(observed.run_id)
+    message = gateway.journals.message_for(observed.run_id)
+
+    assert message.startswith("turn phase timings")
+    assert f"run={observed.run_id}" in message
+    assert "outcome=success" in message
+    for phase in ("admission", "model_request", "first_provider_text", "first_stream_text", "model_completion", "terminal"):
+        assert f"{phase}@" in message, message
+    stream_text_ms = _phase_at(wire, "first_stream_text")
+    assert f"first_stream_text@{round(stream_text_ms)}ms" in message
+    assert "unobservable=browser_first_text(" in message
+
+
+def test_the_time_before_the_model_request_is_accounted_for(gateway: _Gateway) -> None:
+    """Admission to model request, with no unnamed gap in between.
+
+    Tenant-class .15 read 2.6 to 3.4 s of every turn between the sandbox
+    lookup ending and the binding starting with no phase to attribute it to.
+    The three pre-model phases have to sit in the window and in order, so the
+    next run can say which of building the graph, loading the thread's state
+    or the graph's own start owns the time.
+    """
+    with httpx.Client() as client:
+        csrf, thread_id = _register_and_create_thread(client, gateway.loopback_url)
+        observed = _observe_stream(client, gateway.loopback_url, thread_id, csrf, "probe:text please")
+
+    wire = gateway.journals.wait_for(observed.run_id)
+    admission = _phase_at(wire, "admission")
+    assembly = _phase_at(wire, "assembly")
+    agent_build = _phase_at(wire, "agent_build")
+    preflight = _phase_at(wire, "checkpoint_preflight")
+    graph_start = _phase_at(wire, "graph_start")
+    model_request = _phase_at(wire, "model_request")
+    assert None not in (admission, assembly, agent_build, preflight, graph_start, model_request), wire
+    assert admission <= assembly <= agent_build <= preflight <= graph_start <= model_request, wire
+    assert not any(record["phase"] == "skill_materialization" for record in wire["phases"]), "an ordinary turn projects no accepted snapshot, so that phase must be absent rather than zero"
+    build = next(record for record in wire["phases"] if record["phase"] == "agent_build")
+    assert "duration_ms" in build, build  # a span, not a bare mark
+    build_ms = build["duration_ms"]
+    message = gateway.journals.message_for(observed.run_id)
+    for phase in ("agent_build@", "checkpoint_preflight@", "graph_start@"):
+        assert phase in message, message
+    print(
+        "turn-phase e2e (pre-model window): "
+        f"admission={admission:.0f}ms assembly={assembly:.0f}ms agent_build={agent_build:.0f}ms(+{build_ms:.0f}ms) "
+        f"checkpoint_preflight={preflight:.0f}ms graph_start={graph_start:.0f}ms model_request={model_request:.0f}ms"
+    )
+
+
+def test_a_silent_turn_manufactures_no_text_timestamps(gateway: _Gateway) -> None:
+    with httpx.Client() as client:
+        csrf, thread_id = _register_and_create_thread(client, gateway.loopback_url)
+        observed = _observe_stream(client, gateway.loopback_url, thread_id, csrf, "probe:silent")
+
+    assert observed.t_end is not None
+    assert observed.text_frames == 0
+    assert observed.reasoning_frames >= 1, "the hidden reasoning did reach the wire"
+    wire = gateway.journals.wait_for(observed.run_id)
+    assert _phase_at(wire, "model_request") is not None
+    assert _phase_at(wire, "model_completion") is not None
+    assert _phase_at(wire, "first_provider_text") is None
+    assert _phase_at(wire, "first_stream_text") is None
+    assert "first_stream_text" not in {entry["phase"] for entry in wire["unobservable"]}, "nothing to observe is not a missed observation"
+    assert wire["outcome"] == "success"
+
+
+def test_a_cancelled_turn_manufactures_no_text_timestamps(gateway: _Gateway) -> None:
+    cancelled_at: dict[str, float] = {}
+
+    with httpx.Client() as client:
+        csrf, thread_id = _register_and_create_thread(client, gateway.loopback_url)
+
+        def _cancel(observation: _StreamObservation) -> None:
+            # Cancel once the model is provably running: its hidden reasoning
+            # chunk has reached the wire. Earlier, and there would be no model
+            # request to assert on.
+            if "t" in cancelled_at or observation.reasoning_frames == 0:
+                return
+            response = client.post(
+                f"{gateway.loopback_url}/api/threads/{thread_id}/runs/{observation.run_id}/cancel",
+                headers={"X-CSRF-Token": csrf},
+            )
+            assert response.status_code in (202, 204), response.text
+            cancelled_at["t"] = time.monotonic()
+
+        observed = _observe_stream(client, gateway.loopback_url, thread_id, csrf, "probe:hang", on_frame=_cancel, timeout=20.0)
+
+    assert observed.t_end is not None, "the stream must end after the cancel"
+    assert observed.t_end - cancelled_at["t"] < HANG_DELAY_S / 2, "the hang was interrupted, not waited out"
+    assert observed.text_frames == 0
+    wire = gateway.journals.wait_for(observed.run_id)
+    assert _phase_at(wire, "model_request") is not None
+    assert _phase_at(wire, "first_provider_text") is None
+    assert _phase_at(wire, "first_stream_text") is None
+    assert _phase_at(wire, "terminal") is not None
+    assert wire["outcome"] != "success"
+
+
+# ── The released nginx stream path ───────────────────────────────────────
+
+
+_RELAY_CONF = """\
+events {{}}
+http {{
+    server {{
+        listen 8001;
+        location / {{
+            proxy_pass {upstream};
+            proxy_http_version 1.1;
+            proxy_buffering off;
+            proxy_set_header Host $http_host;
+            proxy_set_header Connection '';
+        }}
+    }}
+}}
+"""
+
+
+class _TcpForwarder:
+    """A byte-for-byte TCP forwarder on the Docker bridge's host address.
+
+    Exists only while the nginx test runs. It is the one thing a container
+    can reach, and it copies bytes to the loopback Gateway with no buffering
+    beyond the kernel's, so it cannot mask or manufacture incremental delivery.
+    """
+
+    def __init__(self, bind_ip: str, target_port: int) -> None:
+        self._target_port = target_port
+        self._listener = socket.socket()
+        self._listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self._listener.bind((bind_ip, 0))
+        self._listener.listen()
+        self._listener.settimeout(0.2)
+        self.port = self._listener.getsockname()[1]
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+        self._accept_thread = threading.Thread(target=self._accept_loop, name="turn-phase-e2e-forwarder", daemon=True)
+        self._accept_thread.start()
+
+    def _accept_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                client, _ = self._listener.accept()
+            except TimeoutError:
+                continue
+            except OSError:
+                return
+            try:
+                upstream = socket.create_connection(("127.0.0.1", self._target_port), timeout=5)
+            except OSError:
+                client.close()
+                continue
+            for source, sink in ((client, upstream), (upstream, client)):
+                thread = threading.Thread(target=self._pump, args=(source, sink), daemon=True)
+                thread.start()
+                self._threads.append(thread)
+
+    @staticmethod
+    def _pump(source: socket.socket, sink: socket.socket) -> None:
+        try:
+            while True:
+                chunk = source.recv(65536)
+                if not chunk:
+                    break
+                sink.sendall(chunk)
+        except OSError:
+            pass
+        finally:
+            with contextlib.suppress(OSError):
+                sink.shutdown(socket.SHUT_WR)
+
+    def close(self) -> None:
+        self._stop.set()
+        with contextlib.suppress(OSError):
+            self._listener.close()
+        self._accept_thread.join(timeout=2)
+
+
+def _docker(*args: str, timeout: float = 60) -> subprocess.CompletedProcess[str]:
+    """Run one docker command; any failure to run it at all becomes a skip."""
+    try:
+        return subprocess.run(["docker", *args], capture_output=True, text=True, timeout=timeout)
+    except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        pytest.skip(f"docker {args[0]} unavailable ({type(exc).__name__}): the released nginx stream path stays untested here")
+
+
+@contextlib.contextmanager
+def _released_nginx(gateway: _Gateway, tmp_path: Path) -> Iterator[str]:
+    """The released nginx config in ``nginx:alpine``, published on loopback only.
+
+    ``docker-compose.yaml`` mounts ``docker/nginx/nginx.conf`` as a template
+    and copies it into place before starting nginx; this does the same. The
+    config resolves ``gateway`` through Docker's embedded DNS, so a relay
+    container carries that alias and forwards to a test-scoped forwarder on
+    the bridge's host address, which copies bytes to the loopback Gateway.
+    Every unavailable prerequisite skips; only the released nginx answering
+    on loopback turns the assertions hard.
+    """
+    if _docker("info", timeout=5).returncode != 0:
+        pytest.skip("Docker is not available: the released nginx stream path stays untested here")
+    suffix = uuid.uuid4().hex[:6]
+    network = f"hm-turn-phase-{os.getpid()}-{suffix}"
+    relay_name = f"hm-turn-phase-relay-{suffix}"
+    nginx_name = f"hm-turn-phase-nginx-{suffix}"
+    started: list[str] = []
+    forwarder: _TcpForwarder | None = None
+    network_created = False
+    try:
+        if _docker("network", "create", network, timeout=30).returncode != 0:
+            pytest.skip("could not create a Docker network: the released nginx stream path stays untested here")
+        network_created = True
+        bridge_ip = _docker("network", "inspect", network, "-f", "{{(index .IPAM.Config 0).Gateway}}", timeout=30).stdout.strip()
+        try:
+            forwarder = _TcpForwarder(bridge_ip, gateway.loopback_port)
+        except OSError as exc:
+            pytest.skip(f"cannot bind the Docker bridge address {bridge_ip!r} ({exc}): the released nginx stream path stays untested here")
+        relay_conf = tmp_path / "relay.conf"
+        relay_conf.write_text(_RELAY_CONF.format(upstream=f"http://{bridge_ip}:{forwarder.port}"), encoding="utf-8")
+        for name, args in (
+            (
+                relay_name,
+                ["--network-alias", "gateway", "-v", f"{relay_conf}:/etc/nginx/nginx.conf:ro", "nginx:alpine"],
+            ),
+            (
+                nginx_name,
+                [
+                    "-p",
+                    "127.0.0.1:0:2026",
+                    "-v",
+                    f"{REPO_ROOT / 'docker' / 'nginx' / 'nginx.conf'}:/etc/nginx/nginx.conf.template:ro",
+                    "nginx:alpine",
+                    "sh",
+                    "-c",
+                    "cp /etc/nginx/nginx.conf.template /etc/nginx/nginx.conf && nginx -g 'daemon off;'",
+                ],
+            ),
+        ):
+            result = _docker("run", "-d", "--rm", "--name", name, "--network", network, *args, timeout=180)
+            if result.returncode != 0:
+                pytest.skip(f"could not start {name} ({result.stderr.strip()[-200:]}): the released nginx stream path stays untested here")
+            started.append(name)
+        published = _docker("port", nginx_name, "2026", timeout=30).stdout.strip().splitlines()
+        if not published or not published[0].startswith("127.0.0.1:"):
+            pytest.skip(f"released nginx was not published on loopback ({published}): the released nginx stream path stays untested here")
+        base = f"http://{published[0]}"
+        # Ready means the whole path answers, not just nginx. The released
+        # config resolves the ``gateway`` alias at request time through
+        # Docker's DNS, so until the relay container is up the proxy answers
+        # 502 -- an answer, which is why accepting any status here let a
+        # not-yet-ready path through and failed the first request instead.
+        deadline = time.monotonic() + 30
+        status: int | None = None
+        while True:
+            try:
+                status = httpx.get(f"{base}/api/langgraph/threads", timeout=2.0).status_code
+                if status < 500:
+                    break
+            except httpx.HTTPError:
+                status = None
+            if time.monotonic() > deadline:
+                logs = _docker("logs", nginx_name, timeout=30)
+                pytest.skip(f"released nginx did not reach the Gateway on {base} (last status {status}, {logs.stderr[-300:]!r}): the released nginx stream path stays untested here")
+            time.sleep(0.2)
+        yield base
+    finally:
+        for name in started:
+            subprocess.run(["docker", "rm", "-f", name], capture_output=True, timeout=60)
+        if forwarder is not None:
+            forwarder.close()
+        if network_created:
+            subprocess.run(["docker", "network", "rm", network], capture_output=True, timeout=30)
+
+
+def test_the_released_nginx_stream_path_delivers_text_incrementally(gateway: _Gateway, tmp_path: Path) -> None:
+    with _released_nginx(gateway, tmp_path) as base, httpx.Client() as client:
+        csrf, thread_id = _register_and_create_thread(client, base, langgraph_prefix="/api/langgraph")
+        observed = _observe_stream(client, base, thread_id, csrf, "probe:text through nginx", langgraph_prefix="/api/langgraph")
+
+    assert observed.t_first_byte is not None and observed.t_first_text is not None and observed.t_end is not None
+    client_first_text = observed.t_first_text - observed.t_first_byte
+    client_tail = observed.t_end - observed.t_first_text
+    assert client_first_text >= FIRST_TEXT_DELAY_S * TOLERANCE, f"through nginx, first text arrived {client_first_text:.3f}s after the first byte: the proxy buffered the stream"
+    assert client_tail >= (TAIL_DELAY_S + SLOW_CLEANUP_S) * TOLERANCE
+    wire = gateway.journals.wait_for(observed.run_id)
+    assert _phase_at(wire, "first_stream_text") is not None
+    assert wire["outcome"] == "success"
+    print(f"turn-phase e2e (released nginx.conf in nginx:alpine on 127.0.0.1, relay alias gateway): client first_text={client_first_text:.3f}s tail={client_tail:.3f}s")

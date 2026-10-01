@@ -190,14 +190,15 @@ def test_the_search_service_s_results_reach_the_conversation(
     assert "error" not in observed.events, observed.events
     assert observed.events[-1] == "end", observed.events
     assert gateway.journals.wait_for(observed.run_id)["outcome"] == "success"
-    # One request, the model's query, asking for JSON, capped at the
-    # profile's five results: the client sent what the profile configured.
-    assert len(fake.requests) == 1, fake.requests
-    request = fake.requests[0]
-    assert request["q"] == ["what is the capital of france"], request
-    assert request["format"] == ["json"], request
-    assert request["limit"] == ["5"], request
-    assert fake.urls == ["/search"], "the question stays out of the request line"
+    # The model's query, asking for JSON, page by page until the profile's
+    # five results are in hand or a page adds nothing: the client sent what
+    # the profile configured, and the question only ever in the body.
+    assert [request["pageno"] for request in fake.requests][:1] == [["1"]], fake.requests
+    for request in fake.requests:
+        assert request["q"] == ["what is the capital of france"], request
+        assert request["format"] == ["json"], request
+        assert "limit" not in request, request
+    assert set(fake.urls) == {"/search"}, "the question stays out of the request line"
     assert observed.text_frames >= 1, "the model answered after the tool result"
     assert _RESULT_URL in json.dumps(after["history"]), "the search result never reached the conversation"
 
