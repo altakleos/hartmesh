@@ -25,7 +25,7 @@ from deerflow.authz.sandbox_authz import (
     safe_app_config_async,
 )
 from deerflow.config import get_app_config
-from deerflow.config.paths import VIRTUAL_PATH_PREFIX
+from deerflow.config.paths import SHARED_VIRTUAL_PREFIX, VIRTUAL_PATH_PREFIX
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
@@ -195,6 +195,11 @@ def _is_skills_path(path: str) -> bool:
     """Check if a path is under the skills container path."""
     skills_prefix = _get_skills_container_path()
     return path == skills_prefix or path.startswith(f"{skills_prefix}/")
+
+
+def _is_shared_path(path: str) -> bool:
+    """Whether *path* names the company's Shared area or something inside it."""
+    return path == SHARED_VIRTUAL_PREFIX or path.startswith(f"{SHARED_VIRTUAL_PREFIX}/")
 
 
 def _extract_skill_name_from_skills_path(path: str) -> str | None:
@@ -729,6 +734,7 @@ def replace_virtual_path(path: str, thread_data: ThreadDataState | None) -> str:
         /mnt/user-data/workspace/* -> thread_data['workspace_path']/*
         /mnt/user-data/uploads/* -> thread_data['uploads_path']/*
         /mnt/user-data/outputs/* -> thread_data['outputs_path']/*
+        /mnt/user-data/files/* -> thread_data['files_path']/*  (the person's, not the thread's)
 
     Args:
         path: The path that may contain virtual path prefix.
@@ -765,6 +771,8 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
     workspace = thread_data.get("workspace_path")
     uploads = thread_data.get("uploads_path")
     outputs = thread_data.get("outputs_path")
+    files = thread_data.get("files_path")
+    shared = thread_data.get("shared_path")
 
     if workspace:
         mappings[f"{VIRTUAL_PATH_PREFIX}/workspace"] = workspace
@@ -772,6 +780,15 @@ def _thread_virtual_to_actual_mappings(thread_data: ThreadDataState) -> dict[str
         mappings[f"{VIRTUAL_PATH_PREFIX}/uploads"] = uploads
     if outputs:
         mappings[f"{VIRTUAL_PATH_PREFIX}/outputs"] = outputs
+    if files:
+        # Outside the thread's user-data root, so it takes no part in the
+        # common-parent check below and is never reached through the root.
+        mappings[f"{VIRTUAL_PATH_PREFIX}/files"] = files
+    if shared:
+        # The company's, on the same footing as the person's own files: outside
+        # the thread's root, and readable only — the write gate is in
+        # ``validate_local_tool_path``.
+        mappings[SHARED_VIRTUAL_PREFIX] = shared
 
     # Also map the virtual root when all known dirs share the same parent.
     actual_dirs = [p for p in (workspace, uploads, outputs) if p]
@@ -1031,6 +1048,13 @@ def validate_local_tool_path(path: str, thread_data: ThreadDataState | None, *, 
             raise PermissionError(f"Write access to ACP workspace is not allowed: {path}")
         return
 
+    # The company's Shared area — read-only, like a mounted skill. Publishing
+    # is the person's decision through the Gateway, never the agent's write.
+    if _is_shared_path(path):
+        if not read_only:
+            raise PermissionError(f"Write access to the Shared area is not allowed: {path}")
+        return
+
     # User-data paths
     if path.startswith(f"{VIRTUAL_PATH_PREFIX}/"):
         return
@@ -1056,6 +1080,8 @@ def _validate_resolved_user_data_path(resolved: Path, thread_data: ThreadDataSta
             thread_data.get("workspace_path"),
             thread_data.get("uploads_path"),
             thread_data.get("outputs_path"),
+            thread_data.get("files_path"),
+            thread_data.get("shared_path"),
         )
         if p is not None
     ]
@@ -1945,7 +1971,7 @@ def ensure_thread_directories_exist(runtime: Runtime | None) -> None:
     # Create the three directories
     import os
 
-    for key in ["workspace_path", "uploads_path", "outputs_path"]:
+    for key in ["workspace_path", "uploads_path", "outputs_path", "files_path"]:
         path = thread_data.get(key)
         if path:
             os.makedirs(path, exist_ok=True)

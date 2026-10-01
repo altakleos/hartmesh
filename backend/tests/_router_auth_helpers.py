@@ -123,6 +123,10 @@ def make_authed_test_app(
 
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)
+    # The owner-filtered read, for routes that require a real owner match
+    # rather than ``check_access``'s "or the row has no owner". Mirrors
+    # ``owner_check_passes`` so both gates answer the same way by default.
+    repo.get = AsyncMock(return_value={"thread_id": "stub"} if owner_check_passes else None)
     app.state.thread_store = repo
 
     return app

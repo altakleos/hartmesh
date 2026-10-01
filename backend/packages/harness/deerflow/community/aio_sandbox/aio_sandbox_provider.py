@@ -1095,10 +1095,23 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
         paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
 
-        return [
+        mounts = [
             (paths.host_sandbox_work_dir(thread_id, user_id=effective_user_id), f"{VIRTUAL_PATH_PREFIX}/workspace", False),
             (paths.host_sandbox_uploads_dir(thread_id, user_id=effective_user_id), f"{VIRTUAL_PATH_PREFIX}/uploads", False),
             (paths.host_sandbox_outputs_dir(thread_id, user_id=effective_user_id), f"{VIRTUAL_PATH_PREFIX}/outputs", False),
+        ]
+        if effective_user_id is not None:
+            # The person's own files: one directory per user, the same in every
+            # sandbox of theirs, so a file kept in one chat is on the next one's
+            # disk. Only a caller that passes no user at all (the legacy thread
+            # layout) has no user bucket to mount.
+            paths.ensure_user_files_dir(effective_user_id)
+            mounts.append((paths.host_user_files_dir(effective_user_id), f"{VIRTUAL_PATH_PREFIX}/files", False))
+        # The company's Shared area, the same for everyone and read-only in
+        # the sandbox: publication is the Gateway's alone.
+        paths.ensure_shared_dir()
+        mounts.append((paths.host_shared_dir(), f"{VIRTUAL_PATH_PREFIX}/shared", True))
+        return mounts + [
             # ACP workspace: read-only inside the sandbox (lead agent reads results;
             # the ACP subprocess writes from the host side, not from within the container).
             (paths.host_acp_workspace_dir(thread_id, user_id=effective_user_id), "/mnt/acp-workspace", True),

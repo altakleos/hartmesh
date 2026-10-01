@@ -32,6 +32,7 @@ from app.gateway.routers import (
     console,
     features,
     feedback,
+    files,
     github_webhooks,
     input_polish,
     integrations,
@@ -48,6 +49,7 @@ from app.gateway.routers import (
     projects,
     runs,
     scheduled_tasks,
+    shared,
     skills,
     subagent_batches,
     subagents,
@@ -1088,6 +1090,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Uploads API is mounted at /api/threads/{thread_id}/uploads
     app.include_router(uploads.router)
+
+    # The person's own files: /api/files, plus /api/threads/{thread_id}/files to keep one
+    app.include_router(files.router)
+
+    # The company's Shared area at /api/shared
+    app.include_router(shared.router)
 
     # Thread cleanup API is mounted at /api/threads/{thread_id}
     app.include_router(threads.router)

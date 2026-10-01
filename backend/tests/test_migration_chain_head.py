@@ -18,6 +18,7 @@ LAST_UPSTREAM_REVISION = "0026_mcp_task_lease_tokens"
 DISTRIBUTION_REVISIONS = (
     "0027_account_access",
     "0028_provider_keys",
+    "0029_shared_publications",
 )
 
 
