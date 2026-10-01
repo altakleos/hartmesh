@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from deerflow.skills.first_command import FIRST_COMMAND_PROPERTY, parse_first_command
 from deerflow.skills.frontmatter import ALLOWED_FRONTMATTER_PROPERTIES, split_skill_markdown
 from deerflow.skills.package_paths import is_eval_fixture_skill_md
 from deerflow.skills.parser import parse_allowed_tools, parse_required_secrets
@@ -57,7 +58,7 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
             )
         )
     else:
-        declared_name = _analyze_skill_md(str(root_skill.get("content") or ""), profile=profile, findings=findings)
+        declared_name = _analyze_skill_md(str(root_skill.get("content") or ""), profile=profile, findings=findings, files=files)
 
     for nested in sorted(path for path in skill_entries if path != "SKILL.md" and not is_eval_fixture_skill_md(path)):
         findings.append(
@@ -146,7 +147,7 @@ def analyze_skill_package(snapshot: dict[str, Any], *, profile: ProfileName = "d
     }
 
 
-def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict[str, Any]]) -> str | None:
+def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict[str, Any]], files: dict[str, dict[str, Any]] | None = None) -> str | None:
     parts, error = split_skill_markdown(content)
     if error or parts is None:
         findings.append(
@@ -278,6 +279,20 @@ def _analyze_skill_md(content: str, *, profile: ProfileName, findings: list[dict
                 path="SKILL.md",
                 message="secrets-autonomous must be a boolean.",
                 remediation="Use true or false for secrets-autonomous.",
+            )
+        )
+
+    try:
+        # A symlink is not the script it points to, so only a regular package file counts.
+        parse_first_command(metadata.get(FIRST_COMMAND_PROPERTY), lambda script: files is not None and script in files and files[script].get("kind") != "symlink")
+    except ValueError as exc:
+        findings.append(
+            make_finding(
+                "structure.invalid-first-command",
+                severity="error",
+                path="SKILL.md",
+                message=str(exc),
+                remediation="Name a script in the package, relative to SKILL.md, followed by plain words: first-command: scripts/report.py build",
             )
         )
 

@@ -44,6 +44,16 @@ class ToolResultMeta:
     recoverable_by_model: bool
     recommended_next_action: RecommendedNextAction
     source: Literal["exception", "tool_return", "content_analysis", "progress_middleware"]
+    #: Who refused. ``origin`` is the destination the call named (one page said
+    #: no: a paywall, a missing page, a slow host) and says nothing about the
+    #: next address. ``provider`` is the path itself (the fetch service refused
+    #: this deployment, a bad key, a proxy demanding credentials) and holds for
+    #: every address this turn; the model cannot route around it by choosing a
+    #: different argument. A keyword rule cannot tell the two apart -- "401"
+    #: reads the same from a paywalled page and from a refusing provider -- so
+    #: only a tool that saw the transport can stamp ``provider``, and the
+    #: default is the claim that needs no such knowledge.
+    error_scope: Literal["origin", "provider"] = "origin"
 
 
 _ERROR_RULES: list[tuple[list[str], dict[str, object]]] = [
@@ -104,6 +114,38 @@ _PAGE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch"})
 # never drift from the recoverable/next-action contract of its own category.
 _ATTRS_BY_ERROR_TYPE: dict[str, dict[str, object]] = {str(attrs["error_type"]): attrs for _keywords, attrs in _ERROR_RULES}
 TOOL_RESULT_ERROR_TYPES = frozenset(_ATTRS_BY_ERROR_TYPE) | {"unknown", PROGRESS_GUARD_ERROR_TYPE}
+
+# Categories no keyword rule can reach, because the only thing that knows them
+# is the raiser. ``capacity`` is the deployment saying it has no room to run
+# this call: the tool is fine, the arguments are fine, and the one thing the
+# model must not do is call it again -- which is exactly what every recoverable
+# category invites. Declared by the exception (``tool_error_type``) rather than
+# recognised in its message, so the behaviour cannot drift with the wording.
+#
+# ``not_run`` is a call the runtime held back before it ran
+# (SkillToolPolicyMiddleware): chosen in the same message that loads the skill
+# instructions meant to govern it, or sandbox work chosen before the first
+# command a skill loaded in this turn starts with. Nothing failed; the next
+# step is to choose again with those instructions, or that command, in hand.
+_DECLARED_ATTRS: dict[str, dict[str, object]] = {
+    "capacity": {"error_type": "capacity", "recoverable_by_model": False, "recommended_next_action": "summarize"},
+    "not_run": {"error_type": "not_run", "recoverable_by_model": True, "recommended_next_action": "continue"},
+}
+
+
+def declared_error_attrs(exc: BaseException) -> dict[str, object] | None:
+    """The result category *exc* declares for itself, if it declares one.
+
+    The contract is one attribute, ``tool_error_type``, naming a category this
+    module knows. An unknown name is ignored rather than trusted: a category
+    decides whether the model may retry, so it stays this module's vocabulary.
+    """
+    declared = getattr(exc, "tool_error_type", None)
+    if not isinstance(declared, str):
+        return None
+    attrs = _DECLARED_ATTRS.get(declared) or _ATTRS_BY_ERROR_TYPE.get(declared)
+    return dict(attrs) if attrs is not None else None
+
 
 # Reason phrases (RFC 9110 §15 plus the wording real servers ship) mapped onto the
 # error_type they already have in _ERROR_RULES. Restricted to the statuses a fetch
@@ -226,26 +268,44 @@ def _as_status_line(title: str) -> str | None:
     return " ".join(words) or None
 
 
-def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue") -> dict[str, object]:
+def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue", error_scope: str = "origin") -> dict[str, object]:
     return {
         "status": status,
         "error_type": error_type,
         "recoverable_by_model": recoverable_by_model,
         "recommended_next_action": recommended_next_action,
         "source": source,
+        "error_scope": error_scope,
     }
 
 
-def stamp_exception_meta(msg: ToolMessage, exc_info: str) -> ToolMessage:
+def stamp_exception_meta(msg: ToolMessage, exc_info: str, *, exc: BaseException | None = None) -> ToolMessage:
     """Stamp deerflow_tool_meta with source='exception' onto an exception-derived ToolMessage.
 
     Unlike normalize_tool_message (which preserves existing stamps), this function always
     overwrites any pre-existing TOOL_META_KEY entry.  Exception-derived classification is
     more authoritative than a tool's own return-time stamp.
+
+    An exception that declares its own category (``tool_error_type``) is taken
+    at its word and the text is not read at all. Keyword classification is the
+    fallback for the raisers that say nothing about themselves, not the rule a
+    declaring raiser has to phrase its message around.
     """
-    attrs = _classify_error_text(exc_info)
+    attrs = (None if exc is None else declared_error_attrs(exc)) or _classify_error_text(exc_info)
     updated_kwargs = dict(msg.additional_kwargs or {})
     updated_kwargs[TOOL_META_KEY] = _make_meta(status="error", source="exception", **attrs)
+    msg.additional_kwargs = updated_kwargs
+    return msg
+
+
+def stamp_declared_error_meta(msg: ToolMessage, error_type: str) -> ToolMessage:
+    """Stamp a category the producer knows, without reading the message text.
+
+    For a refusal the runtime makes itself, whose text quotes names (a skill,
+    a path) that the keyword fallback would misread.
+    """
+    updated_kwargs = dict(msg.additional_kwargs or {})
+    updated_kwargs[TOOL_META_KEY] = _make_meta(status="error", source="exception", **_DECLARED_ATTRS[error_type])
     msg.additional_kwargs = updated_kwargs
     return msg
 

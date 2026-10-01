@@ -97,6 +97,46 @@ def test_review_core_reports_non_boolean_required_secret_optional(tmp_path):
     assert finding["remediation"] == "Use true or false for each required-secrets entry's optional field."
 
 
+@pytest.mark.parametrize(
+    ("first_command", "invalid"),
+    [
+        ("scripts/run.py build", False),
+        ("scripts/missing.py build", True),
+        ("/usr/bin/python build", True),
+        ("scripts/run.py build; rm -rf .", True),
+        ("scripts/run.sh build", True),
+    ],
+)
+def test_review_core_checks_the_first_command_against_the_package(tmp_path, first_command, invalid):
+    _write(
+        tmp_path / "SKILL.md",
+        f"---\nname: demo-skill\ndescription: Demo skill. Invoke when testing review.\nfirst-command: {first_command}\n---\n\n# Demo\n\nRun [the script](scripts/run.py).\n",
+    )
+    _write(tmp_path / "scripts" / "run.py", "print('run')\n")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    findings = [f for f in facts["findings"] if f["rule_id"] == "structure.invalid-first-command"]
+    assert bool(findings) is invalid
+    assert not any(f["rule_id"] == "structure.unknown-frontmatter-field" for f in facts["findings"])
+    if invalid:
+        assert findings[0]["severity"] == "error"
+        assert str(tmp_path) not in findings[0]["message"]
+
+
+def test_review_core_does_not_take_a_link_for_the_first_command(tmp_path):
+    _write(
+        tmp_path / "SKILL.md",
+        "---\nname: demo-skill\ndescription: Demo skill. Invoke when testing review.\nfirst-command: scripts/run.py build\n---\n\n# Demo\n\nRun [the script](scripts/run.py).\n",
+    )
+    _write(tmp_path / "scripts" / "real.py", "print('run')\n")
+    (tmp_path / "scripts" / "run.py").symlink_to("real.py")
+
+    facts = analyze_skill_package(LocalDirectoryReader(tmp_path).read())
+
+    assert any(f["rule_id"] == "structure.invalid-first-command" for f in facts["findings"])
+
+
 def test_resource_graph_reports_unreferenced_resource(tmp_path):
     _write(tmp_path / "SKILL.md", _valid_skill())
     _write(tmp_path / "references" / "unused.md", "# Unused\n")

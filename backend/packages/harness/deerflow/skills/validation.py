@@ -4,18 +4,24 @@ Pure-logic validation of SKILL.md frontmatter — no FastAPI or HTTP dependencie
 """
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 
+from deerflow.skills.first_command import FIRST_COMMAND_PROPERTY, is_package_file, parse_first_command
 from deerflow.skills.frontmatter import ALLOWED_FRONTMATTER_PROPERTIES, split_skill_markdown
 from deerflow.skills.parser import parse_allowed_tools
 from deerflow.skills.types import SKILL_MD_FILE
 
 
-def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]:
+def _validate_skill_frontmatter(skill_dir: Path, *, package: bool = True) -> tuple[bool, str, str | None]:
     """Validate a skill directory's SKILL.md frontmatter.
 
     Args:
         skill_dir: Path to the skill directory containing SKILL.md.
+        package: Whether *skill_dir* holds the whole package. When it holds
+            only ``SKILL.md`` (validating content before it is written), a
+            ``first-command`` is checked for its shape alone; loading refuses
+            one whose script the package does not have.
 
     Returns:
         Tuple of (is_valid, message, skill_name).
@@ -25,11 +31,15 @@ def _validate_skill_frontmatter(skill_dir: Path) -> tuple[bool, str, str | None]
         return False, f"{SKILL_MD_FILE} not found", None
 
     content = skill_md.read_text(encoding="utf-8")
-    return validate_skill_frontmatter_text(content)
+    return validate_skill_frontmatter_text(content, is_package_script=(lambda script: is_package_file(skill_dir, script)) if package else None)
 
 
-def validate_skill_frontmatter_text(content: str) -> tuple[bool, str, str | None]:
-    """Validate captured text using the same rules as installation."""
+def validate_skill_frontmatter_text(content: str, *, is_package_script: Callable[[str], bool] | None = None) -> tuple[bool, str, str | None]:
+    """Validate captured text using the same rules as installation.
+
+    ``is_package_script`` says whether a ``first-command`` script is a regular
+    file of the package; without it the command is checked for its shape alone.
+    """
     skill_md = Path(SKILL_MD_FILE)
     parts, error = split_skill_markdown(content)
     if error:
@@ -97,5 +107,10 @@ def validate_skill_frontmatter_text(content: str) -> tuple[bool, str, str | None
     secrets_autonomous = frontmatter.get("secrets-autonomous")
     if secrets_autonomous is not None and not isinstance(secrets_autonomous, bool):
         return False, f"secrets-autonomous in {SKILL_MD_FILE} must be a boolean", None
+
+    try:
+        parse_first_command(frontmatter.get(FIRST_COMMAND_PROPERTY), is_package_script or (lambda script: True))
+    except ValueError as e:
+        return False, str(e), None
 
     return True, "Skill is valid!", name

@@ -85,6 +85,7 @@ from deerflow.runtime.goal import (
     write_thread_goal,
 )
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
+from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
 from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
@@ -340,15 +341,25 @@ def _presented_path_covers_output(presented_path: str, produced_path: str) -> bo
 def _delivery_content_with_outputs(
     content: dict[str, Any],
     produced_paths: list[str],
+    runtime_presented: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Attach a delivery verdict when this run created or modified outputs."""
+    """Attach a delivery verdict when this run created or modified outputs.
+
+    Presented means: what ``present_files`` put in ``artifacts``, what any
+    tool result tagged as presented (``deerflow.runtime.presented_files``,
+    for example ``bash`` with ``present``), and ``runtime_presented``, which
+    is what ``RuntimeDeliveryMiddleware`` handed over inside the graph and
+    reaches here through ``runtime.context``.
+    """
     if not produced_paths:
         return content
 
-    presented_paths = content.get("by_tool", {}).get("present_files", [])
+    by_runtime = list(dict.fromkeys(runtime_presented or []))
+    tagged = content.get("presented_files", [])
+    presented_paths = list(dict.fromkeys([*content.get("by_tool", {}).get("present_files", []), *(tagged if isinstance(tagged, list) else []), *by_runtime]))
     matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented_paths)]
     satisfied = bool(matched_paths)
-    return {
+    verdict = {
         **content,
         "verification": {
             "source": "outputs_changed",
@@ -360,6 +371,19 @@ def _delivery_content_with_outputs(
         "stage": "presented" if satisfied else ("mismatched" if presented_paths else "not_started"),
         "satisfied": satisfied,
     }
+    if by_runtime:
+        # Who handed these over, so a reader of the receipt can tell a turn
+        # the model curated from one the runtime completed.
+        verdict["presented_by_runtime"] = by_runtime
+    return verdict
+
+
+def _runtime_presented_files(runtime_context: Any) -> list[str]:
+    """What the runtime handed over inside the graph, read off the run context."""
+    value = runtime_context.get(RUNTIME_PRESENTED_FILES_CONTEXT_KEY) if isinstance(runtime_context, dict) else None
+    if not isinstance(value, list):
+        return []
+    return list(dict.fromkeys(path for path in value if isinstance(path, str) and path))
 
 
 def _delivery_error(content: dict[str, Any]) -> str | None:
@@ -1511,6 +1535,7 @@ async def run_agent(
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
                 produced_output_paths,
+                _runtime_presented_files(runtime_context),
             )
             delivery_error = _delivery_error(delivery_content)
             cancel_action = await run_manager.set_status_if_not_cancelled(
@@ -1617,7 +1642,11 @@ async def run_agent(
                             user_id=workspace_changes_user_id,
                             extra_excluded_dir_names=workspace_excluded_dir_names,
                         )
-                    delivery_content = _delivery_content_with_outputs(journal.get_delivery_content(), produced_output_paths)
+                    delivery_content = _delivery_content_with_outputs(
+                        journal.get_delivery_content(),
+                        produced_output_paths,
+                        _runtime_presented_files(getattr(runtime, "context", None)),
+                    )
                 receipt_persisted = await _persist_delivery_receipt(
                     event_store,
                     thread_id=thread_id,

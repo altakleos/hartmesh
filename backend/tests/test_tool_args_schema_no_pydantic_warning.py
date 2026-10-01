@@ -69,7 +69,7 @@ _TOOL_CASES = [
 ]
 
 _SANDBOX_TOOL_CASES = [
-    (bash_tool, {"command": "ls"}, ("command",), ("command", "description")),
+    (bash_tool, {"command": "ls"}, ("command",), ("command", "description", "present")),
     (ls_tool, {"path": "/tmp"}, ("path",), ("path", "description")),
     (
         glob_tool,
@@ -104,7 +104,7 @@ _SANDBOX_TOOL_CASES = [
 ]
 
 _SANDBOX_TOOL_FORWARDING_CASES = [
-    (bash_tool, {"command": "command", "description": "description"}, ("command", "description")),
+    (bash_tool, {"command": "command", "description": "description", "present": ["/mnt/user-data/outputs/a"], "tool_call_id": "call-1"}, ("command", "description", ["/mnt/user-data/outputs/a"], "call-1")),
     (ls_tool, {"path": "/path", "description": "description"}, ("/path", "description")),
     (
         glob_tool,

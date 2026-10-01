@@ -16,10 +16,10 @@ from langgraph.types import Command
 from deerflow.agents.middlewares.skill_context import (
     SKILL_CONTEXT_DENIED_KEY,
     SKILL_CONTEXT_ENTRY_KEY,
-    _skill_name_from_path,
     _tool_call_id,
     _tool_call_path,
     build_skill_entry_metadata_from_read,
+    skill_name_from_path,
 )
 from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, build_skill_usage
 from deerflow.agents.middlewares.tool_result_meta import (
@@ -105,8 +105,8 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             registry = build_container_path_registry(self._storage())
         except Exception:
             logger.warning("Failed to load the skill registry while resolving a skill read", exc_info=True)
-            return _skill_name_from_path(skill_md_path)
-        return canonical_skill_name(registry, skill_md_path) or _skill_name_from_path(skill_md_path)
+            return skill_name_from_path(skill_md_path)
+        return canonical_skill_name(registry, skill_md_path) or skill_name_from_path(skill_md_path)
 
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
@@ -127,7 +127,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # carry the same structured metadata.
         structured_error = f"{exc.__class__.__name__}: {detail}"
         message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
-        return stamp_exception_meta(message, structured_error)
+        return stamp_exception_meta(message, structured_error, exc=exc)
 
     def _stamp_skill_read_metadata(
         self,
@@ -186,7 +186,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if not activation_allowed:
             logger.info(
                 "Skill file read for '%s' did not activate it: skill:activate denied",
-                skill_name or _skill_name_from_path(entry["path"]),
+                skill_name or skill_name_from_path(entry["path"]),
             )
             existing = dict(message.additional_kwargs or {})
             existing[SKILL_CONTEXT_DENIED_KEY] = True
@@ -406,6 +406,13 @@ def _build_runtime_middlewares(
             owns_agent_skill_projection=owns_agent_skill_projection,
         )
     )
+
+    # A turn that produced files for the user hands them over even when the
+    # model presented none. Always on: the set is the
+    # one the delivery fence already asserts must be delivered.
+    from deerflow.agents.middlewares.runtime_delivery_middleware import RuntimeDeliveryMiddleware
+
+    thread_hooks.append(RuntimeDeliveryMiddleware())
 
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []
@@ -632,6 +639,9 @@ def build_subagent_runtime_middlewares(
             # Persisted skill_context entries are re-authorized against the
             # skill:activate decision before their allowed-tools apply.
             skill_authorization=skill_authorization,
+            # A subagent sees only its own messages, not a build the lead has
+            # already run and delivered, so it is not held to a first command.
+            first_command_order=False,
         )
     )
 
