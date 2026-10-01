@@ -1730,13 +1730,41 @@ sandbox:
 #   # Optional: Base port for sandbox containers (default: 8080)
 #   # port: 8080
 
-#   # Optional: Maximum number of concurrent sandbox containers (default: 3)
-#   # When the limit is reached the least-recently-used sandbox is evicted to
-#   # make room for new ones. Use a positive integer here; omit this field to use the default.
+#   # Optional: Maximum number of concurrent sandbox containers (default: 3).
+#   # A hard budget, not a hint: the slot is reserved before any container
+#   # work and released only once the container, its sidecar and its networks
+#   # are confirmed absent. When the limit is reached the least-recently-used
+#   # sandbox that no thread is using is evicted to make room; when every
+#   # sandbox is in active use the acquisition waits (capacity_wait_timeout)
+#   # and is then refused with a retryable capacity outcome rather than
+#   # creating one the host has no memory for. Use a positive integer here;
+#   # omit this field to use the default.
 #   # replicas: 3
+#
+#   # Optional: seconds an acquisition waits for a replica slot when every one
+#   # is in active use and nothing is parked to evict (default: 5, maximum
+#   # 300). 0 refuses immediately. A slot not free within a few seconds is
+#   # held by work measured in minutes, so raising this trades a refusal the
+#   # person can act on for a spinner they cannot.
+#   # capacity_wait_timeout: 5
+#
+#   # Optional: a client may ask for a new chat's sandbox to be built the
+#   # moment the chat opens (POST /api/threads/{id}/workspace/prewarm), ahead
+#   # of the first message, so the first turn does not wait for the cold start.
+#   # One nobody sends a message to is stopped after this many seconds instead
+#   # of holding a replica slot for the whole idle_timeout (default: 300; 0
+#   # keeps unclaimed prewarms until idle_timeout). A prewarm never evicts.
+#   # prewarm_claim_timeout: 300
 #
 #   # Optional: Prefix for container names (default: deer-flow-sandbox)
 #   # container_prefix: deer-flow-sandbox
+#
+#   # Optional: cold-start readiness budget in seconds (default: 60). The
+#   # provider polls a new container's /v1/sandbox for this long and destroys
+#   # it when the budget runs out, so the acquisition fails rather than hangs.
+#   # A finite number greater than 0 and at most 3600; nothing disables the
+#   # deadline. Raise it on hosts where the image starts slowly.
+#   # ready_timeout: 60
 #
 #   # Optional: outbound network policy for locally managed Docker sandboxes.
 #   # open keeps the current behavior. isolated denies all outbound traffic.
@@ -2748,7 +2776,7 @@ agent_storage:
 # ============================================================================
 # Background scheduler for one-time, cron, and interval agent runs.
 # Poller fields (enabled, multi_instance, poll_interval_seconds, lease_seconds,
-# max_concurrent_runs, min_once_delay_seconds) are restart-required.
+# max_concurrent_runs, min_once_delay_seconds, max_run_seconds) are restart-required.
 # recursion_limit is read at dispatch and applies to the next scheduled run
 # without a Gateway restart. The default (1000) matches the web UI's
 # interactive budget so scheduled and interactive runs behave identically out
@@ -2767,6 +2795,7 @@ agent_storage:
 #   queue_timeout_seconds: 3600  # Maximum durable queue wait before an occurrence fails
 #   min_once_delay_seconds: 60   # Floor for one-time run_at offset and interval every_seconds
 #   recursion_limit: 1000        # LangGraph super-step cap for scheduled runs (matches the web UI)
+#   max_run_seconds: 900         # Wall-clock bound on one occurrence; unset means no bound (300 to 86400)
 scheduler:
   enabled: false
   multi_instance: false       # Opt into lease-aware recovery across Gateway instances
@@ -2776,6 +2805,7 @@ scheduler:
   queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
   recursion_limit: 1000
+  # max_run_seconds: 900      # Uncomment to stop an occurrence still running after this long
 
 # ============================================================================
 # Long-running MCP Tasks Configuration

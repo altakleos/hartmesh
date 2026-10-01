@@ -1045,12 +1045,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 raise SandboxBeingDestroyedError(sandbox_id)
             self._starting.add(sandbox_id)
 
-    def _forget_create_provenance(self, sandbox_id: str) -> None:
-        with self._lock:
-            carried = getattr(self, "_create_provenance", None)
-            if carried is not None:
-                carried.pop(sandbox_id, None)
-
     def _unmark_starting(self, sandbox_id: str) -> None:
         """Drop the starting mark once the container is tracked or destroyed.
 
@@ -2402,7 +2396,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if warm_item is None:
                 return None
             self._warm_pool_identity.pop(sandbox_id, None)
-            info, _ = warm_item
+            info, parked_at = warm_item
+            # A claimed prewarm is an ordinary sandbox from here on: the mark
+            # goes, so the claim timeout never applies to it again.
+            prewarmed_at = parked_at if self._is_unclaimed_prewarm_locked(sandbox_id, info) else None
+            self._forget_prewarm_unclaimed_locked(sandbox_id)
             sandbox = AioSandbox(
                 id=sandbox_id,
                 base_url=info.sandbox_url,
@@ -2415,6 +2413,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._last_activity[sandbox_id] = time.time()
             self._thread_sandboxes[key] = sandbox_id
 
+        if prewarmed_at is not None:
+            logger.info("Sandbox %s was built %.1fs ahead of this turn and reclaimed warm", sandbox_id, time.time() - prewarmed_at)
         suffix = " (post-lock check)" if post_lock else f" at {info.sandbox_url}"
         logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
         record_acquisition_source(AcquisitionSource.WARM_RECLAIM)
@@ -2953,6 +2953,67 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         marks = getattr(self, "_prewarmed_unclaimed", None)
         return marks is not None and marks.get(sandbox_id) is parked
 
+    async def prewarm_async(self, thread_id: str, *, user_id: str | None = None) -> str | None:
+        """Build and park ``thread_id``'s sandbox without blocking the event loop."""
+        return await asyncio.to_thread(self.prewarm, thread_id, user_id=user_id)
+
+    def prewarm(self, thread_id: str, *, user_id: str | None = None) -> str | None:
+        """Build and park the container ``thread_id``'s first turn would build.
+
+        The container a turn acquires is named by ``(user, thread)`` and shaped
+        by nothing the person is about to type, so it can be built when the
+        conversation is opened. It is created exactly as an acquisition
+        creates it and then released, which parks it in the warm pool; the
+        first turn finds it through the ordinary warm reclaim.
+
+        Answers ``None`` rather than building when the thread already holds a
+        sandbox, one is already parked or running under its name, or no slot
+        is free. A prewarm never evicts and never waits: it is a guess, and a
+        guess must not cost a real turn its container. One that no turn claims
+        within ``prewarm_claim_timeout`` is stopped by the reaper below.
+        """
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        key = self._thread_key(thread_id, effective_user_id)
+        with self._acquire_serializer.hold(key):
+            self._ensure_skills_projection(effective_user_id)
+            sandbox_id = self._sandbox_id_for_thread(thread_id, effective_user_id)
+            with self._lock:
+                if self._thread_sandboxes.get(key) is not None or sandbox_id in self._warm_pool:
+                    return None
+            paths = get_paths()
+            paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+            lock_path = paths.thread_dir(thread_id, user_id=effective_user_id) / f"{sandbox_id}.lock"
+            # The same cross-process lock an acquisition takes, so a turn
+            # arriving in another worker serializes with this build instead of
+            # colliding with it on the container name.
+            with open(lock_path, "a", encoding="utf-8") as lock_file:
+                locked = False
+                try:
+                    _lock_file_exclusive(lock_file)
+                    locked = True
+                    if self._backend.discover(sandbox_id) is not None:
+                        # Already running, started by another worker or left by
+                        # an earlier process. The turn's own discovery decides
+                        # what to do with it.
+                        return None
+                    try:
+                        created = self._create_sandbox(thread_id, sandbox_id, user_id=effective_user_id, allow_eviction=False)
+                    except SandboxSlotsBusyError:
+                        logger.info("Not prewarming a sandbox for thread %s: every slot is taken", thread_id)
+                        return None
+                finally:
+                    if locked:
+                        _unlock_file(lock_file)
+            # Park it. From here on the container is indistinguishable from one
+            # a turn left behind, except for the claim clock.
+            self.release(created)
+            with self._lock:
+                parked = self._warm_pool.get(created)
+                if parked is not None:
+                    self._mark_prewarm_unclaimed_locked(created, parked[0])
+        logger.info("Prewarmed sandbox %s for thread %s", created, thread_id)
+        return created
+
     #: How often the prewarm reaper looks; short against the claim timeout so
     #: an abandoned slot is returned close to when it was promised.
     PREWARM_CHECK_INTERVAL = 30.0
@@ -3033,19 +3094,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if stopped:
                 with self._lock:
                     self._forget_prewarm_unclaimed_locked(sandbox_id)
-
-    def _take_create_provenance(self, sandbox_id: str) -> str:
-        """The provenance the backend reported for this create, or ``unknown``.
-
-        Carried from the create result itself rather than re-read from the
-        active maps, so a lease lost between registration and here cannot
-        turn a confirmed creation into an unknown one.
-        """
-        with self._lock:
-            carried = getattr(self, "_create_provenance", None)
-            if carried is None:
-                return "unknown"
-            return carried.pop(sandbox_id, "unknown")
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment without blocking the event loop.
@@ -3388,15 +3436,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         finally:
             self._unmark_starting(sandbox_id)
 
-    def _record_create_provenance(self, info: SandboxInfo, *, carry: bool = False) -> None:
+    def _record_create_provenance(self, info: SandboxInfo) -> None:
         """Classify one create result by the backend's own word for it.
 
-        With ``carry`` the word is also kept per sandbox id for a caller that
-        needs it after registration and pops it there (or on failure), so the
-        carry never outlives one acquisition. A backend that stays
-        silent is warned about once: its silence disables warm reuse of the
-        containers it creates, and the journal's ``unknown_create_results``
-        is the per-turn signal.
+        A backend that stays silent is warned about once; the journal's
+        ``unknown_create_results`` is the per-turn signal.
         """
         provenance = getattr(info, "provenance", "unknown")
         if provenance == PROVENANCE_CREATED:
@@ -3410,17 +3454,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 self._warned_unknown_provenance = True
             if not warned:
                 logger.warning(
-                    "Sandbox backend %s does not report whether create started or found %s; unknown provenance is never treated as creation, so its containers are not reused warm",
+                    "Sandbox backend %s does not report whether create started or found %s; an unknown result is never treated as a creation",
                     type(self._backend).__name__,
                     info.sandbox_id,
                 )
         record_create_result(provenance)
-        if carry:
-            with self._lock:
-                carried = getattr(self, "_create_provenance", None)
-                if carried is None:
-                    carried = self._create_provenance = {}
-                carried[info.sandbox_id] = provenance
 
     def _own_before_readiness(self, sandbox_id: str, info: SandboxInfo) -> None:
         """Take *sandbox_id*'s lease before waiting for it to become ready.

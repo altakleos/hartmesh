@@ -58,6 +58,7 @@ from app.gateway.routers import (
     subagents,
     suggestions,
     thread_export,
+    thread_workspace,
     thread_runs,
     threads,
     trash,
@@ -1108,6 +1109,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # One conversation's transcript at /api/threads/{thread_id}/export
     app.include_router(thread_export.router)
+    app.include_router(thread_workspace.router)
 
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)
