@@ -19,9 +19,9 @@ from langchain.tools import InjectedToolCallId, tool
 from langgraph.types import Command
 
 from deerflow.community.direct_fetch.client import DEFAULT_TIMEOUT_SECONDS, DirectFetchClient, FetchedPage
+from deerflow.community.direct_fetch.extraction import InProcessExtractor
 from deerflow.community.web_fetch_outcome import FetchRefusal, describe_refusal, refusal_meta, stamped_result, success_meta
 from deerflow.config import get_app_config
-from deerflow.community.direct_fetch.extraction import InProcessExtractor
 
 __all__ = ["PROVIDER_ID", "MAX_RESULT_CHARS", "CONCURRENT_FETCHES", "web_fetch_tool"]
 
@@ -111,4 +111,3 @@ async def web_fetch_tool(url: str, tool_call_id: Annotated[str, InjectedToolCall
         if isinstance(outcome, FetchRefusal):
             return stamped_result(describe_refusal(url, outcome), refusal_meta(outcome), tool_call_id)
         return stamped_result(await _extract(outcome), success_meta(), tool_call_id)
-

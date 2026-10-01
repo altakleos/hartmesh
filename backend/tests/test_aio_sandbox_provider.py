@@ -20,7 +20,6 @@ from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
 
-
 _LEGACY_COLLIDING_IDENTITIES = (
     ("user-9721", "thread-9721"),
     ("user-94361", "thread-94361"),

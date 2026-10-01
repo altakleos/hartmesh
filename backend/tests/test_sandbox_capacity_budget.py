@@ -913,4 +913,3 @@ def test_the_config_schema_refuses_a_budget_that_is_not_a_number():
 
 
 # ── What a person sees when there is no room ─────────────────────────────
-

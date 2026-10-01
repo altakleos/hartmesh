@@ -381,6 +381,7 @@ class SandboxConfig(BaseModel):
             "the provisioner rejects all /api/* requests when the key is unset or mismatched."
         ),
     )
+
     @field_validator("ready_timeout", "capacity_wait_timeout", mode="before")
     @classmethod
     def _timeout_is_a_number(cls, value: object, info: ValidationInfo) -> object:

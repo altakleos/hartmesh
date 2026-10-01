@@ -1194,7 +1194,7 @@ developer-facing skills. `run.sh` names the exclusions in
 - `github-deep-research`, `image-generation`, `music-generation` and
   `video-generation` assign a credential read from the environment to a
   variable the review's `secret-env-assignment` rule treats as blocking;
-  `skill-creator` uses `subprocess`; and `vercel-deploy-claimable` declares a
+  `skill-creator` uses `subprocess`; and `vercel-deploy` declares a
   sensitive capability. The profile's own skill review refuses each, and
   `tool_plane.validation_requires_skill_review: true` makes that review a
   condition of promotion: a governed base holding any one of them could
@@ -3905,7 +3905,7 @@ UV_EXTRAS=postgres .`), so a stand-in for the image the next cut pins.
   26 s: the seed line `13 public skills seeded into .../home/skills/public
   from /app/skills/public (excluded: chart-visualization claude-to-deerflow
   find-skills github-deep-research image-generation music-generation
-  podcast-generation skill-creator vercel-deploy-claimable video-generation
+  podcast-generation skill-creator vercel-deploy video-generation
   web-design-guidelines)`, then `Ensured the public skill projection`, the
   persistence bootstrap to head `0037`, `Application startup complete`;
   `GET /health/ready` 200 `{"status":"ready",...}`. On the data disk

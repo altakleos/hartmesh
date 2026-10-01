@@ -22,6 +22,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 from _config_singleton_guard import restore_config_singletons  # noqa: F401 -- autouse fixture
+
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import Paths
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
@@ -47,7 +48,7 @@ EXCLUDED_BY_POLICY = ("chart-visualization", "claude-to-deerflow", "find-skills"
 # assignments in scripts, subprocess use, a sensitive capability declaration):
 # a governed base holding any one of them could never be promoted. Each must
 # still be refused, or its exclusion is stale (a test below pins that).
-EXCLUDED_BY_REVIEW = ("github-deep-research", "image-generation", "music-generation", "skill-creator", "vercel-deploy-claimable", "video-generation")
+EXCLUDED_BY_REVIEW = ("github-deep-research", "image-generation", "music-generation", "skill-creator", "vercel-deploy", "video-generation")
 EXCLUDED = EXCLUDED_BY_POLICY + EXCLUDED_BY_REVIEW
 EXCLUSION_LINE = f'EXCLUDED_PUBLIC_SKILLS="{" ".join(sorted(EXCLUDED))}"'  # run.sh keeps the list alphabetical
 SEED_LINE = f'sh "$PROFILE/gateway/seed_skills.sh" {IMAGE_PUBLIC} "$DEER_FLOW_HOME/skills" $EXCLUDED_PUBLIC_SKILLS'
@@ -92,8 +93,7 @@ def _seeded_names() -> set[str]:
 
 def _declared_names() -> set[str]:
     """The ``name:`` each seeded package declares in its SKILL.md frontmatter,
-    which is what the tool plane keys its manifest by (one package directory,
-    ``vercel-deploy-claimable``, declares a different name)."""
+    which is the name a person and the agent call it by."""
     names = set()
     for package in _seeded_names():
         text = (PUBLIC / package / "SKILL.md").read_text(encoding="utf-8")
@@ -332,5 +332,3 @@ def _review_blocks(package: Path) -> set[str]:
     maps exactly those severities to a failed validation)."""
     facts = analyze_skill_package(LocalDirectoryReader(package).read())
     return {str(finding["rule_id"]) for finding in facts["findings"] if finding["severity"] in {"blocker", "error"}}
-
-

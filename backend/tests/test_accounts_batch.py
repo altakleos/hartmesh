@@ -79,7 +79,6 @@ def _command(stores: SimpleNamespace, **kwargs) -> AccountsCommand:
 async def _seed_run(stores: SimpleNamespace, user_id: str, *, role: str | None = None) -> str:
     """A run no worker will ever stop: its cancellation stays unconfirmed until the wait runs out."""
     run_id = str(uuid4())
-    sealed = None if role is None else {"user_id": user_id, "role": role}
     await stores.runs.put(run_id, thread_id=str(uuid4()), user_id=user_id, status="running", created_at=datetime.now(UTC).isoformat())
     return run_id
 
