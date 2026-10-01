@@ -70,6 +70,11 @@ class TimeBoundedScheduledTaskService(ScheduledTaskService):
         self._stopping: dict[str, datetime] = {}
         self._ended_at_limit: dict[str, datetime] = {}
 
+    @property
+    def running(self) -> bool:
+        """Whether this process's scheduler loop is live."""
+        return self._task is not None and not self._task.done()
+
     async def run_once(self, *, now: datetime) -> None:
         await self._stop_overdue_runs(now=now)
         if await self._a_stopped_run_is_still_unwinding(now=now):

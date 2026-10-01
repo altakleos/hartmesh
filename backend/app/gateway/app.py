@@ -52,6 +52,7 @@ from app.gateway.routers import (
     projects,
     runs,
     scheduled_tasks,
+    scheduler_state,
     shared,
     skills,
     subagent_batches,
@@ -1154,6 +1155,8 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(threads.router)
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks
+    # Before the scheduled-tasks router: its /scheduled-tasks/{task_id} would otherwise match the fixed path
+    app.include_router(scheduler_state.router)
     app.include_router(scheduled_tasks.router)
 
     # Agents API is mounted at /api/agents
