@@ -82,7 +82,10 @@ jobs:
     uses: ./.github/workflows/verify-versions.yml
 
   publish-chart:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # This distribution releases the compose profile, not the chart: the chart
+    # here is upstream's, unchanged and not qualified against this build, so a
+    # release tag must not publish it under this repository's name.
+    if: startsWith(github.ref, 'refs/tags/v') && github.repository == 'bytedance/deer-flow'
     needs: [verify-versions, validate-chart]
     runs-on: ubuntu-latest
     permissions:

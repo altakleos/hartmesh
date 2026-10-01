@@ -1,0 +1,241 @@
+name: Record Release Manifest
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Release version without the leading v (for example, 2.1.0+hartmesh.1)
+        required: true
+        type: string
+
+permissions:
+  contents: write
+  packages: read
+
+jobs:
+  release-manifest:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the exact release tag
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          ref: refs/tags/v${{ inputs.version }}
+
+      - name: Install crane
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+
+      - name: Compute immutable release references
+        id: identity
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          scripts/release_tag_spellings.sh "$VERSION" >> "$GITHUB_OUTPUT"
+          COMMIT="$(git rev-parse HEAD)"
+          SHORT_SHA="${COMMIT:0:7}"
+          printf 'commit=%s\n' "$COMMIT" >> "$GITHUB_OUTPUT"
+          printf 'short_sha=%s\n' "$SHORT_SHA" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate registry clients
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+
+      - name: Resolve and cross-check published artifacts
+        id: resolve
+        env:
+          VERSION: ${{ inputs.version }}
+          IMAGE_BASE: ghcr.io/${{ github.repository }}
+          IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
+          SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
+        run: |
+          set -euo pipefail
+
+          assert_digest() {
+            if ! printf '%s' "$2" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+              echo "::error::$1 did not resolve to a sha256 digest"
+              exit 1
+            fi
+          }
+
+          for COMPONENT in backend frontend provisioner sandbox sandbox_network_proxy; do
+            IMAGE_REPOSITORY="${IMAGE_BASE}-${COMPONENT//_/-}"
+            TAG_REFERENCE="${IMAGE_REPOSITORY}:${IMAGE_TAG}"
+            SHA_REFERENCE="${IMAGE_REPOSITORY}:sha-${SHORT_SHA}"
+            TAG_DIGEST="$(crane digest "$TAG_REFERENCE")"
+            assert_digest "${COMPONENT} release tag" "$TAG_DIGEST"
+            if SHA_DIGEST="$(crane digest "$SHA_REFERENCE" 2>/dev/null)"; then
+              assert_digest "${COMPONENT} sha tag" "$SHA_DIGEST"
+              if [ "$TAG_DIGEST" != "$SHA_DIGEST" ]; then
+                echo "::error::${TAG_REFERENCE} does not match ${SHA_REFERENCE}"
+                exit 1
+              fi
+              REVISION_CHECK="verified"
+            else
+              TAG_LIST_FILE="${RUNNER_TEMP}/${COMPONENT}-tags.txt"
+              if ! crane ls "$IMAGE_REPOSITORY" > "$TAG_LIST_FILE"; then
+                echo "::error::Unable to confirm whether ${SHA_REFERENCE} exists because ${IMAGE_REPOSITORY} tags could not be listed"
+                exit 1
+              fi
+              if grep -Fxq "sha-${SHORT_SHA}" "$TAG_LIST_FILE"; then
+                echo "::error::${SHA_REFERENCE} is listed but its digest could not be resolved"
+                exit 1
+              fi
+              echo "::warning::${SHA_REFERENCE} was not found; recording ${TAG_REFERENCE} as the published identity"
+              echo "::warning::First 50 tags currently present in ${IMAGE_REPOSITORY}:"
+              head -50 "$TAG_LIST_FILE"
+              REVISION_CHECK="tag-not-found"
+            fi
+            printf '%s_repository=%s\n' "$COMPONENT" "$IMAGE_REPOSITORY" >> "$GITHUB_OUTPUT"
+            printf '%s_digest=%s\n' "$COMPONENT" "$TAG_DIGEST" >> "$GITHUB_OUTPUT"
+            printf '%s_revision_check=%s\n' "$COMPONENT" "$REVISION_CHECK" >> "$GITHUB_OUTPUT"
+          done
+
+      - name: Cross-check the compose profile pins against the published digests
+        id: compose
+        env:
+          IMAGE_BASE: ghcr.io/${{ github.repository }}
+          BACKEND_DIGEST: ${{ steps.resolve.outputs.backend_digest }}
+          FRONTEND_DIGEST: ${{ steps.resolve.outputs.frontend_digest }}
+          SANDBOX_DIGEST: ${{ steps.resolve.outputs.sandbox_digest }}
+          SANDBOX_NETWORK_PROXY_DIGEST: ${{ steps.resolve.outputs.sandbox_network_proxy_digest }}
+        run: |
+          set -euo pipefail
+          # The tagged tree must already be digest-pinned (RELEASING.md): the
+          # golden VM image pre-pulls exactly these lines and a first start
+          # pulls nothing only if the running stack references the same strings.
+          python3 scripts/pin_compose_images.py --check
+          IMAGES_TXT=deploy/compose/images.txt
+          while IFS= read -r LINE; do
+            [ -n "$LINE" ] || continue
+            REPOSITORY="${LINE%%@*}"
+            DIGEST="${LINE##*@}"
+            case "$REPOSITORY" in
+              "${IMAGE_BASE}-"*)
+                COMPONENT="${REPOSITORY#"${IMAGE_BASE}-"}"
+                VARIABLE="$(printf '%s' "$COMPONENT" | tr 'a-z-' 'A-Z_')_DIGEST"
+                EXPECTED="${!VARIABLE:-}"
+                if [ -z "$EXPECTED" ]; then
+                  echo "::error::${LINE} pins a component this release does not publish"
+                  exit 1
+                fi
+                if [ "$DIGEST" != "$EXPECTED" ]; then
+                  echo "::error::${LINE} differs from the published release digest ${EXPECTED}"
+                  exit 1
+                fi
+                ;;
+              *)
+                if ! crane manifest "$LINE" >/dev/null; then
+                  echo "::error::${LINE} is not resolvable in its registry"
+                  exit 1
+                fi
+                ;;
+            esac
+          done < "$IMAGES_TXT"
+          printf 'images_txt_sha256=%s\n' "$(sha256sum "$IMAGES_TXT" | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          python3 - "$IMAGES_TXT" "$RUNNER_TEMP/compose-profile-images.json" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          images_txt, output_path = sys.argv[1:]
+          lines = [line.strip() for line in Path(images_txt).read_text(encoding="utf-8").splitlines() if line.strip()]
+          Path(output_path).write_text(json.dumps(lines), encoding="utf-8")
+          PY
+          printf 'images_json=%s\n' "$RUNNER_TEMP/compose-profile-images.json" >> "$GITHUB_OUTPUT"
+
+      - name: Write release-manifest.json
+        env:
+          VERSION: ${{ inputs.version }}
+          COMMIT: ${{ steps.identity.outputs.commit }}
+          IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
+          BACKEND_REPOSITORY: ${{ steps.resolve.outputs.backend_repository }}
+          BACKEND_DIGEST: ${{ steps.resolve.outputs.backend_digest }}
+          BACKEND_REVISION_CHECK: ${{ steps.resolve.outputs.backend_revision_check }}
+          FRONTEND_REPOSITORY: ${{ steps.resolve.outputs.frontend_repository }}
+          FRONTEND_DIGEST: ${{ steps.resolve.outputs.frontend_digest }}
+          FRONTEND_REVISION_CHECK: ${{ steps.resolve.outputs.frontend_revision_check }}
+          PROVISIONER_REPOSITORY: ${{ steps.resolve.outputs.provisioner_repository }}
+          PROVISIONER_DIGEST: ${{ steps.resolve.outputs.provisioner_digest }}
+          PROVISIONER_REVISION_CHECK: ${{ steps.resolve.outputs.provisioner_revision_check }}
+          SANDBOX_REPOSITORY: ${{ steps.resolve.outputs.sandbox_repository }}
+          SANDBOX_DIGEST: ${{ steps.resolve.outputs.sandbox_digest }}
+          SANDBOX_REVISION_CHECK: ${{ steps.resolve.outputs.sandbox_revision_check }}
+          SANDBOX_NETWORK_PROXY_REPOSITORY: ${{ steps.resolve.outputs.sandbox_network_proxy_repository }}
+          SANDBOX_NETWORK_PROXY_DIGEST: ${{ steps.resolve.outputs.sandbox_network_proxy_digest }}
+          SANDBOX_NETWORK_PROXY_REVISION_CHECK: ${{ steps.resolve.outputs.sandbox_network_proxy_revision_check }}
+          COMPOSE_IMAGES_TXT_SHA256: ${{ steps.compose.outputs.images_txt_sha256 }}
+          COMPOSE_IMAGES_JSON: ${{ steps.compose.outputs.images_json }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          image_tag = os.environ["IMAGE_TAG"]
+          with open(os.environ["COMPOSE_IMAGES_JSON"], encoding="utf-8") as compose_images:
+              compose_profile_images = json.load(compose_images)
+          manifest = {
+              "schema": 4,
+              "version": os.environ["VERSION"],
+              "tag": f"v{os.environ['VERSION']}",
+              "commit": os.environ["COMMIT"],
+              "images": {
+                  name: {
+                      "repository": os.environ[f"{name.upper()}_REPOSITORY"],
+                      "tag": image_tag,
+                      "digest": os.environ[f"{name.upper()}_DIGEST"],
+                      "revision_check": os.environ[f"{name.upper()}_REVISION_CHECK"],
+                  }
+                  for name in ("backend", "frontend", "provisioner", "sandbox", "sandbox_network_proxy")
+              },
+              "compose_profile": {
+                  "images_txt_sha256": os.environ["COMPOSE_IMAGES_TXT_SHA256"],
+                  "images": compose_profile_images,
+              },
+          }
+          with open("release-manifest.json", "w", encoding="utf-8") as output:
+              json.dump(manifest, output, indent=2)
+              output.write("\n")
+          PY
+
+      - name: Verify release manifest offline
+        env:
+          BACKEND_DIGEST: ${{ steps.resolve.outputs.backend_digest }}
+        run: |
+          python3 scripts/verify_release_manifest.py release-manifest.json \
+            --gateway-image-digest "$BACKEND_DIGEST"
+
+      - name: Upload manifest workflow artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-manifest-${{ inputs.version }}
+          path: release-manifest.json
+          if-no-files-found: error
+
+      - name: Create or update the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          TAG="v${VERSION}"
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" --verify-tag --notes "see CHANGELOG.md"
+          fi
+          gh release upload "$TAG" release-manifest.json --clobber
+
+      - name: Summarize resolved digests
+        run: |
+          {
+            echo "### Release artifact digests"
+            echo "| Artifact | Pinned identity | Revision check |"
+            echo "| --- | --- | --- |"
+            echo '| backend | `${{ steps.resolve.outputs.backend_repository }}@${{ steps.resolve.outputs.backend_digest }}` | `${{ steps.resolve.outputs.backend_revision_check }}` |'
+            echo '| frontend | `${{ steps.resolve.outputs.frontend_repository }}@${{ steps.resolve.outputs.frontend_digest }}` | `${{ steps.resolve.outputs.frontend_revision_check }}` |'
+            echo '| provisioner | `${{ steps.resolve.outputs.provisioner_repository }}@${{ steps.resolve.outputs.provisioner_digest }}` | `${{ steps.resolve.outputs.provisioner_revision_check }}` |'
+            echo '| sandbox | `${{ steps.resolve.outputs.sandbox_repository }}@${{ steps.resolve.outputs.sandbox_digest }}` | `${{ steps.resolve.outputs.sandbox_revision_check }}` |'
+            echo '| sandbox-network-proxy | `${{ steps.resolve.outputs.sandbox_network_proxy_repository }}@${{ steps.resolve.outputs.sandbox_network_proxy_digest }}` | `${{ steps.resolve.outputs.sandbox_network_proxy_revision_check }}` |'
+            echo '| compose profile images.txt SHA-256 | `${{ steps.compose.outputs.images_txt_sha256 }}` | n/a |'
+          } >> "$GITHUB_STEP_SUMMARY"

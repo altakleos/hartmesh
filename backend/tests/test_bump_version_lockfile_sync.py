@@ -86,7 +86,7 @@ def _write_sandbox(root: Path) -> Path:
     """Materialize a repo-shaped tree the scripts can run against."""
     (root / "scripts").mkdir(parents=True)
     (root / "backend").mkdir()
-    (root / "frontend").mkdir()
+    (root / "frontend-hm").mkdir()
     (root / "deploy" / "helm" / "deer-flow").mkdir(parents=True)
 
     for name in ("bump_version.sh", "verify_versions.sh"):
@@ -94,7 +94,7 @@ def _write_sandbox(root: Path) -> Path:
 
     (root / "backend" / "pyproject.toml").write_text(PYPROJECT, encoding="utf-8")
     (root / "backend" / "uv.lock").write_text(UV_LOCK, encoding="utf-8")
-    (root / "frontend" / "package.json").write_text(PACKAGE_JSON, encoding="utf-8")
+    (root / "frontend-hm" / "package.json").write_text(PACKAGE_JSON, encoding="utf-8")
     (root / "deploy" / "helm" / "deer-flow" / "Chart.yaml").write_text(CHART, encoding="utf-8")
     return root
 

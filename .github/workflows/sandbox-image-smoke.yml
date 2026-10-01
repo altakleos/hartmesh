@@ -12,12 +12,27 @@ name: Sandbox Image Smoke
 
 on:
   workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - "docker/sandbox/**"
+      - "backend/packages/harness/deerflow/community/aio_sandbox/**"
+      - "backend/tests/test_aio_sandbox_local_backend.py"
+      - "skills/public/data-analysis/**"
+      - "skills/public/business-report/**"
+      - "backend/tests/skills/**"
+      - ".github/workflows/sandbox-image-smoke.yml"
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
     paths:
-      - 'backend/packages/harness/deerflow/community/aio_sandbox/**'
-      - 'backend/tests/test_aio_sandbox_local_backend.py'
-      - '.github/workflows/sandbox-image-smoke.yml'
+      - "docker/sandbox/**"
+      - "backend/packages/harness/deerflow/community/aio_sandbox/**"
+      - "backend/tests/test_aio_sandbox_local_backend.py"
+      - "skills/public/data-analysis/**"
+      - "skills/public/business-report/**"
+      - "backend/tests/skills/**"
+      - ".github/workflows/sandbox-image-smoke.yml"
 
 concurrency:
   group: sandbox-image-smoke-${{ github.event.pull_request.number || github.ref }}
@@ -27,12 +42,245 @@ permissions:
   contents: read
 
 jobs:
+  restricted-profile:
+    runs-on: ubuntu-latest
+    # This job builds docker/sandbox, whose base is pinned in the same Beijing
+    # registry the job below pulls from, so it waits on the same transfer. It
+    # measures three to five minutes; the bound is here so a registry that
+    # stops answering fails it instead of holding a runner -- and this PR's
+    # checks -- for GitHub's default six hours.
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+
+      - name: Build the sandbox image
+        run: docker build --tag deer-flow-sandbox-smoke docker/sandbox
+
+      - name: Exercise the restricted runtime profile
+        run: |
+          set -euo pipefail
+          container_id="$(docker run --detach \
+            --user 1000:1000 \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --publish 127.0.0.1:18080:8080 \
+            --volume "$PWD/skills/public/data-analysis/scripts/analyze.py:/mnt/smoke/analyze.py:ro" \
+            --volume "$PWD/backend/tests/skills/data_analysis/fixtures/example_orders.xls:/mnt/smoke/example_orders.xls:ro" \
+            --volume "$PWD/skills/public/business-report:/mnt/smoke/business-report:ro" \
+            --volume "$PWD/backend/tests/skills/business_report/fixtures/example_services_export_small.xls:/mnt/smoke/example_services_export_small.xls:ro" \
+            --volume "$PWD/backend/tests/skills/business_report/check_pdf_on_image.py:/mnt/smoke/check_pdf_on_image.py:ro" \
+            deer-flow-sandbox-smoke)"
+          trap 'docker logs "$container_id" 2>&1 || true; docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
+
+          ready=false
+          for _attempt in $(seq 1 90); do
+            if curl --fail --silent --show-error --max-time 5 \
+              http://127.0.0.1:18080/v1/sandbox >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            echo "::error::sandbox did not become ready"
+            exit 1
+          fi
+
+          shell_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"id -un"}' \
+            http://127.0.0.1:18080/v1/shell/exec)"
+          shell_user="$(printf '%s' "$shell_response" | jq --raw-output '.data.output' | tr -d '\r\n')"
+          test "$shell_user" = "gem"
+
+          bash_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"id -un"}' \
+            http://127.0.0.1:18080/v1/bash/exec)"
+          bash_user="$(printf '%s' "$bash_response" | jq --raw-output '.data.stdout' | tr -d '\r\n')"
+          test "$bash_user" = "gem"
+
+          # The document libraries must import as the runtime user, not only as
+          # the build-time root that installed them. The endpoint answers 200
+          # whatever the command's exit code, so check that explicitly and print
+          # the whole response (it carries stderr) on failure.
+          library_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"python3 -c \"import docx, duckdb, xlrd, weasyprint, xlsxwriter, matplotlib, pandas, openpyxl; print(duckdb.__version__)\""}' \
+            http://127.0.0.1:18080/v1/bash/exec)"
+          library_version="$(printf '%s' "$library_response" | jq --raw-output '.data.stdout' | tr -d '\r\n')"
+          if ! printf '%s' "$library_response" | jq -e '.data.exit_code == 0' >/dev/null \
+            || [ "$library_version" != "1.5.5" ]; then
+            printf '%s\n' "$library_response"
+            echo "::error::document libraries did not import as the runtime user"
+            exit 1
+          fi
+
+          # Run the data-analysis skill script (mounted read-only above) on the
+          # image it ships with, so a library drift between the image and the
+          # backend test environment cannot pass unnoticed.
+          skill_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"python3 /mnt/smoke/analyze.py --files /mnt/smoke/example_orders.xls --action inspect"}' \
+            http://127.0.0.1:18080/v1/bash/exec)"
+          if ! printf '%s' "$skill_response" | jq -e '.data.exit_code == 0' >/dev/null \
+            || ! printf '%s' "$skill_response" | jq --raw-output '.data.stdout' | grep -q 'Rows: 12'; then
+            printf '%s\n' "$skill_response"
+            echo "::error::data-analysis script failed on the built image"
+            exit 1
+          fi
+
+          # The image ships matplotlib's font cache at MPLCONFIGDIR (the vendor
+          # entrypoint wipes the one under the home directory at every start),
+          # so the first chart a skill draws does not spend seconds building it.
+          font_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"ls \"$MPLCONFIGDIR\"/fontlist-*.json && python3 -c \"import os, matplotlib, matplotlib.pyplot; assert matplotlib.get_cachedir() == os.environ[\\\"MPLCONFIGDIR\\\"], matplotlib.get_cachedir()\""}' \
+            http://127.0.0.1:18080/v1/bash/exec)"
+          # matplotlib falls back to a temporary directory (rebuilding the cache
+          # every process) when MPLCONFIGDIR is not writable, so the cache dir
+          # in use is asserted, not only the file's presence.
+          if ! printf '%s' "$font_response" | jq -e '.data.exit_code == 0' >/dev/null \
+            || printf '%s' "$font_response" | jq --raw-output '.data.stderr' | grep -Eqi 'building the font cache|temporary cache directory'; then
+            printf '%s\n' "$font_response"
+            echo "::error::matplotlib font cache is not pre-built for the runtime user"
+            exit 1
+          fi
+
+          # Build and render the business-report skill's small fixture on the
+          # image (mounted read-only above), then check the PDF with the
+          # PyMuPDF the image ships. Proves the report path, not only imports.
+          report_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"set -e; R=/mnt/smoke/business-report/scripts/report.py; python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/smoke-report --render pdf,docx,xlsx; python3 /mnt/smoke/check_pdf_on_image.py /tmp/smoke-report/smoke-report.pdf"}' \
+            http://127.0.0.1:18080/v1/bash/exec)"
+          if ! printf '%s' "$report_response" | jq -e '.data.exit_code == 0' >/dev/null \
+            || ! printf '%s' "$report_response" | jq --raw-output '.data.stdout' | grep -q 'Checks: Totals match your file'; then
+            printf '%s\n' "$report_response"
+            echo "::error::business-report script failed on the built image"
+            exit 1
+          fi
+
+          logs="$(docker logs "$container_id" 2>&1)"
+          if printf '%s' "$logs" | grep -Eiq 'permission denied|operation not permitted'; then
+            printf '%s\n' "$logs"
+            echo "::error::sandbox emitted a restricted-profile permission failure"
+            exit 1
+          fi
+
+          printf 'shell user: %s\nbash user: %s\nduckdb: %s\n' "$shell_user" "$bash_user" "$library_version"
+          docker rm --force "$container_id" >/dev/null
+          trap - EXIT
+
+      - name: Exercise the slim services profile at the tenant limits
+        # The tenant Compose profile ships every sandbox with the image's six
+        # DISABLE_* switches (deploy/compose/config.yaml sandbox.environment)
+        # at the shipped memory and pid limits (deploy/compose/compose.yaml).
+        # The entrypoint that reads the switches lives in the vendor base, so
+        # this run is the only proof that the built image still honours them:
+        # ready inside the limits, none of the switched-off services running,
+        # the report path rendering, no OOM kill. The values below are pinned
+        # to the profile files by backend/tests/test_sandbox_image_contract.py.
+        run: |
+          set -euo pipefail
+          container_id="$(docker run --detach \
+            --user 1000:1000 \
+            --cap-drop=ALL \
+            --security-opt=no-new-privileges \
+            --memory 1024m --memory-swap 1024m \
+            --pids-limit 256 \
+            --env DISABLE_BROWSER=true \
+            --env DISABLE_JUPYTER=true \
+            --env DISABLE_CODE_SERVER=true \
+            --env DISABLE_VNC=true \
+            --env DISABLE_MCP_BROWSER=true \
+            --env DISABLE_NODEJS_REPL=true \
+            --publish 127.0.0.1:18081:8080 \
+            --volume "$PWD/skills/public/business-report:/mnt/smoke/business-report:ro" \
+            --volume "$PWD/backend/tests/skills/business_report/fixtures/example_services_export_small.xls:/mnt/smoke/example_services_export_small.xls:ro" \
+            --volume "$PWD/backend/tests/skills/business_report/check_pdf_on_image.py:/mnt/smoke/check_pdf_on_image.py:ro" \
+            deer-flow-sandbox-smoke)"
+          trap 'docker logs "$container_id" 2>&1 || true; docker rm --force "$container_id" >/dev/null 2>&1 || true' EXIT
+
+          ready=false
+          for _attempt in $(seq 1 90); do
+            if curl --fail --silent --show-error --max-time 5 \
+              http://127.0.0.1:18081/v1/sandbox >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 2
+          done
+          if [ "$ready" != true ]; then
+            echo "::error::slim sandbox did not become ready inside the tenant limits"
+            exit 1
+          fi
+
+          # The switches stop services, not runtimes: none of the switched-off
+          # programs may be running (matched on process names, since the
+          # command's own shell carries the pattern on its command line), and
+          # node, npx and the document libraries must still answer.
+          services_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"if ps -eo comm= | grep -Ei '"'"'chrom|jupyter|code-server|tigervnc|websocat|openbox'"'"'; then exit 1; fi; node --version && npx --version && python3 -c \"import weasyprint, matplotlib, pandas, docx, duckdb\" && ls /proc | grep -c ^[0-9]"}' \
+            http://127.0.0.1:18081/v1/bash/exec)"
+          if ! printf '%s' "$services_response" | jq -e '.data.exit_code == 0' >/dev/null; then
+            printf '%s\n' "$services_response"
+            echo "::error::slim sandbox is running a switched-off service or lost a runtime"
+            exit 1
+          fi
+
+          slim_report_response="$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data '{"command":"set -e; R=/mnt/smoke/business-report/scripts/report.py; python3 $R build /mnt/smoke/example_services_export_small.xls --period 2026-08 --out /tmp/slim-report --render pdf,docx,xlsx; python3 /mnt/smoke/check_pdf_on_image.py /tmp/slim-report/slim-report.pdf"}' \
+            http://127.0.0.1:18081/v1/bash/exec)"
+          if ! printf '%s' "$slim_report_response" | jq -e '.data.exit_code == 0' >/dev/null; then
+            printf '%s\n' "$slim_report_response"
+            echo "::error::slim sandbox could not render the report inside the shipped memory limit"
+            exit 1
+          fi
+
+          oom_killed="$(docker inspect --format '{{.State.OOMKilled}}' "$container_id")"
+          test "$oom_killed" = false || { echo "::error::slim sandbox was OOM-killed"; exit 1; }
+          # The process count is the check the memory limit no longer makes:
+          # the full profile held at 1 GiB too, so an ignored switch would not
+          # OOM-kill; it shows as ~31 processes against the slim profile's ~11.
+          slim_processes="$(printf '%s' "$services_response" | jq --raw-output '.data.stdout' | grep -E '^[0-9]+$' | tail -n 1)"
+          if [ -z "$slim_processes" ] || [ "$slim_processes" -gt 16 ]; then
+            echo "::error::slim sandbox runs ${slim_processes:-an unknown number of} processes; the slim profile runs about 11 and the full one 31, so a DISABLE_* switch was ignored"
+            exit 1
+          fi
+          printf 'slim sandbox: ready, services off, report rendered, processes: %s\n' "$slim_processes"
+          docker rm --force "$container_id" >/dev/null
+          trap - EXIT
+
   sandbox-image-smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 25
+    # A budget, not a number someone raised. Both source images come from a
+    # Beijing registry and the transfer is effectively the whole job: 16m03s
+    # of the last green 17m06s run. Against the 25-minute job timeout this
+    # used to carry, that is about 1.5x headroom on a transfer nobody here
+    # controls, and on 2026-09-22 it ran out -- the pull passed 25 minutes,
+    # the runner cancelled the job inside that step, and no test in it ran.
+    # The PR read as a red check that had nothing to do with its diff.
+    #
+    # Raising this alone would only move the same cliff, because a stalled
+    # transfer is unbounded and the job timeout is then the only thing that
+    # ever stops it. So the pull bounds itself instead, and the three numbers
+    # are one piece of arithmetic: 2 images x 2 attempts x 12 min = 48 min of
+    # worst-case pulling, inside the 50-minute step timeout, inside this
+    # 60-minute job -- which the last green run finished in 17.
+    # backend/tests/test_sandbox_image_contract.py pins that arithmetic.
+    timeout-minutes: 60
     env:
       SANDBOX_SMOKE_IMAGE_REF: ${{ vars.SANDBOX_SMOKE_IMAGE || 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest' }}
       FOWNER_SMOKE_IMAGE_REF: ${{ vars.SANDBOX_FOWNER_SMOKE_IMAGE || 'enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:1.11.0' }}
+      # Bounds one `docker pull`. Generous against the ~8 minutes each image
+      # measured, so an ordinary slow pull is never killed and restarted;
+      # tight enough that both attempts on both images still fit the step.
+      SANDBOX_PULL_ATTEMPT_TIMEOUT: "12m"
+      SANDBOX_PULL_ATTEMPTS: "2"
 
     steps:
       - name: Checkout
@@ -42,6 +290,17 @@ jobs:
         # Pull on the runner's platform, then pass only immutable repo@sha256
         # references to pytest. This keeps both the baseline and the 1.11.0
         # regression run reproducible even if either source tag moves later.
+        #
+        # Each attempt is bounded and retried rather than left to run into the
+        # job's timeout: docker keeps the layers an interrupted pull already
+        # fetched, so a retry resumes instead of starting over, and a registry
+        # that has stopped answering fails this step by name instead of
+        # cancelling the job mid-stream. The pull's progress stays in the log
+        # (it used to go to /dev/null) because "slow" and "stalled" are exactly
+        # the two cases worth telling apart, and the elapsed seconds reach the
+        # job summary so the margin is visible on every green run rather than
+        # discovered at the cliff.
+        timeout-minutes: 50
         run: |
           set -euo pipefail
 
@@ -49,12 +308,24 @@ jobs:
             local source_ref="$1"
             local output_var="$2"
             local label="$3"
-            local repo_digest
+            local repo_digest attempt started elapsed
 
-            docker pull "$source_ref" >/dev/null
+            for attempt in $(seq 1 "$SANDBOX_PULL_ATTEMPTS"); do
+              started=$SECONDS
+              if timeout "$SANDBOX_PULL_ATTEMPT_TIMEOUT" docker pull "$source_ref"; then
+                break
+              fi
+              elapsed=$((SECONDS - started))
+              if [ "$attempt" -ge "$SANDBOX_PULL_ATTEMPTS" ]; then
+                echo "::error::docker pull $source_ref gave up after $attempt attempts of up to $SANDBOX_PULL_ATTEMPT_TIMEOUT (${elapsed}s on the last one)"
+                return 1
+              fi
+              echo "::warning::docker pull $source_ref did not finish within $SANDBOX_PULL_ATTEMPT_TIMEOUT (attempt $attempt, ${elapsed}s); retrying from the layers already fetched"
+            done
+
             repo_digest="$(docker image inspect "$source_ref" --format '{{index .RepoDigests 0}}')"
             echo "$output_var=$repo_digest" >> "$GITHUB_ENV"
-            printf '%s: `%s`\n' "$label" "$repo_digest" | tee -a "$GITHUB_STEP_SUMMARY"
+            printf '%s: `%s` (pulled in %ss)\n' "$label" "$repo_digest" "$((SECONDS - started))" | tee -a "$GITHUB_STEP_SUMMARY"
           }
 
           resolve_image "$SANDBOX_SMOKE_IMAGE_REF" DEER_FLOW_SANDBOX_SMOKE_IMAGE "Configured/default smoke image"

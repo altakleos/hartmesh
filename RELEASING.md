@@ -204,3 +204,116 @@ For the 2.1.0 chart release (the first chart release), pre-`charts/` nightly
 builds remain at the legacy bare `ghcr.io/<owner>/deer-flow` package. That
 package receives no new versions after 2.1.0; delete it or revoke its
 visibility once nothing still pulls from it.
+
+## HartMesh distribution releases
+
+Everything above is upstream's release process and is kept as upstream wrote
+it. This section is what this repository does instead. HartMesh is a
+distribution of DeerFlow: upstream's `main` is merged in regularly, and what a
+release ships is the single-VM profile under `deploy/compose/` with the five
+container images it runs. The Helm chart in this tree is upstream's, unchanged
+and not qualified against this build; a release tag here does not publish it.
+
+### Version
+
+A HartMesh release is `X.Y.Z+hartmesh.N`: `X.Y.Z` is the upstream version the
+build is based on and `N` increases with every release. The same string goes
+in the four version sources (`deploy/helm/deer-flow/Chart.yaml`,
+`backend/pyproject.toml`, `backend/uv.lock`, `frontend-hm/package.json`);
+`scripts/bump_version.sh` writes all of them and `scripts/verify_versions.sh`
+checks them. Between releases the tree carries upstream's own version.
+
+For `2.1.0+hartmesh.1` the spellings are: git tag `v2.1.0+hartmesh.1`,
+container image tag `v2.1.0-hartmesh.1`, and `sha-<first seven characters of
+the commit>` for lookup by commit. `scripts/release_tag_spellings.sh` is the
+one implementation; workflows call it. The images are
+`ghcr.io/<owner>/<repo>-backend`, `-frontend`, `-provisioner`, `-sandbox` and
+`-sandbox-network-proxy`. `ghcr.io/<owner>/<repo>-sandbox-base` is a private
+cache of the sandbox's upstream base image, not something to deploy.
+
+### Procedure
+
+The compose profile must reference its images by digest in the tagged tree,
+so a release builds its images before the tag exists.
+
+1. **Choose the version** and write it to every source:
+   ```bash
+   scripts/bump_version.sh 2.1.0+hartmesh.1
+   scripts/verify_versions.sh 2.1.0+hartmesh.1
+   ```
+2. **Commit and push** that change (a branch is fine; the candidate build
+   reads the ref it is dispatched on).
+3. **Build the candidate images** from that commit:
+   ```bash
+   gh workflow run container.yaml --ref <that branch> -f version=2.1.0+hartmesh.1
+   ```
+   A dispatch builds all five images under the release's tag spelling and
+   never reuses a pinned digest, whatever `deploy/compose/images.txt` carries.
+   Wait for every job to succeed.
+4. **Pin the compose profile** to the digests that build published, and
+   commit the pins:
+   ```bash
+   scripts/pin_compose_images.py --release 2.1.0+hartmesh.1
+   scripts/pin_compose_images.py --check
+   git add deploy/compose
+   git commit -m "release: pin compose profile for v2.1.0+hartmesh.1"
+   ```
+   `--release` first points the four profile lines for this repository's
+   images at this release's candidate tags and then resolves every tag to a
+   digest, in `deploy/compose/images.txt`, `compose.yaml` and `config.yaml`
+   together. Without it the script refuses while any of those lines is a tag:
+   between releases the tree carries the previous release's pins, and pinning
+   them again would ship the previous release under the new name.
+5. **Tag and push** the pin commit:
+   ```bash
+   git tag v2.1.0+hartmesh.1
+   git push origin v2.1.0+hartmesh.1
+   ```
+   The container workflow does not rebuild an image the profile pins. It
+   re-tags the pinned digest unchanged, after checking that the release tag
+   already resolves to it, which only this version's candidate build can have
+   arranged.
+6. **Record the release**, once the five image jobs have succeeded:
+   ```bash
+   gh workflow run release-manifest.yaml -f version=2.1.0+hartmesh.1
+   ```
+   It checks out the tag, resolves each image, checks every line of
+   `deploy/compose/images.txt` against what was published, and attaches
+   `release-manifest.json` to the GitHub Release. The manifest (schema 4)
+   lists the five images by repository, tag and digest, and the compose
+   profile's `images.txt` with its SHA-256. Verify a downloaded copy offline:
+   ```bash
+   python3 scripts/verify_release_manifest.py release-manifest.json
+   ```
+
+A package GHCR creates is private until its visibility is changed in the
+package's settings; do that once for each of the five images.
+
+### The sandbox base image
+
+`docker/sandbox/Dockerfile` builds on upstream's all-in-one sandbox image,
+pinned by digest. The release build reads that base from this repository's
+own `-sandbox-base` cache so that a release does not depend on a third-party
+registry. To move the base: mirror the new digest with
+`gh workflow run sandbox-image-mirror.yaml -f source=<registry>/<image>@sha256:<digest> -f version=<next version>`,
+then change the digest in both `docker/sandbox/Dockerfile` and the sandbox
+entry of `.github/workflows/container.yaml`, and run the sandbox smoke
+workflow before merging.
+
+### Merging upstream
+
+Three things in this tree follow upstream by hand, each checked by a test or a
+gate so that a merge cannot leave one behind:
+
+- **`frontend/`** is upstream's application and is never edited here; the
+  product's own is `frontend-hm/`. After a merge, record the upstream commit
+  the merged `frontend/` is a copy of, and commit the result with the merge:
+  ```bash
+  python3 scripts/verify_frontend_isolation.py --pin <upstream remote>/main
+  ```
+- **Database migrations.** This distribution's revisions follow upstream's
+  newest one in a single chain. When upstream adds a revision, point the first
+  distribution revision's `down_revision` at it and update
+  `backend/tests/test_migration_chain_head.py`, which names both ends.
+- **Version sources.** When upstream changes its version, the four sources
+  must agree again: `scripts/verify_versions.sh` says which one does not.

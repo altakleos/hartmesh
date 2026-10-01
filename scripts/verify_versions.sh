@@ -4,7 +4,8 @@
 # Sources checked:
 #   deploy/helm/deer-flow/Chart.yaml   — version + appVersion
 #   backend/pyproject.toml             — version
-#   frontend/package.json              — version
+#   backend/uv.lock                    — deer-flow root package version
+#   frontend-hm/package.json              — version
 #
 # Usage:
 #   scripts/verify_versions.sh             # all sources must be mutually equal
@@ -21,9 +22,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 CHART="$ROOT/deploy/helm/deer-flow/Chart.yaml"
 PYPROJECT="$ROOT/backend/pyproject.toml"
-PACKAGE="$ROOT/frontend/package.json"
+PACKAGE="$ROOT/frontend-hm/package.json"
+UV_LOCK="$ROOT/backend/uv.lock"
 
-for f in "$CHART" "$PYPROJECT" "$PACKAGE"; do
+for f in "$CHART" "$PYPROJECT" "$UV_LOCK" "$PACKAGE"; do
   if [ ! -f "$f" ]; then
     echo "::error::missing version file: $f" >&2
     exit 1
@@ -33,12 +35,37 @@ done
 CHART_VERSION=$(awk '/^version:/ {print $2; exit}' "$CHART")
 APP_VERSION=$(awk '/^appVersion:/ {gsub(/"/, ""); print $2; exit}' "$CHART")
 PY_VERSION=$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' "$PYPROJECT")
+LOCK_VERSION=$(awk -F'"' '
+  /^\[\[package\]\]$/ {
+    if (name == "deer-flow") {
+      print version
+      found = 1
+      exit
+    }
+    name = ""
+    version = ""
+    next
+  }
+  /^name[[:space:]]*=/ { name = $2 }
+  /^version[[:space:]]*=/ { version = $2 }
+  END {
+    if (!found && name == "deer-flow") print version
+  }
+' "$UV_LOCK")
 JS_VERSION=$(grep -m1 '"version"' "$PACKAGE" | awk -F'"' '{print $4}')
 
 printf 'Chart.yaml version:     %s\n' "$CHART_VERSION"
 printf 'Chart.yaml appVersion:  %s\n' "$APP_VERSION"
 printf 'backend/pyproject.toml: %s\n' "$PY_VERSION"
-printf 'frontend/package.json:  %s\n' "$JS_VERSION"
+printf 'backend/uv.lock:        %s\n' "$LOCK_VERSION"
+printf 'frontend-hm/package.json:  %s\n' "$JS_VERSION"
+
+# uv.lock records a pre-release without the separator the other sources write:
+# `2.2.0-dev` there is `2.2.0dev`. Compare the lock in that spelling; a release
+# version (`2.1.0`, `2.1.0+build.5`) has no separator and is compared as is.
+lock_spelling() {
+  printf '%s' "$1" | sed -E 's/-(dev|a|b|rc|alpha|beta|pre)/\1/'
+}
 
 # mismatch <name> <actual> <expected>: prints a GitHub Actions annotation and
 # returns 1 when they differ, 0 when equal.
@@ -58,12 +85,14 @@ if [ -n "$EXPECTED" ]; then
   mismatch "Chart.yaml version"     "$CHART_VERSION" "$EXPECTED" || status=1
   mismatch "Chart.yaml appVersion"  "$APP_VERSION"   "$EXPECTED" || status=1
   mismatch "backend/pyproject.toml" "$PY_VERSION"    "$EXPECTED" || status=1
-  mismatch "frontend/package.json"  "$JS_VERSION"    "$EXPECTED" || status=1
+  mismatch "backend/uv.lock"        "$LOCK_VERSION"  "$(lock_spelling "$EXPECTED")" || status=1
+  mismatch "frontend-hm/package.json"  "$JS_VERSION"    "$EXPECTED" || status=1
 else
   echo
   mismatch "Chart.yaml appVersion"  "$APP_VERSION"  "$CHART_VERSION" || status=1
   mismatch "backend/pyproject.toml" "$PY_VERSION"   "$CHART_VERSION" || status=1
-  mismatch "frontend/package.json"  "$JS_VERSION"   "$CHART_VERSION" || status=1
+  mismatch "backend/uv.lock"        "$LOCK_VERSION" "$(lock_spelling "$CHART_VERSION")" || status=1
+  mismatch "frontend-hm/package.json"  "$JS_VERSION"   "$CHART_VERSION" || status=1
 fi
 
 if [ "$status" -ne 0 ]; then

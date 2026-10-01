@@ -7,7 +7,7 @@
 # Updates:
 #   backend/pyproject.toml              (version = "...")
 #   backend/uv.lock                     (root package version, via `uv lock`)
-#   frontend/package.json               ("version": "...")
+#   frontend-hm/package.json            ("version": "...")
 #   deploy/helm/deer-flow/Chart.yaml    (version: + appVersion:)
 #
 # Requires `uv` on PATH: backend/uv.lock pins the root package version too, and
@@ -31,12 +31,18 @@ if ! printf '%s' "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+([0-9A-Za-z.+-]+)
   exit 1
 fi
 
+if ! command -v uv >/dev/null 2>&1; then
+  echo "error: uv is required to update backend/uv.lock; install uv and retry." >&2
+  exit 1
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYPROJECT="$ROOT/backend/pyproject.toml"
-PACKAGE="$ROOT/frontend/package.json"
+PACKAGE="$ROOT/frontend-hm/package.json"
 CHART="$ROOT/deploy/helm/deer-flow/Chart.yaml"
+UV_LOCK="$ROOT/backend/uv.lock"
 
-for f in "$PYPROJECT" "$PACKAGE" "$CHART"; do
+for f in "$PYPROJECT" "$UV_LOCK" "$PACKAGE" "$CHART"; do
   if [ ! -f "$f" ]; then
     echo "error: expected version file not found: $f" >&2
     exit 1
@@ -69,7 +75,7 @@ if new == src:
 with open(pyproject, "w") as f:
     f.write(new)
 
-# frontend/package.json — "version": "..." (preserve indentation; minimal diff)
+# frontend-hm/package.json — "version": "..." (preserve indentation; minimal diff)
 with open(package) as f:
     src = f.read()
 new = re.sub(
@@ -102,7 +108,7 @@ fi
 echo "Bumped version to $VERSION in:"
 echo "  backend/pyproject.toml"
 echo "  backend/uv.lock"
-echo "  frontend/package.json"
+echo "  frontend-hm/package.json"
 echo "  deploy/helm/deer-flow/Chart.yaml (version + appVersion)"
 echo
 
