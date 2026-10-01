@@ -668,6 +668,90 @@ async def test_each_known_limit_says_which_limit_it_was():
     assert generic.updated[-1][1]["error"] == "the task stopped before it finished"
 
 
+class _CapturingRuntime:
+    """The intent the scheduler hands the application runtime, kept for the test to read."""
+
+    def __init__(self):
+        self.intents = []
+
+    async def launch(self, intent):
+        from types import SimpleNamespace
+
+        from app.runtime.invocation import InternalLaunchReceipt
+
+        self.intents.append(intent)
+        return InternalLaunchReceipt(record=SimpleNamespace(thread_id=intent.thread_id, run_id="run-1"))
+
+
+def _due_cron_row():
+    row = _once_task_row(task_id="task-cron")
+    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "status": "enabled", "next_run_at": "2026-07-02T01:00:00+00:00", "context_mode": "fresh_thread_per_run"})
+    return row
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_run_is_launched_with_the_configured_step_limit_read_at_dispatch():
+    """``scheduler.recursion_limit`` reaches the run: without it a run gets the Gateway default of 100 graph steps, about nine model turns."""
+    runtime = _CapturingRuntime()
+    limits = iter([1000, 400])
+    service = ScheduledTaskService(
+        task_repo=DummyTaskRepo([_due_cron_row()]),
+        task_run_repo=DummyRunRepo(),
+        invocation_runtime=runtime,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=1,
+        recursion_limit=lambda: next(limits),
+    )
+
+    await service.dispatch_task(_due_cron_row(), now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC), trigger="manual")
+    await service.dispatch_task(_due_cron_row(), now=datetime(2026, 9, 30, 9, 5, tzinfo=UTC), trigger="manual")
+
+    assert [dict(intent.config) for intent in runtime.intents] == [{"recursion_limit": 1000}, {"recursion_limit": 400}], "read on each dispatch, so an edit applies to the next run"
+
+
+@pytest.mark.asyncio
+async def test_a_scheduled_run_without_a_configured_limit_sends_no_config_of_its_own():
+    runtime = _CapturingRuntime()
+    service = ScheduledTaskService(
+        task_repo=DummyTaskRepo([_due_cron_row()]),
+        task_run_repo=DummyRunRepo(),
+        invocation_runtime=runtime,
+        poll_interval_seconds=5,
+        lease_seconds=120,
+        max_concurrent_runs=1,
+    )
+
+    await service.dispatch_task(_due_cron_row(), now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC), trigger="manual")
+
+    assert [intent.config for intent in runtime.intents] == [None]
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_hit_the_recursion_limit_is_a_failed_occurrence_that_says_so_in_words():
+    """The graph's step limit ends the run ``error`` with a bare reference; the owner reads words, and the run keeps the typed reason."""
+    from deerflow.runtime.runs.worker import RECURSION_LIMIT_STOP_REASON
+
+    task_repo = DummyTaskRepo([_once_task_row()])
+    run_repo = DummyRunRepo()
+
+    await _make_service(task_repo, run_repo).handle_run_completion(_completion_record(RunStatus.error, error="Runtime operation failed (reference: 9b6d5130110345a59c5fee80b63f1556)", stop_reason=RECURSION_LIMIT_STOP_REASON))
+
+    run_update = run_repo.updated[-1][1]
+    assert run_update["status"] == "failed"
+    assert run_update["error"] == "the task used up the number of steps it is allowed, so it stopped before it finished"
+    assert task_repo.rows[0]["last_error"] == run_update["error"]
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_failed_for_any_other_reason_keeps_its_own_error():
+    run_repo = DummyRunRepo()
+
+    await _make_service(DummyTaskRepo([_once_task_row()]), run_repo).handle_run_completion(_completion_record(RunStatus.error, error="Runtime operation failed (reference: abc)"))
+
+    assert run_repo.updated[-1][1]["error"] == "Runtime operation failed (reference: abc)"
+
+
 @pytest.mark.asyncio
 async def test_a_run_that_finished_without_a_stop_reason_is_still_a_success():
     task_repo = DummyTaskRepo([_once_task_row()])
@@ -709,17 +793,24 @@ async def test_a_completion_the_scheduler_already_ended_the_occurrence_for_chang
 class _OverdueRunRepo(DummyRunRepo):
     """Occurrences that are still ``running`` past the cutoff the service asks about."""
 
-    def __init__(self, overdue):
+    def __init__(self, overdue, *, once=False):
         super().__init__()
         self.overdue = overdue
+        self.once = once
         self.asked: list[tuple[datetime, int]] = []
         self.list_error: Exception | None = None
+        self.queued_listed = 0
 
     async def list_overdue_running(self, *, started_before, limit):
         self.asked.append((started_before, limit))
         if self.list_error is not None:
             raise self.list_error
-        return [dict(row) for row in self.overdue]
+        rows, self.overdue = [dict(row) for row in self.overdue], ([] if self.once else self.overdue)
+        return rows
+
+    async def list_queued_runs(self, *, limit):
+        self.queued_listed += 1
+        return []
 
 
 class _StopRecorder:
@@ -736,7 +827,7 @@ class _StopRecorder:
         self.stopped.append(run_id)
 
 
-def _service_that_stops(run_repo, stop, *, max_run_seconds=900, rows=()):
+def _service_that_stops(run_repo, stop, *, max_run_seconds=900, rows=(), run_is_live=None):
     task_repo = DummyTaskRepo(list(rows))
     task_repo.claimed = True
     service = ScheduledTaskService(
@@ -748,6 +839,7 @@ def _service_that_stops(run_repo, stop, *, max_run_seconds=900, rows=()):
         max_concurrent_runs=1,
         max_run_seconds=max_run_seconds,
         stop_run=stop,
+        run_is_live=run_is_live,
     )
     return service, task_repo
 
@@ -919,6 +1011,82 @@ def test_a_bound_reads_in_the_largest_whole_unit(seconds, words):
     from app.scheduler.service import _duration_words
 
     assert _duration_words(seconds) == words
+
+
+class _Liveness:
+    """Which runs the run manager still holds a worker for."""
+
+    def __init__(self, live=()):
+        self.live = set(live)
+        self.asked: list[str] = []
+
+    async def __call__(self, run_id):
+        self.asked.append(run_id)
+        return run_id in self.live
+
+
+@pytest.mark.asyncio
+async def test_nothing_new_is_launched_while_a_run_the_time_limit_stopped_is_still_unwinding():
+    """The occurrence is ended at once, but its run keeps its sandbox until its worker finishes.
+
+    Launching the next scheduled run in the meantime could put two unattended
+    runs on both slots, the state the one-at-a-time budget exists to prevent.
+    """
+    t0 = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
+    run_repo = _OverdueRunRepo([_occurrence(1)], once=True)
+    liveness = _Liveness({"run-1"})
+    service, task_repo = _service_that_stops(run_repo, _StopRecorder(), run_is_live=liveness)
+    task_repo.claimed = False
+
+    await service.run_once(now=t0)
+    assert (task_repo.claimed, run_repo.queued_listed) == (False, 0), "the poll that stopped the run launched nothing"
+    await service.run_once(now=t0 + timedelta(seconds=5))
+    assert (task_repo.claimed, run_repo.queued_listed) == (False, 0), "the run is still unwinding"
+
+    liveness.live.clear()
+    await service.run_once(now=t0 + timedelta(seconds=10))
+    assert (task_repo.claimed, run_repo.queued_listed) == (True, 1), "once the run has ended, scheduling resumes"
+
+
+@pytest.mark.asyncio
+async def test_a_run_that_never_finishes_unwinding_holds_scheduling_only_for_a_grace_period():
+    t0 = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
+    run_repo = _OverdueRunRepo([_occurrence(1)], once=True)
+    service, task_repo = _service_that_stops(run_repo, _StopRecorder(), run_is_live=_Liveness({"run-1"}))
+    task_repo.claimed = False
+
+    await service.run_once(now=t0)
+    await service.run_once(now=t0 + timedelta(seconds=119))
+    assert task_repo.claimed is False
+    await service.run_once(now=t0 + timedelta(seconds=121))
+
+    assert task_repo.claimed is True, "a wedged run does not stop scheduling for good"
+
+
+@pytest.mark.asyncio
+async def test_a_failed_liveness_check_does_not_hold_scheduling():
+    async def _broken(run_id):
+        raise RuntimeError("the run manager could not be reached")
+
+    run_repo = _OverdueRunRepo([_occurrence(1)], once=True)
+    service, task_repo = _service_that_stops(run_repo, _StopRecorder(), run_is_live=_broken)
+    task_repo.claimed = False
+
+    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
+    await service.run_once(now=datetime(2026, 9, 30, 9, 0, 5, tzinfo=UTC))
+
+    assert task_repo.claimed is True
+
+
+@pytest.mark.asyncio
+async def test_without_a_liveness_check_scheduling_is_never_held():
+    run_repo = _OverdueRunRepo([_occurrence(1)], once=True)
+    service, task_repo = _service_that_stops(run_repo, _StopRecorder())
+    task_repo.claimed = False
+
+    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
+
+    assert task_repo.claimed is True
 
 
 @pytest.mark.asyncio

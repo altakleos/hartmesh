@@ -1067,7 +1067,7 @@ def _resolve_max_recursion_limit() -> int:
         return _DEFAULT_MAX_RECURSION_LIMIT
 
 
-def _resolve_scheduler_recursion_limit() -> int:
+def resolve_scheduler_recursion_limit() -> int:
     """Resolve the scheduled-run recursion_limit from ``AppConfig.scheduler``.
 
     Falls back to ``_DEFAULT_RECURSION_LIMIT`` when the app config cannot be
@@ -4094,7 +4094,7 @@ async def launch_scheduled_thread_run(
         input={"messages": [{"role": "user", "content": prompt}]},
         command=None,
         metadata=metadata or {},
-        config={"recursion_limit": _resolve_scheduler_recursion_limit()},
+        config={"recursion_limit": resolve_scheduler_recursion_limit()},
         context=({"non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"non_interactive": True}),
         webhook=None,
         checkpoint_id=None,

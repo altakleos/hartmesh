@@ -557,13 +557,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             logger.exception("No IM channels configured or channel service failed to start")
 
         try:
-            from app.gateway.services import build_scheduled_invocation_runtime
+            from app.gateway.services import build_scheduled_invocation_runtime, resolve_scheduler_recursion_limit
             from app.scheduler import ScheduledTaskService
 
             async def _stop_scheduled_run(run_id: str) -> object:
                 # The run manager is resolved when a run is stopped, not when
                 # the scheduler is built, like the other closures over `app`.
                 return await app.state.run_manager.cancel(run_id, action="interrupt")
+
+            async def _scheduled_run_is_live(run_id: str) -> bool:
+                # A run's sandbox is held until its worker task has finished, which is later than its status
+                # reading ``interrupted``.
+                record = await app.state.run_manager.get(run_id)
+                task = getattr(record, "task", None)
+                return task is not None and not task.done()
 
             if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
                 scheduled_task_service = ScheduledTaskService(
@@ -579,6 +586,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                     tenant_digest=app.state.tenant_identity.digest,
                     max_run_seconds=startup_config.scheduler.max_run_seconds,
                     stop_run=_stop_scheduled_run,
+                    recursion_limit=resolve_scheduler_recursion_limit,
+                    run_is_live=_scheduled_run_is_live,
                 )
                 app.state.scheduled_task_service = scheduled_task_service
                 if startup_config.scheduler.enabled:

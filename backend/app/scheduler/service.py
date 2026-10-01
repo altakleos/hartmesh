@@ -19,7 +19,7 @@ from app.runtime.invocation import InternalLaunchIntent, InternalLaunchReceipt, 
 from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected, ScheduledTaskRunRepository
 from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
 from deerflow.runtime import ConflictError, RunRecord
-from deerflow.runtime.runs.worker import SANDBOX_CAPACITY_STOP_REASON
+from deerflow.runtime.runs.worker import RECURSION_LIMIT_STOP_REASON, SANDBOX_CAPACITY_STOP_REASON
 from deerflow.scheduler.schedules import next_run_at
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -41,6 +41,12 @@ _OVERDUE_ENDS_PER_POLL = 16
 # is ended before the Stop is asked, so a slow Stop costs the poll time, not the
 # outcome.
 _STOP_REQUEST_TIMEOUT_SECONDS = 10.0
+# How long the scheduler launches nothing while a run it stopped at the time
+# limit is still unwinding. A run keeps its sandbox until its worker finishes,
+# and the occurrence that counted against ``max_concurrent_runs`` is already
+# ended, so without this the next scheduled run could start beside it. A run
+# that never finishes unwinding holds scheduling for this long, not for good.
+_STOPPING_GRACE_SECONDS = 120
 
 # What the task list tells its owner when a run ended ``success`` yet a guard or
 # an execution budget had cut it short, keyed by the typed stop reason. The
@@ -56,6 +62,8 @@ _STOPPED_EARLY_ERRORS: dict[str, str] = {
     "repeated_tool_loop": "the task kept repeating the same action, so it was stopped before it finished",
     "loop_capped": "the task kept repeating the same action, so it was stopped before it finished",
     "no_progress_loop": "the task stopped making progress, so it was stopped before it finished",
+    # The graph's step limit ends the run ``error`` with a bare reference the owner cannot use.
+    RECURSION_LIMIT_STOP_REASON: "the task used up the number of steps it is allowed, so it stopped before it finished",
     "token_capped": "the task used up the amount of text it is allowed, so it stopped before it finished",
     "safety_capped": "the model declined to go on, so the task stopped before it finished",
     "model_length_capped": "the model's answer was cut off at its length limit, so the task stopped before it finished",
@@ -86,6 +94,8 @@ class ScheduledTaskService:
         tenant_digest: str | None = None,
         max_run_seconds: int | None = None,
         stop_run: Callable[[str], Awaitable[object]] | None = None,
+        recursion_limit: Callable[[], int] | None = None,
+        run_is_live: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
@@ -101,6 +111,14 @@ class ScheduledTaskService:
         # holds its concurrency slot until it ends, and nobody is watching it.
         self._max_run_seconds = max_run_seconds
         self._stop_run = stop_run
+        # The step limit for a scheduled run, read at each dispatch (so an edit
+        # applies to the next run). Without it the application runtime gives a
+        # run the Gateway default of 100 graph steps, about nine model turns.
+        self._recursion_limit = recursion_limit
+        # Whether the run manager still holds a worker for a run, and the runs
+        # this process asked to stop at the time limit, with when it asked.
+        self._run_is_live = run_is_live
+        self._stopping: dict[str, datetime] = {}
         if (
             tenant_digest is not None
             and re.fullmatch(
@@ -176,6 +194,8 @@ class ScheduledTaskService:
             )
         await self._expire_waiting_runs(now=now)
         await self._stop_overdue_runs(now=now)
+        if await self._a_stopped_run_is_still_unwinding(now=now):
+            return
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
         # persisted even when all execution slots are busy; claim_queued_run()
@@ -450,6 +470,7 @@ class ScheduledTaskService:
                     received_at=time.monotonic(),
                     assistant_id=task.get("assistant_id"),
                     input={"messages": [{"role": "user", "content": task["prompt"]}]},
+                    config=({"recursion_limit": self._recursion_limit()} if self._recursion_limit is not None else None),
                     context={
                         "non_interactive": True,
                         **({"user_id": task["user_id"]} if task.get("user_id") else {}),
@@ -744,6 +765,7 @@ class ScheduledTaskService:
             if not ended:
                 continue
             logger.warning("Scheduled task-run %s ran past %s; ended it and stopping run %s", occurrence_id, _duration_words(self._max_run_seconds), run_id)
+            self._stopping[run_id] = now
             await self._record_task_outcome(occurrence.get("task_id"), None, "failed", error)
             try:
                 outcome = await asyncio.wait_for(self._stop_run(run_id), timeout=_STOP_REQUEST_TIMEOUT_SECONDS)
@@ -753,6 +775,31 @@ class ScheduledTaskService:
                 # The Stop is asked once. Whether it took is the run manager's
                 # answer, so a refusal is at least visible to an operator.
                 logger.info("Scheduled task-run %s: stop of run %s at the time limit answered %s", occurrence_id, run_id, getattr(outcome, "value", outcome))
+
+    async def _a_stopped_run_is_still_unwinding(self, *, now: datetime) -> bool:
+        """Whether a run stopped at the time limit still holds its worker, and so its sandbox.
+
+        The poll launches and claims nothing while one does, for up to
+        ``_STOPPING_GRACE_SECONDS`` after the Stop. A liveness check that fails
+        does not hold scheduling.
+        """
+        if self._run_is_live is None:
+            return False
+        for run_id, asked_at in list(self._stopping.items()):
+            if now - asked_at >= timedelta(seconds=_STOPPING_GRACE_SECONDS):
+                logger.warning("Run %s did not finish unwinding within %s seconds of its Stop; scheduling resumes", run_id, _STOPPING_GRACE_SECONDS)
+                del self._stopping[run_id]
+                continue
+            try:
+                live = await self._run_is_live(run_id)
+            except Exception:
+                logger.exception("Could not tell whether run %s is still unwinding; scheduling is not held for it", run_id)
+                del self._stopping[run_id]
+                continue
+            if live:
+                return True
+            del self._stopping[run_id]
+        return False
 
     async def _record_task_outcome(
         self,
@@ -815,7 +862,7 @@ class ScheduledTaskService:
             error = record.error or "run was interrupted before completion"
         elif record.status.value in {"error", "timeout"}:
             terminal_status = "failed"
-            error = record.error
+            error = _STOPPED_EARLY_ERRORS[RECURSION_LIMIT_STOP_REASON] if record.stop_reason == RECURSION_LIMIT_STOP_REASON else record.error
         else:
             terminal_status = None
             error = record.error
