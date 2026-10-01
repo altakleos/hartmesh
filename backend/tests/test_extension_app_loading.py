@@ -128,6 +128,8 @@ def test_create_app_mounts_extension_routers_after_all_host_routes(monkeypatch):
     assert client.get("/health").json() == {
         "status": "healthy",
         "service": "deer-flow-gateway",
+        "auth_mode": "local",
+        "registration": "open",
     }
     assert client.get("/api/extension-test/ping").status_code == 401
 

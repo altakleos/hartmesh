@@ -406,7 +406,7 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
 ```
 
 - `disable` records the refusal (`disabled_identities`, keyed by issuer and
-  subject, migration `0040_account_access`), and ends the sessions and
+  subject, migration `0027_account_access`), and ends the sessions and
   revokes the personal access tokens of **every account the identity
   covers**, so `enable` revives none of them. From that row every path that acts for
   the account derives its refusal at the next request: the session cookie
@@ -854,7 +854,7 @@ the first release carrying this change, `v2.1.0+hartmesh.30` (the same cut
 that first carries the sign-on keys above) or whichever release is cut
 next. An older release ignores the keys at render time and has no command;
 a `.env` carrying them under an older pin renders sign-on-only mode without
-the claim check. Migration `0040_account_access` runs at the first start on
+the claim check. Migration `0027_account_access` runs at the first start on
 this release.
 
 The role limit (`limit-role`, `lift-role-limit`, `role_limits` and

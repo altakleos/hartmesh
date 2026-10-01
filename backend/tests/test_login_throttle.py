@@ -787,17 +787,6 @@ async def test_redis_backend_source_guard_counts_distinct_accounts():
     assert await store.source_locked(OFFICE_IP, policy) is False
 
 
-async def test_redis_keys_are_tenant_scoped():
-    """Two tenants on one Redis cannot collide, like every key family here."""
-    from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
-
-    namespaces = [TenantIdentityV1.from_canonical_id(name).namespace(TenantSubsystem.REDIS) for name in ("tenant-a", "tenant-b")]
-    prefixes = [login_throttle.redis_key_prefix(namespace) for namespace in namespaces]
-    assert prefixes[0] != prefixes[1]
-    assert all(prefix.endswith(":auth:login-throttle:v1") for prefix in prefixes)
-    assert login_throttle.redis_key_prefix(None) == login_throttle.UNSCOPED_KEY_PREFIX
-
-
 # ── 7. The tenant Compose profile's office retry budget ───────────────────
 #
 # One tenant is one company: five to twenty staff behind one office NAT

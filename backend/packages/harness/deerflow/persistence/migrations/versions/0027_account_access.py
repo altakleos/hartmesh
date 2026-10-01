@@ -1,7 +1,7 @@
 """Accounts the deployer turned off, limited in role or released, and what turning one off held.
 
-Revision ID: 0026_account_access
-Revises: 0025_repair_run_change_seq
+Revision ID: 0027_account_access
+Revises: 0026_mcp_task_lease_tokens
 Create Date: 2026-10-01
 
 alembic_version.version_num is VARCHAR(32); revision ids in this chain must
@@ -25,8 +25,8 @@ from alembic import op
 
 from deerflow.persistence.migrations._helpers import safe_add_column, safe_drop_column
 
-revision: str = "0026_account_access"
-down_revision: str | Sequence[str] | None = "0025_repair_run_change_seq"
+revision: str = "0027_account_access"
+down_revision: str | Sequence[str] | None = "0026_mcp_task_lease_tokens"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

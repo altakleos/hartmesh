@@ -73,7 +73,7 @@ class UserRow(Base):
     # Auth lifecycle flags
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
-    # Stamped at every provider sign-in (0040_account_access); NULL on local
+    # Stamped at every provider sign-in (0027_account_access); NULL on local
     # accounts and on provider accounts that have not signed in since.
     last_sign_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
