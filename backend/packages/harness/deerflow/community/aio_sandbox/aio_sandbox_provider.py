@@ -27,6 +27,8 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
 from typing import Any
+from contextlib import ExitStack
+from contextvars import ContextVar
 
 try:
     import fcntl
@@ -47,8 +49,25 @@ from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths, join_host_path
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.integrations.lark_cli import INTEGRATION_ID as LARK_CLI_INTEGRATION_ID
 from deerflow.integrations.lark_cli import LARK_CLI_SANDBOX_CONFIG_DIR, LARK_CLI_SANDBOX_DATA_DIR, LARK_CLI_SANDBOX_LOCKS_DIR, LARK_CLI_SANDBOX_RUNTIME_DIR, ensure_lark_cli_credential_tree, lark_skills_installed
+from deerflow.runtime.turn_phases import (
+    AcquisitionSource,
+    TurnPhase,
+    phase_span,
+    record_acquisition_source,
+    record_capacity_refusal,
+    record_capacity_wait,
+    record_create_attempt,
+    record_create_result,
+    record_eviction,
+    record_failed_attempt,
+    record_resource_teardown,
+    record_teardown_attempt,
+    record_teardown_failure,
+    record_teardown_refusal,
+)
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
+from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.identity import derive_sandbox_scope_token
 from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox import Sandbox
@@ -57,7 +76,7 @@ from deerflow.skills.types import SkillCategory
 from deerflow.utils.file_io import await_drained
 
 from .aio_sandbox import AioSandbox
-from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, SandboxBackend, wait_for_sandbox_ready, wait_for_sandbox_ready_async
+from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, DestroyOutcome, SandboxBackend, normalize_ready_timeout, wait_for_sandbox_ready, wait_for_sandbox_ready_async
 from .local_backend import LocalContainerBackend
 from .ownership import (
     OwnershipBackendError,
@@ -69,7 +88,7 @@ from .ownership import (
     resolve_ownership_config,
 )
 from .remote_backend import RemoteSandboxBackend, _normalize_skills_container_path
-from .sandbox_info import SandboxInfo
+from .sandbox_info import PROVENANCE_CREATED, PROVENANCE_REDISCOVERED, SandboxInfo
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +96,15 @@ logger = logging.getLogger(__name__)
 DEFAULT_IMAGE = "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
 DEFAULT_PORT = 8080
 DEFAULT_CONTAINER_PREFIX = "deer-flow-sandbox"
+# How long a container built ahead of a thread's first turn may sit unclaimed.
+# Shorter than the idle timeout on purpose: a parked sandbox a turn *used* is
+# a fast follow-up waiting to happen, while one nobody asked for yet is a slot
+# on speculation, and the released profile has two.
+DEFAULT_PREWARM_CLAIM_TIMEOUT = 300
+
+# The run id a prewarm publishes its guessed view under. Generation 0 is the
+# provisional identity: any real run supersedes it without a conflict.
+PREWARM_VIEW_RUN_ID = "prewarm"
 IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 # The supported semver AIO images currently default to ten shell sessions.
 # Leave lower-concurrency deployments on the image default; only override it
@@ -84,19 +112,121 @@ IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 _SHELL_SESSION_HEADROOM = 1
 
+# How long an acquisition waits for a replica slot before the budget refuses
+# it. Short on purpose: the saturation this catches is the overlap at the edges
+# of two turns -- one parking its container while another asks for one -- and a
+# slot that is not free within a few seconds is held by work measured in
+# minutes. Waiting longer would trade a refusal the person can act on for a
+# spinner they cannot.
+DEFAULT_CAPACITY_WAIT_TIMEOUT = 5.0
+CAPACITY_WAIT_TIMEOUT_MAX = 300.0
+
+
+def resolve_capacity_wait_timeout(configured: object) -> float:
+    """The slot-wait budget, in seconds, for ``sandbox.capacity_wait_timeout``.
+
+    ``None`` (the key absent) is :data:`DEFAULT_CAPACITY_WAIT_TIMEOUT`. ``0``
+    is a legitimate value -- refuse immediately rather than wait -- which is
+    why this is the one budget in this provider that is not required to be
+    positive. Anything unusable falls back to the default rather than
+    disabling the budget: the schema already refuses bad input, and a
+    configuration object built without it must not be able to make the wait
+    unbounded.
+    """
+    if configured is None:
+        return DEFAULT_CAPACITY_WAIT_TIMEOUT
+    try:
+        budget = float(configured)
+    except (TypeError, ValueError):
+        return DEFAULT_CAPACITY_WAIT_TIMEOUT
+    if isinstance(configured, bool) or budget != budget or budget < 0:
+        return DEFAULT_CAPACITY_WAIT_TIMEOUT
+    return min(budget, CAPACITY_WAIT_TIMEOUT_MAX)
+
+
+def resolve_ready_timeout(configured: object) -> float:
+    """The readiness budget, in seconds, for ``sandbox.ready_timeout`` = *configured*.
+
+    ``None`` (the key absent) is the default, ``SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT``.
+    Anything else must be a finite positive number no larger than
+    ``SANDBOX_READY_TIMEOUT_MAX``. The config schema already enforces that; the
+    re-check here is what keeps a configuration object built without the schema
+    from disabling the deadline.
+    """
+    if configured is None:
+        return float(SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT)
+    return normalize_ready_timeout(configured)
+
+
+# The caller's Stop, carried into a worker-thread acquisition. An async caller
+# that runs a blocking acquisition in a thread cannot
+# interrupt the thread, so it sets this event and wakes the capacity gate; the
+# thread's capacity wait sees it and leaves without taking a slot, and a
+# readiness wait sees it at its next probe and tears the unready container
+# down. ``asyncio.to_thread``
+# copies context variables into the thread, which is how the event gets there
+# without threading a parameter through every acquisition layer.
+_ACQUISITION_CANCELLED: ContextVar[threading.Event | None] = ContextVar(
+    "deerflow_aio_acquisition_cancelled",
+    default=None,
+)
+
+
+class _AcquisitionCancelledError(Exception):
+    """A worker-thread acquisition left a capacity or readiness wait because its caller stopped."""
+
+
+def _acquisition_cancelled() -> bool:
+    event = _ACQUISITION_CANCELLED.get()
+    return event is not None and event.is_set()
+
+
+def _resolve_capacity_waiter(future: "asyncio.Future[None]") -> None:
+    """Wake one event-loop capacity waiter, on its own loop.
+
+    Written as a module function because it is handed to
+    ``loop.call_soon_threadsafe`` from whichever thread freed the slot; by the
+    time it runs the task may already have been cancelled or timed out, and a
+    settled future must be left alone.
+    """
+    if not future.done():
+        future.set_result(None)
+
 
 class SandboxBeingDestroyedError(RuntimeError):
-    """A peer is tearing this container down, so it must not be handed out.
+    """This container is being torn down, so it must not be handed out.
 
-    Raised on the acquire path when the ownership lease is in its teardown state.
+    Raised on the acquire path when the ownership lease is in its teardown state
+    (a peer's stop), or when this instance's own cleanup of the set did not
+    confirm and its retry under the reacquisition did not confirm either.
     The caller drops the container from tracking and lets the normal
     discover-or-create path provision a fresh one, rather than handing an agent a
     sandbox that is about to stop underneath it.
     """
 
     def __init__(self, sandbox_id: str) -> None:
-        super().__init__(f"sandbox {sandbox_id} is being destroyed by another instance")
+        super().__init__(f"sandbox {sandbox_id} is being destroyed; its cleanup has not confirmed")
         self.sandbox_id = sandbox_id
+
+
+class SandboxCleanupIncompleteError(RuntimeError):
+    """An explicit destroy ran but the resource set is not confirmed absent.
+
+    The set stays tracked, owned and pending cleanup (retried by the idle
+    checker, by eviction and by the next acquisition under its id); it is
+    not a freed slot and is never handed out. Raised so explicit callers --
+    shutdown, the idle checker's active-idle path, cancellation rollback and
+    the stale-entry destroy on reuse -- see the failure rather than a clean
+    return.
+    """
+
+    def __init__(self, sandbox_id: str, outcome: DestroyOutcome, *, cause: Exception | None = None):
+        detail = f"Sandbox {sandbox_id} cleanup incomplete: {outcome}"
+        if cause is not None:
+            detail = f"{detail} ({type(cause).__name__})"
+        super().__init__(detail)
+        self.sandbox_id = sandbox_id
+        self.outcome = outcome
 
 
 class SandboxPolicyReplacementDeferredError(RuntimeError):
@@ -193,6 +323,14 @@ def _open_lock_file(lock_path):
     return open(lock_path, "a", encoding="utf-8")
 
 
+class SandboxSlotsBusyError(RuntimeError):
+    """Every replica slot is taken and the caller declined to evict for its create."""
+
+    def __init__(self, sandbox_id: str) -> None:
+        super().__init__(f"No free sandbox slot for {sandbox_id} and eviction was not allowed")
+        self.sandbox_id = sandbox_id
+
+
 class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     """Sandbox provider that manages containers running the AIO sandbox.
 
@@ -265,6 +403,28 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # our own lease by design — so `del:` says nothing to this process's own
         # threads. See _reserve_local_teardown / _acquire_epoch.
         self._local_teardown: set[str] = set()
+        # Warm entries whose last destroy did not establish the set absent
+        # (failed, partial or unobservable), keyed to that outcome. They stay
+        # in `_warm_pool` -- owned, counted against the replica budget and
+        # renewed -- but are never handed out; every path that would use or
+        # free the slot retries the cleanup first.
+        self._cleanup_pending: dict[str, DestroyOutcome] = {}
+        # Containers this process has started and is still waiting on. The
+        # readiness wait is the one long window in which a running container is
+        # neither tracked nor warm; see _mark_starting.
+        self._starting: set[str] = set()
+        # Event-loop waiters for a replica slot: (loop, future) pairs woken
+        # from whichever thread frees one. The sync half of the same wait is
+        # the condition in `_capacity_gate`; both are signalled together by
+        # `_slot_freed_locked`, because a slot can be freed by a worker thread
+        # (a reaper, a teardown) and wanted by the event loop, or the reverse.
+        self._capacity_async_waiters: list[tuple[Any, Any]] = []
+        # Containers built ahead of a thread's first turn and not yet claimed
+        # by one: sandbox id -> the parked SandboxInfo object (see the prewarm
+        # section for why the object and not a timestamp). A claim pops the
+        # entry, so the short prewarm reaper never touches a container a turn
+        # has used.
+        self._prewarmed_unclaimed: dict[str, SandboxInfo] = {}
         self._acquire_epoch: dict[str, int] = {}
         self._acquire_epoch_counter = 0
         self._acquire_inflight: dict[str, int] = {}
@@ -273,6 +433,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._idle_checker_thread: threading.Thread | None = None
         self._renewal_stop = threading.Event()
         self._renewal_thread: threading.Thread | None = None
+        self._prewarm_reaper_stop = threading.Event()
+        self._prewarm_reaper_thread: threading.Thread | None = None
         # Per-instance id used for cross-instance sandbox ownership leases (#4206).
         self._owner_id = generate_owner_id()
 
@@ -303,6 +465,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # alive even when the idle reaper is disabled, or peers adopt its live
         # containers once the lease lapses (idle_timeout: 0 is a supported config).
         self._start_lease_renewal()
+
+        # The prewarm claim clock is independent of idle cleanup for the same
+        # reason: idle_timeout: 0 disables the idle checker, and an abandoned
+        # prewarm would then hold a slot forever instead of for claim_timeout.
+        self._start_prewarm_reaper()
 
         # Start idle checker if enabled
         if self._config.get("idle_timeout", DEFAULT_IDLE_TIMEOUT) > 0:
@@ -401,6 +568,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
             "command_timeout": command_timeout,
+            "prewarm_claim_timeout": getattr(sandbox_config, "prewarm_claim_timeout", None),
+            "ready_timeout": resolve_ready_timeout(getattr(sandbox_config, "ready_timeout", None)),
+            "capacity_wait_timeout": resolve_capacity_wait_timeout(getattr(sandbox_config, "capacity_wait_timeout", None)),
             "replicas": replicas if replicas is not None else DEFAULT_REPLICAS,
             "mounts": sandbox_config.mounts or [],
             "thread_data_mounts": getattr(sandbox_config, "thread_data_mounts", None),
@@ -426,6 +596,24 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def sandbox_network_temporary_grant_ttl(self) -> int:
         return int(self._config.get("network", {}).get("temporary_grant_ttl", 300))
+
+    def sandbox_ready_timeout(self) -> float:
+        """The readiness budget, in seconds, every cold start on this provider gets.
+
+        Both acquisition paths (sync and async) wait exactly this long for a new
+        container's ``/v1/sandbox`` and destroy it, under the ownership fences,
+        when the budget runs out. Re-validated on every read so that no
+        configuration object can make it zero, negative or non-finite.
+        """
+        return resolve_ready_timeout(self._config.get("ready_timeout"))
+
+    def sandbox_capacity_wait_timeout(self) -> float:
+        """How long an acquisition may wait for a replica slot, in seconds.
+
+        Re-validated on every read for the same reason as the readiness
+        budget: no configuration object may make this wait unbounded.
+        """
+        return resolve_capacity_wait_timeout(self._config.get("capacity_wait_timeout"))
 
     def consume_network_policy_events(self, sandbox_id: str) -> list[dict[str, object]]:
         if not isinstance(self._backend, LocalContainerBackend):
@@ -528,6 +716,357 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     #              exactly as it honours a peer's `del:`.
     #   forgetting — a peer legitimately owns it and must win, so the promote is
     #              the thing to detect: compare the acquire epoch we decided on.
+
+    # ── The replica budget ───────────────────────────────────────────────
+    #
+    # `replicas` is a hard budget, not a soft cap, because what backs it is
+    # memory the deployment does not have: the released Compose profile sums
+    # its in-VM limits to exactly the guest's RAM at two concurrent sandboxes,
+    # so a third is not slower, it is an OOM kill of whatever the kernel scores
+    # highest -- which is rarely the sandbox that overshot.
+    #
+    # Four rules make that budget hold, and all four are properties of the one
+    # reservation below rather than checks spread over the call paths:
+    #
+    #   Reserve before any container work. The reservation is `_starting`, the
+    #   same set reconciliation and lease renewal already honour, taken in the
+    #   same critical section that reads the count -- so two threads cannot
+    #   both see the last slot. Checking and then marking is the window, not a
+    #   narrower version of it.
+    #
+    #   Count real resource sets. Active containers, parked ones, sets whose
+    #   destroy did not confirm absence (quarantined into the warm pool for
+    #   exactly this reason) and reservations, all of them. A map entry that
+    #   names no container would make the budget pass on the defect it exists
+    #   to stop.
+    #
+    #   Reuse never spends a second slot. Every reuse path -- in-process,
+    #   warm reclaim, backend discovery -- returns before
+    #   this, because the container it hands back is already counted.
+    #
+    #   A live turn is never evicted for capacity. Only warm entries are
+    #   eviction candidates, and a refusal is the answer when there are none.
+    #
+    # The wait is what keeps the common case off that refusal: saturation is
+    # usually two turns overlapping at their edges, and one of them is about
+    # to park. It is bounded (`sandbox.capacity_wait_timeout`, five seconds by
+    # default), cancellable on the async path, and ends in a typed retryable
+    # outcome rather than a create.
+
+    def _capacity_gate(self) -> threading.Condition:
+        """The condition a waiting acquisition sleeps on, bound to ``self._lock``.
+
+        Bound lazily, and rebound if the lock object itself is replaced, so a
+        sleeper and a waker always meet on the same lock: a condition built
+        against a stale lock either refuses to notify or never wakes anyone,
+        and both failures are silent. Callers hold ``self._lock``, which is
+        also what makes building it here race-free.
+        """
+        gate = getattr(self, "_capacity_gate_cond", None)
+        if gate is None or getattr(self, "_capacity_gate_lock", None) is not self._lock:
+            gate = threading.Condition(self._lock)
+            self._capacity_gate_cond = gate
+            self._capacity_gate_lock = self._lock
+        return gate
+
+    def _wake_capacity_waiters_locked(self) -> None:
+        """A slot may now be obtainable; wake everything waiting for one.
+
+        Two different events reach here, and missing either one turns the
+        bounded wait into a flat latency tax:
+
+        * a counted set went away, so there is room; and
+        * a set became *evictable* -- a turn ended and parked its container.
+          Parking frees no slot (the container is still there, still counted),
+          but the waiter's next pass can now evict it, which is the whole case
+          the wait exists for: two turns overlapping at their edges, one of
+          them about to finish.
+
+        Called under the lock that guards the counted state, so a waiter's "is
+        there room?" and this "look again" cannot cross. Waking spuriously is
+        harmless -- a woken waiter re-reads everything -- so the call sites err
+        towards notifying.
+        """
+        try:
+            self._capacity_gate().notify_all()
+        except RuntimeError:
+            # A test may swap `_lock` for a mock between the bind and the
+            # notify. Losing a wake-up costs a waiter the rest of its bounded
+            # budget; raising here would cost a teardown.
+            logger.debug("Could not wake sandbox capacity waiters", exc_info=True)
+        waiters = getattr(self, "_capacity_async_waiters", None) or []
+        self._capacity_async_waiters = []
+        for loop, future in waiters:
+            try:
+                loop.call_soon_threadsafe(_resolve_capacity_waiter, future)
+            except RuntimeError:
+                # Its loop is closed; the task that registered it is gone.
+                continue
+
+    def _wake_stopped_acquisition(self) -> None:
+        """Wake a worker-thread capacity wait so it reads its caller's Stop.
+
+        A provider assembled without its state has no gate and no waiter, and a
+        Stop must never fail on the way to its cleanup, so there is nothing to
+        wake then.
+        """
+        lock = getattr(self, "_lock", None)
+        if lock is None:
+            return
+        with lock:
+            self._wake_capacity_waiters_locked()
+
+    def _await_capacity_slot(self) -> "asyncio.Future[None]":
+        """Register this task's wake-up *before* it checks the count.
+
+        Registration precedes the check on purpose: a slot freed between a
+        check and a wait is the lost wake-up that turns a five-second budget
+        into a five-second stall with a free slot sitting there. Callers hold
+        ``self._lock``.
+        """
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future[None] = loop.create_future()
+        waiters = getattr(self, "_capacity_async_waiters", None)
+        if waiters is None:
+            waiters = self._capacity_async_waiters = []
+        waiters.append((loop, future))
+        return future
+
+    def _forget_capacity_waiter(self, future: "asyncio.Future[None]") -> None:
+        with self._lock:
+            waiters = getattr(self, "_capacity_async_waiters", None) or []
+            self._capacity_async_waiters = [entry for entry in waiters if entry[1] is not future]
+
+    def _counted_slots_locked(self) -> tuple[int, int, int, int]:
+        """``(replicas, active, parked, reserved)`` as the budget counts them."""
+        replicas = int(self._config.get("replicas", DEFAULT_REPLICAS))
+        return replicas, self._active_count_locked(), len(self._warm_pool), len(self._starting)
+
+    def _try_reserve_slot_locked(self, sandbox_id: str) -> bool:
+        """Take a replica slot for *sandbox_id*, or report that there is none.
+
+        Raises:
+            SandboxBeingDestroyedError: the id is reserved for teardown here,
+                the same refusal ``_mark_starting`` makes and for the same
+                reason -- creating under a name being stopped either collides
+                with the container mid-stop or starts a generation the
+                reaper's retry cannot tell apart.
+        """
+        if self._being_torn_down_locally(sandbox_id):
+            raise SandboxBeingDestroyedError(sandbox_id)
+        if sandbox_id in self._starting:
+            # Already reserved by this acquisition; re-entering must not take
+            # a second slot for the same container. This reads as one
+            # reservation rather than a count because at most one acquisition
+            # in this process is ever in flight for a given id: acquisitions
+            # for one thread key are serialized by `_acquire_serializer`, and
+            # the create path holds the per-id file lock across the whole
+            # attempt. If either of those ever stops holding, this has to
+            # become a refcount -- the first `_unmark_starting` would
+            # otherwise hand the slot away while the second attempt is still
+            # using it.
+            return True
+        replicas, active, parked, reserved = self._counted_slots_locked()
+        if active + parked + reserved >= replicas:
+            return False
+        self._starting.add(sandbox_id)
+        return True
+
+    def _capacity_refusal(self, sandbox_id: str, *, waited: float) -> SandboxCapacityExceededError:
+        with self._lock:
+            replicas, active, parked, reserved = self._counted_slots_locked()
+        logger.warning(
+            "Refusing to create sandbox %s: all %s replica slots are in use (active=%s parked=%s starting=%s) and none came free in %.1fs",
+            sandbox_id,
+            replicas,
+            active,
+            parked,
+            reserved,
+            waited,
+        )
+        return SandboxCapacityExceededError(
+            "This deployment is already running as many sandboxes as it has room for",
+            active=active,
+            warm=parked,
+            reserved=reserved,
+            replicas=replicas,
+            retry_after_seconds=max(self.sandbox_capacity_wait_timeout(), 1.0),
+        )
+
+    def _admit_create(self, sandbox_id: str, *, allow_eviction: bool) -> None:
+        """Reserve a replica slot for *sandbox_id*, or refuse the create.
+
+        The single admission decision both create paths make. Duplicating it
+        per path is what let the async one drift into having no budget at all:
+        two concurrent async creates each read the count, each found room, and
+        each created.
+
+        ``allow_eviction`` is the difference between a turn and a prewarm. A
+        turn may stop somebody's parked container for its slot and may wait for
+        one; a prewarm may do neither, because trading a container a thread
+        will reclaim for one nobody has asked for yet is a trade against the
+        person at the keyboard. A prewarm therefore gets the fast refusal
+        (``SandboxSlotsBusyError``) its caller already handles.
+
+        Raises:
+            SandboxBeingDestroyedError: the id is reserved for teardown here.
+            SandboxSlotsBusyError: no slot, and the caller declined to wait.
+            SandboxCapacityExceededError: no slot came free within the budget.
+        """
+        started = time.monotonic()
+        deadline = started + (self.sandbox_capacity_wait_timeout() if allow_eviction else 0.0)
+        waiting = False
+        with ExitStack() as measured:
+            while True:
+                if _acquisition_cancelled():
+                    # Checked before reserving, so a stopped caller never
+                    # holds a slot, and a late refusal never replaces the Stop.
+                    raise _AcquisitionCancelledError(sandbox_id)
+                with self._lock:
+                    if self._try_reserve_slot_locked(sandbox_id):
+                        return
+                if not allow_eviction:
+                    raise SandboxSlotsBusyError(sandbox_id)
+                # Outside the lock: a stop is a container round trip, and the
+                # lock guards every acquire path in this process. Re-checked
+                # first: a stopped caller must not evict a thread's parked
+                # sandbox for a slot it will never use.
+                if _acquisition_cancelled():
+                    raise _AcquisitionCancelledError(sandbox_id)
+                if self._evict_oldest_warm(exclude=sandbox_id) is not None:
+                    continue
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    record_capacity_refusal()
+                    raise self._capacity_refusal(sandbox_id, waited=time.monotonic() - started)
+                waiting = waiting or self._open_capacity_wait_span(measured, sandbox_id)
+                with self._lock:
+                    # Re-checked here, in the same critical section as the
+                    # wait: between the check at the top of the loop and this
+                    # point a slot may have come free, and sleeping through it
+                    # would spend the whole budget for nothing.
+                    if _acquisition_cancelled():
+                        raise _AcquisitionCancelledError(sandbox_id)
+                    if self._try_reserve_slot_locked(sandbox_id):
+                        return
+                    self._capacity_gate().wait(remaining)
+
+    async def _admit_create_async(self, sandbox_id: str) -> None:
+        """``_admit_create`` for the event loop: same decision, awaited wait.
+
+        The counting and the eviction are blocking work and are offloaded; the
+        wait itself is an awaited future, so a ``Stop`` during it cancels the
+        acquisition at once and leaves no reservation behind, rather than
+        sitting out the budget in a worker thread nothing can interrupt.
+
+        No ``allow_eviction`` here, unlike the sync form: the only caller that
+        declines to evict or wait is the prewarm, which is synchronous. The
+        parameter would be a branch nothing takes and nothing tests.
+        """
+        started = time.monotonic()
+        deadline = started + self.sandbox_capacity_wait_timeout()
+        waiting = False
+        with ExitStack() as measured:
+            while True:
+                waiter: asyncio.Future[None] | None = None
+                with self._lock:
+                    if self._try_reserve_slot_locked(sandbox_id):
+                        return
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        # Registered before the lock is dropped, so a slot
+                        # freed while we evict or measure cannot be missed.
+                        waiter = self._await_capacity_slot()
+                try:
+                    if await asyncio.to_thread(self._evict_oldest_warm, exclude=sandbox_id) is not None:
+                        continue
+                    if waiter is None:
+                        record_capacity_refusal()
+                        raise self._capacity_refusal(sandbox_id, waited=time.monotonic() - started)
+                    waiting = waiting or self._open_capacity_wait_span(measured, sandbox_id)
+                    remaining = deadline - time.monotonic()
+                    if remaining > 0:
+                        try:
+                            await asyncio.wait_for(asyncio.shield(waiter), timeout=remaining)
+                        except TimeoutError:
+                            pass
+                finally:
+                    if waiter is not None:
+                        self._forget_capacity_waiter(waiter)
+
+    def _open_capacity_wait_span(self, measured: ExitStack, sandbox_id: str) -> bool:
+        """Open the wait's span and count it. Returns ``True``, the new flag.
+
+        One span even when the admission loop goes round several times: a
+        phase name opened twice in a turn has its second span measured and
+        then dropped, so a retry would hide the very wait the phase exists to
+        explain. The counter follows the same rule -- a turn that waited once
+        is one waiting turn, however many passes that took. The "already
+        opened" flag is the caller's local, not provider state: concurrent
+        acquisitions in this process each measure their own wait.
+        """
+        measured.enter_context(phase_span(TurnPhase.SANDBOX_CAPACITY_WAIT))
+        record_capacity_wait()
+        logger.info("Waiting for a replica slot before creating sandbox %s", sandbox_id)
+        return True
+
+    def _mark_starting(self, sandbox_id: str) -> None:
+        """Record that this process is creating *sandbox_id* and waiting on it.
+
+        Between ``backend.create`` and ``_register_created_sandbox`` a container
+        is running, untracked and not warm -- exactly the shape
+        ``_reconcile_orphans`` adopts. That window is the whole readiness
+        budget, and on the released Compose profile it is longer than the
+        ownership recovery grace (one lease TTL), so neither the grace nor the
+        maps can tell "still starting here" from "orphaned". Two marks cover
+        the two halves: this set is the same-process half (the idle checker's
+        reconciliation defers a starting id, and the renewal thread refreshes
+        its lease), and the ``own:`` lease the create path publishes before it
+        starts waiting is the cross-instance half (a peer's reconciliation sees
+        an owner and defers). Set before the container exists so there is no
+        instant at which the container is running and unmarked.
+
+        Refuses an id a reaper in this process has reserved for teardown: the
+        reservation's predicate and this mark are checked in the same critical
+        section, so exactly one of "still starting here" and "reserved for
+        teardown" holds at any instant. Creating under a name that is being
+        stopped would either collide with the container mid-stop and adopt
+        it, or start a generation the reaper's retry could not tell apart.
+
+        The create paths reach this through ``_admit_create``, which makes the
+        same mark inside the replica budget's own critical section; this is the
+        mark without the budget, for a caller that already holds a slot.
+
+        Raises:
+            SandboxBeingDestroyedError: the id is reserved for teardown here.
+        """
+        with self._lock:
+            if self._being_torn_down_locally(sandbox_id):
+                raise SandboxBeingDestroyedError(sandbox_id)
+            self._starting.add(sandbox_id)
+
+    def _forget_create_provenance(self, sandbox_id: str) -> None:
+        with self._lock:
+            carried = getattr(self, "_create_provenance", None)
+            if carried is not None:
+                carried.pop(sandbox_id, None)
+
+    def _unmark_starting(self, sandbox_id: str) -> None:
+        """Drop the starting mark once the container is tracked or destroyed.
+
+        Ordering matters on the failure path: the mark must outlive the
+        ownership-fenced destroy, or reconciliation could adopt the container in
+        the instant between the readiness timeout and the teardown reservation.
+
+        The mark is also the replica reservation, so dropping one an
+        acquisition abandoned -- a failed create, a readiness timeout, a
+        cancellation -- is what returns its slot. A mark that became a tracked
+        container hands the slot on rather than freeing it, and the waiter this
+        wakes simply finds the count unchanged.
+        """
+        with self._lock:
+            self._starting.discard(sandbox_id)
+            self._wake_capacity_waiters_locked()
 
     def _reserve_local_teardown(self, sandbox_id: str, still_reapable: Callable[[], bool]) -> bool:
         """Reserve *sandbox_id* for teardown by this process.
@@ -785,21 +1324,28 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return False
         if not self._adoptable_after_grace(info.sandbox_id, now):
             return False
+        record_teardown_attempt()
         if not self._reserve_local_teardown(
             info.sandbox_id,
-            lambda: info.sandbox_id not in self._sandboxes and info.sandbox_id not in self._sandbox_infos and info.sandbox_id not in self._warm_pool,
+            lambda: info.sandbox_id not in self._sandboxes and info.sandbox_id not in self._sandbox_infos and info.sandbox_id not in self._warm_pool and info.sandbox_id not in self._starting,
         ):
+            record_teardown_refusal()
             return False
 
         try:
             if not self._claim_ownership(info.sandbox_id, for_destroy=True):
+                record_teardown_refusal()
                 return False
-            try:
-                with self._held_teardown_lease(info.sandbox_id):
-                    self._backend.destroy(info)
-            except Exception as e:
-                logger.warning("Failed to replace sandbox %s with incompatible provisioning policy: %s", info.sandbox_id, e)
+            with self._held_teardown_lease(info.sandbox_id):
+                outcome, _error = self._backend_destroy(info)
+            if outcome is not DestroyOutcome.ABSENT:
+                # Reconciliation only re-enumerates sandbox containers; a
+                # sidecar or network left behind would never be seen again, so
+                # the set is tracked here for retry like every other consumer.
+                logger.warning("Failed to replace sandbox %s with incompatible provisioning policy: %s", info.sandbox_id, outcome)
+                self._quarantine_after_failed_destroy(info.sandbox_id, info, outcome, identity=None)
                 return False
+            record_resource_teardown()
             self._unowned_since.pop(info.sandbox_id, None)
             logger.info("Removed orphaned sandbox %s with incompatible provisioning policy", info.sandbox_id)
             return True
@@ -846,6 +1392,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         for info in running:
             age = current_time - info.created_at if info.created_at > 0 else float("inf")
+            with self._lock:
+                starting = info.sandbox_id in self._starting
+            if starting:
+                # This process started it and is waiting for it to become
+                # ready: not an orphan, not replaceable, not adoptable. The
+                # grace below cannot say so on its own (the memory store has
+                # none, and the released profile's budget is one TTL).
+                deferred += 1
+                logger.debug("Deferring container %s during reconciliation: this instance is still waiting for it to become ready", info.sandbox_id)
+                continue
             if info.requires_replacement:
                 if self._replace_incompatible_sandbox(info, current_time):
                     replaced += 1
@@ -861,7 +1417,6 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 deferred += 1
                 logger.debug("Deferring container %s during reconciliation: owned, or not yet past the recovery grace", info.sandbox_id)
                 continue
-
             # Claim second: a successful claim proves the container is not a
             # peer's and locks peers out. It says nothing about *us* — it
             # succeeds against our own lease by design — so it is not a substitute
@@ -876,7 +1431,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # Avoids a TOCTOU window between the "already tracked?" check and the
             # warm-pool insert.
             with self._lock:
-                if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool:
+                if info.sandbox_id in self._sandboxes or info.sandbox_id in self._warm_pool or info.sandbox_id in self._starting:
+                    # `_starting` re-checked here, not only at the loop head:
+                    # a create can mark the id between the two, and parking a
+                    # container mid-readiness hands eviction a live start.
                     continue
                 if self._being_torn_down_locally(info.sandbox_id):
                     # Adoption is a promote, so it needs the same reservation
@@ -892,13 +1450,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                     logger.debug("Deferring container %s during reconciliation: this instance is tearing it down", info.sandbox_id)
                     continue
                 self._warm_pool[info.sandbox_id] = (info, current_time)
-                self._warm_pool_identity[info.sandbox_id] = None
+                # Whose it is, as the backend recorded it on the container at
+                # creation, so a refused owner's adopted sandbox can be ended;
+                # ``None`` (an older container) stays unattributed.
+                self._warm_pool_identity[info.sandbox_id] = info.owner
             self._unowned_since.pop(info.sandbox_id, None)
             adopted += 1
             logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
         logger.info(
-            "Startup reconciliation complete: %s adopted into warm pool, %s incompatible orphan(s) replaced, %s skipped (live peer ownership), %s deferred (owned, locally tracked, or within recovery grace), %s total found",
+            "Startup reconciliation complete: %s adopted into warm pool, %s incompatible orphan(s) replaced, "
+            "%s skipped (live peer ownership), %s deferred (owned, locally tracked, or within recovery grace), %s total found",
             adopted,
             replaced,
             skipped_live,
@@ -980,7 +1542,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """Fail closed if a warm ID changed tenants during an acquire."""
         if sandbox_id not in self._warm_pool:
             return
-        # Startup-adopted entries have unknown identity until their first reclaim.
+        # A startup-adopted entry from a container with no owner label has
+        # unknown identity until its first reclaim.
         stored_key = self._warm_pool_identity.get(sandbox_id)
         if stored_key is not None and stored_key != requested_key:
             raise SandboxIdentityCollisionError(sandbox_id, stored_key, requested_key)
@@ -1399,9 +1962,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         a lapsed one is re-established (see ``_refresh_ownership``). Conflating
         the two would evict every live sandbox on this instance the first time
         the store lost its state.
+
+        Covers containers still in their readiness wait as well: the create
+        path takes their lease before it starts waiting, and a wait longer than
+        the lease TTL (the released profile's budget is one TTL) would otherwise
+        let that lease lapse mid-start and hand a peer's reconciliation an
+        apparent orphan.
         """
         with self._lock:
-            owned_ids = list(self._sandboxes.keys()) + list(self._warm_pool.keys())
+            owned_ids = list(self._sandboxes.keys()) + list(self._warm_pool.keys()) + list(self._starting)
 
         for sandbox_id in owned_ids:
             # Snapshot before the round trip: by the time `renew()` answers LOST,
@@ -1411,6 +1980,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if not self._refresh_ownership(sandbox_id):
                 logger.warning("Lost sandbox ownership lease for %s; dropping it from this instance", sandbox_id)
                 self._forget_lost_sandbox(sandbox_id, expected_epoch=epoch)
+                continue
 
     def _forget_lost_sandbox(self, sandbox_id: str, *, expected_epoch: int | None = None) -> None:
         """Drop a sandbox whose lease we no longer hold, without touching the container.
@@ -1460,10 +2030,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._last_activity.pop(sandbox_id, None)
             self._warm_pool.pop(sandbox_id, None)
             self._warm_pool_identity.pop(sandbox_id, None)
+            self._clear_cleanup_pending_locked(sandbox_id)
             self._acquire_epoch.pop(sandbox_id, None)
             for key, mapped_id in list(self._thread_sandboxes.items()):
                 if mapped_id == sandbox_id:
                     del self._thread_sandboxes[key]
+            # The container is somebody else's now, so it stops counting
+            # against this process's budget even though nothing was stopped.
+            self._wake_capacity_waiters_locked()
 
         # Close the host-side HTTP client we are dropping (#2872); the container
         # itself stays up for its new owner.
@@ -1506,6 +2080,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return False
             return True
 
+        # One attempt per trigger: a set this pass quarantines is not retried
+        # by the same pass, so only what was pending before it started is.
+        with self._lock:
+            pending_before = list(getattr(self, "_cleanup_pending", {}))
+
         for sandbox_id in active_to_destroy:
             try:
                 logger.info(f"Destroying idle sandbox {sandbox_id}")
@@ -1513,6 +2092,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             except Exception as e:
                 logger.error(f"Failed to destroy idle sandbox {sandbox_id}: {e}")
 
+        self._retry_all_pending_cleanup(only=pending_before)
         self._reap_expired_warm(idle_timeout)
 
     def _reap_expired_warm(self, idle_timeout: float | None = None) -> None:
@@ -1524,7 +2104,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         now = time.time()
         expired: list[tuple[str, SandboxInfo]] = []
         with self._lock:
+            pending = getattr(self, "_cleanup_pending", {})
             for sandbox_id, (entry, timestamp) in self._warm_pool.items():
+                # A set pending cleanup keeps its park timestamp; the idle pass
+                # already retried it once (`_retry_all_pending_cleanup`), and one
+                # attempt per trigger is the bound. Reaping it again here would
+                # pay a second timed-out sequence and double-count the failure.
+                if sandbox_id in pending:
+                    continue
                 if now - timestamp > timeout:
                     expired.append((sandbox_id, entry))
 
@@ -1536,24 +2123,45 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         for sandbox_id, entry in expired:
             self._destroy_warm_entry(sandbox_id, entry, reason="idle_timeout", still_reapable=lambda sid=sandbox_id: sid in self._warm_pool)
 
-    def _evict_oldest_warm(self) -> str | None:
-        """Evict the oldest warm entry this instance still owns."""
+    def _evict_oldest_warm(self, *, exclude: str | None = None) -> str | None:
+        """Evict the oldest warm entry this instance still owns.
+
+        ``exclude`` is the id the caller is about to create. Evicting it would
+        stop the very container the acquisition wants and then rebuild it under
+        the same name -- a full cold start bought with a teardown. Callers that
+        reached the create path with their own id still parked have already
+        failed to reclaim it, so the entry is left alone and another candidate
+        pays for the capacity instead.
+        """
         with self._lock:
             if not self._warm_pool:
                 return None
             # Snapshot oldest-first under the lock; ownership is resolved outside
             # it, since a claim can be a network round trip and the provider lock
             # guards every acquire path.
-            candidates = [(sandbox_id, entry) for sandbox_id, (entry, _) in sorted(self._warm_pool.items(), key=lambda item: item[1][1])]
+            pending = getattr(self, "_cleanup_pending", {})
+            # A set whose cleanup did not confirm is the cheapest slot to free
+            # and must not sit behind healthy entries, so it is retried first.
+            candidates = [(sandbox_id, entry) for sandbox_id, (entry, _) in sorted(self._warm_pool.items(), key=lambda item: (item[0] not in pending, item[1][1])) if sandbox_id != exclude]
 
-        for sandbox_id, entry in candidates:
-            # "Still in the warm pool?" is the reapable check, and it has to run
-            # in the same critical section as the reservation — checking it here
-            # and reserving afterwards is exactly the window a reclaim slips
-            # through. `_destroy_warm_entry` does both under one lock hold.
-            if not self._destroy_warm_entry(sandbox_id, entry, reason="replica_enforcement", still_reapable=lambda sid=sandbox_id: sid in self._warm_pool):
-                continue
-            return sandbox_id
+        if not candidates:
+            # Nothing to evict, so nothing to measure. The admission loop asks
+            # again on every pass of a wait, and a phase name opened twice in
+            # a turn has its second span measured and then dropped -- so an
+            # empty attempt would spend the turn's eviction span on a stop
+            # that never happened and leave the real one unaccounted.
+            return None
+
+        with phase_span(TurnPhase.SANDBOX_EVICTION):
+            for sandbox_id, entry in candidates:
+                # "Still in the warm pool?" is the reapable check, and it has to run
+                # in the same critical section as the reservation — checking it here
+                # and reserving afterwards is exactly the window a reclaim slips
+                # through. `_destroy_warm_entry` does both under one lock hold.
+                if not self._destroy_warm_entry(sandbox_id, entry, reason="replica_enforcement", still_reapable=lambda sid=sandbox_id: sid in self._warm_pool):
+                    continue
+                record_eviction()
+                return sandbox_id
 
         return None
 
@@ -1644,6 +2252,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 # Same answer as a peer's `del:` lease: cold-start instead.
                 logger.info("Cached sandbox %s is being destroyed by this instance; not reusing it", existing_id)
                 return None
+            elif existing_id in getattr(self, "_cleanup_pending", {}):
+                # Its cleanup did not confirm: the warm reclaim below retries
+                # it and refuses if it is still not gone.
+                logger.info("Cached sandbox %s is pending cleanup; not reusing it", existing_id)
+                return None
             elif existing_id in self._sandboxes:
                 info = self._sandbox_infos.get(existing_id)
             else:
@@ -1713,6 +2326,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 # fresh client, and the lease we just took is already ours.
                 logger.info("Cached sandbox %s was dropped while publishing ownership; falling through to discovery", existing_id)
                 return None
+        record_acquisition_source(AcquisitionSource.IN_PROCESS)
         return existing_id
 
     def _reclaim_warm_pool_sandbox(
@@ -1729,6 +2343,17 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         effective_user_id = self._effective_acquire_user_id(user_id)
         key = self._thread_key(thread_id, effective_user_id)
+        # Identity first, as on every other promote path: a collision is
+        # refused without driving a destroy. Then a set whose cleanup did not
+        # confirm is retried before anything else happens under its id: gone
+        # now means the id is free to create; still not gone means the
+        # acquisition is refused, never a half-removed set.
+        with self._lock:
+            if sandbox_id in self._warm_pool:
+                self._assert_warm_identity_available_locked(sandbox_id, key)
+        retried = self._retry_pending_cleanup(sandbox_id, reason="reacquisition")
+        if retried is not None and retried is not DestroyOutcome.ABSENT:
+            raise SandboxBeingDestroyedError(sandbox_id)
         with self._lock:
             if sandbox_id not in self._warm_pool:
                 return None
@@ -1793,6 +2418,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         suffix = " (post-lock check)" if post_lock else f" at {info.sandbox_url}"
         logger.info(f"Reclaimed warm-pool sandbox {sandbox_id} for user/thread {effective_user_id}/{thread_id}{suffix}")
+        record_acquisition_source(AcquisitionSource.WARM_RECLAIM)
         return sandbox_id
 
     def _recheck_cached_sandbox(self, thread_id: str, sandbox_id: str, *, user_id: str) -> str | None:
@@ -1876,6 +2502,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             raise
 
         logger.info(f"Discovered existing sandbox {info.sandbox_id} for user/thread {user_id}/{thread_id} at {info.sandbox_url}")
+        record_acquisition_source(AcquisitionSource.DISCOVERED)
         return info.sandbox_id
 
     def _register_created_sandbox(self, thread_id: str | None, sandbox_id: str, info: SandboxInfo, *, user_id: str | None = None) -> str:
@@ -1902,19 +2529,29 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # mid-stop leaves a teardown marker until its TTL lapses. Roll back on
         # both, or the container we just started is leaked.
         try:
-            if key is not None:
-                with self._lock:
+            with self._lock:
+                if self._being_torn_down_locally(sandbox_id):
+                    # A reaper reserved this id after the create started (the
+                    # readiness wait is long): the container is its to finish.
+                    raise SandboxBeingDestroyedError(sandbox_id)
+                if key is not None:
                     self._assert_active_identity_available_locked(sandbox_id, key)
                     self._assert_warm_identity_available_locked(sandbox_id, key)
             self._publish_ownership(sandbox_id)
 
             with self._lock:
+                if self._being_torn_down_locally(sandbox_id):
+                    # Re-checked after the store round trip, as on the discover
+                    # and warm paths: the reservation can land during `take()`.
+                    raise SandboxBeingDestroyedError(sandbox_id)
                 if key is not None:
                     self._assert_active_identity_available_locked(sandbox_id, key)
                     self._assert_warm_identity_available_locked(sandbox_id, key)
-                # Same exclusivity rule as the discover path.
+                # Same exclusivity rule as the discover path. A confirmed
+                # creation supersedes any pending-cleanup mark under the id.
                 self._warm_pool.pop(sandbox_id, None)
                 self._warm_pool_identity.pop(sandbox_id, None)
+                self._clear_cleanup_pending_locked(sandbox_id)
                 self._sandboxes[sandbox_id] = sandbox
                 self._sandbox_infos[sandbox_id] = info
                 self._active_sandbox_identity[sandbox_id] = key
@@ -1983,6 +2620,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             else:
                 self._warm_pool.pop(sandbox_id, None)
             self._warm_pool_identity.pop(sandbox_id, None)
+            self._clear_cleanup_pending_locked(sandbox_id)
+            self._wake_capacity_waiters_locked()
 
         return sandbox, info, True
 
@@ -1993,6 +2632,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # the caches and falls through to discovery, where `take()` still
         # succeeds against our own lease.
         if not self._reserve_local_teardown(sandbox_id, lambda: True):
+            record_teardown_attempt()
+            record_teardown_refusal()
             logger.info(f"Skipped dropping sandbox {sandbox_id}: already being torn down by this instance")
             return
         try:
@@ -2017,18 +2658,23 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # definitive health check, but "definitively dead to us" is not proof
             # it is ours: a peer may have replaced the container behind this id,
             # in which case stopping it is the cross-instance kill again.
+            record_teardown_attempt()
             if self._claim_ownership(sandbox_id, for_destroy=True):
-                try:
-                    # Held like the other two stop paths: this one untracks before
-                    # claiming, so `_renew_owned_leases` cannot see the id either
-                    # and nothing else would refresh the marker. The heartbeat
-                    # releases the marker on exit (success or failure), so there is
-                    # no caller-side release to race a late refresh.
-                    with self._held_teardown_lease(sandbox_id):
-                        self._backend.destroy(info)
-                except Exception as e:
-                    logger.warning(f"Error destroying unhealthy sandbox {sandbox_id}: {e}")
+                # Held like the other two stop paths: this one untracks before
+                # claiming, so `_renew_owned_leases` cannot see the id either
+                # and nothing else would refresh the marker. The heartbeat
+                # releases the marker on exit (success or failure), so there is
+                # no caller-side release to race a late refresh.
+                with self._held_teardown_lease(sandbox_id):
+                    outcome, _error = self._backend_destroy(info)
+                if outcome is DestroyOutcome.ABSENT:
+                    record_resource_teardown()
+                else:
+                    # Dead to us but not gone: keep it tracked for retry rather
+                    # than let a half-removed set read as a freed slot.
+                    self._quarantine_after_failed_destroy(sandbox_id, info, outcome, identity=None)
             else:
+                record_teardown_refusal()
                 logger.info("Not destroying unhealthy sandbox %s: owned by another instance", sandbox_id)
 
         logger.warning(f"Dropped unhealthy sandbox {sandbox_id}: {reason}")
@@ -2036,6 +2682,125 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
     def _active_count_locked(self) -> int:
         """Return active AIO sandbox count while ``_lock`` is held."""
         return len(self._sandboxes)
+
+    def _backend_destroy(self, info: SandboxInfo) -> tuple[DestroyOutcome, Exception | None]:
+        """Run the backend's destroy and say what it established.
+
+        A backend that reports (``DestroyOutcome``) is believed. One that
+        predates the contract and returns nothing is trusted as it always
+        was: a normal return means absent, an exception means not -- and an
+        exception is classified unknown rather than failed, because a raise
+        says nothing about which members are gone.
+        """
+        try:
+            result = self._backend.destroy(info)
+        except Exception as e:
+            logger.error("Destroy of sandbox %s raised; its resource set is not confirmed absent: %s", info.sandbox_id, type(e).__name__)
+            return DestroyOutcome.UNKNOWN, e
+        if isinstance(result, DestroyOutcome):
+            return result, None
+        if result is None:
+            return DestroyOutcome.ABSENT, None
+        logger.error("Destroy of sandbox %s returned %s instead of a DestroyOutcome; treating the set as not confirmed absent", info.sandbox_id, type(result).__name__)
+        return DestroyOutcome.UNKNOWN, None
+
+    def _cleanup_pending_for(self, sandbox_id: str) -> DestroyOutcome | None:
+        with self._lock:
+            return getattr(self, "_cleanup_pending", {}).get(sandbox_id)
+
+    def _mark_cleanup_pending_locked(self, sandbox_id: str, outcome: DestroyOutcome) -> None:
+        pending = getattr(self, "_cleanup_pending", None)
+        if pending is None:
+            pending = self._cleanup_pending = {}
+        pending[sandbox_id] = outcome
+
+    def _clear_cleanup_pending_locked(self, sandbox_id: str) -> None:
+        pending = getattr(self, "_cleanup_pending", None)
+        if pending is not None:
+            pending.pop(sandbox_id, None)
+
+    def _quarantine_after_failed_destroy(self, sandbox_id: str, info: SandboxInfo, outcome: DestroyOutcome, *, identity: tuple[str, str] | None) -> None:
+        """Keep a set that is not confirmed absent tracked, owned and unusable.
+
+        It goes (back) into the warm pool so it is counted against the replica
+        budget and renewed by the lease thread, and into ``_cleanup_pending``
+        so no reclaim hands it out. Ownership is re-established at once rather
+        than left to the next renewal tick: the teardown marker was released
+        with the stop, and an unowned set past its grace is what a peer's
+        reconciliation adopts. A lease a peer already holds is not taken back.
+        The set stays tracked and pending even then: every caller runs this
+        inside its local teardown reservation, under which
+        ``_forget_lost_sandbox`` deliberately does nothing, and a forced drop
+        here would misread the heartbeat's own join-timeout marker as a peer.
+        Retries refuse against the peer's lease, and the renewal thread drops
+        the handle on its next tick outside any reservation.
+        """
+        record_teardown_failure()
+        with self._lock:
+            active = sandbox_id in self._sandboxes
+            if sandbox_id not in self._warm_pool and not active:
+                self._warm_pool[sandbox_id] = (info, time.time())
+                self._warm_pool_identity[sandbox_id] = identity
+            self._mark_cleanup_pending_locked(sandbox_id, outcome)
+        if active:
+            # Every destroy path untracks or reserves before it stops, so an
+            # active id here means a fence was bypassed. The mark still makes
+            # `get` and every acquire refuse the handle; nothing stops it again.
+            logger.error("Sandbox %s was destroyed while active; its handle is refused until the set is confirmed absent", sandbox_id)
+        logger.warning("Sandbox %s resource set is not confirmed absent (%s); kept tracked for cleanup retry, never handed out", sandbox_id, outcome)
+        if not self._refresh_ownership(sandbox_id):
+            logger.warning(
+                "Sandbox %s is owned by another instance after its failed cleanup; kept tracked and pending, retries will refuse and the renewal thread drops the handle",
+                sandbox_id,
+            )
+
+    def _retry_pending_cleanup(self, sandbox_id: str, *, reason: str) -> DestroyOutcome | None:
+        """Retry the cleanup of a pending set; ``None`` when there is nothing pending.
+
+        The retry runs through the same fenced warm destroy as every other
+        reap, so a set a peer has since taken, or one reserved by a reaper in
+        this process, is refused rather than stopped underneath its new owner.
+        """
+        with self._lock:
+            pending = getattr(self, "_cleanup_pending", {}).get(sandbox_id)
+            if pending is None:
+                return None
+            parked = self._warm_pool.get(sandbox_id)
+            active = sandbox_id in self._sandboxes or sandbox_id in self._sandbox_infos
+        if parked is None:
+            if active:
+                # Never stop a live holder from a stale mark, and never clear
+                # the mark because the warm map lacks it: the handle stays
+                # refused until an explicit destroy confirms absence.
+                logger.error("Sandbox %s is active and pending cleanup; not retried from the reaper, handle refused", sandbox_id)
+                return pending
+            # Untracked: no info to retry with. Registration, a peer takeover
+            # and untracking clear the mark themselves, so this is a stale
+            # leftover, not a set; say so rather than refuse the id forever.
+            logger.error("Sandbox %s is pending cleanup but tracked nowhere; dropping the stale mark", sandbox_id)
+            with self._lock:
+                self._clear_cleanup_pending_locked(sandbox_id)
+            return None
+        entry, _ = parked
+        if self._destroy_warm_entry(sandbox_id, entry, reason=reason, still_reapable=lambda: sandbox_id in self._warm_pool):
+            return DestroyOutcome.ABSENT
+        return self._cleanup_pending_for(sandbox_id) or DestroyOutcome.UNKNOWN
+
+    def _retry_all_pending_cleanup(self, *, only: list[str] | None = None) -> None:
+        """Idle-checker pass over every set whose cleanup did not confirm.
+
+        ``only`` restricts the pass to ids that were pending when the caller
+        decided (so a set quarantined moments ago by the same trigger is not
+        attempted twice); ids no longer pending are skipped either way.
+        """
+        with self._lock:
+            pending = getattr(self, "_cleanup_pending", {})
+            pending_ids = [sid for sid in (pending if only is None else only) if sid in pending]
+        for sandbox_id in pending_ids:
+            try:
+                self._retry_pending_cleanup(sandbox_id, reason="cleanup_retry")
+            except Exception:
+                logger.error("Cleanup retry for sandbox %s raised", sandbox_id, exc_info=True)
 
     def _destroy_warm_entry(self, sandbox_id: str, entry: SandboxInfo, *, reason: str, still_reapable: Callable[[], bool]) -> bool:
         """Destroy a warm-pool sandbox using AIO-specific backend logging.
@@ -2066,29 +2831,48 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             ``True`` when the container was stopped and the caller should drop
             its warm-pool entry; ``False`` when it is still running.
         """
-        if not self._reserve_local_teardown(sandbox_id, still_reapable):
-            logger.info("Refusing to destroy warm-pool sandbox %s for %s: reclaimed by this instance", sandbox_id, reason)
+        record_teardown_attempt()
+
+        def _still_this_entry() -> bool:
+            # Entry identity, in the reservation's own critical section: a
+            # decision made about *entry* (a reaper's snapshot, a pending
+            # retry) must not land on a later generation parked under the
+            # same name after that decision was taken. Name membership alone
+            # cannot tell the two apart.
+            current = self._warm_pool.get(sandbox_id)
+            return current is not None and current[0] is entry and still_reapable()
+
+        if not self._reserve_local_teardown(sandbox_id, _still_this_entry):
+            record_teardown_refusal()
+            logger.info("Refusing to destroy warm-pool sandbox %s for %s: reclaimed or replaced by this instance", sandbox_id, reason)
             return False
 
         try:
             if not self._claim_ownership(sandbox_id, for_destroy=True):
+                record_teardown_refusal()
                 logger.info("Refusing to destroy warm-pool sandbox %s for %s: owned by another instance", sandbox_id, reason)
                 return False
 
-            try:
-                # The marker must outlast the stop, not the TTL it was written with,
-                # and is released by the heartbeat on exit. On a failed stop that
-                # release matters just as much — the container is probably still up,
-                # so a marker left behind would block its thread from re-acquiring it.
-                with self._held_teardown_lease(sandbox_id):
-                    self._backend.destroy(entry)
-            except Exception as e:
+            # The marker must outlast the stop, not the TTL it was written with,
+            # and is released by the heartbeat on exit. On a failed stop that
+            # release matters just as much — the container is probably still up,
+            # so a marker left behind would block its thread from re-acquiring it.
+            with self._held_teardown_lease(sandbox_id):
+                outcome, _error = self._backend_destroy(entry)
+            if outcome is not DestroyOutcome.ABSENT:
+                # Not gone. The entry stays parked (its pop is deferred to the
+                # stop, so nothing to undo) but is now pending cleanup: counted,
+                # owned, retried, never handed out. A refused or failed stop
+                # is a failure, not a disappearance, and is logged by reason.
                 if reason == "idle_timeout":
-                    logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {e}")
+                    logger.error(f"Failed to destroy idle warm-pool sandbox {sandbox_id}: {outcome}")
                 elif reason == "replica_enforcement":
-                    logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id}: {e}")
+                    logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id}: {outcome}")
                 else:
-                    logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} for {reason}: {e}")
+                    logger.error(f"Failed to destroy warm-pool sandbox {sandbox_id} for {reason}: {outcome}")
+                with self._lock:
+                    identity = self._warm_pool_identity.get(sandbox_id)
+                self._quarantine_after_failed_destroy(sandbox_id, entry, outcome, identity=identity)
                 return False
 
             # Remove the entry here, inside the reservation, rather than leaving
@@ -2103,9 +2887,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 if current is not None and current[0] is entry:
                     self._warm_pool.pop(sandbox_id, None)
                     self._warm_pool_identity.pop(sandbox_id, None)
+                    self._wake_capacity_waiters_locked()
+                self._clear_cleanup_pending_locked(sandbox_id)
         finally:
             self._finish_local_teardown(sandbox_id)
 
+        # Counted only here, after the backend's destroy returned: an attempt
+        # or a refusal above says nothing about whether the container is gone.
+        record_resource_teardown()
         if reason == "idle_timeout":
             logger.info(f"Destroyed idle warm-pool sandbox {sandbox_id}")
         elif reason == "replica_enforcement":
@@ -2136,6 +2925,128 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
                 return self._acquire_internal(thread_id, user_id=effective_user_id)
         return self._acquire_internal(thread_id, user_id=effective_user_id)
+
+    # ── Prewarm: the first turn's container, built while the person types ──
+
+    def _prewarm_claim_timeout(self) -> float:
+        configured = self._config.get("prewarm_claim_timeout")
+        return float(DEFAULT_PREWARM_CLAIM_TIMEOUT if configured is None else configured)
+
+    # The mark is the parked ``SandboxInfo`` *object*, never the id: ids are
+    # deterministic per (user, thread) and reused, so a container replaced or
+    # evicted and later rebuilt and parked under the same id would otherwise
+    # inherit an ancient mark and be stopped as "unclaimed". A rebuilt
+    # container is a new object; only a claim re-parks the same one, and the
+    # claim pops the mark. The pool's own release timestamp is the clock.
+
+    def _mark_prewarm_unclaimed_locked(self, sandbox_id: str, info: SandboxInfo) -> None:
+        marks = getattr(self, "_prewarmed_unclaimed", None)
+        if marks is None:
+            marks = self._prewarmed_unclaimed = {}
+        marks[sandbox_id] = info
+
+    def _forget_prewarm_unclaimed_locked(self, sandbox_id: str) -> None:
+        marks = getattr(self, "_prewarmed_unclaimed", None)
+        if marks is not None:
+            marks.pop(sandbox_id, None)
+
+    def _is_unclaimed_prewarm_locked(self, sandbox_id: str, parked: SandboxInfo) -> bool:
+        marks = getattr(self, "_prewarmed_unclaimed", None)
+        return marks is not None and marks.get(sandbox_id) is parked
+
+    #: How often the prewarm reaper looks; short against the claim timeout so
+    #: an abandoned slot is returned close to when it was promised.
+    PREWARM_CHECK_INTERVAL = 30.0
+
+    def _start_prewarm_reaper(self) -> None:
+        """Start the thread that enforces the claim timeout, if there is one.
+
+        Its own thread, not the idle checker's: that one starts only for
+        ``idle_timeout > 0``, and a deployment that keeps warm sandboxes
+        until shutdown still needs an abandoned prewarm to give its slot back.
+        """
+        if self._prewarm_claim_timeout() <= 0:
+            return
+        if getattr(self, "_prewarm_reaper_thread", None) is not None and self._prewarm_reaper_thread.is_alive():
+            return
+        if getattr(self, "_prewarm_reaper_stop", None) is None:
+            self._prewarm_reaper_stop = threading.Event()
+        self._prewarm_reaper_stop.clear()
+        self._prewarm_reaper_thread = threading.Thread(
+            target=self._prewarm_reaper_loop,
+            name="sandbox-prewarm-reaper",
+            daemon=True,
+        )
+        self._prewarm_reaper_thread.start()
+        logger.info("Started sandbox prewarm reaper thread (claim timeout: %.0fs)", self._prewarm_claim_timeout())
+
+    def _stop_prewarm_reaper(self) -> None:
+        # Read through ``getattr``: this runs from ``shutdown``, which must
+        # stop every container it owns even when it is handed an instance
+        # whose ``__init__`` never finished. Raising here would abandon the
+        # stops that come after it -- the same reason the accepted-projection
+        # bookkeeping above is read this way.
+        stop = getattr(self, "_prewarm_reaper_stop", None)
+        if stop is not None:
+            stop.set()
+        thread = getattr(self, "_prewarm_reaper_thread", None)
+        if thread is not None and thread.is_alive() and thread is not threading.current_thread():
+            thread.join(timeout=5)
+
+    def _prewarm_reaper_loop(self) -> None:
+        while not self._prewarm_reaper_stop.wait(self.PREWARM_CHECK_INTERVAL):
+            try:
+                self._reap_unclaimed_prewarms()
+            except Exception:
+                logger.exception("Error in sandbox prewarm reaper loop")
+
+    def _reap_unclaimed_prewarms(self) -> None:
+        """Stop prewarmed containers no turn claimed within the claim timeout.
+
+        The parked object is the authority: a mark whose container is no
+        longer the one parked under its id (claimed, evicted, replaced,
+        destroyed, and possibly rebuilt since) is dropped without touching
+        anything. Runs from the prewarm reaper thread, under the same fenced
+        destroy as every other reap.
+        """
+        timeout = self._prewarm_claim_timeout()
+        if timeout <= 0:
+            return
+        now = time.time()
+        expired: list[tuple[str, SandboxInfo]] = []
+        with self._lock:
+            marks = getattr(self, "_prewarmed_unclaimed", None) or {}
+            for sandbox_id, info in list(marks.items()):
+                parked = self._warm_pool.get(sandbox_id)
+                if parked is None or parked[0] is not info:
+                    marks.pop(sandbox_id, None)
+                    continue
+                if now - parked[1] > timeout:
+                    expired.append((sandbox_id, info))
+        for sandbox_id, entry in expired:
+            logger.info("Prewarmed sandbox %s was not claimed within %.0fs; stopping it", sandbox_id, timeout)
+            stopped = self._destroy_warm_entry(
+                sandbox_id,
+                entry,
+                reason="prewarm_unclaimed",
+                still_reapable=lambda sid=sandbox_id, info=entry: self._warm_pool.get(sid, (None, 0.0))[0] is info and self._is_unclaimed_prewarm_locked(sid, info),
+            )
+            if stopped:
+                with self._lock:
+                    self._forget_prewarm_unclaimed_locked(sandbox_id)
+
+    def _take_create_provenance(self, sandbox_id: str) -> str:
+        """The provenance the backend reported for this create, or ``unknown``.
+
+        Carried from the create result itself rather than re-read from the
+        active maps, so a lease lost between registration and here cannot
+        turn a confirmed creation into an unknown one.
+        """
+        with self._lock:
+            carried = getattr(self, "_create_provenance", None)
+            if carried is None:
+                return "unknown"
+            return carried.pop(sandbox_id, "unknown")
 
     async def acquire_async(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment without blocking the event loop.
@@ -2318,12 +3229,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """Tear down a freshly-created container whose readiness check failed.
 
         The container was started by the backend but never reached ready, so it
-        never entered ``_register_created_sandbox`` and the ownership store has
-        no lease for it yet. For the full readiness timeout (60s) it runs
-        unowned, which is exactly the window a peer gateway's startup
-        reconciliation is built to adopt across (#4206). Without a claim, a peer
-        that adopts the not-yet-ready Pod and then has this instance's stop land
-        on it is a cross-instance kill that interrupts an active turn (#4248).
+        never entered ``_register_created_sandbox``. The create path publishes
+        an ``own:`` lease before it starts waiting (see ``_mark_starting``), so
+        for the readiness budget the container is ours in the store; but a peer
+        can still have taken it over in the meantime (a retried turn for the
+        same thread that discovered the container once it answered, #4248), and
+        the registration-failure callers reach here with no lease at all.
+        Without a claim, a stop that lands on a container a peer has handed to a
+        turn is a cross-instance kill (#4206).
 
         Claim the teardown lease first so this reap path is gated by the same
         ownership guard as every other destroy (``_destroy_warm_entry``,
@@ -2345,10 +3258,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         adopt/acquire can slip between them (same pairing as
         ``_destroy_warm_entry``).
         """
+        record_teardown_attempt()
         if not self._reserve_local_teardown(
             sandbox_id,
             lambda: sandbox_id not in self._sandboxes and sandbox_id not in self._sandbox_infos and sandbox_id not in self._warm_pool,
         ):
+            record_teardown_refusal()
             logger.warning(
                 "Not destroying unready sandbox %s: adopted or being torn down by this instance",
                 sandbox_id,
@@ -2356,25 +3271,41 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return
         try:
             if not self._claim_ownership(sandbox_id, for_destroy=True):
+                record_teardown_refusal()
                 logger.warning(
                     "Not destroying unready sandbox %s: owned by another instance or ownership unavailable",
                     sandbox_id,
                 )
                 return
-            try:
-                with self._held_teardown_lease(sandbox_id):
-                    self._backend.destroy(info)
-            except Exception as e:
-                logger.warning(f"Error destroying unready sandbox {sandbox_id}: {e}")
+            with self._held_teardown_lease(sandbox_id):
+                outcome, _error = self._backend_destroy(info)
+            if outcome is DestroyOutcome.ABSENT:
+                record_resource_teardown()
+            else:
+                # Never handed out, but started by us: a set that did not go
+                # away is still ours to finish, so it is tracked for retry.
+                self._quarantine_after_failed_destroy(sandbox_id, info, outcome, identity=None)
         finally:
             self._finish_local_teardown(sandbox_id)
 
-    def _create_sandbox(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
+    def _create_sandbox(
+        self,
+        thread_id: str | None,
+        sandbox_id: str,
+        *,
+        user_id: str | None = None,
+        allow_eviction: bool = True,
+    ) -> str:
         """Create a new sandbox via the backend.
 
         Args:
             thread_id: Optional thread ID.
             sandbox_id: The sandbox ID to use.
+            allow_eviction: Whether a full replica set may evict its oldest
+                warm entry for this create. A turn's acquisition may; a
+                prewarm may not, because stopping a container some thread
+                will reclaim to build one no thread has asked for yet is a
+                trade against the person at the keyboard.
 
         Returns:
             The sandbox_id.
@@ -2391,39 +3322,147 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             user_id=effective_user_id,
         )
 
-        # Enforce replicas: only warm-pool containers count toward eviction budget.
-        # Active sandboxes are in use by live threads and must not be forcibly stopped.
-        replicas, total = self._replica_count()
-        if total >= replicas:
-            evicted = self._evict_oldest_warm()
-            self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
+        # Admission first: the slot is reserved, an id reserved for teardown is
+        # refused, and a saturated deployment is refused -- all before a
+        # container is asked for, an unrelated warm set is stopped for it, or
+        # an attempt is journaled.
+        self._admit_create(sandbox_id, allow_eviction=allow_eviction)
+        try:
+            create_kwargs = {}
+            if config_mount_exclusion_root is not None and not isinstance(self._backend, RemoteSandboxBackend):
+                create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
+            if isinstance(self._backend, RemoteSandboxBackend):
+                create_kwargs["skills_container_path"] = self._configured_skills_container_path()
+            budget = self.sandbox_ready_timeout()
+            if _acquisition_cancelled():
+                # Stopped after the slot was reserved (an eviction runs in
+                # between): send no create, rather than build a set only to
+                # stop it. The ``finally`` below releases the slot.
+                raise _AcquisitionCancelledError(sandbox_id)
+            record_create_attempt()
+            try:
+                with phase_span(TurnPhase.SANDBOX_CREATE):
+                    info = self._backend.create(
+                        thread_id,
+                        sandbox_id,
+                        extra_mounts=extra_mounts or None,
+                        user_id=effective_user_id,
+                        provision_lark_cli_runtime=provision_lark_cli_runtime,
+                        provision_lark_cli_broker=provision_lark_cli_broker,
+                        **create_kwargs,
+                    )
+            except Exception:
+                record_failed_attempt()
+                raise
+            self._record_create_provenance(info)
+            self._own_before_readiness(sandbox_id, info)
 
-        create_kwargs = {}
-        if config_mount_exclusion_root is not None:
-            create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
-        if isinstance(self._backend, RemoteSandboxBackend):
-            create_kwargs["skills_container_path"] = self._configured_skills_container_path()
-        info = self._backend.create(
-            thread_id,
-            sandbox_id,
-            extra_mounts=extra_mounts or None,
-            user_id=effective_user_id,
-            provision_lark_cli_runtime=provision_lark_cli_runtime,
-            provision_lark_cli_broker=provision_lark_cli_broker,
-            **create_kwargs,
-        )
+            # Wait for sandbox to be ready
+            readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
+            # A worker-thread acquisition's Stop (see ``_ACQUISITION_CANCELLED``)
+            # ends this wait too, for a container this call started: a cold
+            # start is the longest thing an acquisition waits for, and the
+            # caller that pressed Stop is waiting on this thread. One the
+            # backend found running was not this call's to tear down; it
+            # answers its first probe and the cancelled caller undoes it by
+            # origin, which parks it.
+            stop = _ACQUISITION_CANCELLED.get()
+            if stop is not None and getattr(info, "provenance", "unknown") == PROVENANCE_CREATED:
+                readiness_kwargs["cancelled"] = stop
+            with phase_span(TurnPhase.SANDBOX_READINESS):
+                ready = wait_for_sandbox_ready(info.sandbox_url, timeout=budget, **readiness_kwargs)
+            if not ready:
+                stopped = "cancelled" in readiness_kwargs and stop.is_set()
+                if not stopped:
+                    record_failed_attempt()
+                # Ours in the store, but never handed out: tear it down under
+                # the same fences as every other reap, and fail closed if a
+                # peer took it over in the meantime (#4248). A stopped start
+                # is torn down the same way, before its caller's Stop returns,
+                # so no container or slot outlives the turn that asked for it.
+                self._destroy_unready_sandbox(sandbox_id, info)
+                if stopped:
+                    raise _AcquisitionCancelledError(sandbox_id)
+                raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within {budget:g}s at {info.sandbox_url}")
 
-        # Wait for sandbox to be ready
-        readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
-        if not wait_for_sandbox_ready(info.sandbox_url, timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, **readiness_kwargs):
-            # The container is running but unowned: ownership is published by
-            # ``_register_created_sandbox`` after this gate. Claim the teardown
-            # lease before stopping it so a peer cannot adopt the not-yet-ready
-            # Pod in the meantime (#4248).
+            return self._register_created_sandbox(thread_id, sandbox_id, info, user_id=effective_user_id)
+        finally:
+            self._unmark_starting(sandbox_id)
+
+    def _record_create_provenance(self, info: SandboxInfo, *, carry: bool = False) -> None:
+        """Classify one create result by the backend's own word for it.
+
+        With ``carry`` the word is also kept per sandbox id for a caller that
+        needs it after registration and pops it there (or on failure), so the
+        carry never outlives one acquisition. A backend that stays
+        silent is warned about once: its silence disables warm reuse of the
+        containers it creates, and the journal's ``unknown_create_results``
+        is the per-turn signal.
+        """
+        provenance = getattr(info, "provenance", "unknown")
+        if provenance == PROVENANCE_CREATED:
+            record_acquisition_source(AcquisitionSource.CREATED)
+        elif provenance == PROVENANCE_REDISCOVERED:
+            record_acquisition_source(AcquisitionSource.REDISCOVERED)
+        else:
+            record_acquisition_source(AcquisitionSource.UNKNOWN_PROVENANCE)
+            with self._lock:
+                warned = getattr(self, "_warned_unknown_provenance", False)
+                self._warned_unknown_provenance = True
+            if not warned:
+                logger.warning(
+                    "Sandbox backend %s does not report whether create started or found %s; unknown provenance is never treated as creation, so its containers are not reused warm",
+                    type(self._backend).__name__,
+                    info.sandbox_id,
+                )
+        record_create_result(provenance)
+        if carry:
+            with self._lock:
+                carried = getattr(self, "_create_provenance", None)
+                if carried is None:
+                    carried = self._create_provenance = {}
+                carried[info.sandbox_id] = provenance
+
+    def _own_before_readiness(self, sandbox_id: str, info: SandboxInfo) -> None:
+        """Take *sandbox_id*'s lease before waiting for it to become ready.
+
+        Registration takes the lease again once the container answers; taking
+        it here first is what stops a peer's reconciliation from adopting the
+        container mid-start (see ``_mark_starting``). Same fail-closed rule as
+        registration: a container whose ownership could not be published, or
+        whose id a peer is tearing down, is torn down under the fences (which
+        refuse if the store still cannot answer) and the acquisition fails now
+        rather than after a wait that cannot succeed.
+        """
+        try:
+            self._publish_ownership(sandbox_id)
+        except (OwnershipBackendError, SandboxBeingDestroyedError):
+            logger.error("Could not take ownership of new sandbox %s before its readiness wait; attempting ownership-fenced cleanup", sandbox_id)
             self._destroy_unready_sandbox(sandbox_id, info)
-            raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
+            raise
 
-        return self._register_created_sandbox(thread_id, sandbox_id, info, user_id=effective_user_id)
+    async def _rollback_unready_after_cancellation(self, sandbox_id: str, info: SandboxInfo) -> None:
+        """Tear down a container whose readiness wait was cancelled.
+
+        The wait itself is cancellation-safe (the probe in flight is cancelled
+        and the client closed), but the container keeps running, owned by this
+        process and tracked nowhere; left alone it would sit unowned for a
+        lease TTL and then be adopted as a warm entry that may never answer. So
+        the same ownership-fenced destroy the timeout path uses runs here, in a
+        worker thread that a second cancellation cannot interrupt: the rollback
+        is drained to completion and the cancellation re-raised by the caller.
+        """
+        rollback = asyncio.ensure_future(asyncio.to_thread(self._destroy_unready_sandbox, sandbox_id, info))
+        while True:
+            try:
+                await asyncio.shield(rollback)
+                return
+            except asyncio.CancelledError:
+                if rollback.done():
+                    return
+            except Exception:
+                logger.warning("Ownership-fenced rollback of cancelled sandbox %s failed", sandbox_id, exc_info=True)
+                return
 
     async def _create_sandbox_async(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Async counterpart to ``_create_sandbox``."""
@@ -2437,46 +3476,63 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             user_id=effective_user_id,
         )
 
-        # Enforce replicas: only warm-pool containers count toward eviction budget.
-        # Active sandboxes are in use by live threads and must not be forcibly stopped.
-        replicas, total = self._replica_count()
-        if total >= replicas:
-            evicted = await run_sync_lifecycle_operation(self._evict_oldest_warm)
-            self._log_replicas_soft_cap(replicas, sandbox_id, evicted)
+        # The same admission decision the sync path makes, in its cancellable
+        # form. This path used to have no budget at all: it read the count,
+        # evicted if it could and created regardless, so two concurrent async
+        # creates could each find the last slot and each take it.
+        await self._admit_create_async(sandbox_id)
+        try:
+            create_kwargs = {}
+            if config_mount_exclusion_root is not None:
+                create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
+            if isinstance(self._backend, RemoteSandboxBackend):
+                create_kwargs["skills_container_path"] = self._configured_skills_container_path()
+            budget = self.sandbox_ready_timeout()
+            record_create_attempt()
+            try:
+                with phase_span(TurnPhase.SANDBOX_CREATE):
+                    info = await run_sync_lifecycle_operation(
+                        self._backend.create,
+                        thread_id,
+                        sandbox_id,
+                        extra_mounts=extra_mounts or None,
+                        user_id=effective_user_id,
+                        provision_lark_cli_runtime=provision_lark_cli_runtime,
+                        provision_lark_cli_broker=provision_lark_cli_broker,
+                        **create_kwargs,
+                    )
+            except Exception:
+                record_failed_attempt()
+                raise
+            self._record_create_provenance(info)
+            # Ownership is blocking store IO, offloaded like every other step here.
+            await run_sync_lifecycle_operation(self._own_before_readiness, sandbox_id, info)
 
-        create_kwargs = {}
-        if config_mount_exclusion_root is not None:
-            create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
-        if isinstance(self._backend, RemoteSandboxBackend):
-            create_kwargs["skills_container_path"] = self._configured_skills_container_path()
-        info = await run_sync_lifecycle_operation(
-            self._backend.create,
-            thread_id,
-            sandbox_id,
-            extra_mounts=extra_mounts or None,
-            user_id=effective_user_id,
-            provision_lark_cli_runtime=provision_lark_cli_runtime,
-            provision_lark_cli_broker=provision_lark_cli_broker,
-            **create_kwargs,
-        )
+            # Wait for sandbox to be ready without blocking the event loop.
+            readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
+            try:
+                with phase_span(TurnPhase.SANDBOX_READINESS):
+                    ready = await wait_for_sandbox_ready_async(
+                        info.sandbox_url,
+                        timeout=budget,
+                        **readiness_kwargs,
+                    )
+            except asyncio.CancelledError:
+                await self._rollback_unready_after_cancellation(sandbox_id, info)
+                raise
+            if not ready:
+                # Ours in the store, but never handed out: tear it down under
+                # the same fences as every other reap, and fail closed if a
+                # peer took it over in the meantime (#4248).
+                record_failed_attempt()
+                await run_sync_lifecycle_operation(self._destroy_unready_sandbox, sandbox_id, info)
+                raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within {budget:g}s at {info.sandbox_url}")
 
-        # Wait for sandbox to be ready without blocking the event loop.
-        readiness_kwargs = {"headers": info.request_headers} if info.request_headers else {}
-        if not await wait_for_sandbox_ready_async(
-            info.sandbox_url,
-            timeout=SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT,
-            **readiness_kwargs,
-        ):
-            # The container is running but unowned: ownership is published by
-            # ``_register_created_sandbox`` after this gate. Claim the teardown
-            # lease before stopping it so a peer cannot adopt the not-yet-ready
-            # Pod in the meantime (#4248).
-            await run_sync_lifecycle_operation(self._destroy_unready_sandbox, sandbox_id, info)
-            raise RuntimeError(f"Sandbox {sandbox_id} failed to become ready within timeout at {info.sandbox_url}")
-
-        # Registration publishes ownership (blocking store IO), so it is offloaded
-        # like every other blocking step on this path.
-        return await run_sync_lifecycle_operation(self._register_created_sandbox, thread_id, sandbox_id, info, user_id=effective_user_id)
+            # Registration publishes ownership (blocking store IO), so it is offloaded
+            # like every other blocking step on this path.
+            return await run_sync_lifecycle_operation(self._register_created_sandbox, thread_id, sandbox_id, info, user_id=effective_user_id)
+        finally:
+            self._unmark_starting(sandbox_id)
 
     def get(self, sandbox_id: str) -> Sandbox | None:
         """Get a sandbox by ID. Updates last activity timestamp.
@@ -2495,6 +3551,19 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             The sandbox instance if found, None otherwise.
         """
         with self._lock:
+            if sandbox_id in getattr(self, "_cleanup_pending", {}):
+                # Quarantine is a lifecycle state, not a warm-pool detail: a
+                # set whose cleanup did not confirm is never usable, whichever
+                # map still names it.
+                return None
+            if self._being_torn_down_locally(sandbox_id):
+                # A reaper in this process has reserved the id: the teardown
+                # decision is taken and the entry stays tracked only so a
+                # refused claim can recover. A lookup made after that decision
+                # gets nothing and refreshes nothing; once the reservation is
+                # released the handle answers again if the claim refused. Same
+                # critical section as the answer, so the check is never stale.
+                return None
             sandbox = self._sandboxes.get(sandbox_id)
             if sandbox is not None:
                 self._last_activity[sandbox_id] = time.time()
@@ -2570,6 +3639,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if info and sandbox_id not in self._warm_pool:
                 self._warm_pool[sandbox_id] = (info, time.time())
                 self._warm_pool_identity[sandbox_id] = thread_keys_to_remove[0] if thread_keys_to_remove else active_identity
+            # Either way a waiter should look again: a parked container frees
+            # no slot but is the cheapest one to evict, and reaching the else
+            # branch means the active entry that just went away was the last
+            # thing counting this set at all.
+            self._wake_capacity_waiters_locked()
 
         if sandbox is not None:
             # Defense-in-depth: close() already swallows its own errors; this
@@ -2619,7 +3693,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         section that reserves the teardown. ``destroy()`` itself passes a
         constant: an explicit destroy is a decision made now.
         """
+        record_teardown_attempt()
         if not self._reserve_local_teardown(sandbox_id, still_reapable):
+            record_teardown_refusal()
             logger.info("Skipping destroy of sandbox %s: re-acquired by this instance or already being torn down", sandbox_id)
             return
 
@@ -2633,9 +3709,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # refused claim: still running, and no longer in any of our maps, so
         # nothing here would ever reap or reclaim it.
         if not self._claim_ownership(sandbox_id, for_destroy=True):
+            record_teardown_refusal()
             logger.warning("Refusing to destroy sandbox %s: owned by another instance", sandbox_id)
             return
 
+        with self._lock:
+            identity = self._active_sandbox_identity.get(sandbox_id) or self._warm_pool_identity.get(sandbox_id)
         sandbox, info, _ = self._remove_tracked_sandbox(sandbox_id)
 
         if sandbox is not None:
@@ -2655,8 +3734,16 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             # the error still propagates out of the `with` (`shutdown()` logs per
             # sandbox off it), it is just no longer this method's job to release.
             with self._held_teardown_lease(sandbox_id):
-                self._backend.destroy(info)
-            logger.info(f"Destroyed sandbox {sandbox_id}")
+                outcome, error = self._backend_destroy(info)
+            if outcome is DestroyOutcome.ABSENT:
+                record_resource_teardown()
+                logger.info(f"Destroyed sandbox {sandbox_id}")
+            else:
+                # Untracked before the stop (so no reclaim could race it); a set
+                # that is not confirmed absent must not stay untracked, or it
+                # would be a freed slot with a container still behind it.
+                self._quarantine_after_failed_destroy(sandbox_id, info, outcome, identity=identity)
+                raise SandboxCleanupIncompleteError(sandbox_id, outcome, cause=error) from error
         else:
             # No container to stop, so no teardown lease was held: clear the
             # marker the claim above wrote, so an untracked id cannot leave a
@@ -2675,11 +3762,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 return
             self._shutdown_called = True
             sandbox_ids = list(self._sandboxes.keys())
+            # Snapshotted, not cleared: `_destroy_warm_entry` re-validates the
+            # parked entry's identity inside its reservation and pops it on a
+            # confirmed stop, so the entries must still be parked when it runs.
+            # A set whose stop does not confirm stays parked and pending, the
+            # same shape every other failed warm destroy leaves behind.
             warm_items = list(self._warm_pool.items())
-            self._warm_pool.clear()
-            self._warm_pool_identity.clear()
 
         self._stop_idle_checker()
+        self._stop_prewarm_reaper()
         # Stop renewing before destroying: the destroy paths claim ownership
         # themselves, and a renewal racing them only re-publishes leases we are
         # about to drop.
@@ -2695,10 +3786,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         for sandbox_id, (info, _) in warm_items:
             # Route through _destroy_warm_entry so the ownership claim and the
-            # container stop stay together, as on the idle path. Unconditional
-            # here: the entries were removed from `_warm_pool` under the lock
-            # above, so the pool-membership predicate the other callers use would
-            # refuse every one of them.
+            # container stop stay together, as on the idle path. No age
+            # predicate here: shutdown stops every parked set it still finds
+            # (entry identity is checked by the destroy itself).
             self._destroy_warm_entry(sandbox_id, info, reason="shutdown", still_reapable=lambda: True)
 
         try:

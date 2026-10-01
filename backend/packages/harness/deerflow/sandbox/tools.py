@@ -30,6 +30,7 @@ from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
 from deerflow.runtime.secret_context import read_active_secrets
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox.exceptions import (
+    SandboxCapacityExceededError,
     SandboxError,
     SandboxNotFoundError,
     SandboxRuntimeError,
@@ -2542,6 +2543,8 @@ def bash_tool(
             max_chars=max_chars,
             truncate=_truncate_bash_output,
         )
+    except SandboxCapacityExceededError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except PermissionError as e:
@@ -2614,6 +2617,8 @@ def ls_tool(runtime: Runtime, path: str, description: str = "") -> str:
         except Exception:
             max_chars = 20000
         return _truncate_ls_output(output, max_chars)
+    except SandboxCapacityExceededError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -2677,6 +2682,8 @@ def glob_tool(
         # so a root above a disabled skill still surfaces its files.
         matches = _drop_disabled_skill_paths(matches, user_id=user_id)
         return _format_glob_results(requested_path, matches, truncated)
+    except SandboxCapacityExceededError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -2776,6 +2783,8 @@ def grep_tool(
         allowed = set(_drop_disabled_skill_paths([match.path for match in matches], user_id=user_id))
         matches = [match for match in matches if match.path in allowed]
         return _format_grep_results(requested_path, matches, truncated)
+    except SandboxCapacityExceededError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -2906,6 +2915,8 @@ def read_file_tool(
             max_chars = 50000
         # Line numbers in the marker are file line numbers, so a ranged read passes its offset along.
         return _truncate_read_file_output(content, max_chars, line_offset=effective_start - 1, joined_lines=use_line_range, ends_at_eof=end_line is None)
+    except SandboxCapacityExceededError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:
@@ -3022,6 +3033,8 @@ def write_file_tool(
         with get_file_operation_lock(sandbox, path):
             sandbox.write_file(path, content, append)
         return "OK"
+    except SandboxCapacityExceededError:
+        raise
     except SandboxError as e:
         return _format_write_file_error(requested_path, e, runtime)
     except PermissionError:
@@ -3099,6 +3112,8 @@ def str_replace_tool(
                 content = content.replace(old_str, new_str, 1)
             sandbox.write_file(path, content)
         return "OK"
+    except SandboxCapacityExceededError:
+        raise
     except SandboxError as e:
         return f"Error: {e}"
     except FileNotFoundError:

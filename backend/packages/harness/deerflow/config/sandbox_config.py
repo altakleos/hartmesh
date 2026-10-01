@@ -2,7 +2,7 @@ import ipaddress
 import math
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
 SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
@@ -182,6 +182,15 @@ class SandboxConfig(BaseModel):
             workers when ownership uses Redis; other modes/providers keep
             process-local accounting.
         idle_timeout: Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.
+        capacity_wait_timeout: AioSandboxProvider only. Seconds an acquisition
+            waits for a replica slot before the hard budget refuses it
+            (default: 5; 0 refuses immediately, maximum 300).
+        ready_timeout: Seconds a newly created sandbox may take to answer its
+            readiness probe before the provider destroys it and the acquisition
+            fails. AioSandboxProvider's local Docker backend defaults to 60
+            (SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT); OpenSandboxProvider defaults
+            to 30. A finite number greater than 0 and at most 3600; anything
+            else refuses to load. There is no value that disables the deadline.
         environment: Environment variables to inject into the sandbox (values starting with $ are resolved from host env)
 
     BoxliteProvider specific options:
@@ -201,7 +210,6 @@ class SandboxConfig(BaseModel):
     OpenSandboxProvider specific options:
         api_key, domain, protocol, request_timeout, use_server_proxy: OpenSandbox
             management and execd connection settings.
-        ready_timeout: Create/readiness deadline in seconds (default: 30).
         sandbox_timeout: Remote lifetime in seconds (default: 14400); 0 requires
             explicit provider cleanup.
     """
@@ -272,6 +280,37 @@ class SandboxConfig(BaseModel):
             raise ValueError("must be a number, not a boolean")
         return value
 
+    prewarm_claim_timeout: int | None = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Seconds a sandbox built ahead of a thread's first turn (AioSandboxProvider prewarm) may sit unclaimed before it is stopped "
+            "(default: 300). A claimed one is an ordinary parked sandbox and follows idle_timeout instead. Set to 0 to keep unclaimed prewarms until idle_timeout."
+        ),
+    )
+    ready_timeout: float | None = Field(
+        default=None,
+        gt=0,
+        le=3600,
+        allow_inf_nan=False,
+        description=(
+            "Seconds a newly created sandbox may take to answer its readiness probe before the provider destroys it and the acquisition fails. "
+            "AioSandboxProvider (local Docker backend) defaults to 60; OpenSandboxProvider defaults to 30. Must be a finite number greater than 0 and at most 3600: "
+            "the deadline cannot be disabled, only sized. Hosts whose sandbox cold start is slow (one-CPU gVisor sandboxes were measured at 80 to 91 seconds) need it raised."
+        ),
+    )
+    capacity_wait_timeout: float | None = Field(
+        default=None,
+        ge=0,
+        le=300,
+        allow_inf_nan=False,
+        description=(
+            "AioSandboxProvider: seconds an acquisition may wait for a replica slot when every slot is in active use and nothing is warm enough to evict "
+            "(default: 5). The budget is hard -- when the wait runs out the acquisition is refused with a retryable capacity outcome rather than creating a "
+            "sandbox the deployment has no memory for. Set to 0 to refuse immediately. Raising it past a few seconds trades a refusal the person can act on "
+            "for a spinner they cannot."
+        ),
+    )
     health_check_skip_seconds: float | None = Field(
         default=None,
         ge=0,
@@ -342,5 +381,13 @@ class SandboxConfig(BaseModel):
             "the provisioner rejects all /api/* requests when the key is unset or mismatched."
         ),
     )
+    @field_validator("ready_timeout", "capacity_wait_timeout", mode="before")
+    @classmethod
+    def _timeout_is_a_number(cls, value: object, info: ValidationInfo) -> object:
+        # pydantic coerces ``true`` to 1.0, which would silently become a
+        # one-second deadline; a boolean is a mistake, not a budget.
+        if isinstance(value, bool):
+            raise ValueError(f"{info.field_name} must be a number of seconds, not a boolean")
+        return value
 
     model_config = ConfigDict(extra="allow")

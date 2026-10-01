@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from deerflow.community.aio_sandbox import backend as _backend_mod
 from deerflow.community.aio_sandbox.local_backend import (
     LocalContainerBackend,
     _ContainerInspection,
@@ -490,6 +491,129 @@ def test_restricted_sandbox_has_no_published_port_and_forces_proxy_env(monkeypat
     assert proxy_values[-1] == "HTTP_PROXY=http://deer-flow-netproxy-test:3128"
 
 
+def test_restricted_start_pins_the_proxy_name_in_the_sandbox_hosts_file(monkeypatch):
+    """A sandbox under its own network stack (gVisor) cannot use Docker's
+    embedded DNS, so the proxy name it is told to use must also resolve from
+    /etc/hosts with the address Docker assigned on the internal network."""
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._network_mode = "allowlist"
+    backend._network_config = {"mode": "allowlist", "allow_domains": [], "approval": "prompt", "proxy_image": "proxy:latest"}
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "missing")
+    monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
+    captured: dict[str, object] = {}
+
+    def fake_start(container_name, port, extra_mounts, **kwargs):
+        captured.update(kwargs)
+        return "container-id"
+
+    monkeypatch.setattr(backend, "_start_container", fake_start)
+
+    backend._start_restricted_sandbox("sandbox-id", "sandbox-name", 18080, None, config_mount_exclusion_root=None, relay_token="test-relay-token")
+
+    proxy_name, _ = backend._resource_names("sandbox-id")
+    assert captured["extra_hosts"] == {proxy_name: "172.24.0.2"}
+    assert captured["extra_environment"]["HTTPS_PROXY"] == f"http://{proxy_name}:3128"
+
+
+def test_start_container_emits_add_host_entries_for_docker_only(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **_kwargs):
+        captured_cmd.extend(cmd)
+        return SimpleNamespace(stdout="container-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._start_container("sandbox-test", 18080, extra_hosts={"proxy-name": "172.24.0.2"})
+    assert captured_cmd[captured_cmd.index("--add-host") + 1] == "proxy-name:172.24.0.2"
+
+    captured_cmd.clear()
+    monkeypatch.setattr(backend, "_runtime", "container")
+    backend._start_container("sandbox-test", 18080, extra_hosts={"proxy-name": "172.24.0.2"})
+    assert "--add-host" not in captured_cmd
+
+
+def test_start_network_proxy_returns_its_internal_network_address(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._network_mode = "allowlist"
+    backend._network_config = {"mode": "allowlist", "allow_domains": [], "approval": "prompt", "proxy_image": "proxy:latest"}
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        if cmd[:2] == ["docker", "inspect"]:
+            assert "network-name" in cmd[3]
+            return SimpleNamespace(stdout="172.24.0.2\n", stderr="", returncode=0)
+        return SimpleNamespace(stdout="proxy-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    address = backend._start_network_proxy("proxy-name", "network-name", "egress-network-name", "sandbox-name", 18080, "sandbox-id", "test-relay-token")
+
+    assert address == "172.24.0.2"
+    assert commands[-1][:2] == ["docker", "inspect"] and commands[-1][-1] == "proxy-name"
+
+
+def test_container_network_address_reports_inspect_failures_as_none(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="not-an-address\n", stderr="", returncode=0))
+    assert backend._container_network_address("proxy-name", "network-name") is None
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="", stderr="No such object", returncode=1))
+    assert backend._container_network_address("proxy-name", "network-name") is None
+
+
+def test_restricted_start_refuses_a_proxy_without_an_address_and_tears_down(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._network_mode = "allowlist"
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "missing")
+    monkeypatch.setattr(backend, "_create_internal_network", lambda _name, _sandbox_id: None)
+    monkeypatch.setattr(backend, "_create_egress_network", lambda _name, _sandbox_id: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
+    started: list[str] = []
+    monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: started.append("started") or "container-id")
+    cleaned: list[str] = []
+    monkeypatch.setattr(backend, "_cleanup_restricted_resources", lambda sandbox_id: cleaned.append(sandbox_id))
+
+    with pytest.raises(RuntimeError, match="reported no address .* without a resolvable proxy"):
+        backend._start_restricted_sandbox("id", "sandbox-id", 18080, None, config_mount_exclusion_root=None, relay_token="test-relay-token")
+
+    assert started == [], "a sandbox must never start without its proxy pinned in /etc/hosts"
+    assert cleaned == ["id"]
+
+
 def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
     backend = LocalContainerBackend(
         image="sandbox:latest",
@@ -598,6 +722,83 @@ def test_network_proxy_uses_read_only_root_and_bounded_policy_storage(monkeypatc
     assert "--cap-drop=ALL" in create
     assert "no-new-privileges" in create
     assert "DEERFLOW_RELAY_TOKEN=test-relay-token" in create
+    # The sidecar keeps the daemon's default OCI runtime: it is the trusted
+    # policy enforcement point, runs no model-authored code, and the sandbox
+    # runtime seam must not leak into it.
+    assert "--runtime" not in create
+
+
+def _capture_proxy_create_command(monkeypatch, backend: LocalContainerBackend) -> list[str]:
+    backend._network_mode = "allowlist"
+    backend._network_config = {
+        "mode": "allowlist",
+        "allow_domains": [],
+        "approval": "prompt",
+        "proxy_image": "proxy:latest",
+    }
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(stdout="proxy-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._start_network_proxy("proxy-name", "network-name", "egress-network-name", "sandbox-name", 18080, "sandbox-id", "test-relay-token")
+    return commands[0]
+
+
+def test_network_proxy_memory_limit_defaults_to_256m_with_equal_swap(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
+
+    create = _capture_proxy_create_command(monkeypatch, backend)
+
+    assert create[create.index("--memory") + 1] == "256m"
+    assert create[create.index("--memory-swap") + 1] == "256m"
+    assert create[create.index("--cpus") + 1] == "1"
+    assert create[create.index("--pids-limit") + 1] == "128"
+    assert "--runtime" not in create
+
+
+def test_network_proxy_memory_limit_is_tunable(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_PROXY_MEMORY", "96m")
+
+    create = _capture_proxy_create_command(monkeypatch, backend)
+
+    assert create[create.index("--memory") + 1] == "96m"
+    assert create[create.index("--memory-swap") + 1] == "96m"
+
+
+def test_network_proxy_memory_limit_can_be_disabled(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_PROXY_MEMORY", "none")
+
+    create = _capture_proxy_create_command(monkeypatch, backend)
+
+    assert "--memory" not in create
+    assert "--memory-swap" not in create
 
 
 def test_start_container_filters_nested_config_mounts_for_policy_scoped_skills(
@@ -882,6 +1083,8 @@ def _clear_hardening_env(monkeypatch):
         "DEER_FLOW_SANDBOX_CONTAINER_USER",
         "DEER_FLOW_SANDBOX_NETWORK",
         "DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS",
+        "DEER_FLOW_SANDBOX_RUNTIME",
+        "DEER_FLOW_SANDBOX_PROXY_MEMORY",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -1003,11 +1206,79 @@ def test_start_container_hardens_docker_run_by_default(monkeypatch):
     # hardening that does not break the shipped image is kept.
     assert "seccomp=unconfined" in security_opts
     assert captured_cmd[captured_cmd.index("--memory") + 1] == "2g"
+    # Swap is capped at the memory limit so the budget is the whole budget.
+    assert captured_cmd[captured_cmd.index("--memory-swap") + 1] == "2g"
     assert captured_cmd[captured_cmd.index("--cpus") + 1] == "2"
     assert captured_cmd[captured_cmd.index("--pids-limit") + 1] == "512"
     # Opt-in-only knobs stay absent unless explicitly configured.
     assert "--user" not in captured_cmd
     assert "--network" not in captured_cmd
+    assert "--runtime" not in captured_cmd
+
+
+def test_start_container_passes_oci_runtime_with_builtin_seccomp(monkeypatch):
+    """The gVisor profile needs both flags on the sandbox's docker run.
+
+    Asserting only that ``seccomp=unconfined`` is absent would pass on a
+    regression that emits no seccomp option at all and silently inherits the
+    daemon default, which is exactly what the explicit opt-out exists to
+    prevent. The OCI runtime is the daemon-registered name, distinct from the
+    container CLI that ``backend.runtime`` reports.
+    """
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED", "0")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("--runtime") + 1] == "runsc"
+    security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
+    assert "seccomp=builtin" in security_opts
+    assert "seccomp=unconfined" not in security_opts
+    assert "no-new-privileges" in security_opts
+    assert backend.runtime == "docker"
+
+
+def test_start_container_emits_no_runtime_when_unset(monkeypatch):
+    """Unset or blank keeps the upstream self-host path byte-for-byte."""
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "   ")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert "--runtime" not in captured_cmd
+    assert "runsc" not in captured_cmd
+
+
+def test_start_container_does_not_pass_runtime_to_apple_container(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
+
+    assert "--runtime" not in captured_cmd
+    assert "--memory-swap" not in captured_cmd
 
 
 def test_start_container_seccomp_can_opt_out_to_default_profile(monkeypatch):
@@ -1090,6 +1361,7 @@ def test_start_container_resource_limits_env_override(monkeypatch):
     captured_cmd = _capture_start_container_command(monkeypatch, backend)
 
     assert captured_cmd[captured_cmd.index("--memory") + 1] == "4g"
+    assert captured_cmd[captured_cmd.index("--memory-swap") + 1] == "4g"
     assert captured_cmd[captured_cmd.index("--cpus") + 1] == "4"
     assert captured_cmd[captured_cmd.index("--pids-limit") + 1] == "1024"
 
@@ -1110,6 +1382,7 @@ def test_start_container_resource_limits_can_be_disabled(monkeypatch):
     captured_cmd = _capture_start_container_command(monkeypatch, backend)
 
     assert "--memory" not in captured_cmd
+    assert "--memory-swap" not in captured_cmd
     assert "--cpus" not in captured_cmd
     assert "--pids-limit" not in captured_cmd
 
@@ -1199,6 +1472,7 @@ def test_start_container_does_not_add_docker_hardening_to_apple_container(monkey
     assert "--cap-drop=ALL" not in captured_cmd
     assert "--security-opt" not in captured_cmd
     assert "--memory" not in captured_cmd
+    assert "--memory-swap" not in captured_cmd
     assert "--cpus" not in captured_cmd
     assert "--pids-limit" not in captured_cmd
 
@@ -2351,202 +2625,231 @@ def test_start_container_preinitialized_image_can_drop_startup_caps(monkeypatch)
     assert "no-new-privileges" in security_opts
 
 
-# ── gVisor runtime, proxy address and memory limits (compose profile) ──
+# ── Provenance: what ``create`` returned, in the backend's own words ─────
 
 
-def _capture_proxy_create_command(monkeypatch, backend: LocalContainerBackend) -> list[str]:
-    backend._network_mode = "allowlist"
-    backend._network_config = {
-        "mode": "allowlist",
-        "allow_domains": [],
-        "approval": "prompt",
-        "proxy_image": "proxy:latest",
-    }
-    commands: list[list[str]] = []
+def test_open_create_reports_a_fresh_start_as_created(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
 
-    def fake_run(cmd, **_kwargs):
-        commands.append(cmd)
-        return SimpleNamespace(stdout="proxy-id\n", stderr="", returncode=0)
+    info = backend.create(thread_id="thread", sandbox_id="fresh-open")
 
-    monkeypatch.setattr("subprocess.run", fake_run)
-    backend._start_network_proxy("proxy-name", "network-name", "egress-network-name", "sandbox-name", 18080, "sandbox-id", "test-relay-token")
-    return commands[0]
+    assert info.provenance == "created"
+    assert "provenance" not in info.to_dict()
 
 
-def test_restricted_start_pins_the_proxy_name_in_the_sandbox_hosts_file(monkeypatch):
-    """A sandbox under its own network stack (gVisor) cannot use Docker's
-    embedded DNS, so the proxy name it is told to use must also resolve from
-    /etc/hosts with the address Docker assigned on the internal network."""
-    backend = LocalContainerBackend(
-        image="sandbox:latest",
-        base_port=8080,
-        container_prefix="sandbox",
-        config_mounts=[],
-        environment={},
+def test_open_create_reports_a_name_conflict_adoption_as_rediscovered(monkeypatch):
+    """The ordinary name-conflict return path through the real control flow."""
+    backend = _backend_for_inspect_tests()
+    existing = SandboxInfo(sandbox_id="conflicted", sandbox_url="http://localhost:18081", container_name="sandbox-conflicted")
+
+    def _conflict(*_args, **_kwargs):
+        raise RuntimeError('docker: Error response from daemon: Conflict. The container name "/sandbox-conflicted" is already in use by container "abc".')
+
+    monkeypatch.setattr(backend, "_start_container", _conflict)
+    monkeypatch.setattr(backend, "discover", lambda _sandbox_id: existing)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    info = backend.create(thread_id="thread", sandbox_id="conflicted")
+
+    assert info.sandbox_id == "conflicted"
+    assert info.sandbox_url == existing.sandbox_url
+    assert info.provenance == "rediscovered"
+    assert existing.provenance == "unknown", "discovery's own record is left as it was"
+
+
+def test_open_create_name_conflict_without_an_adoptable_container_still_raises(monkeypatch):
+    backend = _backend_for_inspect_tests()
+
+    def _conflict(*_args, **_kwargs):
+        raise RuntimeError('Conflict. The container name "/sandbox-x" is already in use by container "abc".')
+
+    monkeypatch.setattr(backend, "_start_container", _conflict)
+    monkeypatch.setattr(backend, "discover", lambda _sandbox_id: None)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    with pytest.raises(RuntimeError, match="already in use"):
+        backend.create(thread_id="thread", sandbox_id="x")
+
+
+def test_restricted_create_reports_a_compatible_existing_set_as_rediscovered(monkeypatch):
+    """The ``_ExistingRestrictedSandbox`` return path through the real control flow."""
+    backend = _restricted_backend()
+    existing = SandboxInfo(
+        sandbox_id="restricted-existing",
+        sandbox_url="http://localhost:18082",
+        container_name="sandbox-restricted-existing",
+        request_headers={"X-DeerFlow-Relay-Token": "relay"},
     )
-    backend._network_mode = "allowlist"
-    backend._network_config = {"mode": "allowlist", "allow_domains": [], "approval": "prompt", "proxy_image": "proxy:latest"}
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "compatible")
+    monkeypatch.setattr(backend, "discover", lambda _sandbox_id: existing)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    info = backend.create(thread_id="thread", sandbox_id="restricted-existing")
+
+    assert info.provenance == "rediscovered"
+    assert info.request_headers == existing.request_headers
+
+
+def test_restricted_create_reports_a_fresh_set_as_created(monkeypatch):
+    backend = _restricted_backend()
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
     monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
     monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
-    captured: dict[str, object] = {}
+    monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
 
-    def fake_start(container_name, port, extra_mounts, **kwargs):
-        captured.update(kwargs)
-        return "container-id"
+    info = backend.create(thread_id="thread", sandbox_id="restricted-fresh")
 
-    monkeypatch.setattr(backend, "_start_container", fake_start)
-
-    backend._start_restricted_sandbox("sandbox-id", "sandbox-name", 18080, None, config_mount_exclusion_root=None, relay_token="test-relay-token")
-
-    proxy_name, _ = backend._resource_names("sandbox-id")
-    assert captured["extra_hosts"] == {proxy_name: "172.24.0.2"}
-    assert captured["extra_environment"]["HTTPS_PROXY"] == f"http://{proxy_name}:3128"
+    assert info.provenance == "created"
 
 
-def test_start_container_emits_add_host_entries_for_docker_only(monkeypatch):
-    backend = LocalContainerBackend(
-        image="sandbox:latest",
-        base_port=8080,
-        container_prefix="sandbox",
-        config_mounts=[],
-        environment={},
-    )
-    _clear_hardening_env(monkeypatch)
-    captured_cmd: list[str] = []
+# ── Destroy reports what is established absent, never what was attempted ─
 
-    def fake_run(cmd, **_kwargs):
-        captured_cmd.extend(cmd)
-        return SimpleNamespace(stdout="container-id\n", stderr="", returncode=0)
+# Lenient so the file collects on a tree without the contract; the outcome
+# tests then fail on ``None`` coming back rather than on an import.
+DestroyOutcome = getattr(_backend_mod, "DestroyOutcome", None)
+
+
+def _destroy_probe(monkeypatch, backend, *, containers: set[str], networks: set[str], faults: dict[str, str] | None = None):
+    """Inventory-backed subprocess stand-in for one restricted destroy.
+
+    Successful stop/rm/network rm commands remove from the inventory; a
+    ``refuse`` fault leaves the resource and answers non-zero; a ``daemon``
+    fault makes every command fail with the daemon's error and every
+    inspection unanswerable.
+    """
+    faults = faults or {}
+    calls: list[list[str]] = []
+    daemon_down = "Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?"
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        verb = cmd[1]
+        if faults.get("daemon"):
+            if verb == "stop":
+                raise subprocess.CalledProcessError(1, cmd, stderr=daemon_down)
+            return SimpleNamespace(stdout="", stderr=daemon_down, returncode=1)
+        if verb == "inspect":
+            name = cmd[-1]
+            return SimpleNamespace(stdout="id\n", stderr="", returncode=0) if name in containers else SimpleNamespace(stdout="", stderr=f"Error: No such object: {name}", returncode=1)
+        if verb == "network" and cmd[2] == "inspect":
+            name = cmd[3]
+            return (
+                SimpleNamespace(stdout='[{"Driver":"bridge","Internal":true,"Labels":{},"Options":{}}]', stderr="", returncode=0)
+                if name in networks
+                else SimpleNamespace(stdout="", stderr=f"Error: No such network: {name} not found", returncode=1)
+            )
+        if verb == "stop":
+            # `docker stop` carries a grace flag before the name; the name is last.
+            name = cmd[-1]
+            if faults.get(f"stop:{name}") == "refuse":
+                raise subprocess.CalledProcessError(1, cmd, stderr="synthetic Docker daemon refusal")
+            if faults.get(f"stop:{name}") == "timeout":
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
+            containers.discard(name)
+            return SimpleNamespace(stdout="", stderr="", returncode=0)
+        if verb == "rm":
+            name = cmd[-1]
+            if faults.get(f"rm:{name}") == "refuse":
+                return SimpleNamespace(stdout="", stderr="synthetic Docker daemon refusal", returncode=1)
+            present = name in containers
+            containers.discard(name)
+            return SimpleNamespace(stdout="", stderr="" if present else f"Error: No such container: {name}", returncode=0 if present else 1)
+        if verb == "network" and cmd[2] == "rm":
+            name = cmd[3]
+            if faults.get(f"network_rm:{name}") == "refuse":
+                return SimpleNamespace(stdout="", stderr="synthetic Docker daemon refusal", returncode=1)
+            present = name in networks
+            networks.discard(name)
+            return SimpleNamespace(stdout="", stderr="" if present else f"Error: No such network: {name} not found", returncode=0 if present else 1)
+        raise AssertionError(cmd)
 
     monkeypatch.setattr("subprocess.run", fake_run)
-    backend._start_container("sandbox-test", 18080, extra_hosts={"proxy-name": "172.24.0.2"})
-    assert captured_cmd[captured_cmd.index("--add-host") + 1] == "proxy-name:172.24.0.2"
-
-    captured_cmd.clear()
-    monkeypatch.setattr(backend, "_runtime", "container")
-    backend._start_container("sandbox-test", 18080, extra_hosts={"proxy-name": "172.24.0.2"})
-    assert "--add-host" not in captured_cmd
+    return calls
 
 
-def test_network_proxy_memory_limit_defaults_to_256m_with_equal_swap(monkeypatch):
-    backend = LocalContainerBackend(
-        image="sandbox:latest",
-        base_port=8080,
-        container_prefix="sandbox",
-        config_mounts=[],
-        environment={},
-    )
-    _clear_hardening_env(monkeypatch)
-    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
-
-    create = _capture_proxy_create_command(monkeypatch, backend)
-
-    assert create[create.index("--memory") + 1] == "256m"
-    assert create[create.index("--memory-swap") + 1] == "256m"
-    assert create[create.index("--cpus") + 1] == "1"
-    assert create[create.index("--pids-limit") + 1] == "128"
-    assert "--runtime" not in create
+def _restricted_set(backend, sandbox_id: str) -> tuple[set[str], set[str]]:
+    proxy, network = backend._resource_names(sandbox_id)
+    return {f"sandbox-{sandbox_id}", proxy}, {network, backend._egress_network_name(sandbox_id)}
 
 
-def test_network_proxy_memory_limit_is_tunable(monkeypatch):
-    backend = LocalContainerBackend(
-        image="sandbox:latest",
-        base_port=8080,
-        container_prefix="sandbox",
-        config_mounts=[],
-        environment={},
-    )
-    _clear_hardening_env(monkeypatch)
-    monkeypatch.setenv("DEER_FLOW_SANDBOX_PROXY_MEMORY", "96m")
-
-    create = _capture_proxy_create_command(monkeypatch, backend)
-
-    assert create[create.index("--memory") + 1] == "96m"
-    assert create[create.index("--memory-swap") + 1] == "96m"
+def _info(sandbox_id: str) -> SandboxInfo:
+    return SandboxInfo(sandbox_id=sandbox_id, sandbox_url="http://localhost:18080", container_name=f"sandbox-{sandbox_id}")
 
 
-def test_network_proxy_memory_limit_can_be_disabled(monkeypatch):
-    backend = LocalContainerBackend(
-        image="sandbox:latest",
-        base_port=8080,
-        container_prefix="sandbox",
-        config_mounts=[],
-        environment={},
-    )
-    _clear_hardening_env(monkeypatch)
-    monkeypatch.setenv("DEER_FLOW_SANDBOX_PROXY_MEMORY", "none")
+def test_restricted_destroy_reports_absent_only_when_every_member_is_gone(monkeypatch):
+    backend = _restricted_backend()
+    containers, networks = _restricted_set(backend, "gone")
+    _destroy_probe(monkeypatch, backend, containers=containers, networks=networks)
 
-    create = _capture_proxy_create_command(monkeypatch, backend)
-
-    assert "--memory" not in create
-    assert "--memory-swap" not in create
+    assert backend.destroy(_info("gone")) is DestroyOutcome.ABSENT
+    assert containers == set() and networks == set()
 
 
-def test_start_container_passes_oci_runtime_with_builtin_seccomp(monkeypatch):
-    """The gVisor profile needs both flags on the sandbox's docker run.
+def test_restricted_destroy_with_every_command_refused_is_failed_not_absent(monkeypatch):
+    backend = _restricted_backend()
+    containers, networks = _restricted_set(backend, "stuck")
+    proxy, network = backend._resource_names("stuck")
+    faults = {"stop:sandbox-stuck": "refuse", f"stop:{proxy}": "refuse", f"rm:{proxy}": "refuse", f"network_rm:{network}": "refuse", f"network_rm:{backend._egress_network_name('stuck')}": "refuse"}
+    _destroy_probe(monkeypatch, backend, containers=containers, networks=networks, faults=faults)
 
-    Asserting only that ``seccomp=unconfined`` is absent would pass on a
-    regression that emits no seccomp option at all and silently inherits the
-    daemon default, which is exactly what the explicit opt-out exists to
-    prevent. The OCI runtime is the daemon-registered name, distinct from the
-    container CLI that ``backend.runtime`` reports.
-    """
-    backend = LocalContainerBackend(
-        image="sandbox:latest",
-        base_port=8080,
-        container_prefix="sandbox",
-        config_mounts=[],
-        environment={},
-    )
-    _clear_hardening_env(monkeypatch)
-    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
-    monkeypatch.setenv("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED", "0")
-
-    captured_cmd = _capture_start_container_command(monkeypatch, backend)
-
-    assert captured_cmd[captured_cmd.index("--runtime") + 1] == "runsc"
-    security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
-    assert "seccomp=builtin" in security_opts
-    assert "seccomp=unconfined" not in security_opts
-    assert "no-new-privileges" in security_opts
-    assert backend.runtime == "docker"
+    assert backend.destroy(_info("stuck")) is DestroyOutcome.FAILED
+    assert len(containers) == 2 and len(networks) == 2, "nothing was removed, and nothing was reported removed"
 
 
-def test_start_container_emits_no_runtime_when_unset(monkeypatch):
-    """Unset or blank keeps the upstream self-host path byte-for-byte."""
-    backend = LocalContainerBackend(
-        image="sandbox:latest",
-        base_port=8080,
-        container_prefix="sandbox",
-        config_mounts=[],
-        environment={},
-    )
-    _clear_hardening_env(monkeypatch)
-    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "   ")
+def test_restricted_destroy_with_a_sidecar_left_behind_is_partial(monkeypatch):
+    backend = _restricted_backend()
+    containers, networks = _restricted_set(backend, "half")
+    proxy, _network = backend._resource_names("half")
+    _destroy_probe(monkeypatch, backend, containers=containers, networks=networks, faults={f"stop:{proxy}": "refuse", f"rm:{proxy}": "refuse"})
 
-    captured_cmd = _capture_start_container_command(monkeypatch, backend)
-
-    assert "--runtime" not in captured_cmd
-    assert "runsc" not in captured_cmd
+    assert backend.destroy(_info("half")) is DestroyOutcome.PARTIAL
+    assert containers == {proxy} and networks == set()
 
 
-def test_start_container_does_not_pass_runtime_to_apple_container(monkeypatch):
-    backend = LocalContainerBackend(
-        image="sandbox:latest",
-        base_port=8080,
-        container_prefix="sandbox",
-        config_mounts=[],
-        environment={},
-    )
-    _clear_hardening_env(monkeypatch)
-    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
+def test_restricted_destroy_with_the_daemon_down_is_unknown_not_absent(monkeypatch):
+    """Every command fails with the daemon's error and nothing can be observed: unknown, nothing reported removed."""
+    backend = _restricted_backend()
+    containers, networks = _restricted_set(backend, "blind")
+    proxy, _network = backend._resource_names("blind")
+    calls = _destroy_probe(monkeypatch, backend, containers=containers, networks=networks, faults={"daemon": "1"})
 
-    captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
+    assert backend.destroy(_info("blind")) is DestroyOutcome.UNKNOWN
+    assert ["docker", "stop", "-t", str(backend._STOP_GRACE_SECONDS), "sandbox-blind"] in calls and ["docker", "rm", "-f", proxy] in calls, "the commands were attempted"
+    assert len(containers) == 2 and len(networks) == 2
 
-    assert "--runtime" not in captured_cmd
-    assert "--memory-swap" not in captured_cmd
+
+def test_restricted_destroy_stop_timeout_is_unknown_and_still_attempts_the_rest(monkeypatch):
+    backend = _restricted_backend()
+    containers, networks = _restricted_set(backend, "slow")
+    proxy, _network = backend._resource_names("slow")
+    calls = _destroy_probe(monkeypatch, backend, containers=containers, networks=networks, faults={"stop:sandbox-slow": "timeout"})
+
+    assert backend.destroy(_info("slow")) is DestroyOutcome.UNKNOWN
+    assert ["docker", "stop", "-t", str(backend._STOP_GRACE_SECONDS), proxy] in calls, "the sidecar was still stopped"
+    assert "sandbox-slow" in containers
+
+
+def test_restricted_destroy_of_an_already_absent_set_is_absent_and_idempotent(monkeypatch):
+    backend = _restricted_backend()
+    _destroy_probe(monkeypatch, backend, containers=set(), networks=set())
+
+    assert backend.destroy(_info("never")) is DestroyOutcome.ABSENT
+
+
+def test_open_mode_destroy_reports_absent_only_when_the_container_is_gone(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    containers: set[str] = {"sandbox-open"}
+    _destroy_probe(monkeypatch, backend, containers=containers, networks=set())
+    assert backend.destroy(_info("open")) is DestroyOutcome.ABSENT
+
+    containers.add("sandbox-open")
+    _destroy_probe(monkeypatch, backend, containers=containers, networks=set(), faults={"stop:sandbox-open": "refuse"})
+    assert backend.destroy(_info("open")) is DestroyOutcome.FAILED
+    assert containers == {"sandbox-open"}
 
 
 def test_stop_container_asks_for_a_short_grace_period(monkeypatch):
@@ -2598,3 +2901,79 @@ def test_stop_container_leaves_a_runtime_that_is_not_docker_on_its_own_default(m
     backend._stop_container("sandbox-parked")
 
     assert seen == [["container", "stop", "sandbox-parked"]]
+
+
+def test_a_sandbox_is_labelled_with_whose_it_is_so_a_restarted_gateway_can_attribute_it(monkeypatch):
+    """Adopted after a restart, a sandbox whose owner is unknown cannot be stopped when that owner is turned off."""
+    backend = _backend_for_inspect_tests()
+    captured: dict[str, object] = {}
+
+    def fake_start(*_args, **kwargs):
+        captured.update(kwargs)
+        return "container-id"
+
+    monkeypatch.setattr(backend, "_start_container", fake_start)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    backend.create(thread_id="thread-1", sandbox_id="owned-open", user_id="user-1")
+
+    assert captured["labels"] == {
+        "deerflow.sandbox_id": "owned-open",
+        "deerflow.role": "sandbox",
+        "deerflow.network_mode": "open",
+        "deerflow.owner_user_id": "user-1",
+        "deerflow.thread_id": "thread-1",
+    }
+
+
+def test_a_restricted_sandbox_is_labelled_with_its_owner_and_stays_compatible(monkeypatch):
+    backend = _restricted_backend()
+    started: dict[str, dict] = {}
+
+    def fake_start(container_name, *_args, **kwargs):
+        started[container_name] = kwargs["labels"]
+        return "container-id"
+
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "missing")
+    monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "10.0.0.2")
+    monkeypatch.setattr(backend, "_start_container", fake_start)
+    monkeypatch.setattr("deerflow.community.aio_sandbox.local_backend.get_free_port", lambda start_port=None: 18080)
+
+    backend.create(thread_id="thread-1", sandbox_id="owned-restricted", user_id="user-1")
+
+    labels = started["sandbox-owned-restricted"]
+    assert labels["deerflow.owner_user_id"] == "user-1" and labels["deerflow.thread_id"] == "thread-1"
+    assert backend._labels_match(labels, backend._restricted_labels("owned-restricted", "sandbox")), "the owner is not part of the policy identity"
+
+
+def test_listing_running_sandboxes_reads_whose_each_is_and_none_for_an_unlabelled_one(monkeypatch):
+    backend = _backend_for_inspect_tests()
+    identity = {"deerflow.role": "sandbox", "deerflow.network_mode": "open"}
+    monkeypatch.setattr(
+        backend,
+        "_batch_inspect",
+        lambda *_args, **_kwargs: {
+            "sandbox-owned": _ContainerInspection(1.0, 18080, {**identity, "deerflow.sandbox_id": "owned", "deerflow.owner_user_id": "user-1", "deerflow.thread_id": "thread-1"}, "sandbox:latest", frozenset({"bridge"})),
+            "sandbox-older": _ContainerInspection(1.0, 18081, {**identity, "deerflow.sandbox_id": "older"}, "sandbox:latest", frozenset({"bridge"})),
+            "sandbox-half": _ContainerInspection(1.0, 18082, {**identity, "deerflow.sandbox_id": "half", "deerflow.owner_user_id": "user-1"}, "sandbox:latest", frozenset({"bridge"})),
+        },
+    )
+    monkeypatch.setattr("subprocess.run", lambda *_args, **_kwargs: SimpleNamespace(stdout="sandbox-owned\nsandbox-older\nsandbox-half\n", stderr="", returncode=0))
+
+    owners = {info.sandbox_id: info.owner for info in backend.list_running()}
+
+    assert owners == {"owned": ("user-1", "thread-1"), "older": None, "half": None}, "half an owner is no owner: it stays unattributed"
+
+
+def test_a_sandbox_without_a_thread_or_a_user_carries_no_owner_label():
+    assert LocalContainerBackend._owner_labels("user-1", None) == {}
+    assert LocalContainerBackend._owner_labels(None, "thread-1") == {}
+
+
+def test_the_owner_is_not_part_of_a_restricted_sandbox_s_identity_labels():
+    """Older unlabelled sets must stay compatible: the expected set names identity and policy only."""
+    backend = _restricted_backend()
+
+    assert set(backend._restricted_labels("x", "sandbox")) == {"deerflow.sandbox_id", "deerflow.role", "deerflow.network_mode", "deerflow.network_policy_digest"}
