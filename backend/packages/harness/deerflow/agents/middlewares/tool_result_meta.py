@@ -44,6 +44,11 @@ class ToolResultMeta:
     recoverable_by_model: bool
     recommended_next_action: RecommendedNextAction
     source: Literal["exception", "tool_return", "content_analysis", "progress_middleware"]
+    #: Who refused. ``origin`` is the destination the call named (one page said
+    #: no) and says nothing about the next address. ``provider`` is the path
+    #: itself and holds for every address this turn. Only a tool that saw the
+    #: transport stamps it; a result without the key reads as ``origin``.
+    error_scope: Literal["origin", "provider"] = "origin"
 
 
 _ERROR_RULES: list[tuple[list[str], dict[str, object]]] = [

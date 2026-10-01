@@ -77,6 +77,7 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     Deferring the call instead of faking the value keeps one answer.
     """
     from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.agents.middlewares.provider_refusal_middleware import ProviderRefusalMiddleware
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
     from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
@@ -98,6 +99,11 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
             reason=("ToolProgressMiddleware reads deerflow_tool_meta in _update_state_from_result, so its wrap_tool_call chain must enclose the ToolErrorHandlingMiddleware step that stamps it"),
         ),
         OrderingConstraint(
+            outer=ProviderRefusalMiddleware,
+            inner=ToolErrorHandlingMiddleware,
+            reason=("ProviderRefusalMiddleware reads deerflow_tool_meta.error_scope from the result ToolErrorHandlingMiddleware normalizes, so its wrap_tool_call chain must enclose that step"),
+        ),
+        OrderingConstraint(
             outer=ToolReceiptMiddleware,
             inner=ToolErrorHandlingMiddleware,
             reason=("ToolReceiptMiddleware reads the deerflow_tool_meta status stamped by ToolErrorHandlingMiddleware when building each receipt, so its wrap_tool_call chain must enclose the stamping step"),
@@ -114,6 +120,7 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
                 SandboxAuditMiddleware,
                 ReadBeforeWriteMiddleware,
                 ToolProgressMiddleware,
+                ProviderRefusalMiddleware,
             )
         ),
         *(

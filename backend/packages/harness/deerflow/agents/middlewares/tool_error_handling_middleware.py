@@ -518,6 +518,14 @@ def _build_runtime_middlewares(
 
         tail.append(ToolProgressMiddleware.from_config(tool_progress_config))
 
+    # ProviderRefusalMiddleware reads deerflow_tool_meta.error_scope, which a
+    # fetch tool stamps on its own result and ToolErrorHandlingMiddleware
+    # leaves in place; it must enclose that step to see it. Always on: it acts
+    # only on a typed provider fact, never on the words of a result.
+    from deerflow.agents.middlewares.provider_refusal_middleware import ProviderRefusalMiddleware
+
+    tail.append(ProviderRefusalMiddleware())
+
     tail.append(ToolErrorHandlingMiddleware(app_config=app_config, skill_authorization=skill_authorization, user_id=user_id))
     # Artifact capture is a `before_model` hook that reads state messages, so
     # its position in the tool-execution wrap chain is functionally irrelevant:
