@@ -78,7 +78,7 @@ class UserRow(Base):
     last_sign_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # The address this account held before the deployer released it
-    # (0041_email_released_from). NULL on every account whose email is its
+    # (0027_account_access). NULL on every account whose email is its
     # own; non-NULL is what "released" means, so nothing has to read the
     # shape of the replacement address to know.
     email_released_from: Mapped[str | None] = mapped_column(String(320), nullable=True)

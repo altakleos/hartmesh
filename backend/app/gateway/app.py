@@ -42,6 +42,7 @@ from app.gateway.routers import (
     models,
     personal_mcp,
     plugins,
+    provider_keys,
     project_documents,
     project_thread_files,
     projects,
@@ -531,6 +532,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     async with personal_mcp_authority(), _runtime_with_mcp_pool_shutdown(app, startup_config):
         logger.info("LangGraph runtime initialised")
+        if getattr(app.state, "provider_keys_applied", False):
+            # Keys set in the product were applied and the config reloaded
+            # inside the runtime's start; what starts from here builds on it.
+            startup_config = get_app_config()
 
         # Check admin bootstrap state and migrate orphan threads after admin exists.
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
@@ -1044,6 +1049,9 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     app.include_router(managed_models.router)
     app.include_router(models.router)
+
+    # Provider keys set in the product (compose profile) at /api/provider-keys
+    app.include_router(provider_keys.router)
 
     # Features API is mounted at /api/features
     app.include_router(features.router)

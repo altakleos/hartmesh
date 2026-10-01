@@ -541,6 +541,21 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         await init_engine_from_config(config.database)
         await _pin_provider_accounts_to_their_issuer(config)
 
+        # Provider keys an administrator set in the product outrank the
+        # environment's, so they are applied before anything below is built
+        # from the config; everything after this reads the reloaded one.
+        app.state.provider_keys = None
+        app.state.provider_keys_applied = False
+        provider_keys_sf = get_session_factory()
+        if provider_keys_sf is not None:
+            from app.gateway.provider_keys.service import ProviderKeyService
+            from deerflow.persistence.provider_keys import ProviderKeyRepository
+
+            app.state.provider_keys = ProviderKeyService.from_environ(ProviderKeyRepository(provider_keys_sf))
+            if app.state.provider_keys is not None and await app.state.provider_keys.start():
+                app.state.provider_keys_applied = True
+                config = get_app_config()
+
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
 
