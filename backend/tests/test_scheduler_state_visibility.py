@@ -17,9 +17,8 @@ import asyncio
 from types import SimpleNamespace
 
 from _router_auth_helpers import call_unwrapped
-from fastapi import FastAPI
 
-from app.gateway.routers import scheduled_tasks, scheduler_state
+from app.gateway.routers import scheduler_state
 
 
 def _request(service: object | None) -> SimpleNamespace:
@@ -121,23 +120,12 @@ def test_reading_the_state_starts_nothing(monkeypatch):
     assert calls == []
 
 
-def test_the_fixed_path_is_not_taken_for_a_task_id():
-    """Both routers share a prefix; registered in the Gateway's order, the fixed path wins."""
-    app = FastAPI()
-    app.include_router(scheduler_state.router)
-    app.include_router(scheduled_tasks.router)
-
-    matched = next(route for route in app.routes if getattr(route, "path", "").startswith("/api/scheduled-tasks/") and route.matches({"type": "http", "method": "GET", "path": "/api/scheduled-tasks/scheduler"})[0].value == 2)
-
-    assert matched.endpoint.__module__ == scheduler_state.__name__
-
-
-def test_the_gateway_registers_the_state_route_before_the_task_routes():
+def test_the_gateway_serves_the_state_where_the_product_reads_it():
     from app.gateway.app import create_app
 
     paths = [getattr(route, "path", "") for route in create_app().routes]
 
-    assert paths.index("/api/scheduled-tasks/scheduler") < paths.index("/api/scheduled-tasks/{task_id}")
+    assert "/api/scheduler" in paths
 
 
 def test_the_bounded_service_reports_whether_its_loop_is_live():

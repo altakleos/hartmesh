@@ -46,10 +46,11 @@ from app.gateway.routers import (
     personal_mcp,
     plugins,
     product,
-    provider_keys,
     project_documents,
     project_thread_files,
     projects,
+    provider_keys,
+    run_delivery,
     runs,
     scheduled_tasks,
     scheduler_state,
@@ -59,8 +60,8 @@ from app.gateway.routers import (
     subagents,
     suggestions,
     thread_export,
-    thread_workspace,
     thread_runs,
+    thread_workspace,
     threads,
     trash,
     uploads,
@@ -1110,7 +1111,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # One conversation's transcript at /api/threads/{thread_id}/export
     app.include_router(thread_export.router)
+
+    # A conversation's sandbox built ahead of its first turn at /api/threads/{thread_id}/workspace/prewarm
     app.include_router(thread_workspace.router)
+
+    # One run's delivery verdict at /api/threads/{thread_id}/runs/{run_id}/delivery
+    app.include_router(run_delivery.router)
 
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)
@@ -1155,9 +1161,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(threads.router)
 
     # Scheduled tasks API is mounted at /api/scheduled-tasks
-    # Before the scheduled-tasks router: its /scheduled-tasks/{task_id} would otherwise match the fixed path
-    app.include_router(scheduler_state.router)
     app.include_router(scheduled_tasks.router)
+
+    # Whether a scheduler is running here at /api/scheduler
+    app.include_router(scheduler_state.router)
 
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)

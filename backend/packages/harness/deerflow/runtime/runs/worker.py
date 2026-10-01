@@ -90,9 +90,9 @@ from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
 from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
+from deerflow.runtime.turn_phases import TurnPhase, TurnPhaseCallbackHandler, current_turn_phases, mark_phase, phase_span
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
-from deerflow.runtime.turn_phases import TurnPhase, TurnPhaseCallbackHandler, current_turn_phases, mark_phase, phase_span
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id, resolve_trace_id
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.assembly_io import run_assembly
@@ -100,6 +100,7 @@ from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
+from .delivery import DELIVERY_INCOMPLETE_STOP_REASON, publish_delivery_failure
 from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
 from .schemas import RunStatus, ThreadOperationKind
@@ -1602,6 +1603,11 @@ async def _run_agent(
                 _runtime_presented_files(runtime_context),
             )
             delivery_error = _delivery_error(delivery_content)
+            if delivery_error is not None:
+                # The terminal status being reported is the delivery error, so
+                # the reason has to explain that one; without it a client that
+                # reloads cannot tell this run from any other failed run.
+                stop_reason = DELIVERY_INCOMPLETE_STOP_REASON
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error if delivery_error else RunStatus.success,
@@ -1611,6 +1617,8 @@ async def _run_agent(
             )
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
+            elif delivery_error is not None and not record.ownership_lost:
+                await publish_delivery_failure(bridge, run_id, message=delivery_error, content=delivery_content)
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)

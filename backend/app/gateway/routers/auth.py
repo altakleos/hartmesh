@@ -8,7 +8,7 @@ import time
 import urllib.parse
 from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from starlette.responses import RedirectResponse

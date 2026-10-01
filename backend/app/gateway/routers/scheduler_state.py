@@ -1,9 +1,4 @@
-"""Whether a scheduler is actually running for the saved schedules.
-
-Mounted beside the scheduled-task routes (``GET /api/scheduled-tasks/scheduler``)
-and registered before them, because their ``/scheduled-tasks/{task_id}`` would
-otherwise match this fixed path.
-"""
+"""Whether a scheduler is actually running for the saved schedules (``GET /api/scheduler``)."""
 
 from __future__ import annotations
 
@@ -37,7 +32,7 @@ class SchedulerStateResponse(BaseModel):
     )
 
 
-@router.get("/scheduled-tasks/scheduler", response_model=SchedulerStateResponse)
+@router.get("/scheduler", response_model=SchedulerStateResponse)
 @require_permission("threads", "read")
 async def get_scheduler_state(request: Request) -> SchedulerStateResponse:
     """Whether anything is actually going to run the saved schedules.
