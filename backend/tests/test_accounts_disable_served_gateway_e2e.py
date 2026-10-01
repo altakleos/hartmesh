@@ -174,3 +174,57 @@ def test_disable_ends_the_session_and_the_run_in_flight_and_enable_lets_the_pers
         with sign_on._client(base) as back:
             assert sign_on._sign_in(back, base, provider, subject=STAFF_SUBJECT, email=sign_on.STAFF).status_code == 302
             assert back.get(f"{base}/api/v1/auth/me").json()["email"] == sign_on.STAFF
+
+
+def _processes_matching(marker: str) -> list[str]:
+    found = subprocess.run(["pgrep", "-f", marker], capture_output=True, text=True, check=False)
+    return [pid for pid in found.stdout.split() if pid and int(pid) != os.getpid()]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process semantics")
+def test_disable_during_a_long_sandbox_command_ends_the_run_and_reports_what_became_of_the_command(gateway: e2e._Gateway, provider: OIDCTestProvider) -> None:
+    """The run is ended and confirmed, and the command it was running is killed with it.
+
+    The local sandbox runs the command as a child of the Gateway. Upstream's
+    cancelled run waits for its command to finish; the command-scoped
+    cancellation carried here (``run_sync_sandbox_command``) kills it, which
+    is what lets the run reach a terminal status inside the command's wait.
+    """
+    base = gateway.loopback_url
+    issuer = provider.issuer_url("a")
+    subject = "sub-long-command"
+    marker = "sleep 211.337"
+
+    with sign_on._client(base) as person:
+        assert sign_on._sign_in(person, base, provider, subject=subject, email="long@example.com").status_code == 302
+        thread_id = sign_on._create_thread(person, base)
+        seen: dict[str, Any] = {}
+
+        def drive() -> None:
+            try:
+                seen["observation"] = e2e._observe_stream(person, base, thread_id, sign_on._csrf(person)["X-CSRF-Token"], f"probe:bash {marker}", timeout=120.0)
+            except Exception as exc:  # noqa: BLE001 - the stream ending however it ends is the result
+                seen["stream_error"] = exc
+
+        stream = threading.Thread(target=drive, name="long-command-run", daemon=True)
+        stream.start()
+        deadline = time.monotonic() + 30
+        while not _processes_matching(marker) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert _processes_matching(marker), "the sandbox command never started"
+
+        try:
+            code, document = _accounts(gateway, "disable", "--issuer", issuer, "--subject", subject, "--wait-seconds", "60")
+            assert document["verdict"] == "disabled" and document["runs_found"] == 1, document
+            assert code == 0 and document["runs_cancelled"] == 1 and document["runs_unconfirmed"] == [], document
+            stream.join(timeout=30)
+            assert not stream.is_alive(), "the stream outlived the run"
+            time.sleep(2.0)
+            survivors = _processes_matching(marker)
+            # Recorded for the trial's findings: printed with -s, asserted either way below.
+            print(f"COMMAND_SURVIVED_THE_CANCELLED_RUN={bool(survivors)}")
+            seen["survivors"] = survivors
+        finally:
+            for pid in _processes_matching(marker):
+                subprocess.run(["kill", "-9", pid], check=False)
+        assert seen["survivors"] == [], "the command outlived the run it belonged to"

@@ -1045,11 +1045,9 @@ async def test_the_boundary_holds_on_a_real_redis(office, monkeypatch):
     # not have chosen. Only the URL is test-local; the key prefix comes from a
     # throwaway tenant namespace, which is both how a real Gateway derives it
     # and what keeps one run's keys off every other tenant on this server.
-    from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
-
     local = office.model_copy(update={"lockout_store_redis_url": redis_url})
     set_app_config(AppConfig(sandbox=SandboxConfig(use="test"), auth=AuthAppConfig(local=local)))
-    namespace = TenantIdentityV1.from_canonical_id(f"px-{uuid.uuid4().hex[:12]}").namespace(TenantSubsystem.REDIS)
+    namespace = f"px-{uuid.uuid4().hex[:12]}"
     monkeypatch.setattr(_BareApp._State, "redis_tenant_namespace", namespace)
     prefix = login_throttle.redis_key_prefix(namespace)
     assert prefix != login_throttle.UNSCOPED_KEY_PREFIX
