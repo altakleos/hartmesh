@@ -5,6 +5,12 @@ All notable changes to DeerFlow are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.1.0+hartmesh.37] — 2026-10-01
+
+- hartmesh#174 — a scheduled run can be given a wall-time bound: `scheduler.max_run_seconds` (300 to 86400, unset by default). An occurrence still running past it ends `failed` with "the task did not finish within N minutes, so it was stopped", the task's last error says the same, and the run is asked to stop. A scheduled run a limit cut short (the run's guard cap or execution budget) is now a `failed` occurrence with a plain-words reason on the scheduled-tasks page, where it used to read as completed. `config_version` is 58.
+
+- hartmesh#175 — the tenant profile ships with scheduled tasks on: `max_concurrent_runs: 1` (one less than the two sandbox slots, so a person's turn keeps a slot), `max_run_seconds: 900`, `queue_timeout_seconds: 7200`. `scheduler.recursion_limit` was never sent on the live path, so scheduled runs got the Gateway default of 100 graph steps (about 9 model turns); it is now sent on every dispatch (1000 steps, about 90 turns), and a run that reaches it ends `failed` with a plain reason. After a wall-time Stop the scheduler launches nothing until the stopped run has finished unwinding. **On upgrade:** the first poll after a start runs every enabled overdue schedule once, oldest first, one at a time (no backfill); `queue_timeout_seconds` counts from admission, so a long backlog fails its tail; paused schedules do not run. A second person is still refused while a scheduled run and one person hold both slots. The compose README's "Scheduled tasks" section states the values and limits.
+
 ## [2.1.0+hartmesh.36] — 2026-09-29
 
 - hartmesh#168 — a conversation's Markdown or JSON download is written by the Gateway (`GET /api/threads/{thread_id}/export?format=markdown|json`) from the conversation's message feed, not from whatever the page had loaded. A long conversation downloads whole, and one that was summarized or compacted keeps every turn the page shows; the sidebar's menu used to drop the earlier ones. "Created" shows the conversation's real creation time, times are UTC, and a conversation with no messages says so instead of downloading an empty file. The file carries the person's and the assistant's words only, without reasoning, tool calls and results, or injected context. The chat header's export is no longer offered in a static demo, which has no Gateway.
@@ -394,6 +400,7 @@ browser-only (IM surfaces still show the uncorrected prose) and does not yet
 survive a reload, since it rides the stream rather than being rehydrated from
 the run's delivery receipt.
 
+[2.1.0+hartmesh.37]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.37
 [2.1.0+hartmesh.36]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.36
 [2.1.0+hartmesh.35]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.35
 [2.1.0+hartmesh.34]: https://github.com/altakleos/hartmesh/releases/tag/v2.1.0+hartmesh.34
