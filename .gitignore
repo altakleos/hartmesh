@@ -42,6 +42,8 @@ extensions_config.json
 coverage.xml
 coverage/
 .deer-flow/
+# Per-worker writable homes created by the parallel backend test run.
+.deer-flow-test/
 .claude/
 skills/custom/*
 logs/
@@ -64,6 +66,8 @@ config.yaml.bak
 .playwright-mcp
 /frontend/test-results/
 /frontend/playwright-report/
+/frontend-hm/test-results/
+/frontend-hm/playwright-report/
 .gstack/
 .worktrees
 

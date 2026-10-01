@@ -125,7 +125,7 @@ def test_dev_compose_env_files_are_optional():
     compose = yaml.safe_load(COMPOSE_PATHS["dev"].read_text(encoding="utf-8"))
     expected = {
         "provisioner": "../.env",
-        "frontend": "../frontend/.env",
+        "frontend": "../frontend-hm/.env",
         "gateway": "../.env",
     }
     for service_name, path in expected.items():

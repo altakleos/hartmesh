@@ -1,0 +1,392 @@
+{
+  "version": 1,
+  "meta": {
+    "title": "August 2026 Business Review",
+    "company": "Example Services Co.",
+    "period": {
+      "start": "2026-08-01",
+      "end": "2026-08-31",
+      "label": "August 2026",
+      "key": "2026-08"
+    },
+    "generated_at": "2026-09-16T06:29:23Z",
+    "draft": 1,
+    "inputs": [
+      {
+        "name": "example_services_export_small.csv",
+        "sha256": "dcb160294261a4f4214fa2b3bf1d88940fbf130e4ced6566d8cff3d5fb9f8a8a",
+        "rows": 300,
+        "uploaded": "2026-09-15",
+        "sheet": null
+      }
+    ],
+    "profile": "services-generic",
+    "preferences_applied": [],
+    "lang": "en-US",
+    "currency": {
+      "code": "USD",
+      "source": "header"
+    },
+    "build": {
+      "sources": ["/mnt/user-data/uploads/example_services_export_small.csv"],
+      "mapping": {
+        "date": "Completed On",
+        "amount": "Total (USD)",
+        "id": "Job #",
+        "customer": "Customer Name",
+        "category": "Service Type",
+        "person": "Assigned To",
+        "status": "Invoice Status",
+        "source": "Source",
+        "quantity": "Quantity",
+        "location": "City"
+      },
+      "exclusions": []
+    },
+    "brand": {
+      "company": "Example Services Co.",
+      "primary": "#1F4E79",
+      "secondary": "#8FA9C8",
+      "logo": null
+    }
+  },
+  "kpis": [
+    {
+      "id": "revenue",
+      "label": "Revenue",
+      "value": 74702.61,
+      "format": "currency",
+      "delta": {
+        "vs": "July 2026",
+        "pct": 38.7,
+        "previous": 53864.48
+      }
+    },
+    {
+      "id": "jobs",
+      "label": "Jobs",
+      "value": 164,
+      "format": "integer",
+      "delta": {
+        "vs": "July 2026",
+        "pct": 20.6,
+        "previous": 136
+      }
+    },
+    {
+      "id": "average_ticket",
+      "label": "Avg ticket",
+      "value": 455.5,
+      "format": "currency"
+    },
+    {
+      "id": "unpaid",
+      "label": "Unpaid",
+      "value": 14213.15,
+      "format": "currency"
+    },
+    {
+      "id": "new_customers",
+      "label": "New customer share",
+      "value": 28.6,
+      "format": "percent"
+    }
+  ],
+  "sections": [
+    {
+      "id": "summary",
+      "heading": "Summary",
+      "paragraphs": [
+        "August 2026: $74,702.61 in revenue across 164 jobs, an average of $455.50 per job. That is 38.7% above July 2026 ($53,864.48). Installation was the largest service at 51.6% of revenue. F. Haddad led with $16,490.17 across 30 jobs. $14,213.15 across 23 jobs is unpaid."
+      ]
+    },
+    {
+      "id": "comparison",
+      "heading": "Compared with earlier periods",
+      "table": {
+        "columns": ["Metric", "August 2026", "July 2026", "Change"],
+        "formats": ["text", "number", "number", "percent"],
+        "rows": [
+          ["Revenue", 74702.61, 53864.48, 38.7],
+          ["Jobs", 164, 136, 20.6],
+          ["Average ticket", 455.5, 396.06, 15.0]
+        ],
+        "totals": null,
+        "row_formats": [
+          ["text", "currency", "currency", "percent"],
+          ["text", "integer", "integer", "percent"],
+          ["text", "currency", "currency", "percent"]
+        ]
+      }
+    },
+    {
+      "id": "by_period",
+      "heading": "By week",
+      "table": {
+        "columns": ["Week", "Jobs", "Revenue", "Avg ticket"],
+        "formats": ["text", "integer", "currency", "currency"],
+        "rows": [
+          ["1–2 Aug", 3, 595.44, 198.48],
+          ["3–9 Aug", 32, 10003.14, 312.6],
+          ["10–16 Aug", 43, 20782.22, 483.31],
+          ["17–23 Aug", 41, 19285.19, 470.37],
+          ["24–30 Aug", 39, 21436.16, 549.65],
+          ["31 Aug", 6, 2600.46, 433.41]
+        ],
+        "totals": ["Total", 164, 74702.61, 455.5],
+        "ratios": [[3, 2, 1]]
+      },
+      "charts": ["revenue_by_period"]
+    },
+    {
+      "id": "by_category",
+      "heading": "By service",
+      "table": {
+        "columns": ["Service", "Jobs", "Revenue", "Avg ticket", "Share"],
+        "formats": ["text", "integer", "currency", "currency", "percent"],
+        "rows": [
+          ["Installation", 42, 38521.86, 917.19, 51.57],
+          ["Repair", 59, 24469.62, 414.74, 32.76],
+          ["Maintenance", 33, 7620.42, 230.92, 10.2],
+          ["Consultation", 12, 2232.86, 186.07, 2.99],
+          ["Inspection", 14, 1857.85, 132.7, 2.49],
+          ["Warranty", 4, 0, 0, 0]
+        ],
+        "totals": ["Total", 164, 74702.61, 455.5, 100],
+        "ratios": [[3, 2, 1]]
+      },
+      "charts": ["revenue_by_category"]
+    },
+    {
+      "id": "by_person",
+      "heading": "By technician",
+      "table": {
+        "columns": ["Technician", "Jobs", "Revenue", "Avg ticket", "Unpaid"],
+        "formats": ["text", "integer", "currency", "currency", "currency"],
+        "rows": [
+          ["F. Haddad", 30, 16490.17, 549.67, 4806.61],
+          ["B. Chen", 37, 14820.26, 400.55, 1634.9],
+          ["E. Schmidt", 19, 14278.37, 751.49, 2106.52],
+          ["D. Novak", 28, 12910.69, 461.1, 1951.03],
+          ["C. Okafor", 24, 8499.6, 354.15, 3465.57],
+          ["A. Rivera", 24, 6539.76, 272.49, 0],
+          ["Unassigned", 2, 1163.76, 581.88, 248.52]
+        ],
+        "totals": ["Total", 164, 74702.61, 455.5, 14213.15],
+        "ratios": [[3, 2, 1]]
+      },
+      "charts": ["jobs_by_person"]
+    },
+    {
+      "id": "customers",
+      "heading": "Top 10 customers",
+      "table": {
+        "columns": ["Customer", "Jobs", "Revenue", "Avg ticket"],
+        "formats": ["text", "integer", "currency", "currency"],
+        "rows": [
+          ["Elm Point Hotel", 12, 7338.31, 611.53],
+          ["Stone Ridge Apartments", 11, 5227.4, 475.22],
+          ["Maple Crossing Offices", 7, 5205.74, 743.68],
+          ["Cedar Ridge Hotel", 10, 5046.13, 504.61],
+          ["Hillcrest Crossing Library", 10, 4698.41, 469.84],
+          ["Cedar Creek Cafe", 8, 4117.26, 514.66],
+          ["Oak Street Studio", 7, 3919.99, 560.0],
+          ["Elm View Bakery", 11, 3791.32, 344.67],
+          ["Lakeside Ridge Library", 6, 3568.6, 594.77],
+          ["Willow Heights Cafe", 6, 3516.98, 586.16]
+        ],
+        "totals": null,
+        "ratios": [[3, 2, 1]]
+      },
+      "paragraphs": [
+        "8 of 28 customers were new in August 2026 (28.6%), based on the files given."
+      ]
+    },
+    {
+      "id": "status",
+      "heading": "By status",
+      "table": {
+        "columns": ["Status", "Jobs", "Revenue", "Avg ticket", "Share"],
+        "formats": ["text", "integer", "currency", "currency", "percent"],
+        "rows": [
+          ["Paid", 129, 60489.46, 468.91, 80.97],
+          ["Unpaid", 23, 14213.15, 617.96, 19.03],
+          ["Cancelled", 12, 0, 0, 0]
+        ],
+        "totals": ["Total", 164, 74702.61, 455.5, 100],
+        "ratios": [[3, 2, 1]]
+      }
+    },
+    {
+      "id": "source",
+      "heading": "By lead source",
+      "table": {
+        "columns": ["Lead source", "Jobs", "Revenue", "Avg ticket", "Share"],
+        "formats": ["text", "integer", "currency", "currency", "percent"],
+        "rows": [
+          ["Referral", 59, 30106.23, 510.28, 40.3],
+          ["Website", 55, 27273.85, 495.89, 36.51],
+          ["Repeat", 30, 10253.07, 341.77, 13.73],
+          ["Phone", 13, 4799.77, 369.21, 6.43],
+          ["Social", 7, 2269.69, 324.24, 3.04]
+        ],
+        "totals": ["Total", 164, 74702.61, 455.5, 100],
+        "ratios": [[3, 2, 1]]
+      }
+    },
+    {
+      "id": "actions",
+      "heading": "What to act on",
+      "bullets": [
+        "Collect the $14,213.15 still unpaid across 23 jobs.",
+        "Installation is 51.6% of revenue; a slow month there moves the whole business.",
+        "Assign the 2 jobs with no technician so the by-technician figures are complete."
+      ]
+    }
+  ],
+  "charts": [
+    {
+      "id": "revenue_by_period",
+      "png": "charts/revenue_by_period.png",
+      "spec": {
+        "type": "bar",
+        "x": "week",
+        "y": "revenue",
+        "title": "Revenue by week",
+        "format": "currency"
+      }
+    },
+    {
+      "id": "revenue_by_category",
+      "png": "charts/revenue_by_category.png",
+      "spec": {
+        "type": "barh",
+        "x": "service",
+        "y": "revenue",
+        "title": "Revenue by service",
+        "format": "currency"
+      }
+    },
+    {
+      "id": "jobs_by_person",
+      "png": "charts/jobs_by_person.png",
+      "spec": {
+        "type": "bar",
+        "x": "technician",
+        "y": "jobs",
+        "title": "Jobs by technician",
+        "format": "integer"
+      }
+    }
+  ],
+  "checks": [
+    {
+      "id": "rows_used",
+      "status": "pass",
+      "text": "Used 164 of 300 rows: 136 are outside August 2026, 0 had no usable date."
+    },
+    {
+      "id": "totals_reconcile",
+      "status": "pass",
+      "text": "Totals match your file: $74,702.61 across 164 jobs."
+    },
+    {
+      "id": "duplicate_ids",
+      "status": "pass",
+      "text": "No job ID appears more than once."
+    },
+    {
+      "id": "unmapped_rows",
+      "status": "warn",
+      "text": "2 jobs had no technician and are listed as Unassigned."
+    },
+    {
+      "id": "unparsed_amounts",
+      "status": "pass",
+      "text": "Every row has a usable amount."
+    },
+    {
+      "id": "currency",
+      "status": "pass",
+      "text": "Amounts are in USD (from the column header)."
+    },
+    {
+      "id": "included_zero_rows",
+      "status": "warn",
+      "text": "12 cancelled jobs and 16 jobs at $0.00 are included in the job count and the average ticket."
+    }
+  ],
+  "notes": [
+    "Comparison with August 2025: not included, the files have no rows for that period."
+  ],
+  "rows": {
+    "columns": [
+      "Date",
+      "Revenue",
+      "ID",
+      "Customer",
+      "Service",
+      "Technician",
+      "Status",
+      "Lead source",
+      "Quantity",
+      "Location",
+      "Notes"
+    ],
+    "formats": [
+      "date",
+      "currency",
+      "text",
+      "text",
+      "text",
+      "text",
+      "text",
+      "text",
+      "number",
+      "text",
+      "text"
+    ],
+    "rows": [
+      [
+        "2026-08-02",
+        416.61,
+        "J-10137",
+        "Elm View Bakery",
+        "Maintenance",
+        "C. Okafor",
+        "Paid",
+        "Website",
+        3,
+        "Fairview",
+        "Follow-up call booked"
+      ],
+      [
+        "2026-08-02",
+        178.83,
+        "J-10138",
+        "Hillcrest Crossing Library",
+        "Maintenance",
+        "E. Schmidt",
+        "Paid",
+        "Website",
+        1,
+        "Greenville",
+        "Customer asked for a quote"
+      ],
+      [
+        "2026-08-02",
+        0,
+        "J-10139",
+        "Hillcrest Grove Gym",
+        "Repair",
+        "A. Rivera",
+        "Cancelled",
+        "Website",
+        1,
+        "Greenville",
+        ""
+      ]
+    ],
+    "totals": null
+  }
+}

@@ -283,9 +283,9 @@ stop_all() {
 # Validate the reusable frontend build before any stop_all runs, so start and
 # restart never tear down a healthy stack only to fail here. --stop is exempt.
 if [ "$ACTION" != "stop" ] && ! $DEV_MODE && $SKIP_FRONTEND_BUILD; then
-    if [ ! -f "$REPO_ROOT/frontend/.next/BUILD_ID" ]; then
+    if [ ! -f "$REPO_ROOT/frontend-hm/.next/BUILD_ID" ]; then
         echo "✗ --skip-frontend-build requires an existing frontend build."
-        echo "  Run 'make start' once (full build), or: cd frontend && pnpm run build"
+        echo "  Run 'make start' once (full build), or: cd frontend-hm && pnpm run build"
         exit 1
     fi
 fi
@@ -326,15 +326,15 @@ export DEERFLOW_PNPM_PYTHON DEERFLOW_PNPM_RUNNER
 
 # Frontend command
 if $DEV_MODE; then
-    FRONTEND_CMD='env PORT=3000 "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" run dev'
+    FRONTEND_CMD='env PORT=3000 "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" --project frontend-hm -- run dev'
     if $SKIP_FRONTEND_BUILD; then
         echo "  Note: --skip-frontend-build is ignored in dev mode (next dev does not build)."
     fi
 elif $SKIP_FRONTEND_BUILD; then
     # The BUILD_ID preflight above already guarantees a reusable build exists.
-    FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run start"
+    FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" --project frontend-hm -- run start"
 else
-    FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" run preview"
+    FRONTEND_CMD="env PORT=3000 BETTER_AUTH_SECRET=$($DEERFLOW_PNPM_PYTHON -c 'import secrets; print(secrets.token_hex(16))') \"\$DEERFLOW_PNPM_PYTHON\" \"\$DEERFLOW_PNPM_RUNNER\" --project frontend-hm -- run preview"
 fi
 
 # Runtime path defaults. Local `make dev` launches Gateway from `backend/`,
@@ -419,7 +419,7 @@ if ! $SKIP_INSTALL; then
     # in particular). Required for postgres extras — see PR #2584.
     # Intentionally unquoted to splat multiple `--extra X` pairs.
     (cd backend && uv sync --locked --quiet --all-packages $UV_EXTRAS_FLAGS) || { echo "✗ Backend dependency install failed"; exit 1; }
-    (cd frontend && "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
+    (cd frontend-hm && "$DEERFLOW_PNPM_PYTHON" "$DEERFLOW_PNPM_RUNNER" --project frontend-hm -- install --silent) || { echo "✗ Frontend dependency install failed"; exit 1; }
     echo "✓ Dependencies synced"
 else
     echo "⏩ Skipping dependency install (--skip-install)"
@@ -500,7 +500,7 @@ run_service "Gateway" \
 
 # 2. Frontend
 run_service "Frontend" \
-    "cd frontend && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
+    "cd frontend-hm && $FRONTEND_CMD > ../logs/frontend.log 2>&1" \
     3000 300
 
 # 3. Nginx

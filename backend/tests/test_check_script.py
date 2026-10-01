@@ -84,7 +84,7 @@ def test_check_script_resolves_runner_paths_independently_of_cwd(monkeypatch):
 
     assert check_script.PNPM_SCRIPT_PATH == PNPM_SCRIPT_PATH
     assert check_script.PNPM_SCRIPT_PATH.is_absolute()
-    assert check_script.FRONTEND_DIR == REPO_ROOT / "frontend"
+    assert check_script.FRONTEND_DIR == REPO_ROOT / "frontend-hm"
     assert check_script.FRONTEND_DIR.is_absolute()
 
 
@@ -108,7 +108,7 @@ def test_check_script_preserves_runner_failure_diagnostics(monkeypatch):
         False,
         "Error: pnpm command failed with exit status 42.\npartial pnpm output",
     )
-    assert call_kwargs["cwd"] == REPO_ROOT / "frontend"
+    assert call_kwargs["cwd"] == REPO_ROOT / "frontend-hm"
 
 
 def test_check_script_preserves_corepack_resolution_hint(monkeypatch):

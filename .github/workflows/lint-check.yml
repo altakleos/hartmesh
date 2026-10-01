@@ -71,6 +71,14 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Check upstream snapshot and Hartmesh source isolation
+        run: python3 scripts/verify_frontend_isolation.py --revision HEAD
+
+      - name: Build without the upstream reference source
+        run: mv frontend "$RUNNER_TEMP/hartmesh-upstream-frontend"
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -85,25 +93,25 @@ jobs:
 
       - name: Install frontend dependencies
         run: |
-          cd frontend
+          cd frontend-hm
           pnpm install --frozen-lockfile
 
       - name: Check frontend formatting
         run: |
-          cd frontend
+          cd frontend-hm
           pnpm format
 
       - name: Run frontend linting
         run: |
-          cd frontend
+          cd frontend-hm
           pnpm lint
 
       - name: Check TypeScript types
         run: |
-          cd frontend
+          cd frontend-hm
           pnpm typecheck
 
       - name: Build frontend
         run: |
-          cd frontend
+          cd frontend-hm
           BETTER_AUTH_SECRET=local-dev-secret pnpm build

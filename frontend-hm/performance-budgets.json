@@ -1,0 +1,14 @@
+{
+  "/login": {
+    "css": 170000,
+    "js": 850000
+  },
+  "/workspace/chats": {
+    "css": 190000,
+    "js": 1750000
+  },
+  "/workspace/chats/7cfa5f8f-a2f8-47ad-acbd-da7137baf990": {
+    "css": 190000,
+    "js": 4100000
+  }
+}

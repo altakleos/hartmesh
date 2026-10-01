@@ -54,12 +54,12 @@ jobs:
 
             // ---- area: replaces .github/labeler.yml (path -> area) ----
             const AREA_RULES = [
-              ['area:frontend', [/^frontend\//]],
+              ['area:frontend', [/^frontend(?:-hm)?\//]],
               ['area:backend',  [/^backend\/app\//, /^backend\/packages\/harness\/deerflow\/(runtime|persistence|config|tools|guardrails|tracing|models|utils|uploads)\//]],
               ['area:agents',   [/^backend\/packages\/harness\/deerflow\/(agents|subagents|reflection)\//, /(^|\/)langgraph\.json$/, /^backend\/.*\/prompts\//]],
               ['area:sandbox',  [/^docker\//, /^backend\/packages\/harness\/deerflow\/sandbox\//, /(^|\/)Dockerfile$/]],
-              ['area:skills',   [/^skills\//, /^backend\/packages\/harness\/deerflow\/skills\//, /^frontend\/src\/core\/skills\//]],
-              ['area:mcp',      [/^backend\/packages\/harness\/deerflow\/mcp\//, /^frontend\/src\/core\/mcp\//]],
+              ['area:skills',   [/^skills\//, /^backend\/packages\/harness\/deerflow\/skills\//, /^frontend(?:-hm)?\/src\/core\/skills\//]],
+              ['area:mcp',      [/^backend\/packages\/harness\/deerflow\/mcp\//, /^frontend(?:-hm)?\/src\/core\/mcp\//]],
               ['area:ci',       [/^\.github\//, /^scripts\//]],
               ['area:docs',     [/^docs\//, /\.mdx?$/]],
               ['area:deps',     [/(^|\/)(pyproject\.toml|uv\.lock|package\.json|pnpm-lock\.yaml)$/]],
@@ -98,7 +98,7 @@ jobs:
               m(/^backend\/app\/gateway\//) ||
               m(/^backend\/packages\/harness\/deerflow\/(agents|subagents)\//) ||
               m(/(^|\/)langgraph\.json$/) ||
-              m(/^frontend\/src\/core\/(api|threads|messages)\//);
+              m(/^frontend(?:-hm)?\/src\/core\/(api|threads|messages)\//);
 
             // ---- live current labels (NOT the stale event payload) ----
             const current = (await github.paginate(github.rest.issues.listLabelsOnIssue, {
