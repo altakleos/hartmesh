@@ -20,6 +20,7 @@ from app.channels.connection_identity import attach_connection_identity
 from app.channels.message_bus import InboundMessage, InboundMessageType, InboundReservation, MessageBus, OutboundMessage, ResolvedAttachment
 from app.channels.sandbox_files import sync_file_to_thread_sandbox
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, get_paths
+from deerflow.config.ui_config import DEFAULT_PRODUCT_NAME
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.uploads.manager import (
@@ -981,7 +982,7 @@ class DingTalkChannel(Channel):
                 headers=self._api_headers(token),
                 json={
                     "msgKey": "sampleMarkdown",
-                    "msgParam": json.dumps({"title": "DeerFlow", "text": text}),
+                    "msgParam": json.dumps({"title": self.config.get("product_name") or DEFAULT_PRODUCT_NAME, "text": text}),
                     "robotCode": robot_code,
                     "userIds": [user_id],
                 },
@@ -1012,7 +1013,7 @@ class DingTalkChannel(Channel):
                 headers=self._api_headers(token),
                 json={
                     "msgKey": "sampleMarkdown",
-                    "msgParam": json.dumps({"title": "DeerFlow", "text": text}),
+                    "msgParam": json.dumps({"title": self.config.get("product_name") or DEFAULT_PRODUCT_NAME, "text": text}),
                     "robotCode": robot_code,
                     "openConversationId": conversation_id,
                 },

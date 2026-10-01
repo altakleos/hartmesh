@@ -25,6 +25,7 @@ from app.gateway.routers import (
     artifacts,
     assistants_compat,
     auth,
+    branding,
     browser,
     capabilities,
     channel_connections,
@@ -43,6 +44,7 @@ from app.gateway.routers import (
     models,
     personal_mcp,
     plugins,
+    product,
     provider_keys,
     project_documents,
     project_thread_files,
@@ -54,6 +56,7 @@ from app.gateway.routers import (
     subagent_batches,
     subagents,
     suggestions,
+    thread_export,
     thread_runs,
     threads,
     trash,
@@ -1057,6 +1060,15 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # Features API is mounted at /api/features
     app.include_router(features.router)
+
+    # Branding API (the tenant bundle's logo) is mounted at /api/branding
+    app.include_router(branding.router)
+
+    # The product's name, public for the sign-in page, at /api/product
+    app.include_router(product.router)
+
+    # One conversation's transcript at /api/threads/{thread_id}/export
+    app.include_router(thread_export.router)
 
     # Console API (cross-thread observability) is mounted at /api/console
     app.include_router(console.router)
