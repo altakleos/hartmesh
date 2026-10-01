@@ -51,6 +51,7 @@ from deerflow.config.subagents_config import SubagentsAppConfig, load_subagents_
 from deerflow.config.suggestions_config import SuggestionsConfig
 from deerflow.config.summarization_config import SummarizationConfig, load_summarization_config_from_dict
 from deerflow.config.task_continuity_config import TaskContinuityConfig
+from deerflow.config.tenant_bundle import TenantBundleConfig
 from deerflow.config.title_config import TitleConfig, load_title_config_from_dict
 from deerflow.config.token_budget_config import TokenBudgetConfig
 from deerflow.config.token_usage_config import TokenUsageConfig
@@ -60,6 +61,7 @@ from deerflow.config.tool_output_config import ToolOutputConfig
 from deerflow.config.tool_progress_config import ToolProgressConfig
 from deerflow.config.tool_search_config import ToolSearchConfig, load_tool_search_config_from_dict
 from deerflow.config.typesafe_config import TypeSafeConfig, load_typesafe_config_from_dict
+from deerflow.config.ui_config import UiConfig
 from deerflow.config.verification_config import VerificationConfig
 from deerflow.extensions.loader import ExtensionSpec
 
@@ -303,6 +305,8 @@ class AppConfig(BaseModel):
     pii_redaction: PiiRedactionConfig = Field(default_factory=PiiRedactionConfig, description="PII redaction middleware configuration (issue #3190)")
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
+    ui: UiConfig = Field(default_factory=UiConfig, description="Workspace presentation: the Home starters and which screens non-administrators are offered.")
+    tenant_bundle: TenantBundleConfig = Field(default_factory=TenantBundleConfig, description="Where the deployment's brand, starter list and report profiles are read from; the same directory sandboxes mount at /mnt/tenant.")
     model_config = ConfigDict(extra="allow")
     database: DatabaseConfig = Field(
         default_factory=DatabaseConfig,

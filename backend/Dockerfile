@@ -73,6 +73,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     done; \
     UV_INDEX_URL=${UV_INDEX_URL:-https://pypi.org/simple} uv sync --locked --extra redis $extras_flags'
 
+
 # UTF-8 locale prevents UnicodeEncodeError on Chinese/emoji content in minimal
 # containers where locale configuration may be missing and the default encoding is not UTF-8.
 ENV LANG=C.UTF-8
@@ -119,6 +120,13 @@ WORKDIR /app
 
 # Copy backend with pre-built virtualenv from builder
 COPY --from=builder /app/backend ./backend
+
+# Public skill library, last so a skill edit rebuilds only this layer. Stacks
+# that bind-mount ../skills at /app/skills (docker/docker-compose*.yaml, the
+# chart's skills volume) shadow it; the tenant VM profile seeds its skills root
+# from it at every start (deploy/compose/gateway/run.sh), so a public skill
+# reaches a tenant only through a release of this image.
+COPY skills/public ./skills/public
 
 # Expose Gateway API port.
 EXPOSE 8001

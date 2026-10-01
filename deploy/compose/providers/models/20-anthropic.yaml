@@ -1,0 +1,21 @@
+# Included when ANTHROPIC_API_KEY is present. From config.example.yaml.
+env: ANTHROPIC_API_KEY
+models:
+  - name: claude-sonnet-4
+    display_name: Claude Sonnet 4
+    use: langchain_anthropic:ChatAnthropic
+    model: claude-sonnet-4-20250514
+    api_key: $ANTHROPIC_API_KEY
+    default_request_timeout: 600.0
+    max_retries: 2
+    max_tokens: 16000
+    context_window: 200000
+    supports_vision: true
+    supports_thinking: true
+    when_thinking_enabled:
+      thinking:
+        type: enabled
+        budget_tokens: 4096
+    when_thinking_disabled:
+      thinking:
+        type: disabled

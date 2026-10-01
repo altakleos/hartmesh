@@ -1,0 +1,1293 @@
+"""Offline contracts for the tenant VM compose profile under deploy/compose.
+
+The profile is a released deployment path beside the Helm chart: one KVM
+guest per customer, the whole stack under Docker Compose, sandboxes created
+by the Gateway's local Docker backend. These tests pin what the profile
+promises without a Docker daemon: the .env contract, the published surface,
+the memory budget, the config render, the nginx render, and the release
+pinning that makes ``images.txt`` and the profile agree byte for byte.
+"""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+from collections.abc import Iterator
+from ipaddress import ip_network
+from pathlib import Path
+from types import ModuleType
+
+import pytest
+import yaml
+from _compose_network_ranges import DOCKER_DEFAULT_POOLS, EXTERNAL_RANGES
+
+# Two tests here load the tenant profile with ``AppConfig.from_file``, which
+# writes process-wide singletons ``reset_app_config()`` does not restore.
+from _config_singleton_guard import restore_config_singletons  # noqa: F401 -- autouse fixture
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PROFILE = REPO_ROOT / "deploy" / "compose"
+COMPOSE = PROFILE / "compose.yaml"
+TEMPLATE = PROFILE / "config.yaml"
+CATALOG = PROFILE / "providers"
+IMAGES = PROFILE / "images.txt"
+RELEASE = "2.1.0+hartmesh.5"
+RELEASE_IMAGE_TAG = "v2.1.0-hartmesh.5"
+CONTRACT_KEYS = {
+    "HARTMESH_TENANT",
+    "HARTMESH_PUBLIC_HOST",
+    "HARTMESH_TRUSTED_PROXIES",
+    "HARTMESH_LISTEN",
+    "HARTMESH_DATA_DIR",
+    "SANDBOX_RUNTIME",
+    "SANDBOX_EGRESS",
+    "POSTGRES_PASSWORD",
+    "REDIS_PASSWORD",
+    "AUTH_JWT_SECRET",
+}
+SERVICES = {"gateway", "frontend", "nginx", "postgres", "redis", "searxng"}
+# Optional keys compose.yaml itself interpolates; each must carry its own
+# default so an existing tenant .env that never heard of it still renders.
+OPTIONAL_KEYS = {"HARTMESH_APP_SUBNET", "HARTMESH_SANDBOX_RESOLV_CONF"}
+# Optional secrets compose.yaml interpolates with an empty default, so they can
+# come from the environment of the `docker compose` command and stay off the
+# data disk the .env lives on (README: "Provider keys in the product").
+COMMAND_ENVIRONMENT_KEYS = {"HARTMESH_PROVIDER_KEYS_SECRET", "HARTMESH_PROVIDER_KEYS_SECRET_PREVIOUS"}
+# Optional keys compose.yaml never interpolates: they reach the Gateway
+# through the tenant .env (`env_file`) and are read by the profile's own
+# scripts. See tests/test_compose_operator_models.py.
+PASSTHROUGH_KEYS = {
+    "HARTMESH_MODELS_FILE",
+    "HARTMESH_PRODUCT_NAME",
+    "SANDBOX_READY_TIMEOUT",
+    "SANDBOX_CAPACITY_WAIT_TIMEOUT",
+    "HARTMESH_SIGN_ON_ADMINS",
+    "HARTMESH_SIGN_ON_SCOPES",
+    "HARTMESH_SIGN_ON_CLIENT_AUTH",
+    "HARTMESH_SIGN_ON_NAME",
+    "HARTMESH_SIGN_ON_ACCESS_CLAIM",
+    "HARTMESH_SIGN_ON_ACCESS_VALUES",
+    "HARTMESH_SIGN_ON_ROLES",
+    "HARTMESH_SIGN_ON_CLOCK_SKEW",
+    "AUTH_TOKEN_EXPIRY_DAYS",
+}
+# The sign-in mode: one side or the other is required, read by
+# gateway/render_config.py only. See tests/test_compose_sign_on.py.
+SIGN_ON_KEYS = {"HARTMESH_SIGN_ON_ISSUER", "HARTMESH_SIGN_ON_CLIENT_ID", "HARTMESH_SIGN_ON_CLIENT_SECRET"}
+LOCAL_PASSWORDS_KEY = "HARTMESH_LOCAL_PASSWORDS"
+MODE_KEYS = SIGN_ON_KEYS | {LOCAL_PASSWORDS_KEY, "HARTMESH_LOCAL_REGISTRATION"}
+MEMORY_MIB = {"gateway": 1088, "frontend": 384, "nginx": 128, "postgres": 768, "redis": 256, "searxng": 256}
+# The sandbox image's own service switches (its entrypoint compares each to the
+# string "true"): the profile ships every sandbox with the browser, VNC,
+# Jupyter, code-server and the Node REPL off (README: "Slim services profile").
+SLIM_SANDBOX_SERVICES = {
+    "DISABLE_BROWSER": "true",
+    "DISABLE_JUPYTER": "true",
+    "DISABLE_CODE_SERVER": "true",
+    "DISABLE_VNC": "true",
+    "DISABLE_MCP_BROWSER": "true",
+    "DISABLE_NODEJS_REPL": "true",
+}
+SANDBOX_SLOTS = 2
+NGINX_VARIABLES = {
+    "$forwarded_proto",
+    "$remote_addr",
+    "$proxy_add_x_forwarded_for",
+    "$http_host",
+    "$gateway_upstream",
+    "$http_upgrade",
+    "$connection_upgrade",
+    "$scheme",
+    "$frontend_upstream",
+    "$provisioner_upstream",
+    "$http_x_forwarded_proto",
+}
+_BARE_VARIABLE = re.compile(r"\$[a-z_]+")
+_ENV_REFERENCE = re.compile(r"\$\{([A-Z_][A-Z0-9_]*)")
+_APP_SUBNET = re.compile(r"\$\{HARTMESH_APP_SUBNET:-([^}]+)\}")
+
+
+def _load_module(name: str, path: Path) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture(scope="module")
+def render_config() -> Iterator[ModuleType]:
+    module = _load_module("hartmesh_render_config_test", PROFILE / "gateway" / "render_config.py")
+    try:
+        yield module
+    finally:
+        sys.modules.pop("hartmesh_render_config_test", None)
+
+
+@pytest.fixture(scope="module")
+def pin_images() -> Iterator[ModuleType]:
+    module = _load_module("hartmesh_pin_compose_images_test", REPO_ROOT / "scripts" / "pin_compose_images.py")
+    try:
+        yield module
+    finally:
+        sys.modules.pop("hartmesh_pin_compose_images_test", None)
+
+
+@pytest.fixture(scope="module")
+def compose() -> dict:
+    return yaml.safe_load(COMPOSE.read_text(encoding="utf-8"))
+
+
+def _mib(value: str) -> int:
+    assert value.endswith("m"), value
+    return int(value[:-1])
+
+
+def _base_environ() -> dict[str, str]:
+    # Local-password mode: the render every test here relied on before the
+    # sign-in mode existed, and still the same document.
+    return {"DATABASE_URL": "postgresql://deerflow:x@postgres:5432/deerflow", "DEER_FLOW_STREAM_BRIDGE_REDIS_URL": "redis://:x@redis:6379/0", LOCAL_PASSWORDS_KEY: "allowed", "HARTMESH_LOCAL_REGISTRATION": "closed"}
+
+
+def _open_runsc_environ() -> dict[str, str]:
+    return {**_base_environ(), "SANDBOX_EGRESS": "open", "DEER_FLOW_SANDBOX_RUNTIME": "runsc", "HARTMESH_SANDBOX_RESOLV_CONF": "/run/systemd/resolve/resolv.conf"}
+
+
+def test_open_runsc_uses_the_validated_host_resolver_read_only(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    resolver = tmp_path / "resolv.conf"
+    resolver.write_text("nameserver 10.17.72.1\nsearch corp.example\n")
+    monkeypatch.setattr(render_config, "HOST_RESOLVER_VIEW", resolver, raising=False)
+    template = yaml.safe_load(TEMPLATE.read_text())
+    original = {"host_path": "/srv/example", "container_path": "/mnt/example", "read_only": True}
+    template["sandbox"]["mounts"] = [original]
+    rendered, _ = render_config.render(template, (), _open_runsc_environ())
+    assert rendered["sandbox"]["mounts"] == [
+        original,
+        {
+            "host_path": "/run/systemd/resolve/resolv.conf",
+            "container_path": "/etc/resolv.conf",
+            "read_only": True,
+        },
+    ]
+    assert template["sandbox"]["mounts"] == [original], "rendering must not mutate the template"
+
+
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "",
+        "nameserver\n",
+        "nameserver not-an-address\n",
+        "nameserver 127.0.0.53\n",
+        "nameserver 0.0.0.0\n",
+        "nameserver 169.254.1.1\n",
+        "nameserver 224.0.0.1\n",
+        "nameserver 255.255.255.255\n",
+        "nameserver ::1\n",
+        "nameserver fe80::1\n",
+        "nameserver 10.17.72.1\nnameserver 127.0.0.11\n",
+    ],
+)
+def test_open_runsc_refuses_unusable_resolvers(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, contents: str) -> None:
+    resolver = tmp_path / "resolv.conf"
+    resolver.write_text(contents)
+    monkeypatch.setattr(render_config, "HOST_RESOLVER_VIEW", resolver, raising=False)
+    with pytest.raises(render_config.RenderError, match="resolver"):
+        render_config.render_text(TEMPLATE.read_text(), (), _open_runsc_environ())
+
+
+def test_open_runsc_refuses_missing_resolver_or_conflicting_mount(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    resolver = tmp_path / "resolv.conf"
+    monkeypatch.setattr(render_config, "HOST_RESOLVER_VIEW", resolver, raising=False)
+    with pytest.raises(render_config.RenderError, match="resolver"):
+        render_config.render_text(TEMPLATE.read_text(), (), _open_runsc_environ())
+    resolver.write_text("nameserver 10.17.72.1\n")
+    template = yaml.safe_load(TEMPLATE.read_text())
+    template["sandbox"]["mounts"] = [{"host_path": "/another", "container_path": "/etc/resolv.conf", "read_only": False}]
+    with pytest.raises(render_config.RenderError, match="resolver"):
+        render_config.render(template, (), _open_runsc_environ())
+    with pytest.raises(render_config.RenderError, match="resolver"):
+        render_config.render_text(TEMPLATE.read_text(), (), {**_open_runsc_environ(), "HARTMESH_SANDBOX_RESOLV_CONF": "relative/file"})
+
+
+@pytest.mark.parametrize("mode,runtime", [("allowlist", "runsc"), ("open", "runc")])
+def test_resolver_override_is_only_for_open_runsc(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str, runtime: str) -> None:
+    monkeypatch.setattr(render_config, "HOST_RESOLVER_VIEW", tmp_path / "absent", raising=False)
+    rendered, _ = render_config.render_text(TEMPLATE.read_text(), (), {**_base_environ(), "SANDBOX_EGRESS": mode, "DEER_FLOW_SANDBOX_RUNTIME": runtime})
+    assert not any(m["container_path"] == "/etc/resolv.conf" for m in yaml.safe_load(rendered)["sandbox"].get("mounts", []))
+
+
+# ── compose.yaml ─────────────────────────────────────────────────────────────
+
+
+def test_profile_declares_exactly_the_six_services_and_no_named_volumes(compose: dict) -> None:
+    assert compose["name"] == "hartmesh"
+    assert set(compose["services"]) == SERVICES
+    assert "volumes" not in compose, "named volumes would live on the root disk, which is not tenant data"
+    for name, service in compose["services"].items():
+        assert service.get("restart") == "unless-stopped", name
+        assert "logging" not in service, f"{name}: the daemon's journald default must not be overridden"
+
+
+def test_only_nginx_publishes_a_port_and_the_contract_carries_the_bind(compose: dict) -> None:
+    published = {name: service.get("ports") for name, service in compose["services"].items() if service.get("ports")}
+    assert set(published) == {"nginx"}
+    (mapping,) = published["nginx"]
+    assert mapping.startswith("${HARTMESH_LISTEN") and mapping.endswith(":2026")
+    assert compose["services"]["nginx"].get("user") == "101:101"
+
+
+def test_memory_limits_sum_to_2880_mib_with_equal_swap(compose: dict) -> None:
+    total = 0
+    for name, expected in MEMORY_MIB.items():
+        service = compose["services"][name]
+        assert _mib(service["mem_limit"]) == expected, name
+        assert service["memswap_limit"] == service["mem_limit"], name
+        total += expected
+    assert total == 2880, (
+        "3072 less the 192 MiB the Gateway gave up for the 1 GiB sandboxes; the 192 MiB it took back with the two-slot profile, and a further 64 MiB, now pay for the search service, so the line has not moved (README: Memory budget)"
+    )
+    assert MEMORY_MIB["searxng"] == 256, "clears by 64 MiB the ceiling the tenant class found it sitting on, 170 reclaims and no OOM kill (README: Web search)"
+    assert MEMORY_MIB["gateway"] == 1088, "1.86 times its measured 586 MiB two-turn peak; the donor each time, because its limit is a multiple of a peak rather than a figure set against a failure"
+
+
+PIDS_LIMIT = {"gateway": 2048, "frontend": 512, "nginx": 256, "postgres": 512, "redis": 128, "searxng": 128}
+
+
+def test_every_service_bounds_its_processes_and_the_app_tier_its_cpus(compose: dict) -> None:
+    for name, expected in PIDS_LIMIT.items():
+        assert compose["services"][name]["pids_limit"] == expected, name
+    for name in ("gateway", "frontend"):
+        assert compose["services"][name]["cpus"] == 2, f"{name} shares four vCPUs with two sandboxes at --cpus 2"
+    for name in ("nginx", "postgres", "redis", "searxng"):
+        assert "cpus" not in compose["services"][name], name
+
+
+def test_two_slim_sandboxes_at_one_gib_with_proxies_fit_the_five_gib_budget(compose: dict) -> None:
+    env = compose["services"]["gateway"]["environment"]
+    sandbox = _mib(env["DEER_FLOW_SANDBOX_MEMORY"])
+    proxy = _mib(env["DEER_FLOW_SANDBOX_PROXY_MEMORY"])
+    services = sum(MEMORY_MIB.values())
+    assert sandbox == 1024, "a slim sandbox holds 436 to 484 MiB right after boot and a 5,000-row report peaks at 713 MiB in it; 512 MiB thrashed for 289 s on the tenant class (README: Two 1 GiB slots)"
+    assert env["DEER_FLOW_SANDBOX_CPUS"] == "2", "a render wants about 1.6 CPUs and the cold boot halves at two (README: Two 1 GiB slots)"
+    assert int(env["DEER_FLOW_SANDBOX_PIDS_LIMIT"]) == 256, "host-side tasks: 58 idle, 62 rendering, 134 under a forty-way fan-out (README: Slim services profile)"
+    assert services + SANDBOX_SLOTS * (sandbox + proxy) == 5120, "exactly on the 5.0 GiB line: raising any limit in compose.yaml must be paid for by lowering another"
+    assert 5120 < services + (SANDBOX_SLOTS + 1) * (sandbox + proxy)
+    assert services + SANDBOX_SLOTS * sandbox <= 5120 < services + (SANDBOX_SLOTS + 1) * sandbox, "open mode carries no proxy, fits two and not three"
+
+
+def test_cpu_quotas_are_six_on_the_four_vcpu_guest(compose: dict) -> None:
+    """Two sandboxes at two CPUs plus two relays at one CPU: six quotas, what the README and compose comments say (the four-slot profile had eight)."""
+    env = compose["services"]["gateway"]["environment"]
+    assert SANDBOX_SLOTS * (float(env["DEER_FLOW_SANDBOX_CPUS"]) + 1) == 6
+
+
+def test_template_runs_the_slim_services_profile_in_two_slots(compose: dict) -> None:
+    """The ceiling in config.yaml is the one the compose budget pays for, and the
+    sandbox image's service switches are exact strings: its entrypoint compares
+    each to "true", and the harness types the mapping as str -> str, so a bare
+    YAML boolean would refuse to load."""
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    sandbox = template["sandbox"]
+    assert sandbox["replicas"] == SANDBOX_SLOTS, "one slot per 1 GiB sandbox the budget fits (README: Memory budget)"
+    assert sandbox["idle_timeout"] == 1800, "a follow-up half an hour later still finds its sandbox warm"
+    assert sandbox["environment"] == SLIM_SANDBOX_SERVICES
+    assert all(value == "true" and isinstance(value, str) for value in sandbox["environment"].values())
+    for key in SLIM_SANDBOX_SERVICES:
+        assert re.search(rf'^\s+{key}: "true"$', TEMPLATE.read_text(encoding="utf-8"), flags=re.MULTILINE), f"{key} must be the quoted string true"
+
+
+def test_search_runs_privately_read_only_and_needs_no_new_contract_key(compose: dict) -> None:
+    """The tenant's web search is its own service and nothing about it leaks.
+
+    No published port, no env_file, no data-disk volume, a read-only root
+    with two small tmpfs mounts, and the same uid as every other service.
+    The secret SearXNG insists on is minted per start by the bundle's own
+    script, so an existing tenant .env renders exactly as before.
+    """
+
+    service = compose["services"]["searxng"]
+    assert "ports" not in service
+    assert "env_file" not in service
+    assert "environment" not in service, "nothing to configure, so nothing to get wrong"
+    assert service["user"] == "1000:1000"
+    assert service["read_only"] is True
+    assert service["entrypoint"] == ["sh", "/opt/hartmesh/searxng/run.sh"], "the image's own entrypoint ignores its arguments, so ours replaces it"
+    assert "command" not in service
+    assert service["networks"] == ["app"]
+    assert "depends_on" not in compose["services"]["gateway"] or "searxng" not in compose["services"]["gateway"].get("depends_on", {}), "a search outage must not stop chat from starting"
+    mounts = service["volumes"]
+    assert "./searxng:/opt/hartmesh/searxng:ro" in mounts
+    tmpfs = {volume["target"]: volume for volume in mounts if isinstance(volume, dict)}
+    # /var/cache/searxng is the image's declared data volume: unmounted, Docker
+    # would give it an anonymous volume on the root disk at every `up`.
+    assert set(tmpfs) == {"/etc/searxng", "/tmp", "/var/cache/searxng"}
+    assert all(volume["type"] == "tmpfs" for volume in tmpfs.values())
+    assert service["healthcheck"]["test"] == ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/healthz >/dev/null"]
+
+
+def test_search_bundle_mints_its_secret_and_copies_settings_into_the_tmpfs() -> None:
+    script = (PROFILE / "searxng" / "run.sh").read_text(encoding="utf-8")
+    assert "SEARXNG_SECRET" in script and "/dev/urandom" in script, "no secret in git, none in .env, none on the data disk"
+    assert 'cp "$BUNDLE/settings.yml" "$CONFIG_DIR/settings.yml"' in script
+    assert script.rstrip().endswith('exec /usr/local/searxng/entrypoint.sh "$@"'), "the image's own start script still runs, after ours"
+    assert not os.access(PROFILE / "searxng" / "run.sh", os.X_OK), "the bundle carries no exec bits; compose invokes it through sh"
+
+
+def test_search_settings_name_exactly_the_engines_a_query_may_reach() -> None:
+    """A tenant's questions go to these three engines and nowhere else.
+
+    Each was measured alone from a server address on six tenant questions.
+    Google's search element ranks best and is the first to gate, so it leads
+    the merged ranking at weight 2 while Bing and Yahoo, which never gated,
+    keep the tool answering when it stops. Three behind one tool is what
+    makes one of them closing survivable. Bing and Yahoo are off in SearXNG's
+    own defaults and on here.
+    """
+
+    settings = yaml.safe_load((PROFILE / "searxng" / "settings.yml").read_text(encoding="utf-8"))
+    web = ["google cse", "bing", "yahoo"]
+    images = ["google cse images", "unsplash", "openverse", "wikicommons.images"]
+    assert settings["use_default_settings"]["engines"]["keep_only"] == web + images
+    entries = {engine["name"]: engine for engine in settings["engines"]}
+    assert set(entries) == set(web + images)
+    assert entries["google cse"] == {"name": "google cse", "weight": 2}
+    assert entries["yahoo"] == {"name": "yahoo", "disabled": False}
+    # Bing never gates and is the availability floor, but it was measured
+    # returning results unrelated to the question, so it must not outrank
+    # Yahoo in the merged ranking.
+    assert entries["bing"] == {"name": "bing", "disabled": False, "weight": 0.5}
+    # image_search reaches the image engines and nothing else; both of the
+    # keyless DuckDuckGo endpoints the profile used to carry are gone.
+    assert entries["google cse images"] == {"name": "google cse images", "weight": 2}
+    for name in ("unsplash", "openverse", "wikicommons.images"):
+        assert entries[name] == {"name": name, "disabled": False, "inactive": False}, name
+    # `keep_only` above is the registry, so the plain `google` engine (which
+    # answers a server only with the degraded no-JavaScript page) is already
+    # out by not being named. These are the ones a future edit might reach for.
+    for excluded, reason in (
+        ("duckduckgo", "both its web and its image endpoints refuse this address"),
+        ("flickr", "answers, but its results carry no direct image address"),
+        ("pixabay", "parsing errors, and no usable image address when it answers"),
+        ("startpage", "answers only through a proof-of-work CAPTCHA, which is not ours to solve"),
+        ("brave", "rate-limits the address after a handful of queries and stays closed"),
+        ("qwant", "challenges the address after a couple of dozen queries"),
+        ("yandex", "a tenant's questions do not leave for it"),
+    ):
+        assert excluded not in yaml.safe_dump(settings), f"{excluded}: {reason}"
+    assert settings["server"]["limiter"] is False, "the limiter needs a Redis this instance does not have"
+    assert settings["server"]["image_proxy"] is False
+    assert "secret_key" not in settings["server"], "minted per start by run.sh, never a committed value"
+    assert settings["search"]["formats"] == ["html", "json"], "the Gateway reads JSON"
+    assert settings["search"]["safe_search"] == 1
+    assert settings["general"]["enable_metrics"] is False
+
+
+def test_image_search_is_upstreams_keyless_default_until_the_search_work_is_ported() -> None:
+    """This build keeps upstream's keyless image tool; the profile's own SearXNG image search is not ported yet."""
+
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    tools = {tool["name"]: tool for tool in template["tools"]}
+    images = tools["image_search"]
+    assert images["use"] == "deerflow.community.image_search.tools:image_search_tool"
+    assert images["group"] == "web"
+
+
+def test_web_search_defaults_to_the_profile_s_own_searxng(render_config: ModuleType) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    tools = {tool["name"]: tool for tool in template["tools"]}
+    search = tools["web_search"]
+    assert search["use"] == "deerflow.community.searxng.tools:web_search_tool"
+    assert search["base_url"] == "http://searxng:8080", "the compose service name on the app network"
+    assert search["group"] == "web"
+    assert "ddg_search" not in yaml.safe_dump(search), "the DuckDuckGo page answers a server with a challenge, not results"
+
+
+def test_only_the_gateway_reads_the_env_file_and_the_others_get_explicit_environment(compose: dict) -> None:
+    services = compose["services"]
+    with_env_file = {name for name, service in services.items() if service.get("env_file")}
+    assert with_env_file == {"gateway"}
+    (env_file,) = services["gateway"]["env_file"]
+    assert env_file == {"path": "${HARTMESH_DATA_DIR}/.env", "required": False}
+    assert set(services["frontend"]["environment"]) == {"NODE_ENV", "DEER_FLOW_INTERNAL_GATEWAY_BASE_URL"}
+    assert services["frontend"]["environment"]["DEER_FLOW_INTERNAL_GATEWAY_BASE_URL"] == "http://gateway:8001"
+    assert set(services["nginx"]["environment"]) == {"HARTMESH_PUBLIC_HOST", "HARTMESH_TRUSTED_PROXIES"}
+    for name in SERVICES - {"gateway"}:
+        assert "AUTH_JWT_SECRET" not in yaml.safe_dump(services[name]), name
+
+
+def test_bind_mounts_stay_under_the_data_directory_or_the_read_only_bundle(compose: dict) -> None:
+    for name, service in compose["services"].items():
+        for volume in service.get("volumes", []):
+            if isinstance(volume, dict):
+                if volume.get("target") == "/run/hartmesh-host-resolv.conf":
+                    assert name == "gateway"
+                    assert volume == {"type": "bind", "source": "${HARTMESH_SANDBOX_RESOLV_CONF:-/run/systemd/resolve/resolv.conf}", "target": "/run/hartmesh-host-resolv.conf", "read_only": True, "bind": {"create_host_path": False}}
+                    assert service["environment"]["HARTMESH_SANDBOX_RESOLV_CONF"] == volume["source"]
+                    continue
+                assert volume["type"] == "tmpfs", (name, volume)
+                continue
+            source, _, rest = volume.partition(":")
+            if source == "/var/run/docker.sock":
+                assert name == "gateway"
+                continue
+            if source.startswith("./"):
+                assert rest.endswith(":ro") and rest.startswith("/opt/hartmesh/"), (name, volume)
+                continue
+            assert source.startswith("${HARTMESH_DATA_DIR"), (name, volume)
+
+
+MEASURE_SCRIPT = PROFILE / "scripts" / "measure-sandbox-boot.sh"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="the measurement script is bash")
+def test_measurement_script_runs_the_profile_flags_and_the_slim_switches(compose: dict, tmp_path: Path) -> None:
+    """The operator's boot measurement must measure the shipped sandbox: the
+    pinned image, the compose limits, the hardening the backend emits, and the
+    slim switches config.yaml carries, so a figure it records is a figure of
+    this profile. A stub ``docker`` records every invocation and refuses
+    ``run``, which is the script's run_failed path. The environment is built
+    from scratch: the script's knobs are plain uppercase names a runner may
+    already export."""
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    log = tmp_path / "docker.log"
+    (stub / "docker").write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{log}"\n[ "$1" = run ] && exit 1\nexit 0\n', encoding="utf-8")
+    (stub / "docker").chmod(0o755)
+    out = tmp_path / "rows.tsv"
+    env = {"PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}", "HOME": str(tmp_path), "TMPDIR": str(tmp_path), "CPUS": "1", "RUNS": "1", "CONCURRENT": "1", "SETTLE": "0", "OUT": str(out)}
+    result = subprocess.run(["bash", str(MEASURE_SCRIPT)], cwd=PROFILE, env=env, capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+    runs = [line for line in log.read_text(encoding="utf-8").splitlines() if line.startswith("run ")]
+    assert len(runs) == 2, "one full and one slim container"
+    gateway = compose["services"]["gateway"]["environment"]
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))["sandbox"]
+    for line in runs:
+        assert line.endswith(" " + template["image"]), "the image is the template's digest pin"
+        assert "--runtime runsc" in line and "--cpus 1" in line and "--rm" not in line.split(), "kept until its row is written, so an OOM kill is recorded"
+        assert f"--pids-limit {gateway['DEER_FLOW_SANDBOX_PIDS_LIMIT']}" in line
+        for flag in ("--user 1000:1000", "--cap-drop=ALL", "--security-opt no-new-privileges", "--security-opt seccomp=builtin", "--network none"):
+            assert flag in line, flag
+    full, slim = runs
+    assert "--memory 1024m --memory-swap 1024m" in full, "the full profile is measured at the limit it was released at"
+    assert f"--memory {gateway['DEER_FLOW_SANDBOX_MEMORY']} --memory-swap {gateway['DEER_FLOW_SANDBOX_MEMORY']}" in slim
+    assert "DISABLE_" not in full
+    assert all(f"-e {key}={value}" in slim for key, value in SLIM_SANDBOX_SERVICES.items()), "the slim run carries exactly the switches config.yaml ships"
+    assert slim.count("-e DISABLE_") == len(SLIM_SANDBOX_SERVICES)
+    rows = out.read_text(encoding="utf-8").splitlines()
+    assert rows[0].split("\t") == ["profile", "cpus", "run", "index", "memory", "ready_s", "procs", "mem_MiB", "peak_MiB", "pids_peak", "oom_kills", "exec_s", "exec_exit", "status"]
+    assert [row.split("\t")[0] for row in rows[1:]] == ["full", "slim"] and all(row.endswith("run_failed") for row in rows[1:])
+    rejected = subprocess.run(["bash", str(MEASURE_SCRIPT)], cwd=PROFILE, env={**env, "PROFILES": "Slim"}, capture_output=True, text=True, timeout=60)
+    assert rejected.returncode == 2 and "PROFILES accepts full and slim" in rejected.stderr, "a mislabelled row is worse than a refusal"
+    assert (PROFILE / "README.md").read_text(encoding="utf-8").count("scripts/measure-sandbox-boot.sh") >= 2, "the README names the script where the figures are recorded"
+
+
+SEARXNG_MEASURE_SCRIPT = PROFILE / "scripts" / "measure-searxng.sh"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("column") is None, reason="the measurement script is bash and prints through column")
+def test_the_search_measurement_script_runs_the_profile_shape_and_the_gateway_workload(compose: dict, tmp_path: Path) -> None:
+    """A figure is only this profile's if it was measured under this profile.
+
+    The released 192 MiB was taken from what the Gateway could spare and
+    checked against one near-idle sample; the tenant class then found the
+    cgroup at its ceiling 170 times. So the script has to reproduce the
+    container the profile actually runs -- its image pin, limits, pids bound,
+    read-only root and the three tmpfs mounts -- and the workload the Gateway
+    actually sends, at its own ``CONCURRENT_SEARCHES``. Stubs for ``docker``
+    and ``curl`` record the invocation without a daemon or a network; the
+    cgroup files are unreadable for a stub container, which is the zeroed
+    row this asserts.
+    """
+    stub = tmp_path / "bin"
+    stub.mkdir()
+    log = tmp_path / "docker.log"
+    queries = tmp_path / "queries.log"
+    (stub / "docker").write_text(
+        f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{log}"\ncase "$1" in port) echo "127.0.0.1:18080";; inspect) echo stubbed-container-id;; esac\nexit 0\n',
+        encoding="utf-8",
+    )
+    (stub / "curl").write_text(f'#!/bin/sh\nprintf \'%s\\n\' "$*" >> "{queries}"\ncase "$*" in *healthz*) exit 0;; esac\necho 200\nexit 0\n', encoding="utf-8")
+    for name in ("docker", "curl"):
+        (stub / name).chmod(0o755)
+    out = tmp_path / "rows.tsv"
+    cgroup = tmp_path / "cgroup"
+    cgroup.mkdir()
+    (cgroup / "memory.peak").write_text("201330688\n", encoding="utf-8")
+    (cgroup / "memory.current").write_text("115007488\n", encoding="utf-8")
+    (cgroup / "memory.events").write_text("low 0\nhigh 0\nmax 170\noom 0\noom_kill 0\n", encoding="utf-8")
+    env = {"PATH": f"{stub}{os.pathsep}{os.environ.get('PATH', '')}", "HOME": str(tmp_path), "TMPDIR": str(tmp_path), "SETTLE": "0", "OUT": str(out), "CGROUP_DIR": str(cgroup)}
+    result = subprocess.run(["bash", str(SEARXNG_MEASURE_SCRIPT)], cwd=PROFILE, env=env, capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stderr
+
+    searxng = compose["services"]["searxng"]
+    [run] = [line for line in log.read_text(encoding="utf-8").splitlines() if line.startswith("run ")]
+    assert f" {searxng['image']} " in run, "the image is the compose pin, not a floating tag"
+    assert f"--memory {searxng['mem_limit']} --memory-swap {searxng['mem_limit']}" in run, "measured at the limit the profile ships"
+    assert f"--pids-limit {searxng['pids_limit']}" in run
+    for flag in ("--user 1000:1000", "--read-only", "--tmpfs /etc/searxng", "--tmpfs /tmp", "--tmpfs /var/cache/searxng"):
+        assert flag in run, flag
+
+    sent = [line for line in queries.read_text(encoding="utf-8").splitlines() if "/search" in line]
+    assert len(sent) == 22, "the exact queries two tenant-class turns produced, once per round"
+    assert all("format=json" in line and "pageno=1" in line for line in sent)
+    assert any("Great Lakes overview geography facts" in line for line in sent)
+
+    rows = out.read_text(encoding="utf-8").splitlines()
+    assert rows[0].split("\t") == ["limit", "pids", "concurrent", "queries", "answered", "seconds", "memory_peak_bytes", "memory_peak_mib", "memory_current_mib", "memory_max_events", "oom_kills"]
+    row = rows[1].split("\t")
+    assert row[0] == searxng["mem_limit"] and row[2] == "4", "the Gateway's own CONCURRENT_SEARCHES is the default concurrency"
+    assert row[3] == "22" and row[4] == "22"
+    assert row[6] == "201330688" and row[7] == "192.0", "the cgroup's own bytes, and the same figure in MiB"
+    # The stub's counter is the same before and after, so the reported count
+    # is zero: the row carries what this workload did, not what the container
+    # had already done by the time it was ready.
+    assert row[9] == "0"
+
+    # Without the counters there is no measurement, and a row of zeros would
+    # read like one. Before this refusal existed, `set -e` ended the run with
+    # no reason at all on a host whose cgroup layout is neither of the two
+    # the script knows.
+    refused = subprocess.run(["bash", str(SEARXNG_MEASURE_SCRIPT)], cwd=PROFILE, env={**env, "CGROUP_DIR": str(tmp_path / "absent")}, capture_output=True, text=True, timeout=120)
+    assert refused.returncode == 3 and "cannot read this container's cgroup counters" in refused.stderr
+    assert "scripts/measure-searxng.sh" in (PROFILE / "README.md").read_text(encoding="utf-8"), "the README names the script the figures came from"
+
+
+def test_readme_tells_the_operator_to_remove_orphaned_sandboxes_before_an_upgrade() -> None:
+    """The provider adopts a surviving sandbox by its labels and networks, never
+    by its image, environment or limits, so a Gateway that was killed rather than
+    stopped brings pre-upgrade sandboxes into the new budget with their old
+    limits. Until the backend compares those, the README carries the upgrade step."""
+    readme = (PROFILE / "README.md").read_text(encoding="utf-8")
+    note = readme[readme.index("**Upgrading a guest that already runs sandboxes.**") :]
+    assert "docker ps --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-" in note
+    assert "docker rm -f $(docker ps -q --filter name=deer-flow-sandbox- --filter name=deer-flow-netproxy-)" in note
+    assert "6336 MiB" in note, "two surviving 512 MiB sandboxes beside the two new 1 GiB slots on the 6 GiB guest"
+
+
+def test_gateway_wiring_follows_the_contract(compose: dict) -> None:
+    gateway = compose["services"]["gateway"]
+    env = gateway["environment"]
+    assert "user" not in gateway, "the entrypoint drops privileges itself after reading the socket's group"
+    assert gateway["command"] == ["sh", "/opt/hartmesh/gateway/entrypoint.sh"]
+    assert env["DEER_FLOW_TENANT_ID"].startswith("${HARTMESH_TENANT")
+    assert env["DEER_FLOW_SANDBOX_RUNTIME"].startswith("${SANDBOX_RUNTIME")
+    assert env["DEER_FLOW_HOME"] == "${HARTMESH_DATA_DIR}/home"
+    assert env["DEER_FLOW_HOST_BASE_DIR"] == env["DEER_FLOW_HOME"]
+    assert env["DEER_FLOW_CONFIG_PATH"] == "${HARTMESH_DATA_DIR}/home/config.yaml"
+    assert env["DEER_FLOW_EXTENSIONS_CONFIG_PATH"] == "${HARTMESH_DATA_DIR}/home/extensions_config.json"
+    assert "${HARTMESH_DATA_DIR}/home:${HARTMESH_DATA_DIR}/home" in gateway["volumes"], "the data dir must be mounted at its host path"
+    assert env["DATABASE_URL"] == "postgresql://deerflow:${POSTGRES_PASSWORD}@postgres:5432/deerflow"
+    assert env["DEER_FLOW_STREAM_BRIDGE_REDIS_URL"] == "redis://:${REDIS_PASSWORD}@redis:6379/0"
+    assert env["DEER_FLOW_SANDBOX_HOST"] == "host.docker.internal"
+    assert "host.docker.internal:host-gateway" in gateway["extra_hosts"]
+    assert env["DEER_FLOW_SANDBOX_NETWORK"] == "hartmesh_sandbox"
+    assert env["DEER_FLOW_SANDBOX_MEMORY"] == "1024m"
+    assert env["DEER_FLOW_SANDBOX_CPUS"] == "2"
+    assert env["DEER_FLOW_SANDBOX_PIDS_LIMIT"] == "256"
+    assert env["DEER_FLOW_SANDBOX_PROXY_MEMORY"].endswith("m")
+    assert env["DEER_FLOW_SANDBOX_CONTAINER_USER"] == "1000:1000"
+    assert env["DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS"] == "0"
+    assert env["DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED"] == "0"
+    assert "DEER_FLOW_SANDBOX_SECCOMP_PROFILE" not in env
+    assert "DEER_FLOW_INTERNAL_AUTH_TOKEN" not in env, "one worker keeps the per-process token coherent without a second key"
+    assert "BETTER_AUTH_SECRET" not in COMPOSE.read_text(encoding="utf-8")
+    subnet = compose["networks"]["app"]["ipam"]["config"][0]["subnet"]
+    assert env["AUTH_TRUSTED_PROXIES"] == subnet
+    healthcheck = compose["services"]["gateway"]["healthcheck"]["test"]
+    assert healthcheck[-1].count("/health/ready") == 1
+    assert healthcheck[:6] == ["CMD", "setpriv", "--reuid=1000", "--regid=1000", "--clear-groups", "--no-new-privs"], "docker runs the probe as root; it must drop like the entrypoint"
+    assert compose["services"]["gateway"]["cap_drop"] == ["ALL"]
+    assert compose["services"]["gateway"]["cap_add"] == ["SETUID", "SETGID"], "the root window needs exactly the two capabilities the drop uses"
+
+
+def test_sandbox_network_is_declared_and_joined_by_no_service(compose: dict) -> None:
+    assert set(compose["networks"]) == {"app", "sandbox"}
+    for name, service in compose["services"].items():
+        assert service["networks"] == ["app"], name
+    run = (PROFILE / "gateway" / "run.sh").read_text(encoding="utf-8")
+    assert 'docker network create --driver bridge -o com.docker.network.bridge.enable_icc=false "$DEER_FLOW_SANDBOX_NETWORK"' in run, "under open, peers must not reach each other on the bridge"
+    assert 'docker network inspect "$DEER_FLOW_SANDBOX_NETWORK"' in run
+
+
+# ── the app bridge's address space ───────────────────────────────────────────
+
+
+def _app_subnet_defaults() -> list[str]:
+    return _APP_SUBNET.findall(COMPOSE.read_text(encoding="utf-8"))
+
+
+def test_the_app_subnet_default_clears_every_recorded_external_range() -> None:
+    """The defect this pins: until 2026-09-08 the app bridge was 172.30.10.0/24,
+    which is inside the operator's kosmos pod range, and a bridge is a
+    connected route in the guest. A public GET still working does not disprove
+    the overlap -- the Kubernetes worker was SNAT'ing the request onto another
+    leg -- so the check has to be on the address space, not on reachability."""
+    defaults = set(_app_subnet_defaults())
+    assert len(defaults) == 1, defaults
+    subnet = ip_network(defaults.pop())
+    assert subnet.version == 4 and subnet.is_private
+    assert subnet.num_addresses >= 16, "the five services plus the bridge address must fit"
+    for entry in EXTERNAL_RANGES:
+        assert not subnet.overlaps(ip_network(entry)), f"the app bridge would swallow the route to {entry}"
+    for entry in DOCKER_DEFAULT_POOLS:
+        assert not subnet.overlaps(ip_network(entry)), f"pinning inside {entry} collides with, or spends, the pool the sandbox networks draw from"
+
+
+def test_gateway_trust_and_the_app_network_are_the_same_string(compose: dict) -> None:
+    """Moving IPAM alone would leave the Gateway trusting an address nginx no
+    longer has: X-Real-IP would be ignored and the per-source spray guard would
+    collapse onto the proxy's own address for the whole world. One override with
+    one default at both sites makes that divergence unrepresentable, including
+    when an operator sets the override."""
+    references = _app_subnet_defaults()
+    assert len(references) == 2 and len(set(references)) == 1, references
+    subnet = compose["networks"]["app"]["ipam"]["config"][0]["subnet"]
+    assert subnet == "${HARTMESH_APP_SUBNET:-" + references[0] + "}"
+    assert compose["services"]["gateway"]["environment"]["AUTH_TRUSTED_PROXIES"] == subnet
+    # The operator-facing key is nginx's trust of the front door and is untouched.
+    assert compose["services"]["nginx"]["environment"]["HARTMESH_TRUSTED_PROXIES"] == "${HARTMESH_TRUSTED_PROXIES:?HARTMESH_TRUSTED_PROXIES is a required .env key}"
+
+
+def test_the_login_path_honours_a_forwarded_address_only_from_the_app_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The other half of that contract, on the Gateway's side: the shipped
+    subnet is what makes nginx's X-Real-IP count, and a peer outside it cannot
+    forge one."""
+    from starlette.requests import Request
+
+    from app.gateway.routers.auth import _get_client_ip
+
+    subnet = ip_network(_app_subnet_defaults()[0])
+    monkeypatch.setenv("AUTH_TRUSTED_PROXIES", str(subnet))
+    hosts = list(subnet.hosts())
+    proxy, outsider, client = str(hosts[1]), "203.0.113.7", "198.51.100.44"
+
+    def _request(peer: str) -> Request:
+        return Request({"type": "http", "method": "POST", "path": "/api/v1/auth/login/local", "headers": [(b"x-real-ip", client.encode())], "query_string": b"", "client": (peer, 51000), "server": ("testserver", 80)})
+
+    assert _get_client_ip(_request(proxy)) == client, "nginx sits on the app network; its forwarded address is the one the spray guard counts"
+    assert _get_client_ip(_request(outsider)) == outsider, "a peer off the app network cannot name its own source"
+    # And the old subnet is no longer trusted, which is what makes the move real.
+    assert _get_client_ip(_request("172.30.10.5")) == "172.30.10.5"
+
+
+def test_datastores_run_as_the_data_directory_owner_with_relaxed_durability(compose: dict) -> None:
+    postgres = compose["services"]["postgres"]
+    redis = compose["services"]["redis"]
+    assert postgres["user"] == "1000:1000" and redis["user"] == "1000:1000"
+    assert postgres["command"] == ["postgres", "-c", "synchronous_commit=off", "-c", "wal_writer_delay=200ms"]
+    assert postgres["stop_grace_period"] == "60s"
+    assert "--appendfsync everysec" in redis["command"][-1]
+    assert "--maxmemory 128mb --maxmemory-policy volatile-lru" in redis["command"][-1], "maxmemory is half the cgroup so an AOF rewrite fork fits; only TTL keys are evictable"
+    assert "$$REDIS_PASSWORD" in redis["command"][-1]
+    assert compose["services"]["gateway"]["depends_on"] == {"postgres": {"condition": "service_healthy"}, "redis": {"condition": "service_healthy"}}
+
+
+# ── the .env contract ────────────────────────────────────────────────────────
+
+
+def _compose_config(env_file: Path) -> subprocess.CompletedProcess[str]:
+    if shutil.which("docker") is None:
+        if os.environ.get("CI"):
+            pytest.fail("docker compose is required in CI to verify the .env value alphabet")
+        pytest.skip("docker is not installed")
+    return subprocess.run(
+        ["docker", "compose", "--project-directory", str(PROFILE), "--env-file", str(env_file), "config", "--format", "json"],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_single_quoted_env_values_pass_through_compose_verbatim(tmp_path: Path) -> None:
+    """Compose's dotenv parser interpolates `$` and strips ` #` in bare values; single quotes carry them."""
+    lines = (PROFILE / ".env.example").read_text(encoding="utf-8").splitlines()
+    replaced = {"POSTGRES_PASSWORD": "pa$sword#x", "REDIS_PASSWORD": "ab${HOME}cd"}
+    env_file = tmp_path / "tenant.env"
+    env_file.write_text("".join(f"{line.split('=', 1)[0]}='{replaced[line.split('=', 1)[0]]}'\n" if line.split("=", 1)[0] in replaced else f"{line}\n" for line in lines), encoding="utf-8")
+    result = _compose_config(env_file)
+    assert result.returncode == 0, result.stderr
+    assert "variable is not set" not in result.stderr
+    gateway = json.loads(result.stdout)["services"]["gateway"]["environment"]
+    # `config` re-escapes a literal `$` as `$$` so its output stays re-parseable; the value itself is intact
+    assert gateway["DATABASE_URL"] == "postgresql://deerflow:pa$$sword#x@postgres:5432/deerflow"
+    assert gateway["DEER_FLOW_STREAM_BRIDGE_REDIS_URL"] == "redis://:ab$${HOME}cd@redis:6379/0"
+    # control: the same values bare are rewritten, which is the defect the quoting closes
+    env_file.write_text("".join(f"{line.split('=', 1)[0]}={replaced[line.split('=', 1)[0]]}\n" if line.split("=", 1)[0] in replaced else f"{line}\n" for line in lines), encoding="utf-8")
+    control = _compose_config(env_file)
+    assert control.returncode == 0, control.stderr
+    assert "sword" in control.stderr and "variable is not set" in control.stderr
+    assert json.loads(control.stdout)["services"]["gateway"]["environment"]["DATABASE_URL"] == "postgresql://deerflow:pa#x@postgres:5432/deerflow"
+
+
+def test_env_example_lists_exactly_the_fixed_contract_keys() -> None:
+    lines = (PROFILE / ".env.example").read_text(encoding="utf-8").splitlines()
+    keys = {line.split("=", 1)[0] for line in lines if line and not line.startswith("#")}
+    assert keys == CONTRACT_KEYS | SIGN_ON_KEYS, "the example shows sign-on-only mode"
+    comments = [line for line in lines if line.startswith("#")]
+    assert len(comments) == 10
+    assert "sign-on-only" in comments[0] and LOCAL_PASSWORDS_KEY in comments[0] and "callback" in comments[0]
+    assert "Membership follows the claim" in comments[1] and "HARTMESH_SIGN_ON_ROLES" in comments[1]
+    assert [line.split("=", 1)[0] for line in comments[2:5]] == ["#HARTMESH_SIGN_ON_ACCESS_CLAIM", "#HARTMESH_SIGN_ON_ACCESS_VALUES", "#HARTMESH_SIGN_ON_ROLES"], "the optional access keys are shown commented out"
+    # The clock tolerance: its own sentence, then the key commented out with
+    # the default it already has, so a deployer sees the number without
+    # having to set it.
+    assert "clock" in comments[5] and "0 to 300" in comments[5]
+    assert comments[6] == "#HARTMESH_SIGN_ON_CLOCK_SKEW=60"
+    assert "Optional keys" in comments[7] and "HartMesh" in comments[7]
+    assert comments[8] == "#HARTMESH_PRODUCT_NAME=HartMesh", "optional, shown commented out with the name it already has"
+    # Last: the provider keys onboarding appends follow it directly.
+    assert "verbatim" in comments[9] and "subset" in comments[9]
+    values = dict(line.split("=", 1) for line in lines if line and not line.startswith("#"))
+    assert values["HARTMESH_TRUSTED_PROXIES"] == "192.0.2.10,192.0.2.11"
+    assert values["HARTMESH_PUBLIC_HOST"] == "tenant.example.com"
+    assert values["HARTMESH_LISTEN"] == "0.0.0.0:2026"
+    assert values["SANDBOX_EGRESS"] in {"allowlist", "open"}
+    assert not (PROFILE / ".env").exists()
+    assert ".env" in (PROFILE / ".gitignore").read_text(encoding="utf-8").split()
+
+
+def test_compose_renders_one_subnet_into_both_places_with_and_without_the_override(tmp_path: Path) -> None:
+    """The same three properties through the real renderer, on the
+    documentation values: an existing contract file that never heard of the
+    override still renders and gets the shipped default, an override moves the
+    network and the Gateway's trust together, and neither render publishes
+    anything but nginx."""
+    default = _app_subnet_defaults()[0]
+    override = "10.90.7.0/24"
+    example = (PROFILE / ".env.example").read_text(encoding="utf-8")
+    cases = {default: example, override: f"{example}HARTMESH_APP_SUBNET={override}\n"}
+    for expected, body in cases.items():
+        env_file = tmp_path / f"{expected.replace('/', '_')}.env"
+        env_file.write_text(body, encoding="utf-8")
+        result = _compose_config(env_file)
+        assert result.returncode == 0, result.stderr
+        assert "variable is not set" not in result.stderr
+        rendered = json.loads(result.stdout)
+        assert rendered["networks"]["app"]["ipam"]["config"][0]["subnet"] == expected
+        assert rendered["services"]["gateway"]["environment"]["AUTH_TRUSTED_PROXIES"] == expected
+        assert {name for name, service in rendered["services"].items() if service.get("ports")} == {"nginx"}
+        assert {name for name, service in rendered["services"].items() if list(service["networks"]) == ["app"]} == SERVICES
+
+
+def test_profile_consumes_no_key_outside_the_contract() -> None:
+    source = COMPOSE.read_text(encoding="utf-8")
+    referenced = set(_ENV_REFERENCE.findall(source))
+    assert referenced <= CONTRACT_KEYS | OPTIONAL_KEYS | COMMAND_ENVIRONMENT_KEYS, referenced - CONTRACT_KEYS - OPTIONAL_KEYS - COMMAND_ENVIRONMENT_KEYS
+    for key in COMMAND_ENVIRONMENT_KEYS:
+        # Absent is a supported state (keys cannot be set in the product), so
+        # the only default is empty, and the Gateway is the only reader.
+        assert len(re.findall(r"\$\{" + key + r"\b", source)) == source.count("${" + key + ":-}") == 1, key
+    assert referenced >= CONTRACT_KEYS - {"SANDBOX_EGRESS"}, "every fixed key but SANDBOX_EGRESS is interpolated by compose.yaml"
+    for key in OPTIONAL_KEYS:
+        # An optional key is one an existing tenant .env does not carry, so every
+        # reference to it must supply the shipped default itself.
+        occurrences = source.count("${" + key)
+        assert occurrences and occurrences == len(re.findall(r"\$\{" + key + r":-[^}\s]+\}", source)), f"{key} must be referenced only as ${{{key}:-<default>}} so an existing .env still renders"
+    contract_like = re.compile(r"\b(HARTMESH_[A-Z_]+|SANDBOX_[A-Z_]+|POSTGRES_PASSWORD|REDIS_PASSWORD|AUTH_JWT_SECRET)\b")
+    seams = {"HARTMESH_RENDER_ONLY", "HARTMESH_NGINX_SOURCE", "HARTMESH_NGINX_TARGET"}
+    for path in (PROFILE / "gateway" / "run.sh", PROFILE / "gateway" / "entrypoint.sh", PROFILE / "gateway" / "render_config.py", PROFILE / "nginx" / "render.sh"):
+        names = set(contract_like.findall(path.read_text(encoding="utf-8"))) - seams
+        allowed = CONTRACT_KEYS | OPTIONAL_KEYS | PASSTHROUGH_KEYS | MODE_KEYS
+        assert names <= allowed, (path.name, names - allowed)
+
+
+def test_gateway_entrypoint_drops_to_uid_1000_with_the_socket_group_and_runs_one_worker() -> None:
+    entrypoint = (PROFILE / "gateway" / "entrypoint.sh").read_text(encoding="utf-8")
+    run = (PROFILE / "gateway" / "run.sh").read_text(encoding="utf-8")
+    assert 'docker_gid="$(stat -c %g "$SOCKET")"' in entrypoint
+    assert 'setpriv --reuid=1000 --regid=1000 --groups="$docker_gid" --inh-caps=-all --no-new-privs sh "$RUN"' in entrypoint
+    assert 'if [ "$docker_gid" = "0" ]; then' in entrypoint, "a socket owned by gid 0 must be refused, not granted as a supplementary group"
+    assert entrypoint.index('if [ "$docker_gid" = "0" ]') < entrypoint.index("exec setpriv")
+    assert "uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001 --workers 1" in run
+    assert 'render_config.py" \\' in run and '--output "$DEER_FLOW_CONFIG_PATH"' in run
+    assert 'if [ ! -f "$DEER_FLOW_EXTENSIONS_CONFIG_PATH" ]; then' in run
+    assert 'cp "$PROFILE/extensions_config.json" "$DEER_FLOW_EXTENSIONS_CONFIG_PATH"' in run
+
+
+# ── nginx ────────────────────────────────────────────────────────────────────
+
+
+def test_profile_nginx_conf_is_a_verbatim_copy_of_the_compose_nginx_conf() -> None:
+    assert (PROFILE / "nginx" / "nginx.conf").read_bytes() == (REPO_ROOT / "docker" / "nginx" / "nginx.conf").read_bytes()
+    source = (PROFILE / "nginx" / "nginx.conf").read_text(encoding="utf-8")
+    assert "${" not in source
+    assert set(_BARE_VARIABLE.findall(source)) == NGINX_VARIABLES
+    assert len(_BARE_VARIABLE.findall(source)) == 99
+
+
+def _render_nginx(tmp_path: Path, environ: dict[str, str], *, source: Path | None = None) -> subprocess.CompletedProcess[str]:
+    target = tmp_path / "nginx.conf"
+    env = {"PATH": os.environ["PATH"], "HARTMESH_RENDER_ONLY": "1", "HARTMESH_NGINX_SOURCE": str(source or PROFILE / "nginx" / "nginx.conf"), "HARTMESH_NGINX_TARGET": str(target), **environ}
+    return subprocess.run(["sh", str(PROFILE / "nginx" / "render.sh")], env=env, capture_output=True, text=True, timeout=30, check=False)
+
+
+def test_nginx_render_substitutes_only_the_server_name_and_adds_real_ip_directives(tmp_path: Path) -> None:
+    result = _render_nginx(tmp_path, {"HARTMESH_PUBLIC_HOST": "tenant.example.com", "HARTMESH_TRUSTED_PROXIES": "192.0.2.10, 192.0.2.11,2001:db8::/32"})
+    assert result.returncode == 0, result.stderr
+    rendered = (tmp_path / "nginx.conf").read_text(encoding="utf-8")
+    source = (PROFILE / "nginx" / "nginx.conf").read_text(encoding="utf-8")
+    assert _BARE_VARIABLE.findall(rendered) == _BARE_VARIABLE.findall(source), "every nginx variable must survive the render"
+    assert "server_name _;" not in rendered
+    assert "        server_name tenant.example.com;\n" in rendered
+    for address in ("192.0.2.10", "192.0.2.11", "2001:db8::/32"):
+        assert f"        set_real_ip_from {address};\n" in rendered
+    assert "        real_ip_header X-Forwarded-For;\n" in rendered
+    assert "        real_ip_recursive on;\n" in rendered
+    assert rendered.count("set_real_ip_from ") == 3
+    assert rendered.count("real_ip_header ") == 1
+
+
+def test_nginx_render_refuses_bad_hosts_bad_proxies_and_a_missing_anchor(tmp_path: Path) -> None:
+    bad_host = _render_nginx(tmp_path, {"HARTMESH_PUBLIC_HOST": "evil; }", "HARTMESH_TRUSTED_PROXIES": "192.0.2.10"})
+    assert bad_host.returncode == 1 and "HARTMESH_PUBLIC_HOST" in bad_host.stderr
+    bad_proxy = _render_nginx(tmp_path, {"HARTMESH_PUBLIC_HOST": "tenant.example.com", "HARTMESH_TRUSTED_PROXIES": "192.0.2.10;x"})
+    assert bad_proxy.returncode == 1 and "HARTMESH_TRUSTED_PROXIES" in bad_proxy.stderr
+    empty = _render_nginx(tmp_path, {"HARTMESH_PUBLIC_HOST": "tenant.example.com", "HARTMESH_TRUSTED_PROXIES": " , "})
+    assert empty.returncode == 1
+    anchorless = tmp_path / "anchorless.conf"
+    anchorless.write_text((PROFILE / "nginx" / "nginx.conf").read_text(encoding="utf-8").replace("server_name _;", "server_name x;"), encoding="utf-8")
+    missing = _render_nginx(tmp_path, {"HARTMESH_PUBLIC_HOST": "tenant.example.com", "HARTMESH_TRUSTED_PROXIES": "192.0.2.10"}, source=anchorless)
+    assert missing.returncode == 1 and "anchor" in missing.stderr
+
+
+# ── config.yaml render ───────────────────────────────────────────────────────
+
+
+def _example_config() -> str:
+    return (REPO_ROOT / "config.example.yaml").read_text(encoding="utf-8")
+
+
+def test_template_matches_the_example_version_provider_and_local_backend(render_config: ModuleType) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    example = yaml.safe_load(_example_config())
+    assert template["config_version"] == example["config_version"]
+    provider_line = re.search(r"^#\s+use: (deerflow\.community\.aio_sandbox:AioSandboxProvider)$", _example_config(), flags=re.MULTILINE)
+    assert provider_line is not None
+    assert template["sandbox"]["use"] == provider_line.group(1)
+    assert "provisioner_url" not in template["sandbox"]
+    assert template["sandbox"]["replicas"] == SANDBOX_SLOTS
+    assert template["sandbox"]["ready_timeout"] == 120, "the one-CPU gVisor cold start measured 80 to 91 s; the harness default of 60 destroyed every one (README: Sandbox readiness budget)"
+    assert template["sandbox"]["image"].startswith("ghcr.io/altakleos/hartmesh-sandbox@sha256:"), "the tree carries digest pins between cuts"
+    assert template["sandbox"]["network"]["allow_domains"] == ["pypi.org", "files.pythonhosted.org", "registry.npmjs.org", "github.com"]
+    assert template["sandbox"]["network"]["approval"] == "prompt"
+    assert template["skills"]["path"].startswith("/srv/hartmesh/")
+    assert template["auth"]["local"]["lockout_store"] == "redis", "the login lockout must survive a restart so an admin unlock is not an outage (README: Login lockout)"
+    assert "deployment" not in template and "tool_plane" not in template, "this build carries no deployment profile and no tool plane"
+    assert template["run_ownership"]["heartbeat_enabled"] is True, "the lease renewal is where the worker reads a cancellation the accounts command asked for"
+    assert template["run_events"]["backend"] == "db"
+    assert template["database"]["postgres_url"] == "$DATABASE_URL"
+
+
+def test_catalog_fragments_are_derived_from_the_example_and_reference_only_their_own_key(render_config: ModuleType) -> None:
+    fragments = render_config.load_catalog(CATALOG)
+    assert len(fragments) >= 20
+    example = _example_config()
+    for fragment in fragments:
+        assert fragment.env in example, fragment.source
+        assert fragment.env.endswith(("_API_KEY", "_APIKEY")), fragment.source
+        referenced: set[str] = set()
+        render_config._references({"models": list(fragment.models), "tools": list(fragment.tools)}, referenced)
+        assert referenced <= {fragment.env}, (fragment.source, referenced)
+        for model in fragment.models:
+            assert isinstance(model.get("use"), str) and isinstance(model.get("model"), str), fragment.source
+        for tool in fragment.tools:
+            assert tool["name"] in {"web_search", "web_fetch", "image_search"}, fragment.source
+    envs = [fragment.env for fragment in fragments]
+    assert len(envs) == len(set(envs))
+
+
+@pytest.mark.parametrize(
+    ("label", "keys", "expected_models", "expected_search"),
+    [
+        ("none", set(), [], "deerflow.community.searxng.tools:web_search_tool"),
+        ("one", {"GEMINI_API_KEY"}, ["gemini-2.5-pro"], "deerflow.community.searxng.tools:web_search_tool"),
+        ("several", {"OPENAI_API_KEY", "ANTHROPIC_API_KEY", "TAVILY_API_KEY", "SERPER_API_KEY"}, ["gpt-4", "gpt-5-responses", "claude-sonnet-4"], "deerflow.community.tavily.tools:web_search_tool"),
+    ],
+)
+def test_render_includes_only_present_providers_and_leaves_no_absent_reference(render_config: ModuleType, label: str, keys: set[str], expected_models: list[str], expected_search: str) -> None:
+    environ = {**_base_environ(), **{key: "secret" for key in keys}}
+    rendered, included = render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), environ)
+    document = yaml.safe_load(rendered)
+    assert [model["name"] for model in document["models"]] == expected_models, label
+    tools = {tool["name"]: tool for tool in document["tools"]}
+    assert tools["web_search"]["use"] == expected_search
+    assert {"web_fetch", "image_search", "ls", "read_file", "glob", "grep", "write_file", "str_replace", "bash"} <= set(tools)
+    referenced: set[str] = set()
+    render_config._references(document, referenced)
+    assert referenced == {"DATABASE_URL", *keys}, label
+    assert "secret" not in rendered
+    assert {fragment.env for fragment in included} == keys
+    assert document["sandbox"]["network"]["mode"] == "allowlist"
+    assert "provisioner_url" not in document["sandbox"]
+
+
+def test_render_selects_the_network_block_from_sandbox_egress(render_config: ModuleType) -> None:
+    fragments = render_config.load_catalog(CATALOG)
+    template = TEMPLATE.read_text(encoding="utf-8")
+    allowlist, _ = render_config.render_text(template, fragments, _base_environ())
+    assert yaml.safe_load(allowlist)["sandbox"]["network"]["mode"] == "allowlist"
+    absent, _ = render_config.render_text(template, fragments, {**_base_environ(), "SANDBOX_EGRESS": ""})
+    assert yaml.safe_load(absent)["sandbox"]["network"]["mode"] == "allowlist"
+    opened, _ = render_config.render_text(template, fragments, {**_base_environ(), "SANDBOX_EGRESS": "open"})
+    assert yaml.safe_load(opened)["sandbox"]["network"] == {"mode": "open"}
+    for bad in ("isolated", "ALLOWLIST", "yes"):
+        with pytest.raises(render_config.RenderError, match="SANDBOX_EGRESS"):
+            render_config.render_text(template, fragments, {**_base_environ(), "SANDBOX_EGRESS": bad})
+
+
+def test_render_takes_the_readiness_budget_from_the_template_or_the_optional_key(render_config: ModuleType) -> None:
+    fragments = render_config.load_catalog(CATALOG)
+    template = TEMPLATE.read_text(encoding="utf-8")
+    for environ in (_base_environ(), {**_base_environ(), "SANDBOX_READY_TIMEOUT": ""}, {**_base_environ(), "SANDBOX_READY_TIMEOUT": "   "}):
+        rendered, _ = render_config.render_text(template, fragments, environ)
+        assert yaml.safe_load(rendered)["sandbox"]["ready_timeout"] == 120
+    for raw, expected in (("60", 60), ("90", 90), (" 300 ", 300), ("600", 600)):
+        rendered, _ = render_config.render_text(template, fragments, {**_base_environ(), "SANDBOX_READY_TIMEOUT": raw})
+        assert yaml.safe_load(rendered)["sandbox"]["ready_timeout"] == expected
+
+
+@pytest.mark.parametrize("bad", ["0", "-5", "59", "601", "120.5", "1e2", "abc", "inf", "nan", "true", "+120", "0x78", "\u0661\u0662\u0660", "120s", "120 60"])
+def test_render_refuses_a_readiness_budget_that_is_not_a_whole_number_of_seconds_in_range(render_config: ModuleType, bad: str) -> None:
+    """No `.env` value may disable or malform the cold-start deadline; a refusal
+    names the key and the rule, never what was typed."""
+    with pytest.raises(render_config.RenderError, match=r"SANDBOX_READY_TIMEOUT must be a whole number of seconds from 60 to 600") as excinfo:
+        render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), {**_base_environ(), "SANDBOX_READY_TIMEOUT": bad})
+    assert bad.strip() not in str(excinfo.value).replace("60 to 600", "")
+
+
+@pytest.mark.parametrize("bad", [0, 59, 601, "120", 120.5, True, None, "absent"])
+def test_render_refuses_a_template_whose_readiness_budget_is_not_a_whole_number_of_seconds_in_range(render_config: ModuleType, bad: object) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    if bad == "absent":
+        del template["sandbox"]["ready_timeout"]
+    else:
+        template["sandbox"]["ready_timeout"] = bad
+    with pytest.raises(render_config.RenderError, match=r"template `sandbox.ready_timeout` must be a whole number of seconds from 60 to 600"):
+        render_config.render(template, (), _base_environ())
+
+
+def test_check_mode_refuses_a_bad_readiness_budget_and_writes_nothing(render_config: ModuleType, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    for name, value in _base_environ().items():
+        monkeypatch.setenv(name, value)
+    output = tmp_path / "home" / "config.yaml"
+    monkeypatch.setenv("SANDBOX_READY_TIMEOUT", "90")
+    assert render_config.main(["--template", str(TEMPLATE), "--catalog", str(CATALOG), "--output", str(output)]) == 0
+    assert "sandbox ready_timeout=90s" in capsys.readouterr().out
+    assert yaml.safe_load(output.read_text(encoding="utf-8"))["sandbox"]["ready_timeout"] == 90
+    before = output.read_bytes()
+    monkeypatch.setenv("SANDBOX_READY_TIMEOUT", "0")
+    assert render_config.main(["--template", str(TEMPLATE), "--catalog", str(CATALOG), "--check"]) == 1
+    assert render_config.main(["--template", str(TEMPLATE), "--catalog", str(CATALOG), "--output", str(output)]) == 1
+    captured = capsys.readouterr()
+    assert "SANDBOX_READY_TIMEOUT must be a whole number of seconds from 60 to 600" in captured.err
+    assert output.read_bytes() == before, "a refused render must leave the last valid file in place"
+    assert sorted(child.name for child in output.parent.iterdir()) == ["config.yaml"], "no temporary output may survive a refusal"
+
+
+def test_render_takes_the_slot_wait_from_the_template_or_the_optional_key(render_config: ModuleType) -> None:
+    """`replicas` is a hard budget, so the wait in front of it is configurable.
+
+    Zero is a real setting here, unlike the readiness budget: refusing at once
+    is a legitimate choice for a tenant that would rather be told than waited
+    at.
+    """
+    fragments = render_config.load_catalog(CATALOG)
+    template = TEMPLATE.read_text(encoding="utf-8")
+    for environ in (_base_environ(), {**_base_environ(), "SANDBOX_CAPACITY_WAIT_TIMEOUT": ""}, {**_base_environ(), "SANDBOX_CAPACITY_WAIT_TIMEOUT": "   "}):
+        rendered, _ = render_config.render_text(template, fragments, environ)
+        assert yaml.safe_load(rendered)["sandbox"]["capacity_wait_timeout"] == 5
+    for raw, expected in (("0", 0), ("5", 5), (" 20 ", 20), ("60", 60)):
+        rendered, _ = render_config.render_text(template, fragments, {**_base_environ(), "SANDBOX_CAPACITY_WAIT_TIMEOUT": raw})
+        assert yaml.safe_load(rendered)["sandbox"]["capacity_wait_timeout"] == expected
+
+
+@pytest.mark.parametrize("bad", ["-5", "61", "5.5", "abc", "inf", "nan", "true", "+5", "5s"])
+def test_render_refuses_a_slot_wait_that_is_not_a_whole_number_of_seconds_in_range(render_config: ModuleType, bad: str) -> None:
+    with pytest.raises(render_config.RenderError, match=r"SANDBOX_CAPACITY_WAIT_TIMEOUT must be a whole number of seconds from 0 to 60"):
+        render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), {**_base_environ(), "SANDBOX_CAPACITY_WAIT_TIMEOUT": bad})
+
+
+@pytest.mark.parametrize("bad", [-1, 61, "5", 5.5, True, None, "absent"])
+def test_render_refuses_a_template_whose_slot_wait_is_out_of_range(render_config: ModuleType, bad: object) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    if bad == "absent":
+        del template["sandbox"]["capacity_wait_timeout"]
+    else:
+        template["sandbox"]["capacity_wait_timeout"] = bad
+    with pytest.raises(render_config.RenderError, match=r"template `sandbox.capacity_wait_timeout` must be a whole number of seconds from 0 to 60"):
+        render_config.render(template, (), _base_environ())
+
+
+def test_render_refuses_a_template_reference_to_an_unset_variable(render_config: ModuleType) -> None:
+    with pytest.raises(render_config.RenderError, match="DATABASE_URL"):
+        render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), {LOCAL_PASSWORDS_KEY: "allowed", "HARTMESH_LOCAL_REGISTRATION": "closed"})
+
+
+def test_render_output_is_a_valid_app_config(render_config: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from deerflow.config.app_config import AppConfig
+
+    keys = {"OPENAI_API_KEY", "TAVILY_API_KEY"}
+    environ = {**_base_environ(), **{key: "secret" for key in keys}}
+    for name, value in environ.items():
+        monkeypatch.setenv(name, value)
+    rendered, _ = render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), environ)
+    path = tmp_path / "config.yaml"
+    path.write_text(rendered, encoding="utf-8")
+    config = AppConfig.from_file(str(path))
+    assert [model.name for model in config.models] == ["gpt-4", "gpt-5-responses"]
+    assert config.sandbox.use == "deerflow.community.aio_sandbox:AioSandboxProvider"
+    assert config.sandbox.replicas == SANDBOX_SLOTS
+    assert config.sandbox.environment == SLIM_SANDBOX_SERVICES, "the render copies the slim switches through unchanged"
+    assert config.sandbox.ready_timeout == 120
+    assert config.sandbox.network.mode == "allowlist"
+    assert config.run_events.backend == "db"
+
+
+def test_rendered_profile_carries_the_office_retry_budget(render_config: ModuleType, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The login-throttle policy as the tenant Gateway actually consumes it.
+
+    Asserted on the rendered file rather than on a hand-built LocalAuthConfig,
+    because what ships is this template plus the renderer: a value dropped from
+    the template, or a renderer that stops copying `auth:` through, would leave
+    a policy fixture passing and the tenant on the generic default.
+
+    The profile raises only the total-volume limit. The standalone default of
+    300 is exactly the design allowance for this deployment shape -- twenty
+    staff, five wrong attempts each, then ten further retries each while their
+    account is locked -- so a single bad morning would sit *on* the limit with
+    nothing left. 600 is that allowance doubled: 299 further failures before the
+    limit trips. Every other control is the standalone default, deliberately.
+    """
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.auth_config import LocalAuthConfig
+
+    monkeypatch.setenv("DATABASE_URL", _base_environ()["DATABASE_URL"])
+    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", _base_environ()["DEER_FLOW_STREAM_BRIDGE_REDIS_URL"])
+    rendered, _ = render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), _base_environ())
+    path = tmp_path / "config.yaml"
+    path.write_text(rendered, encoding="utf-8")
+    local = AppConfig.from_file(str(path)).auth.local
+
+    standalone = LocalAuthConfig()
+    assert local.source_max_failures == 600
+    assert local.source_max_failures == 2 * standalone.source_max_failures, "the profile doubles the generic volume limit and changes nothing else"
+    assert local.lockout_store == "redis", "the profile's one other departure (README: 'Login lockout')"
+    for field in ("source_max_distinct_accounts", "source_window_seconds", "source_lockout_seconds"):
+        assert getattr(local, field) == getattr(standalone, field), field
+    assert local.effective_account_max_attempts == standalone.effective_account_max_attempts == 5
+    assert local.effective_account_lockout_seconds == standalone.effective_account_lockout_seconds == 300.0
+
+
+# ── release pinning ──────────────────────────────────────────────────────────
+
+
+def test_the_tree_carries_digest_pins_between_cuts_and_check_accepts_them(pin_images: ModuleType) -> None:
+    references = pin_images.read_references(IMAGES)
+    assert all(pin_images.PINNED_REFERENCE.fullmatch(reference) for reference in references), "the last pin commit left digest pins; a candidate build must ignore them"
+    assert pin_images.verify(pin_images.ProfileFiles.under(PROFILE)) == references
+
+
+def test_images_txt_lists_exactly_the_references_the_profile_uses(pin_images: ModuleType) -> None:
+    references = pin_images.read_references(IMAGES)
+    used = pin_images.yaml_references(COMPOSE) + pin_images.yaml_references(TEMPLATE)
+    assert sorted(references) == sorted(set(used))
+    assert len(references) == 8
+    repositories = {pin_images.repository_of(reference) for reference in references}
+    assert repositories == {
+        "ghcr.io/altakleos/hartmesh-backend",
+        "ghcr.io/altakleos/hartmesh-frontend",
+        "searxng/searxng",
+        "ghcr.io/altakleos/hartmesh-sandbox",
+        "ghcr.io/altakleos/hartmesh-sandbox-network-proxy",
+        "postgres",
+        "redis",
+        "nginx",
+    }
+    for repository in repositories:
+        assert re.fullmatch(r"[a-z0-9./_-]+", repository), repository
+
+
+def _fake_resolver(calls: list[str]):
+    def resolve(reference: str) -> str:
+        calls.append(reference)
+        import hashlib
+
+        return "sha256:" + hashlib.sha256(reference.encode()).hexdigest()
+
+    return resolve
+
+
+PLACEHOLDER_THIRD_PARTY = {
+    "postgres": "postgres:16",
+    "redis": "redis:7-alpine",
+    "nginx": "nginx:alpine",
+    "searxng/searxng": "searxng/searxng:latest",
+}
+
+
+def _placeholder_profile(pin_images: ModuleType, tmp_path: Path):
+    """A copy of the profile whose references are tag-form placeholders.
+
+    Between cuts the tree carries the previous release's digest pins, so the
+    tests build the placeholder state themselves instead of assuming it.
+    """
+
+    copy = tmp_path / "compose"
+    shutil.copytree(PROFILE, copy)
+    files = pin_images.ProfileFiles.under(copy)
+    mapping = {}
+    for reference in pin_images.read_references(files.images):
+        repository = pin_images.repository_of(reference)
+        mapping[reference] = f"{repository}:v0.0.0-hartmesh.0" if pin_images.is_fork_image(repository) else PLACEHOLDER_THIRD_PARTY[repository]
+    for path in (files.compose, files.config):
+        pin_images.rewrite_yaml(path, mapping)
+    files.images.write_text("".join(f"{mapping[reference]}\n" for reference in mapping), encoding="utf-8")
+    return files
+
+
+def test_pin_rewrites_every_reference_to_a_digest_and_check_refuses_tag_form(pin_images: ModuleType, tmp_path: Path) -> None:
+    files = _placeholder_profile(pin_images, tmp_path)
+    copy = files.images.parent
+    if any(pin_images.PINNED_REFERENCE.fullmatch(reference) is None for reference in pin_images.read_references(files.images)):
+        with pytest.raises(pin_images.PinError, match="tag-form"):
+            pin_images.verify(files)
+    calls: list[str] = []
+    pinned = pin_images.pin(files, _fake_resolver(calls), release=RELEASE).references
+    assert len(pinned) == 8
+    assert all(pin_images.PINNED_REFERENCE.fullmatch(reference) for reference in pinned)
+    assert files.images.read_text(encoding="utf-8") == "".join(f"{reference}\n" for reference in pinned)
+    assert set(pin_images.yaml_references(files.compose)) | set(pin_images.yaml_references(files.config)) == set(pinned)
+    assert pin_images.verify(files) == pinned
+    assert (copy / "compose.yaml").read_text(encoding="utf-8").count("#") == COMPOSE.read_text(encoding="utf-8").count("#"), "comments survive the rewrite"
+    again = pin_images.pin(files, _fake_resolver(calls_again := []))
+    assert again.references == pinned and again.resolutions == () and calls_again == []
+    with pytest.raises(pin_images.PinError, match="not a sha256 digest"):
+        garbage = tmp_path / "garbage"
+        shutil.copytree(PROFILE, garbage)
+        pin_images.pin(pin_images.ProfileFiles.under(garbage), lambda reference: "latest", release=RELEASE)
+
+
+def test_pin_check_mode_refuses_a_profile_that_disagrees_with_images_txt(pin_images: ModuleType, tmp_path: Path) -> None:
+    files = _placeholder_profile(pin_images, tmp_path)
+    copy = files.images.parent
+    pin_images.pin(files, _fake_resolver([]), release=RELEASE)
+    text = files.compose.read_text(encoding="utf-8")
+    files.compose.write_text(text.replace("postgres@sha256:", "postgres:16@sha256:", 1), encoding="utf-8")
+    with pytest.raises(pin_images.PinError, match="not a line of"):
+        pin_images.verify(files)
+    result = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "pin_compose_images.py"), "--check", "--profile", str(copy)], capture_output=True, text=True, check=False)
+    assert result.returncode == 1 and "pin_compose_images:" in result.stderr
+
+
+def test_release_rewrites_fork_lines_to_the_release_tag_and_leaves_third_party_lines(pin_images: ModuleType, tmp_path: Path) -> None:
+    files = _placeholder_profile(pin_images, tmp_path)
+    before = pin_images.read_references(files.images)
+    fork_before = [reference for reference in before if pin_images.is_fork_image(pin_images.repository_of(reference))]
+    third_party_before = [reference for reference in before if reference not in fork_before]
+    assert len(fork_before) == 4 and third_party_before == ["searxng/searxng:latest", "postgres:16", "redis:7-alpine", "nginx:alpine"]
+    assert all(reference.endswith(f":{RELEASE_IMAGE_TAG}") is False for reference in fork_before), "the tree carries placeholders, not this release"
+    calls: list[str] = []
+    result = pin_images.pin(files, _fake_resolver(calls), release=RELEASE)
+    assert calls == [f"{pin_images.repository_of(reference)}:{RELEASE_IMAGE_TAG}" for reference in fork_before] + third_party_before
+    assert [resolution.reference for resolution in result.resolutions] == calls
+    for resolution in result.resolutions:
+        assert resolution.pinned == f"{pin_images.repository_of(resolution.reference)}@{_fake_resolver([])(resolution.reference)}"
+    assert result.references == [resolution.pinned for resolution in result.resolutions]
+    assert pin_images.verify(files) == result.references
+    # A leading "v" is tolerated and means the same release.
+    again = pin_images.pin(files, _fake_resolver(calls_again := []), release=f"v{RELEASE}")
+    assert again.references == result.references and calls_again == [f"{pin_images.repository_of(r)}:{RELEASE_IMAGE_TAG}" for r in fork_before]
+
+
+def test_release_repins_fork_lines_already_pinned_to_an_earlier_release(pin_images: ModuleType, tmp_path: Path) -> None:
+    files = _placeholder_profile(pin_images, tmp_path)
+    earlier = pin_images.pin(files, _fake_resolver([]), release="2.1.0+hartmesh.4").references
+    calls: list[str] = []
+    result = pin_images.pin(files, _fake_resolver(calls), release=RELEASE)
+    assert calls == [f"{pin_images.repository_of(reference)}:{RELEASE_IMAGE_TAG}" for reference in earlier if pin_images.is_fork_image(pin_images.repository_of(reference))]
+    assert result.references != earlier and pin_images.verify(files) == result.references
+    assert [reference for reference in result.references if not pin_images.is_fork_image(pin_images.repository_of(reference))] == [reference for reference in earlier if not pin_images.is_fork_image(pin_images.repository_of(reference))]
+
+
+def test_pin_without_a_release_refuses_tag_form_fork_lines(pin_images: ModuleType, tmp_path: Path) -> None:
+    files = _placeholder_profile(pin_images, tmp_path)
+    copy = files.images.parent
+    original = {path: path.read_text(encoding="utf-8") for path in (files.images, files.compose, files.config)}
+    calls: list[str] = []
+    with pytest.raises(pin_images.PinError, match="--release"):
+        pin_images.pin(files, _fake_resolver(calls))
+    assert calls == [], "nothing is resolved before the refusal"
+    assert {path: path.read_text(encoding="utf-8") for path in original} == original, "nothing is rewritten before the refusal"
+    result = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "pin_compose_images.py"), "--profile", str(copy)], capture_output=True, text=True, check=False)
+    assert result.returncode == 1 and "--release" in result.stderr
+    for bad in ("2.1.0", "hartmesh.5", "2.1.0-hartmesh.5", "v2.1.0+hartmesh.", "2.1.0+hartmesh.5 "):
+        with pytest.raises(pin_images.PinError, match="release version"):
+            pin_images.pin(files, _fake_resolver([]), release=bad)
+    with pytest.raises(pin_images.PinError, match="tag-form"):
+        pin_images.verify(files)
+    check = subprocess.run([sys.executable, str(REPO_ROOT / "scripts" / "pin_compose_images.py"), "--check", "--release", RELEASE, "--profile", str(copy)], capture_output=True, text=True, check=False)
+    assert check.returncode != 0, "--check takes no release: it verifies the tree as it is"
+
+
+def test_pin_script_is_executable_as_releasing_md_invokes_it() -> None:
+    script = REPO_ROOT / "scripts" / "pin_compose_images.py"
+    assert script.read_text(encoding="utf-8").startswith("#!/usr/bin/env python3\n")
+    assert script.stat().st_mode & 0o111, "RELEASING.md runs scripts/pin_compose_images.py directly"
+
+
+def test_release_image_tag_spelling_matches_the_shell_helper(pin_images: ModuleType) -> None:
+    for version in (RELEASE, "2.1.0+hartmesh.10", "10.0.1+hartmesh.1"):
+        helper = subprocess.run(["bash", str(REPO_ROOT / "scripts" / "release_tag_spellings.sh"), version], capture_output=True, text=True, check=True)
+        expected = dict(line.split("=", 1) for line in helper.stdout.split())["image_tag"]
+        assert pin_images.release_image_tag(version) == expected
+        assert pin_images.release_image_tag(f"v{version}") == expected
+
+
+def _adopt_step() -> tuple[dict, str]:
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "container.yaml").read_text(encoding="utf-8"))
+    job = workflow["jobs"]["container"]
+    steps = {step.get("name"): step for step in job["steps"]}
+    return job, steps["Adopt the digest deploy/compose pins for this component"]["run"]
+
+
+def test_the_profile_ships_the_scheduler_on_with_values_chosen_for_two_sandbox_slots(render_config: ModuleType) -> None:
+    """Scheduling is on, and every value is a choice, not a default.
+
+    Nobody watches a scheduled run, and the profile's two 1 GiB sandbox slots
+    are the tenant's whole hard budget: a run that holds both refuses a
+    person's turn after ``capacity_wait_timeout``. The scheduler therefore
+    holds at most one slot at a time (``max_concurrent_runs`` is derived from
+    the replicas: two slots, one left out of its reach), bounds a run's clock,
+    and lets a queued occurrence wait for the runs ahead of it.
+    """
+    from deerflow.config.scheduler_config import SchedulerConfig
+
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    scheduler = SchedulerConfig(**template["scheduler"])
+
+    assert scheduler.enabled is True
+    # A person always has a slot the scheduler cannot take.
+    assert scheduler.max_concurrent_runs == SANDBOX_SLOTS - 1
+    assert scheduler.multi_instance is False, "one Gateway"
+    # The wall-clock bound on one scheduled run (max_run_seconds) is not ported yet.
+    assert "max_run_seconds" not in template["scheduler"]
+    assert scheduler.queue_timeout_seconds == 7200
+    # Model calls: a scheduled run does the work a person would ask for, so it keeps the interactive numbers
+    # (the graph's step limit, about 11 steps a model turn on the lead-agent graph, ends a run near 90 turns,
+    # before the 500-turn execution budget could). The profile changes wall time and concurrency only.
+    assert "recursion_limit" not in template["scheduler"]
+    assert scheduler.recursion_limit == SchedulerConfig().recursion_limit == 1000
+    assert "execution_policy" not in template
+
+    # The renderer copies the block through unchanged, so what the tenant runs is what is pinned here.
+    rendered, _ = render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), _base_environ())
+    document = yaml.safe_load(rendered)
+    assert document["scheduler"] == template["scheduler"]

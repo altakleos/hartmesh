@@ -1,0 +1,297 @@
+# HartMesh tenant VM profile: config.yaml TEMPLATE.
+#
+# This file is never read by the Gateway directly. gateway/run.sh renders the
+# effective config.yaml into the tenant's data directory at every start
+# (gateway/render_config.py), pointing DEER_FLOW_CONFIG_PATH at the result:
+#
+#   - `models:` is filled from providers/models/*.yaml for every provider whose
+#     environment variable is present and non-empty in the tenant .env, and
+#     `tools:` entries are replaced by providers/tools/*.yaml the same way, so
+#     no `$NAME` reference survives for a key the tenant does not carry
+#     (`$NAME` expansion is whole-string, secrets-only, and raises on an unset
+#     name, which would otherwise be a hard start requirement).
+#   - `sandbox.network` is chosen by SANDBOX_EGRESS: the allowlist block below
+#     when the key is `allowlist` or absent, `mode: open` alone for `open`;
+#     any other value refuses to render.
+#   - `auth` is the sign-in mode: the three HARTMESH_SIGN_ON_* keys add
+#     `auth.oidc` (one provider, `sso`) and close local passwords
+#     (`auth.local.enabled: false`, registration off); HARTMESH_LOCAL_PASSWORDS
+#     =allowed adds `auth.local.enabled: true` and `allow_registration` from
+#     HARTMESH_LOCAL_REGISTRATION (`open` or `closed`, required). Neither,
+#     both, a half-set group, or local passwords without the registration key
+#     refuses to render (README: "Sign-in").
+#
+# Everything else is copied through unchanged. Paths are literal because this
+# file cannot interpolate them: HARTMESH_DATA_DIR is therefore fixed at
+# /srv/hartmesh by this file (README: "Mount points").
+config_version: 45
+log_level: info
+
+models: []
+
+# ── Local login throttling ──────────────────────────────────────────────────
+# The lockout is keyed on the account, not the client address: one tenant is
+# one company, five to twenty staff behind one office NAT address, so an
+# address-keyed lock made five failures by anyone lock out everyone (README:
+# "The .env contract", AUTH_TRUSTED_PROXIES). The counters live in Redis, which
+# this profile already runs, so an administrator can clear a lockout through
+# POST /api/v1/auth/lockouts/clear without restarting the Gateway — a restart
+# here is a visible interruption for everyone still working, because the stack
+# is one replica with a recreate rollout. A Redis outage fails login closed;
+# on this profile Redis is already load-bearing for streaming.
+#
+# Deliberately absent here: `auth.local.enabled`, `allow_registration` and
+# `auth.oidc`. They are the sign-in mode and whether visitors may sign up, and
+# the renderer writes them from the tenant .env in both modes (and refuses a
+# template that names one), so the template cannot carry an open default and
+# one bundle serves every tenant.
+auth:
+  local:
+    lockout_store: redis
+    # The one number this profile raises. The generic default of 300 total
+    # failures per source window is exactly this deployment's design allowance
+    # and no more: twenty staff, five wrong attempts each to reach their own
+    # account lock, then ten further retries each during it (the response a
+    # locked account gets is the one a wrong password gets, by design, so
+    # nothing tells a person to stop) is 20 x 15 = 300. A single bad morning
+    # would land *on* the limit and lock the office's shared address for
+    # 15 minutes. 600 is that allowance doubled, leaving 299 further failures
+    # before the limit trips. These are design allowances, not measured
+    # behaviour. The tradeoff is explicit in README ("Login lockout"): this
+    # source may now cause twice as many counted failures before the volume
+    # block, and neither this limit nor the 50-account guard makes an office
+    # immune to a malicious user sharing its address.
+    source_max_failures: 600
+
+# ── Sandbox: the Gateway's local Docker backend (no provisioner_url) ────────
+sandbox:
+  use: deerflow.community.aio_sandbox:AioSandboxProvider
+  image: ghcr.io/altakleos/hartmesh-sandbox@sha256:8c5dfd856c772b1517aa693b042de1ddeda46b881e04312d78e1330223fe9a04
+  port: 8080
+  # Concurrent-sandbox ceiling from the memory budget (README: "Memory
+  # budget"): two 1 GiB slim sandboxes with their relays sit on the 5.0 GiB
+  # line (a 512 MiB slot had no headroom over the sandbox's own idle
+  # footprint; README: "Two 1 GiB slots"). This is a **hard** budget with LRU
+  # eviction of warm sandboxes in front of it: a third acquisition evicts the
+  # least-recently-used idle sandbox instead of failing, and with both in
+  # active use it waits capacity_wait_timeout and is then refused. It is not a
+  # ceiling the guest's spare memory absorbs -- the sum above leaves none
+  # (README: "Memory budget").
+  replicas: 2
+  # How long an idle sandbox keeps one of the two slots. The budget reserves
+  # every slot whether or not it is used, and a cold start of the sandbox
+  # image under gVisor takes tens of seconds, so idle sandboxes are kept warm
+  # for 30 minutes; a third thread still evicts the least recently used one.
+  idle_timeout: 1800
+  # A new thread's sandbox is built the moment the chat opens, ahead of the
+  # first message (README: "Two 1 GiB slots at two CPUs"). One nobody sends a
+  # message to is stopped after this many seconds so an abandoned "new chat"
+  # does not hold one of the two slots for the full idle timeout. A sandbox a
+  # turn has used follows idle_timeout instead.
+  prewarm_claim_timeout: 300
+  # The tenant bundle, read-only in every sandbox at the path the
+  # business-report skill reads by default: the company name, logo and
+  # colours a report carries, and the report profiles it loads by name ahead
+  # of its own. The same directory is `tenant_bundle.path` below, which is
+  # where the Gateway reads it for the workspace (README: "Tenant bundle").
+  mounts:
+    - host_path: /srv/hartmesh/operator/tenant
+      container_path: /mnt/tenant
+      read_only: true
+  # The sandbox image's own service switches, passed to every sandbox as
+  # environment by the local Docker backend. Off: the browser and its MCP
+  # server, VNC, Jupyter, code-server and the Node REPL (this last one also
+  # stops its on-demand start). Left running in the container: the sandbox
+  # API server and its nginx (the relay is a separate sidecar, unchanged).
+  # The switches stop services; the node, npx and python3 runtimes that bash
+  # and the public skills invoke are unaffected (checked). Measured on a
+  # development host under gVisor
+  # at one CPU: ready in 10.2 s and 238 MiB idle against 20.2 s and 1,209 MiB
+  # for the full profile (README: "Slim services profile"). Each value must
+  # stay the quoted string "true": the image's entrypoint compares strings,
+  # and the harness types this mapping as text.
+  environment:
+    DISABLE_BROWSER: "true"
+    DISABLE_JUPYTER: "true"
+    DISABLE_CODE_SERVER: "true"
+    DISABLE_VNC: "true"
+    DISABLE_MCP_BROWSER: "true"
+    DISABLE_NODEJS_REPL: "true"
+  # Cold-start readiness budget, in seconds: the provider polls a new
+  # sandbox's /v1/sandbox for this long and destroys it when the budget runs
+  # out. At `--cpus 1` under gVisor the released full-profile image answered
+  # after 80 to 91 seconds on the tenant VM class, so the harness default of
+  # 60 destroyed every cold start; the slim profile measured about 15 s there
+  # at one CPU and boots at two since 2026-09-17 (README: "Sandbox readiness
+  # budget"). 120 is the initial
+  # candidate the estate is evaluating, not a qualified fleet-wide bound; the
+  # optional .env key SANDBOX_READY_TIMEOUT overrides it (60 to 600).
+  ready_timeout: 120
+  # How long an acquisition waits for one of the two slots when both are in
+  # active use and nothing is parked to evict. The budget above is exact
+  # (README: "Memory budget"), so the wait ends in a refusal rather than a
+  # third container. Five seconds is the overlap at the edges of two turns --
+  # one parking its sandbox while another asks for one; a slot still held
+  # after that is held by work measured in minutes, and waiting longer trades
+  # a refusal the person can act on for a spinner they cannot. The optional
+  # .env key SANDBOX_CAPACITY_WAIT_TIMEOUT overrides it (0 to 60; 0 refuses
+  # immediately).
+  capacity_wait_timeout: 5
+  network:
+    mode: allowlist
+    approval: prompt
+    temporary_grant_ttl: 300
+    # Bounded on purpose: the package-installation set from
+    # config.example.yaml and nothing else. Everything beyond installs goes
+    # through the approval card per session; widening this standing list is
+    # the operator's decision. web_search/web_fetch run from the Gateway and
+    # are not governed by this list.
+    allow_domains:
+      - pypi.org
+      - files.pythonhosted.org
+      - registry.npmjs.org
+      - github.com
+    proxy_image: ghcr.io/altakleos/hartmesh-sandbox-network-proxy@sha256:7eab1274f9060da958a0585a7ca566b9a424a1dad85cad2fc7187405846c4729
+
+skills:
+  # Skill library on the tenant data disk: public/ is mirrored from the
+  # Gateway image at every start by gateway/run.sh (README: "Public skills"),
+  # custom/ is the operator's. A chat's sandbox sees an immutable per-turn
+  # snapshot under container_path/.accepted instead of this path (README:
+  # "Public skills").
+  path: /srv/hartmesh/home/skills
+  container_path: /mnt/skills
+
+# Someone who is not an administrator is not offered the developer screens
+# (skills, tools, subagents, integrations, the scheduled-task recipes) and
+# Home shows a starter grid. Presentation only; `system_role` limits a person.
+ui:
+  profile: business
+
+# Where the Gateway reads the company's brand, starter list and report
+# profiles: brand.json, an optional PNG or JPEG logo, starters.json and
+# report-profiles/ under /srv/hartmesh/operator/tenant, the operator's own
+# directory on the tenant data disk. Sandboxes mount the same directory
+# read-only at /mnt/tenant (sandbox.mounts above), so the workspace header
+# and the report carry the one name the operator wrote. Every file is
+# optional; a malformed one degrades its own field and is named in the log
+# and by `render_config.py --check` (README: "Tenant bundle").
+tenant_bundle:
+  path: /srv/hartmesh/operator/tenant
+
+database:
+  backend: postgres
+  postgres_url: $DATABASE_URL
+  pool_recycle: 300
+  command_timeout: 30
+
+dedupe_storage:
+  backend: auto
+
+run_events:
+  backend: db
+
+# One Gateway worker owns every run, and it renews a lease on each while it
+# runs. The renewal is also where the worker reads a cancellation another
+# process asked for: `python -m app.gateway.auth.accounts disable` ends a
+# person's running work through it. Without the heartbeat that request would
+# sit unread until the run ended on its own.
+run_ownership:
+  heartbeat_enabled: true
+
+# The LangGraph Store reads this legacy section and does not fall back to
+# `database:`; point it at the same PostgreSQL so checkpoints survive restarts.
+checkpointer:
+  type: postgres
+  connection_string: $DATABASE_URL
+
+# URL comes from DEER_FLOW_STREAM_BRIDGE_REDIS_URL in the Gateway environment.
+stream_bridge:
+  type: redis
+
+memory:
+  storage_path: memory.json
+
+verification:
+  receipts_enabled: true
+  receipts_render_mode: "delegation_only"
+  judge_enabled: false
+  judge_model_name: null
+
+# ── Scheduled tasks ─────────────────────────────────────────────────────────
+# Scheduling ships on. It was off only because this block was absent and
+# `scheduler.enabled` defaults to false; the Gateway re-renders the tenant's own
+# config.yaml from this bundle at every start, so this is the only place the
+# setting can be turned on or off. Nobody watches a scheduled run and the two
+# 1 GiB sandbox slots are the tenant's whole hard budget, so each value is a
+# choice (README: "Scheduled tasks"):
+#
+#   - max_concurrent_runs is sandbox.replicas minus one. A scheduled run takes
+#     the slot its first sandbox call needs and keeps it until it ends, so the
+#     scheduler never holds both slots. That keeps one slot out of its reach; it
+#     does not stop a second person's turn from being refused while a scheduled
+#     run and one person hold the two (README states the limit). Runs that come
+#     due together queue and run one after another.
+#   - queue_timeout_seconds is how long an occurrence may wait, measured from
+#     when it was admitted, behind the run ahead of it before it is failed:
+#     eight full-length runs.
+#   - Model calls keep the interactive numbers: a scheduled run does the work a
+#     person would ask for. The graph's step limit (recursion_limit, 1000; the
+#     lead-agent graph spends about 11 steps a model turn, so a run ends near
+#     90 turns) bounds them well before the 500-turn execution budget, and the
+#     tasks page shows a run that reaches it in words.
+scheduler:
+  enabled: true
+  max_concurrent_runs: 1
+  queue_timeout_seconds: 7200
+
+tool_groups:
+  - name: web
+  - name: file:read
+  - name: file:write
+  - name: bash
+
+# Keyless defaults. A providers/tools fragment whose key is present replaces
+# the entry with the same name (first fragment in file order wins), so a
+# tenant with no search key still has web_search, web_fetch and image_search.
+# web_search is the profile's own SearXNG (compose.yaml: searxng), reached
+# only over the app network. web_fetch and image_search are upstream's keyless
+# defaults in this build; the fork's own page reader and SearXNG image search
+# are not ported yet (they are part of the search and fetch work).
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.searxng.tools:web_search_tool
+    base_url: http://searxng:8080
+    max_results: 5
+  - name: web_fetch
+    group: web
+    use: deerflow.community.jina_ai.tools:web_fetch_tool
+    timeout: 10
+  - name: image_search
+    group: web
+    use: deerflow.community.image_search.tools:image_search_tool
+    max_results: 5
+  - name: ls
+    group: file:read
+    use: deerflow.sandbox.tools:ls_tool
+  - name: read_file
+    group: file:read
+    use: deerflow.sandbox.tools:read_file_tool
+  - name: glob
+    group: file:read
+    use: deerflow.sandbox.tools:glob_tool
+    max_results: 200
+  - name: grep
+    group: file:read
+    use: deerflow.sandbox.tools:grep_tool
+    max_results: 100
+  - name: write_file
+    group: file:write
+    use: deerflow.sandbox.tools:write_file_tool
+  - name: str_replace
+    group: file:write
+    use: deerflow.sandbox.tools:str_replace_tool
+  - name: bash
+    group: bash
+    use: deerflow.sandbox.tools:bash_tool

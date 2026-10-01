@@ -63,10 +63,25 @@ class UserRow(Base):
     # unconstrained so plain password accounts can coexist.
     oauth_provider: Mapped[str | None] = mapped_column(String(32), nullable=True)
     oauth_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    # The issuer whose assertion created the account. The lookup key stays
+    # (oauth_provider, oauth_id); this pins the row to one issuer so pointing
+    # the same provider name elsewhere cannot hand it to a stranger. NULL on
+    # rows linked before 0039_users_oauth_issuer; they adopt the configured
+    # issuer on their next sign-in.
+    oauth_issuer: Mapped[str | None] = mapped_column(String(512), nullable=True)
 
     # Auth lifecycle flags
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
+    # Stamped at every provider sign-in (0040_account_access); NULL on local
+    # accounts and on provider accounts that have not signed in since.
+    last_sign_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # The address this account held before the deployer released it
+    # (0041_email_released_from). NULL on every account whose email is its
+    # own; non-NULL is what "released" means, so nothing has to read the
+    # shape of the replacement address to know.
+    email_released_from: Mapped[str | None] = mapped_column(String(320), nullable=True)
 
     __table_args__ = (
         # sqlite_where alone is a SQLAlchemy dialect-specific kwarg -- it

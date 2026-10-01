@@ -22,6 +22,17 @@ class AuthErrorCode(StrEnum):
     NOT_AUTHENTICATED = "not_authenticated"
     SYSTEM_ALREADY_INITIALIZED = "system_already_initialized"
     REGISTRATION_DISABLED = "registration_disabled"
+    # Sign-on-only mode (auth.local.enabled: false): the deployment signs
+    # people in through its identity provider and local passwords are no
+    # way in -- not for a new account, not for one restored from before.
+    SIGN_ON_REQUIRED = "sign_on_required"
+    # The deployer turned the account off (``disabled_identities``); every
+    # credential that resolves to it is refused until it is turned on again.
+    ACCOUNT_DISABLED = "account_disabled"
+    # The account's first password was set for it (``reset_admin``, or an
+    # administrator adding the person): until the person chooses their own,
+    # the one thing any credential of it may do is complete that setup.
+    SETUP_REQUIRED = "setup_required"
 
 
 class TokenError(StrEnum):

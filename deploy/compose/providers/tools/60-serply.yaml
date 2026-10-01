@@ -1,0 +1,11 @@
+# Included when SERPLY_API_KEY is present; replaces web_search.
+env: SERPLY_API_KEY
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.serply.tools:web_search_tool
+    max_results: 5
+    max_item_bytes: 16384
+    max_total_bytes: 65536
+    timeout: 30
+    api_key: $SERPLY_API_KEY

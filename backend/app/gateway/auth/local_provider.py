@@ -1,9 +1,10 @@
 """Local email/password authentication provider."""
 
 import logging
+from datetime import datetime
 
 from app.gateway.auth.models import User
-from app.gateway.auth.password import hash_password_async, needs_rehash, verify_password_async
+from app.gateway.auth.password import equalize_password_timing, hash_password_async, needs_rehash, verify_password_async
 from app.gateway.auth.providers import AuthProvider
 from app.gateway.auth.repositories.base import UserRepository
 
@@ -38,10 +39,15 @@ class LocalAuthProvider(AuthProvider):
 
         user = await self._repo.get_user_by_email(email)
         if user is None:
+            # Spend the verification this lookup skipped: an unknown address
+            # must not answer faster than a wrong password, or response time
+            # enumerates which addresses have accounts.
+            await equalize_password_timing()
             return None
 
         if user.password_hash is None:
-            # OAuth user without local password
+            # OAuth user without local password — same reasoning.
+            await equalize_password_timing()
             return None
 
         if not await verify_password_async(password, user.password_hash):
@@ -120,12 +126,30 @@ class LocalAuthProvider(AuthProvider):
         """Get user by email."""
         return await self._repo.get_user_by_email(email)
 
+    async def record_sign_in(self, user: User, *, email: str | None = None) -> bool:
+        """Write what a provider sign-in changed on an existing account (role, issuer, the stamp, and the address when it follows).
+
+        Returns whether the address followed; ``False`` also when another
+        account took it between the caller's check and this write.
+        """
+        return await self._repo.record_sign_in(str(user.id), system_role=user.system_role, oauth_issuer=user.oauth_issuer, last_sign_in_at=user.last_sign_in_at, email=email)
+
+    async def release_email(self, user_id: str, *, replacement: str) -> str | None:
+        """Give up an account's address, recording what it held; ``None`` when there was nothing to release."""
+        return await self._repo.release_email(user_id, replacement=replacement)
+
+    async def is_identity_disabled(self, issuer: str, subject: str) -> bool:
+        """Whether the deployer turned this provider identity off (account or not)."""
+        return await self._repo.is_identity_disabled(issuer, subject)
+
     async def create_oauth_user(
         self,
         email: str,
         oauth_provider: str,
         oauth_id: str,
         system_role: str = "user",
+        oauth_issuer: str | None = None,
+        last_sign_in_at: datetime | None = None,
     ) -> User:
         """Create a new user from an OAuth/OIDC login.
 
@@ -134,6 +158,7 @@ class LocalAuthProvider(AuthProvider):
             oauth_provider: Provider ID (e.g. 'keycloak', 'google')
             oauth_id: User's subject claim from the ID token
             system_role: Role to assign ("admin" or "user")
+            oauth_issuer: The issuer whose assertion this is; the account is pinned to it
 
         Returns:
             Created User instance
@@ -145,5 +170,7 @@ class LocalAuthProvider(AuthProvider):
             needs_setup=False,
             oauth_provider=oauth_provider,
             oauth_id=oauth_id,
+            oauth_issuer=oauth_issuer,
+            last_sign_in_at=last_sign_in_at,
         )
         return await self._repo.create_user(user)

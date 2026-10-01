@@ -1,0 +1,71 @@
+# SearXNG for the tenant profile: the keyless web_search behind the Gateway.
+# One instance per tenant, reachable only on the app network, JSON only.
+# It also answers image_search. Engines are a curated set rather than
+# SearXNG's eighty: each one here answered from a server address when
+# measured (README: "Web search"), and a query goes to these and nowhere
+# else. The two groups do not mix: a web query reaches only the general
+# engines, an image query only the image ones.
+use_default_settings:
+  engines:
+    keep_only:
+      # web_search
+      ["google cse", bing, yahoo,
+       # image_search
+       "google cse images", unsplash, openverse, "wikicommons.images"]
+general:
+  instance_name: hartmesh
+  enable_metrics: false
+server:
+  # secret_key comes from SEARXNG_SECRET, minted per start by run.sh. The
+  # limiter needs a Redis this instance does not have and guards an HTML
+  # surface nothing reaches; only the Gateway calls this, over the bridge.
+  limiter: false
+  image_proxy: false
+search:
+  formats: [html, json]
+  safe_search: 1
+  autocomplete: ""
+outgoing:
+  request_timeout: 6.0
+  max_request_timeout: 10.0
+engines:
+  # Google's search element answered every probe with an authoritative source
+  # in its top three, the best of any keyless engine, so it leads the merged
+  # ranking. It gated this address after about 54 queries and reaches Google
+  # through a publisher engine id carried in SearXNG's own source, so it is
+  # the engine most likely to stop answering; Bing and Yahoo are what the
+  # tool falls back to. Both of those are off in SearXNG's own defaults.
+  - name: google cse
+    weight: 2
+  - name: yahoo
+    disabled: false
+  # Bing never gated and is the fastest, so it is the availability floor,
+  # but it is the weakest ranker of the three and was measured returning
+  # results unrelated to the question (a tree-service directory for a
+  # central-bank rate, a game forum for a VAT rate). Half weight keeps its
+  # coverage without letting it outrank Yahoo.
+  - name: bing
+    disabled: false
+    weight: 0.5
+  # image_search. Measured the same way and on the same day as the three
+  # above, on six reference-image queries: Google's element answered every
+  # one with a usable image address, and Unsplash and Openverse did too and
+  # are photo libraries that publish for this use. Wikimedia Commons answers
+  # fewer queries with fewer results but covers public-domain subjects the
+  # others miss. DuckDuckGo's image endpoint refused this address on every
+  # query, Flickr and Pixabay returned results carrying no direct image
+  # address, and Startpage answers only by solving a challenge and ships
+  # inactive upstream (README: "Web search").
+  - name: google cse images
+    weight: 2
+  - name: unsplash
+    disabled: false
+    inactive: false
+  - name: openverse
+    disabled: false
+    inactive: false
+  - name: wikicommons.images
+    disabled: false
+    inactive: false
+ui:
+  static_use_hash: true

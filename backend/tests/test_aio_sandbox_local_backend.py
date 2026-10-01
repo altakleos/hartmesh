@@ -502,7 +502,7 @@ def test_restricted_start_configures_shell_and_aio_browser_proxy(monkeypatch):
     monkeypatch.setattr(backend, "_restricted_resources_status", lambda _sandbox_id: "missing")
     monkeypatch.setattr(backend, "_create_internal_network", lambda _name, _sandbox_id: None)
     monkeypatch.setattr(backend, "_create_egress_network", lambda _name, _sandbox_id: None)
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
     captured: dict[str, object] = {}
 
     def fake_start(*_args, **kwargs):
@@ -540,7 +540,7 @@ def test_restricted_start_refuses_to_remove_resources_with_stale_policy(monkeypa
     monkeypatch.setattr(backend, "_cleanup_restricted_resources", cleaned.append)
     monkeypatch.setattr(backend, "_create_internal_network", lambda name, sandbox_id: created.append((name, sandbox_id)))
     monkeypatch.setattr(backend, "_create_egress_network", lambda name, sandbox_id: created.append((name, sandbox_id)))
-    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
     monkeypatch.setattr(backend, "_start_container", lambda *_args, **_kwargs: "container-id")
 
     with pytest.raises(RuntimeError, match="requires ownership-fenced replacement"):
@@ -2349,3 +2349,252 @@ def test_start_container_preinitialized_image_can_drop_startup_caps(monkeypatch)
     assert not [arg for arg in captured_cmd if arg.startswith("--cap-add=")]
     security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
     assert "no-new-privileges" in security_opts
+
+
+# ── gVisor runtime, proxy address and memory limits (compose profile) ──
+
+
+def _capture_proxy_create_command(monkeypatch, backend: LocalContainerBackend) -> list[str]:
+    backend._network_mode = "allowlist"
+    backend._network_config = {
+        "mode": "allowlist",
+        "allow_domains": [],
+        "approval": "prompt",
+        "proxy_image": "proxy:latest",
+    }
+    commands: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        commands.append(cmd)
+        return SimpleNamespace(stdout="proxy-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._start_network_proxy("proxy-name", "network-name", "egress-network-name", "sandbox-name", 18080, "sandbox-id", "test-relay-token")
+    return commands[0]
+
+
+def test_restricted_start_pins_the_proxy_name_in_the_sandbox_hosts_file(monkeypatch):
+    """A sandbox under its own network stack (gVisor) cannot use Docker's
+    embedded DNS, so the proxy name it is told to use must also resolve from
+    /etc/hosts with the address Docker assigned on the internal network."""
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    backend._network_mode = "allowlist"
+    backend._network_config = {"mode": "allowlist", "allow_domains": [], "approval": "prompt", "proxy_image": "proxy:latest"}
+    monkeypatch.setattr(backend, "_restricted_resources_status", lambda *_args, **_kwargs: "missing")
+    monkeypatch.setattr(backend, "_create_internal_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_create_egress_network", lambda *_args: None)
+    monkeypatch.setattr(backend, "_start_network_proxy", lambda *_args: "172.24.0.2")
+    captured: dict[str, object] = {}
+
+    def fake_start(container_name, port, extra_mounts, **kwargs):
+        captured.update(kwargs)
+        return "container-id"
+
+    monkeypatch.setattr(backend, "_start_container", fake_start)
+
+    backend._start_restricted_sandbox("sandbox-id", "sandbox-name", 18080, None, config_mount_exclusion_root=None, relay_token="test-relay-token")
+
+    proxy_name, _ = backend._resource_names("sandbox-id")
+    assert captured["extra_hosts"] == {proxy_name: "172.24.0.2"}
+    assert captured["extra_environment"]["HTTPS_PROXY"] == f"http://{proxy_name}:3128"
+
+
+def test_start_container_emits_add_host_entries_for_docker_only(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    captured_cmd: list[str] = []
+
+    def fake_run(cmd, **_kwargs):
+        captured_cmd.extend(cmd)
+        return SimpleNamespace(stdout="container-id\n", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._start_container("sandbox-test", 18080, extra_hosts={"proxy-name": "172.24.0.2"})
+    assert captured_cmd[captured_cmd.index("--add-host") + 1] == "proxy-name:172.24.0.2"
+
+    captured_cmd.clear()
+    monkeypatch.setattr(backend, "_runtime", "container")
+    backend._start_container("sandbox-test", 18080, extra_hosts={"proxy-name": "172.24.0.2"})
+    assert "--add-host" not in captured_cmd
+
+
+def test_network_proxy_memory_limit_defaults_to_256m_with_equal_swap(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
+
+    create = _capture_proxy_create_command(monkeypatch, backend)
+
+    assert create[create.index("--memory") + 1] == "256m"
+    assert create[create.index("--memory-swap") + 1] == "256m"
+    assert create[create.index("--cpus") + 1] == "1"
+    assert create[create.index("--pids-limit") + 1] == "128"
+    assert "--runtime" not in create
+
+
+def test_network_proxy_memory_limit_is_tunable(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_PROXY_MEMORY", "96m")
+
+    create = _capture_proxy_create_command(monkeypatch, backend)
+
+    assert create[create.index("--memory") + 1] == "96m"
+    assert create[create.index("--memory-swap") + 1] == "96m"
+
+
+def test_network_proxy_memory_limit_can_be_disabled(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_PROXY_MEMORY", "none")
+
+    create = _capture_proxy_create_command(monkeypatch, backend)
+
+    assert "--memory" not in create
+    assert "--memory-swap" not in create
+
+
+def test_start_container_passes_oci_runtime_with_builtin_seccomp(monkeypatch):
+    """The gVisor profile needs both flags on the sandbox's docker run.
+
+    Asserting only that ``seccomp=unconfined`` is absent would pass on a
+    regression that emits no seccomp option at all and silently inherits the
+    daemon default, which is exactly what the explicit opt-out exists to
+    prevent. The OCI runtime is the daemon-registered name, distinct from the
+    container CLI that ``backend.runtime`` reports.
+    """
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED", "0")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert captured_cmd[captured_cmd.index("--runtime") + 1] == "runsc"
+    security_opts = [captured_cmd[i + 1] for i, arg in enumerate(captured_cmd) if arg == "--security-opt"]
+    assert "seccomp=builtin" in security_opts
+    assert "seccomp=unconfined" not in security_opts
+    assert "no-new-privileges" in security_opts
+    assert backend.runtime == "docker"
+
+
+def test_start_container_emits_no_runtime_when_unset(monkeypatch):
+    """Unset or blank keeps the upstream self-host path byte-for-byte."""
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "   ")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend)
+
+    assert "--runtime" not in captured_cmd
+    assert "runsc" not in captured_cmd
+
+
+def test_start_container_does_not_pass_runtime_to_apple_container(monkeypatch):
+    backend = LocalContainerBackend(
+        image="sandbox:latest",
+        base_port=8080,
+        container_prefix="sandbox",
+        config_mounts=[],
+        environment={},
+    )
+    _clear_hardening_env(monkeypatch)
+    monkeypatch.setenv("DEER_FLOW_SANDBOX_RUNTIME", "runsc")
+
+    captured_cmd = _capture_start_container_command(monkeypatch, backend, runtime="container")
+
+    assert "--runtime" not in captured_cmd
+    assert "--memory-swap" not in captured_cmd
+
+
+def test_stop_container_asks_for_a_short_grace_period(monkeypatch):
+    """A person waits through this stop, and the grace period buys nothing.
+
+    Capacity eviction stops a parked container in the foreground of somebody's
+    next message: `_evict_oldest_warm` runs inside the acquisition, before the
+    turn's first model request. Both members of the set ignore SIGTERM — the
+    sandbox's init is a bash script with no trap, the sidecar a Python server
+    that installs no handler — so every stop already ends in the runtime's
+    SIGKILL, and the default ten-second grace is ten seconds of waiting that
+    changes nothing about how the container dies. Measured on the released
+    images at the profile's limits: 10.94s + 10.68s with the default grace,
+    1.74s + 1.63s at `-t 1`, both exiting 137 either way.
+
+    The flag is what makes the escalation prompt, so it is asserted on the
+    command rather than inferred from the wall clock.
+    """
+    backend = _backend_for_inspect_tests()
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._stop_container("sandbox-parked")
+
+    assert seen == [["docker", "stop", "-t", str(backend._STOP_GRACE_SECONDS), "sandbox-parked"]]
+    assert backend._STOP_GRACE_SECONDS < backend._STOP_TIMEOUT_SECONDS
+
+
+def test_stop_container_leaves_a_runtime_that_is_not_docker_on_its_own_default(monkeypatch):
+    """Apple Container's `stop` grace flag is not verified here, so it is not sent.
+
+    The tenant profile and CI are Docker, where the flag is measured. The macOS
+    developer runtime keeps the behaviour it has rather than gaining a spelling
+    nobody in this repository has run.
+    """
+    backend = _backend_for_inspect_tests()
+    backend._runtime = "container"
+    seen: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return SimpleNamespace(stdout="", stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    backend._stop_container("sandbox-parked")
+
+    assert seen == [["container", "stop", "sandbox-parked"]]

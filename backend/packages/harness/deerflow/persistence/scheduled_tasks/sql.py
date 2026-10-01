@@ -4,13 +4,13 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, exists, or_, select, update
+from sqlalchemy import and_, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, keeps_pause
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, ScheduledTaskRow
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
@@ -18,6 +18,10 @@ from deerflow.utils.time import coerce_iso
 logger = logging.getLogger(__name__)
 
 TERMINAL_TASK_STATUSES: frozenset[str] = frozenset({"completed", "failed", "cancelled"})
+
+#: A task that can start an occurrence without anyone asking: the statuses a
+#: hold pauses.
+ACTIVE_TASK_STATUSES: frozenset[str] = frozenset({"enabled", "running"})
 
 
 class ActiveScheduledTaskMutationConflict(Exception):
@@ -453,6 +457,10 @@ class ScheduledTaskRepository:
                 # commits. Cron parents stay enabled even after completion,
                 # so also protect the terminal occurrence's status/error.
                 pass
+            elif keeps_pause(row, status):
+                # Paused while this occurrence was launching -- its owner was
+                # turned off -- so the launch is recorded and the pause stands.
+                row.last_error = last_error
             else:
                 row.status = status
                 row.last_error = last_error
@@ -467,6 +475,113 @@ class ScheduledTaskRepository:
             row.updated_at = datetime.now(UTC)
             await session.commit()
             return True
+
+    # ── Held while the owner is turned off ──────────────────────────────
+
+    async def authority_now(self, *, fallback: datetime) -> datetime:
+        """The database's clock on PostgreSQL, the caller's aware clock on SQLite."""
+        if fallback.tzinfo is None or fallback.utcoffset() is None:
+            raise ValueError("scheduler fallback clock must be timezone-aware")
+        async with self._sf() as session:
+            if session.get_bind().dialect.name != "postgresql":
+                return fallback.astimezone(UTC)
+            value = await session.scalar(text("SELECT CURRENT_TIMESTAMP"))
+        if not isinstance(value, datetime):
+            raise RuntimeError("scheduler_database_time_unavailable")
+        if value.tzinfo is None or value.utcoffset() is None:
+            value = value.replace(tzinfo=UTC)
+        return value.astimezone(UTC)
+
+    async def hold(self, task_id: str, *, user_id: str, now: datetime) -> bool:
+        """Pause an active task of ``user_id`` because its owner was turned off; False when it was not active.
+
+        Unlike the owner's own pause, a hold does not wait for an occurrence
+        already launching or running: the owner's run is being cancelled, and
+        the bookkeeping after it leaves the pause in place (``keeps_pause``).
+        A claim not yet turned into an occurrence is dropped, so it cannot
+        queue one.
+        """
+        async with self._sf() as session:
+            task = await self._lock_task(session, task_id)
+            if task is None or task.user_id != user_id or task.status not in ACTIVE_TASK_STATUSES:
+                await session.rollback()
+                return False
+            task.status = "paused"
+            task.lease_owner = None
+            task.lease_expires_at = None
+            task.updated_at = now
+            await session.commit()
+            return True
+
+    async def end_queued_occurrences(self, user_ids: list[str], *, error: str, now: datetime) -> int:
+        """End every occurrence of these users' tasks still waiting to launch, manual triggers included; returns how many.
+
+        A manual trigger runs even on a paused task, so pausing alone would
+        leave one to run once the owner is back. An occurrence already
+        launching is left to its launch, which the owner's refusal fails.
+        """
+        if not user_ids:
+            return 0
+        async with self._sf() as session:
+            keys = (
+                await session.execute(
+                    select(ScheduledTaskRunRow.id, ScheduledTaskRunRow.task_id)
+                    .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+                    .where(ScheduledTaskRow.user_id.in_(user_ids), ScheduledTaskRunRow.status == "queued")
+                    .order_by(ScheduledTaskRunRow.task_id.asc(), ScheduledTaskRunRow.id.asc())
+                )
+            ).all()
+        ended = 0
+        for run_id, task_id in keys:
+            async with self._sf() as session:
+                await self._lock_task(session, task_id)
+                run = await session.get(ScheduledTaskRunRow, run_id, with_for_update=True)
+                if run is None or run.status != "queued":
+                    await session.rollback()
+                    continue
+                run.status = "interrupted"
+                run.error = error
+                run.finished_at = now
+                run.lease_owner = None
+                run.lease_expires_at = None
+                await session.commit()
+                ended += 1
+        return ended
+
+    async def count_launching_occurrences(self, user_ids: list[str]) -> int:
+        """How many occurrences of these users' tasks a scheduler has claimed and is launching now."""
+        if not user_ids:
+            return 0
+        async with self._sf() as session:
+            stmt = select(func.count()).select_from(ScheduledTaskRunRow).join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id).where(ScheduledTaskRow.user_id.in_(user_ids), ScheduledTaskRunRow.status == "launching")
+            return int((await session.execute(stmt)).scalar_one())
+
+    async def restore_held(self, task_id: str, *, user_id: str, now: datetime) -> str:
+        """Resume a task a hold paused, at its next occurrence after ``now``.
+
+        Returns ``restored``; ``time_passed`` for a ``once`` task whose time
+        went by during the hold, which stays paused; ``changed_since`` for a
+        task no longer paused; ``gone`` for one deleted or not ``user_id``'s.
+        """
+        async with self._sf() as session:
+            task = await self._lock_task(session, task_id)
+            if task is None or task.user_id != user_id:
+                await session.rollback()
+                return "gone"
+            if task.status != "paused":
+                await session.rollback()
+                return "changed_since"
+            upcoming = compute_next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=now)
+            if upcoming is None:
+                await session.rollback()
+                return "time_passed"
+            task.status = "enabled"
+            task.next_run_at = upcoming
+            task.lease_owner = None
+            task.lease_expires_at = None
+            task.updated_at = now
+            await session.commit()
+            return "restored"
 
     async def complete_run(
         self,

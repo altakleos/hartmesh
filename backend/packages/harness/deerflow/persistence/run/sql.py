@@ -412,6 +412,13 @@ class RunRepository(RunStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
+    async def list_active_by_user(self, user_id: str) -> list[dict[str, Any]]:
+        """Return this account's runs that are still ``pending`` or ``running``."""
+        stmt = select(RunRow).where(RunRow.operation_kind == "run", RunRow.user_id == user_id, RunRow.status.in_(("pending", "running"))).order_by(RunRow.created_at.asc())
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [self._row_to_dict(row) for row in result.scalars()]
+
     async def list_inflight(self, *, before=None):
         """Return persisted active runs for startup recovery."""
         if before is None:

@@ -1156,7 +1156,19 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         Returns:
             Service health status information.
         """
-        return {"status": "healthy", "service": "deer-flow-gateway"}
+        from app.gateway.auth.mode import auth_mode, registration_state
+
+        return {
+            "status": "healthy",
+            "service": "deer-flow-gateway",
+            # Which way people sign in, for an apply to assert before it
+            # publishes the tenant: "local" or "sign_on_only", read live like
+            # every door reads it -- and whether a visitor may create their
+            # own account there, "open" or "closed" (always closed in
+            # sign-on-only mode).
+            "auth_mode": auth_mode(),
+            "registration": registration_state(),
+        }
 
     @app.get("/health/ready", tags=["health"])
     async def readiness_check(request: Request, response: Response) -> dict[str, str]:

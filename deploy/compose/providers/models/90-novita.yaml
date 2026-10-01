@@ -1,0 +1,23 @@
+# Included when NOVITA_API_KEY is present. From config.example.yaml.
+env: NOVITA_API_KEY
+models:
+  - name: novita-deepseek-v3.2
+    display_name: Novita DeepSeek V3.2
+    use: langchain_openai:ChatOpenAI
+    model: deepseek/deepseek-v3.2
+    api_key: $NOVITA_API_KEY
+    base_url: https://api.novita.ai/openai
+    request_timeout: 600.0
+    max_retries: 2
+    max_tokens: 4096
+    temperature: 0.7
+    supports_thinking: true
+    supports_vision: true
+    when_thinking_enabled:
+      extra_body:
+        thinking:
+          type: enabled
+    when_thinking_disabled:
+      extra_body:
+        thinking:
+          type: disabled

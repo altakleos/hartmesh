@@ -1,0 +1,8 @@
+# Included when TAVILY_API_KEY is present; replaces the keyless web_search.
+env: TAVILY_API_KEY
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.tavily.tools:web_search_tool
+    max_results: 5
+    api_key: $TAVILY_API_KEY

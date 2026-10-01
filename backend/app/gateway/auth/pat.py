@@ -226,6 +226,14 @@ async def authenticate_pat(app: Any, authorization: str | None) -> tuple[Any, fr
         # dead even though its row survives (deleting a user revokes their
         # PATs, without needing a FK cascade).
         raise HTTPException(status_code=401, detail="Invalid token")
+    from app.gateway.auth.mode import account_refusal
+
+    if account_refusal(user) is not None:
+        # An account nothing may act for -- turned off by the deployer, or a
+        # local-password account in sign-on-only mode -- and so every token it
+        # minted, whenever it minted it. Same 401 as any dead token: the
+        # answer must not say why.
+        raise HTTPException(status_code=401, detail="Invalid token")
     await pat_repo.touch_last_used(str(record["id"]))
     return user, frozenset(record.get("scopes") or ())
 

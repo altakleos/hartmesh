@@ -56,6 +56,72 @@ def _browser_tools_enabled_in_config(config: AppConfig) -> bool:
     return any(getattr(tool, "name", None) == "browser_navigate" for tool in (getattr(config, "tools", None) or []))
 
 
+def _enforce_auth_settings(config: AppConfig) -> None:
+    """Refuse a start whose sign-in settings cannot be honoured.
+
+    1. Sign-on-only mode (``auth.local.enabled: false``) and
+       ``DEER_FLOW_AUTH_DISABLED=1`` contradict each other: the switch would
+       hand every anonymous request a synthetic admin on a deployment whose
+       one rule is that the identity provider decides who is in. The
+       production-environment escape hatch does not apply; the refusal holds
+       whatever ``DEER_FLOW_ENV`` says.
+    2. ``AUTH_TOKEN_EXPIRY_DAYS`` must be whole days within the model's bound,
+       refused here rather than at the first session mint.
+    """
+    from app.gateway.auth.config import token_expiry_days_from_environment
+    from app.gateway.auth_disabled import AUTH_DISABLED_ENV_VAR, is_auth_disabled_requested
+
+    # A startup config without an ``auth`` section (test doubles) is a
+    # local-password deployment, the model's own default.
+    auth = getattr(config, "auth", None)
+    local_enabled = auth is None or auth.local.enabled
+    if not local_enabled and is_auth_disabled_requested():
+        reason = f"{AUTH_DISABLED_ENV_VAR}=1 is set on a sign-on-only deployment (auth.local.enabled: false); unset it. The identity provider is the only way in here, whatever DEER_FLOW_ENV says."
+        # The Gateway's own line, so the reason is in its journal whatever
+        # the server wrapper does with the exception.
+        logger.error("Refusing to start: %s", reason)
+        raise RuntimeError(reason)
+    try:
+        token_expiry_days_from_environment()
+    except ValueError as exc:
+        logger.error("Refusing to start: %s", exc)
+        raise RuntimeError(str(exc)) from exc
+
+
+async def _pin_provider_accounts_to_their_issuer(config: AppConfig) -> int:
+    """Record the issuer on provider accounts linked before it was recorded.
+
+    Start is the last moment the issuer those rows belong to is known for
+    certain: the provider name is still pointed where it was when they were
+    created. Left NULL, a row would adopt whatever issuer the name is
+    pointed at by the time its owner next signs in, and until then the same
+    subject at a new issuer could take it. Idempotent; returns the rows
+    pinned.
+    """
+    from sqlalchemy import text
+
+    from deerflow.persistence.engine import get_session_factory
+
+    oidc = getattr(getattr(config, "auth", None), "oidc", None)
+    if oidc is None or not oidc.enabled or not oidc.providers:
+        return 0
+    session_factory = get_session_factory()
+    if session_factory is None:
+        return 0
+    pinned = 0
+    async with session_factory() as session:
+        for name, provider in oidc.providers.items():
+            result = await session.execute(
+                text("UPDATE users SET oauth_issuer = :issuer WHERE oauth_provider = :provider AND oauth_issuer IS NULL"),
+                {"issuer": provider.issuer, "provider": name},
+            )
+            if result.rowcount:
+                logger.info("Pinned %d account(s) under provider %s to its issuer", result.rowcount, name)
+                pinned += result.rowcount
+        await session.commit()
+    return pinned
+
+
 def _enforce_postgres_for_multi_worker(config: AppConfig) -> None:
     """Refuse unsafe multi-process configurations before persistence starts.
 
@@ -418,6 +484,20 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
     # Reject agent_storage.backend='db' on a non-durable database, and warn on
     # node-divergent file storage under multi-worker Postgres.
     _validate_agent_storage(startup_config)
+    _enforce_auth_settings(startup_config)
+    # The one readiness fact a deployment reads before it publishes a tenant:
+    # which way people sign in. /health derives it live; this is the journal's line.
+    from app.gateway.auth.mode import registration_state
+
+    startup_auth = getattr(startup_config, "auth", None)
+    if startup_auth is None or startup_auth.local.enabled:
+        logger.info("auth mode: local (local passwords on; registration %s)", registration_state())
+    else:
+        # A space closes the issuer: the log filter collapses a URL's path up
+        # to the next whitespace, and would take the rest of the line with it.
+        providers = ", ".join(f"{name} ({provider.issuer} )" for name, provider in startup_auth.oidc.providers.items())
+        # Registration last, so a check written against the earlier line still matches.
+        logger.info("auth mode: sign_on_only (local passwords off; provider %s; registration %s)", providers, registration_state())
 
     async with AsyncExitStack() as stack:
         # Lifecycle and system-model hooks can originate on isolated subagent
@@ -459,6 +539,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         # cancellation cannot strand an engine created along the way.
         stack.push_async_callback(close_engine)
         await init_engine_from_config(config.database)
+        await _pin_provider_accounts_to_their_issuer(config)
 
         app.state.checkpointer = await stack.enter_async_context(make_checkpointer(config))
         app.state.store = await stack.enter_async_context(make_store(config))
@@ -867,6 +948,16 @@ async def get_current_user_from_request(request: Request):
             detail=AuthErrorResponse(code=AuthErrorCode.TOKEN_INVALID, message="Token revoked (password changed)").model_dump(),
         )
 
+    from app.gateway.auth.mode import SETUP_ROUTES, require_live_account
+    from app.gateway.request_path import get_request_route_path
+
+    # Sign-on only: an account without a provider identity is inert, so a
+    # session it minted before the switch is refused now, not honoured
+    # until it expires. An account the deployer turned off is refused the
+    # same way, and one whose setup is pending reaches only the routes that
+    # complete it.
+    require_live_account(user, completing_setup=get_request_route_path(request).rstrip("/") in SETUP_ROUTES)
+
     return user
 
 
@@ -898,15 +989,26 @@ async def is_admin_user(request: Request) -> bool:
     return getattr(user, "system_role", None) == "admin"
 
 
-async def require_admin_user(request: Request, *, detail: str) -> None:
-    """Require the authenticated caller to be an admin user.
+async def require_admin_user(request: Request, *, detail: str):
+    """Require the authenticated caller to be an admin user, and return them.
 
     ``detail`` is the route-specific 403 message. The shared predicate keeps
-    read-side redaction and write authorization on the same admin definition.
+    read-side redaction and write authorization on the same admin definition,
+    including its refusal of a personal access token: the token route
+    allowlist admits no admin route today, but it must not be the only
+    barrier between an administrator's automation token and one.
     """
 
+    from app.gateway.auth_disabled import AUTH_SOURCE_PAT
+
+    if getattr(request.state, "auth_source", None) == AUTH_SOURCE_PAT:
+        raise HTTPException(status_code=403, detail=detail)
     if not await is_admin_user(request):
         raise HTTPException(status_code=403, detail=detail)
+    user = getattr(request.state, "user", None)
+    if user is None:
+        user = await get_current_user_from_request(request)
+    return user
 
 
 async def get_optional_user_from_request(request: Request):

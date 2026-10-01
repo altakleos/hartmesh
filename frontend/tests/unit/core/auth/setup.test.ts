@@ -4,6 +4,7 @@ import { AUTH_REQUEST_TIMEOUT_MS } from "@/core/auth/constants";
 import {
   canCreateRegularAccount,
   fetchSetupStatus,
+  isSignOnOnly,
   isSystemAlreadyInitializedError,
   setupStatusFetchInit,
 } from "@/core/auth/setup";
@@ -184,6 +185,30 @@ describe("auth setup helpers", () => {
         status: { needs_setup: false },
       }),
     ).toBe(true);
+  });
+
+  test("sign-on-only hides the local form only on a checked answer that says so", () => {
+    expect(
+      isSignOnOnly({ checked: true, status: { sign_on_only: true } }),
+    ).toBe(true);
+    expect(
+      isSignOnOnly({ checked: false, status: { sign_on_only: true } }),
+    ).toBe(false);
+    // An older Gateway omits the field: a local-password deployment.
+    expect(
+      isSignOnOnly({ checked: true, status: { needs_setup: false } }),
+    ).toBe(false);
+    // And no sign-up entry in that mode, whatever the other fields say.
+    expect(
+      canCreateRegularAccount({
+        checked: true,
+        status: {
+          needs_setup: false,
+          registration_enabled: true,
+          sign_on_only: true,
+        },
+      }),
+    ).toBe(false);
   });
 
   test("detects already-initialized setup conflicts", () => {

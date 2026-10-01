@@ -11,7 +11,7 @@ from sqlalchemy.orm import aliased
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, keeps_pause
 from deerflow.persistence.scheduled_tasks.model import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -507,7 +507,10 @@ class ScheduledTaskRunRepository:
                         task.timezone,
                         now=now,
                     )
-                task.status = task_status
+                if not keeps_pause(task, task_status):
+                    # A task held while this occurrence was launching -- its
+                    # owner was turned off -- stays paused through the failure.
+                    task.status = task_status
                 task.next_run_at = next_at
                 task.last_run_at = now
                 task.last_run_id = None

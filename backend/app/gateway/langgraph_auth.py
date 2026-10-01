@@ -281,6 +281,16 @@ async def authenticate(request):
             status_code=401,
             detail="Token revoked (password changed)",
         )
+    from fastapi import HTTPException
+
+    from app.gateway.auth.mode import require_live_account
+
+    try:
+        require_live_account(user)
+    except HTTPException as exc:
+        # Carry the refusal's own message (sign-on required, or access turned off).
+        detail = exc.detail.get("message", "Sign-on required") if isinstance(exc.detail, dict) else str(exc.detail)
+        raise Auth.exceptions.HTTPException(status_code=401, detail=detail) from exc
 
     return payload.sub
 

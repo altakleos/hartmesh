@@ -229,6 +229,11 @@ _DOCKER_BRIDGE_GATEWAY_FALLBACK = "172.17.0.1"
 # value can be tuned or disabled through the corresponding DEER_FLOW_SANDBOX_*
 # environment variable (see _start_container).
 _DEFAULT_SANDBOX_MEMORY = "2g"
+# The trusted network-policy sidecar is a small Python process; its memory
+# limit is tunable through DEER_FLOW_SANDBOX_PROXY_MEMORY (see
+# _start_network_proxy) so a memory-budgeted host can size it from a
+# measurement instead of inheriting this default.
+_DEFAULT_PROXY_MEMORY = "256m"
 _DEFAULT_SANDBOX_CPUS = "2"
 _DEFAULT_SANDBOX_PIDS_LIMIT = "512"
 _NETWORK_PROXY_CONTAINER_SCRIPT = "/tmp/deerflow-network-proxy.py"
@@ -527,6 +532,35 @@ def _docker_resource_limit(env_name: str, default: str) -> str | None:
     return value
 
 
+def _docker_oci_runtime() -> str | None:
+    """Return the OCI runtime name sandbox containers must run under, if any.
+
+    ``DEER_FLOW_SANDBOX_RUNTIME`` names a runtime registered with the Docker
+    daemon (``runtimes`` in ``daemon.json``, e.g. ``runsc`` for gVisor). It is
+    passed through as ``--runtime`` on the sandbox's ``docker run``; unset or
+    empty emits nothing so the daemon's default runtime applies unchanged.
+    This is the OCI runtime, not the container CLI that
+    ``LocalContainerBackend.runtime`` reports (``docker`` vs Apple
+    ``container``).
+    """
+    value = os.environ.get("DEER_FLOW_SANDBOX_RUNTIME", "").strip()
+    return value or None
+
+
+def _docker_memory_limit_args(env_name: str, default: str) -> list[str]:
+    """Return ``--memory``/``--memory-swap`` for a resolved memory limit.
+
+    ``--memory-swap`` is pinned to the memory limit so a bounded container
+    cannot spill past its budget into host swap (Docker's default otherwise
+    grants swap equal to the memory limit on top of it). ``0``/``none``
+    disables both, matching ``_docker_resource_limit``.
+    """
+    memory = _docker_resource_limit(env_name, default)
+    if not memory:
+        return []
+    return ["--memory", memory, "--memory-swap", memory]
+
+
 def _is_no_such_container_error(stderr: str, container_name: str) -> bool:
     """Return True only when stderr definitively says the container does not exist.
 
@@ -562,6 +596,15 @@ class LocalContainerBackend(SandboxBackend):
     # SIGKILL escalation (10s for docker/podman), so this only fires when the
     # daemon itself is wedged rather than truncating a slow-but-progressing stop.
     _STOP_TIMEOUT_SECONDS = 120.0
+    # How long SIGTERM is given before the runtime escalates to SIGKILL. The
+    # default is ten seconds per container, and somebody waits through it when
+    # a parked sandbox is stopped ahead of their next message. Neither member
+    # honours SIGTERM -- the sandbox's init is a bash script with no trap, the
+    # sidecar a Python server that installs no handler -- so both already die
+    # by SIGKILL, and the grace only decides how long the person waits for it.
+    # Measured on the released images at the profile's limits: 10.94s + 10.68s
+    # by default, 1.74s + 1.63s here, exit 137 either way.
+    _STOP_GRACE_SECONDS = 1
 
     def __init__(
         self,
@@ -1002,7 +1045,15 @@ class LocalContainerBackend(SandboxBackend):
         try:
             self._create_internal_network(network_name, sandbox_id)
             self._create_egress_network(egress_network_name, sandbox_id)
-            self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
+            proxy_address = self._start_network_proxy(proxy_name, network_name, egress_network_name, container_name, port, sandbox_id, relay_token)
+            if proxy_address is None:
+                # Without the hosts entry below, a sandbox whose runtime has its
+                # own network stack (gVisor's runsc) passes readiness through the
+                # proxy's relay and then fails every proxied request; refuse now
+                # so the teardown below reclaims the resource set and the
+                # acquisition retries, instead of handing out a sandbox with no
+                # egress.
+                raise RuntimeError(f"Sandbox network proxy {proxy_name} reported no address on {network_name}; refusing to start {container_name} without a resolvable proxy")
             proxy_url = f"http://{proxy_name}:3128"
             return self._start_container(
                 container_name,
@@ -1025,6 +1076,12 @@ class LocalContainerBackend(SandboxBackend):
                     "PROXY_SERVER": f"{proxy_name}:3128",
                     "PROXY_EXCLUDE": "localhost,127.0.0.1,::1",
                 },
+                # The sandbox reaches its proxy by name. Docker's embedded DNS
+                # (127.0.0.11) is a NAT rule in the host network namespace,
+                # which a sandbox running under its own network stack (gVisor's
+                # runsc) never sees, so the name is also pinned in /etc/hosts
+                # with the address Docker assigned on the internal network.
+                extra_hosts={proxy_name: proxy_address},
                 labels=self._restricted_labels(sandbox_id, "sandbox"),
             )
         except BaseException as exc:
@@ -1105,7 +1162,8 @@ class LocalContainerBackend(SandboxBackend):
         port: int,
         sandbox_id: str,
         relay_token: str,
-    ) -> None:
+    ) -> str | None:
+        """Create, connect, start and provision the sidecar; return its internal-network address."""
         allow_domains = self._network_config.get("allow_domains", [])
         proxy_image = self._proxy_image()
         labels = self._restricted_labels(sandbox_id, "network-proxy")
@@ -1117,8 +1175,9 @@ class LocalContainerBackend(SandboxBackend):
             "--cap-drop=ALL",
             "--security-opt",
             "no-new-privileges",
-            "--memory",
-            "256m",
+            *_docker_memory_limit_args("DEER_FLOW_SANDBOX_PROXY_MEMORY", _DEFAULT_PROXY_MEMORY),
+            # CPU and PID limits stay fixed: the sidecar relays one sandbox's
+            # traffic and has never needed tuning.
             "--cpus",
             "1",
             "--pids-limit",
@@ -1185,6 +1244,30 @@ class LocalContainerBackend(SandboxBackend):
         )
         if copied.returncode != 0:
             raise RuntimeError(f"Failed to install sandbox network proxy: {(copied.stderr or b'').decode(errors='replace').strip()}")
+        return self._container_network_address(proxy_name, network_name)
+
+    def _container_network_address(self, container_name: str, network_name: str) -> str | None:
+        """Return the IPv4 address Docker assigned to ``container_name`` on ``network_name``."""
+        try:
+            result = subprocess.run(
+                ["docker", "inspect", "--format", "{{(index .NetworkSettings.Networks " + json.dumps(network_name) + ").IPAddress}}", container_name],
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+            logger.warning("Could not read the network address of %s on %s: %s", container_name, network_name, exc)
+            return None
+        candidate = (result.stdout or "").strip()
+        if result.returncode != 0 or not candidate:
+            logger.warning("Could not read the network address of %s on %s: %s", container_name, network_name, (result.stderr or "").strip() or "<empty>")
+            return None
+        try:
+            ipaddress.ip_address(candidate)
+        except ValueError:
+            logger.warning("Docker reported a non-address %r for %s on %s", candidate, container_name, network_name)
+            return None
+        return candidate
 
     def destroy(self, info: SandboxInfo) -> None:
         """Stop the container and release its port."""
@@ -1654,6 +1737,7 @@ class LocalContainerBackend(SandboxBackend):
         publish_port: bool = True,
         extra_environment: dict[str, str] | None = None,
         labels: dict[str, str] | None = None,
+        extra_hosts: dict[str, str] | None = None,
     ) -> str:
         """Start a new container.
 
@@ -1750,8 +1834,7 @@ class LocalContainerBackend(SandboxBackend):
                 # https://docs.docker.com/reference/cli/docker/container/run/#optional-security-options---security-opt
                 cmd.extend(["--security-opt", "seccomp=builtin"])
 
-            if memory := _docker_resource_limit("DEER_FLOW_SANDBOX_MEMORY", _DEFAULT_SANDBOX_MEMORY):
-                cmd.extend(["--memory", memory])
+            cmd.extend(_docker_memory_limit_args("DEER_FLOW_SANDBOX_MEMORY", _DEFAULT_SANDBOX_MEMORY))
             if cpus := _docker_resource_limit("DEER_FLOW_SANDBOX_CPUS", _DEFAULT_SANDBOX_CPUS):
                 cmd.extend(["--cpus", cpus])
             if pids_limit := _docker_resource_limit("DEER_FLOW_SANDBOX_PIDS_LIMIT", _DEFAULT_SANDBOX_PIDS_LIMIT):
@@ -1764,6 +1847,11 @@ class LocalContainerBackend(SandboxBackend):
             # UID/GID ownership of its mounts) can pass it through.
             if container_user := os.environ.get("DEER_FLOW_SANDBOX_CONTAINER_USER", "").strip():
                 cmd.extend(["--user", container_user])
+
+            # Optional OCI runtime (e.g. gVisor's runsc) for the sandbox only;
+            # the network-policy sidecar deliberately keeps the daemon default.
+            if oci_runtime := _docker_oci_runtime():
+                cmd.extend(["--runtime", oci_runtime])
 
             # Default: the daemon's default network (unchanged behavior).
             # Point this at a dedicated, egress-controlled Docker network so
@@ -1824,6 +1912,9 @@ class LocalContainerBackend(SandboxBackend):
         if labels and self._runtime == "docker":
             for key, value in labels.items():
                 cmd.extend(["--label", f"{key}={value}"])
+        if extra_hosts and self._runtime == "docker":
+            for host, address in extra_hosts.items():
+                cmd.extend(["--add-host", f"{host}:{address}"])
 
         # Environment variables
         for key, value in self._environment.items():
@@ -1892,9 +1983,11 @@ class LocalContainerBackend(SandboxBackend):
         Bounding the stop caps how long that exposure can last even when the
         store is perfectly healthy.
         """
+        # The grace period is sent only to Docker, where it was measured.
+        grace = ["-t", str(self._STOP_GRACE_SECONDS)] if self._runtime == "docker" else []
         try:
             subprocess.run(
-                [self._runtime, "stop", container_id],
+                [self._runtime, "stop", *grace, container_id],
                 capture_output=True,
                 text=True,
                 check=True,

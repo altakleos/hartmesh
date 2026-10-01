@@ -1681,6 +1681,30 @@ async def _validate_scope_thread_binding(
 # ---------------------------------------------------------------------------
 
 
+class OwnerRefusedLaunchError(ValueError):
+    """An internal launch for an owner whose account nothing may act for."""
+
+
+async def _refuse_launch_for_refused_owner(request: Request) -> None:
+    """Refuse a process-internal launch whose owner was turned off, or is inert in sign-on-only mode.
+
+    HTTP callers were already refused where their credential was read; a due
+    scheduled task or a task notification names its owner in the trusted
+    header and reaches here without passing a credential check.
+    """
+    if getattr(getattr(request, "state", None), "auth_source", None) != AUTH_SOURCE_INTERNAL:
+        return
+    headers = getattr(request, "headers", None) or {}
+    owner_user_id = (headers.get(INTERNAL_OWNER_USER_ID_HEADER_NAME) or "").strip()
+    if not owner_user_id:
+        return
+    from app.gateway.auth.mode import owner_is_refused
+
+    refusal = await owner_is_refused(owner_user_id)
+    if refusal is not None:
+        raise OwnerRefusedLaunchError(f"trusted internal launch owner's account is {refusal}")
+
+
 async def start_run(
     body: RunCreateRequest,
     thread_id: str,
@@ -1711,6 +1735,7 @@ async def start_run(
     # multitask_strategy="reject" and are unaffected. Requests without a
     # stamped auth context (internal/test compositions) skip the gate.
     require_cancel_permission_if(request, body.multitask_strategy != "reject")
+    await _refuse_launch_for_refused_owner(request)
 
     try:
         validate_thread_id(thread_id)

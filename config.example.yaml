@@ -1400,6 +1400,71 @@ suggestions:
 
 
 # ============================================================================
+# Workspace Presentation
+# ============================================================================
+# What the workspace shows before anyone has asked for anything, and which
+# screens people who are not administrators are offered.
+#
+# profile:
+#   developer (default) - every screen is offered to everyone, which is what a
+#                         deployment that says nothing gets.
+#   business            - the skills, tools, subagents and integrations
+#                         screens, and the scheduled-task recipe chips, are
+#                         kept for administrators. Nothing else changes:
+#                         chats, agents, scheduled tasks, channels, memory and
+#                         a person's own account and preferences stay put.
+#                         `agents_api.enabled: false` is the switch for Agents.
+#
+# This is presentation: it hides screens and changes no route. `authorization`
+# has no permission covering these APIs, so it is not the lever that closes
+# them - an administrator-only action is already refused by the API, and what
+# limits a person is their `system_role`. `business` tells administrators from
+# everyone else, so it has no effect when authentication is disabled.
+#
+# starters are what Home offers before anyone types. Choosing one fills the
+# message box; nothing is sent, so the person adds their files and their own
+# words first. At most 6. Unset takes the profile's default (`business` opens
+# on a small built-in set, `developer` on none); an empty list shows no grid.
+#
+# product_name is what the product is called wherever a person sees it: the
+# sign-in and setup pages, the browser tab, the workspace when the tenant
+# bundle names no company, the assistant's own name and DingTalk's message
+# title. One line, at most 40 characters. Unset, HartMesh. It is served
+# before sign-in (GET /api/product), so it is public.
+#
+# These strings are served verbatim (the starters to every signed-in person,
+# the product name to anyone), so keep secrets out of them - a value beginning
+# with `$` is replaced from the environment before this block is validated. A
+# malformed `ui:` block makes the Gateway return 503 on every route until it
+# is fixed.
+
+ui:
+  # product_name: HartMesh
+  profile: developer
+  # starters:
+  #   - id: business-review
+  #     title: Monthly business review
+  #     prompt: >-
+  #       Build a monthly business review from the spreadsheet I am about to
+  #       attach, and give me the PDF, Word and Excel versions.
+
+
+# ============================================================================
+# Tenant Bundle
+# ============================================================================
+# One directory the operator writes: brand.json (company_name, logo, colors),
+# an optional PNG or JPEG logo next to it, starters.json (the same shape and
+# rules as ui.starters; present, it is the grid) and report-profiles/*.json.
+# The Gateway reads it for the workspace header, the About page and Home's
+# starters, after sign-in. Mount the same directory read-only at /mnt/tenant
+# through sandbox.mounts so the business-report skill reads the same files.
+# Every file is optional; a malformed one degrades its own field and is named
+# in the log. Unset means no bundle: the workspace shows the product's name.
+tenant_bundle:
+  # path: /srv/hartmesh/operator/tenant
+
+
+# ============================================================================
 # Input Polish Configuration
 # ============================================================================
 # Configure whether the composer can rewrite draft input before sending.

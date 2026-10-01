@@ -1,0 +1,13 @@
+# Included when BRAVE_SEARCH_API_KEY is present; replaces web_search and image_search.
+env: BRAVE_SEARCH_API_KEY
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.brave.tools:web_search_tool
+    max_results: 5
+    api_key: $BRAVE_SEARCH_API_KEY
+  - name: image_search
+    group: web
+    use: deerflow.community.brave.tools:image_search_tool
+    max_results: 5
+    api_key: $BRAVE_SEARCH_API_KEY

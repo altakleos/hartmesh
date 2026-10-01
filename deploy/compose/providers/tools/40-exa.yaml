@@ -1,0 +1,14 @@
+# Included when EXA_API_KEY is present; replaces web_search and web_fetch.
+env: EXA_API_KEY
+tools:
+  - name: web_search
+    group: web
+    use: deerflow.community.exa.tools:web_search_tool
+    max_results: 5
+    search_type: auto
+    contents_max_characters: 1000
+    api_key: $EXA_API_KEY
+  - name: web_fetch
+    group: web
+    use: deerflow.community.exa.tools:web_fetch_tool
+    api_key: $EXA_API_KEY

@@ -11,6 +11,24 @@ if TYPE_CHECKING:
     from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 
 
+_TERMINAL_TASK_STATUSES = frozenset({"completed", "failed", "cancelled"})
+
+
+def keeps_pause(task: ScheduledTaskRow, status: str) -> bool:
+    """Whether scheduler bookkeeping writing ``status`` must leave a paused ``task`` paused.
+
+    A pause is lifted only by a resume (the owner's) or a restore (of a hold
+    ``disable`` placed). What the scheduler writes after an occurrence it had
+    already started -- a launch that failed, one that beat the pause, a claim
+    it recovers -- never lifts it. The one exception is a ``once`` task whose
+    single occurrence launched: that occurrence is spent, and the task records
+    how it went.
+    """
+    if task.status != "paused":
+        return False
+    return task.schedule_type != "once" or status not in ({"running"} | _TERMINAL_TASK_STATUSES)
+
+
 def can_project(task: ScheduledTaskRow, occurrence: ScheduledTaskRunRow) -> bool:
     """Keep unsequenced history best-effort until a sequenced run is admitted."""
     if occurrence.occurrence_seq is None:

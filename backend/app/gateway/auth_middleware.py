@@ -103,6 +103,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
             owner_user_id = request.headers.get(INTERNAL_OWNER_USER_ID_HEADER_NAME)
             if owner_user_id:
                 owner_user_id = owner_user_id.strip()
+            if owner_user_id:
+                from app.gateway.auth.mode import owner_is_refused, refusal_response
+
+                refusal = await owner_is_refused(owner_user_id)
+                if refusal is not None:
+                    # An internal service may not act as an account nothing may
+                    # act for: one the deployer turned off, or (sign-on only) an
+                    # IM connection bound while its owner still held a local
+                    # session.
+                    return JSONResponse(status_code=401, content={"detail": refusal_response(refusal).detail})
             internal_user = get_internal_user(owner_user_id=owner_user_id or None)
 
         auth_source = AUTH_SOURCE_SESSION
