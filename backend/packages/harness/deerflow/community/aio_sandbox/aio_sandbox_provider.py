@@ -25,10 +25,10 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from functools import partial
-from typing import Any
 from contextlib import ExitStack
 from contextvars import ContextVar
+from functools import partial
+from typing import Any
 
 try:
     import fcntl
@@ -1459,8 +1459,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             logger.info(f"Adopted container {info.sandbox_id} into warm pool (age: {age:.0f}s)")
 
         logger.info(
-            "Startup reconciliation complete: %s adopted into warm pool, %s incompatible orphan(s) replaced, "
-            "%s skipped (live peer ownership), %s deferred (owned, locally tracked, or within recovery grace), %s total found",
+            "Startup reconciliation complete: %s adopted into warm pool, %s incompatible orphan(s) replaced, %s skipped (live peer ownership), %s deferred (owned, locally tracked, or within recovery grace), %s total found",
             adopted,
             replaced,
             skipped_live,

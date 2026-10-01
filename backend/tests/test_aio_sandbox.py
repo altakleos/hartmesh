@@ -1,6 +1,7 @@
 """Tests for AioSandbox concurrent command serialization (#1433)."""
 
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -10,6 +11,23 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+
+from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV
+
+_ABORT_MARKER_RE = re.compile(rf"^export {ABORT_TOKEN_ENV}=df-[0-9a-f]{{32}}; ")
+
+
+def _without_abort_marker(command: str) -> str:
+    """Strip a session's abort marker, asserting it was the expected shape.
+
+    The first command sent to a shell session also exports that session's
+    abort token. Its value is fresh per session, so it cannot be compared
+    literally -- but everything else about the command can be, and a session
+    with no marker cannot have its commands aborted.
+    """
+    stripped, substitutions = _ABORT_MARKER_RE.subn("", command, count=1)
+    assert substitutions == 1, f"command is not markable for abort: {command!r}"
+    return stripped
 
 
 class _TeardownFirstScopeLock:
@@ -238,10 +256,12 @@ def test_command_delivers_trailing_backslash_unmodified(sandbox, execution_path,
         assert delivered == [f"exec < /dev/null\n{command}"]
     elif execution_path == "scope":
         sandbox.execute_command_in_scope(command, scope_id="subagent")
-        assert delivered == [command]
+        sandbox.execute_command_in_scope(command, scope_id="subagent")
+        assert [_without_abort_marker(delivered[0]), delivered[1]] == [command, command]
     else:
         sandbox.execute_command(command)
-        assert delivered == [command]
+        sandbox.execute_command(command)
+        assert [_without_abort_marker(delivered[0]), delivered[1]] == [command, command]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="executes the Bash sandbox shell transport")
@@ -318,6 +338,7 @@ def test_persistent_shell_preserves_session_state(sandbox, tmp_path):
 @pytest.mark.parametrize("command", ["", " \t\n", "# comment\n \t# another comment"])
 def test_empty_or_comment_only_command_keeps_session_status(sandbox, command):
     sandbox._client.shell.exec_command = MagicMock(return_value=SimpleNamespace(data=SimpleNamespace(output="ok", exit_code=0)))
+    sandbox.execute_command("false")  # the session's first command also carries its abort marker
     sandbox.execute_command(command)
     assert sandbox._client.shell.exec_command.call_args.kwargs["command"] == command
 
@@ -1542,7 +1563,10 @@ class TestScopedShellSessions:
         for thread in threads:
             thread.join()
 
-        assert sorted(outputs) == ["subagent-a", "subagent-b"]
+        # Each command is prefixed with its own abort marker; strip exactly
+        # that prefix rather than everything before the last "; ", so a
+        # regression that prepends anything else is still visible.
+        assert sorted(_without_abort_marker(output) for output in outputs) == ["subagent-a", "subagent-b"]
         assert max_active == 2
         assert len(set(session_ids)) == 2
 
@@ -1740,7 +1764,7 @@ class TestScopedShellSessions:
         assert not teardown_thread.is_alive()
         assert queued_results == ["Error: sandbox command scope is no longer active"]
         assert len(created_ids) == 1
-        assert executed_commands == ["initial"]
+        assert [_without_abort_marker(command) for command in executed_commands] == ["initial"]
         assert cleaned_ids == created_ids
 
     def test_queued_command_cannot_restart_session_while_sandbox_closes(self, sandbox):
@@ -1776,7 +1800,7 @@ class TestScopedShellSessions:
         assert not teardown_thread.is_alive()
         assert queued_results == ["Error: sandbox command scope is no longer active"]
         assert len(created_ids) == 1
-        assert executed_commands == ["initial"]
+        assert [_without_abort_marker(command) for command in executed_commands] == ["initial"]
         assert cleaned_ids == created_ids
 
     def test_scoped_unknown_status_is_ambiguous_without_replay(self, sandbox):
