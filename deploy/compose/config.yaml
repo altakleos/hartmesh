@@ -24,7 +24,7 @@
 # Everything else is copied through unchanged. Paths are literal because this
 # file cannot interpolate them: HARTMESH_DATA_DIR is therefore fixed at
 # /srv/hartmesh by this file (README: "Mount points").
-config_version: 45
+config_version: 50
 log_level: info
 
 models: []
@@ -232,6 +232,10 @@ verification:
 #     does not stop a second person's turn from being refused while a scheduled
 #     run and one person hold the two (README states the limit). Runs that come
 #     due together queue and run one after another.
+#   - max_run_seconds is the wall-clock bound on one run: longer than a cold
+#     sandbox and a real report build, short enough that a run that never
+#     finishes frees the slot. The occurrence ends failed and says how long it
+#     had.
 #   - queue_timeout_seconds is how long an occurrence may wait, measured from
 #     when it was admitted, behind the run ahead of it before it is failed:
 #     eight full-length runs.
@@ -243,6 +247,7 @@ verification:
 scheduler:
   enabled: true
   max_concurrent_runs: 1
+  max_run_seconds: 900
   queue_timeout_seconds: 7200
 
 tool_groups:

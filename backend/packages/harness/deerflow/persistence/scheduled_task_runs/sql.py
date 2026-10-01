@@ -245,6 +245,27 @@ class ScheduledTaskRunRepository:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
+    async def list_overdue_running(self, *, started_before: datetime, limit: int) -> list[dict[str, Any]]:
+        """Occurrences still ``running`` that started before the cutoff, oldest first, each with its task's owner.
+
+        ``started_at`` is written when the run is launched, so a row without it
+        (one whose launch bookkeeping failed) is never overdue here.
+        """
+        stmt = (
+            select(ScheduledTaskRunRow, ScheduledTaskRow.user_id)
+            .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
+            .where(
+                ScheduledTaskRunRow.status == "running",
+                ScheduledTaskRunRow.started_at.is_not(None),
+                ScheduledTaskRunRow.started_at < started_before,
+            )
+            .order_by(ScheduledTaskRunRow.started_at.asc(), ScheduledTaskRunRow.id.asc())
+            .limit(limit)
+        )
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return [{**self._row_to_dict(row), "user_id": user_id} for row, user_id in result.all()]
+
     async def count_active_runs(self) -> int:
         """Count launch claims and live runs; waiting rows do not consume slots."""
         stmt = select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES))

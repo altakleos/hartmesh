@@ -389,14 +389,21 @@ def test_search_settings_name_exactly_the_engines_a_query_may_reach() -> None:
     assert settings["general"]["enable_metrics"] is False
 
 
-def test_image_search_is_upstreams_keyless_default_until_the_search_work_is_ported() -> None:
-    """This build keeps upstream's keyless image tool; the profile's own SearXNG image search is not ported yet."""
+def test_image_search_defaults_to_the_profile_s_own_searxng() -> None:
+    """The keyless image tool went the same way as the keyless web tool.
+
+    `image_search` read DuckDuckGo's image endpoint, which refuses this
+    address on every query, so a model looking for a reference picture got
+    nothing back. It now reaches the profile's own instance.
+    """
 
     template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
     tools = {tool["name"]: tool for tool in template["tools"]}
     images = tools["image_search"]
-    assert images["use"] == "deerflow.community.image_search.tools:image_search_tool"
+    assert images["use"] == "deerflow.community.searxng.tools:image_search_tool"
+    assert images["base_url"] == "http://searxng:8080", "the compose service name on the app network"
     assert images["group"] == "web"
+    assert "ddg" not in yaml.safe_dump(template["tools"]), "no keyless tool reaches DuckDuckGo any more"
 
 
 def test_web_search_defaults_to_the_profile_s_own_searxng(render_config: ModuleType) -> None:
@@ -820,7 +827,7 @@ def test_profile_nginx_conf_is_a_verbatim_copy_of_the_compose_nginx_conf() -> No
     source = (PROFILE / "nginx" / "nginx.conf").read_text(encoding="utf-8")
     assert "${" not in source
     assert set(_BARE_VARIABLE.findall(source)) == NGINX_VARIABLES
-    assert len(_BARE_VARIABLE.findall(source)) == 99
+    assert len(_BARE_VARIABLE.findall(source)) == 104
 
 
 def _render_nginx(tmp_path: Path, environ: dict[str, str], *, source: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -1251,11 +1258,61 @@ def test_release_image_tag_spelling_matches_the_shell_helper(pin_images: ModuleT
         assert pin_images.release_image_tag(f"v{version}") == expected
 
 
+def test_fork_images_are_the_components_the_container_workflow_builds(pin_images: ModuleType) -> None:
+    workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "container.yaml").read_text(encoding="utf-8"))
+    matrix = next(job for job in workflow["jobs"].values() if "strategy" in job)["strategy"]["matrix"]["include"]
+    assert {entry["component"] for entry in matrix} == set(pin_images.FORK_COMPONENTS)
+    assert pin_images.is_fork_image("ghcr.io/example/fork-backend")
+    assert pin_images.is_fork_image("ghcr.io/example/fork-sandbox-network-proxy")
+    assert not pin_images.is_fork_image("ghcr.io/example/fork-sandbox-base")
+    assert not pin_images.is_fork_image("postgres")
+    assert not pin_images.is_fork_image("docker.io/library/nginx")
+
+
 def _adopt_step() -> tuple[dict, str]:
     workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "container.yaml").read_text(encoding="utf-8"))
     job = workflow["jobs"]["container"]
     steps = {step.get("name"): step for step in job["steps"]}
     return job, steps["Adopt the digest deploy/compose pins for this component"]["run"]
+
+
+def test_adopt_step_retags_with_crane_and_asserts_the_digest_before_and_after() -> None:
+    job, adopt = _adopt_step()
+    assert "imagetools" not in adopt
+    assert 'crane manifest "$PIN" >/dev/null' in adopt
+    assert 'crane tag "$PIN" "$IMAGE_TAG"' in adopt
+    assert 'crane tag "$PIN" "sha-${SHORT_SHA}"' in adopt
+    # Before: the candidate build under this version put the pinned digest at the release tag.
+    before = 'if [ "$BEFORE" != "$PIN_DIGEST" ]; then'
+    assert before in adopt and adopt.index(before) < adopt.index('crane tag "$PIN"')
+    assert "resolves to ${BEFORE:-nothing}, not the pinned ${PIN_DIGEST}" in adopt
+    # After: both new tags resolve to the pin with the pin's media type.
+    after = 'if [ "$AFTER" != "$PIN_DIGEST" ] || [ "$AFTER_MEDIA_TYPE" != "$PIN_MEDIA_TYPE" ]; then'
+    assert after in adopt and adopt.index(after) > adopt.index('crane tag "$PIN" "sha-${SHORT_SHA}"')
+    assert 'for REF in "$RELEASE_TAG" "$SHA_TAG"; do' in adopt
+    assert 'tee -a "$GITHUB_STEP_SUMMARY"' in adopt, "the cut reads the assertion lines back from the log and the summary"
+    crane_setup = [step for step in job["steps"] if str(step.get("uses", "")).startswith("imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b")]
+    assert len(crane_setup) == 1 and job["steps"].index(crane_setup[0]) < job["steps"].index(next(step for step in job["steps"] if step.get("id") == "adopt"))
+    assert 'crane auth login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin' in adopt
+
+
+def test_adopt_step_adopts_only_on_a_tag_push() -> None:
+    _, adopt = _adopt_step()
+    guard = 'if [ "$GITHUB_EVENT_NAME" != "push" ]; then'
+    assert guard in adopt
+    assert adopt.index(guard) < adopt.index('PIN="$(grep'), "a candidate build exits before reading the pins"
+    guarded = adopt[adopt.index(guard) : adopt.index("fi", adopt.index(guard))]
+    assert 'echo "adopted=false" >> "$GITHUB_OUTPUT"' in guarded and "exit 0" in guarded
+    assert "run scripts/pin_compose_images.py before tagging the release" in adopt, "a tag-form fork line still fails a tag push"
+
+
+def test_release_workflows_reference_the_compose_profile() -> None:
+    manifest = (REPO_ROOT / ".github" / "workflows" / "release-manifest.yaml").read_text(encoding="utf-8")
+    assert "deploy/compose/images.txt" in manifest
+    assert "scripts/pin_compose_images.py --check" in manifest
+    releasing = (REPO_ROOT / "RELEASING.md").read_text(encoding="utf-8")
+    assert "scripts/pin_compose_images.py" in releasing
+    assert "deploy/compose/images.txt" in releasing
 
 
 def test_the_profile_ships_the_scheduler_on_with_values_chosen_for_two_sandbox_slots(render_config: ModuleType) -> None:
@@ -1277,15 +1334,16 @@ def test_the_profile_ships_the_scheduler_on_with_values_chosen_for_two_sandbox_s
     # A person always has a slot the scheduler cannot take.
     assert scheduler.max_concurrent_runs == SANDBOX_SLOTS - 1
     assert scheduler.multi_instance is False, "one Gateway"
-    # The wall-clock bound on one scheduled run (max_run_seconds) is not ported yet.
-    assert "max_run_seconds" not in template["scheduler"]
-    assert scheduler.queue_timeout_seconds == 7200
+    # Wall time: longer than a cold sandbox and a real report build, short enough that a stuck run frees the slot.
+    assert scheduler.max_run_seconds == 900
+    assert scheduler.max_run_seconds >= 5 * template["sandbox"]["ready_timeout"]
+    # An occurrence queued behind the run ahead of it outlasts several full-length runs before it is failed.
+    assert scheduler.queue_timeout_seconds >= 8 * scheduler.max_run_seconds
     # Model calls: a scheduled run does the work a person would ask for, so it keeps the interactive numbers
-    # (the graph's step limit, about 11 steps a model turn on the lead-agent graph, ends a run near 90 turns,
-    # before the 500-turn execution budget could). The profile changes wall time and concurrency only.
+    # (the graph's step limit, about 11 steps a model turn on the lead-agent graph, ends a run near 90 turns).
+    # The profile changes wall time and concurrency only.
     assert "recursion_limit" not in template["scheduler"]
     assert scheduler.recursion_limit == SchedulerConfig().recursion_limit == 1000
-    assert "execution_policy" not in template
 
     # The renderer copies the block through unchanged, so what the tenant runs is what is pinned here.
     rendered, _ = render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), _base_environ())

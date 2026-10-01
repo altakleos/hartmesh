@@ -593,14 +593,22 @@ class ScheduledTaskRepository:
         status: str,
         error: str | None,
         finished_at: datetime,
+        only_if_active: bool = False,
     ) -> bool:
-        """Commit occurrence completion, accounting and eligible parent outcome."""
+        """Commit occurrence completion, accounting and eligible parent outcome.
+
+        ``only_if_active`` makes it a compare-and-set: an occurrence that has
+        already ended keeps its outcome and the call answers ``False``.
+        """
         if status not in TERMINAL_RUN_STATUSES:
             raise ValueError(f"unsupported terminal occurrence status: {status!r}")
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             occurrence = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
             if occurrence is None or occurrence.task_id != task_id or occurrence.run_id not in (None, run_id) or (task is not None and task.user_id != user_id):
+                await session.rollback()
+                return False
+            if only_if_active and occurrence.status not in ACTIVE_RUN_STATUSES:
                 await session.rollback()
                 return False
             occurrence.status = status
