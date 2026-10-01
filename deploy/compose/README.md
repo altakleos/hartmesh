@@ -2009,6 +2009,13 @@ with a retryable capacity outcome. The slot is reserved before any container
 work and released only once the container, its sidecar and its networks are
 confirmed absent, so concurrent acquisitions cannot each take the last slot.
 
+Scheduled tasks share these two slots and add no container and no limit to the
+budget: `scheduler.max_concurrent_runs` is 1, so unattended work holds at most
+one of them (§ "Scheduled tasks" says what that does and does not leave a
+person). A scheduled run is one more run in the Gateway process, at most one
+at a time; the Gateway's own limit was measured under interactive load and has
+not been measured separately under scheduled work.
+
 That is a change of kind, and the reason for it is the arithmetic above: a
 third container (1024 + 96 MiB of limit) already exceeds the 1024 MiB the line
 leaves unallocated, so three concurrently active people would put 6240 MiB of
@@ -2209,6 +2216,118 @@ An export needs as much free space as the person's data until it is
 downloaded or expires, so an account larger than the free space minus 1 GiB
 cannot be exported until the data disk grows. The logs say when one starts and
 finishes, with its counts and size, and never a title or a file name.
+
+## Scheduled tasks
+
+The profile ships with the scheduler on. It was off only because the template
+declared no `scheduler:` block, so `scheduler.enabled` took its `false`
+default. The Gateway re-renders the tenant's own `config.yaml` from the bundle
+at every start, so the bundle is the only place the setting is turned on or off:
+a change in the tenant's copy has no effect, and there is no `.env` key for it.
+The scheduled-tasks page shows a notice when no scheduler is running (turned
+off in configuration, turned on but stopped, or none at all) and tells the
+person that saved times will not arrive on their own; while one is running it
+shows nothing (`GET /api/scheduler` names the state). The levers a person or
+the deployer has beside the bundle are pausing or deleting a schedule and
+`accounts disable`, which holds a person's schedules.
+
+Nobody watches a scheduled run, and the two 1 GiB sandbox slots are the
+tenant's whole hard budget, so each value is a choice:
+
+| Setting | Value | Why |
+| --- | --- | --- |
+| `scheduler.max_concurrent_runs` | 1 | `sandbox.replicas` minus one: the scheduler never holds both slots. |
+| `scheduler.max_run_seconds` | 900 | Longer than a cold sandbox (80 to 91 s measured) and a report build, which has not been measured under a scheduled run; short enough that a run that never finishes frees the slot. |
+| `scheduler.queue_timeout_seconds` | 7200 | Eight full-length runs: how long an occurrence may wait behind the run ahead of it, counted from when it was admitted. |
+| `scheduler.recursion_limit` | 1000 (unchanged) | A scheduled run does the work a person would ask for. The lead-agent graph spends about 11 steps a model turn (counted with a scripted model), so a run ends near 90 turns, before the 500-turn execution budget. |
+
+`backend/tests/test_compose_profile.py` pins these, and derives the first from
+the replicas. `recursion_limit` reaches the run through the launch intent; a run
+launched without one gets the Gateway default of 100 steps, about nine turns.
+
+**Two occurrences due together.** Each 5 s poll admits at most one due task
+(oldest first), and only one scheduled run executes at a time. A scheduled run
+takes a sandbox slot at its first sandbox call and keeps it until the run ends,
+so the second occurrence waits, durably, as `queued`, and launches on a later
+poll once the first has ended. If it is still waiting when `queue_timeout_seconds`
+have passed since it was admitted, it ends `failed` with
+`scheduled task queue wait timeout exceeded`.
+
+**A person's turn while a scheduled run holds a slot.** The scheduler never holds
+both slots, so a person's turn finds one it can take. That is all the profile
+promises. Two slots are two slots: while a scheduled run and one person's turn
+hold both, a second person's sandbox turn waits `SANDBOX_CAPACITY_WAIT_TIMEOUT`
+and is refused, as it is between two people, and it is refused for as long as
+the scheduled run lasts (up to `max_run_seconds`). A scheduled run's new sandbox
+can also evict a person's idle warm sandbox, so that person's next turn pays a
+cold start (80 to 91 s measured). Scheduled work at round times (a Monday 09:00
+review) overlaps with people opening the app. With room for two scheduled runs
+at once (`max_concurrent_runs` 2), two runs hold both slots and a person's turn
+is refused after the wait; `backend/tests/test_scheduled_capacity_admission.py`
+shows both cases.
+
+**A scheduled occurrence that cannot get a slot.** With both slots held by
+people, its first sandbox call waits and is refused. The occurrence ends `failed`
+and says `no sandbox was free when the task ran, so its tools did not run`, on
+the task's *Last error* and on the run's row. It starts no third container, and
+it is not retried: the next occurrence is the next attempt.
+
+**What bounds a scheduled run**, and what its owner reads when it ends (in the
+task's *Last error* and on the occurrence's row of the run history). Nothing
+notifies a person: they read the page.
+
+| Bound | Ends as | The page says |
+| --- | --- | --- |
+| Wall time, `max_run_seconds` | occurrence `failed`; the run is asked to stop and ends `interrupted` when the Stop lands | `the task did not finish within 15 minutes, so it was stopped` |
+| Step limit, `recursion_limit` | occurrence `failed`; run `error`, `stop_reason: recursion_limit_reached` | `the task used up the number of steps it is allowed, so it stopped before it finished` |
+| A guard or execution budget (`loop_capped`, `turn_budget_exhausted`, and the like) | occurrence `failed`; run `success` with that `stop_reason` | words about the limit, never the code |
+| No sandbox free | occurrence `failed`; run `success`, `stop_reason: sandbox_capacity_exceeded` | `no sandbox was free when the task ran, so its tools did not run` |
+| Waiting behind the run ahead, `queue_timeout_seconds` | occurrence `failed`, no run | `scheduled task queue wait timeout exceeded` |
+
+The wall-time bound ends the occurrence first and then asks the run to stop,
+once; the occurrence is `failed` whether or not the run stops. The bound is
+measured from when the run started, so a poll can end it up to 5 s late. After a
+Stop the scheduler launches nothing until the stopped run's worker has finished,
+for up to two minutes, because the run keeps its sandbox until then. A person's
+own Stop still ends the occurrence `interrupted`.
+
+**When the scheduler starts.** There is no misfire grace. On the first poll after
+a start, every enabled schedule whose next time has already passed runs once,
+oldest due first, one at a time: a recurring schedule runs once however many
+times it missed, and a one-time schedule whose time has passed runs then, late.
+Schedules saved while scheduling was off, and any that came due while the
+Gateway was restarting, are in that set. An occurrence still waiting after
+`queue_timeout_seconds` fails as above, and a one-time task then ends `failed`.
+A paused schedule does not run. Each run uses the task's current prompt, as the
+person who saved it, and spends the tenant's model budget; a schedule a person
+does not want to run is paused or deleted before the start.
+
+**Disable, enable and role limits with the scheduler running.** They are
+exercised against the running scheduler
+(`backend/tests/test_scheduler_on_disable_and_role_limit.py`):
+
+- `disable` holds the person's active schedules; a held schedule is not
+  claimed at its next due time, and it stays held after `enable`. `enable
+  --restore-held` turns back on exactly what the last `disable` held, and it
+  runs at its next due time.
+- An occurrence the scheduler claimed just before the disable is refused at
+  launch: it ends `failed`, creates no run (no model call, no sandbox) and is
+  not retried. One waiting in the queue behind a running occurrence is ended
+  `interrupted` by the disable and never launches.
+- A demoted administrator's scheduled task runs as `user`: `limit-role` holds
+  the identity at `user` and the scheduled launch resolves the owner's role at
+  the launch.
+
+**What is controlled, and what still depends on the model or provider.**
+Controlled: how many scheduled runs execute at once, that they never hold both
+slots, the wall-clock and step bounds, and how each ends. Not controlled:
+whether a run finishes its task inside those bounds, how many model turns a real
+task takes, the answer, or a person's turn being refused while a scheduled run
+and another person hold the slots. The single slot is workspace-wide (no
+per-person cap or minimum interval), and *Trigger now* is subject to the same
+one-at-a-time budget and shows `queued` while it waits. Not measured: an
+unattended run against the tenant's own model route on a leased guest, and the
+Gateway's memory under scheduled work.
 
 ## Durability
 

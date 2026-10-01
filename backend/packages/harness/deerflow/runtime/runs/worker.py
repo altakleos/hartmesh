@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Final, Literal, cast
 
 from deerflow_extension_api import TenantReferenceV1, VerifiedActorContextV1
 from langgraph.checkpoint.base import empty_checkpoint
+from langgraph.errors import GraphRecursionError
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
@@ -154,6 +155,10 @@ logger = logging.getLogger(__name__)
 # this stays inside it while still saying something true.
 SANDBOX_CAPACITY_MESSAGE = "This workspace is already running as many sandboxes as it has room for. Your turn did not start; try again once the other work finishes."
 SANDBOX_CAPACITY_STOP_REASON = SandboxCapacityExceededError.run_stop_reason
+# The run's step limit (``recursion_limit``) ended it. The failure the person
+# reads is still the generic reference: only the run's typed ``stop_reason``
+# says which bound it hit, so a host that reports the run (the scheduler) can.
+RECURSION_LIMIT_STOP_REASON = "recursion_limit_reached"
 
 
 class _ExecutionRecoveryTerminalized(RuntimeError):
@@ -3952,6 +3957,7 @@ async def _run_agent(
             run_id,
             RunStatus.error,
             error=error_msg,
+            stop_reason=RECURSION_LIMIT_STOP_REASON if isinstance(exc, GraphRecursionError) else None,
             **terminal_status_kwargs,
         )
         if cancel_action is not None:

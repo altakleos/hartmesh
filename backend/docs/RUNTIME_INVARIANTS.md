@@ -156,9 +156,10 @@ root's. Markdown links resolve from this file.
   travels in the run's `ToolMessage.additional_kwargs`, never a process-global
   provider-ID cache.
 - Scheduled executions dispatch through the same Gateway run path
-  (`launch_scheduled_thread_run`; `scheduler.recursion_limit` default 1000,
-  clamped by `max_recursion_limit`, read from `get_app_config()` at dispatch);
-  the scheduler only decides when. It is single-instance by default:
+  (`InvocationRuntime`; `scheduler.recursion_limit` default 1000, clamped by
+  `max_recursion_limit`, read at each dispatch by
+  `resolve_scheduler_recursion_limit` and sent as the launch intent's
+  `config`); the scheduler only decides when. It is single-instance by default:
   `scheduler.multi_instance=true` requires shared Postgres,
   `run_ownership.heartbeat_enabled=true`, and `run_events.backend=db`
   (startup rejects anything else), preserves live runs when a peer starts,

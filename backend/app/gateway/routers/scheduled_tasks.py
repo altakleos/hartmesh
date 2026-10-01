@@ -117,9 +117,9 @@ async def get_scheduler_state(request: Request) -> SchedulerStateResponse:
     surfacing rather than papering over. ``configured`` is what the file says
     now. ``state`` is the single discriminator a caller should branch on.
 
-    A read, and only a read -- an overdue schedule on a stopped scheduler is a
-    resumption and catch-up decision, made deliberately by whoever owns the
-    deployment, never as a side effect of somebody opening a page. Triggering
+    A read, and only a read -- opening a page never starts anything. There is
+    no misfire grace: when a scheduler starts, each enabled schedule that is
+    already overdue runs once, oldest first. Triggering
     one by hand is unaffected in every state but ``unavailable``: the service
     is constructed whether or not it is started, and ``POST
     /scheduled-tasks/{id}/trigger`` dispatches through it directly.

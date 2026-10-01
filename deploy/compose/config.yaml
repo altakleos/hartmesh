@@ -245,6 +245,38 @@ tool_plane:
   maximum_skills: 512
   validation_requires_skill_review: true
 
+# ── Scheduled tasks ─────────────────────────────────────────────────────────
+# Scheduling ships on. It was off only because this block was absent and
+# `scheduler.enabled` defaults to false; the Gateway re-renders the tenant's own
+# config.yaml from this bundle at every start, so this is the only place the
+# setting can be turned on or off. Nobody watches a scheduled run and the two
+# 1 GiB sandbox slots are the tenant's whole hard budget, so each value is a
+# choice (README: "Scheduled tasks"):
+#
+#   - max_concurrent_runs is sandbox.replicas minus one. A scheduled run takes
+#     the slot its first sandbox call needs and keeps it until it ends, so the
+#     scheduler never holds both slots. That keeps one slot out of its reach; it
+#     does not stop a second person's turn from being refused while a scheduled
+#     run and one person hold the two (README states the limit). Runs that come
+#     due together queue and run one after another.
+#   - max_run_seconds is the wall-clock bound on one run: longer than a cold
+#     sandbox (ready_timeout above) and a real report build, short enough that
+#     a run that never finishes frees the slot. The occurrence ends failed and
+#     says how long it had.
+#   - queue_timeout_seconds is how long an occurrence may wait, measured from
+#     when it was admitted, behind the run ahead of it before it is failed:
+#     eight full-length runs.
+#   - Model calls keep the interactive numbers: a scheduled run does the work a
+#     person would ask for. The graph's step limit (recursion_limit, 1000; the
+#     lead-agent graph spends about 11 steps a model turn, so a run ends near
+#     90 turns) bounds them well before the 500-turn execution budget, and the
+#     tasks page shows a run that reaches it in words.
+scheduler:
+  enabled: true
+  max_concurrent_runs: 1
+  max_run_seconds: 900
+  queue_timeout_seconds: 7200
+
 tool_groups:
   - name: web
   - name: file:read

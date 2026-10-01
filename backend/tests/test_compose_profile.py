@@ -1312,3 +1312,43 @@ def test_release_workflows_reference_the_compose_profile() -> None:
     releasing = (REPO_ROOT / "RELEASING.md").read_text(encoding="utf-8")
     assert "scripts/pin_compose_images.py" in releasing
     assert "deploy/compose/images.txt" in releasing
+
+
+def test_the_profile_ships_the_scheduler_on_with_values_chosen_for_two_sandbox_slots(render_config: ModuleType) -> None:
+    """Scheduling is on, and every value is a choice, not a default.
+
+    Nobody watches a scheduled run, and the profile's two 1 GiB sandbox slots
+    are the tenant's whole hard budget: a run that holds both refuses a
+    person's turn after ``capacity_wait_timeout``. The scheduler therefore
+    holds at most one slot at a time (``max_concurrent_runs`` is derived from
+    the replicas: two slots, one left out of its reach), bounds a run's clock,
+    and lets a queued occurrence wait for the runs ahead of it.
+    """
+    from deerflow.config.execution_policy_config import ExecutionPolicyConfig
+    from deerflow.config.scheduler_config import SchedulerConfig
+
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    scheduler = SchedulerConfig(**template["scheduler"])
+    policy = ExecutionPolicyConfig(**template.get("execution_policy", {}))
+
+    assert scheduler.enabled is True
+    # A person always has a slot the scheduler cannot take.
+    assert scheduler.max_concurrent_runs == SANDBOX_SLOTS - 1
+    assert scheduler.multi_instance is False, "one Gateway"
+    # Wall time: longer than a cold sandbox and a real report build, short enough that a stuck run frees the slot.
+    assert scheduler.max_run_seconds == 900
+    assert scheduler.max_run_seconds >= 5 * template["sandbox"]["ready_timeout"]
+    # An occurrence queued behind the run ahead of it outlasts several full-length runs before it is failed.
+    assert scheduler.queue_timeout_seconds >= 8 * scheduler.max_run_seconds
+    # Model calls: a scheduled run does the work a person would ask for, so it keeps the interactive numbers
+    # (the graph's step limit, about 11 steps a model turn on the lead-agent graph, ends a run near 90 turns,
+    # before the 500-turn execution budget could). The profile changes wall time and concurrency only.
+    assert "recursion_limit" not in template["scheduler"]
+    assert scheduler.recursion_limit == SchedulerConfig().recursion_limit == 1000
+    assert "execution_policy" not in template, "the execution budget is the default"
+    assert policy == ExecutionPolicyConfig()
+
+    # The renderer copies the block through unchanged, so what the tenant runs is what is pinned here.
+    rendered, _ = render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), _base_environ())
+    document = yaml.safe_load(rendered)
+    assert document["scheduler"] == template["scheduler"]
