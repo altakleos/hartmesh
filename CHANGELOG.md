@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Schema changes
+
+Compared with `v2.1.0+hartmesh.37`, the database schema and migration history
+have changed:
+
+- Adds upstream `projects`, `project_documents`, `user_preferences` and
+  `run_change_clock` tables; project membership and incarnation columns on
+  threads; MCP incarnation and lease-token columns; scheduling occurrence
+  sequence/accounting fields; run change sequences; and subagent acceptance
+  criteria/verdict fields.
+- Retains the account, identity-access, provider-key and Shared-publication
+  table definitions. Their HartMesh migrations are now
+  `0027_account_access`, `0028_provider_keys` and `0029_shared_publications`,
+  following upstream `0026_mcp_task_lease_tokens`.
+- The application no longer maps the old fork's durable invocation, execution
+  evidence, governed-tool, tenant-binding, credential-audit and refusal-watch
+  structures. Related columns on runs, events, MCP tasks, subagent batches,
+  access tokens and schedules are absent from the new application schema.
+  This does not automatically drop those structures from an existing database.
+- An existing database at release 37's `0047_identity_holds` revision is not
+  automatically upgraded: the Gateway refuses that unknown revision. There is
+  no migration bridge in this build. Operators retaining an existing database
+  need a separately implemented and tested migration before deploying it.
+  Newly initialized databases use `0029_shared_publications`.
+
 This section accumulates work toward the **2.2.0** milestone
 ([2.2.0](https://github.com/bytedance/deer-flow/milestone/3)).
 This release closes that milestone with **301 merged pull requests**.
@@ -7514,4 +7539,3 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 [#6112]: https://github.com/bytedance/deer-flow/pull/6112
 [#6132]: https://github.com/bytedance/deer-flow/pull/6132
 [#6134]: https://github.com/bytedance/deer-flow/pull/6134
-

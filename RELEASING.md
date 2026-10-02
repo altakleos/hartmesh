@@ -236,6 +236,21 @@ cache of the sandbox's upstream base image, not something to deploy.
 The compose profile must reference its images by digest in the tagged tree,
 so a release builds its images before the tag exists.
 
+Every release's `CHANGELOG.md` entry must include a `### Schema changes`
+section comparing its database schema with the previous HartMesh release.
+Describe added, changed or removed tables and columns, migration revisions,
+and the upgrade behavior or required operator action. If the database schema
+is unchanged, state explicitly: "No database schema changes since v<previous
+release>." Changes to a manifest or configuration format should be described
+separately from the database schema.
+
+Before committing the release version, rename `## [Unreleased]` to the chosen
+version, keep its schema section, and start a new Unreleased section. Preview
+the notes with `python3 scripts/release_notes.py <version>`. The manifest
+workflow requires a nonempty schema section and publishes that release's
+changelog entry as the GitHub Release notes; rerunning it updates those notes
+from the same tagged source.
+
 1. **Choose the version** and write it to every source:
    ```bash
    scripts/bump_version.sh 2.1.0+hartmesh.1

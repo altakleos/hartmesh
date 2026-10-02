@@ -21,6 +21,13 @@ jobs:
         with:
           ref: refs/tags/v${{ inputs.version }}
 
+      - name: Validate and prepare release notes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_notes.py "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+
       - name: Install crane
         uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
 
@@ -221,10 +228,12 @@ jobs:
         run: |
           set -euo pipefail
           TAG="v${VERSION}"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --notes "see CHANGELOG.md"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
-          gh release upload "$TAG" release-manifest.json --clobber
+          gh release upload "$TAG" release-manifest.json --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Summarize resolved digests
         run: |

@@ -1,3 +1,14 @@
+## Release Notes
+
+Every HartMesh release entry in `CHANGELOG.md` includes a nonempty
+`### Schema changes` section describing the database changes relative to the
+previous release, or explicitly stating that there are none. Include migration
+revisions and upgrade behavior when the schema changes. `release_notes.py`
+extracts the exact version's entry, ignores headings inside fenced examples,
+and refuses missing, duplicate or incomplete entries. The release-manifest
+workflow validates notes before resolving artifacts and uses the entry for both
+new and existing GitHub Releases. Tests: `backend/tests/test_release_notes.py`.
+
 ## Service Startup Contracts
 
 Optional browser dependency detection reads the top-level `tools:` sequence

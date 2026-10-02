@@ -581,6 +581,11 @@ DeerFlow's built-in custom events are available through both LangGraph streaming
 
 #### Docker Production Deployment
 
+HartMesh release notes describe database schema changes relative to the previous
+release, including upgrade behavior, or explicitly state that there are none.
+See [CHANGELOG.md](CHANGELOG.md) and the
+[HartMesh release procedure](RELEASING.md#hartmesh-distribution-releases).
+
 `deploy.sh` supports building and starting separately:
 
 ```bash
