@@ -22,7 +22,7 @@ export const getServerSideProductName = cache(async (): Promise<string> => {
   const timeout = setTimeout(() => controller.abort(), AUTH_REQUEST_TIMEOUT_MS);
   try {
     const { internalGatewayUrl } = getGatewayConfig();
-    const response = await fetch(`${internalGatewayUrl}/api/product`, {
+    const response = await fetch(`${internalGatewayUrl}/api/v1/auth/product`, {
       cache: "no-store",
       signal: controller.signal,
     });

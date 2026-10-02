@@ -217,7 +217,8 @@ async def test_changed_outputs_fail_closed_when_not_presented(monkeypatch):
     }
     assert record.status == RunStatus.error
     assert record.error == "Artifact delivery incomplete: no produced output artifact was presented"
-    assert record.stop_reason is None
+    # The reason names the delivery failure, so a client that reloads can tell this run from any other failed one.
+    assert record.stop_reason == "artifact_delivery_incomplete"
 
 
 @pytest.mark.anyio

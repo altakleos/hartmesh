@@ -31,6 +31,7 @@ from app.channels.manager import ChannelManager
 from app.channels.message_bus import InboundMessage, InboundMessageType, MessageBus
 from app.channels.store import ChannelStore
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV
 from deerflow.sandbox.tools import _github_env_from_runtime, bash_tool
 
 
@@ -146,7 +147,8 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     assert out == "ok"
     assert captured["command"] == "exec < /dev/null\ngh pr create"
     assert "tok-123" not in captured["command"]
-    assert captured["env"] == {"GH_TOKEN": "tok-123"}
+    # Beside the injected token, the command carries the one that lets a cancelled call stop it.
+    assert {name: value for name, value in captured["env"].items() if name != ABORT_TOKEN_ENV} == {"GH_TOKEN": "tok-123"}
     assert captured["created_session"] == captured["exec_session"] == captured["closed_session"]
     assert captured["create_options"] == {
         "timeout_in_seconds": 5,
@@ -166,6 +168,7 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
 
     class _FakeShell:
         def exec_command(self, *, command, no_change_timeout=None, **kwargs):
+            captured.setdefault("first_command", command)
             captured["command"] = command
             return _FakeResult()
 
@@ -177,7 +180,11 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
     sbx._default_shell_corrupted = False
 
     assert sbx.execute_command("echo hello") == "ok"
+    assert sbx.execute_command("echo hello") == "ok"
 
+    # The first command a shell session is sent also exports that session's
+    # abort token; from then on a command reaches the shell exactly as written.
+    assert captured["first_command"].endswith("; echo hello") and captured["first_command"].startswith(f"export {ABORT_TOKEN_ENV}=df-")
     assert captured["command"] == "echo hello"
 
 

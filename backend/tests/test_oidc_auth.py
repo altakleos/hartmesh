@@ -587,7 +587,7 @@ async def test_a_token_issued_seconds_ahead_of_this_gateways_clock_is_accepted(m
     private_key, public_key = _signing_keypair()
     service = _skew_service(monkeypatch, public_key)
 
-    claims = await service.validate_skew_id_token(
+    claims = await service.validate_id_token(
         _skew_metadata(),
         "deer-flow",
         _skew_id_token(private_key, iat_offset=5),
@@ -610,7 +610,7 @@ async def test_a_token_issued_far_ahead_is_still_refused_and_the_refusal_names_t
     service = _skew_service(monkeypatch, public_key)
 
     with pytest.raises(OIDCValidationError) as refusal:
-        await service.validate_skew_id_token(
+        await service.validate_id_token(
             _skew_metadata(),
             "deer-flow",
             _skew_id_token(private_key, iat_offset=120),
@@ -629,7 +629,7 @@ async def test_a_token_that_expired_seconds_ago_is_accepted_within_the_leeway(mo
     private_key, public_key = _signing_keypair()
     service = _skew_service(monkeypatch, public_key)
 
-    claims = await service.validate_skew_id_token(
+    claims = await service.validate_id_token(
         _skew_metadata(),
         "deer-flow",
         _skew_id_token(private_key, iat_offset=-300, exp_offset=-5),
@@ -646,7 +646,7 @@ async def test_a_token_that_expired_long_ago_is_refused_with_its_age(monkeypatch
     service = _skew_service(monkeypatch, public_key)
 
     with pytest.raises(OIDCValidationError) as refusal:
-        await service.validate_skew_id_token(
+        await service.validate_id_token(
             _skew_metadata(),
             "deer-flow",
             _skew_id_token(private_key, iat_offset=-300, exp_offset=-120),
@@ -671,9 +671,9 @@ async def test_the_leeway_is_a_bound_the_caller_sets_not_a_constant(monkeypatch)
     token = _skew_id_token(private_key, iat_offset=5)
 
     with pytest.raises(OIDCValidationError):
-        await service.validate_skew_id_token(_skew_metadata(), "deer-flow", token, leeway=0)
+        await service.validate_id_token(_skew_metadata(), "deer-flow", token, leeway=0)
 
-    assert (await service.validate_skew_id_token(_skew_metadata(), "deer-flow", token, leeway=300))["sub"] == "subject"
+    assert (await service.validate_id_token(_skew_metadata(), "deer-flow", token, leeway=300))["sub"] == "subject"
     await service.close()
 
 

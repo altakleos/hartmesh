@@ -383,7 +383,7 @@ async def test_memory_json_is_what_the_memory_export_route_answers(tmp_path, mon
     monkeypatch.setattr(memory_router, "get_memory_manager", lambda: _Manager())
     monkeypatch.setattr(account_export, "memory_export_document", _REAL_MEMORY_EXPORT_DOCUMENT)
     deployment.agents[A_ID] = [{"name": "analyst"}]
-    app = make_authed_test_app(user_factory=lambda: PERSON_A)
+    app = make_authed_test_app(signed_in=True, user_factory=lambda: PERSON_A)
     app.include_router(memory_router.router)
     with TestClient(app) as client:
         route = client.get("/api/memory/export")
@@ -1235,7 +1235,7 @@ async def test_a_failure_logs_no_file_name(tmp_path, monkeypatch, caplog) -> Non
 
 def _routes_app(tmp_path, monkeypatch, user: User, *, auth_source: str | None = None):
     if auth_source is None:
-        app = make_authed_test_app(user_factory=lambda: user)
+        app = make_authed_test_app(signed_in=True, user_factory=lambda: user)
     else:
         # Signed in some other way than an interactive session.
         app = FastAPI()

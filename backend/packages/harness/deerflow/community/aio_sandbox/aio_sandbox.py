@@ -505,7 +505,7 @@ class AioSandbox(Sandbox):
         session_id: str | None,
         timeout: float,
     ) -> tuple[str, int | None, str | None]:
-        with self._abort_lock:
+        with self._abort_state_lock():
             token = self._session_abort_tokens.get(session_id)
             known_session_id = session_id if session_id is not None else self._implicit_session_id
         marking = token is None
@@ -534,6 +534,24 @@ class AioSandbox(Sandbox):
         self._record_session_marking(session_id, token, result)
         return self._format_shell_result(result)
 
+    def _abort_state_lock(self) -> threading.Lock:
+        """The lock guarding the abort state, creating that state where ``__init__`` did not run.
+
+        A sandbox object can be built without its constructor (a caller that
+        fills in only what it uses). Executing a command on one must not fail
+        for want of bookkeeping that exists only so a command can be stopped.
+        """
+        state = self.__dict__
+        lock = state.get("_abort_lock")
+        if lock is None:
+            state.setdefault("_inflight_commands", {})
+            state.setdefault("_next_command_seq", 0)
+            state.setdefault("_session_abort_tokens", {})
+            state.setdefault("_implicit_session_id", None)
+            state.setdefault("_aborted_calls", {})
+            lock = state.setdefault("_abort_lock", threading.Lock())
+        return lock
+
     def _record_session_marking(self, session_id: str | None, token: str, result) -> None:
         """Remember that a session now exports ``token``, once it has answered.
 
@@ -544,7 +562,7 @@ class AioSandbox(Sandbox):
         which does not export the token yet.
         """
         reported = getattr(getattr(result, "data", None), "session_id", None)
-        with self._abort_lock:
+        with self._abort_state_lock():
             if session_id is not None:
                 self._remember_session_token(session_id, token)
                 return
@@ -584,14 +602,14 @@ class AioSandbox(Sandbox):
         sweep can tell this command's processes from older ones.
         """
         call_id = current_sandbox_command_call()
-        with self._abort_lock:
+        with self._abort_state_lock():
             self._next_command_seq += 1
             sequence = self._next_command_seq
             self._inflight_commands[sequence] = _InflightCommand(call_id, session_id, token, started)
         try:
             yield
         finally:
-            with self._abort_lock:
+            with self._abort_state_lock():
                 self._inflight_commands.pop(sequence, None)
 
     def _call_was_aborted(self) -> bool:
@@ -599,7 +617,7 @@ class AioSandbox(Sandbox):
         call_id = current_sandbox_command_call()
         if call_id is None:
             return False
-        with self._abort_lock:
+        with self._abort_state_lock():
             return call_id in self._aborted_calls
 
     def _rotate_and_retry_shell(
@@ -683,7 +701,7 @@ class AioSandbox(Sandbox):
         Returns the number of commands that were executing. Zero means there
         was nothing to end and nothing is asked of the container.
         """
-        with self._abort_lock:
+        with self._abort_state_lock():
             if call_id is not None:
                 self._aborted_calls[call_id] = None
                 while len(self._aborted_calls) > _ABORTED_CALL_MEMORY:

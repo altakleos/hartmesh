@@ -1430,7 +1430,7 @@ suggestions:
 # sign-in and setup pages, the browser tab, the workspace when the tenant
 # bundle names no company, the assistant's own name and DingTalk's message
 # title. One line, at most 40 characters. Unset, HartMesh. It is served
-# before sign-in (GET /api/product), so it is public.
+# before sign-in (GET /api/v1/auth/product), so it is public.
 #
 # These strings are served verbatim (the starters to every signed-in person,
 # the product name to anyone), so keep secrets out of them - a value beginning

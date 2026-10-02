@@ -75,17 +75,19 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
     authenticated context and skips its own re-authentication path.
     """
 
-    def __init__(self, app: ASGIApp, user_factory: Callable[[], User], bind_current_user: bool = False) -> None:
+    def __init__(self, app: ASGIApp, user_factory: Callable[[], User], bind_current_user: bool = False, signed_in: bool = False) -> None:
         super().__init__(app)
         self._user_factory = user_factory
         self._bind_current_user = bind_current_user
+        self._signed_in = signed_in
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         user = self._user_factory()
         request.state.user = user
         request.state.auth = AuthContext(user=user, permissions=list(_STUB_PERMISSIONS))
-        # A stub user is signed in as a person in a browser unless it is the internal caller.
-        request.state.auth_source = "internal" if getattr(user, "system_role", None) == "internal" else "session"
+        if self._signed_in:
+            # As the real middleware records it: a person in a browser, unless the stub is the internal caller.
+            request.state.auth_source = "internal" if getattr(user, "system_role", None) == "internal" else "session"
         if not self._bind_current_user:
             return await call_next(request)
         token = set_current_user(user)
@@ -100,6 +102,7 @@ def make_authed_test_app(
     user_factory: Callable[[], User] | None = None,
     owner_check_passes: bool = True,
     bind_current_user: bool = False,
+    signed_in: bool = False,
 ) -> FastAPI:
     """Build a FastAPI test app with stub auth + permissive thread_store.
 
@@ -113,6 +116,9 @@ def make_authed_test_app(
             permission failures surface correctly.
         bind_current_user: Also bind the stub user to the request's user
             context when a test needs to assert owner-scoped behavior.
+        signed_in: Also record how the stub user authenticated
+            (``request.state.auth_source``), for routes that read the current
+            user from the request or require an interactive session.
 
     Returns:
         A ``FastAPI`` app with the stub middleware installed and
@@ -121,7 +127,7 @@ def make_authed_test_app(
     """
     factory = user_factory or _make_stub_user
     app = FastAPI()
-    app.add_middleware(_StubAuthMiddleware, user_factory=factory, bind_current_user=bind_current_user)
+    app.add_middleware(_StubAuthMiddleware, user_factory=factory, bind_current_user=bind_current_user, signed_in=signed_in)
 
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)

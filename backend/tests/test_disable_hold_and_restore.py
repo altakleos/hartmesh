@@ -31,7 +31,8 @@ from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from app.gateway.services import OwnerRefusedLaunchError
 
 ISSUER = "https://login.example.com/realms/tenant"
-HOLD_SURFACES = ("schedules", "channel_bindings", "scheduled_occurrences", "mcp_task_notifications", "channel_receipts")
+# The surfaces this command is given a store for; one it cannot look at is not reported.
+HOLD_SURFACES = ("schedules", "channel_bindings", "scheduled_occurrences")
 
 
 @pytest.fixture

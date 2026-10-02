@@ -19,6 +19,7 @@ from langchain.agents.middleware.types import ModelRequest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
+from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV
 from deerflow.skills.types import SecretRequirement, Skill, SkillCategory
 
 _SLASH_SOURCE_OWNER_TOKEN = "test-slash-source-owner"
@@ -117,7 +118,9 @@ class TestAioSandboxEnvInjection:
         out = sandbox.execute_command("echo $TOK", env={"TOK": "secret-v"})
         sandbox._client.bash.exec.assert_called_once()
         _, kwargs = sandbox._client.bash.exec.call_args
-        assert kwargs["env"] == {"TOK": "secret-v"}
+        # Beside what the caller injected, the command carries the token that lets a cancelled call stop it.
+        assert {name: value for name, value in kwargs["env"].items() if name != ABORT_TOKEN_ENV} == {"TOK": "secret-v"}
+        assert kwargs["env"][ABORT_TOKEN_ENV].startswith("df-")
         # Secret must NOT be smuggled into the command string (audit / ps safety).
         assert "secret-v" not in kwargs["command"]
         sandbox._client.shell.exec_command.assert_not_called()

@@ -27,6 +27,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -1043,11 +1044,11 @@ async def test_the_boundary_holds_on_a_real_redis(office, monkeypatch):
     # Selected the way the profile selects it -- `lockout_store: redis`, which
     # is what it ships -- rather than by installing a store the router might
     # not have chosen. Only the URL is test-local; the key prefix comes from a
-    # throwaway tenant namespace, which is both how a real Gateway derives it
-    # and what keeps one run's keys off every other tenant on this server.
+    # throwaway namespace, which keeps one run's keys off everything else on
+    # this server.
     local = office.model_copy(update={"lockout_store_redis_url": redis_url})
     set_app_config(AppConfig(sandbox=SandboxConfig(use="test"), auth=AuthAppConfig(local=local)))
-    namespace = f"px-{uuid.uuid4().hex[:12]}"
+    namespace = SimpleNamespace(key_prefix=f"px-{uuid.uuid4().hex[:12]}")
     monkeypatch.setattr(_BareApp._State, "redis_tenant_namespace", namespace)
     prefix = login_throttle.redis_key_prefix(namespace)
     assert prefix != login_throttle.UNSCOPED_KEY_PREFIX

@@ -13,7 +13,11 @@ from app.gateway.deps import get_config
 from deerflow.config.app_config import AppConfig
 from deerflow.config.ui_config import MAX_PRODUCT_NAME_CHARS, product_name
 
-router = APIRouter(prefix="/api", tags=["product"])
+# Beside the other reads a sign-in page makes before anyone is signed in
+# (``/api/v1/auth/providers``, ``/api/v1/auth/setup-status``). A public path
+# directly under ``/api`` would be one an extension's own ``/api/{name}`` route
+# could enter, and the extension host refuses such routes.
+router = APIRouter(prefix="/api/v1/auth", tags=["product"])
 
 
 class ProductResponse(BaseModel):

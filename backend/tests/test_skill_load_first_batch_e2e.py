@@ -42,6 +42,13 @@ from test_runtime_lifecycle_e2e import (
     _wait_for_status,
 )
 
+# These tests run the real business-report script, which uses the document
+# libraries the sandbox image ships (docker/sandbox/Dockerfile). They are not
+# part of this project's locked dependencies, so the module is skipped where
+# one is missing; the "Skill script tests" workflow installs them and runs it.
+for _library in ("docx", "jinja2", "matplotlib"):
+    pytest.importorskip(_library)
+
 pytestmark = pytest.mark.no_auto_user
 
 REPO_ROOT = Path(__file__).resolve().parents[2]

@@ -1106,7 +1106,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Branding API (the tenant bundle's logo) is mounted at /api/branding
     app.include_router(branding.router)
 
-    # The product's name, public for the sign-in page, at /api/product
+    # The product's name, public for the sign-in page, at /api/v1/auth/product
     app.include_router(product.router)
 
     # One conversation's transcript at /api/threads/{thread_id}/export
