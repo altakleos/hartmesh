@@ -1,0 +1,71 @@
+name: Skill script tests
+
+# The public skill scripts that build documents (business-report) run on the
+# libraries the sandbox image ships, which are not part of the backend's locked
+# dependencies. This job installs those libraries at the image's versions and
+# runs the skill script tests, which the unit-test workflow skips without them.
+
+on:
+  push:
+    branches: [ 'main', '*-dev' ]
+    paths:
+      - 'skills/public/**'
+      - 'backend/tests/skills/**'
+      - 'contracts/business_report/**'
+      - 'docker/sandbox/Dockerfile'
+      - '.github/workflows/skill-script-tests.yml'
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - 'skills/public/**'
+      - 'backend/tests/skills/**'
+      - 'contracts/business_report/**'
+      - 'docker/sandbox/Dockerfile'
+      - '.github/workflows/skill-script-tests.yml'
+
+concurrency:
+  group: skill-script-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  skill-script-tests:
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.draft == false }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          # Must match backend/Dockerfile's UV_IMAGE tag; pinned by backend/tests/test_ci_uv_version_pin.py
+          version: "0.11.1"
+
+      - name: Install backend dependencies
+        working-directory: backend
+        run: uv sync --group dev
+
+      - name: Install the document libraries the sandbox image ships
+        working-directory: backend
+        run: uv pip install python-docx==1.2.0 pypdf==6.18.1 weasyprint==70.0 matplotlib==3.11.2 jinja2==3.1.6
+
+      - name: Confirm the document libraries import
+        working-directory: backend
+        # --no-sync: a sync would remove the libraries installed above. A
+        # library that does not import would make the tests below skip, and a
+        # skipped test passes.
+        run: uv run --no-sync python -c "import docx, pypdf, weasyprint, matplotlib, jinja2"
+
+      - name: Run the skill script tests
+        working-directory: backend
+        run: PYTHONPATH=. uv run --no-sync pytest tests/skills -v -rs

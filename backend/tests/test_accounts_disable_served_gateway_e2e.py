@@ -1,4 +1,4 @@
-"""Turning an account off, end to end, on a served Gateway with no durable layer.
+"""Turning an account off, end to end, on a served Gateway.
 
 One real Gateway in sign-on-only mode, one real identity provider, one person
 signed in through it with a run in flight, and the deployer's command run as
