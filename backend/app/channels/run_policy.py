@@ -14,10 +14,13 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
     from app.channels.message_bus import InboundMessage
+
+InteractionMode = Literal["interactive", "webhook", "scheduled", "autonomous"]
+_VALID_INTERACTION_MODES = frozenset({"interactive", "webhook", "scheduled", "autonomous"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +42,9 @@ class ChannelRunPolicy:
     multiple separate methods on the manager.
 
     Attributes:
+        interaction_mode: Explicit interaction mode forwarded to the lead agent.
+            ``None`` means the mode was not declared and preserves legacy
+            ``is_interactive`` behavior.
         is_interactive: When False, the manager sets
             ``run_context["disable_clarification"] = True`` so
             ``ClarificationMiddleware`` returns a "proceed with best
@@ -90,9 +96,8 @@ class ChannelRunPolicy:
             log + reply with the generic busy message: the triggering
             message is appended to a per-thread follow-up buffer, and a
             background watcher subscribes to the active run's
-            ``StreamBridge`` stream so it can launch each buffered source
-            delivery as its own FIFO-chained run as soon as the prior run
-            ends. This targets
+            ``StreamBridge`` stream so it can coalesce the buffer into a
+            follow-up run as soon as that run ends. This targets
             ``fire_and_forget`` channels whose ``send`` is otherwise the
             only feedback a busy sender gets (e.g. GitHub, where ``send``
             is log-only) — without it, a concurrent comment is silently
@@ -103,12 +108,17 @@ class ChannelRunPolicy:
     """
 
     is_interactive: bool = True
+    interaction_mode: InteractionMode | None = None
     default_recursion_limit: int | None = None
     credentials_provider: Callable[[InboundMessage, dict[str, Any]], Awaitable[None]] | None = None
     requires_bound_identity: bool = True
     fire_and_forget: bool = False
     serialize_thread_runs: bool = False
     buffer_followups_on_busy: bool = False
+
+    def __post_init__(self) -> None:
+        if self.interaction_mode is not None and self.interaction_mode not in _VALID_INTERACTION_MODES:
+            raise ValueError(f"Unknown channel interaction mode: {self.interaction_mode!r}")
 
 
 # Channel name → policy. Channels absent from this map fall through to

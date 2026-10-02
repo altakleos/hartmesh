@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app.gateway.deps import get_config, require_admin_user
-from app.gateway.tool_plane_guard import reject_direct_tool_plane_mutation
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
 from deerflow.integrations.lark_cli import (
@@ -83,6 +82,7 @@ class LarkIntegrationStatusResponse(BaseModel):
     cli: LarkCliProbeResponse
     auth: LarkAuthProbeResponse
     sandbox_runtime_mode: str = Field("none", description="How lark-cli is provisioned into the sandbox: none, gateway-download, init-container, or broker")
+    sandbox_runtime_probed: bool = Field(False, description="Whether sandbox runtime readiness was evaluated rather than conservatively defaulted")
     sandbox_runtime_ready: bool = Field(False, description="Whether the sandbox lark-cli runtime is provisioned and usable at chat time")
     sandbox_runtime_detail: str | None = Field(None, description="Human-readable reason when the sandbox runtime is not ready")
 
@@ -203,6 +203,7 @@ def _status_to_response(status: LarkIntegrationStatus, *, include_host_paths: bo
         cli=cli,
         auth=_auth_probe_to_response(status.auth),
         sandbox_runtime_mode=status.sandbox_runtime_mode,
+        sandbox_runtime_probed=status.sandbox_runtime_probed,
         sandbox_runtime_ready=status.sandbox_runtime_ready,
         sandbox_runtime_detail=status.sandbox_runtime_detail,
     )
@@ -270,7 +271,6 @@ async def get_lark_status(request: Request, config: AppConfig = Depends(get_conf
 @router.post("/lark/install", response_model=LarkInstallResponse, summary="Install Lark/Feishu Skill Pack")
 async def install_lark(request: Request, config: AppConfig = Depends(get_config)) -> LarkInstallResponse:
     await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-    reject_direct_tool_plane_mutation(request, surface="managed_integration_install")
     try:
         result = await asyncio.to_thread(install_lark_integration, get_effective_user_id(), config)
         await refresh_skills_system_prompt_cache_async()

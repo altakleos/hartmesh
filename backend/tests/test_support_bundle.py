@@ -9,13 +9,6 @@ import zipfile
 import pytest
 import support_bundle
 
-from deerflow.extensions.artifacts import (
-    ExtensionSourceLockV1,
-    build_installed_artifact_manifest,
-    write_artifact_manifest,
-    write_source_lock,
-)
-
 
 def _zip_text(zip_path, name: str) -> str:
     with zipfile.ZipFile(zip_path) as zf:
@@ -37,8 +30,8 @@ def test_collect_environment_routes_pnpm_through_shared_runner(tmp_path, monkeyp
     assert pnpm_calls == [
         (
             "pnpm",
-            [sys.executable, str(tmp_path / "scripts" / "pnpm.py"), "--project", "frontend-hm", "--", "--version"],
-            tmp_path / "frontend-hm",
+            [sys.executable, str(tmp_path / "scripts" / "pnpm.py"), "--version"],
+            tmp_path / "frontend",
         )
     ]
 
@@ -74,18 +67,12 @@ def test_redact_data_masks_url_credentials_and_cli_flag_secrets():
     data = {
         "models": [
             {"name": "m", "base_url": "https://admin:S3cr3tPass@proxy.internal/v1"},
-            {
-                "name": "n",
-                "endpoint": "https://host/v1?access_token=AKIA1234567890ABCD",
-            },
+            {"name": "n", "endpoint": "https://host/v1?access_token=AKIA1234567890ABCD"},
             {"name": "h", "default_headers": {"X-My-Auth": "rawsecrettoken123"}},
         ],
         "database_url": "postgres://dfuser:dfpass@db:5432/deer",
         "mcpServers": {
-            "svc": {
-                "command": "npx",
-                "args": ["-y", "server", "--api-key", "LIVE-MCP-SECRET-XYZ"],
-            },
+            "svc": {"command": "npx", "args": ["-y", "server", "--api-key", "LIVE-MCP-SECRET-XYZ"]},
         },
     }
 
@@ -105,10 +92,7 @@ def test_redact_data_masks_url_credentials_and_cli_flag_secrets():
 def test_redact_data_masks_inline_and_credential_only_url_secrets():
     data = {
         "mcpServers": {
-            "svc": {
-                "command": "npx",
-                "args": ["server", "--api-key=LIVE-COMBINED-SECRET"],
-            },
+            "svc": {"command": "npx", "args": ["server", "--api-key=LIVE-COMBINED-SECRET"]},
         },
         "cache_url": "redis://:SuperSecretPass@cache:6379/0",
     }
@@ -145,12 +129,10 @@ def test_redact_keeps_non_secret_flags_visible():
 
 
 def test_redact_text_masks_env_assignments_and_bearer_tokens():
-    raw_pat = "dfp_" + ("A" * 43)
     text = "\n".join(
         [
             "OPENAI_API_KEY=sk-live-secret",
             "Authorization: Bearer abc.def.ghi",
-            f"driver exception leaked {raw_pat}",
             "client_secret: very-secret",
             "normal=value",
         ]
@@ -160,8 +142,6 @@ def test_redact_text_masks_env_assignments_and_bearer_tokens():
 
     assert "sk-live-secret" not in redacted
     assert "abc.def.ghi" not in redacted
-    assert raw_pat not in redacted
-    assert "dfp_" not in redacted
     assert "very-secret" not in redacted
     assert "OPENAI_API_KEY=<redacted>" in redacted
     assert "Authorization: Bearer <redacted>" in redacted
@@ -287,11 +267,7 @@ def test_redact_data_does_not_over_redact_lookalike_non_secret_keys():
     (extensions_config.json -> mcpServers.*.routing.keywords) and the
     guardrails "passport" path/ID are real, non-secret fields."""
     data = {
-        "routing": {
-            "mode": "prefer",
-            "priority": 50,
-            "keywords": ["database", "SQL", "table"],
-        },
+        "routing": {"mode": "prefer", "priority": 50, "keywords": ["database", "SQL", "table"]},
         "guardrails": {"passport": "/etc/deer-flow/passport.json"},
     }
 
@@ -376,94 +352,8 @@ def test_create_support_bundle_masks_provider_config_secret_shaped_keys(tmp_path
     assert manifest["privacy"]["redacted_secret_fields"] is True
 
     all_text = "\n".join(_zip_text(output_path, name) for name in zipfile.ZipFile(output_path).namelist())
-    for secret in (
-        "hunter2-literal",
-        "0123456789abcdef-literal",
-        "redis-literal-secret",
-        "whsec_literal_secret",
-    ):
+    for secret in ("hunter2-literal", "0123456789abcdef-literal", "redis-literal-secret", "whsec_literal_secret"):
         assert secret not in all_text
-
-
-def test_config_summary_replaces_raw_tenant_id_with_safe_projection(tmp_path):
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "config_version: 44\ndeployment:\n  tenant_id: customer-readable-name\n",
-        encoding="utf-8",
-    )
-
-    summary = support_bundle.collect_config_summary(config_path)
-
-    assert summary["deployment"]["tenant_identity"] == {
-        "configured_in_yaml": True,
-        "version": 1,
-        "public_ref": "tenant-d25d6d3e435cafee",
-        "digest": "d25d6d3e435cafee9cbb0925350695cf31a9f2316658a580babf91f06bf1a6d9",
-        "prefix_schema_version": 1,
-    }
-    assert "tenant_id" not in summary["deployment"]
-    assert "customer-readable-name" not in str(summary)
-
-
-@pytest.mark.parametrize(
-    "manager_class",
-    [
-        "honcho",
-        "deerflow.agents.memory.backends.honcho.honcho_manager:HonchoMemoryManager",
-    ],
-)
-def test_config_summary_redacts_honcho_endpoint_and_identity_overrides(
-    tmp_path,
-    manager_class,
-):
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        f"""config_version: 45
-deployment:
-  tenant_id: customer-readable-name
-memory:
-  manager_class: {manager_class}
-  backend_config:
-    base_url: https://admin:provider-password@honcho.example/v3?api_key=query-secret
-    api_key: literal-api-secret
-    workspace_prefix: customer-readable-prefix
-    workspace_overrides:
-      alice@example.com: customer-alpha-shared
-      bob@example.com: customer-alpha-shared
-    user_peer_overrides:
-      alice@example.com: peer-alice-private
-    assistant_peer: assistant-private
-    _hartmesh_tenant:
-      tenant_public_ref: caller-forged
-""",
-        encoding="utf-8",
-    )
-
-    summary = support_bundle.collect_config_summary(config_path)
-    backend = summary["memory"]["backend_config"]
-    rendered = repr(summary)
-
-    assert backend["endpoint_posture"] == "https"
-    assert "base_url" not in backend
-    assert backend["workspace_prefix"] == "<redacted>"
-    assert backend["workspace_overrides"] == {"configured_count": 2}
-    assert backend["user_peer_overrides"] == {"configured_count": 1}
-    assert backend["assistant_peer"] == "<redacted>"
-    assert backend["_hartmesh_tenant"] == "<reserved-server-owned>"
-    for sensitive in (
-        "provider-password",
-        "query-secret",
-        "literal-api-secret",
-        "customer-readable-prefix",
-        "alice@example.com",
-        "bob@example.com",
-        "customer-alpha-shared",
-        "peer-alice-private",
-        "assistant-private",
-        "caller-forged",
-        "honcho.example",
-    ):
-        assert sensitive not in rendered
 
 
 def test_create_support_bundle_masks_hardcoded_env_secret(tmp_path):
@@ -509,7 +399,8 @@ def test_create_support_bundle_masks_hardcoded_env_secret(tmp_path):
     assert env["PROJECT_REF"] == "$SUPABASE_PROJECT_REF"
 
 
-def test_create_support_bundle_writes_sanitized_zip(tmp_path):
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-8-sig"])
+def test_create_support_bundle_writes_sanitized_zip(tmp_path, encoding):
     project_root = tmp_path / "project"
     project_root.mkdir()
     (project_root / "config.yaml").write_text(
@@ -549,7 +440,7 @@ channels:
                 },
             }
         ),
-        encoding="utf-8",
+        encoding=encoding,
     )
 
     output_path = tmp_path / "support.zip"
@@ -569,7 +460,6 @@ channels:
         "environment.json",
         "config-summary.json",
         "extensions-summary.json",
-        "topology-summary.json",
         "git.json",
     }.issubset(names)
 
@@ -579,77 +469,17 @@ channels:
     assert "xoxb-secret" not in all_text
     assert "mcp-secret" not in all_text
 
+    extensions_summary = json.loads(_zip_text(bundle_path, "extensions-summary.json"))
+    assert extensions_summary["mcpServers"]["private"]["env"]["PRIVATE_TOKEN"] == "<redacted>"
+
+    triage = json.loads(_zip_text(bundle_path, "triage.json"))
+    assert triage["signals"]["extensions_config_error"] is False
+    assert not any("fix `extensions_config.json` syntax" in step for step in triage["maintainer_next_steps"])
+
     config_summary = json.loads(_zip_text(bundle_path, "config-summary.json"))
     assert config_summary["models"][0]["api_key"] == "<redacted>"
     assert config_summary["tools"][0]["api_key"] == "<redacted>"
     assert config_summary["channels"]["slack"]["bot_token"] == "<redacted>"
-
-
-def test_topology_summary_keeps_only_safe_deployment_report_fields(tmp_path):
-    report_path = tmp_path / "deployment-report.json"
-    report_path.write_text(
-        json.dumps(
-            {
-                "api_version": "deerflow.deployment/v1",
-                "tenant": {
-                    "canonical_id": "customer-secret-name",
-                    "public_ref": "tenant-1111111111111111",
-                },
-                "topology": {
-                    "version": 1,
-                    "profile": "durable_two_gateway_v1",
-                    "replica_id": "gateway-0",
-                    "topology_digest": "a" * 64,
-                    "ready": True,
-                    "live_compatible_replicas": 2,
-                    "degraded_replicas": 0,
-                    "qualification_ready": True,
-                    "reason_code": None,
-                },
-                "qualification": {
-                    "version": 1,
-                    "status": "qualified",
-                    "trust": "operator_asserted",
-                    "evidence": [
-                        {
-                            "qualification_id": "qualification-09",
-                            "scope": "durable_two_gateway_v1_postgres_redis_aio_rwx",
-                            "status": "passed",
-                            "artifact_digest": "sha256:" + ("b" * 64),
-                            "completed_at": "2026-09-01T12:00:00Z",
-                        }
-                    ],
-                },
-                "database_url": "postgresql://admin:do-not-copy@example/db",
-            }
-        ),
-        encoding="utf-8",
-    )
-
-    summary = support_bundle.collect_topology_summary(report_path)
-
-    assert summary["present"] is True
-    assert summary["topology"]["topology_digest"] == "a" * 64
-    assert summary["qualification"]["evidence"][0]["artifact_digest"] == ("sha256:" + ("b" * 64))
-    rendered = json.dumps(summary)
-    assert "customer-secret-name" not in rendered
-    assert "do-not-copy" not in rendered
-    assert "database_url" not in rendered
-
-
-def test_topology_summary_rejects_invalid_document_without_echoing_it(tmp_path):
-    report_path = tmp_path / "deployment-report.json"
-    report_path.write_text('{"secret":"do-not-echo"}', encoding="utf-8")
-
-    summary = support_bundle.collect_topology_summary(report_path)
-
-    assert summary == {
-        "version": 1,
-        "present": True,
-        "valid": False,
-        "error_code": "deployment_report_invalid",
-    }
-    assert "do-not-echo" not in json.dumps(summary)
 
 
 def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatch):
@@ -670,12 +500,7 @@ def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatc
                 {"name": "node", "ok": True, "stdout": "v20.19.5", "stderr": ""},
                 {"name": "pnpm", "ok": True, "stdout": "11.7.0", "stderr": ""},
                 {"name": "uv", "ok": True, "stdout": "uv 0.8.11", "stderr": ""},
-                {
-                    "name": "nginx",
-                    "ok": True,
-                    "stdout": "",
-                    "stderr": "nginx version: nginx/1.31.1",
-                },
+                {"name": "nginx", "ok": True, "stdout": "", "stderr": "nginx version: nginx/1.31.1"},
                 {"name": "docker", "ok": False, "error": "docker not found"},
             ],
         },
@@ -684,18 +509,10 @@ def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatc
         support_bundle,
         "collect_git_summary",
         lambda _project_root: {
-            "branch": {
-                "ok": True,
-                "stdout": "feat/community-support-bundle",
-                "stderr": "",
-            },
+            "branch": {"ok": True, "stdout": "feat/community-support-bundle", "stderr": ""},
             "head": {"ok": True, "stdout": "abc123", "stderr": ""},
             "upstream": {"ok": True, "stdout": "origin/main", "stderr": ""},
-            "status_short": {
-                "ok": True,
-                "stdout": "## feat/community-support-bundle...origin/main\n M README.md",
-                "stderr": "",
-            },
+            "status_short": {"ok": True, "stdout": "## feat/community-support-bundle...origin/main\n M README.md", "stderr": ""},
             "diff_stat": {"ok": True, "stdout": " README.md | 1 +", "stderr": ""},
         },
     )
@@ -729,12 +546,7 @@ def test_create_support_bundle_writes_ai_triage_entrypoints(tmp_path, monkeypatc
     with zipfile.ZipFile(output_path) as zf:
         names = set(zf.namelist())
 
-    assert {
-        "README.md",
-        "issue-summary.md",
-        "ai-issue-draft.md",
-        "triage.json",
-    }.issubset(names)
+    assert {"README.md", "issue-summary.md", "ai-issue-draft.md", "triage.json"}.issubset(names)
 
     triage = json.loads(_zip_text(output_path, "triage.json"))
     assert triage["schema_version"] == 1
@@ -965,64 +777,3 @@ def test_main_prints_reporter_next_steps_and_optional_upload(tmp_path, capsys):
     assert "Suggested next steps:" in captured.out
     assert "If an AI assistant files the issue, start from the issue draft" in captured.out
     assert "Attach the zip if a maintainer asks" in captured.out
-
-
-def test_extension_artifact_summary_contains_only_canonical_safe_facts(tmp_path):
-    backend = tmp_path / "backend"
-    backend.mkdir()
-    lock = ExtensionSourceLockV1.create(
-        extension_api_version="0.13.0",
-        entries=(),
-    )
-    write_source_lock(backend / "extensions.lock.json", lock)
-    manifest = build_installed_artifact_manifest(lock, platform_tag="py3-none-any")
-    write_artifact_manifest(
-        tmp_path / "hartmesh" / "extension-artifacts.json",
-        manifest,
-    )
-
-    summary = support_bundle.collect_extension_artifact_summary(tmp_path)
-
-    assert summary == {
-        "version": 1,
-        "source_lock": {
-            "present": True,
-            "valid": True,
-            "digest": lock.digest,
-            "extension_api_version": "0.13.0",
-            "entry_count": 0,
-        },
-        "installed_manifest": {
-            "present": True,
-            "valid": True,
-            "digest": manifest.digest,
-            "source_lock_digest": lock.digest,
-            "extension_api_version": "0.13.0",
-            "platform_tag": "py3-none-any",
-            "entry_count": 0,
-        },
-        "source_lock_matches": True,
-    }
-    serialized = json.dumps(summary)
-    assert str(tmp_path) not in serialized
-    assert "plugins" not in serialized
-
-
-def test_extension_artifact_summary_never_echoes_invalid_document_values(tmp_path):
-    backend = tmp_path / "backend"
-    backend.mkdir()
-    (backend / "extensions.lock.json").write_text(
-        '{"secret":"do-not-echo"}\n',
-        encoding="utf-8",
-    )
-
-    summary = support_bundle.collect_extension_artifact_summary(tmp_path)
-
-    serialized = json.dumps(summary)
-    assert summary["source_lock"] == {
-        "present": True,
-        "valid": False,
-        "error_code": "extension_artifact_manifest_invalid",
-    }
-    assert "do-not-echo" not in serialized
-    assert str(tmp_path) not in serialized

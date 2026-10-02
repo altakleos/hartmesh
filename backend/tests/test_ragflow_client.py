@@ -167,6 +167,39 @@ async def test_retrieve_rejects_empty_dataset_ids_before_request() -> None:
 
 
 @pytest.mark.anyio
+async def test_retrieve_sends_nonempty_document_filter_and_rejects_empty_filter() -> None:
+    requests: list[dict] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(json.loads(request.content))
+        return httpx.Response(
+            200,
+            json={"code": 0, "data": {"chunks": [], "doc_aggs": [], "total": 0}},
+        )
+
+    client = RAGFlowClient(
+        base_url="http://ragflow.test",
+        api_key="ragflow-secret",
+        transport=httpx.MockTransport(handler),
+    )
+
+    await client.retrieve(
+        "annual leave",
+        dataset_ids=["dataset-1"],
+        document_ids=["document-1"],
+    )
+    assert requests[0]["document_ids"] == ["document-1"]
+
+    with pytest.raises(ValueError, match="document_ids must be omitted or non-empty"):
+        await client.retrieve(
+            "annual leave",
+            dataset_ids=["dataset-1"],
+            document_ids=[],
+        )
+    assert len(requests) == 1
+
+
+@pytest.mark.anyio
 async def test_nonzero_api_code_is_normalized_and_redacts_api_key() -> None:
     async def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -240,69 +273,6 @@ async def test_invalid_json_response_is_normalized_in_english() -> None:
 
     with pytest.raises(RAGFlowProtocolError, match="RAGFlow returned invalid JSON"):
         await client.list_datasets(dataset_id="dataset-1")
-
-
-@pytest.mark.anyio
-async def test_success_response_rejects_non_json_content_type() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            content=b'{"code":0,"data":[]}',
-            headers={"content-type": "text/html"},
-        )
-
-    client = RAGFlowClient(
-        base_url="http://ragflow.test",
-        api_key="ragflow-secret",
-        transport=httpx.MockTransport(handler),
-    )
-
-    with pytest.raises(RAGFlowProtocolError, match="content type"):
-        await client.list_datasets(dataset_id="dataset-1")
-
-
-@pytest.mark.anyio
-async def test_success_response_is_bounded_before_json_parsing() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            200,
-            content=b'{"code":0,"data":[]}' + b" " * 128,
-            headers={"content-type": "application/json"},
-        )
-
-    client = RAGFlowClient(
-        base_url="http://ragflow.test",
-        api_key="ragflow-secret",
-        max_response_bytes=64,
-        transport=httpx.MockTransport(handler),
-    )
-
-    with pytest.raises(RAGFlowProtocolError, match="size limit") as caught:
-        await client.list_datasets(dataset_id="dataset-1")
-
-    assert caught.value.provider_status == "oversized_response"
-
-
-@pytest.mark.anyio
-async def test_http_rate_limit_is_a_closed_provider_status() -> None:
-    async def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(
-            429,
-            content=b"provider-private-diagnostic",
-            headers={"content-type": "text/plain"},
-        )
-
-    client = RAGFlowClient(
-        base_url="http://ragflow.test",
-        api_key="ragflow-secret",
-        transport=httpx.MockTransport(handler),
-    )
-
-    with pytest.raises(RAGFlowProtocolError) as caught:
-        await client.list_datasets(dataset_id="dataset-1")
-
-    assert caught.value.provider_status == "rate_limited"
-    assert "provider-private-diagnostic" not in str(caught.value)
 
 
 @pytest.mark.anyio

@@ -14,16 +14,15 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, runtime_checkable
 
+from deerflow_extension_api.plugins import PluginContribution
 from deerflow_extension_api.state import ExtensionData
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from deerflow_extension_api.assembly import AgentAssemblyObserver
-    from deerflow_extension_api.authorization import AuthorizationProviderFactory
     from deerflow_extension_api.compaction import ContextCompactionObserver
-    from deerflow_extension_api.constraints import InvocationConstraintsProviderFactory
-    from deerflow_extension_api.contributors import OriginContributorFactory, RunContextContributorFactory
-    from deerflow_extension_api.mcp import McpInterceptorDescriptor
+    from deerflow_extension_api.model_invocation import ModelInvoker
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
+    from deerflow_extension_api.run_evidence import RunEvidenceReader
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -161,16 +160,6 @@ class MiddlewareContributor(Protocol):
 # --- Extension services ----------------------------------------------------
 
 
-class ReplicaSafety(StrEnum):
-    """Cross-replica authority declaration for Gateway-lifetime work."""
-
-    STATELESS_REPLICA_SAFE = "stateless_replica_safe"
-    SHARED_STORE_FENCED = "shared_store_fenced"
-    SINGLETON_LEASED = "singleton_leased"
-    SINGLE_REPLICA_ONLY = "single_replica_only"
-    UNCLASSIFIED = "unclassified"
-
-
 @dataclass(frozen=True)
 class ExtensionRuntimeDeps:
     """Host capabilities bound after Gateway infrastructure is ready."""
@@ -178,15 +167,11 @@ class ExtensionRuntimeDeps:
     app_store: ExtensionData | None = None
     policy: HostPolicySnapshot = field(default_factory=HostPolicySnapshot)
     session_factory: Any | None = None
+    run_evidence_reader: RunEvidenceReader | None = None
+    model_invoker: ModelInvoker | None = None
 
 
 class ExtensionService(Protocol):
-    # Existing services remain source-compatible and are deliberately treated
-    # as unclassified by multi-replica hosts until they opt in explicitly.
-    replica_safety: ReplicaSafety = ReplicaSafety.UNCLASSIFIED
-    replica_safety_health_capability_id: str | None = None
-    replica_safety_fence_evidence_kind: str | None = None
-
     async def start(self, deps: ExtensionRuntimeDeps) -> None:
         return None
 
@@ -203,33 +188,15 @@ class ExtensionRegistry(Protocol):
 
     Structural and minimal on purpose. Every method has a default so additive
     contract releases remain compatible with older registry implementations.
-    It exposes typed capability contributions rather than an untyped generic
-    registry.
     The host's concrete registry additionally carries host-only machinery
     (attribution, positional rollback, build) that is deliberately absent here.
     """
 
+    def plugin(self, contribution: PluginContribution) -> bool:
+        """Return True when accepted; False means this host lacks plugin UI support."""
+        return False
+
     def middlewares(self, contributor: MiddlewareContributor) -> None:
-        return None
-
-    def authorization_provider(self, contribution: AuthorizationProviderFactory) -> None:
-        """Register the process's single authoritative authorization factory."""
-        return None
-
-    def origin_contributor(self, contribution: OriginContributorFactory) -> None:
-        """Register one trusted Origin contributor factory."""
-        return None
-
-    def run_context_contributor(self, contribution: RunContextContributorFactory) -> None:
-        """Register one trusted accepted-run-context contributor factory."""
-        return None
-
-    def invocation_constraints(self, contribution: InvocationConstraintsProviderFactory) -> None:
-        """Register the process's single restrictive constraints factory."""
-        return None
-
-    def mcp_interceptor(self, contribution: McpInterceptorDescriptor) -> None:
-        """Register one trusted MCP call-preparation interceptor."""
         return None
 
     def task_lifecycle(self, contributor: TaskLifecycleContributor) -> None:

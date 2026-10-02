@@ -1,18 +1,3 @@
-{{- include "deer-flow.validate" . -}}
-{{- $appConfig := (.Values.config | fromYaml) -}}
-{{- $deploymentConfig := (index $appConfig "deployment") | default dict -}}
-{{- $shutdownConfig := (index $deploymentConfig "shutdown") | default dict -}}
-{{- $memoryConfig := (index $appConfig "memory") | default dict -}}
-{{- $shutdownTotal := addf
-      ((index $shutdownConfig "admission_seconds") | default 2.0)
-      ((index $shutdownConfig "channel_seconds") | default 5.0)
-      ((index $shutdownConfig "scheduler_seconds") | default 3.0)
-      ((index $shutdownConfig "run_seconds") | default 8.0)
-      ((index $memoryConfig "shutdown_flush_timeout_seconds") | default 30.0)
-      ((index $shutdownConfig "dependencies_seconds") | default 5.0) -}}
-{{- $derivedTermination := int (ceil (addf $shutdownTotal (.Values.gateway.preStopSleepSeconds | default 0) (.Values.gateway.shutdownSchedulingHeadroomSeconds | default 3))) -}}
-{{- $isMultiGateway := eq .Values.deployment.mode "durable_two_gateway_v1" -}}
-{{- $sandboxImageDigest := regexFind "sha256:[0-9a-f]{64}$" .Values.provisioner.sandboxImage -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,14 +8,6 @@ metadata:
     app.kubernetes.io/component: gateway
 spec:
   replicas: {{ .Values.gateway.replicas }}
-  # Recreate is intentional for both durable profiles. The two-Gateway profile
-  # rejects mixed topology fingerprints, so upgrades use a documented
-  # maintenance window instead of claiming mixed-version zero downtime.
-  strategy:
-    type: Recreate
-    # Explicitly clear the API-defaulted RollingUpdate settings when upgrading
-    # an existing release that previously omitted strategy.
-    rollingUpdate: null
   selector:
     matchLabels:
       {{- include "deer-flow.selectorLabels" . | nindent 6 }}
@@ -40,24 +17,17 @@ spec:
       labels:
         {{- include "deer-flow.selectorLabels" . | nindent 8 }}
         app.kubernetes.io/component: gateway
-        {{- with .Values.gateway.podLabels }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
       annotations:
         # Roll pods when the mounted ConfigMaps change (subPath mounts don't
         # get live updates, so without this a config-only upgrade is ignored).
         checksum/config: {{ include "deer-flow.configChecksum" . }}
         checksum/extensions: {{ include "deer-flow.extensionsChecksum" . }}
-        {{- with .Values.gateway.podAnnotations }}
-        {{- toYaml . | nindent 8 }}
-        {{- end }}
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
-      serviceAccountName: {{ include "deer-flow.serviceAccountName" . }}
-      automountServiceAccountToken: {{ .Values.serviceAccount.automountServiceAccountToken }}
-      # Defaults to every configured application shutdown phase plus preStop
-      # and scheduling headroom. An explicit override remains operator-owned.
-      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default $derivedTermination }}
+      # MUST exceed channel stop (~5s) + memory shutdown_flush_timeout_seconds
+      # (default 30s) + buffer, or K8s SIGKILLs the memory drain mid-flight
+      # (values.yaml gateway.terminationGracePeriodSeconds). K8s defaults to 30s.
+      terminationGracePeriodSeconds: {{ .Values.gateway.terminationGracePeriodSeconds | default 45 }}
       securityContext:
         # Non-root: the gateway image has no USER directive and would otherwise
         # run as root. uid/gid 1000; fsGroup 1000 so the .deer-flow PVC is
@@ -66,29 +36,8 @@ spec:
         runAsUser: 1000
         runAsGroup: 1000
         fsGroup: 1000
-        fsGroupChangePolicy: OnRootMismatch
         seccompProfile:
           type: RuntimeDefault
-      {{- if $isMultiGateway }}
-      affinity:
-        podAntiAffinity:
-          preferredDuringSchedulingIgnoredDuringExecution:
-            - weight: 100
-              podAffinityTerm:
-                topologyKey: kubernetes.io/hostname
-                labelSelector:
-                  matchLabels:
-                    {{- include "deer-flow.selectorLabels" . | nindent 20 }}
-                    app.kubernetes.io/component: gateway
-      topologySpreadConstraints:
-        - maxSkew: 1
-          topologyKey: kubernetes.io/hostname
-          whenUnsatisfiable: ScheduleAnyway
-          labelSelector:
-            matchLabels:
-              {{- include "deer-flow.selectorLabels" . | nindent 14 }}
-              app.kubernetes.io/component: gateway
-      {{- end }}
       # Seed extensions_config.json into a writable directory. ConfigMap
       # volumes are always read-only; the seed remains immutable while runtime
       # API updates land in the home volume (PVC or pod-local emptyDir).
@@ -103,7 +52,6 @@ spec:
           volumeMounts:
             - name: home
               mountPath: /home-pvc
-        {{- if not $isMultiGateway }}
         - name: init-extensions
           image: busybox:1.36
           command: ["sh", "-c"]
@@ -124,7 +72,6 @@ spec:
             - name: home
               mountPath: /extensions-runtime
               subPath: deer-flow/extensions-config
-        {{- end }}
       containers:
         - name: gateway
           image: {{ include "deer-flow.gatewayImage" . }}
@@ -148,46 +95,6 @@ spec:
             # (1777). --no-sync means no install/cache writes in practice.
             - name: UV_CACHE_DIR
               value: /tmp
-            - name: DEER_FLOW_IMAGE_REFERENCE
-              value: {{ include "deer-flow.gatewayImage" . | quote }}
-            {{- if .Values.gateway.image.digest }}
-            - name: DEER_FLOW_IMAGE_DIGEST
-              value: {{ .Values.gateway.image.digest | quote }}
-            {{- end }}
-            {{- if $isMultiGateway }}
-            - name: DEER_FLOW_REPLICA_ID
-              valueFrom:
-                fieldRef:
-                  fieldPath: metadata.name
-            - name: DEER_FLOW_TOPOLOGY_IMAGE_DIGESTS
-              value: {{ dict "gateway" .Values.gateway.image.digest "frontend" .Values.frontend.image.digest "nginx" .Values.nginx.image.digest "provisioner" .Values.provisioner.image.digest "sandbox" $sandboxImageDigest "postgres" .Values.postgresql.image.digest "redis" .Values.redis.image.digest | toJson | quote }}
-            - name: DEER_FLOW_TOPOLOGY_CONFIG_DIGEST
-              value: {{ printf "sha256:%s" (include "deer-flow.renderedConfig" . | sha256sum) | quote }}
-            - name: DEER_FLOW_TOPOLOGY_DATABASE_SCHEMA_REF
-              value: {{ .Values.deployment.topology.databaseSchemaRef | quote }}
-            {{- end }}
-            {{- if .Values.extensions.artifactManifestDigest }}
-            - name: DEER_FLOW_EXTENSION_ARTIFACT_MANIFEST_DIGEST
-              value: {{ .Values.extensions.artifactManifestDigest | quote }}
-            - name: DEER_FLOW_EXTENSION_CONFIGURATION_DIGEST
-              value: {{ .Values.extensions.configurationDigest | quote }}
-            {{- end }}
-            {{- if .Values.deployment.provenance.sourceRevision }}
-            - name: DEER_FLOW_SOURCE_REVISION
-              value: {{ .Values.deployment.provenance.sourceRevision | quote }}
-            {{- end }}
-            {{- if .Values.deployment.qualificationEvidence }}
-            - name: DEER_FLOW_QUALIFICATION_EVIDENCE
-              value: {{ .Values.deployment.qualificationEvidence | toJson | quote }}
-            {{- end }}
-            {{- if .Values.deployment.qualificationCandidate.enabled }}
-            - name: DEER_FLOW_QUALIFICATION_CANDIDATE
-              value: "1"
-            - name: DEER_FLOW_QUALIFICATION_CANDIDATE_ID
-              value: {{ .Values.deployment.qualificationCandidate.id | quote }}
-            - name: DEER_FLOW_QUALIFICATION_NAMESPACE
-              value: {{ include "deer-flow.namespace" . | quote }}
-            {{- end }}
             - name: DEER_FLOW_PROJECT_ROOT
               value: /app
             - name: DEER_FLOW_HOME
@@ -195,11 +102,7 @@ spec:
             - name: DEER_FLOW_CONFIG_PATH
               value: /app/backend/config.yaml
             - name: DEER_FLOW_EXTENSIONS_CONFIG_PATH
-              {{- if $isMultiGateway }}
-              value: /app/backend/extensions_config.json
-              {{- else }}
               value: /app/backend/.deer-flow/extensions-config/extensions_config.json
-              {{- end }}
             - name: DEER_FLOW_CHANNELS_LANGGRAPH_URL
               value: http://gateway:8001/api
             - name: DEER_FLOW_CHANNELS_GATEWAY_URL
@@ -210,10 +113,6 @@ spec:
               value: 0.0.0.0
             - name: GATEWAY_PORT
               value: "8001"
-            {{- with (include "deer-flow.tenantId" .) }}
-            - name: DEER_FLOW_TENANT_ID
-              value: {{ . | quote }}
-            {{- end }}
             - name: DEER_FLOW_INTERNAL_AUTH_TOKEN
               valueFrom:
                 secretKeyRef:
@@ -231,10 +130,6 @@ spec:
                   name: {{ include "deer-flow.databaseUrlSecret" . }}
                   key: database-url
             {{- end }}
-            {{- if ne .Values.database.poolMaxOverflow nil }}
-            - name: DATABASE_POOL_MAX_OVERFLOW
-              value: {{ .Values.database.poolMaxOverflow | quote }}
-            {{- end }}
             {{- /* Redis stream-bridge URL — only mounted when redis is configured
                   (bundled StatefulSet, external URL, or an existing Secret).
                   Drives cross-pod SSE delivery (PR #3191). redis-py connects via
@@ -246,40 +141,34 @@ spec:
                   name: {{ include "deer-flow.redisUrlSecret" . }}
                   key: redis-url
             {{- end }}
-            {{- include "deer-flow.redisKeyPrefixEnv" . | nindent 12 }}
             - name: NO_PROXY
               value: localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner
             - name: no_proxy
               value: localhost,127.0.0.1,::1,gateway,frontend,nginx,provisioner
-          {{- if or .Values.secrets .Values.existingSecret .Values.gateway.extraEnvFrom }}
+          {{- if or .Values.secrets .Values.existingSecret }}
           envFrom:
-            {{- if or .Values.secrets .Values.existingSecret }}
             - secretRef:
                 name: {{ include "deer-flow.providerSecret" . }}
-            {{- end }}
-            {{- with .Values.gateway.extraEnvFrom }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
           {{- end }}
           ports:
             - containerPort: 8001
               name: http
           readinessProbe:
             httpGet:
-              path: /ready
+              path: /health/ready
               port: http
-            initialDelaySeconds: {{ .Values.gateway.readinessProbe.initialDelaySeconds }}
-            periodSeconds: {{ .Values.gateway.readinessProbe.periodSeconds }}
-            timeoutSeconds: {{ .Values.gateway.readinessProbe.timeoutSeconds }}
-            failureThreshold: {{ .Values.gateway.readinessProbe.failureThreshold }}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            # /health/ready bounds both probes to a 3s endpoint deadline;
+            # timeoutSeconds must stay above that bound or Kubernetes aborts
+            # slow-but-healthy responses at its 1s default.
+            timeoutSeconds: 5
           livenessProbe:
             httpGet:
               path: /health
               port: http
-            initialDelaySeconds: {{ .Values.gateway.livenessProbe.initialDelaySeconds }}
-            periodSeconds: {{ .Values.gateway.livenessProbe.periodSeconds }}
-            timeoutSeconds: {{ .Values.gateway.livenessProbe.timeoutSeconds }}
-            failureThreshold: {{ .Values.gateway.livenessProbe.failureThreshold }}
+            initialDelaySeconds: 30
+            periodSeconds: 20
           {{- /* preStop sleep so the Service/ingress deregisters the pod and
                   in-flight requests drain before SIGTERM begins graceful shutdown
                   (which runs the memory queue drain). 0 / unset disables it.
@@ -305,20 +194,6 @@ spec:
             - name: home
               mountPath: /app/backend/.deer-flow
               subPath: deer-flow
-            {{- if $isMultiGateway }}
-            - name: extensions-seed
-              mountPath: /app/backend/extensions_config.json
-              subPath: extensions_config.json
-              readOnly: true
-            {{- end }}
-            {{- if .Values.provisioner.enabled }}
-            - name: provisioner-identity
-              mountPath: /var/run/secrets/hartmesh-provisioner
-              readOnly: true
-            {{- end }}
-            {{- with .Values.gateway.extraVolumeMounts }}
-            {{- toYaml . | nindent 12 }}
-            {{- end }}
       volumes:
         - name: config
           configMap:
@@ -342,17 +217,4 @@ spec:
             claimName: {{ include "deer-flow.homePVC" . }}
           {{- else }}
           emptyDir: {}
-        {{- end }}
-        {{- if .Values.provisioner.enabled }}
-        - name: provisioner-identity
-          projected:
-            defaultMode: 0440
-            sources:
-              - serviceAccountToken:
-                  audience: {{ .Values.provisioner.gatewayTokenAudience | quote }}
-                  expirationSeconds: 600
-                  path: token
-        {{- end }}
-        {{- with .Values.gateway.extraVolumes }}
-        {{- toYaml . | nindent 8 }}
         {{- end }}

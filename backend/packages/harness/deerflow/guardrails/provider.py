@@ -2,13 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
-from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
-
-from deerflow_extension_api import InvocationIdentityV1, SealedOriginV1, TrustedRunContextV1
 
 
 @dataclass
@@ -32,10 +27,7 @@ class GuardrailRequest:
     # providers that don't read them.
     channel_user_id: str | None = None
     is_internal: bool = False
-    authz_attributes: Mapping[str, Any] = field(default_factory=dict)
-    identity: InvocationIdentityV1 | None = None
-    origin: SealedOriginV1 | None = None
-    trusted_context: TrustedRunContextV1 | None = None
+    authz_attributes: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -54,36 +46,6 @@ class GuardrailDecision:
     reasons: list[GuardrailReason] = field(default_factory=list)
     policy_id: str | None = None
     metadata: dict[str, Any] = field(default_factory=dict)
-    provider_receipt: object | None = field(default=None, repr=False, compare=False)
-
-
-_PROVIDER_RECEIPT: ContextVar[object | None] = ContextVar(
-    "deerflow_guardrail_provider_receipt",
-    default=None,
-)
-
-
-@contextmanager
-def bind_guardrail_provider_receipt(receipt: object | None) -> Iterator[None]:
-    """Make one allowed provider result available only during its tool call."""
-
-    if receipt is None:
-        # An independent inner guardrail must not mask the authorization
-        # adapter's outer receipt. With no outer receipt this still exposes
-        # the default ``None`` and required operational preparation fails shut.
-        yield
-        return
-    token = _PROVIDER_RECEIPT.set(receipt)
-    try:
-        yield
-    finally:
-        _PROVIDER_RECEIPT.reset(token)
-
-
-def current_guardrail_provider_receipt() -> object | None:
-    """Return the receipt bound to the current tool-call execution context."""
-
-    return _PROVIDER_RECEIPT.get()
 
 
 @runtime_checkable

@@ -2,7 +2,7 @@
 
 The delivery fence runs after an ordinary graph completion, so until these
 regressions it terminalized the run in SQL and in the journal while the browser
-saw confident prose followed by a normal end: two tenant-class turns produced
+saw confident prose followed by a normal end: two recorded turns produced
 valid outputs, omitted ``present_files``, and looked successful on screen.
 
 The verdict deliberately does **not** ride an ``error`` frame. That frame means
@@ -23,19 +23,16 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
+from deerflow.runtime.runs.delivery import MAX_DISCLOSED_UNDELIVERED_PATHS
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
-from deerflow.runtime.runs.store.memory import MemoryRunStore
 from deerflow.runtime.runs.worker import (
     _DELIVERY_INCOMPLETE_ERROR,
-    _DELIVERY_RECEIPT_FAILED_ERROR,
-    MAX_DISCLOSED_UNDELIVERED_PATHS,
     RunContext,
     run_agent,
 )
 
 INCOMPLETE_STOP_REASON = "artifact_delivery_incomplete"
-RECEIPT_STOP_REASON = "delivery_receipt_failed"
 
 END_FRAME = "__end__"
 
@@ -288,48 +285,6 @@ async def test_a_large_undelivered_set_is_bounded_but_still_counted(monkeypatch)
 
 
 @pytest.mark.anyio
-async def test_an_unverifiable_receipt_also_reaches_the_client(monkeypatch):
-    """A presented run downgraded to error because its receipt could not be
-    written is a terminal failure too, and was equally silent. It carries no
-    paths: the files were presented, so there is nothing to offer in place."""
-
-    class FailingReceiptStore(MemoryRunEventStore):
-        async def put_if_absent(self, **kwargs):
-            if kwargs.get("event_type") == "run.delivery":
-                raise RuntimeError("event store unavailable")
-            return await super().put_if_absent(**kwargs)
-
-    run_manager = RunManager(store=MemoryRunStore())
-    record = await run_manager.create("thread-1")
-    bridge, frames = _recording_bridge()
-    _produced(monkeypatch, "/mnt/user-data/outputs/report.md")
-
-    await run_agent(
-        bridge,
-        run_manager,
-        record,
-        ctx=RunContext(checkpointer=None, event_store=FailingReceiptStore()),
-        agent_factory=lambda *, config: _PresentingAgent("/mnt/user-data/outputs/report.md"),
-        graph_input={},
-        config={},
-    )
-
-    assert record.status == RunStatus.error
-    assert record.error == _DELIVERY_RECEIPT_FAILED_ERROR
-    assert record.stop_reason == RECEIPT_STOP_REASON
-    assert _frames_of(frames, "error") == []
-    assert _verdicts(frames) == [
-        {
-            "type": "artifact_delivery_unverified",
-            "run_id": record.run_id,
-            "message": _DELIVERY_RECEIPT_FAILED_ERROR,
-        }
-    ]
-    names = [name for name, _ in frames]
-    assert _verdict_index(frames) < names.index(END_FRAME)
-
-
-@pytest.mark.anyio
 async def test_a_fenced_worker_narrates_nothing_onto_a_stream_a_peer_owns(monkeypatch):
     """Losing the run mid-terminalization also returns None from the status CAS.
 
@@ -453,32 +408,3 @@ async def test_a_delivered_run_leaves_stop_reason_alone(monkeypatch):
 
     assert record.status == RunStatus.success
     assert record.stop_reason is None
-
-
-def test_both_delivery_reasons_are_registered_lifecycle_evidence():
-    """``stop_reason`` is governed, not free text.
-
-    It reaches the durable row through ``LifecycleTransition.reason``, which
-    ``build_lifecycle_payload`` validates against a closed vocabulary; an
-    unregistered value raises there, the terminal CAS is caught as an
-    indeterminate store failure, and the worker marks its own lease lost and
-    overwrites the real error. So registering these two is load-bearing, and
-    this pins it directly instead of leaving it to a worker-level symptom.
-    """
-    from deerflow.runtime.runs.store.base import (
-        LifecycleTransition,
-        build_lifecycle_payload,
-        lifecycle_type_for_status,
-    )
-
-    for reason in (INCOMPLETE_STOP_REASON, RECEIPT_STOP_REASON):
-        payload = build_lifecycle_payload(
-            LifecycleTransition(
-                lifecycle_type=lifecycle_type_for_status(RunStatus.error.value),
-                status=RunStatus.error.value,
-                error="boom",
-                stop_reason=reason,
-                reason=reason,
-            )
-        )
-        assert payload["reason"] == reason

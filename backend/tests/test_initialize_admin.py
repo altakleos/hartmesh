@@ -159,24 +159,6 @@ def test_initialize_rejects_common_password(client):
     assert resp.status_code == 422
 
 
-def test_initialize_rejects_an_address_no_account_can_hold_before_the_handler(client):
-    """The route refuses the address itself, never as "email already registered".
-
-    The handler wraps ``create_user`` in ``except ValueError`` and reports a
-    collision -- the same shape that misreported a first SSO sign-in as an
-    existing account (``test_sso_unusable_email.py``). This door is not
-    exposed, because ``email`` on the request model is the same ``EmailStr``
-    the row is held to, so FastAPI answers 422 before the handler runs.
-    """
-    resp = client.post(
-        "/api/v1/auth/initialize",
-        json={**_init_payload(), "email": "someone@example.invalid"},
-    )
-    assert resp.status_code == 422, resp.text
-    assert resp.json()["detail"][0]["loc"][-1] == "email"
-    assert "already registered" not in resp.text
-
-
 # ── setup-status reflects initialization ─────────────────────────────────
 
 
@@ -276,3 +258,91 @@ async def test_setup_status_single_flight_per_ip(monkeypatch):
 
     assert all(result["needs_setup"] is True for result in results)
     assert provider.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_initialize_creates_only_one_admin(_setup_auth):
+    """Two first-boot requests arriving together must not both become admins."""
+    import httpx
+
+    from app.gateway.app import create_app
+    from app.gateway.deps import get_local_provider
+
+    app = create_app()
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://setup.local") as http:
+        first, second = await asyncio.gather(
+            http.post("/api/v1/auth/initialize", json=_init_payload(email="operator@example.com")),
+            http.post("/api/v1/auth/initialize", json=_init_payload(email="attacker@example.com")),
+        )
+
+    assert sorted([first.status_code, second.status_code]) == [201, 409]
+    assert await get_local_provider().count_admin_users() == 1
+
+
+@pytest.mark.asyncio
+async def test_create_first_admin_claim_is_atomic(_setup_auth):
+    """The storage claim itself is the guard: only one concurrent caller wins."""
+    from app.gateway.auth.models import User
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.engine import get_session_factory
+
+    repo = SQLiteUserRepository(get_session_factory())
+
+    def _admin(email: str) -> User:
+        return User(email=email, password_hash="hash", system_role="admin", needs_setup=False)
+
+    winner, loser = await asyncio.gather(
+        repo.create_first_admin(_admin("operator@example.com")),
+        repo.create_first_admin(_admin("attacker@example.com")),
+    )
+
+    created = [result for result in (winner, loser) if result is not None]
+    assert len(created) == 1, "exactly one caller may claim the first admin"
+    assert await repo.count_admin_users() == 1
+
+
+@pytest.mark.asyncio
+async def test_create_first_admin_declines_once_an_admin_exists(_setup_auth):
+    from app.gateway.auth.models import User
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.engine import get_session_factory
+
+    repo = SQLiteUserRepository(get_session_factory())
+    await repo.create_user(User(email="first@example.com", password_hash="hash", system_role="admin", needs_setup=False))
+
+    result = await repo.create_first_admin(User(email="second@example.com", password_hash="hash", system_role="admin", needs_setup=False))
+
+    assert result is None
+    assert await repo.count_admin_users() == 1
+
+
+@pytest.mark.asyncio
+async def test_create_first_admin_reports_a_taken_email(_setup_auth):
+    """A regular account already holding the address is still an email conflict."""
+    from app.gateway.auth.models import User
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+    from deerflow.persistence.engine import get_session_factory
+
+    repo = SQLiteUserRepository(get_session_factory())
+    await repo.create_user(User(email="taken@example.com", password_hash="hash", system_role="user", needs_setup=False))
+
+    with pytest.raises(ValueError, match="Email already registered"):
+        await repo.create_first_admin(User(email="taken@example.com", password_hash="hash", system_role="admin", needs_setup=False))
+
+    assert await repo.count_admin_users() == 0
+
+
+@pytest.mark.asyncio
+async def test_create_first_admin_refuses_a_dialect_it_cannot_serialize():
+    """A new backend must fail loudly rather than fall back to check-then-act."""
+    from types import SimpleNamespace
+
+    from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
+
+    class _UnknownDialectSession:
+        def get_bind(self):
+            return SimpleNamespace(dialect=SimpleNamespace(name="mysql"))
+
+    with pytest.raises(RuntimeError, match="serializ"):
+        await SQLiteUserRepository._serialize_first_admin_claim(_UnknownDialectSession())

@@ -96,7 +96,6 @@ class TestAllowlistProvider:
         assert policy == {
             "fail_closed": True,
             "passport": "ops-policy",
-            "decision_kind": "guardrail",
             "policy": {
                 "id": "deerflow.guardrails.allowlist",
                 "version": "1.0.0",

@@ -6,7 +6,7 @@ import asyncio
 import logging
 import math
 import os
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -16,12 +16,11 @@ from app.channels.message_bus import DEFAULT_INBOUND_QUEUE_MAXSIZE, MessageBus
 from app.channels.runtime_config_store import merge_runtime_channel_configs
 from app.channels.store import ChannelStore
 from deerflow.config.ui_config import product_name
-from deerflow.deployment import coerce_deployment_profile
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from app.runtime import InvocationRuntime
     from deerflow.config.app_config import AppConfig
     from deerflow.config.channel_connections_config import ChannelConnectionsConfig
     from deerflow.runtime import StreamBridge
@@ -113,18 +112,6 @@ def _make_connection_repo(connection_config: ChannelConnectionsConfig | None):
     return ChannelConnectionRepository(session_factory)
 
 
-def _uses_postgres_receipts(app_config: AppConfig | None) -> bool:
-    if app_config is None:
-        return False
-    database = getattr(app_config, "database", None)
-    if getattr(database, "backend", None) != "postgres":
-        return False
-    dedupe = getattr(app_config, "dedupe_storage", None)
-    backend = getattr(dedupe, "backend", "auto")
-    raw_backend = backend.value if hasattr(backend, "value") else str(backend)
-    return raw_backend != "memory"
-
-
 class ChannelService:
     """Manages the lifecycle of all configured IM channels.
 
@@ -140,7 +127,6 @@ class ChannelService:
         require_bound_identity: bool = False,
         app_config: AppConfig | None = None,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
-        invocation_runtime: InvocationRuntime | None = None,
     ) -> None:
         config = dict(channels_config or {})
         inbound_queue_maxsize = _resolve_positive_int(config, "inbound_queue_maxsize", DEFAULT_INBOUND_QUEUE_MAXSIZE)
@@ -148,13 +134,9 @@ class ChannelService:
         shutdown_grace_period_seconds = _resolve_non_negative_float(config, "shutdown_grace_period_seconds", DEFAULT_CHANNEL_SHUTDOWN_GRACE_PERIOD_SECONDS)
         self.bus = MessageBus(inbound_queue_maxsize=inbound_queue_maxsize)
         self.store = ChannelStore()
+        self._product_name = product_name(app_config)
         self._connection_repo = connection_repo
         self._get_stream_bridge = get_stream_bridge
-        self._product_name = product_name(app_config)
-        deployment = getattr(app_config, "deployment", None)
-        self._durable_profile = coerce_deployment_profile(
-            getattr(deployment, "profile", None),
-        ).is_durable
         langgraph_url = _resolve_service_url(config, "langgraph_url", _CHANNELS_LANGGRAPH_URL_ENV, DEFAULT_LANGGRAPH_URL)
         gateway_url = _resolve_service_url(config, "gateway_url", _CHANNELS_GATEWAY_URL_ENV, DEFAULT_GATEWAY_URL)
         default_session = config.pop("session", None)
@@ -174,37 +156,7 @@ class ChannelService:
             require_bound_identity=require_bound_identity,
             inbound_dedupe_store=make_inbound_dedupe_store(app_config),
             get_stream_bridge=get_stream_bridge,
-            invocation_runtime=invocation_runtime,
         )
-        self.inbound_receipt_processor = None
-        self.inbound_receipt_operations = None
-        if _uses_postgres_receipts(app_config):
-            from app.channels.inbound_receipt_operations import InboundReceiptOperations
-            from app.channels.inbound_receipts import (
-                InboundReceiptProcessor,
-                InboundReceiptWakeup,
-                SqlInboundReceiptStore,
-            )
-            from deerflow.persistence.engine import get_session_factory
-
-            session_factory = get_session_factory()
-            if session_factory is None:
-                raise RuntimeError("PostgreSQL inbound receipt storage is unavailable")
-            receipt_store = SqlInboundReceiptStore(session_factory)
-            self.inbound_receipt_processor = InboundReceiptProcessor(
-                store=receipt_store,
-                publish_wakeup=self.bus.publish_receipt_wakeup,
-                process_message=self.manager.process_inbound_receipt_message,
-            )
-
-            async def publish_operator_wakeup(receipt_id: str) -> None:
-                await self.bus.publish_receipt_wakeup(InboundReceiptWakeup(receipt_id))
-
-            self.inbound_receipt_operations = InboundReceiptOperations(
-                store=receipt_store,
-                publish_wakeup=publish_operator_wakeup,
-            )
-            self.manager.set_inbound_receipt_processor(self.inbound_receipt_processor)
         self._channels: dict[str, Any] = {}  # name -> Channel instance
         self._config = config
         self._running = False
@@ -216,16 +168,13 @@ class ChannelService:
         app_config: AppConfig | None = None,
         *,
         get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
-        invocation_runtime: InvocationRuntime | None = None,
     ) -> ChannelService:
         """Create a ChannelService from the application config.
 
         ``get_stream_bridge`` is threaded straight through to the
         ``ChannelManager`` (see its docstring); it is optional so direct
         callers (including most tests) that don't need follow-up-buffer
-        auto-draining can omit it. The embedded Gateway also supplies its
-        explicitly constructed ``InvocationRuntime``; omission retains the
-        standalone SDK transport boundary.
+        auto-draining can omit it.
         """
         if app_config is None:
             from deerflow.config.app_config import get_app_config
@@ -246,7 +195,6 @@ class ChannelService:
             require_bound_identity=require_bound_identity,
             app_config=app_config,
             get_stream_bridge=get_stream_bridge,
-            invocation_runtime=invocation_runtime,
         )
 
     async def start(self) -> None:
@@ -255,8 +203,6 @@ class ChannelService:
             return
 
         await self.manager.start()
-        if self.inbound_receipt_processor is not None:
-            await self.inbound_receipt_processor.start()
         self._running = True
 
         ready_status = await self.ensure_ready_channels(attempts=2)
@@ -312,11 +258,15 @@ class ChannelService:
                 return True
 
             if channel is not None:
-                try:
-                    await channel.stop()
-                except Exception:
-                    logger.exception("Error stopping non-running channel before readiness retry")
-                self._channels.pop(name, None)
+                # Ownership-preserving cleanup: the instance is retained when
+                # its stop() fails or is cancelled, and this round must NOT
+                # start a replacement over it — _start_channel would overwrite
+                # the tracked entry and orphan the still-subscribed listener
+                # one hop later (the gap this closes from the review on 5227).
+                await self._stop_and_discard_channel(name, channel)
+                if self._channels.get(name) is channel:
+                    logger.warning("Readiness retry deferred: previous %s channel failed to stop and remains tracked", name)
+                    return False
 
             max_attempts = max(1, attempts)
             for attempt in range(max_attempts):
@@ -324,6 +274,13 @@ class ChannelService:
                     logger.info("Retrying channel startup after readiness check")
                 if await self._start_channel(name, channel_config):
                     return True
+                # A failed attempt whose cleanup retained the instance ends
+                # the loop for this round: the next attempt would be refused
+                # by _start_channel's retained-instance guard anyway, and the
+                # still-tracked channel must not be replaced one hop later.
+                if self._channels.get(name) is not None:
+                    logger.warning("Readiness retries deferred: %s channel failed to clean up after a failed start and remains tracked", name)
+                    return False
             return False
 
     async def stop(self) -> None:
@@ -335,14 +292,6 @@ class ChannelService:
         # final update.
         await self.manager.stop()
         stop_errors: list[Exception] = []
-        if self.inbound_receipt_processor is not None:
-            try:
-                await self.inbound_receipt_processor.stop()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.exception("Error stopping inbound receipt processor")
-                stop_errors.append(exc)
         for name, channel in list(self._channels.items()):
             try:
                 await channel.stop()
@@ -361,35 +310,8 @@ class ChannelService:
 
         if stop_errors:
             raise ExceptionGroup("one or more channels failed to stop", stop_errors)
+
         logger.info("ChannelService stopped")
-
-    @property
-    def github_ingress_durability(self) -> str:
-        """Return the truthful signed-GitHub receipt support level."""
-
-        if self.inbound_receipt_processor is not None and self.inbound_receipt_processor.durable:
-            return "durable"
-        return "best_effort"
-
-    async def accept_verified_inbound_batch(
-        self,
-        messages: Sequence[Any],
-    ) -> None:
-        """Persist a verified fan-out before acknowledgment, or label it local-only."""
-
-        batch = tuple(messages)
-        if not batch:
-            return
-        processor = self.inbound_receipt_processor
-        if processor is not None:
-            if self._durable_profile and not getattr(processor, "durable", False):
-                raise RuntimeError("durable inbound receipt processor is unavailable")
-            await processor.receive_batch(batch)
-            return
-        if self._durable_profile:
-            raise RuntimeError("durable inbound receipt processor is unavailable")
-        for message in batch:
-            await self.bus.publish_inbound(message)
 
     def _load_channel_config(self, name: str) -> dict[str, Any] | None:
         """Load the latest config for a specific channel from disk.
@@ -421,11 +343,14 @@ class ChannelService:
     async def restart_channel(self, name: str, *, reload_config: bool = True) -> bool:
         """Restart a specific channel. Returns True if successful."""
         if name in self._channels:
-            try:
-                await self._channels[name].stop()
-            except Exception:
-                logger.exception("Error stopping channel for restart")
-            del self._channels[name]
+            channel = self._channels[name]
+            # Same ownership rule as readiness retries: retain an instance
+            # whose stop() fails, and decline the restart rather than
+            # overwriting a still-tracked (still-listening) channel.
+            await self._stop_and_discard_channel(name, channel)
+            if self._channels.get(name) is channel:
+                logger.warning("Restart deferred: %s channel failed to stop and remains tracked", name)
+                return False
 
         if reload_config:
             # Reading config.yaml and the runtime store is disk IO; keep it
@@ -456,22 +381,75 @@ class ChannelService:
     async def remove_channel(self, name: str) -> bool:
         """Remove runtime config for a channel and stop it if currently running."""
         self._config.pop(name, None)
-        channel = self._channels.pop(name, None)
+        channel = self._channels.get(name)
         if channel is None:
             return True
+        # Stop-then-drop with the shared ownership rule: a channel whose
+        # stop() fails stays tracked (and returns False) instead of being
+        # popped first and leaking its subscribed listener on failure.
+        await self._stop_and_discard_channel(name, channel)
+        if self._channels.get(name) is channel:
+            logger.warning("Removal incomplete: %s channel failed to stop and remains tracked", name)
+            return False
+        logger.info("Channel stopped and removed")
+        return True
+
+    async def _stop_and_discard_channel(self, name: str, channel: Channel) -> None:
+        """Stop a channel and drop it only once its ``stop()`` has completed.
+
+        This is the single ownership-preserving cleanup every discard path
+        routes through (failed startup, readiness retry, restart, removal).
+        ``start()`` subscribes the outbound listener before the transport is
+        up, so an instance that never reached ``is_running`` — or a running
+        one being torn down — must be ``stop()``-ed before it is discarded:
+        otherwise the bus keeps a strong reference to the dead listener and
+        every future outbound for this channel name fans out to it, while
+        repeated attempts accumulate more stale listeners the service can no
+        longer clean up (the instances are untracked by then). Discord's
+        fail-fast ``is_running`` makes this reachable for a client thread that
+        dies immediately (invalid token); the same hygiene applies to any
+        channel that subscribes before its transport is confirmed.
+
+        Ownership mirrors ``ChannelService.stop()``: the instance is dropped
+        only after its ``stop()`` actually completes. A cancellation arriving
+        mid-cleanup (or a ``stop()`` that raises) leaves it tracked, so a
+        retried readiness attempt stops it again before replacing it and
+        service shutdown can still reach it — untracking first would orphan
+        resources nobody can clean up anymore. Callers check for retention
+        (``self._channels.get(name) is channel``) and defer starting or
+        removing a replacement for that round, so startup cannot silently
+        overwrite a still-listening retained instance; ``ensure_channel_ready``
+        additionally serializes on the per-channel readiness lock.
+        """
         try:
             await channel.stop()
-            logger.info("Channel stopped and removed")
-            return True
+        except asyncio.CancelledError:
+            # Keep this transport owned by the service: the Gateway deadline
+            # interrupted cleanup, so detaching it here would hide resources
+            # that may still be in use (mirrors ChannelService.stop()).
+            raise
         except Exception:
-            logger.exception("Error stopping channel for removal")
-            return False
+            logger.exception("Error stopping channel %s during discard", name)
+            return
+        if self._channels.get(name) is channel:
+            self._channels.pop(name, None)
 
     async def _start_channel(self, name: str, config: dict[str, Any]) -> bool:
         """Instantiate and start a single channel."""
         import_path = _CHANNEL_REGISTRY.get(name)
         if not import_path:
             logger.warning("Unknown channel type")
+            return False
+
+        # Never install a fresh instance over a retained one: a channel whose
+        # failed cleanup kept it tracked still holds a subscribed outbound
+        # listener, and overwriting the entry here is the one remaining way to
+        # orphan it (nothing would be able to stop it afterwards). Callers
+        # decline the operation when they see the name still tracked; this
+        # guard makes the invariant hold at the mechanism itself.
+        retained = self._channels.get(name)
+        if retained is not None:
+            logger.warning("Refusing to start %s: another channel instance is still tracked under this name (previous cleanup incomplete, or the instance is still running)", name)
             return False
 
         try:
@@ -482,6 +460,7 @@ class ChannelService:
             logger.exception("Failed to import channel class")
             return False
 
+        channel: Channel | None = None
         try:
             config = dict(config)
             config["channel_store"] = self.store
@@ -495,21 +474,30 @@ class ChannelService:
                 # (tests, tooling) stay free of filesystem side effects.
                 from deerflow.config.paths import get_paths
 
-                config["seen_event_store_path"] = str(Path(get_paths().base_dir) / "channels" / "buzz_seen_events.json")
+                def _default_seen_store_path() -> str:
+                    # Worker thread: ``base_dir`` resolves through realpath, and a
+                    # channel start runs on the Gateway event loop — including the
+                    # per-request ``POST /api/channels/{name}/restart`` path.
+                    return str(Path(get_paths().base_dir) / "channels" / "buzz_seen_events.json")
+
+                config["seen_event_store_path"] = await asyncio.to_thread(_default_seen_store_path)
             if self._connection_repo is not None:
                 config["connection_repo"] = self._connection_repo
             channel = channel_cls(bus=self.bus, config=config)
             self._channels[name] = channel
             await channel.start()
             if not channel.is_running:
-                self._channels.pop(name, None)
                 logger.error("Channel did not enter a running state after start()")
+                await self._stop_and_discard_channel(name, channel)
                 return False
             logger.info("Channel started")
             return True
         except Exception:
-            self._channels.pop(name, None)
             logger.exception("Failed to start channel")
+            if channel is not None:
+                await self._stop_and_discard_channel(name, channel)
+            else:
+                self._channels.pop(name, None)
             return False
 
     def get_status(self) -> dict[str, Any]:
@@ -581,17 +569,15 @@ async def start_channel_service(
     app_config: AppConfig | None = None,
     *,
     get_stream_bridge: Callable[[], StreamBridge | None] | None = None,
-    invocation_runtime: InvocationRuntime | None = None,
 ) -> ChannelService:
     """Create and start the global ChannelService from app config.
 
-    ``invocation_runtime`` and ``get_stream_bridge`` are threaded through
-    ``ChannelService.from_app_config`` -> ``ChannelManager`` so channel launches
-    share durable admission and fire_and_forget channels that opt into
+    ``get_stream_bridge`` is threaded through to ``ChannelService.from_app_config``
+    -> ``ChannelManager`` so fire_and_forget channels that opt into
     ``ChannelRunPolicy.buffer_followups_on_busy`` (currently GitHub) can watch
     a run's completion and auto-drain buffered follow-ups. ``app.py``'s
-    lifespan passes a closure over ``app.state.stream_bridge`` and constructs
-    the channel runtime beside the Scheduled Task runtime.
+    lifespan passes a closure over ``app.state.stream_bridge`` here, the same
+    pattern it already uses for ``ScheduledTaskService``'s ``launch_run``.
     """
     global _channel_service
     if _channel_service is not None:
@@ -599,16 +585,30 @@ async def start_channel_service(
     # from_app_config reads the JSON channel store and runtime config files;
     # keep that disk IO off the event loop. asyncio.to_thread forwards both
     # args and kwargs to the target callable.
-    factory_kwargs: dict[str, Any] = {"get_stream_bridge": get_stream_bridge}
-    if invocation_runtime is not None:
-        factory_kwargs["invocation_runtime"] = invocation_runtime
-    _channel_service = await asyncio.to_thread(
-        ChannelService.from_app_config,
-        app_config,
-        **factory_kwargs,
-    )
-    await _channel_service.start()
-    return _channel_service
+    service = await asyncio.to_thread(ChannelService.from_app_config, app_config, get_stream_bridge=get_stream_bridge)
+    _channel_service = service
+
+    async def rollback_failed_start() -> None:
+        global _channel_service
+        await service.stop()
+        if _channel_service is service:
+            _channel_service = None
+
+    try:
+        await service.start()
+    except BaseException:
+        try:
+            await await_drained(rollback_failed_start())
+        except asyncio.CancelledError:
+            # A repeated caller cancellation arrives only after the owned
+            # rollback has drained; preserve cancellation semantics.
+            raise
+        except Exception:
+            # Retain the singleton when cleanup itself fails so shutdown can
+            # retry it instead of orphaning partially-started resources.
+            logger.exception("Failed to stop ChannelService after startup failure; retaining singleton")
+        raise
+    return service
 
 
 async def stop_channel_service() -> None:

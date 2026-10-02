@@ -75,7 +75,9 @@ def _make_provider_with_active_sandbox(tmp_path: Path, sandbox_id: str):
 
     provider = AioSandboxProvider.__new__(AioSandboxProvider)
     provider._lock = threading.Lock()
-    provider._sandboxes = {sandbox_id: MagicMock()}
+    sandbox = MagicMock()
+    sandbox.requires_container_recycle = False
+    provider._sandboxes = {sandbox_id: sandbox}
     provider._active_sandbox_identity = {sandbox_id: ("default", "thread-1")}
     provider._sandbox_infos = {
         sandbox_id: SandboxInfo(
@@ -92,7 +94,6 @@ def _make_provider_with_active_sandbox(tmp_path: Path, sandbox_id: str):
     provider._warm_pool_identity = {}
     provider._unowned_since = {}
     provider._local_teardown = set()
-    provider._starting = set()
     provider._acquire_epoch = {}
     provider._acquire_epoch_counter = 0
     provider._acquire_inflight = {}
@@ -103,7 +104,6 @@ def _make_provider_with_active_sandbox(tmp_path: Path, sandbox_id: str):
     provider._renewal_thread = None
     provider._config = {"idle_timeout": 600, "replicas": 3}
     provider._backend = MagicMock()
-    provider._backend.destroy.return_value = None
     provider._owner_id = "worker-blockingio"
     provider._ownership_config = SandboxOwnershipConfig()
     provider._ownership = _BlockingProbeStore(tmp_path / "ownership-probe")

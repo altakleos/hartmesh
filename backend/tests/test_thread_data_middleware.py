@@ -1,4 +1,5 @@
 import pytest
+from langchain_core.messages import HumanMessage
 from langgraph.runtime import Runtime
 
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
@@ -34,20 +35,6 @@ class TestThreadDataMiddleware:
 
         assert result is not None
         assert "/users/runtime-user/threads/thread-123/" in _as_posix(result["thread_data"]["workspace_path"])
-        # The person's files sit beside their threads and are the same on every thread.
-        assert _as_posix(result["thread_data"]["files_path"]).endswith("/users/runtime-user/files")
-
-    @pytest.mark.no_auto_user
-    def test_before_agent_names_the_default_buckets_files_without_a_signed_in_user(self, tmp_path):
-        # An unauthenticated path lands in the default bucket, files included,
-        # which is the directory the sandbox providers mount for it.
-        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
-
-        result = middleware.before_agent(state={}, runtime=Runtime(context={"thread_id": "thread-123"}))
-
-        assert result is not None
-        assert "/users/default/threads/thread-123/" in _as_posix(result["thread_data"]["workspace_path"])
-        assert _as_posix(result["thread_data"]["files_path"]).endswith("/users/default/files")
 
     def test_before_agent_uses_thread_id_from_configurable_when_context_is_none(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
@@ -80,8 +67,6 @@ class TestThreadDataMiddleware:
     def test_before_agent_handles_none_context_with_trailing_human_message(self, tmp_path, monkeypatch):
         # Regression: run_id was read via the unguarded `runtime.context`, so a None context plus a
         # trailing HumanMessage raised AttributeError (thread_id still resolves from config.configurable).
-        from langchain_core.messages import HumanMessage
-
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
         runtime = Runtime(context=None)
         monkeypatch.setattr(
@@ -93,6 +78,31 @@ class TestThreadDataMiddleware:
 
         assert result is not None
         assert runtime.context is None
+
+    def test_before_agent_preserves_human_message_response_metadata(self, tmp_path):
+        middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)
+        message = HumanMessage(
+            content="hello",
+            id="message-1",
+            response_metadata={"source": "gateway"},
+        )
+
+        result = middleware.before_agent(
+            state={"messages": [message]},
+            runtime=Runtime(
+                context={
+                    "thread_id": "thread-123",
+                    "run_id": "run-123",
+                },
+            ),
+        )
+
+        assert result is not None
+        updated_message = result["messages"][-1]
+        assert updated_message.response_metadata == {"source": "gateway"}
+        assert updated_message.name == "user-input"
+        assert updated_message.additional_kwargs["run_id"] == "run-123"
+        assert updated_message.additional_kwargs["timestamp"]
 
     def test_before_agent_raises_clear_error_when_thread_id_missing_everywhere(self, tmp_path, monkeypatch):
         middleware = ThreadDataMiddleware(base_dir=str(tmp_path), lazy_init=True)

@@ -7,7 +7,7 @@ import logging
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import Permissions, require_permission, resolve_route_permissions
 from app.gateway.browser_capability import browser_capability
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
@@ -141,20 +141,10 @@ async def _authenticate_ws(websocket: WebSocket):
                     require_live_account(user)
                 except HTTPException:
                     return None
-                return _held_by(websocket, user)
+                return user
     if is_auth_disabled():
-        return _held_by(websocket, get_auth_disabled_user())
+        return get_auth_disabled_user()
     return None
-
-
-def _held_by(websocket: WebSocket, user):
-    """Stamp the socket's owner, so it is held under them once accepted (``owner_connections``).
-
-    Turning the account off then closes the socket instead of waiting for the
-    client; a socket without the stamp is never held and never reported.
-    """
-    websocket.state.user = user
-    return user
 
 
 def _ws_origin_allowed(websocket: WebSocket) -> bool:
@@ -237,6 +227,21 @@ async def browser_stream(websocket: WebSocket, thread_id: ThreadId) -> None:
 
     if not _ws_origin_allowed(websocket):
         # Cross-origin upgrade — reject before touching any session (WS-CSRF).
+        await websocket.close(code=4403)
+        return
+
+    # HTTP auth middleware does not run for WebSockets. Live is bidirectional,
+    # so even a viewer must have the same write permission as REST navigation.
+    # _authenticate_ws accepts session cookies or the auth-disabled user, not
+    # internal-auth tokens. Both sources are non-internal, including the
+    # synthetic admin used when authentication is disabled.
+    try:
+        permissions = await resolve_route_permissions(user, is_internal=False)
+    except Exception:
+        logger.warning("Failed to resolve browser stream permissions", exc_info=True)
+        await websocket.close(code=4501)
+        return
+    if Permissions.THREADS_WRITE not in permissions:
         await websocket.close(code=4403)
         return
 

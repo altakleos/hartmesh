@@ -16,8 +16,8 @@ name: Publish Containers
 #     scripts/pin_compose_images.py can resolve their digests before the tag
 #     exists. A dispatch never adopts, whatever pins the tree carries: between
 #     cuts it carries the previous release's, and adopting them would ship
-#     that release's code as the next one. See RELEASING.md, "Fork release
-#     procedure".
+#     that release's code as the next one. See RELEASING.md, "HartMesh
+#     distribution releases".
 on:
   push:
     tags:

@@ -18,9 +18,10 @@ from deerflow_extension_api import (
     TaskInfo,
     TaskOutcome,
 )
-from deerflow_extension_example import install
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+
+from deerflow_extension_example import install
 
 
 class FakeRegistry:
@@ -35,21 +36,6 @@ class FakeRegistry:
 
     def middlewares(self, contributor: Any) -> None:
         self.middleware_contributors.append(contributor)
-
-    def authorization_provider(self, contribution: Any) -> None:
-        pass
-
-    def origin_contributor(self, contribution: Any) -> None:
-        pass
-
-    def run_context_contributor(self, contribution: Any) -> None:
-        pass
-
-    def invocation_constraints(self, contribution: Any) -> None:
-        pass
-
-    def mcp_interceptor(self, contribution: Any) -> None:
-        pass
 
     def task_lifecycle(self, contributor: Any) -> None:
         self.task_lifecycle_contributors.append(contributor)
@@ -92,7 +78,7 @@ def test_install_registers_all_five_contribution_kinds() -> None:
     assert len(registry.services) == 1
     assert len(registry.contributed_routers) == 1
     assert [route.path for route in registry.contributed_routers[0].routes] == ["/api/extension-example/stats"]
-    assert install.__deerflow_api__ == "0.13.0"
+    assert install.__deerflow_api__ == "0.2.0"
     assert install.__deerflow_name__ == "example"
 
 

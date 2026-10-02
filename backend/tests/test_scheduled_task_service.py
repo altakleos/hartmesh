@@ -2,7 +2,6 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from support.scheduled_task_runtime import CallbackInvocationRuntime, NeverLaunchInvocationRuntime
 
 from app.scheduler.service import ScheduledTaskService
 from deerflow.runtime import ConflictError, RunStatus
@@ -15,6 +14,7 @@ class DummyTaskRepo:
         self.rows = rows
         self.claimed = False
         self.updated = None
+        self.completions = []
         self.release_calls = []
         self.cancelled_stuck_once = None
         self.reconciled_stuck_once = None
@@ -46,6 +46,10 @@ class DummyTaskRepo:
     async def update_after_launch(self, *args, **kwargs):
         self.updated = (args, kwargs)
 
+    async def complete_run(self, task_id, **kwargs):
+        self.completions.append((task_id, kwargs))
+        return True
+
     async def get(self, task_id: str, *, user_id: str):
         row = next((item for item in self.rows if item["id"] == task_id and item["user_id"] == user_id), None)
         return dict(row) if row is not None else None
@@ -71,7 +75,6 @@ class DummyRunRepo:
         self.stale_marked = None
         self.reconciled = None
         self.reconcile_count = 0
-        self.ended = True
 
     async def count_active_runs(self):
         return self.active_count
@@ -111,11 +114,6 @@ class DummyRunRepo:
     async def update_status(self, run_record_id, **kwargs):
         self.updated.append((run_record_id, kwargs))
         return True
-
-    async def end_active_run(self, run_record_id, **kwargs):
-        """The compare-and-set the hook and the time limit end an occurrence with; ``ended`` is what the store answers."""
-        self.updated.append((run_record_id, kwargs))
-        return self.ended
 
     async def reconcile_launched_run(self, run_record_id, **kwargs):
         self.updated.append((run_record_id, {"reconciled": True, **kwargs}))
@@ -165,7 +163,7 @@ async def test_service_claims_and_dispatches_due_task():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -205,7 +203,7 @@ async def test_manual_trigger_keeps_paused_cron_task_paused():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -246,7 +244,7 @@ async def test_fresh_thread_per_run_creates_new_execution_thread():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -291,7 +289,7 @@ async def test_scheduled_overlap_conflict_is_kept_in_queue():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -335,7 +333,7 @@ async def test_manual_overlap_conflict_is_kept_in_queue():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -361,7 +359,7 @@ async def test_dispatch_task_records_failure_for_legacy_invalid_thread_id():
     aborts the rest of the claimed batch every cycle."""
 
     async def fake_launch(**_kwargs):
-        raise AssertionError("InvocationRuntime must not be called for an invalid thread_id")
+        raise AssertionError("launch_run must not be called for an invalid thread_id")
 
     task_repo = DummyTaskRepo(
         [
@@ -383,7 +381,7 @@ async def test_dispatch_task_records_failure_for_legacy_invalid_thread_id():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -446,7 +444,7 @@ async def test_run_once_continues_batch_after_invalid_thread_id():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -459,7 +457,7 @@ async def test_run_once_continues_batch_after_invalid_thread_id():
 
 
 @pytest.mark.asyncio
-async def test_handle_run_completion_persists_success():
+async def test_handle_run_completion_uses_atomic_repository_boundary():
     task_repo = DummyTaskRepo(
         [
             {
@@ -480,7 +478,7 @@ async def test_handle_run_completion_persists_success():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=NeverLaunchInvocationRuntime(),
+        launch_run=lambda **_kwargs: None,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -501,20 +499,26 @@ async def test_handle_run_completion_persists_success():
 
     await service.handle_run_completion(record)
 
-    assert run_repo.updated[-1][0] == "task-run-6"
-    assert run_repo.updated[-1][1]["status"] == "success"
-    assert task_repo.rows[0]["last_error"] is None
+    assert len(task_repo.completions) == 1
+    task_id, completion = task_repo.completions[0]
+    assert task_id == "task-6"
+    assert completion["user_id"] == "user-1"
+    assert completion["task_run_id"] == "task-run-6"
+    assert completion["run_id"] == "run-6"
+    assert completion["status"] == "success"
+    assert completion["error"] is None
+    assert completion["finished_at"].tzinfo == UTC
+    assert run_repo.updated == []
 
 
-def _make_service(task_repo, run_repo, **kwargs):
+def _make_service(task_repo, run_repo):
     return ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=NeverLaunchInvocationRuntime(),
+        launch_run=lambda **_kwargs: None,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
-        **kwargs,
     )
 
 
@@ -533,8 +537,8 @@ def _once_task_row(task_id="task-once", status="running"):
     }
 
 
-def _completion_record(status, *, task_id="task-once", error=None, stop_reason=None):
-    record = RunRecord(
+def _completion_record(status, *, task_id="task-once", error=None):
+    return RunRecord(
         run_id="run-x",
         thread_id="thread-x",
         assistant_id="lead_agent",
@@ -547,586 +551,32 @@ def _completion_record(status, *, task_id="task-once", error=None, stop_reason=N
         user_id="user-1",
         error=error,
     )
-    record.stop_reason = stop_reason
-    return record
 
 
 @pytest.mark.asyncio
-async def test_once_task_completes_only_via_completion_hook():
+@pytest.mark.parametrize(
+    ("run_status", "error", "occurrence_status", "expected_error"),
+    [
+        (RunStatus.success, None, "success", None),
+        (RunStatus.error, "boom", "failed", "boom"),
+        (RunStatus.timeout, "time limit", "failed", "time limit"),
+        (RunStatus.interrupted, None, "interrupted", "run was interrupted before completion"),
+        (RunStatus.interrupted, "cancelled by user", "interrupted", "cancelled by user"),
+    ],
+)
+async def test_handle_run_completion_forwards_terminal_outcome(run_status, error, occurrence_status, expected_error):
     task_repo = DummyTaskRepo([_once_task_row()])
     run_repo = DummyRunRepo()
     service = _make_service(task_repo, run_repo)
 
-    await service.handle_run_completion(_completion_record(RunStatus.success))
-
-    assert run_repo.updated[-1][1]["status"] == "success"
-    assert task_repo.rows[0]["status"] == "completed"
-
-
-@pytest.mark.asyncio
-async def test_once_task_failed_run_marks_task_failed():
-    task_repo = DummyTaskRepo([_once_task_row()])
-    run_repo = DummyRunRepo()
-    service = _make_service(task_repo, run_repo)
-
-    await service.handle_run_completion(_completion_record(RunStatus.error, error="boom"))
-
-    assert run_repo.updated[-1][1]["status"] == "failed"
-    assert run_repo.updated[-1][1]["error"] == "boom"
-    assert task_repo.rows[0]["status"] == "failed"
-    assert task_repo.rows[0]["last_error"] == "boom"
-
-
-@pytest.mark.asyncio
-async def test_a_run_whose_sandbox_was_refused_is_a_failed_occurrence_not_a_completed_one():
-    """Nobody reads an unattended answer, so a refusal must show in the task list.
-
-    A sandbox tool refused for capacity ends the run as ``success`` with a
-    recorded stop reason: the agent says the workspace is busy and stops. For
-    a scheduled task that answer is the only trace, so the occurrence is failed
-    and says why, instead of reading as a clean completion.
-    """
-    from deerflow.runtime.runs.worker import SANDBOX_CAPACITY_STOP_REASON
-
-    task_repo = DummyTaskRepo([_once_task_row()])
-    run_repo = DummyRunRepo()
-    service = _make_service(task_repo, run_repo)
-
-    await service.handle_run_completion(_completion_record(RunStatus.success, stop_reason=SANDBOX_CAPACITY_STOP_REASON))
-
-    run_update = run_repo.updated[-1][1]
-    assert run_update["status"] == "failed"
-    assert "sandbox" in run_update["error"]
-    assert task_repo.rows[0]["status"] == "failed"
-    assert task_repo.rows[0]["last_error"] == run_update["error"]
-
-
-_STOPPED_EARLY_CODES = [
-    "turn_budget_exhausted",
-    "tool_attempt_budget_exhausted",
-    "sandbox_operation_budget_exhausted",
-    "sandbox_runtime_budget_exhausted",
-    "retrieval_budget_exhausted",
-    "repeated_tool_loop",
-    "no_progress_loop",
-    "loop_capped",
-    "token_capped",
-    "safety_capped",
-    "model_length_capped",
-]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("reason", [*_STOPPED_EARLY_CODES, "subagent_limit_capped", "batch_item_budget_exhausted", "an_extension_guard"])
-async def test_a_run_a_limit_cut_short_is_a_failed_occurrence_not_a_completed_one(reason):
-    """A run that hit a bound ends ``success`` with the bound's reason; nobody reads its answer.
-
-    The tenant reads the task list, so an occurrence the runtime stopped at a
-    turn, tool or loop limit says so instead of reading as a clean completion.
-    """
-    task_repo = DummyTaskRepo([_once_task_row()])
-    run_repo = DummyRunRepo()
-    service = _make_service(task_repo, run_repo)
-
-    await service.handle_run_completion(_completion_record(RunStatus.success, stop_reason=reason))
-
-    run_update = run_repo.updated[-1][1]
-    assert run_update["status"] == "failed"
-    assert "before it finished" in run_update["error"]
-    assert task_repo.rows[0]["status"] == "failed"
-    assert task_repo.rows[0]["last_error"] == run_update["error"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("reason", [*_STOPPED_EARLY_CODES, "subagent_limit_capped", "batch_item_budget_exhausted", "an_extension_guard"])
-async def test_what_the_owner_reads_about_a_stopped_run_carries_no_internal_code(reason):
-    """The task list shows this text to a business owner: words, never ``turn_budget_exhausted``."""
-    task_repo = DummyTaskRepo([_once_task_row()])
-    run_repo = DummyRunRepo()
-
-    await _make_service(task_repo, run_repo).handle_run_completion(_completion_record(RunStatus.success, stop_reason=reason))
-
-    error = run_repo.updated[-1][1]["error"]
-    assert "_" not in error, error
-    assert reason not in error
-
-
-@pytest.mark.asyncio
-async def test_each_known_limit_says_which_limit_it_was():
-    reads = {}
-    for reason in _STOPPED_EARLY_CODES:
-        run_repo = DummyRunRepo()
-        await _make_service(DummyTaskRepo([_once_task_row()]), run_repo).handle_run_completion(_completion_record(RunStatus.success, stop_reason=reason))
-        reads[reason] = run_repo.updated[-1][1]["error"]
-
-    # The same words for the same kind of limit, different words for a different one.
-    assert reads["loop_capped"] == reads["repeated_tool_loop"]
-    assert len(set(reads.values())) >= 7, reads
-    # A limit with no phrase of its own still reads as a stop, with no code in it.
-    generic = DummyRunRepo()
-    await _make_service(DummyTaskRepo([_once_task_row()]), generic).handle_run_completion(_completion_record(RunStatus.success, stop_reason="an_extension_guard"))
-    assert generic.updated[-1][1]["error"] == "the task stopped before it finished"
-
-
-class _CapturingRuntime:
-    """The intent the scheduler hands the application runtime, kept for the test to read."""
-
-    def __init__(self):
-        self.intents = []
-
-    async def launch(self, intent):
-        from types import SimpleNamespace
-
-        from app.runtime.invocation import InternalLaunchReceipt
-
-        self.intents.append(intent)
-        return InternalLaunchReceipt(record=SimpleNamespace(thread_id=intent.thread_id, run_id="run-1"))
-
-
-def _due_cron_row():
-    row = _once_task_row(task_id="task-cron")
-    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "status": "enabled", "next_run_at": "2026-07-02T01:00:00+00:00", "context_mode": "fresh_thread_per_run"})
-    return row
-
-
-@pytest.mark.asyncio
-async def test_a_scheduled_run_is_launched_with_the_configured_step_limit_read_at_dispatch():
-    """``scheduler.recursion_limit`` reaches the run: without it a run gets the Gateway default of 100 graph steps, about nine model turns."""
-    runtime = _CapturingRuntime()
-    limits = iter([1000, 400])
-    service = ScheduledTaskService(
-        task_repo=DummyTaskRepo([_due_cron_row()]),
-        task_run_repo=DummyRunRepo(),
-        invocation_runtime=runtime,
-        poll_interval_seconds=5,
-        lease_seconds=120,
-        max_concurrent_runs=1,
-        recursion_limit=lambda: next(limits),
-    )
-
-    await service.dispatch_task(_due_cron_row(), now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC), trigger="manual")
-    await service.dispatch_task(_due_cron_row(), now=datetime(2026, 9, 30, 9, 5, tzinfo=UTC), trigger="manual")
-
-    assert [dict(intent.config) for intent in runtime.intents] == [{"recursion_limit": 1000}, {"recursion_limit": 400}], "read on each dispatch, so an edit applies to the next run"
-
-
-@pytest.mark.asyncio
-async def test_a_scheduled_run_without_a_configured_limit_sends_no_config_of_its_own():
-    runtime = _CapturingRuntime()
-    service = ScheduledTaskService(
-        task_repo=DummyTaskRepo([_due_cron_row()]),
-        task_run_repo=DummyRunRepo(),
-        invocation_runtime=runtime,
-        poll_interval_seconds=5,
-        lease_seconds=120,
-        max_concurrent_runs=1,
-    )
-
-    await service.dispatch_task(_due_cron_row(), now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC), trigger="manual")
-
-    assert [intent.config for intent in runtime.intents] == [None]
-
-
-@pytest.mark.asyncio
-async def test_a_run_that_hit_the_recursion_limit_is_a_failed_occurrence_that_says_so_in_words():
-    """The graph's step limit ends the run ``error`` with a bare reference; the owner reads words, and the run keeps the typed reason."""
-    from deerflow.runtime.runs.worker import RECURSION_LIMIT_STOP_REASON
-
-    task_repo = DummyTaskRepo([_once_task_row()])
-    run_repo = DummyRunRepo()
-
-    await _make_service(task_repo, run_repo).handle_run_completion(_completion_record(RunStatus.error, error="Runtime operation failed (reference: 9b6d5130110345a59c5fee80b63f1556)", stop_reason=RECURSION_LIMIT_STOP_REASON))
-
-    run_update = run_repo.updated[-1][1]
-    assert run_update["status"] == "failed"
-    assert run_update["error"] == "the task used up the number of steps it is allowed, so it stopped before it finished"
-    assert task_repo.rows[0]["last_error"] == run_update["error"]
-
-
-@pytest.mark.asyncio
-async def test_a_run_that_failed_for_any_other_reason_keeps_its_own_error():
-    run_repo = DummyRunRepo()
-
-    await _make_service(DummyTaskRepo([_once_task_row()]), run_repo).handle_run_completion(_completion_record(RunStatus.error, error="Runtime operation failed (reference: abc)"))
-
-    assert run_repo.updated[-1][1]["error"] == "Runtime operation failed (reference: abc)"
-
-
-@pytest.mark.asyncio
-async def test_a_run_that_finished_without_a_stop_reason_is_still_a_success():
-    task_repo = DummyTaskRepo([_once_task_row()])
-    run_repo = DummyRunRepo()
-    service = _make_service(task_repo, run_repo)
-
-    await service.handle_run_completion(_completion_record(RunStatus.success))
-
-    assert run_repo.updated[-1][1]["status"] == "success"
-    assert run_repo.updated[-1][1]["error"] is None
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("status", "error", "expected"), [(RunStatus.error, "boom", "failed"), (RunStatus.interrupted, None, "interrupted")])
-async def test_a_stop_reason_on_a_run_that_did_not_succeed_does_not_change_how_it_ended(status, error, expected):
-    task_repo = DummyTaskRepo([_once_task_row()])
-    run_repo = DummyRunRepo()
-
-    await _make_service(task_repo, run_repo).handle_run_completion(_completion_record(status, error=error, stop_reason="loop_capped"))
-
-    assert run_repo.updated[-1][1]["status"] == expected
-
-
-@pytest.mark.asyncio
-async def test_a_completion_the_scheduler_already_ended_the_occurrence_for_changes_nothing_more():
-    """The occurrence was ended once, by whoever got there first; the run's later completion does not rewrite it or its task."""
-    task_repo = DummyTaskRepo([_once_task_row(status="failed")])
-    task_repo.rows[0]["last_error"] = "the task did not finish within 15 minutes, so it was stopped"
-    run_repo = DummyRunRepo()
-    run_repo.ended = False
-    service = _make_service(task_repo, run_repo)
-
-    await service.handle_run_completion(_completion_record(RunStatus.interrupted))
-
-    assert task_repo.rows[0]["status"] == "failed"
-    assert task_repo.rows[0]["last_error"] == "the task did not finish within 15 minutes, so it was stopped"
-
-
-class _OverdueRunRepo(DummyRunRepo):
-    """Occurrences that are still ``running`` past the cutoff the service asks about."""
-
-    def __init__(self, overdue, *, once=False):
-        super().__init__()
-        self.overdue = overdue
-        self.once = once
-        self.asked: list[tuple[datetime, int]] = []
-        self.list_error: Exception | None = None
-        self.queued_listed = 0
-
-    async def list_overdue_running(self, *, started_before, limit):
-        self.asked.append((started_before, limit))
-        if self.list_error is not None:
-            raise self.list_error
-        rows, self.overdue = [dict(row) for row in self.overdue], ([] if self.once else self.overdue)
-        return rows
-
-    async def list_queued_runs(self, *, limit):
-        self.queued_listed += 1
-        return []
-
-
-class _StopRecorder:
-    def __init__(self, *, fail_for: tuple[str, ...] = (), hang_for: tuple[str, ...] = ()):
-        self.stopped: list[str] = []
-        self._fail_for = fail_for
-        self._hang_for = hang_for
-
-    async def __call__(self, run_id):
-        if run_id in self._hang_for:
-            await asyncio.sleep(3600)
-        if run_id in self._fail_for:
-            raise RuntimeError("the run manager could not be reached")
-        self.stopped.append(run_id)
-
-
-def _service_that_stops(run_repo, stop, *, max_run_seconds=900, rows=(), run_is_live=None):
-    task_repo = DummyTaskRepo(list(rows))
-    task_repo.claimed = True
-    service = ScheduledTaskService(
-        task_repo=task_repo,
-        task_run_repo=run_repo,
-        invocation_runtime=NeverLaunchInvocationRuntime(),
-        poll_interval_seconds=5,
-        lease_seconds=120,
-        max_concurrent_runs=1,
-        max_run_seconds=max_run_seconds,
-        stop_run=stop,
-        run_is_live=run_is_live,
-    )
-    return service, task_repo
-
-
-def _occurrence(index, *, task_id=None, run_id="unset"):
-    return {"id": f"task-run-{index}", "task_id": task_id or f"task-{index}", "run_id": f"run-{index}" if run_id == "unset" else run_id}
-
-
-_TIME_LIMIT_ERROR = "the task did not finish within 15 minutes, so it was stopped"
-
-
-@pytest.mark.asyncio
-async def test_a_poll_ends_the_occurrence_that_ran_past_its_limit_and_then_stops_its_run():
-    now = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
-    run_repo = _OverdueRunRepo([_occurrence(1), _occurrence(2)])
-    stop = _StopRecorder()
-    service, _ = _service_that_stops(run_repo, stop)
-
-    await service.run_once(now=now)
-
-    assert run_repo.asked == [(now - timedelta(seconds=900), 16)]
-    ended = [(run_id, update) for run_id, update in run_repo.updated if update.get("status") == "failed"]
-    assert [run_id for run_id, _ in ended] == ["task-run-1", "task-run-2"]
-    assert all(update["error"] == _TIME_LIMIT_ERROR and update["finished_at"] == now for _, update in ended)
-    assert stop.stopped == ["run-1", "run-2"]
-
-
-@pytest.mark.asyncio
-async def test_the_occurrence_is_ended_before_its_run_is_asked_to_stop():
-    """The outcome is decided before the Stop lands, so the run's own completion cannot decide it first."""
-    order: list[str] = []
-
-    class _Repo(_OverdueRunRepo):
-        async def end_active_run(self, run_record_id, **kwargs):
-            order.append("ended")
-            return await super().end_active_run(run_record_id, **kwargs)
-
-    async def stop(run_id):
-        order.append("stopped")
-
-    service, _ = _service_that_stops(_Repo([_occurrence(1)]), stop)
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert order == ["ended", "stopped"]
-
-
-@pytest.mark.asyncio
-async def test_a_run_that_finished_first_keeps_its_own_outcome_and_is_not_stopped():
-    run_repo = _OverdueRunRepo([_occurrence(1, task_id="task-once")])
-    run_repo.ended = False
-    stop = _StopRecorder()
-    service, task_repo = _service_that_stops(run_repo, stop, rows=[_once_task_row(task_id="task-once")])
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert stop.stopped == []
-    assert task_repo.rows[0]["status"] == "running", "the task was not touched"
-
-
-@pytest.mark.asyncio
-async def test_a_once_task_whose_run_ran_past_its_limit_ends_failed_with_the_reason():
-    run_repo = _OverdueRunRepo([_occurrence(1, task_id="task-once")])
-    service, task_repo = _service_that_stops(run_repo, _StopRecorder(), rows=[_once_task_row(task_id="task-once")])
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert task_repo.rows[0]["status"] == "failed"
-    assert task_repo.rows[0]["last_error"] == _TIME_LIMIT_ERROR
-
-
-@pytest.mark.asyncio
-async def test_a_recurring_task_whose_run_ran_past_its_limit_stays_enabled_and_says_why():
-    row = _once_task_row(task_id="task-cron")
-    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "status": "enabled"})
-    service, task_repo = _service_that_stops(_OverdueRunRepo([_occurrence(1, task_id="task-cron")]), _StopRecorder(), rows=[row])
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert task_repo.rows[0]["status"] == "enabled"
-    assert task_repo.rows[0]["last_error"] == _TIME_LIMIT_ERROR
-
-
-@pytest.mark.asyncio
-async def test_a_poll_without_a_time_limit_asks_for_no_overdue_runs_and_stops_none():
-    run_repo = _OverdueRunRepo([_occurrence(1)])
-    stop = _StopRecorder()
-    service, _ = _service_that_stops(run_repo, stop, max_run_seconds=None)
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert run_repo.asked == []
-    assert stop.stopped == []
-
-
-@pytest.mark.asyncio
-async def test_one_run_that_cannot_be_stopped_does_not_keep_the_others_running_or_the_poll_from_finishing():
-    run_repo = _OverdueRunRepo([_occurrence(1), _occurrence(2)])
-    stop = _StopRecorder(fail_for=("run-1",))
-    service, _ = _service_that_stops(run_repo, stop)
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert stop.stopped == ["run-2"]
-    assert {run_id for run_id, update in run_repo.updated if update.get("status") == "failed"} == {"task-run-1", "task-run-2"}
-
-
-@pytest.mark.asyncio
-async def test_a_stop_that_never_answers_does_not_hold_up_the_poll(monkeypatch):
-    import app.scheduler.service as scheduler_service
-
-    monkeypatch.setattr(scheduler_service, "_STOP_REQUEST_TIMEOUT_SECONDS", 0.05)
-    run_repo = _OverdueRunRepo([_occurrence(1), _occurrence(2)])
-    stop = _StopRecorder(hang_for=("run-1",))
-    service, _ = _service_that_stops(run_repo, stop)
-
-    await asyncio.wait_for(service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC)), timeout=5)
-
-    assert stop.stopped == ["run-2"]
-
-
-@pytest.mark.asyncio
-async def test_a_failing_look_for_overdue_runs_does_not_stop_the_poll_from_dispatching_what_is_due():
-    """The bound is one duty of the poll; a store error there must not stop the others."""
-    run_repo = _OverdueRunRepo([])
-    run_repo.list_error = RuntimeError("database is locked")
-    service, task_repo = _service_that_stops(run_repo, _StopRecorder())
-    task_repo.claimed = False
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert task_repo.claimed is True, "due tasks were still claimed"
-
-
-@pytest.mark.asyncio
-async def test_a_task_write_that_fails_does_not_keep_the_run_from_being_stopped():
-    class _Tasks(DummyTaskRepo):
-        async def update(self, *args, **kwargs):
-            raise RuntimeError("database is locked")
-
-    stop = _StopRecorder()
-    service, _ = _service_that_stops(_OverdueRunRepo([_occurrence(1, task_id="task-once")]), stop, rows=[])
-    service._task_repo = _Tasks([_once_task_row(task_id="task-once")])
-    service._task_repo.claimed = True
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert stop.stopped == ["run-1"]
-
-
-@pytest.mark.asyncio
-async def test_what_the_run_manager_answers_to_the_stop_is_logged(caplog):
-    class _Answer:
-        value = "not_active_locally"
-
-    async def stop(run_id):
-        return _Answer()
-
-    service, _ = _service_that_stops(_OverdueRunRepo([_occurrence(1)]), stop)
-
-    with caplog.at_level("INFO", logger="app.scheduler.service"):
-        await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert any("answered not_active_locally" in record.getMessage() and "run-1" in record.getMessage() for record in caplog.records)
-
-
-@pytest.mark.parametrize(("seconds", "words"), [(300, "5 minutes"), (60, "1 minute"), (90, "90 seconds"), (3600, "1 hour"), (86400, "24 hours"), (7200, "2 hours")])
-def test_a_bound_reads_in_the_largest_whole_unit(seconds, words):
-    from app.scheduler.service import _duration_words
-
-    assert _duration_words(seconds) == words
-
-
-class _Liveness:
-    """Which runs the run manager still holds a worker for."""
-
-    def __init__(self, live=()):
-        self.live = set(live)
-        self.asked: list[str] = []
-
-    async def __call__(self, run_id):
-        self.asked.append(run_id)
-        return run_id in self.live
-
-
-@pytest.mark.asyncio
-async def test_nothing_new_is_launched_while_a_run_the_time_limit_stopped_is_still_unwinding():
-    """The occurrence is ended at once, but its run keeps its sandbox until its worker finishes.
-
-    Launching the next scheduled run in the meantime could put two unattended
-    runs on both slots, the state the one-at-a-time budget exists to prevent.
-    """
-    t0 = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
-    run_repo = _OverdueRunRepo([_occurrence(1)], once=True)
-    liveness = _Liveness({"run-1"})
-    service, task_repo = _service_that_stops(run_repo, _StopRecorder(), run_is_live=liveness)
-    task_repo.claimed = False
-
-    await service.run_once(now=t0)
-    assert (task_repo.claimed, run_repo.queued_listed) == (False, 0), "the poll that stopped the run launched nothing"
-    await service.run_once(now=t0 + timedelta(seconds=5))
-    assert (task_repo.claimed, run_repo.queued_listed) == (False, 0), "the run is still unwinding"
-
-    liveness.live.clear()
-    await service.run_once(now=t0 + timedelta(seconds=10))
-    assert (task_repo.claimed, run_repo.queued_listed) == (True, 1), "once the run has ended, scheduling resumes"
-
-
-@pytest.mark.asyncio
-async def test_a_run_that_never_finishes_unwinding_holds_scheduling_only_for_a_grace_period():
-    t0 = datetime(2026, 9, 30, 9, 0, tzinfo=UTC)
-    run_repo = _OverdueRunRepo([_occurrence(1)], once=True)
-    service, task_repo = _service_that_stops(run_repo, _StopRecorder(), run_is_live=_Liveness({"run-1"}))
-    task_repo.claimed = False
-
-    await service.run_once(now=t0)
-    await service.run_once(now=t0 + timedelta(seconds=119))
-    assert task_repo.claimed is False
-    await service.run_once(now=t0 + timedelta(seconds=121))
-
-    assert task_repo.claimed is True, "a wedged run does not stop scheduling for good"
-
-
-@pytest.mark.asyncio
-async def test_a_failed_liveness_check_does_not_hold_scheduling():
-    async def _broken(run_id):
-        raise RuntimeError("the run manager could not be reached")
-
-    run_repo = _OverdueRunRepo([_occurrence(1)], once=True)
-    service, task_repo = _service_that_stops(run_repo, _StopRecorder(), run_is_live=_broken)
-    task_repo.claimed = False
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, 5, tzinfo=UTC))
-
-    assert task_repo.claimed is True
-
-
-@pytest.mark.asyncio
-async def test_without_a_liveness_check_scheduling_is_never_held():
-    run_repo = _OverdueRunRepo([_occurrence(1)], once=True)
-    service, task_repo = _service_that_stops(run_repo, _StopRecorder())
-    task_repo.claimed = False
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert task_repo.claimed is True
-
-
-@pytest.mark.asyncio
-async def test_an_occurrence_whose_run_was_never_recorded_is_left_to_recovery():
-    run_repo = _OverdueRunRepo([_occurrence(1, run_id=None)])
-    stop = _StopRecorder()
-    service, _ = _service_that_stops(run_repo, stop)
-
-    await service.run_once(now=datetime(2026, 9, 30, 9, 0, tzinfo=UTC))
-
-    assert stop.stopped == []
-    assert [update for _, update in run_repo.updated if update.get("status") == "failed"] == []
-
-
-@pytest.mark.asyncio
-async def test_interrupted_run_is_distinct_and_cancels_once_task():
-    task_repo = DummyTaskRepo([_once_task_row()])
-    run_repo = DummyRunRepo()
-    service = _make_service(task_repo, run_repo)
-
-    await service.handle_run_completion(_completion_record(RunStatus.interrupted))
-
-    run_update = run_repo.updated[-1][1]
-    assert run_update["status"] == "interrupted"
-    assert run_update["error"] == "run was interrupted before completion"
-    assert task_repo.rows[0]["status"] == "cancelled"
-
-
-@pytest.mark.asyncio
-async def test_interrupted_cron_run_keeps_task_enabled():
-    row = _once_task_row(task_id="task-cron")
-    row.update({"schedule_type": "cron", "schedule_spec": {"cron": "0 9 * * *"}, "status": "enabled"})
-    task_repo = DummyTaskRepo([row])
-    run_repo = DummyRunRepo()
-    service = _make_service(task_repo, run_repo)
-
-    await service.handle_run_completion(_completion_record(RunStatus.interrupted, task_id="task-cron"))
-
-    assert run_repo.updated[-1][1]["status"] == "interrupted"
-    assert task_repo.rows[0]["status"] == "enabled"
+    await service.handle_run_completion(_completion_record(run_status, error=error))
+
+    assert len(task_repo.completions) == 1
+    task_id, completion = task_repo.completions[0]
+    assert task_id == "task-once"
+    assert completion["status"] == occurrence_status
+    assert completion["error"] == expected_error
+    assert run_repo.updated == []
 
 
 @pytest.mark.asyncio
@@ -1144,7 +594,7 @@ async def test_existing_running_occurrence_blocks_duplicate_fresh_thread_run():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -1170,6 +620,64 @@ async def test_startup_sweep_reconciles_stale_runs_and_stuck_once_tasks():
     assert task_repo.cancelled_stuck_once == run_repo.stale_marked
 
 
+@pytest.mark.parametrize("failure_stage", ["occurrence", "parent"])
+@pytest.mark.asyncio
+async def test_single_instance_start_fails_closed_before_polling(failure_stage):
+    order = []
+
+    class StartupTaskRepo(DummyTaskRepo):
+        def __init__(self):
+            super().__init__([])
+            self.recovery_attempts = 0
+
+        async def cancel_stuck_once_tasks(self, *, error):
+            self.recovery_attempts += 1
+            order.append("parent")
+            assert service._task is None
+            if failure_stage == "parent" and self.recovery_attempts == 1:
+                raise RuntimeError("simulated parent recovery failure")
+            return await super().cancel_stuck_once_tasks(error=error)
+
+    class StartupRunRepo(DummyRunRepo):
+        def __init__(self):
+            super().__init__()
+            self.recovery_attempts = 0
+
+        async def mark_stale_active_runs(self, *, error):
+            self.recovery_attempts += 1
+            order.append("occurrence")
+            assert service._task is None
+            if failure_stage == "occurrence" and self.recovery_attempts == 1:
+                raise RuntimeError("simulated occurrence recovery failure")
+            return await super().mark_stale_active_runs(error=error)
+
+    task_repo = StartupTaskRepo()
+    run_repo = StartupRunRepo()
+    service = ScheduledTaskService(
+        task_repo=task_repo,
+        task_run_repo=run_repo,
+        launch_run=lambda **_kwargs: None,
+        poll_interval_seconds=0,
+        lease_seconds=120,
+        max_concurrent_runs=3,
+    )
+
+    async def parked_run_loop():
+        await service._stop.wait()
+
+    service._run_loop = parked_run_loop
+    try:
+        with pytest.raises(RuntimeError, match=f"simulated {failure_stage} recovery failure"):
+            await service.start()
+        assert run_repo.recovery_attempts == 1
+        assert task_repo.recovery_attempts == (0 if failure_stage == "occurrence" else 1)
+        assert order == (["occurrence"] if failure_stage == "occurrence" else ["occurrence", "parent"])
+        assert service._task is None
+        assert task_repo.claimed is False
+    finally:
+        await service.stop()
+
+
 @pytest.mark.asyncio
 async def test_multi_instance_start_uses_lease_aware_reconciliation():
     task_repo = DummyTaskRepo([])
@@ -1177,7 +685,7 @@ async def test_multi_instance_start_uses_lease_aware_reconciliation():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=NeverLaunchInvocationRuntime(),
+        launch_run=lambda **_kwargs: None,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -1212,7 +720,7 @@ async def test_manual_trigger_with_active_run_returns_conflict_without_launching
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -1258,7 +766,7 @@ async def test_launch_bookkeeping_passes_protect_terminal():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -1279,7 +787,7 @@ class _StatefulRunRepo:
         ``run_id``;
       * with ``fail_first_update=True`` the very FIRST ``update_status()``
         call raises, simulating a transient DB failure on the
-        ``queued -> running`` write that fires right after ``InvocationRuntime``
+        ``queued -> running`` write that fires right after ``_launch_run``
         returns a live ``run_id``; every later ``update_status()`` applies;
       * ``has_active_runs()`` reflects whether any tracked row for the task
         is still in an active status (``queued``/``running``), exactly like
@@ -1380,7 +888,7 @@ async def test_post_launch_bookkeeping_failure_does_not_release_active_slot():
     """Regression for issue #4452.
 
     A transient failure in the ``queued -> running`` bookkeeping write
-    (after ``InvocationRuntime`` has already returned a live ``run_id``) must NOT
+    (after ``_launch_run`` has already returned a live ``run_id``) must NOT
     flip the task-run row to ``failed``: ``failed`` is outside the partial
     unique index ``uq_scheduled_task_run_active``, so releasing the slot
     would let the next dispatch launch a DUPLICATE run. The fix keeps the
@@ -1414,7 +922,7 @@ async def test_post_launch_bookkeeping_failure_does_not_release_active_slot():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -1487,7 +995,7 @@ async def test_both_post_launch_association_writes_can_fail_without_releasing_sl
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -1508,7 +1016,7 @@ async def test_both_post_launch_association_writes_can_fail_without_releasing_sl
 
 @pytest.mark.asyncio
 async def test_pre_launch_failure_still_releases_active_slot():
-    """Complement to the #4452 fix: when ``InvocationRuntime`` itself fails (no run
+    """Complement to the #4452 fix: when ``_launch_run`` itself fails (no run
     was ever started), the task-run row is marked ``failed`` and the active
     slot is released as before -- the post-launch retention path does not
     apply because there is no live run to protect.
@@ -1540,7 +1048,7 @@ async def test_pre_launch_failure_still_releases_active_slot():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -1562,7 +1070,7 @@ async def test_pre_launch_failure_still_releases_active_slot():
 async def test_malformed_launch_result_still_retains_active_slot():
     """Defense-in-depth for the #4452 invariant.
 
-    If ``InvocationRuntime`` returns a malformed receipt (e.g. missing ``run_id``),
+    If ``_launch_run`` returns a malformed result (e.g. missing ``run_id``),
     the unpacking line raises AFTER a live run was already created. The
     dispatch must still take the retention path (keep the row active so the
     slot stays held and no duplicate launches) rather than the pre-launch
@@ -1598,7 +1106,7 @@ async def test_malformed_launch_result_still_retains_active_slot():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -1639,7 +1147,7 @@ async def test_manual_trigger_is_queued_when_global_budget_exhausted():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -1669,7 +1177,7 @@ async def test_manual_trigger_proceeds_when_global_budget_available():
     service = ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
+        launch_run=fake_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -1679,142 +1187,3 @@ async def test_manual_trigger_proceeds_when_global_budget_available():
 
     assert result["outcome"] == "launched"
     assert len(launched) == 1
-
-
-def test_scheduled_occurrence_identity_is_tenant_due_time_and_version_bound():
-    task = {
-        "id": "task-stable",
-        "schedule_type": "cron",
-        "schedule_spec": {"cron": "*/5 * * * *"},
-        "schedule_version": 7,
-        "timezone": "UTC",
-    }
-    due = datetime(2026, 9, 1, 12, 0, tzinfo=UTC)
-
-    def service(tenant: str) -> ScheduledTaskService:
-        return ScheduledTaskService(
-            task_repo=DummyTaskRepo([]),
-            task_run_repo=DummyRunRepo(),
-            invocation_runtime=NeverLaunchInvocationRuntime(),
-            poll_interval_seconds=5,
-            lease_seconds=120,
-            max_concurrent_runs=3,
-            tenant_digest=tenant,
-        )
-
-    first = service("a" * 64)._scheduled_occurrence_id(task, scheduled_for=due)
-    second = service("a" * 64)._scheduled_occurrence_id(task, scheduled_for=due)
-
-    assert first == second
-    assert first.startswith("task-run-")
-    assert first != service("b" * 64)._scheduled_occurrence_id(
-        task,
-        scheduled_for=due,
-    )
-    assert first != service("a" * 64)._scheduled_occurrence_id(
-        {**task, "schedule_version": 8},
-        scheduled_for=due,
-    )
-    assert first != service("a" * 64)._scheduled_occurrence_id(
-        task,
-        scheduled_for=due + timedelta(minutes=5),
-    )
-
-
-@pytest.mark.asyncio
-async def test_run_once_replaces_pod_clock_with_repository_authority_time():
-    pod_time = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
-    database_time = datetime(2026, 9, 1, 10, 2, tzinfo=UTC)
-
-    class AuthorityTaskRepo(DummyTaskRepo):
-        def __init__(self):
-            super().__init__([])
-            self.fallback = None
-            self.claim_now = None
-
-        async def authority_now(self, *, fallback):
-            self.fallback = fallback
-            return database_time
-
-        async def claim_due_tasks(self, **kwargs):
-            self.claim_now = kwargs["now"]
-            return []
-
-    task_repo = AuthorityTaskRepo()
-    service = ScheduledTaskService(
-        task_repo=task_repo,
-        task_run_repo=DummyRunRepo(),
-        invocation_runtime=NeverLaunchInvocationRuntime(),
-        poll_interval_seconds=5,
-        lease_seconds=120,
-        max_concurrent_runs=3,
-    )
-
-    await service.run_once(now=pod_time)
-
-    assert task_repo.fallback == pod_time
-    assert task_repo.claim_now == database_time
-    assert service.lease_stats.cycles == 1
-    assert service.lease_stats.database_clock_reads == 1
-    assert service.lease_stats.last_database_time == database_time
-
-
-@pytest.mark.asyncio
-async def test_manual_dispatch_uses_repository_authority_time():
-    pod_time = datetime(2026, 9, 1, 10, 0, tzinfo=UTC)
-    database_time = datetime(2026, 9, 1, 10, 2, tzinfo=UTC)
-
-    class AuthorityTaskRepo(DummyTaskRepo):
-        async def authority_now(self, *, fallback):
-            assert fallback == pod_time
-            return database_time
-
-    async def fake_launch(**kwargs):
-        return {"run_id": "run-authority", "thread_id": kwargs["thread_id"]}
-
-    row = _once_task_row(task_id="task-authority", status="enabled")
-    task_repo = AuthorityTaskRepo([row])
-    run_repo = DummyRunRepo()
-    service = ScheduledTaskService(
-        task_repo=task_repo,
-        task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(fake_launch),
-        poll_interval_seconds=5,
-        lease_seconds=120,
-        max_concurrent_runs=3,
-    )
-
-    await service.dispatch_task(row, now=pod_time, trigger="manual")
-
-    assert run_repo.created["scheduled_for"] == database_time
-    assert run_repo.updated[0][1]["started_at"] == database_time
-    assert service.lease_stats.database_clock_reads == 1
-
-
-@pytest.mark.asyncio
-async def test_multi_instance_start_reconciles_with_repository_authority_time():
-    database_time = datetime(2026, 9, 1, 10, 2, tzinfo=UTC)
-
-    class AuthorityTaskRepo(DummyTaskRepo):
-        async def authority_now(self, *, fallback):
-            return database_time
-
-    task_repo = AuthorityTaskRepo([])
-    run_repo = DummyRunRepo()
-    service = ScheduledTaskService(
-        task_repo=task_repo,
-        task_run_repo=run_repo,
-        invocation_runtime=NeverLaunchInvocationRuntime(),
-        poll_interval_seconds=5,
-        lease_seconds=120,
-        max_concurrent_runs=3,
-        multi_instance=True,
-    )
-
-    await service.start()
-    await asyncio.sleep(0)
-    await service.stop()
-
-    assert run_repo.reconciled["now"] == database_time
-    assert task_repo.reconciled_stuck_once["now"] == database_time
-    assert service.lease_stats.database_clock_reads >= 1

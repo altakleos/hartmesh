@@ -25,7 +25,7 @@ from langgraph.store.memory import InMemoryStore
 
 from app.gateway import transcript
 from app.gateway.auth.models import User
-from app.gateway.routers import threads
+from app.gateway.routers import thread_export, threads
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import EditReplayVisibility
@@ -153,6 +153,7 @@ def _app(monkeypatch, owners: dict[str, str | None], *, superseded: set[str] | N
     run_manager.list_edit_replay_visibility.return_value = EditReplayVisibility()
     app.state.run_manager = run_manager
     app.include_router(threads.router)
+    app.include_router(thread_export.router)
     asked: list[str | None] = []
 
     def _accessor(request, *, thread_id, assistant_id=None, checkpoint_id=None):

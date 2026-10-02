@@ -168,6 +168,33 @@ def test_list_dir_on_user_data_root_does_not_duplicate_subdir_mounts(provider):
         assert len(matches) == 1, f"{subdir} listed {len(matches)} time(s), expected exactly 1: {entries}"
 
 
+def test_list_dir_on_skills_root_lists_category_mounts(provider):
+    """Regression: with the default (non-policy-scoped) mount layout there is
+    no mapping for the aggregate ``/mnt/skills`` root itself — only the four
+    category mounts (public/custom/legacy/integrations), each pointing at its
+    own host directory. The root must still be listable: the virtual
+    sub-directory overlay in ``list_dir`` exists exactly so the agent can
+    discover the categories via ``ls /mnt/skills``, but the host ``list_dir``
+    on the unmapped root raised ``FileNotFoundError`` before the overlay ran.
+    """
+    sandbox_id = provider.acquire("alpha")
+    sbx = provider.get(sandbox_id)
+
+    # Pin the scenario: the default category layout, no aggregate root mapping.
+    mounted = {m.container_path for m in sbx.path_mappings}
+    assert "/mnt/skills" not in mounted
+    assert mounted >= {"/mnt/skills/public", "/mnt/skills/custom", "/mnt/skills/legacy", "/mnt/skills/integrations"}
+
+    entries = sbx.list_dir("/mnt/skills")
+
+    assert entries == [
+        "/mnt/skills/custom/",
+        "/mnt/skills/integrations/",
+        "/mnt/skills/legacy/",
+        "/mnt/skills/public/",
+    ]
+
+
 def test_update_file_with_virtual_path_for_remote_sync_scenario(provider):
     """This is the exact code path used by ``uploads.py:282`` and ``feishu.py:389``.
 
@@ -408,48 +435,3 @@ def test_lru_promotes_recently_used_thread(isolated_paths, tmp_path):
     assert ("default", "a") in provider._thread_sandboxes
     assert ("default", "b") not in provider._thread_sandboxes
     assert {("default", "a"), ("default", "c"), ("default", "d")} == set(provider._thread_sandboxes.keys())
-
-
-def test_lru_pressure_does_not_evict_invocation_owned_projection(
-    isolated_paths,
-    tmp_path,
-):
-    """A background consumer keeps its cached sandbox until its exact release."""
-    from deerflow.runtime.skill_projection import SkillProjectionCoordinator
-
-    skills_dir = tmp_path / "skills"
-    skills_dir.mkdir()
-    cfg = _build_config(skills_dir)
-    coordinator = SkillProjectionCoordinator()
-
-    with (
-        patch("deerflow.config.get_app_config", return_value=cfg),
-        patch(
-            "deerflow.runtime.skill_projection.get_skill_projection_coordinator",
-            return_value=coordinator,
-        ),
-    ):
-        provider = LocalSandboxProvider(max_cached_threads=1)
-        sandbox_id = provider.acquire("owned", user_id="default")
-        coordinator.claim_committed_run(
-            user_id="default",
-            thread_id="owned",
-            run_id="run-owned",
-            snapshot_id=None,
-        )
-        token = coordinator.activate(
-            user_id="default",
-            thread_id="owned",
-            sandbox_id=sandbox_id,
-            run_id="run-owned",
-            snapshot_id=None,
-            consumer_id="subagent:background",
-        )
-
-        provider.acquire("pressure", user_id="default")
-
-    assert ("default", "owned") in provider._thread_sandboxes
-    assert provider.get(sandbox_id) is not None
-    clear = coordinator.release(token)
-    assert clear is not None
-    assert coordinator.finalize_release(clear)

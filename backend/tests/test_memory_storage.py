@@ -1,30 +1,28 @@
 """Tests for memory storage providers (DI: FileMemoryStorage(config) / create_storage)."""
 
-import os
-import subprocess
-import sys
-import textwrap
+import json
 import threading
-import time
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
+from deerflow.agents.memory.backends.deermem.deermem.core import markdown_format as mf
+from deerflow.agents.memory.backends.deermem.deermem.core.markdown_storage import MarkdownMemoryStorage
 from deerflow.agents.memory.backends.deermem.deermem.core.paths import validate_agent_name
 from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
     FileMemoryStorage,
     MemoryStorage,
     create_empty_memory,
     create_storage,
+    normalize_memory_data,
 )
 
 
 def _storage_at(memory_file) -> FileMemoryStorage:
-    """A FileMemoryStorage whose absolute storage_path is a single shared file."""
-    resolved = str(memory_file.resolve())
-    return FileMemoryStorage(DeerMemConfig(storage_path=resolved))
+    """A FileMemoryStorage rooted at the directory containing ``memory_file``."""
+    root = str(memory_file.parent.resolve())
+    return FileMemoryStorage(DeerMemConfig(storage_path=root))
 
 
 class TestCreateEmptyMemory:
@@ -38,6 +36,45 @@ class TestCreateEmptyMemory:
         assert isinstance(memory["user"], dict)
         assert isinstance(memory["history"], dict)
         assert isinstance(memory["facts"], list)
+
+
+class TestNormalizeMemoryData:
+    """Test backward-compatible memory schema normalization."""
+
+    def test_normalizes_legacy_facts_without_mutating_input(self):
+        legacy = {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {},
+            "history": {},
+            "facts": [
+                {"content": "User prefers conclusions first", "category": "cognitive"},
+                None,
+                {"category": "context"},
+            ],
+        }
+
+        normalized = normalize_memory_data(legacy)
+
+        assert legacy == {
+            "version": "1.0",
+            "lastUpdated": "",
+            "user": {},
+            "history": {},
+            "facts": [
+                {"content": "User prefers conclusions first", "category": "cognitive"},
+                None,
+                {"category": "context"},
+            ],
+        }
+        assert len(normalized["facts"]) == 1
+        fact = normalized["facts"][0]
+        assert fact["id"].startswith("fact_")
+        assert fact["content"] == "User prefers conclusions first"
+        assert fact["category"] == "cognitive"
+        assert fact["confidence"] == 0.5
+        assert fact["createdAt"] == ""
+        assert fact["source"] == "unknown"
 
 
 class TestMemoryStorageInterface:
@@ -79,173 +116,6 @@ class TestFileMemoryStorage:
         memory = storage.load()
         assert isinstance(memory, dict)
         assert memory["version"] == "1.0"
-
-    def test_open_sweeps_owned_atomic_write_temp_only(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
-        owned_temp = tmp_path / f".memory.json.{'a' * 32}.tmp"
-        unrelated_temp = tmp_path / f".journal.json.{'b' * 32}.tmp"
-        nested_temp = tmp_path / "nested" / f".memory.json.{'c' * 32}.tmp"
-        nested_temp.parent.mkdir()
-        for temp in (owned_temp, unrelated_temp, nested_temp):
-            temp.write_bytes(b"incomplete")
-
-        FileMemoryStorage(DeerMemConfig()).load()
-
-        assert not owned_temp.exists()
-        assert unrelated_temp.exists()
-        assert nested_temp.exists()
-
-    def test_open_waits_for_live_atomic_writer(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
-        release_path = tmp_path / "release-writer"
-        ready_path = tmp_path / "writer-ready"
-        child = textwrap.dedent(
-            """
-            import os
-            import sys
-            import time
-            from pathlib import Path
-
-            from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
-            from deerflow.agents.memory.backends.deermem.deermem.core import storage as storage_module
-
-            ready = Path(sys.argv[1])
-            release = Path(sys.argv[2])
-            original_fsync = os.fsync
-            original_atomic_write = storage_module._atomic_write
-
-            def block_fsync(descriptor: int) -> None:
-                ready.write_text("ready", encoding="utf-8")
-                while not release.exists():
-                    time.sleep(0.01)
-                original_fsync(descriptor)
-
-            def block_memory_write(path: Path, raw: bytes) -> None:
-                if path.name != "memory.json":
-                    original_atomic_write(path, raw)
-                    return
-                storage_module.os.fsync = block_fsync
-                try:
-                    original_atomic_write(path, raw)
-                finally:
-                    storage_module.os.fsync = original_fsync
-
-            storage_module._atomic_write = block_memory_write
-            memory = storage_module.create_empty_memory()
-            memory["user"]["workContext"]["summary"] = "committed by live writer"
-            storage_module.FileMemoryStorage(DeerMemConfig()).save(memory)
-            """
-        )
-        process = subprocess.Popen(
-            [sys.executable, "-c", child, str(ready_path), str(release_path)],
-            env={**os.environ, "DEERMEM_DATA_DIR": str(tmp_path)},
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        deadline = time.monotonic() + 10
-        while not ready_path.exists() and process.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not ready_path.exists():
-            process.kill()
-            _, stderr = process.communicate(timeout=5)
-            pytest.fail(f"writer did not reach atomic fsync: {stderr}")
-
-        loaded_summary: list[str] = []
-
-        def open_store() -> None:
-            memory = FileMemoryStorage(DeerMemConfig()).load()
-            loaded_summary.append(memory["user"]["workContext"]["summary"])
-
-        opener = threading.Thread(target=open_store)
-        opener.start()
-        time.sleep(0.1)
-        assert opener.is_alive()
-        assert list(tmp_path.glob(".memory.json.*.tmp"))
-
-        release_path.write_text("release", encoding="utf-8")
-        process.wait(timeout=5)
-        opener.join(timeout=5)
-
-        assert process.returncode == 0
-        assert not opener.is_alive()
-        assert loaded_summary == ["committed by live writer"]
-        assert list(tmp_path.glob(".memory.json.*.tmp")) == []
-
-    @pytest.mark.skipif(os.name == "nt", reason="SIGKILL crash evidence is POSIX-only")
-    def test_sigkill_temp_is_removed_on_immediate_next_open(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
-        original = create_empty_memory()
-        original["user"]["workContext"]["summary"] = "last committed value"
-        assert FileMemoryStorage(DeerMemConfig()).save(original)
-        ready_path = tmp_path / "writer-ready"
-        child = textwrap.dedent(
-            """
-            import sys
-            import time
-            from pathlib import Path
-
-            from deerflow.agents.memory.backends.deermem.deermem.config import DeerMemConfig
-            from deerflow.agents.memory.backends.deermem.deermem.core import storage as storage_module
-
-            ready = Path(sys.argv[1])
-            original_atomic_write = storage_module._atomic_write
-            original_fsync = storage_module.os.fsync
-
-            def block_fsync(_descriptor: int) -> None:
-                ready.write_text("ready", encoding="utf-8")
-                time.sleep(60)
-
-            def block_memory_write(path: Path, raw: bytes) -> None:
-                if path.name != "memory.json":
-                    original_atomic_write(path, raw)
-                    return
-                storage_module.os.fsync = block_fsync
-                try:
-                    original_atomic_write(path, raw)
-                finally:
-                    storage_module.os.fsync = original_fsync
-
-            storage_module._atomic_write = block_memory_write
-            memory = storage_module.create_empty_memory()
-            memory["user"]["workContext"]["summary"] = "uncommitted value"
-            storage_module.FileMemoryStorage(DeerMemConfig()).save(memory)
-            """
-        )
-        process = subprocess.Popen(
-            [sys.executable, "-c", child, str(ready_path)],
-            env={**os.environ, "DEERMEM_DATA_DIR": str(tmp_path)},
-            stderr=subprocess.PIPE,
-            text=True,
-        )
-        deadline = time.monotonic() + 10
-        while not ready_path.exists() and process.poll() is None and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not ready_path.exists():
-            process.kill()
-            _, stderr = process.communicate(timeout=5)
-            pytest.fail(f"writer did not reach atomic fsync: {stderr}")
-
-        process.kill()
-        process.wait(timeout=5)
-        temps = list(tmp_path.glob(".memory.json.*.tmp"))
-        assert temps
-
-        reopened = FileMemoryStorage(DeerMemConfig()).load()
-
-        assert reopened["user"]["workContext"]["summary"] == "last committed value"
-        assert list(tmp_path.glob(".memory.json.*.tmp")) == []
 
     def test_save_writes_to_file(self, tmp_path, monkeypatch):
         monkeypatch.setenv("DEERMEM_DATA_DIR", str(tmp_path))
@@ -351,3 +221,132 @@ class TestCreateStorage:
     def test_dotted_storage_class_resolves(self):
         storage = create_storage(DeerMemConfig(storage_class="deerflow.agents.memory.backends.deermem.deermem.core.storage.FileMemoryStorage"))
         assert isinstance(storage, FileMemoryStorage)
+
+
+def test_load_normalizes_legacy_json_without_cognitive_style(tmp_path) -> None:
+    memory_file = tmp_path / "memory.json"
+    memory_file.write_text(
+        '{"version":"1.0","lastUpdated":"","user":{"workContext":{"summary":"work","updatedAt":""}},"history":{},"facts":[]}',
+        encoding="utf-8",
+    )
+    storage = _storage_at(memory_file)
+
+    loaded = storage.load()
+
+    assert loaded["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+    assert loaded["user"]["workContext"]["summary"] == "work"
+
+
+def test_cache_hit_returns_an_equivalent_normalized_copy(tmp_path) -> None:
+    memory_file = tmp_path / "memory.json"
+    memory_file.write_text(
+        '{"version":"1.0","lastUpdated":"","user":{},"history":{},"facts":[{"content":"Legacy cached fact"}]}',
+        encoding="utf-8",
+    )
+
+    storage = _storage_at(memory_file)
+    first = storage.load()
+    second = storage.load()
+
+    assert second == first
+    assert second is not first
+    assert second["user"]["cognitiveStyle"] == {"summary": "", "updatedAt": ""}
+
+
+class TestMarkdownMemoryStorage:
+    """Opt-in ``storage_class="markdown"``: tolerant load path (issue #3124)."""
+
+    def _markdown_storage_at(self, memory_file) -> MarkdownMemoryStorage:
+        return MarkdownMemoryStorage(DeerMemConfig(storage_path=str(memory_file.parent.resolve())))
+
+    def test_markdown_alias_resolves(self):
+        storage = create_storage(DeerMemConfig(storage_class="markdown"))
+        assert isinstance(storage, MarkdownMemoryStorage)
+        assert isinstance(storage, FileMemoryStorage)
+
+    @pytest.mark.parametrize(("version", "expected_revision"), [("1.0", 8), ("2.0", 7)])
+    def test_corrupt_json_with_fenced_block_recovers(self, tmp_path, version, expected_revision):
+        """A partially written JSON summary that still carries a fenced
+        ```memory-json block is recovered losslessly instead of crashing."""
+        memory_file = tmp_path / "memory.json"
+        manifest = create_empty_memory()
+        manifest["version"] = version
+        if version == "2.0":
+            manifest.pop("facts")  # v2 manifests keep facts in separate files.
+        manifest["revision"] = 7
+        manifest["user"]["workContext"] = {"summary": "recovered"}
+        fenced = '{"version": 1, "revision": 7, "user": {"lang": "zh"}\n```memory-json\n' + json.dumps(manifest, ensure_ascii=False) + "\n```"
+        memory_file.write_text(fenced, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        # Legacy manifests migrate to v2 on load and advance the revision.
+        assert loaded["version"] == "2.0"
+        assert loaded["revision"] == expected_revision
+        assert loaded["user"]["workContext"]["summary"] == "recovered"
+
+    def test_hand_edited_markdown_without_fence_is_quarantined(self, tmp_path):
+        """Markdown without a fenced block cannot be mapped onto the manifest
+        schema losslessly: load() must not crash AND must not return an
+        invalid shape -- the file is quarantined so nothing is silently lost."""
+        memory_file = tmp_path / "memory.json"
+        body = "# DeerFlow Memory\n\n- version: 2\n- revision: 5\n\n## User\n- summary: likes tea\n"
+        memory_file.write_text(body, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()  # must not raise
+        assert isinstance(loaded, dict)
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1, "unreadable file must be preserved via quarantine"
+        assert quarantined[0].read_text(encoding="utf-8") == body
+
+    def test_truncated_json_is_quarantined_before_rebuild(self, tmp_path):
+        """A truncated manifest must not be silently erased by the next save:
+        the unreadable file is quarantined (revision reset is then safe)."""
+        memory_file = tmp_path / "memory.json"
+        truncated = '{"version": "2.0", "revision": 41, "user": {"work'
+        memory_file.write_text(truncated, encoding="utf-8")
+        storage = self._markdown_storage_at(memory_file)
+        loaded = storage.load()
+        assert isinstance(loaded, dict)
+        assert storage.save(create_empty_memory()) is True
+        quarantined = list(tmp_path.glob("memory.json.corrupt-*"))
+        assert len(quarantined) == 1
+        assert quarantined[0].read_text(encoding="utf-8") == truncated
+
+    def test_fenced_block_containing_backticks_parses_losslessly(self):
+        """Remembered code snippets must not terminate the JSON block."""
+        manifest = create_empty_memory()
+        manifest["user"]["workContext"] = {"summary": "prefers ```python\nprint('hi')\n``` snippets"}
+        rendered = "# DeerFlow Memory\n\n```memory-json\n" + json.dumps(manifest, ensure_ascii=False) + "\n```\n"
+        parsed = mf._parse_markdown_memory(rendered)
+        assert parsed == manifest
+
+    @pytest.mark.parametrize("newline", ["\n", "\r\n"])
+    def test_fenced_summary_with_trailing_code_block_loads_without_quarantine(self, tmp_path, newline):
+        manifest = create_empty_memory()
+        manifest["version"] = "2.0"
+        manifest.pop("facts")
+        manifest["revision"] = 7
+        manifest["user"]["workContext"]["summary"] = "prefers ```python snippets```"
+        body = newline.join(["# Memory", "```memory-json", json.dumps(manifest, indent=2), "", "```", "Notes:", "```python", "print('example')", "```", ""])
+        memory_file = tmp_path / "memory.json"
+        memory_file.write_text(body, encoding="utf-8")
+        assert mf._parse_markdown_memory(body) == manifest
+        loaded = self._markdown_storage_at(memory_file).load()
+        assert loaded["revision"] == 7
+        assert loaded["user"]["workContext"] == manifest["user"]["workContext"]
+        assert not list(tmp_path.glob("memory.json.corrupt-*"))
+
+    @pytest.mark.parametrize(
+        "body",
+        [
+            "# Memory without a fence",
+            '```memory-json\n{"user": ',
+            '```memory-json\n{"user": {}}',
+            '```memory-json\n{"user": {}} trailing garbage\n```',
+            '```memory-json\n{"user": {}}\n```python\nnotes\n```',
+            "```memory-json\n[]\n```",
+            "```memory-json\nnull\n```",
+        ],
+    )
+    def test_invalid_or_non_object_fenced_summary_rejected(self, body):
+        assert mf._parse_markdown_memory(body) is None

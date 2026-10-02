@@ -59,11 +59,6 @@ class Skill:
     # Frontmatter ``first-command``: what the skill's work starts with; nothing
     # else runs in the sandbox between its first load and a run of it.
     first_command: FirstCommand | None = None
-    # Accepted durable invocations may execute from a host-owned immutable
-    # snapshot whose sandbox location is not derived from the live category
-    # tree. This value is process-local execution material and is never part of
-    # persisted skill metadata.
-    container_relative_path: str | None = field(default=None, repr=False)
 
     @property
     def skill_path(self) -> str:
@@ -81,8 +76,6 @@ class Skill:
         Returns:
             Full container path to the skill directory
         """
-        if self.container_relative_path is not None:
-            return f"{container_base_path.rstrip('/')}/{self.container_relative_path}"
         category_base = f"{container_base_path}/{self.category}"
         skill_path = self.skill_path
         if skill_path:

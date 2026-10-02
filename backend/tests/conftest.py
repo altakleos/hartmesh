@@ -7,79 +7,12 @@ issues when unit-testing lightweight config/registry code in isolation.
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
-import warnings
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
-
-_SKIPPED_POSTGRES_CONTRACTS: list[str] = []
-_SKIPPED_KUBERNETES_CONTRACTS: list[str] = []
-
-
-def pytest_configure(config: pytest.Config) -> None:
-    """Give every parallel worker its own writable DeerFlow home.
-
-    ``DEER_FLOW_HOME`` holds process-owned state -- the accepted skill snapshot
-    store above all -- whose bookkeeping is in-process by design, because one
-    Gateway owns one home. Its retention pass keeps every tree this process has
-    leased and removes the rest, and its startup cleanup removes staging trees
-    it does not recognise. Point eight workers at one home and each of them is
-    that "other process": one worker prunes a snapshot another is holding
-    (``skill_snapshot_manifest_missing``, ``skill_snapshot_tree_unreadable``)
-    or clears a ``.building-`` tree another is still writing into.
-
-    So the home is per worker. This is also simply correct: a test run has no
-    business writing into the home a developer's own Gateway uses.
-    """
-    worker = os.environ.get("PYTEST_XDIST_WORKER")
-    if worker is None or os.environ.get("DEER_FLOW_TEST_HOME_PER_WORKER") == "0":
-        return
-    home = Path(config.rootpath) / ".deer-flow-test" / worker
-    home.mkdir(parents=True, exist_ok=True)
-    os.environ["DEER_FLOW_HOME"] = str(home)
-
-
-def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    """Record required opt-in contract skips for their session gates."""
-
-    if report.skipped and "postgres_contract" in report.keywords:
-        _SKIPPED_POSTGRES_CONTRACTS.append(report.nodeid)
-    if report.skipped and "kubernetes_contract" in report.keywords:
-        _SKIPPED_KUBERNETES_CONTRACTS.append(report.nodeid)
-
-
-def pytest_runtest_setup(item: pytest.Item) -> None:
-    """Collect Kubernetes contracts by default but run them only by opt-in."""
-
-    if item.get_closest_marker("kubernetes_contract") is None:
-        return
-    if os.environ.get("DEERFLOW_TEST_KUBERNETES") != "1":
-        pytest.skip("Kubernetes qualification is opt-in; set DEERFLOW_TEST_KUBERNETES=1 with an explicit KUBECONFIG and qualification context")
-
-
-def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
-    """Fail an explicitly configured qualification if any contract skipped."""
-
-    del exitstatus
-    if os.environ.get("DEERFLOW_TEST_POSTGRES_URL") and _SKIPPED_POSTGRES_CONTRACTS:
-        warnings.warn(
-            "Configured PostgreSQL contract tests skipped: " + ", ".join(_SKIPPED_POSTGRES_CONTRACTS),
-            RuntimeWarning,
-            stacklevel=1,
-        )
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
-    if os.environ.get("DEERFLOW_TEST_KUBERNETES") == "1" and _SKIPPED_KUBERNETES_CONTRACTS:
-        warnings.warn(
-            "Configured Kubernetes contract tests skipped: " + ", ".join(_SKIPPED_KUBERNETES_CONTRACTS),
-            RuntimeWarning,
-            stacklevel=1,
-        )
-        session.exitstatus = pytest.ExitCode.TESTS_FAILED
-
 
 # Make 'app' and 'deerflow' importable from any working directory
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -143,34 +76,6 @@ def provisioner_module():
 # contextvar is unset. The fixture sets a default test user on every
 # test; tests that explicitly want to verify behaviour *without* a user
 # context should mark themselves ``@pytest.mark.no_auto_user``.
-
-
-@pytest.fixture(autouse=True)
-def _no_leaked_projection_state():
-    """Fail the test that leaves a thread owned by the projection coordinator.
-
-    ``SkillProjectionCoordinator`` is a process singleton, so a test that
-    admits a thread and never releases it hands the next test a thread that is
-    already owned. ``reserve_admission`` answers a matching reservation
-    idempotently, so the next test quietly exercises the re-reserve branch
-    rather than the fresh admission it reads as testing -- and which branch it
-    takes moves with the shard split. Blaming the test that leaked beats
-    debugging the one that inherited it. The state is cleared either way, so
-    one leak cannot cascade; release properly with
-    ``_skill_projection_release.release_thread_projection``.
-    """
-    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-    coordinator = get_skill_projection_coordinator()
-    before = set(coordinator._states)
-    try:
-        yield
-    finally:
-        leaked = sorted(set(coordinator._states) - before)
-        for key in leaked:
-            coordinator._states.pop(key, None)
-    if leaked:
-        raise AssertionError(f"test left projection state with the coordinator for {leaked}; release it in teardown (the singleton outlives the test, so the next one inherits an owned thread)")
 
 
 @pytest.fixture(autouse=True)

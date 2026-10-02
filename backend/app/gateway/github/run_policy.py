@@ -104,18 +104,20 @@ def register_policy() -> None:
         # GitHub webhooks have no synchronous human — ask_clarification
         # would dead-end the run.
         is_interactive=False,
+        interaction_mode="webhook",
         # Autonomous coder runs (clone -> edit -> test -> push -> PR)
         # routinely need more than the 100 super-step interactive ceiling.
         # Per-agent overrides via GitHubAgentConfig.recursion_limit still
         # win (read in ChannelManager._resolve_run_params from msg.metadata).
         default_recursion_limit=250,
         credentials_provider=inject_github_credentials,
-        # GitHub deliveries are HMAC-authenticated at the webhook route. The
-        # dispatcher resolves the installation/owner/agent/repository tuple
-        # from the trusted agent registry and attaches a verified route binding;
-        # it never invents an interactive channel connection. There is no
-        # per-sender /connect handshake, so this policy selects that distinct
-        # binding path while interactive channels keep repository revalidation.
+        # GitHub deliveries are HMAC-authenticated at the webhook route,
+        # and the binding from "sender" to DeerFlow user is encoded in
+        # the agent's config.yaml ownership (not in the channel-connections
+        # table). There is no per-sender /connect handshake — opting out
+        # of the bound-identity gate is what lets webhook events reach
+        # the agent even when channel_connections.enabled=True for
+        # interactive IM channels in the same deployment.
         requires_bound_identity=False,
         # GitHub agents post their own outbound to the issue/PR via the
         # ``gh`` CLI in the sandbox; the channel's ``send`` is log-only

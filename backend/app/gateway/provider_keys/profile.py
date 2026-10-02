@@ -21,7 +21,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Literal
+from typing import Any, Literal
 
 PROFILE_DIR_ENV = "HARTMESH_PROFILE_DIR"
 _MODULE_NAME = "hartmesh_profile_render_config"
@@ -69,6 +69,13 @@ class ProfileRenderer:
     def from_environ(cls, environ: Mapping[str, str]) -> ProfileRenderer | None:
         raw = environ.get(PROFILE_DIR_ENV, "").strip()
         return cls(Path(raw)) if raw else None
+
+    def first_model(self, variable: str) -> Mapping[str, Any] | None:
+        """The first model the catalog offers for *variable*'s provider, as the catalog writes it."""
+        for fragment in self._catalog:
+            if fragment.env == variable and fragment.models:
+                return fragment.models[0]
+        return None
 
     def operator_models_file(self, environ: Mapping[str, str]) -> str | None:
         """The operator model file the environment names, if any."""

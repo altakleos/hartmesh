@@ -143,7 +143,9 @@ def _login(client: httpx.Client, email: str, password: str) -> httpx.Response:
 
 def _add_user_command(*args: str) -> tuple[int, dict[str, Any], str]:
     """The deployer's command as a subprocess against the served Gateway's config; one JSON document back."""
-    env = {**os.environ, "PYTHONPATH": f"{BACKEND}{os.pathsep}{BACKEND / 'tests'}"}
+    # The harness packages too: without an installed copy of this tree the
+    # subprocess would import whichever one the interpreter has installed.
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join(str(path) for path in (BACKEND, BACKEND / "tests", BACKEND / "packages" / "harness", BACKEND / "packages" / "runtime-api", BACKEND / "packages" / "extension-api"))}
     completed = subprocess.run([sys.executable, "-m", "app.gateway.auth.add_user", *args], cwd=BACKEND, env=env, capture_output=True, text=True, timeout=120, check=False)
     lines = [line for line in completed.stdout.splitlines() if line.strip()]
     assert len(lines) == 1, f"one JSON document on stdout, got: {completed.stdout!r} / {completed.stderr[-800:]!r}"

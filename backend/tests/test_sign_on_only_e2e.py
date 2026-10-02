@@ -284,7 +284,8 @@ class TestServedGateway:
         # The provisioning line, by its own words: the callback's line carries
         # the subject and the issuer too, so matching only those would pass
         # against the refusal this change replaced.
-        assert any("is not one an account can hold" in line and provider.issuer_url("a") in line for line in refusals), refusals
+        # The log filter collapses a URL's path, so the line names the issuer by its origin.
+        assert any("is not one an account can hold" in line and provider.base_url in line for line in refusals), refusals
         assert not any("already exists" in line for line in refusals), refusals
 
     # ── Evidence 2, 4, 5: the doors through the served Gateway ───────────────

@@ -52,9 +52,6 @@ def _tuple(status: str, error_type: str | None, recoverable: bool, next_action: 
         "recoverable_by_model": recoverable,
         "recommended_next_action": next_action,
         "source": "content_analysis",
-        # Content analysis never saw the transport, so it can only make the
-        # claim that needs no such knowledge: the origin refused.
-        "error_scope": "origin",
     }
 
 

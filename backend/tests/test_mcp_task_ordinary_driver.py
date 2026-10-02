@@ -1,17 +1,10 @@
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
-from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 
-from deerflow.mcp.tasks import (
-    McpTaskLineageBinder,
-    TaskReference,
-    TaskStatus,
-    TaskSubmitRequest,
-)
+from deerflow.mcp.tasks import TaskReference, TaskStatus, TaskSubmitRequest
 from deerflow.mcp.tasks.ordinary import McpTaskProtocolError, OrdinaryMcpTaskDriver
-from deerflow.runtime.tenant_identity import TenantIdentityV1
-from deerflow.runtime.tool_evidence import build_request_projection
 
 
 class FakeCaller:
@@ -33,33 +26,15 @@ def _result(structured_content, *, text="ignored", is_error=False):
 
 
 def _request() -> TaskSubmitRequest:
-    arguments = {"topic": "MCP"}
-    lineage = McpTaskLineageBinder().for_standalone_api(
-        tenant=TenantIdentityV1.from_canonical_id("test").to_persisted_reference(),
-        principal_identity=InvocationIdentityV1(
-            effective_subject=EffectiveSubjectV1(
-                kind="human",
-                subject_id="user-1",
-                role="member",
-            )
-        ),
-        extension_generation=1,
-        extension_manifest_digest="a" * 64,
-        accepted_origin_digest="b" * 64,
-        server_name="reports",
-        tool_name="submit_report",
-        safe_request_projection=build_request_projection(
-            "submit_report",
-            arguments,
-        ),
-        credential_selector=None,
-    )
     return TaskSubmitRequest(
         user_id="user-1",
         thread_id="thread-1",
-        lineage=lineage,
+        thread_incarnation="incarnation-1",
+        run_id="run-1",
+        tool_call_id="call-1",
+        server_name="reports",
         task_name="report-generation",
-        arguments=arguments,
+        arguments={"topic": "MCP"},
         driver_data={
             "submit_tool": "submit_report",
             "status_tool": "get_report_status",
@@ -74,6 +49,7 @@ def _reference() -> TaskReference:
         local_task_id="local-1",
         user_id="user-1",
         thread_id="thread-1",
+        thread_incarnation="incarnation-1",
         server_name="reports",
         remote_task_id="remote-1",
         driver_data={
@@ -94,17 +70,50 @@ async def test_submit_uses_structured_content_and_keeps_remote_id_out_of_driver_
     assert submission.remote_task_id == "remote-1"
     assert submission.snapshot.status == TaskStatus.SUBMITTED
     assert "remote_task_id" not in submission.driver_data
-    call = caller.calls[0]
-    assert call["server_name"] == "reports"
-    assert call["tool_name"] == "submit_report"
-    assert call["arguments"] == {"topic": "MCP"}
-    assert call["user_id"] == "user-1"
-    assert call["thread_id"] == "thread-1"
-    assert call["lineage"] == _request().lineage
-    assert call["operation"] == "submit"
-    # Submit is the one durable-task call awaited inside the Agent run, so it
-    # is the only one that may carry request-scoped credentials.
-    assert call["request_scoped_headers"] is True
+    assert caller.calls == [
+        {
+            "server_name": "reports",
+            "tool_name": "submit_report",
+            "arguments": {"topic": "MCP"},
+            "user_id": "user-1",
+            "thread_id": "thread-1",
+            "thread_incarnation": "incarnation-1",
+            # Submit is the one durable-task call awaited inside the Agent run,
+            # so it is the only one that may carry request-scoped credentials.
+            "request_scoped_headers": True,
+            "connection_scope": "deployment",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_personal_connection_scope_survives_submit_status_and_cancel() -> None:
+    caller = FakeCaller(
+        _result({"task_id": "remote-1", "status": "running"}),
+        _result({"task_id": "remote-1", "status": "completed"}),
+        _result({"task_id": "remote-1", "status": "cancelled"}),
+    )
+    driver = OrdinaryMcpTaskDriver(caller)
+    request = _request()
+    request = replace(request, driver_data={**request.driver_data, "connection_scope": "personal"})
+    submission = await driver.submit(request)
+    reference = replace(_reference(), driver_data=submission.driver_data)
+
+    await driver.get_status(reference)
+    await driver.cancel(reference)
+
+    assert submission.driver_data["connection_scope"] == "personal"
+    assert [call["connection_scope"] for call in caller.calls] == ["personal"] * 3
+
+
+@pytest.mark.asyncio
+async def test_unknown_task_connection_scope_fails_closed() -> None:
+    driver = OrdinaryMcpTaskDriver(FakeCaller())
+    reference = _reference()
+    reference = replace(reference, driver_data={**reference.driver_data, "connection_scope": "unknown"})
+
+    with pytest.raises(McpTaskProtocolError, match="connection scope"):
+        await driver.get_status(reference)
 
 
 @pytest.mark.asyncio

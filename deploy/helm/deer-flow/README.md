@@ -5,38 +5,20 @@ LangGraph runtime), **frontend** (Next.js), **nginx** (internal reverse proxy
 preserving the compose routing), and the **provisioner** (K8s-native sandbox
 that spawns code-execution Pods on demand).
 
-The default values describe an explicitly unqualified local evaluation profile,
-but a bare install is intentionally refused: home persistence is enabled while
-no skills claim is named, which would crashloop the provisioner. Supply the
-recommended PVC values below or explicitly select the legacy local/hybrid
-hostPath mode. `durable_one_replica` remains the validated production mode.
-The exact-two profile in this checkout is available only as an isolated live-
-qualification candidate; production rendering stays blocked until a future
-release bundles authority for an independently verified artifact. Neither mode
-claims arbitrary scaling or rolling zero downtime.
-
-Durable subagent batches are not yet part of either production profile's
-qualified artifact. Setting `subagent_batches.enabled: true` is rejected in
-both production modes; use only local evaluation until the artifact-bound
-PostgreSQL process-restart/failover gate passes.
-
-Each chart release owns one server identity configured by `tenant.id`.
-Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.
-The chart never derives it from the Helm release or Kubernetes namespace.
-`durable_one_replica` requires an explicit non-`local` lowercase DNS label;
-local evaluation may leave it empty and the application resolves `local`.
+This chart translates the production `docker/docker-compose.yaml` into native
+Kubernetes resources. No existing repo files are modified.
 
 ## Prerequisites
 
 - A Kubernetes cluster (Docker Desktop K8s, OrbStack, kind, k3d, or a real cluster).
 - `kubectl` + `helm` 3.8+ installed (OCI registry support stabilized in 3.8; earlier 3.x needs `HELM_EXPERIMENTAL_OCI=1`).
-- The four DeerFlow images — either the published ones (see "Install the
+- The three DeerFlow images — either the published ones (see "Install the
   published chart" below) or built locally (see step 1).
 - An Ingress controller (e.g. ingress-nginx) if you enable `ingress`.
 
 ## Install the published chart (GHCR)
 
-The chart and all four images are published to GHCR on every `v*` release tag
+The chart and all three images are published to GHCR on every `v*` release tag
 (see `.github/workflows/container.yaml` and `chart.yaml`). Skip the build step
 and install directly:
 
@@ -48,108 +30,34 @@ helm install deer-flow oci://ghcr.io/<owner>/charts/deer-flow \
 ```
 
 where `<owner>` is the GitHub owner the chart is published from and `<version>`
-matches the release tag without the leading `v` (tag
-`v2.1.0+hartmesh.1` → `--version 2.1.0+hartmesh.1`). Helm handles the chart's
-underscore-normalized OCI storage tag internally.
+matches the release tag without the leading `v` (tag `v0.1.0` → `--version
+0.1.0`).
 
 > **Note:** the helm chart is new in 2.1.0 - no chart was published before it.
 > It publishes to `oci://ghcr.io/<owner>/charts/deer-flow` (the `charts/` prefix
-> keeps it distinct from the `deer-flow-{backend,frontend,provisioner,sandbox}` image
+> keeps it distinct from the `deer-flow-{backend,frontend,provisioner}` image
 > packages).
 
-For local evaluation, the legacy shared tag values remain supported:
+Point the chart at the published images:
 
 ```yaml
 image:
-  registry: ghcr.io/<owner>
-  tag: "vX.Y.Z-hartmesh.N"      # release-manifest.json -> images.*.tag
-  gatewayImage: <repo>-backend
-  frontendImage: <repo>-frontend
-  provisionerImage: <repo>-provisioner
+  registry: ghcr.io/<owner>     # owner prefix; images are <owner>/deer-flow-<name>
+  tag: "<version>"              # match the release tag (sans leading `v`)
   pullSecrets:
     - { name: regcred }         # only if the GHCR package is private
 ```
 
-Only a repository actually named `deer-flow` can rely on the chart's legacy
-`gatewayImage` / `frontendImage` / `provisionerImage` defaults. Other forks
-publish `<repo>-backend`, `<repo>-frontend`, `<repo>-provisioner`, and
-`<repo>-sandbox`. They must set the three legacy workload names as shown and
-set both sandbox references separately (or use the per-workload repositories
-below). New GHCR packages default to **private** — flip the package to public
-in its GHCR settings page for unauthenticated pulls, otherwise create a pull
-secret (step 1) and reference it via `image.pullSecrets`.
+The chart's `gatewayImage` / `frontendImage` / `provisionerImage` defaults
+already match the published image names (`deer-flow-backend`,
+`deer-flow-frontend`, `deer-flow-provisioner`), so only `registry` and `tag`
+are required. New GHCR packages default to **private** — flip the package to
+public in its GHCR settings page for unauthenticated pulls, otherwise create a
+pull secret (step 1) and reference it via `image.pullSecrets`.
 
 > The OCI chart and the images are versioned independently of the chart's
-> `appVersion`; for local evaluation, use the image tag recorded in
-> `release-manifest.json`. It includes the leading `v` and uses the registry-safe
-> spelling, which differs from the chart `--version` when build metadata is
-> present.
-
-For the validated one-replica profile, use immutable per-workload references
-from `release-manifest.json`. Map `images.backend` to `gateway.image`, map the
-frontend and provisioner entries directly, and map `images.sandbox` to both
-independent sandbox references. With a digest set, a workload's tag is
-documentation only and is not appended:
-
-```yaml
-deployment:
-  mode: durable_one_replica
-  persistenceTier: shared_durable
-
-tenant:
-  id: customer-a
-
-gateway:
-  image:
-    repository: ghcr.io/<owner>/<repo>-backend
-    digest: "sha256:..." # release-manifest.json -> images.backend.digest
-
-extensions:
-  # release-manifest.json -> images.backend.extension_artifact_manifest_digest
-  artifactManifestDigest: "sha256:..."
-  # `deerflow extensions config-digest --config <exact-config-path>`
-  configurationDigest: "sha256:..."
-
-frontend:
-  image:
-    repository: ghcr.io/<owner>/<repo>-frontend
-    digest: "sha256:..." # release-manifest.json -> images.frontend.digest
-
-provisioner:
-  image:
-    repository: ghcr.io/<owner>/<repo>-provisioner
-    digest: "sha256:..." # release-manifest.json -> images.provisioner.digest
-  sandboxImage: "ghcr.io/<owner>/<repo>-sandbox@sha256:..." # images.sandbox
-
-sandbox:
-  volumeMode: pvc
-
-skills:
-  existingClaim: deer-flow-skills
-
-# Production validation accepts only references to separately managed
-# credentials; inline passwords and connection URLs are rejected.
-postgresql:
-  existingSecret: deer-flow-postgres
-redis:
-  existingSecret: deer-flow-redis
-
-config: |
-  # Keep the complete chart config; the relevant production declarations are:
-  deployment:
-    profile: durable_production
-  database:
-    backend: postgres
-    postgres_url: $DATABASE_URL
-  sandbox:
-    use: deerflow.community.aio_sandbox:AioSandboxProvider
-    provisioner_url: http://provisioner:8002
-    image: "ghcr.io/<owner>/<repo>-sandbox@sha256:..." # same images.sandbox
-```
-
-`nginx.image`, `postgresql.image`, and `redis.image` accept the same optional
-`digest` form. They are not part of the current invocation qualification
-boundary, but pinning them is recommended for a reproducible full deployment.
+> `appVersion`; always set `image.tag` to the release that matches your chart
+> `--version` unless you have a reason to pin differently.
 
 ## 1. Build & push images (custom builds only)
 
@@ -160,23 +68,22 @@ images yourself from the existing Dockerfiles:
 REGISTRY=ghcr.io/yourorg
 TAG=latest
 
-# backend - build with the `postgres` extra used by the durable profile
+# backend - build with the `postgres` extra so multi-replica deploys can use
+# shared Postgres (matches the published image)
 docker build -t $REGISTRY/deer-flow-backend:$TAG --build-arg UV_EXTRAS=postgres -f backend/Dockerfile .
 # frontend
-docker build -t $REGISTRY/deer-flow-frontend:$TAG -f frontend-hm/Dockerfile .
+docker build -t $REGISTRY/deer-flow-frontend:$TAG -f frontend/Dockerfile .
 # provisioner
 docker build -t $REGISTRY/deer-flow-provisioner:$TAG -f docker/provisioner/Dockerfile docker/provisioner
-# restricted-profile sandbox
-docker build -t $REGISTRY/deer-flow-sandbox:$TAG docker/sandbox
 
 docker push $REGISTRY/deer-flow-backend:$TAG
 docker push $REGISTRY/deer-flow-frontend:$TAG
 docker push $REGISTRY/deer-flow-provisioner:$TAG
-docker push $REGISTRY/deer-flow-sandbox:$TAG
 ```
 
-These names match the legacy image defaults. New values files should set each
-workload's `image.repository`; keep the legacy block only while migrating.
+These names match the chart's `gatewayImage` / `frontendImage` /
+`provisionerImage` defaults, so only `image.registry` and `image.tag` need to
+point at them.
 
 If your registry needs auth, create a pull secret:
 
@@ -192,25 +99,12 @@ kubectl create secret docker-registry regcred \
 
 Copy and edit `values.yaml` → `my-values.yaml`. At minimum set:
 
-<!-- recommended-kubernetes-values:start -->
 ```yaml
 image:
   registry: ghcr.io/yourorg
   tag: latest
   pullSecrets:
     - { name: regcred }
-
-# Stable operator-selected identity; never derive it from the release name.
-tenant:
-  id: customer-a
-
-# Kubernetes installs should fail closed unless both sandbox claims resolve.
-sandbox:
-  volumeMode: pvc
-
-# Pre-create this read-only skills claim in the sandbox namespace.
-skills:
-  existingClaim: deer-flow-skills
 
 ingress:
   enabled: true
@@ -220,36 +114,28 @@ ingress:
     enabled: true
     secretName: deer-flow-tls
 
-# Reference a separately managed Secret; do not put provider credentials in
-# ordinary values files. It may contain OPENAI_API_KEY and other provider vars.
-existingSecret: deer-flow-provider
+secrets:
+  OPENAI_API_KEY: sk-...
+  # add channel tokens, search keys, etc. as needed
 ```
-<!-- recommended-kubernetes-values:end -->
-
-The provisioner resolves its volume mode once at startup. `sandbox.volumeMode:
-pvc` requires both the home and skills claim names; the chart supplies the home
-claim name while `persistence.home.enabled: true`, but operators must configure
-`skills.existingClaim`. Helm refuses an enabled provisioner with exactly one
-claim before install or upgrade; the provisioner's startup guard still protects
-non-Helm deployments and identifies a missing environment variable. The empty
-mode infers `pvc` only when both names are present and `hostpath` only when
-neither is present. Use explicit `hostpath` only for local or hybrid deployments
-that intentionally mount node filesystem paths—the claim values, if present,
-are ignored in that mode.
 
 The default ingress annotations permit a 100 MiB local `.skill` archive plus
 multipart framing, stream request bodies without ingress buffering, and allow
-up to 600 seconds for validation. If you replace `ingress.annotations`,
-preserve equivalent size, streaming, and response-timeout settings for your
-ingress controller or local skill uploads may fail before DeerFlow completes
-the installation.
+up to 600 seconds for a response, which the API requests that wait on a model
+call or a whole run all need — skill install and custom-skill edits (each file
+is scanned by an LLM), `/api/threads/{id}/compact`, `/api/input-polish`, and
+`/api/runs/wait`. If you replace `ingress.annotations`, preserve equivalent
+size, streaming, and response-timeout settings for your ingress controller, or
+local skill uploads may fail before DeerFlow completes the installation and
+those requests may time out while Gateway is still working — for
+`/api/runs/wait` the disconnect also cancels the run.
 
 Provide your model config under `config` (keep secrets as `$VAR` references —
-they resolve from the selected Secret):
+they resolve from the `secrets` map):
 
 ```yaml
 config: |
-  config_version: 58
+  config_version: 50
   models:
     - name: gpt-4
       use: langchain_openai:ChatOpenAI
@@ -269,6 +155,10 @@ config: |
     connection_string: $DATABASE_URL
   stream_bridge:
     type: redis   # cross-pod SSE; URL from DEER_FLOW_STREAM_BRIDGE_REDIS_URL
+  knowledge_base:
+    enabled: true
+    scope_selection_enabled: false
+    # Provider connection/retrieval settings belong on the knowledge_search tool.
   # Tools MUST be listed explicitly - the agent gets none otherwise
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The chart
   # default in values.yaml enables the sandbox tools + web tools (web_search,
@@ -280,6 +170,7 @@ config: |
     - name: file:read
     - name: file:write
     - name: bash
+    - name: knowledge
   tools:
     - name: web_search
       group: web
@@ -293,6 +184,14 @@ config: |
       group: web
       use: deerflow.community.image_search.tools:image_search_tool
       max_results: 5
+    - name: knowledge_search
+      group: knowledge
+      use: deerflow.community.ragflow.tools:knowledge_search_tool
+      base_url: http://ragflow:9380
+      api_key: $RAGFLOW_API_KEY
+    - name: list_knowledge_bases
+      group: knowledge
+      use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
     - name: bash
       group: bash
       use: deerflow.sandbox.tools:bash_tool
@@ -300,122 +199,14 @@ config: |
 ```
 
 `$DATABASE_URL` is injected from the postgres Secret (see below). The
-`checkpointer:` section keeps LangGraph checkpoints and Store data on the same
-restart-durable backend; the Store does not fall back to `database:`.
-Set `database.poolMaxOverflow: 2` to inject `DATABASE_POOL_MAX_OVERFLOW` and cap
-temporary app ORM connections on a shared PostgreSQL server. Leaving the value
-unset omits the environment variable and keeps SQLAlchemy's default of 10.
-`stream_bridge.type: redis` supplies bounded reconnect replay through the
-bundled Redis StatefulSet (or `redis.external`).
-
-For a Redis shared by tenant releases, give each release one server-owned
-identity:
-
-```yaml
-tenant:
-  id: customer-a
-```
-
-The chart computes the canonical tenant digest and public reference, then
-derives all three covered Redis component prefixes under
-`hm:v1:tenant-<digest-prefix>:redis`. Restrict the release's Redis user with
-both key/stream and pub/sub channel patterns:
-`~hm:v1:tenant-<digest-prefix>:redis*` and
-`&hm:v1:tenant-<digest-prefix>:redis*`.
-
-`redis.tenantPrefix` and `redis.keyPrefixes.{streamBridge,checkpointCache,sandboxOwnership}`
-are compatibility selectors for the first feature release containing
-server-owned tenant identity. A nonempty value must exactly equal its canonical
-projection or the matching `tenant.legacyRedisPrefixes.*` declaration produced
-from the `bind-tenant` migration command. Gateway startup then verifies the
-same value against the database binding record before opening Redis; a Helm
-declaration alone cannot authorize a legacy prefix. The conflicting field is
-named during render or startup failure. The following feature release removes
-these legacy fields. Existing keys are not searched or copied automatically;
-follow the stop/backup/inventory/offline-copy procedure in
-[the tenant migration guide](../../../backend/docs/TENANT_IDENTITY.md#database-binding-and-migration).
-
-When the `config:` blob selects `memory.manager_class: honcho`, `tenant.id` is
-also the sole tenant input for Honcho. Do not put `_hartmesh_tenant` or an
-independent workspace namespace in the blob: the Gateway injects the safe
-projection and production rejects escaping/shared overrides. Keep
-`HONCHO_API_KEY` in `existingSecret`, use an HTTPS `base_url`, and follow the
-[provider-copy migration procedure](../../../backend/packages/harness/deerflow/agents/memory/backends/honcho/README.md#existing-workspace-migration)
-before switching existing workspaces. Honcho remains an optional mutable
-context backend and is not a durable readiness dependency.
-
+`checkpointer:` section is required for multi-replica operation — the LangGraph
+Store (cross-thread memory + thread list) reads it and does not fall back to
+`database:`. `stream_bridge.type: redis` is the default and routes live SSE
+events through the bundled redis StatefulSet (or `redis.external`).
 Because `config:` is a single override blob, a partial `config:` replaces the
 chart default entirely - keep the `tools:`/`tool_groups:` block (or the agent
 will have no tools) and the `sandbox:`/`database:`/`checkpointer:`/`stream_bridge:`
 sections shown above.
-
-### Split release and sandbox namespaces
-
-By default, `namespace: ""` follows Helm's release namespace and
-`sandboxNamespace: ""` places sandbox resources there too. For a split
-deployment, pre-create a second namespace and provide same-name home and skills
-claims in both namespaces before installing the chart:
-
-```bash
-kubectl create namespace acme-sbx
-helm install deer-flow deploy/helm/deer-flow -n acme -f my-values.yaml
-```
-
-```yaml
-namespace: ""              # use `helm -n acme`
-sandboxNamespace: acme-sbx # must already exist
-
-tenant:
-  id: customer-a            # independent of either Kubernetes namespace
-
-sandbox:
-  volumeMode: pvc
-
-persistence:
-  home:
-    enabled: true           # required even when existingClaim is set
-    existingClaim: acme-home
-
-skills:
-  existingClaim: acme-skills
-```
-
-The provisioner remains in `acme`, but its namespaced Role and RoleBinding are
-rendered into `acme-sbx`; the binding subject is the provisioner ServiceAccount
-in `acme`. `K8S_NAMESPACE=acme-sbx` selects where sandbox resources are
-created, while `PROVISIONER_GATEWAY_NAMESPACE=acme` deliberately remains the
-Gateway identity namespace checked by TokenReview. Accepted-skill NetworkPolicy
-peers select Gateway and provisioner Pods in that release namespace.
-
-The chart never creates `sandboxNamespace` and does not grant namespace-create
-RBAC. Its ClusterRole grants only name-pinned `get` for that Namespace object
-and TokenReview create. The provisioner's `PROVISIONER_CREATE_NAMESPACE` escape hatch defaults to
-`false`; set it to `true` only for operator-controlled single-namespace local or
-Compose environments. The repository's Compose files opt in explicitly.
-
-When `persistence.home.existingClaim` is set, the chart does not create the
-home PVC. Both the Gateway home volume and provisioner `USERDATA_PVC_NAME` use
-the existing claim. Keep `persistence.home.enabled: true`, because disabling it
-also suppresses the provisioner environment variable.
-
-### Extension artifact fence
-
-Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source.
-
-The Gateway image embeds `/app/hartmesh/extension-artifacts.json` after its
-locked dependency sync. Set `extensions.artifactManifestDigest` to the value in
-release-manifest schema 2, and calculate `extensions.configurationDigest` from
-the exact ordered `plugins:` block with `deerflow extensions config-digest
---config <path>`. Both fields require exact lowercase SHA-256 values when
-`deployment.mode=durable_one_replica` and any plugin is enabled. The rendered
-Deployment passes only these expected digests; the manifest and plugin config
-do not enter a ConfigMap through these values.
-
-Keep plugin credentials in existing Secret/env mechanisms, never in either
-digest value. A mismatch makes Gateway startup/readiness fail before extension
-import. For migration and rollback, use the matching image, source lock,
-artifact digest, configuration digest, and config as one unit; see the
-[provenance guide](../../../docs/EXTENSION_ARTIFACT_PROVENANCE.md).
 
 `extensionsConfig` is an initial seed, not a live read-only mount. An init
 container copies it into
@@ -445,321 +236,6 @@ kubectl -n deer-flow port-forward svc/nginx 2026:2026
 curl http://localhost:2026/health          # gateway health via nginx
 ```
 
-The Gateway pod uses `GET /ready` for readiness and `GET /health` for liveness.
-Readiness includes operator-required authoritative capability health, lifecycle-cursor
-and transactionally maintained retained-cardinality/bound integrity, database availability, and the configured deployment
-durability promise, but its unauthenticated body
-is deliberately only `{"status":"ready"}` or `{"status":"not_ready"}`. Defaults use
-`deployment.mode: local_evaluation` and `deployment.profile: local_development`,
-so tag-based images remain convenient without implying production qualification.
-The validated mode requires one replica, pinned Gateway/provisioner images,
-`shared_durable`/PostgreSQL storage, and the runtime's
-`durable_production` profile. Safe provenance, persistence tier, qualification
-state, and safe admission-readiness reason codes are available only to an authenticated administrator
-at `GET /api/runtime/v1/deployment`; portable runtime support remains the strict
-`GET /api/runtime/v1/capabilities` record. Plugin registrations, required
-capabilities, `agent_storage`, `dedupe_storage`, deployment profile, and their
-derived manifest/storage composition are startup-only; deploy a restart to adopt
-changes, while in-flight invocations stay pinned to the generation they accepted.
-
-Signed GitHub ingress also participates in that deployment truth. The default
-`config.dedupe_storage.backend: auto` selects PostgreSQL leased receipt storage when
-the chart's database backend is PostgreSQL; an explicit `postgres` is equivalent.
-`memory` retains local best-effort behavior and is rejected by the
-`durable_production` chart contract. The authenticated deployment report exposes a
-versioned `native_ingress` map with `durable` or `best_effort` per enabled source.
-Durable requires both current HMAC authentication and PostgreSQL receipt storage, and
-means the webhook commits every bounded fan-out receipt before acknowledgment. The
-explicit unverified local-development mode remains `best_effort` even with PostgreSQL;
-it cannot satisfy `durable_production`. Removing the HMAC secret makes the Gateway
-not-ready and requests fail closed rather than falling through to that development mode;
-it does not mean that the process-local `MessageBus` is durable, and it does not claim
-multi-replica channel ownership. Verified-ingress eligibility is frozen at Gateway
-composition, so adding a previously absent HMAC secret requires restart; rotating an
-already configured nonblank secret remains request-time behavior.
-
-The default internal health probe timeout is 2 seconds and the complete readiness evaluation
-is capped at 5 seconds. The chart's Gateway readiness probe uses `timeoutSeconds: 6`, so
-Kubernetes supplies bounded headroom rather than aborting an evaluation first. Readiness
-fails on its first unsafe result; liveness uses an independent failure threshold of three.
-Override these through `config.deployment.readiness` and `gateway.readinessProbe` only while
-preserving `readinessProbe.timeoutSeconds > overall_timeout_seconds >
-capability_probe_timeout_seconds`. Render validation also requires the probe
-period to cover its timeout and any explicit termination grace to cover the
-application shutdown budget, preStop delay, and scheduling headroom.
-
-### Deployment identity and qualification
-
-`deployment.provenance.sourceRevision` and a pinned Gateway digest are injected
-through bounded trusted environment fields and appear only in the administrator
-deployment report. `deployment.qualificationEvidence` accepts completed safe
-identifiers, artifact SHA-256 digests, and RFC3339 completion times. Scoped
-evidence additionally requires a bounded `scope` and exact `status: passed`;
-legacy three-field records remain readable. It is empty by default, so the
-report says `status: unqualified` and `trust: none_declared`; Helm never invents
-evidence. A configured reference retains v1 `status: qualified` for compatibility
-but explicitly reports `trust: operator_asserted`. It does not mean the Gateway
-fetched or verified the artifact. Neither configuration accepts credentials or
-arbitrary metadata.
-
-#### Exact two-Gateway qualification
-
-`deployment.mode=durable_two_gateway_v1` is a separate exact profile, not a
-replica-count variant of `durable_one_replica`. It requires exactly two Gateway
-replicas; seven digest-pinned images; one explicit tenant; shared external
-PostgreSQL and Redis Secrets; database-backed checkpoint, run-event, metadata,
-dedupe, scheduler, and MCP state; tenant-prefixed Redis adapters; existing home
-and skills RWX claims; the in-cluster AIO provisioner with
-`rwx_verified_copy_v2`; active multi-instance scheduler and MCP services; and
-the exact extension artifact/configuration/capability tuple for
-`durable_two_gateway_v1_postgres_redis_aio_rwx`.
-
-Both Gateway replicas must also receive identical dedicated MCP replay and
-execution-policy HMAC keyrings through Secrets referenced by
-`gateway.extraEnvFrom`. The Gateway binds versioned non-secret confirmations
-of every retained key and active ID into topology compatibility; secrets do
-not enter Helm values, topology rows, or evidence. Any
-additive/removal/active-key change therefore requires the documented quiesced
-stop/restart sequence, not a rolling per-pod rotation.
-
-Render validation rejects any other replica count, HPA, local/memory/JSONL
-stores, inline database or Redis credentials, mutable image tags, OpenSandbox,
-non-RWX claims, IM connectors/webhook ingress, or unqualified extension service.
-It emits a `Recreate` Gateway Deployment, a one-available PDB, preferred
-anti-affinity/topology spread, and a pre-install/pre-upgrade migration Job using
-the exact Gateway digest. Gateway containers verify the head and do not migrate.
-
-The optional `deployment.qualificationCandidate` path exists only for the live
-harness. It requires a disposable `hartmesh-qualification-*` namespace, cannot
-declare passing evidence, and the backend accepts it only with its internal test
-runtime flag. Never route production traffic to a candidate.
-
-The candidate does not turn every orphan into a retry. Recovery policy is
-server-selected and persisted once per newly accepted run: ordinary,
-one-replica, and historical rows retain `terminalize_v1`, while only the exact
-two-Gateway candidate stamps `exact_two_takeover_v1`. Exact-two execution
-takeover is currently unavailable for every orphan: the Gateway's unconditional eligibility
-gate runs before owner CAS, and setting
-`HARTMESH_EXECUTION_RECOVERY_CLAIMS_ENABLED=true` cannot bypass it. Expired
-exact-two rows remain fail-closed rather than falling through to legacy
-terminalization. Scenarios 4 and 8 therefore remain mandatory and unpassed;
-projected Secret rotation does not count as linearizable old-owner revocation.
-Switching back to
-`durable_one_replica` therefore changes only future admissions after the
-required drain; it does not rewrite rows or require a schema downgrade. See the
-qualification guide for the exact drain and rollback conditions.
-
-The repository does not bundle a passing artifact. A reference under
-`deployment.qualificationEvidence` is still `operator_asserted`; Helm cannot
-read the referenced bytes and deliberately refuses to unlock the profile from
-that reference. Run the offline verifier with independent expected subjects and
-retain its `external_evidence_verified` result as release evidence. Enabling
-production requires a later reviewed change that bundles authority for that
-exact verified artifact; this checkout remains candidate-only.
-The dedicated manual workflow is
-`.github/workflows/multi-gateway-qualification.yml`. Its bounded subject JSON
-must include three distinct digest-pinned Gateway binaries: the target, a
-compatible predecessor used for the stop/migrate/start proof, and an
-incompatible negative control. Operator inputs supply immutable expected
-subjects only; the harness itself collects Kubernetes UID references, topology
-registrations, ACL outcomes, and scenario counters from the live cluster.
-
-`durable_two_gateway_v1` is qualified only for the exact two-replica PostgreSQL + Redis + AIO/RWX profile and artifact. It does not claim arbitrary scaling, IM connector HA, cross-region operation, or zero-downtime upgrades.
-
-See the [complete topology, live-gate, stop/migrate/start, rollback, and
-troubleshooting guide](../../../docs/MULTI_GATEWAY_QUALIFICATION.md). Missing
-real Kubernetes, PostgreSQL, Redis, routing, or RWX infrastructure is an unpassed
-gate, never a pass or harmless skip.
-
-For `durable_one_replica_pod_recovery`, the operator copies only an artifact-bound passing
-live result into `deployment.qualificationEvidence`. The Gateway reports that bounded
-assertion through the authenticated administrative deployment report. A release or
-deployment controller must separately verify the artifact digest and exact image/chart,
-configuration, Alembic head, qualification run/namespace, scope, and scenario set. A
-collected test, default skip, process-loss simulation, image build, Helm render, or declared
-reference alone is not externally verified qualification evidence.
-
-#### Opt-in real-pod recovery qualification
-
-`backend/tests/kubernetes/test_durable_invocation_pod_recovery.py` qualifies the
-exact chart checkout and `repository@sha256` Gateway image against a disposable
-cluster supplied through `KUBECONFIG`. It uses only Helm and kubectl, never
-changes the current context, creates only the explicitly named
-`hartmesh-qualification-*` namespace, and keeps its PostgreSQL and Redis pods
-alive while replacing the one Gateway pod. The ordinary test suite collects and
-skips it; that skip is an unpassed release gate, not evidence.
-
-```bash
-export DEERFLOW_TEST_KUBERNETES=1
-export KUBECONFIG=/absolute/path/to/disposable-kubeconfig
-export DEERFLOW_TEST_KUBERNETES_CONTEXT=kind-hartmesh-qualification
-export DEERFLOW_TEST_KUBERNETES_CONFIRM_CONTEXT="$DEERFLOW_TEST_KUBERNETES_CONTEXT"
-export DEERFLOW_TEST_KUBERNETES_NAMESPACE=hartmesh-qualification-20260808
-export DEERFLOW_TEST_KUBERNETES_QUALIFICATION_ID=pod-recovery-20260808
-export DEERFLOW_TEST_GATEWAY_IMAGE_REPOSITORY=registry.example/hartmesh/gateway
-export DEERFLOW_TEST_GATEWAY_IMAGE_DIGEST=sha256:<64-lowercase-hex>
-export DEERFLOW_TEST_INCOMPATIBLE_GATEWAY_IMAGE_REPOSITORY=registry.example/hartmesh/gateway-negative-control
-export DEERFLOW_TEST_INCOMPATIBLE_GATEWAY_IMAGE_DIGEST=sha256:<different-64-lowercase-hex>
-export DEERFLOW_TEST_KUBERNETES_EVIDENCE="$PWD/artifacts/kubernetes-qualification.json"
-cd backend
-PYTHONPATH=. uv run pytest -m kubernetes_contract -v -s
-```
-
-Nonempty durable skills use a separate, explicit evidence scope. It reuses the
-same marked test, confirmed context, namespace confinement, chart, PostgreSQL,
-Redis, and offline verifier, but additionally requires two schedulable nodes,
-an RWX storage class, and exact provisioner/verifier/sandbox image identities.
-The verifier container is shipped in the provisioner image, so those two
-operator-supplied references and digests must match exactly. The v2 evidence
-schema and offline expectation reject any other combination rather than
-accepting a structurally impossible qualification artifact.
-
-```bash
-export DEERFLOW_TEST_KUBERNETES_SCOPE=durable_one_replica_rwx_verified_copy_v2_nonempty_skill
-export DEERFLOW_TEST_PROVISIONER_IMAGE_REPOSITORY=registry.example/hartmesh/provisioner
-export DEERFLOW_TEST_PROVISIONER_IMAGE_DIGEST=sha256:<64-lowercase-hex>
-export DEERFLOW_TEST_VERIFIER_IMAGE_REPOSITORY="$DEERFLOW_TEST_PROVISIONER_IMAGE_REPOSITORY"
-export DEERFLOW_TEST_VERIFIER_IMAGE_DIGEST="$DEERFLOW_TEST_PROVISIONER_IMAGE_DIGEST"
-export DEERFLOW_TEST_SANDBOX_IMAGE_REPOSITORY=registry.example/hartmesh/sandbox
-export DEERFLOW_TEST_SANDBOX_IMAGE_DIGEST=sha256:<64-lowercase-hex>
-export DEERFLOW_TEST_KUBERNETES_RWX_STORAGE_CLASS=<rwx-storage-class>
-PYTHONPATH=. uv run pytest -m kubernetes_contract -v -s
-```
-
-That v2 run seeds bounded deterministic skill bytes and allowed-tool metadata,
-requires Gateway and accepted sandbox Pods on different Ready schedulable nodes,
-observes the TokenReview-protected materialization and a real Lease renewal,
-faults Gateway and Lease ownership, proves cleanup of the exact owned sandbox
-resources, verifies the v2 proof against independent subjects, then embeds it in
-a canonical `deerflow.accepted-sandbox-qualification/v1` companion.
-The opt-in GitHub Actions Kubernetes qualification workflow selects this v2
-scope. Its dispatch therefore requires pinned Gateway, provisioner, and AIO
-sandbox images plus an RWX storage class. The runner creates the accepted
-sandbox through the provisioner-backed AIO provider and executes a bounded
-operation through `AcceptedSandboxSession` inside the real sandbox container.
-At a deterministic post-validation barrier it deletes the provider Lease;
-AIO's declared non-atomic operation profile must record exactly one raced call,
-then refuse the next call and stale terminal success. The lane therefore also
-serves as the hardened-sandbox smoke for the chart's restricted security baseline.
-Lease owner loss deliberately fails closed; this scope does not claim same-run
-sandbox rehydration or replacement.
-A renewal is proven only when the Lease keeps the exact UID, accepted-attempt
-holder, and qualified duration while its bounded RFC3339 `spec.renewTime`
-strictly advances. A `metadata.resourceVersion` change by itself is not renewal
-evidence. Offline fakes pin this predicate and the v2 orchestration, but only an
-artifact from the opt-in live run qualifies cross-node Kubernetes behavior.
-The companion also binds the shipped AIO capability profile, explicit race
-facts, and the portable policy sampled from live Pod Security, storage,
-runtime-class, TokenReview, image, and reconciliation settings. Namespace and
-volume identities must exist in each fresh provisioner sample but are not
-portable artifact fields. A v2 proof alone cannot unlock execution.
-
-The live runner publishes the companion into a read-only ConfigMap mount, pins
-its exact byte digest, turns candidate mode off, performs the final Helm upgrade,
-then requires one fresh accepted invocation to succeed. For an independently managed deployment, use
-the equivalent shape (the artifact is bounded evidence, not a credential):
-
-```yaml
-gateway:
-  extraVolumes:
-    - name: accepted-sandbox-qualification
-      configMap:
-        name: accepted-sandbox-qualification
-        items:
-          - key: evidence.json
-            path: evidence.json
-  extraVolumeMounts:
-    - name: accepted-sandbox-qualification
-      mountPath: /var/run/hartmesh/qualification
-      readOnly: true
-
-config: |
-  sandbox:
-    use: deerflow.community.aio_sandbox:AioSandboxProvider
-    provisioner_url: http://deer-flow-provisioner:8002
-    accepted_skill_projection_profile: rwx_verified_copy_v2
-    accepted_material_qualification_evidence: /var/run/hartmesh/qualification/evidence.json
-    accepted_material_qualification_digest: sha256:<artifact-sha256>
-    accepted_material_qualification_max_age_seconds: 2592000
-```
-
-The Gateway parses canonical companion bytes, enforces freshness, checks the
-embedded v2 image subjects and explicit race facts, and compares capability and
-portable topology-policy digests with a fresh authenticated provisioner sample.
-That sample must resolve the current namespace UID, ServiceAccount, and each
-bound PVC UID plus its `spec.volumeName`; it does not claim a PV UID. Those
-deployment-specific values are deliberately excluded from the artifact so
-qualification output remains usable after its temporary namespace is deleted. A standalone
-v2 proof or
-`deployment.qualificationEvidence` report entry alone does not satisfy this
-runtime gate. `deployment.qualificationCandidate` is accepted only in a
-`hartmesh-qualification-*` namespace with matching internal live-test and fault
-flags; candidate status is never production qualification.
-
-The live runner applies the following offline verification to the subordinate v2
-bytes before it can construct the companion. Supply expected subjects from the
-deployment controller, not from untrusted evidence fields:
-
-```bash
-cd backend
-PYTHONPATH=. uv run python scripts/verify_qualification_evidence.py \
-  /operator/artifacts/kubernetes-qualification.json \
-  --declared-digest "sha256:<report-artifact-digest>" \
-  --qualification-id "pod-recovery-20260808" \
-  --image-digest "sha256:<deployed-image-digest>" \
-  --chart-version "<deployed-chart-version>" \
-  --chart-digest "sha256:<deployed-chart-digest>" \
-  --configuration-digest "sha256:<rendered-qualification-config-digest>" \
-  --migration-head "<expected-alembic-head>" \
-  --scope "durable_one_replica_pod_recovery" \
-  --namespace "hartmesh-qualification-20260808" \
-  --required-scenario accepted_before_client_response \
-  --required-scenario accepted_before_worker_start \
-  --required-scenario active_execution \
-  --required-scenario terminal_before_lifecycle_commit \
-  --required-scenario graceful_rollout_termination \
-  --required-scenario forced_kill_after_graceful_deadline
-```
-
-For the nonempty-skill v2 scope, pass the same Gateway digest through
-`--image-digest`, add `--provisioner-image-digest`,
-`--verifier-image-digest`, and `--sandbox-image-digest`, select scope
-`durable_one_replica_rwx_verified_copy_v2_nonempty_skill`, and independently
-require these five scenarios: `nonempty_material_execution`,
-`token_review_and_lease_renewal`, `gateway_replacement_cleanup`,
-`sandbox_owner_loss_cleanup`, and `process_loss_cleanup`. Do not derive the
-expected scenario set from the artifact being verified. The verifier rejects a
-v1 artifact under the v2 expectation and vice versa.
-
-Success is one bounded JSON record with `status: verified` and
-`trust: external_evidence_verified`; every mismatch exits nonzero with a stable code. The
-verifier is offline and never follows report paths or URLs, reads kubeconfig, or emits pod
-logs. This digest/exact-subject check is not signature verification or remote attestation.
-
-An enabled run fails for missing CLIs or inputs, unreachable infrastructure,
-any skipped scenario, an unreached barrier, timeout, incomplete coverage, or an
-unwritable evidence file. Failure preserves bounded namespace logs and the
-namespace; success deletes only the namespace the runner created.
-`.github/workflows/kubernetes-qualification.yml` exposes the same path as a
-manual job using the `QUALIFICATION_KUBECONFIG_B64` secret. Evidence records the
-image/chart/config/schema identities, exact PostgreSQL/Redis pod, volume, and
-image continuity plus their versions, confirmed context, operator-reported
-driver, all six scenario outcomes, and timestamp. It proves
-one-replica pod recovery only—not failover, active-active operation, scheduler
-HA, or zero-downtime rollout.
-
-### ServiceAccount, metadata, and referenced configuration
-
-`serviceAccount.create` creates a Gateway account with no RBAC and with API-token
-automount disabled. Set `create: false` and `name` to select an existing account.
-The provisioner has an independent `provisioner.serviceAccount` selector; its
-existing Role/RoleBinding remain limited to sandbox lifecycle operations.
-
-Gateway pod labels/annotations are bounded and chart-owned selector/checksum
-keys are reserved. `gateway.extraEnvFrom`, `gateway.extraVolumes`, and
-`gateway.extraVolumeMounts` accept structured Secret/ConfigMap references. Put
-only object names and mount metadata in values—never secret contents.
-
 Hit the Ingress host (map it in `/etc/hosts` for local clusters) to load the UI.
 
 Provisioner sanity check:
@@ -776,151 +252,62 @@ kubectl -n deer-flow exec deploy/deer-flow-provisioner -- curl -s localhost:8002
   (key `database-url`) and injected as `DATABASE_URL`; `config.yaml` references
   it as `$DATABASE_URL` in `database.postgres_url`. Schema is bootstrapped
   automatically on gateway startup (alembic `create_all` + `stamp head`).
-  The local-evaluation profile can generate its own Secret. The validated
-  production profile requires a separately managed Secret, whether PostgreSQL
-  is bundled or external. The application binds each schema to exactly one
-  tenant reference. Different tenant releases must use separate databases or
-  PostgreSQL schemas; the tenant columns are not a claim of shared-schema
-  row-level multi-tenancy. To use a managed database:
+  For real HA, disable the bundled instance and point at a managed DB with a
+  full DSN (the chart wraps it into the Secret) or with a Secret you manage
+  (key `database-url`):
   ```yaml
   postgresql:
     enabled: false
     external:
-      existingSecret: deer-flow-managed-postgres # key: database-url
+      databaseUrl: postgresql://deerflow:changeme@mydb.example.com:5432/deerflow
+      # or: existingSecret: my-deerflow-db   # key `database-url`
   ```
-- **Graceful shutdown & memory drain.** The Gateway owns one ordered deadline: freeze admission; stop channels and scheduler; interrupt/drain local runs; flush memory; close dependencies. Application phase budgets live in `config -> deployment.shutdown`, while `memory.shutdown_flush_timeout_seconds` owns the memory phase. The durable profile also requires a finite `config.database.command_timeout`; `null` remains available only to non-durable local profiles because an unbounded database command could otherwise defeat the admission and shutdown budgets. By default the chart computes `terminationGracePeriodSeconds` from their sum plus `gateway.preStopSleepSeconds` (default 5s) and `gateway.shutdownSchedulingHeadroomSeconds` (default 3s). Set `gateway.terminationGracePeriodSeconds` only for an explicit override, and never below that derived requirement. A timed-out run remains subject to durable orphan recovery after restart. The opt-in suite above, not this configuration statement, is the live one-replica pod-termination evidence.
-- **Gateway replicas.** The supported local and production topology is one
-  Gateway replica. `durable_one_replica` rejects any other count, and the
-  Gateway Deployment uses `strategy.type: Recreate` so an upgrade terminates
-  the old execution owner before creating its replacement. The rendered
-  strategy explicitly clears previously defaulted RollingUpdate settings
-  during upgrade. Replacement causes an availability gap; it is not a
-  zero-downtime claim. Those one-replica modes do not install a
-  PodDisruptionBudget or topology spread. The unavailable exact-two
-  qualification candidate renders a one-pod PDB plus required anti-affinity
-  and topology spread as scheduling safeguards; they are not availability or
-  zero-downtime evidence. No mode installs a process leader-election or
-  rolling-zero-downtime policy.
+
+  URL-encode special characters in the DSN password (for example, `@` as
+  `%40`). The chart uses an external `databaseUrl` verbatim and does not
+  rewrite the DSN in a user-managed Secret.
+
+- **Graceful shutdown & memory drain.** The gateway pod sets `terminationGracePeriodSeconds` (default 45s, overridable via `gateway.terminationGracePeriodSeconds`) plus an optional `preStop` sleep (`gateway.preStopSleepSeconds`, default 5s). The grace period MUST exceed the Gateway's graceful-shutdown work — channel stop (~5s) plus the memory-queue drain (`memory.shutdown_flush_timeout_seconds`, default 30s) plus a buffer — because the drain runs on a daemon thread and K8s SIGKILLs anything still running at the end of the grace window. K8s defaults to 30s, which SIGKILLs the drain mid-flight and silently re-introduces the memory loss the drain is fixing. **When you raise `memory.shutdown_flush_timeout_seconds`, raise `gateway.terminationGracePeriodSeconds` to match** (channel stop + drain + buffer).
+- **Gateway replicas.** Postgres + the Redis stream bridge together make the
+  gateway's *persisted* state (checkpointer + run/thread metadata) and *live
+  stream* path cross-pod-safe. The default is still 1 replica: **do not raise
+  `gateway.replicas` past 1 yet.** Run control — `create_or_reject` dedup,
+  `cancel`, and orphan reconciliation — is still worker-local (in-process
+  `asyncio.Lock` + in-memory `record.task`), tracked by [issue
+  #3948](https://github.com/bytedance/deer-flow/issues/3948). With >1 replica a
+  double-submit can create two runs on one thread (checkpoint corruption), a
+  cancel can land on a non-owner pod (409), and a crashed pod's runs stay
+  `pending`/`running` forever. Stay on 1 replica until that work lands.
 - **Scheduled task recovery.** If a deployment explicitly enables
   `scheduler.multi_instance: true`, it must use shared Postgres,
   `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`.
   Scheduler startup then preserves live scheduled runs owned by another Pod,
-  atomically terminalizes only expired `terminalize_v1` runs, leaves exact-two
-  rows fail-closed while execution takeover is unavailable, and fences stale
-  post-launch bookkeeping. `max_concurrent_runs` is a shared global cap across Pods,
-  including pre-launch dispatch reservations. These startup-only controls do
-  not by themselves qualify scheduler HA. The candidate-only exact-two profile
-  adds its own stricter topology and live-evidence contract.
+  atomically takes over only expired leases, and fences stale post-launch
+  bookkeeping. `max_concurrent_runs` is a shared global cap across Pods,
+  including pre-launch dispatch reservations. Restart all Gateway Pods after
+  changing these startup-only settings. This does not remove the broader
+  Gateway replica limitations described above.
 - **Redis stream bridge.** A bundled single-instance redis StatefulSet
   (`redis.enabled: true`, `redis:7-alpine`) runs in the namespace and the
   gateway connects via the in-cluster Service. Per-run SSE events are stored in
-  Redis Streams so reconnect resumes from `Last-Event-ID`. The URL is
-  auto-generated into a Secret for local evaluation (key `redis-url`) and injected as
+  Redis Streams (PR #3191) so a client connected to any gateway pod receives
+  live events and reconnect resumes from `Last-Event-ID`. The URL is
+  auto-generated into a Secret (key `redis-url`) and injected as
   `DEER_FLOW_STREAM_BRIDGE_REDIS_URL`; `config.yaml` sets `stream_bridge.type:
-  redis` by default. Production validation rejects inline passwords and URLs;
-  set `redis.existingSecret` for bundled Redis or
-  `redis.external.existingSecret` for managed Redis (key `redis-url`). For a
-  Redis shared by tenant releases, set `tenant.id`; the chart derives all
-  component names under `hm:v1:tenant-<digest-prefix>:redis`. Restrict that
-  release's Redis user with both
-  `~hm:v1:tenant-<digest-prefix>:redis*` and
-  `&hm:v1:tenant-<digest-prefix>:redis*`. Legacy `redis.tenantPrefix` and
-  `redis.keyPrefixes.*` fields select only a canonical projection or an exact
-  `tenant.legacyRedisPrefixes.*` value recorded by the migration command;
-  Gateway startup verifies the database record. These
-  environment variables are injected only into the Gateway; the provisioner
-  does not run any of the three Redis-backed subsystems.
+  redis` by default. No-auth by default (ClusterIP isolation, matching compose);
+  set `redis.auth.password` to enable AUTH. For a managed Redis, disable the
+  bundled instance and point at it via `redis.external`.
 - **Persistence.** A PVC (`<release>-home`) backs `/app/backend/.deer-flow`
   (sqlite DB, memory, custom agents, per-thread user-data). The gateway mounts
   it with `subPath: deer-flow` so the layout matches the provisioner's PVC
   user-data mode. Default `ReadWriteOnce`; use `ReadWriteMany` (NFS) on
-  multi-node clusters so sandbox Pods on other nodes can mount it. Set
-  `persistence.home.existingClaim` to consume a pre-created claim instead;
-  leave `persistence.home.enabled: true` so the provisioner receives the same
-  claim name. Kubernetes deployments should set `sandbox.volumeMode: pvc` and
-  also configure `skills.existingClaim`; Helm rejects a half-configured claim
-  pair instead of installing a crashlooping provisioner. Gateway, PostgreSQL,
-  and Redis PVC mounts use `fsGroupChangePolicy: OnRootMismatch`, avoiding a
-  recursive ownership walk when the volume root already has the expected group.
+  multi-node clusters so sandbox Pods on other nodes can mount it.
 - **Provisioner RBAC.** The provisioner gets a ServiceAccount with a namespaced
-  Role in the sandbox namespace (the exact Pod, Service, Secret,
-  NetworkPolicy, Lease, and PVC-read verbs used by the provisioner) and a
-  ClusterRole containing name-pinned namespace get plus TokenReview create. It uses
-  in-cluster service-account credentials — no kubeconfig mount. The Role applies
-  to every named resource kind in the sandbox namespace, not only label-matched sandbox objects;
-  Kubernetes RBAC cannot narrow these verbs by attempt label. Treat the
-  provisioner as a trusted sandbox-namespace control-plane component. Unused
-  list/watch/pod-log/update/patch/pods-exec/events verbs were dropped (audited against
-  `docker/provisioner/app.py`).
-- **Immutable durable skills.** Set
-  `provisioner.acceptedSkillProjectionProfile: rwx_verified_copy_v2`, pin both
-  `provisioner.image.digest` and `provisioner.sandboxImage` by SHA-256 digest, and
-  use `persistence.home.accessMode: ReadWriteMany`. Helm rejects RWO rather than
-  adding same-node affinity. The provisioner readiness probe uses `/ready`, which
-  confirms the configured claim is `Bound` and actually reports RWX before admitting the profile.
-  Each sandbox init verifies the content-addressed snapshot into a private
-  `emptyDir`; the main container mounts only that copy read-only and is accessed
-  through a per-attempt capability gate. The receipt binds the admitted Pod isolation
-  digest, Lease and Pod UIDs, exact NetworkPolicy UID/spec, immutable Secret identities,
-  pinned images, verifier receipt, and final materialization digest. A Kubernetes Lease owns every accepted
-  attempt; response-loss replay, renewal, reuse, and execution fencing re-read that complete
-  tuple, while bounded expiry
-  reconciliation cleans process-lost attempts. Scheduling only prefers another
-  Gateway node when available and never requires same-node placement. Gateway-to-provisioner
-  management calls use a rotating projected ServiceAccount token with a dedicated audience; the
-  provisioner validates the exact Gateway namespace and ServiceAccount through TokenReview. This
-  management authentication is also rendered when the immutable projection profile is disabled,
-  because legacy remote AIO calls use the same protected API. Local evaluation can leave the profile
-  `disabled`, in which case remote durable runs remain empty-skill-only. Legacy v1
-  receipts are readable compatibility records but also remain empty-skill-only. Fake-Kubernetes
-  and rendered-chart tests prove the contract and drift fences, not live cross-node CNI/RWX;
-  exact-artifact Kubernetes qualification remains a separate opt-in release gate.
-
-- **OpenSandbox accepted material remains unavailable.** The chart does not
-  expose `durable_one_replica_opensandbox_immutable_skills_v1` or render a way
-  around Gateway startup validation. OpenSandbox server 0.1.14 / SDK 0.1.15
-  lacks the atomic ownership and resolved-image readback required by the profile;
-  candidate trusted-setup surfaces remain live-unqualified. An ordinary OpenSandbox provider config
-  is therefore empty-skill-only; a non-disabled accepted-material profile is a
-  startup error even when its requested image uses an OCI digest. SDK-surface
-  evidence and operator assertions are not live qualification. See the
-  [Phase 0 decision](../../../backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md).
-
-## Upgrading existing values
-
-**Sandbox volume render guard:** a bare default install is now refused at render
-time instead of creating a crashlooping provisioner. Existing installations'
-values must either configure `skills.existingClaim` alongside enabled home persistence,
-disable both claim sources, or explicitly set `sandbox.volumeMode: hostpath` for
-the legacy local/hybrid layout before `helm upgrade`.
-
-**Namespace default change:** `namespace` now defaults to `""`, so Helm's
-`-n/--namespace` selects the release namespace. Existing installations that
-relied on the old implicit `deer-flow` value must install with `-n deer-flow`
-or set `namespace: deer-flow` explicitly. This is the one intentional default
-behavior change in the split-namespace patch; empty `sandboxNamespace` otherwise
-preserves single-namespace sandbox placement.
-
-Legacy `image.registry`, `image.tag`, and the three image-name keys continue to
-render tag references. Existing raw `config:` overrides remain valid, but an
-override that changes `database.backend` must also set the matching
-`deployment.persistenceTier`; the chart will not render a contradictory storage
-claim. The new `deployment.mode` defaults to `local_evaluation`; adopting
-production validation is deliberate: migrate to per-workload
-repositories/digests and externally managed credential Secrets, set
-`persistenceTier: shared_durable`, and set the embedded runtime config profile
-to `durable_production`. Helm then rejects invalid digests, process-local
-storage, multiple Gateway replicas, inline credentials, and unsafe
-probe/shutdown timing before an install or upgrade. This validation is
-deployment reproducibility, not evidence that live Kubernetes
-termination/recovery has been qualified.
-- **Sandbox volumes.** Set `sandbox.volumeMode: pvc` and provide
-  `skills.existingClaim`; the enabled home persistence supplies the other claim
-  name. Empty or `pvc` mode now rejects exactly-one-claim configurations during
-  Helm rendering. Select `hostpath` explicitly only to preserve the legacy
-  local/hybrid layout.
-- **Skills.** Disabled by default (an emptyDir at `/app/skills` shadows the
-  public skill library the backend image carries). Populate via
+  Role (get/list/watch/create/delete on pods + services) and a narrow ClusterRole
+  (namespace get/create). It uses in-cluster service-account creds — no
+  kubeconfig mount. The unused update/patch/pods-exec/events verbs were dropped
+  (audited against `docker/provisioner/app.py`).
+- **Skills.** Disabled by default (emptyDir at `/app/skills`). Populate via
   `skills.existingClaim` or `skills.configMap`, or bake skills into a custom
   gateway image.
 
@@ -933,13 +320,12 @@ container escalates privileges or runs as uid 0.
 
 | workload | runAsUser | fsGroup | writable-path handling |
 |---|---|---|---|
-| gateway | 1000 | 1000 | `.deer-flow` PVC group-writable via fsGroup with `OnRootMismatch`; `PYTHONDONTWRITEBYTECODE=1` suppresses `.pyc` writes; `UV_CACHE_DIR=/tmp` |
-| frontend | 1000 (`node`) | 1000 | `emptyDir` at `/app/frontend/.next/cache` (root-owned in the image); fsGroup uses `OnRootMismatch` for uniformity |
+| gateway | 1000 | 1000 | `.deer-flow` PVC group-writable via fsGroup; `PYTHONDONTWRITEBYTECODE=1` suppresses `.pyc` writes; `UV_CACHE_DIR=/tmp` |
+| frontend | 1000 (`node`) | 1000 | `emptyDir` at `/app/frontend/.next/cache` (root-owned in the image) |
 | nginx | 101 (`nginx`) | 101 | command writes the rendered config to `/tmp/nginx.conf` and loads `nginx -c /tmp/nginx.conf` (since `/etc/nginx` is root-owned); `emptyDir` at `/var/cache/nginx` |
 | provisioner | 1000 | — | no PVC; `PYTHONDONTWRITEBYTECODE=1` |
-| sandbox | 1000 (`gem`) | 1000 | repository-built image pre-seeds vendor runtime paths; sandbox Pod mounts stay at `/mnt/user-data` and `/mnt/skills`; fsGroup uses `OnRootMismatch`, so pre-owned volumes (1000:1000) are not re-walked at mount |
-| postgres | 999 (`postgres`) | 999 | official `postgres:16` entrypoint detects non-root and skips the chown/gosu dance; data PVC group-writable via fsGroup with `OnRootMismatch` |
-| redis | 999 (`redis`) | 999 | official `redis:7-alpine` entrypoint detects non-root and skips the gosu dance; data PVC group-writable via fsGroup with `OnRootMismatch` |
+| postgres | 999 (`postgres`) | 999 | official `postgres:16` entrypoint detects non-root and skips the chown/gosu dance; data PVC group-writable via fsGroup |
+| redis | 999 (`redis`) | 999 | official `redis:7-alpine` entrypoint detects non-root and skips the gosu dance; data PVC group-writable via fsGroup |
 
 Every container sets:
 
@@ -951,82 +337,12 @@ Every container sets:
 All listening ports are >1024 (8001 / 3000 / 2026 / 8002 / 5432), so no
 `NET_BIND_SERVICE` capability is required.
 
-The repository-owned sandbox image runs Chromium with
-`BROWSER_NO_SANDBOX=--no-sandbox`. This is the expected posture when sandbox
-Pods use the chart's gVisor RuntimeClass: the gVisor Sentry already intercepts
-every syscall in userspace and supplies the host-kernel boundary that
-Chromium's own sandbox would otherwise provide. The residual risk is
-intra-container: renderer and agent code share uid 1000, so a renderer exploit
-could reach that tenant's agent workspace without the agent's cooperation. It
-does not bypass gVisor's tenant boundary, and the container already runs
-arbitrary tenant agent code.
-
-For the more conservative browser-free profile, set `DISABLE_BROWSER=true` in
-the sandbox container environment (or bake it into a derived image). The
-vendor entrypoint then skips `write_browser_supervisor_config` entirely. This
-is supported but is not the default because browser tools become unavailable.
-Do not add a `Localhost` seccomp profile merely to nest Chromium's sandbox
-under gVisor; that combination remains a cluster-qualification decision.
-
-The sandbox's `sudo` command is intentionally unusable: the image adds no
-sudoers entry, and `no-new-privileges` prevents the setuid binary from gaining
-privilege. The vendor `/v1/sandbox` metadata may still advertise `sudo`; treat
-that field as an upstream capability description, not an authorization promise.
-
-`provisioner.sandboxImage` selects the image used when creating a Pod, while
-the `sandbox.image` field inside the `config:` blob identifies the provider's
-expected image. They are independent consumers and must be set to the same
-immutable release-manifest identity in production. The following shows only
-the relevant excerpt; retain the rest of the chart's complete `config:` value:
-
-```yaml
-provisioner:
-  sandboxImage: ghcr.io/example/deer-flow-sandbox@sha256:<64-lowercase-hex>
-config: |
-  sandbox:
-    use: deerflow.community.aio_sandbox:AioSandboxProvider
-    provisioner_url: http://provisioner:8002
-    image: ghcr.io/example/deer-flow-sandbox@sha256:<same-64-lowercase-hex>
-```
-
-Provisioner-created sandbox Pods have a startup probe on `/v1/sandbox`. The
-default `sandbox.startupProbe` values are 0 seconds initial delay, 10 seconds
-period, 3 seconds timeout, and 20 failures: a 200-second budget. The longest of
-three quota-filling concurrent gVisor starts served at 134 seconds, leaving 66
-seconds (6.6 poll periods) of margin. Raising the old 15-failure threshold adds
-at most 50 seconds before diagnosing a sandbox that never starts, but adds no
-delay to a healthy sandbox because startup probing stops on its first success.
-The period remains 10 seconds, so this change does not coarsen the Ready-time
-quantisation. Image pulling precedes container start and is outside the probe
-budget.
-
-After startup first succeeds, `sandbox.livenessProbe` takes over with defaults
-of 10 seconds initial delay, 10 seconds period, 10 seconds timeout, and 3
-failures. A dead server refuses immediately, so the larger timeout does not
-change its conservative configured detection budget: `10 + (10 × 3) = 40`
-seconds. A wedged server that still listens can consume every timeout. Raising
-the timeout from 3 to 10 seconds therefore adds up to `(10 − 3) × 3 = 21`
-seconds, for a 61-second worst case. This deliberately trades up to 21 seconds
-of wedged-listener detection for tolerance of healthy responses that exceed 3
-seconds during the roughly 30-second startup tail; increasing the failure
-threshold instead would also delay immediate connection-refused detection.
-
-A stricter startup success signal was considered and rejected for this change.
-Kubernetes requires a startup probe's `successThreshold` to remain 1, and the
-current image exposes no boot-complete endpoint distinct from the reachable
-`/v1/sandbox` endpoint. Adding one would require defining the required
-supervised-service set and changing the vendor API or image, rather than a
-chart-only adjustment. It would also move the product's Ready latency later.
-The existing 10-second poll period and first-answer Ready behavior are therefore
-preserved while liveness absorbs the measured tail.
-
 **ConfigMap rollout.** ConfigMaps mount via `subPath`, which does **not** receive
 in-place updates — a `helm upgrade` that changes only a ConfigMap would leave
 pods on stale config. Each pod template carries a `checksum/*` annotation (SHA256
 of the rendered ConfigMap): `checksum/config` + `checksum/extensions` on the
 gateway, `checksum/nginx` on nginx. Any content change alters the pod spec and
-triggers workload replacement. The Gateway specifically uses `Recreate`, so its
-old Pod terminates before the replacement Pod is created.
+triggers a rolling restart.
 
 **Resource defaults.** Every workload ships with modest requests+limits in
 `values.yaml`; override per workload (`gateway.resources`, `frontend.resources`,
@@ -1049,20 +365,20 @@ per-workload with testing:
   image writes its socket to `/var/run/postgresql` and isn't designed for a
   read-only root, so it may need socket-path redirection (`PGHOST`/`unix_socket_directories`).
   Optionally, add `USER` directives to the `backend/Dockerfile`,
-  `frontend-hm/Dockerfile`, and `docker/provisioner/Dockerfile` so the images are
+  `frontend/Dockerfile`, and `docker/provisioner/Dockerfile` so the images are
   non-root by default (defense in depth — the chart already forces the uid via
   `securityContext`, so this is not required). A cluster enforcing the
   `restricted` Pod Security Admission standard would require this setting.
-- **Provisioner RBAC narrowing.** The Role grants the audited verbs required
-  for sandbox lifecycle on resource kinds in the dedicated
-  sandbox namespace. These verbs still apply to *all* matching kinds there,
+- **Provisioner RBAC narrowing.** The Role grants get/list/watch/create/delete
+  on pods and services in the namespace (update/patch/pods-exec/events were
+  dropped as unused). These verbs still apply to *all* Pods in the namespace,
   not just sandbox Pods — RBAC can't scope by label, so the remaining
-  option for finer restrictions is admission control (OPA/Kyverno).
-- **Gateway `startupProbe`.** The provisioner-created sandbox has a values-driven
-  startup probe, but the Gateway workload still relies on
-  `livenessProbe.initialDelaySeconds: 30`. A Gateway startup probe would isolate
-  any future slow application initialization from its steady-state liveness
-  budget.
+  options are a dedicated sandbox namespace or admission control (OPA/Kyverno).
+- **`startupProbe`.** Workloads have readiness + liveness probes but no startup
+  probe. The gateway's `livenessProbe.initialDelaySeconds: 30` covers slow starts
+  today; a `startupProbe` would let it take arbitrarily long to initialize
+  without risking a liveness kill during a cold start (e.g. slow model config
+  load).
 
 None of these affect correctness of the current deployment.
 
@@ -1145,6 +461,44 @@ provisioner:
 On multi-node clusters, also switch `persistence.home.accessMode` to
 `ReadWriteMany` (this is orthogonal to the Service type - it governs whether a
 sandbox Pod can be scheduled on a node other than the gateway's).
+
+## Sandbox lark-cli runtime (optional)
+
+The Lark/Feishu `lark-cli` integration needs a `lark-cli` binary inside the
+sandbox. For remote/Kubernetes (provisioner) deployments the sandbox-side path
+comes from an optional runtime image instead of an install-time GitHub
+download. The chart exposes the same two knobs the Compose stack reads on the
+provisioner:
+
+```yaml
+provisioner:
+  # Pattern A - an init container copies the binaries into a shared emptyDir.
+  larkCliInitImage: deer-flow/lark-cli-init:v1.0.65
+  # Pattern B - a shim init container + broker sidecar owns the credentials, so
+  # the plaintext config/data dirs are never mounted into the sandbox.
+  # Supersedes larkCliInitImage when both are set.
+  larkCliBrokerImage: deer-flow/lark-cli-broker:v1.0.65
+```
+
+Both default to empty, which leaves the feature off (legacy behavior) and makes
+an in-sandbox `lark-cli` call fail with exit 127 (`command not found`). When
+set, they render `LARK_CLI_INIT_IMAGE` / `LARK_CLI_BROKER_IMAGE` on the
+provisioner Deployment - the names `docker/docker-compose.yaml` uses - and the
+variable is omitted entirely while empty. Point them at a tag that exists in a
+registry your nodes can pull from (mirror the registry prefix if you do not use
+Docker Hub). The images are built from `docker/lark-cli-init` and
+`docker/lark-cli-broker`; see those READMEs and the root README's Lark section
+for the build/publish flow and the credential model. Broker mode is the safer
+choice on a shared cluster: the app secret and OAuth tokens stay in the sidecar
+instead of the sandbox container.
+
+> An image here does not authenticate anyone by itself. The Gateway only asks
+the provisioner to attach the runtime once the Lark integration pack is
+installed for the user, so the sandbox gets the binary but the per-user
+credentials still follow the normal install/authorize flow. The Lark
+integration status reports `sandbox_runtime_mode` / `sandbox_runtime_ready` so
+the Settings UI surfaces a missing runtime instead of a later
+`command not found`.
 
 ## Lint / dry-run
 

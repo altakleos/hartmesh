@@ -1,8 +1,15 @@
 #!/usr/bin/env python3
 """Verify upstream tree equality and reject direct cross-application inputs.
 
+`frontend/` is upstream's application and is never edited here, so that a merge
+of upstream never conflicts in it; `frontend-hm/` is this distribution's own
+and must not read from `frontend/`. The marker records which upstream commit
+`frontend/` is a copy of.
+
 Default: check both the index and worktree without changing the real index.
 CI: --revision HEAD checks only committed material, including that marker.
+After merging upstream: --pin <upstream revision> rewrites the marker for the
+merged commit; commit it with the merge.
 The source scan is a guard for literal paths, not a JavaScript interpreter;
 the independent build without frontend/ exercises computed build inputs.
 """
@@ -20,7 +27,9 @@ import tempfile
 from pathlib import Path
 
 MARKER = ".github/upstream-frontend.json"
-FIELDS = {"schema_version", "upstream_repository", "upstream_commit", "frontend_tree", "hartmesh_seed_commit"}
+UPSTREAM_REPOSITORY = "https://github.com/bytedance/deer-flow.git"
+SCHEMA_VERSION = 2
+FIELDS = {"schema_version", "upstream_repository", "upstream_commit", "frontend_tree"}
 SOURCE_SUFFIXES = {".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".yaml", ".yml", ".css", ".html"}
 LITERAL = re.compile(r"[\"'`]([^\"'`\r\n]+)[\"'`]")
 UPSTREAM_PATH = re.compile(r"^(?:(?:file|link):)?(?:\.?\.?/)*frontend(?:/|$)")
@@ -77,11 +86,11 @@ def verify_tree(root: Path, tree: str, revision: str) -> None:
         marker = json.loads(git(root, "show", f"{tree}:{MARKER}"))
     except (ValueError, VerificationError) as exc:
         raise VerificationError(f"{MARKER}: missing or invalid marker in the checked tree") from exc
-    if not isinstance(marker, dict) or set(marker) != FIELDS or type(marker["schema_version"]) is not int or marker["schema_version"] != 1:
-        raise VerificationError(f"{MARKER}: expected schema version 1 and its exact fields")
-    if marker["upstream_repository"] != "https://github.com/bytedance/deer-flow.git":
+    if not isinstance(marker, dict) or set(marker) != FIELDS or type(marker["schema_version"]) is not int or marker["schema_version"] != SCHEMA_VERSION:
+        raise VerificationError(f"{MARKER}: expected schema version {SCHEMA_VERSION} and its exact fields")
+    if marker["upstream_repository"] != UPSTREAM_REPOSITORY:
         raise VerificationError(f"{MARKER}: unexpected upstream repository")
-    for field in ("upstream_commit", "frontend_tree", "hartmesh_seed_commit"):
+    for field in ("upstream_commit", "frontend_tree"):
         if not isinstance(marker[field], str) or not re.fullmatch(r"[0-9a-f]{40}", marker[field]):
             raise VerificationError(f"{MARKER}: {field} must be a full Git object ID")
     upstream = marker["upstream_commit"]
@@ -100,21 +109,40 @@ def verify_tree(root: Path, tree: str, revision: str) -> None:
     verify_sources(root, tree)
 
 
+def pin(root: Path, upstream_revision: str) -> str:
+    """Write the marker for *upstream_revision* and return the commit it names."""
+    upstream = object_id(root, f"{upstream_revision}^{{commit}}")
+    marker = {
+        "schema_version": SCHEMA_VERSION,
+        "upstream_repository": UPSTREAM_REPOSITORY,
+        "upstream_commit": upstream,
+        "frontend_tree": object_id(root, f"{upstream}:frontend"),
+    }
+    (root / MARKER).write_text(json.dumps(marker, indent=2) + "\n", encoding="utf-8")
+    return upstream
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parent.parent)
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--revision", help="Verify a committed revision, using its own marker")
     mode.add_argument("--index", action="store_true", help="Verify only staged material")
+    mode.add_argument("--pin", metavar="UPSTREAM_REVISION", help="Rewrite the marker for this upstream revision (after merging it), then verify the worktree")
     args = parser.parse_args(argv)
     try:
         root = args.repo.resolve()
+        if args.pin:
+            # Resolved before anything is written, so an unknown revision changes nothing.
+            print(f"Pinned {MARKER} to upstream {pin(root, args.pin)}.")
         revision = object_id(root, f"{args.revision or 'HEAD'}^{{commit}}")
         if args.revision:
             verify_tree(root, revision, revision)
         else:
             index_tree = git(root, "write-tree").decode().strip()
-            verify_tree(root, index_tree, revision)
+            if not args.pin:
+                # A fresh pin is in the worktree only; the index still carries the previous one.
+                verify_tree(root, index_tree, revision)
             if not args.index:
                 with tempfile.TemporaryDirectory(prefix="frontend-isolation-") as temp:
                     env = {**os.environ, "GIT_INDEX_FILE": str(Path(temp) / "index")}

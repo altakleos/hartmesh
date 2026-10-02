@@ -35,14 +35,12 @@ def stores(tmp_path) -> Iterator[tuple[SQLiteUserRepository, object, object]]:
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
     from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
     asyncio.run(init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/accounts.db", sqlite_dir=str(tmp_path)))
     session_factory = get_session_factory()
     assert session_factory is not None
-    tenant = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
     try:
-        yield SQLiteUserRepository(session_factory), PersonalAccessTokenRepository(session_factory, tenant=tenant), ScheduledTaskRepository(session_factory)
+        yield SQLiteUserRepository(session_factory), PersonalAccessTokenRepository(session_factory), ScheduledTaskRepository(session_factory)
     finally:
         asyncio.run(close_engine())
 

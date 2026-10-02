@@ -434,6 +434,7 @@ def _make_provider_for_reconciliation(tmp_path=None, *, worker_id: str = "worker
     provider._sandbox_infos = {}
     provider._thread_sandboxes = {}
     provider._acquire_serializer = AcquireSerializer(thread_name_prefix="aio-sandbox-lock-wait")
+    provider._acquire_worker_executor = aio_mod.ThreadPoolExecutor(thread_name_prefix="aio-sandbox-owned-worker-test")
     provider._last_activity = {}
     provider._warm_pool = {}
     provider._active_sandbox_identity = {}
@@ -1570,7 +1571,7 @@ def test_teardown_marker_is_held_for_a_stop_that_outlives_the_lease_ttl():
     shared = _make_shared_ownership_store(ttl_seconds=lease_ttl)
     worker_a = _make_provider_for_reconciliation(worker_id="worker-a", store=shared)
     worker_b = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
-    # A legal config: the schema bounds only renewal > 0 and multiplier >= 2.
+    # A legal memory-backed config can still use a short 150 ms derived TTL.
     worker_a._ownership_config = SandboxOwnershipConfig(renewal_interval_seconds=0.05, ttl_multiplier=3.0)
     info = SandboxInfo(
         sandbox_id="doomed1",
@@ -3041,35 +3042,6 @@ def test_a_container_adopted_during_register_is_not_reaped_from_the_warm_pool():
     assert provider.get("adopted") is not None, "warm expiry stopped a container this turn is holding"
 
 
-def test_reconcile_destroys_accepted_orphans_instead_of_adopting_them(tmp_path):
-    """A digest-bound accepted container must never be parked as an ordinary
-    warm-pool sandbox after a crash; it is destroyed once this instance can
-    claim it, and the ordinary orphan beside it is still adopted."""
-    provider = _make_provider_for_reconciliation(tmp_path)
-    now = time.time()
-    accepted = SandboxInfo(
-        sandbox_id="abc12345-accepted",
-        sandbox_url="http://localhost:8083",
-        container_name="deer-flow-sandbox-abc12345-accepted",
-        created_at=now - 1200,
-    )
-    ordinary = SandboxInfo(
-        sandbox_id="plain123",
-        sandbox_url="http://localhost:8084",
-        container_name="deer-flow-sandbox-plain123",
-        created_at=now - 1200,
-    )
-    provider._backend.list_running.return_value = [accepted, ordinary]
-
-    provider._reconcile_orphans()
-
-    provider._backend.destroy.assert_called_once_with(accepted)
-    assert "abc12345-accepted" not in provider._warm_pool
-    assert "abc12345-accepted" not in provider._sandboxes
-    assert "plain123" in provider._warm_pool
-    assert provider._ownership.owner("abc12345-accepted") is None
-
-
 def _partial_then_absent_backend(list_running):
     """A backend whose destroy answers ``PARTIAL`` until told the set is gone."""
     from deerflow.community.aio_sandbox.backend import DestroyOutcome
@@ -3118,44 +3090,6 @@ def test_reconcile_quarantines_an_incompatible_set_whose_replacement_did_not_con
     assert info.sandbox_id not in worker._warm_pool and info.sandbox_id not in worker._cleanup_pending
     assert retried.snapshot().resource_teardowns == 1
     assert retried.snapshot().teardown_failures == 0
-
-
-def test_reconcile_quarantines_an_accepted_orphan_whose_destroy_did_not_confirm():
-    from deerflow.community.aio_sandbox.backend import DestroyOutcome
-    from deerflow.runtime.turn_phases import turn_phases
-
-    shared = _make_shared_ownership_store()
-    worker = _make_provider_for_reconciliation(worker_id="worker-b", store=shared)
-    accepted = SandboxInfo(
-        sandbox_id="abc12345-accepted",
-        sandbox_url="http://localhost:8083",
-        container_name="deer-flow-sandbox-abc12345-accepted",
-        created_at=time.time() - 1200,
-    )
-    running = {accepted.sandbox_id: accepted}
-    worker._backend = _partial_then_absent_backend(lambda: list(running.values()))
-    aio_mod = importlib.import_module("deerflow.community.aio_sandbox.aio_sandbox_provider")
-    now = time.time()
-    later = now + compute_lease_ttl(worker._ownership_config) + 1
-
-    # First pass starts the recovery grace (shared store); the second, past it, claims and destroys.
-    with patch.object(aio_mod.time, "time", return_value=now):
-        worker._reconcile_orphans()
-    with turn_phases(correlation_id="partial") as journal, patch.object(aio_mod.time, "time", return_value=later):
-        worker._reconcile_orphans()
-
-    worker._backend.destroy.assert_called_once_with(accepted)
-    assert journal.snapshot().teardown_failures == 1
-    assert journal.snapshot().resource_teardowns == 0
-    assert accepted.sandbox_id in worker._warm_pool and worker._cleanup_pending[accepted.sandbox_id] is DestroyOutcome.PARTIAL
-    assert accepted.sandbox_id not in worker._sandboxes
-    assert shared.owner(accepted.sandbox_id) == "worker-b"
-
-    worker._backend.outcome = DestroyOutcome.ABSENT
-    with turn_phases(correlation_id="retry") as retried:
-        worker._retry_all_pending_cleanup()
-    assert accepted.sandbox_id not in worker._warm_pool and accepted.sandbox_id not in worker._cleanup_pending
-    assert retried.snapshot().resource_teardowns == 1
 
 
 # ── P-z: a container is owned for its whole readiness wait ─────────────────

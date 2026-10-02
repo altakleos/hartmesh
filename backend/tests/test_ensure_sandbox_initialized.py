@@ -6,19 +6,13 @@ import asyncio
 import threading
 
 import pytest
-from _skill_projection_release import release_thread_projection
 from langchain.tools import ToolRuntime
 from langgraph.types import Overwrite
 
-from deerflow.sandbox.capabilities import AcceptedSkillProjection
 from deerflow.sandbox.exceptions import SandboxNotFoundError
 from deerflow.sandbox.lease import SANDBOX_LEASE_OWNER_CONTEXT_KEY, get_sandbox_lease_manager
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import (
-    SandboxProvider,
-    reset_sandbox_provider,
-    set_sandbox_provider,
-)
+from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.tools import (
     _run_sync_tool_after_async_sandbox_init,
@@ -86,6 +80,10 @@ class _RecordingProvider(SandboxProvider):
             return self.sandbox
         return None
 
+    def get_scoped(self, sandbox_id: str, *, thread_id: str, user_id: str) -> Sandbox | None:
+        del thread_id, user_id
+        return self.get(sandbox_id)
+
     def release(self, sandbox_id: str) -> None:
         self.released.append(sandbox_id)
 
@@ -134,37 +132,6 @@ class _PostAcquireLookupFailureProvider(SandboxProvider):
         self.released.append(sandbox_id)
 
 
-class _BoundAcceptedProvider(_FallthroughProvider, AcceptedSkillProjection):
-    def __init__(self) -> None:
-        super().__init__()
-        self.bound_acquisitions = []
-        self.bound_material = []
-
-    def provision_accepted_skills(self, thread_id: str, *, user_id: str, binding) -> str:
-        self.bound_acquisitions.append((thread_id, user_id, binding))
-        return "fresh-sandbox"
-
-    async def provision_accepted_skills_async(self, thread_id: str, *, user_id: str, binding) -> str:
-        self.bound_acquisitions.append((thread_id, user_id, binding))
-        return "fresh-sandbox"
-
-    def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
-        return sandbox_id == "fresh-sandbox"
-
-    def bind_accepted_skill_snapshot(
-        self,
-        sandbox_id: str,
-        *,
-        thread_id: str,
-        user_id: str,
-        binding,
-    ) -> None:
-        self.bound_material.append((sandbox_id, thread_id, user_id, binding))
-
-    async def bind_accepted_skill_snapshot_async(self, *args, **kwargs) -> None:
-        self.bind_accepted_skill_snapshot(*args, **kwargs)
-
-
 def _make_runtime(state: dict) -> ToolRuntime:
     return ToolRuntime(
         state=state,
@@ -175,29 +142,6 @@ def _make_runtime(state: dict) -> ToolRuntime:
         tool_call_id="call-1",
         store=None,
     )
-
-
-def _make_accepted_runtime(state: dict) -> ToolRuntime:
-    from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
-    from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
-
-    runtime = _make_runtime(state)
-    runtime.context.update(
-        {
-            "thread_id": "accepted-thread",
-            "run_id": "accepted-run",
-            "user_id": "accepted-owner",
-            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: ResolvedAgentMaterialV1(
-                agent_id="lead-agent",
-                storage_source="test",
-                storage_version="1",
-                agent_config=None,
-                soul="",
-                model_profile={},
-            ),
-        }
-    )
-    return runtime
 
 
 def test_post_acquire_lookup_failure_unwinds_sync_execution_lease() -> None:
@@ -253,6 +197,7 @@ def test_ensure_sandbox_initialized_unwraps_overwrite_state() -> None:
     set_sandbox_provider(provider)
     try:
         runtime = _make_runtime({"sandbox": Overwrite({"sandbox_id": "parent-sandbox"})})
+        runtime.context["thread_id"] = "thread-1"
         sandbox = ensure_sandbox_initialized(runtime)
     finally:
         reset_sandbox_provider()
@@ -270,6 +215,7 @@ async def test_ensure_sandbox_initialized_async_unwraps_overwrite_state() -> Non
     set_sandbox_provider(provider)
     try:
         runtime = _make_runtime({"sandbox": Overwrite({"sandbox_id": "parent-sandbox"})})
+        runtime.context["thread_id"] = "thread-1"
         sandbox = await ensure_sandbox_initialized_async(runtime)
     finally:
         reset_sandbox_provider()
@@ -340,6 +286,7 @@ def test_ensure_sandbox_initialized_plain_state_unchanged() -> None:
     set_sandbox_provider(provider)
     try:
         runtime = _make_runtime({"sandbox": {"sandbox_id": "parent-sandbox"}})
+        runtime.context["thread_id"] = "thread-1"
         sandbox = ensure_sandbox_initialized(runtime)
     finally:
         reset_sandbox_provider()
@@ -426,6 +373,7 @@ async def test_ensure_sandbox_initialized_async_plain_state_unchanged() -> None:
     set_sandbox_provider(provider)
     try:
         runtime = _make_runtime({"sandbox": {"sandbox_id": "parent-sandbox"}})
+        runtime.context["thread_id"] = "thread-1"
         sandbox = await ensure_sandbox_initialized_async(runtime)
     finally:
         reset_sandbox_provider()
@@ -540,74 +488,6 @@ async def test_ensure_sandbox_initialized_async_acquires_fresh_when_parent_missi
     assert sandbox is provider.sandbox
     assert runtime.state["sandbox"] == {"sandbox_id": "fresh-sandbox"}
     assert runtime.context["sandbox_id"] == "fresh-sandbox"
-
-
-@pytest.mark.anyio
-async def test_lazy_accepted_acquisition_carries_committed_binding() -> None:
-    provider = _BoundAcceptedProvider()
-    set_sandbox_provider(provider)
-    try:
-        runtime = _make_accepted_runtime({})
-        sandbox = await ensure_sandbox_initialized_async(runtime)
-    finally:
-        reset_sandbox_provider()
-        release_thread_projection(user_id="accepted-owner", thread_id="accepted-thread", run_id="accepted-run")
-
-    assert sandbox is provider.sandbox
-    assert len(provider.bound_acquisitions) == 1
-    _thread_id, _user_id, binding = provider.bound_acquisitions[0]
-    assert (_thread_id, _user_id) == ("accepted-thread", "accepted-owner")
-    assert binding.run_id == "accepted-run"
-    assert binding.snapshot_id is None
-    assert len(provider.bound_material) == 1
-
-
-def test_lazy_accepted_acquisition_borrows_the_execution_lease_without_parking() -> None:
-    """Accepted-skill material is parked by the projection's consumer refcount;
-    the execution lease fences the client but never requests the park."""
-    provider = _BoundAcceptedProvider()
-    set_sandbox_provider(provider)
-    try:
-        runtime = _make_accepted_runtime({})
-        runtime.context[SANDBOX_LEASE_OWNER_CONTEXT_KEY] = "accepted-lease-owner"
-        sandbox = ensure_sandbox_initialized(runtime)
-        manager = get_sandbox_lease_manager(provider)
-        assert sandbox is provider.sandbox
-        assert manager.binding_for("accepted-lease-owner") == "fresh-sandbox"
-        assert runtime.context["sandbox_id"] == "fresh-sandbox"
-
-        # A second tool call reuses the persisted id under the same borrower.
-        assert ensure_sandbox_initialized(runtime) is provider.sandbox
-        assert manager.binding_for("accepted-lease-owner") == "fresh-sandbox"
-        assert len(provider.bound_acquisitions) == 1
-
-        manager.release("accepted-lease-owner")
-        assert manager.binding_for("accepted-lease-owner") is None
-        assert provider.released == []
-    finally:
-        reset_sandbox_provider()
-        release_thread_projection(user_id="accepted-owner", thread_id="accepted-thread", run_id="accepted-run")
-
-
-@pytest.mark.anyio
-async def test_lazy_accepted_acquisition_borrows_the_execution_lease_without_parking_async() -> None:
-    provider = _BoundAcceptedProvider()
-    set_sandbox_provider(provider)
-    try:
-        runtime = _make_accepted_runtime({})
-        runtime.context[SANDBOX_LEASE_OWNER_CONTEXT_KEY] = "accepted-lease-owner"
-        sandbox = await ensure_sandbox_initialized_async(runtime)
-        manager = get_sandbox_lease_manager(provider)
-        assert sandbox is provider.sandbox
-        assert manager.binding_for("accepted-lease-owner") == "fresh-sandbox"
-        assert await ensure_sandbox_initialized_async(runtime) is provider.sandbox
-        assert len(provider.bound_acquisitions) == 1
-        await manager.release_async("accepted-lease-owner")
-        assert manager.binding_for("accepted-lease-owner") is None
-        assert provider.released == []
-    finally:
-        reset_sandbox_provider()
-        release_thread_projection(user_id="accepted-owner", thread_id="accepted-thread", run_id="accepted-run")
 
 
 @pytest.mark.anyio

@@ -4,20 +4,15 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from deerflow_extension_api import (
-    ActingServiceV1,
-    EffectiveSubjectV1,
-    InvocationIdentityV1,
-)
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
 from app.gateway.auth_middleware import AuthMiddleware
-from app.gateway.authorization import AuthorizationProviderResolver
 from app.gateway.authz import (
     Permissions,
     _authenticate,
+    _get_cached_route_provider,
     require_permission,
     resolve_route_permissions,
 )
@@ -25,7 +20,6 @@ from app.gateway.routers import runs, scheduled_tasks
 from deerflow.authz.provider import AuthzDecision, AuthzReason
 from deerflow.authz.rbac import RbacAuthorizationProvider
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
-from deerflow.extensions.registry import ExtensionRegistry
 
 
 class _RecordingProvider:
@@ -69,39 +63,26 @@ def _user(**overrides):
     return SimpleNamespace(**values)
 
 
-_TOOL_PLANE_PERMISSIONS = [
-    Permissions.TOOL_PLANE_READ,
-    Permissions.TOOL_PLANE_MUTATE,
-    Permissions.TOOL_PLANE_ADMIN,
-]
-
-
-class _FixedResolver:
-    def __init__(self, provider) -> None:
-        self.provider = provider
-
-    def resolve(self, config):
-        return SimpleNamespace(provider=self.provider)
-
-
-def _enable_authorization(monkeypatch, provider, *, fail_closed: bool = True):
+def _enable_authorization(monkeypatch, provider, *, fail_closed: bool = True) -> None:
     config = AuthorizationConfig(
         enabled=True,
         fail_closed=fail_closed,
         default_role="user",
     )
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
-    return _FixedResolver(provider)
+    # Bypass the provider cache so each test gets its own provider instance.
+    monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", lambda c: provider)
 
 
 @pytest.mark.asyncio
 async def test_route_permissions_disabled_preserves_all_permissions(monkeypatch):
     config = AuthorizationConfig(enabled=False)
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
-    resolver = _FixedResolver(None)
-    resolver.resolve = AsyncMock(side_effect=AssertionError("disabled authorization must not resolve a provider"))
+    # Bypass cache + ensure provider is never resolved when disabled.
+    cached = AsyncMock(side_effect=AssertionError("disabled authorization must not resolve a provider"))
+    monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", cached)
 
-    permissions = await resolve_route_permissions(_user(), is_internal=False, resolver=resolver)
+    permissions = await resolve_route_permissions(_user(), is_internal=False)
 
     assert permissions == [
         Permissions.THREADS_READ,
@@ -110,24 +91,36 @@ async def test_route_permissions_disabled_preserves_all_permissions(monkeypatch)
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
         Permissions.RUNS_CANCEL,
-        *_TOOL_PLANE_PERMISSIONS,
+        Permissions.MEMORY_READ,
+        Permissions.MEMORY_WRITE,
+        Permissions.AGENTS_READ,
+        Permissions.AGENTS_WRITE,
+        Permissions.PROJECTS_READ,
+        Permissions.PROJECTS_WRITE,
+        Permissions.PROJECTS_DELETE,
     ]
-    resolver.resolve.assert_not_called()
+    cached.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_route_permissions_use_async_provider_and_trusted_principal(monkeypatch):
     provider = _RecordingProvider(denied={Permissions.THREADS_DELETE, Permissions.RUNS_CANCEL})
-    resolver = _enable_authorization(monkeypatch, provider)
+    _enable_authorization(monkeypatch, provider)
 
-    permissions = await resolve_route_permissions(_user(), is_internal=True, resolver=resolver)
+    permissions = await resolve_route_permissions(_user(), is_internal=True)
 
     assert permissions == [
         Permissions.THREADS_READ,
         Permissions.THREADS_WRITE,
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
-        *_TOOL_PLANE_PERMISSIONS,
+        Permissions.MEMORY_READ,
+        Permissions.MEMORY_WRITE,
+        Permissions.AGENTS_READ,
+        Permissions.AGENTS_WRITE,
+        Permissions.PROJECTS_READ,
+        Permissions.PROJECTS_WRITE,
+        Permissions.PROJECTS_DELETE,
     ]
     assert [(request.resource, request.action, request.target) for request in provider.requests] == [
         ("route", "read", Permissions.THREADS_READ),
@@ -136,51 +129,28 @@ async def test_route_permissions_use_async_provider_and_trusted_principal(monkey
         ("route", "create", Permissions.RUNS_CREATE),
         ("route", "read", Permissions.RUNS_READ),
         ("route", "cancel", Permissions.RUNS_CANCEL),
-        ("route", "read", Permissions.TOOL_PLANE_READ),
-        ("route", "mutate", Permissions.TOOL_PLANE_MUTATE),
-        ("route", "admin", Permissions.TOOL_PLANE_ADMIN),
+        ("route", "read", Permissions.MEMORY_READ),
+        ("route", "write", Permissions.MEMORY_WRITE),
+        ("route", "read", Permissions.AGENTS_READ),
+        ("route", "write", Permissions.AGENTS_WRITE),
+        ("route", "read", Permissions.PROJECTS_READ),
+        ("route", "write", Permissions.PROJECTS_WRITE),
+        ("route", "delete", Permissions.PROJECTS_DELETE),
     ]
     principal = provider.requests[0].principal
     assert principal.user_id == "user-123"
     assert principal.role == "user"
     assert principal.oauth_provider == "github"
     assert principal.oauth_id == "oauth-456"
-    assert principal.is_internal is False
-
-
-@pytest.mark.asyncio
-async def test_route_permissions_preserve_split_human_and_acting_service(
-    monkeypatch,
-):
-    provider = _RecordingProvider()
-    resolver = _enable_authorization(monkeypatch, provider)
-    identity = InvocationIdentityV1(
-        effective_subject=EffectiveSubjectV1(
-            kind="human",
-            subject_id="owner-1",
-            role="member",
-        ),
-        acting_service=ActingServiceV1(service_id="gateway-internal"),
-    )
-
-    await resolve_route_permissions(
-        _user(system_role="internal"),
-        is_internal=True,
-        resolver=resolver,
-        identity=identity,
-    )
-
-    assert all(request.principal.identity is identity for request in provider.requests)
-    assert all(request.principal.user_id == "owner-1" for request in provider.requests)
-    assert all(request.principal.is_internal is False for request in provider.requests)
+    assert principal.is_internal is True
 
 
 @pytest.mark.asyncio
 async def test_route_permissions_fail_closed_denies_only_the_failed_permission(monkeypatch):
     provider = _RecordingProvider(errors={Permissions.RUNS_CANCEL})
-    resolver = _enable_authorization(monkeypatch, provider, fail_closed=True)
+    _enable_authorization(monkeypatch, provider, fail_closed=True)
 
-    permissions = await resolve_route_permissions(_user(), is_internal=False, resolver=resolver)
+    permissions = await resolve_route_permissions(_user(), is_internal=False)
 
     assert permissions == [
         Permissions.THREADS_READ,
@@ -188,42 +158,22 @@ async def test_route_permissions_fail_closed_denies_only_the_failed_permission(m
         Permissions.THREADS_DELETE,
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
-        *_TOOL_PLANE_PERMISSIONS,
+        Permissions.MEMORY_READ,
+        Permissions.MEMORY_WRITE,
+        Permissions.AGENTS_READ,
+        Permissions.AGENTS_WRITE,
+        Permissions.PROJECTS_READ,
+        Permissions.PROJECTS_WRITE,
+        Permissions.PROJECTS_DELETE,
     ]
-
-
-@pytest.mark.asyncio
-async def test_route_permission_provider_failure_diagnostic_redacts_exception_text(
-    monkeypatch,
-    caplog,
-):
-    marker = "credential=route-provider-secret-marker"
-
-    class _MaliciousProvider(_RecordingProvider):
-        async def aauthorize(self, request):
-            raise RuntimeError(marker)
-
-    resolver = _enable_authorization(monkeypatch, _MaliciousProvider(), fail_closed=True)
-
-    with caplog.at_level("WARNING", logger="app.gateway.authz"):
-        permissions = await resolve_route_permissions(
-            _user(),
-            is_internal=False,
-            resolver=resolver,
-        )
-
-    assert permissions == []
-    assert marker not in caplog.text
-    assert "authorization_decision_failed" in caplog.text
-    assert any(getattr(record, "correlation_id", None) for record in caplog.records)
 
 
 @pytest.mark.asyncio
 async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypatch):
     provider = _RecordingProvider(errors={Permissions.RUNS_CANCEL})
-    resolver = _enable_authorization(monkeypatch, provider, fail_closed=False)
+    _enable_authorization(monkeypatch, provider, fail_closed=False)
 
-    permissions = await resolve_route_permissions(_user(), is_internal=False, resolver=resolver)
+    permissions = await resolve_route_permissions(_user(), is_internal=False)
 
     assert permissions == [
         Permissions.THREADS_READ,
@@ -232,7 +182,13 @@ async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypa
         Permissions.RUNS_CREATE,
         Permissions.RUNS_READ,
         Permissions.RUNS_CANCEL,
-        *_TOOL_PLANE_PERMISSIONS,
+        Permissions.MEMORY_READ,
+        Permissions.MEMORY_WRITE,
+        Permissions.AGENTS_READ,
+        Permissions.AGENTS_WRITE,
+        Permissions.PROJECTS_READ,
+        Permissions.PROJECTS_WRITE,
+        Permissions.PROJECTS_DELETE,
     ]
 
 
@@ -250,17 +206,18 @@ async def test_route_permissions_fail_open_allows_the_failed_permission(monkeypa
                 Permissions.RUNS_CREATE,
                 Permissions.RUNS_READ,
                 Permissions.RUNS_CANCEL,
-                *_TOOL_PLANE_PERMISSIONS,
+                Permissions.MEMORY_READ,
+                Permissions.MEMORY_WRITE,
+                Permissions.AGENTS_READ,
+                Permissions.AGENTS_WRITE,
+                Permissions.PROJECTS_READ,
+                Permissions.PROJECTS_WRITE,
+                Permissions.PROJECTS_DELETE,
             ],
         ),
     ],
 )
-async def test_route_permissions_apply_failure_mode_to_provider_resolution(
-    monkeypatch,
-    caplog,
-    fail_closed,
-    expected,
-):
+async def test_route_permissions_apply_failure_mode_to_provider_resolution(monkeypatch, fail_closed, expected):
     config = AuthorizationConfig(
         enabled=True,
         fail_closed=fail_closed,
@@ -268,14 +225,12 @@ async def test_route_permissions_apply_failure_mode_to_provider_resolution(
     )
     monkeypatch.setattr("app.gateway.authz._get_route_authorization_config", lambda: config)
 
-    class _FailingResolver:
-        def resolve(self, config):
-            raise ValueError("credential=resolver-secret-marker")
+    def fail_cached(c):
+        raise ValueError("invalid provider configuration")
 
-    with caplog.at_level("WARNING", logger="app.gateway.authz"):
-        assert await resolve_route_permissions(_user(), is_internal=False, resolver=_FailingResolver()) == expected
-    assert "resolver-secret-marker" not in caplog.text
-    assert "authorization_provider_resolution_failed" in caplog.text
+    monkeypatch.setattr("app.gateway.authz._get_cached_route_provider", fail_cached)
+
+    assert await resolve_route_permissions(_user(), is_internal=False) == expected
 
 
 @pytest.mark.asyncio
@@ -289,9 +244,9 @@ async def test_route_permissions_use_builtin_rbac_route_policy(monkeypatch):
             }
         }
     )
-    resolver = _enable_authorization(monkeypatch, provider)
+    _enable_authorization(monkeypatch, provider)
 
-    permissions = await resolve_route_permissions(_user(), is_internal=False, resolver=resolver)
+    permissions = await resolve_route_permissions(_user(), is_internal=False)
 
     assert permissions == [Permissions.THREADS_READ, Permissions.RUNS_READ]
 
@@ -302,21 +257,13 @@ async def test_authenticate_uses_route_permission_resolution(monkeypatch):
     permission_resolver = AsyncMock(return_value=[Permissions.THREADS_READ])
     monkeypatch.setattr("app.gateway.deps.get_optional_user_from_request", AsyncMock(return_value=user))
     monkeypatch.setattr("app.gateway.authz.resolve_route_permissions", permission_resolver)
-    request = SimpleNamespace(
-        state=SimpleNamespace(),
-        app=SimpleNamespace(state=SimpleNamespace(authorization_provider_resolver=None)),
-    )
+    request = SimpleNamespace(state=SimpleNamespace())
 
     auth_context = await _authenticate(request)
 
     assert auth_context.user is user
     assert auth_context.permissions == [Permissions.THREADS_READ]
-    permission_resolver.assert_awaited_once_with(
-        user,
-        is_internal=False,
-        resolver=None,
-        request=request,
-    )
+    permission_resolver.assert_awaited_once_with(user, is_internal=False)
 
 
 def _make_middleware_app() -> FastAPI:
@@ -347,9 +294,7 @@ def test_auth_middleware_stamps_provider_derived_permissions(monkeypatch):
 
     assert permission_resolver.await_count == 2
     for call in permission_resolver.await_args_list:
-        assert call.kwargs["is_internal"] is False
-        assert call.kwargs["resolver"] is None
-        assert call.kwargs["request"] is not None
+        assert call.kwargs == {"is_internal": False}
 
 
 def test_auth_middleware_marks_internal_route_principal(monkeypatch):
@@ -363,9 +308,7 @@ def test_auth_middleware_marks_internal_route_principal(monkeypatch):
 
     assert response.status_code == 200
     permission_resolver.assert_awaited_once()
-    assert permission_resolver.await_args.kwargs["is_internal"] is True
-    assert permission_resolver.await_args.kwargs["resolver"] is None
-    assert permission_resolver.await_args.kwargs["request"] is not None
+    assert permission_resolver.await_args.kwargs == {"is_internal": True}
 
 
 _STATELESS_RUN_PATHS = ("/api/runs/stream", "/api/runs/wait")
@@ -472,18 +415,19 @@ def test_scheduled_run_creation_requires_thread_write_and_runs_create(monkeypatc
 # ── Provider cache tests ────────────────────────────────────────────────
 
 
-class TestRouteProviderResolver:
-    """Verify provider identity across legacy authorization generations."""
-
-    @staticmethod
-    def _resolver(config):
-        return AuthorizationProviderResolver(
-            ExtensionRegistry().build(generation=1),
-            config,
-        )
+class TestRouteProviderCache:
+    """Verify the provider cache returns the same instance for unchanged config
+    and re-resolves when config content changes."""
 
     def test_same_config_returns_same_provider(self):
         """Calling twice with the same config object returns the same instance."""
+        import app.gateway.authz as authz_module
+
+        # Reset cache
+        authz_module._route_provider_cache.clear()
+        authz_module._route_provider_config_id = None
+        authz_module._route_provider_config_sig = None
+
         config = AuthorizationConfig(
             enabled=True,
             provider=AuthorizationProviderConfig(
@@ -492,14 +436,19 @@ class TestRouteProviderResolver:
             ),
         )
 
-        resolver = self._resolver(config)
-        p1 = resolver.resolve(config).provider
-        p2 = resolver.resolve(config).provider
+        p1 = _get_cached_route_provider(config)
+        p2 = _get_cached_route_provider(config)
         assert p1 is not None
         assert p2 is p1
 
     def test_changed_config_returns_new_provider(self):
         """A config with different content triggers re-resolution."""
+        import app.gateway.authz as authz_module
+
+        authz_module._route_provider_cache.clear()
+        authz_module._route_provider_config_id = None
+        authz_module._route_provider_config_sig = None
+
         config1 = AuthorizationConfig(
             enabled=True,
             provider=AuthorizationProviderConfig(
@@ -515,15 +464,20 @@ class TestRouteProviderResolver:
             ),
         )
 
-        resolver = self._resolver(config1)
-        p1 = resolver.resolve(config1).provider
-        p2 = resolver.resolve(config2).provider
+        p1 = _get_cached_route_provider(config1)
+        p2 = _get_cached_route_provider(config2)
         assert p1 is not None
         assert p2 is not None
         assert p1 is not p2
 
     def test_same_content_different_object_reuses_provider(self):
         """Same content in a new object (e.g. hot-reload with no changes) reuses provider."""
+        import app.gateway.authz as authz_module
+
+        authz_module._route_provider_cache.clear()
+        authz_module._route_provider_config_id = None
+        authz_module._route_provider_config_sig = None
+
         config1 = AuthorizationConfig(
             enabled=True,
             provider=AuthorizationProviderConfig(
@@ -540,7 +494,6 @@ class TestRouteProviderResolver:
             ),
         )
 
-        resolver = self._resolver(config1)
-        p1 = resolver.resolve(config1).provider
-        p2 = resolver.resolve(config2).provider
+        p1 = _get_cached_route_provider(config1)
+        p2 = _get_cached_route_provider(config2)
         assert p1 is p2

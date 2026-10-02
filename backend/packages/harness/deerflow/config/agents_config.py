@@ -9,24 +9,35 @@ per-user layout.
 
 import logging
 import re
+import unicodedata
 from pathlib import Path
 from typing import Annotated, Literal
 
-from deerflow_extension_api.identifiers import (
-    AGENT_IDENTIFIER_PATTERN,
-    canonicalize_agent_identifier,
-    validate_model_profile_identifier,
-)
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
+from deerflow.knowledge_scope import KnowledgeScope
 from deerflow.runtime.user_context import get_effective_user_id
 
 logger = logging.getLogger(__name__)
 
 SOUL_FILENAME = "SOUL.md"
-AGENT_NAME_PATTERN = re.compile(rf"{AGENT_IDENTIFIER_PATTERN}\Z", re.ASCII)
+AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 MAX_AGENT_OUTPUT_TOKENS = 200_000
+
+
+def _validate_display_name(value: object) -> object:
+    # Check before trimming so leading/trailing controls cannot disappear.
+    # Keep ordinary RTL text, ZWNJ in Persian/Indic text and ZWJ in emoji.
+    if isinstance(value, str):
+        if re.search(r"[\x00-\x1f\x7f-\x9f\u00ad\u061c\u200b\u200e-\u200f\u2028-\u202e\u2060-\u2069\ufeff]", value):
+            raise ValueError("Display name must not contain control characters or invisible formatting controls")
+        if value.strip() and all(unicodedata.category(char)[0] in {"C", "M", "Z"} for char in value):
+            raise ValueError("Display name must contain visible text")
+    return value
+
+
+AgentDisplayName = Annotated[str, StringConstraints(strip_whitespace=True, max_length=100), BeforeValidator(_validate_display_name)]
 
 
 def _blank_to_none(value: str | None) -> str | None:
@@ -92,12 +103,10 @@ class GitHubAgentConfig(BaseModel):
     # into ``run_context["github_token"]``, which the ``bash`` tool exposes to
     # the agent's sandbox as ``GH_TOKEN`` / ``GITHUB_TOKEN``. The agent then
     # uses ``gh`` to read repo state, push branches, and post comments itself.
-    # A signed production webhook must carry the same strict positive integer
-    # installation id in its authenticated payload before the dispatcher can
-    # construct a verified route binding. None is retained for explicit
-    # unverified local development, where the launch remains unkeyed and no
-    # token is minted. Quoted numeric strings are rejected rather than coerced.
-    installation_id: Annotated[int, Field(strict=True, gt=0)] | None = None
+    # None means no token is minted: the agent still runs but cannot push or
+    # post (effectively read-only via unauthenticated ``gh`` for public repos,
+    # or fully blind for private ones).
+    installation_id: int | None = None
     # GitHub App login this agent posts as (e.g. ``llm-gateway-ai`` for the
     # ``llm-gateway-ai[bot]`` App identity, without the ``[bot]`` suffix).
     # The dispatcher's self-event gate uses this to recognize webhook
@@ -156,10 +165,11 @@ def validate_agent_name(name: str | None) -> str | None:
     """Validate a custom agent name before using it in filesystem paths."""
     if name is None:
         return None
-    try:
-        return canonicalize_agent_identifier(name, field_name="agent name")
-    except ValueError as exc:
-        raise ValueError(f"Invalid agent name {name!r}. Must match pattern: {AGENT_NAME_PATTERN.pattern}") from exc
+    if not isinstance(name, str):
+        raise ValueError("Invalid agent name. Expected a string or None.")
+    if not AGENT_NAME_PATTERN.fullmatch(name):
+        raise ValueError(f"Invalid agent name '{name}'. Must match pattern: {AGENT_NAME_PATTERN.pattern}")
+    return name
 
 
 class AgentModelSettings(BaseModel):
@@ -198,6 +208,7 @@ class AgentConfig(BaseModel):
     """Configuration for a custom agent."""
 
     name: str
+    display_name: AgentDisplayName | None = None
     description: str = ""
     model: str | None = None
     tool_groups: list[str] | None = None
@@ -207,6 +218,12 @@ class AgentConfig(BaseModel):
     # - [] (explicit empty list): disable all skills
     # - ["skill1", "skill2"]: load only the specified skills
     skills: list[str] | None = None
+    # Stable MCP installation IDs. None inherits all; [] selects none.
+    # This is tool selection, not a replacement for host authorization.
+    mcp_plugins: list[str] | None = None
+    # Default for new Gateway turns; explicit message scope overrides it.
+    # Kept outside managed fields so harness self-updates preserve the binding.
+    knowledge_scope: KnowledgeScope | None = None
     # Controls which deployment-level subagents this custom agent may invoke:
     # None = all currently enabled definitions, [] = none, list = allowlist.
     # The default Lead Agent has no AgentConfig and therefore keeps access to
@@ -221,22 +238,13 @@ class AgentConfig(BaseModel):
     # Per-agent reasoning-effort default for models that support it. None = do
     # not override (a request-supplied reasoning_effort still wins over this).
     reasoning_effort: Literal["low", "medium", "high"] | None = None
+    # Disable every memory path for stateless execution-oriented agents while
+    # preserving the global memory configuration for all other agents.
+    memory_enabled: bool = True
     # Optional binding to GitHub repositories so this agent can respond to
     # webhook events from the gateway dispatcher. None means "no GitHub
     # integration", which is the case for every existing agent.
     github: GitHubAgentConfig | None = None
-
-    @field_validator("name")
-    @classmethod
-    def _validate_name(cls, value: str) -> str:
-        return canonicalize_agent_identifier(value, field_name="agent name")
-
-    @field_validator("model")
-    @classmethod
-    def _validate_model(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        return validate_model_profile_identifier(value, field_name="agent model profile identifier")
 
 
 # Fields explicitly managed by agent-update surfaces. Anything else declared

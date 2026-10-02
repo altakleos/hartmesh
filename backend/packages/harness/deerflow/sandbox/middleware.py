@@ -13,6 +13,7 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite
 
 from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.interaction_policy import resolve_run_interaction_policy
 from deerflow.agents.thread_state import SandboxStateField, ThreadDataState
 from deerflow.authz.sandbox_authz import (
     authorize_sandbox_execution,
@@ -20,35 +21,17 @@ from deerflow.authz.sandbox_authz import (
     safe_app_config,
     safe_app_config_async,
 )
-from deerflow.runtime.turn_phases import (
-    AcquisitionSource,
-    TurnPhase,
-    phase_span,
-    record_acquire_reason,
-    record_acquisition_source,
-)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.sandbox import get_sandbox_provider
-from deerflow.sandbox.accepted_projection import (
-    _NO_BINDING,
-    accepted_skill_snapshot_id_from_runtime,
-    bind_runtime_accepted_skill_projection,
-    bind_runtime_accepted_skill_projection_async,
-    has_accepted_skill_isolation,
-    provision_runtime_accepted_skill_projection,
-    provision_runtime_accepted_skill_projection_async,
-    release_accepted_skill_consumer,
-)
-from deerflow.sandbox.diagnostics import record_sandbox_diagnostic
-from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxCapacityExceededError, SandboxRuntimeError
+from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.lease import (
     ensure_sandbox_lease_owner,
     get_sandbox_lease_manager,
+    run_sync_lifecycle_operation,
     sandbox_lease_owner,
 )
 from deerflow.sandbox.overwrite import unwrap_sandbox
 from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
-from deerflow.sandbox.session import SandboxSessionKind, current_sandbox_session, declared_sandbox
 
 logger = logging.getLogger(__name__)
 
@@ -56,32 +39,8 @@ NETWORK_POLICY_HUMAN_INPUT_SOURCE = "sandbox_network"
 _NETWORK_POLICY_DECISIONS = frozenset({"deny", "allow_temporary", "allow_sandbox"})
 
 
-def _holds_run_sandbox(runtime: Runtime) -> bool:
-    """Whether this run was handed a sandbox before the agent started."""
-    return isinstance((runtime.context or {}).get("sandbox_id"), str)
-
-
 def _network_approval_is_non_interactive(context: Mapping[str, object]) -> bool:
-    return bool(context.get("disable_clarification") or context.get("non_interactive"))
-
-
-def _egress_denial_reason(context: Mapping[str, object]) -> str | None:
-    """Why this execution cannot ask a person about a blocked destination.
-
-    An accepted session is denied by kind: its egress was declared at admission
-    and rendered by its Material (``deerflow.sandbox.egress``), so a sidecar
-    grant, which would bind to the container rather than to the run, is never
-    offered; the denial is recorded. Subagents and non-interactive executions
-    have nobody to ask.
-    """
-    declaration = current_sandbox_session()
-    if declaration is not None and declaration.kind is SandboxSessionKind.ACCEPTED:
-        return "accepted_session"
-    if context.get("is_subagent"):
-        return "subagent"
-    if _network_approval_is_non_interactive(context):
-        return "non_interactive"
-    return None
+    return not resolve_run_interaction_policy({"context": context}).allows_clarification
 
 
 class SandboxMiddlewareState(AgentState):
@@ -205,49 +164,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         return sandbox_id
 
     @staticmethod
-    def _borrow_accepted_sandbox(
-        sandbox_id: str,
-        *,
-        thread_id: str,
-        user_id: str,
-        owner_id: str | None,
-    ) -> None:
-        """Hold an accepted-skill sandbox under the execution lease as a borrower.
-
-        The accepted-skill projection keeps its own consumer refcount, and
-        ``release_accepted_skill_consumer`` parks the sandbox when the last
-        consumer leaves. The execution lease therefore fences the client and
-        owns command-scope cleanup, but never requests the park itself.
-        """
-        if owner_id is None:
-            return
-        get_sandbox_lease_manager(get_sandbox_provider()).retain(
-            owner_id,
-            sandbox_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            release_on_last=False,
-        )
-
-    @staticmethod
-    async def _borrow_accepted_sandbox_async(
-        sandbox_id: str,
-        *,
-        thread_id: str,
-        user_id: str,
-        owner_id: str | None,
-    ) -> None:
-        if owner_id is None:
-            return
-        await get_sandbox_lease_manager(get_sandbox_provider()).retain_async(
-            owner_id,
-            sandbox_id,
-            thread_id=thread_id,
-            user_id=user_id,
-            release_on_last=False,
-        )
-
-    @staticmethod
     def _retain_existing_sandbox(
         state: SandboxMiddlewareState,
         *,
@@ -263,7 +179,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         sandbox_id = sandbox.get("sandbox_id")
         if isinstance(sandbox_id, str):
             provider = get_sandbox_provider()
-            get_sandbox_lease_manager(provider).retain(
+            sandbox_id = get_sandbox_lease_manager(provider).reuse_or_acquire(
                 owner_id,
                 sandbox_id,
                 thread_id=thread_id,
@@ -288,7 +204,7 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         sandbox_id = sandbox.get("sandbox_id")
         if isinstance(sandbox_id, str):
             provider = get_sandbox_provider()
-            await get_sandbox_lease_manager(provider).retain_async(
+            sandbox_id = await get_sandbox_lease_manager(provider).reuse_or_acquire_async(
                 owner_id,
                 sandbox_id,
                 thread_id=thread_id,
@@ -311,157 +227,72 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     def before_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        has_accepted_binding = accepted_skill_snapshot_id_from_runtime(runtime) is not _NO_BINDING
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             return super().before_agent(state, runtime)
         self._apply_network_policy_response(state, runtime)
         user_id = resolve_runtime_user_id(runtime)
-        declared = declared_sandbox()
-        if declared is not None:
+        projection = self._prepare_agent_skill_projection(thread_id, user_id=user_id)
+        owner_id = ensure_sandbox_lease_owner(runtime.context)
+
+        # Preserve lazy initialization for threads that use the shared view.
+        # A policy-scoped view is acquired eagerly so an old shared-view
+        # sandbox cannot survive into this run through checkpoint state.
+        if self._lazy_init and projection is None:
+            # Bind the execution lease only when a sandbox-backed tool actually
+            # touches the persisted sandbox. Runs that only answer or return a
+            # terminal Command must not leave an unused owner behind when the
+            # graph bypasses after_agent.
+            return super().before_agent(state, runtime)
+
+        existing_sandbox_id = self._read_sandbox_id_from_state(state)
+        if existing_sandbox_id is None or projection is not None:
+            # Phase 3: enforce sandbox:execute authorization before acquiring
+            # (eager path). On deny, skip the eager acquisition instead of
+            # raising: an exception here is outside any tool call, so it would
+            # surface as a run-level graph error rather than the RFC §9
+            # friendly ToolMessage. Shared-view runs skip and defer to the lazy
+            # gate inside ``ensure_sandbox_initialized``. Policy-scoped runs
+            # abort here because retaining an older checkpointed sandbox would
+            # bypass the new filesystem view.
             try:
                 authorize_sandbox_execution(
                     context=runtime.context or {},
                     app_config=safe_app_config(),
                 )
             except SandboxAuthorizationError:
-                logger.info(
-                    "Accepted sandbox execution denied for this role (thread_id=%s)",
-                    thread_id,
-                )
+                if projection is not None:
+                    # An explicit skill policy cannot leave a checkpointed,
+                    # previously shared sandbox reusable by downstream tools.
+                    # Abort this run before the model can reach that state.
+                    raise
+                logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
                 return None
-            existing_sandbox_id = self._read_sandbox_id_from_state(state)
-            if existing_sandbox_id == declared.id:
-                return super().before_agent(state, runtime)
-            if existing_sandbox_id is not None:
-                return {
-                    "sandbox": Overwrite({"sandbox_id": declared.id}),
-                }
-            return {"sandbox": {"sandbox_id": declared.id}}
-        projection = None if has_accepted_binding else self._prepare_agent_skill_projection(thread_id, user_id=user_id)
-        owner_id = ensure_sandbox_lease_owner(runtime.context)
-
-        # Policy-scoped legacy views must be projected before the first model.
-        # Everything else keeps lazy sandbox initialization and binds the
-        # execution lease only when a sandbox-backed tool actually touches the
-        # sandbox: runs that only answer or return a terminal Command must not
-        # leave an unused owner behind when the graph bypasses after_agent.
-        # Accepted material is one of those: the first sandbox-backed tool call
-        # provisions and binds the admitted snapshot behind the same checks
-        # (``ensure_sandbox_initialized``). Durable accepted material never
-        # reaches here; its declared session is handled above.
-        if self._lazy_init and projection is None and not (has_accepted_binding and _holds_run_sandbox(runtime)):
-            if has_accepted_binding:
-                record_acquire_reason("lazy_deferred")
-            return super().before_agent(state, runtime)
-
-        existing_sandbox_id = self._read_sandbox_id_from_state(state)
-        sandbox_id = existing_sandbox_id
-        if isinstance(sandbox_id, str) and not has_accepted_binding and projection is None:
-            retained_id = self._retain_existing_sandbox(
-                state,
-                thread_id=thread_id,
+            provider = get_sandbox_provider()
+            self._require_projection_support(provider, projection)
+            sandbox_id = self._acquire_sandbox(
+                thread_id,
                 user_id=user_id,
                 owner_id=owner_id,
             )
-            if retained_id is not None and runtime.context is not None:
-                runtime.context["sandbox_id"] = retained_id
-            return super().before_agent(state, runtime)
-        try:
-            authorize_sandbox_execution(
-                context=runtime.context or {},
-                app_config=safe_app_config(),
-            )
-        except SandboxAuthorizationError:
-            if projection is not None:
-                # An explicit skill policy cannot leave a checkpointed,
-                # previously shared sandbox reusable by downstream tools.
-                raise
-            logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
-            return None
-        provider = get_sandbox_provider()
-        self._require_projection_support(provider, projection)
-        prebound = False
-        runtime_sandbox_id = (runtime.context or {}).get("sandbox_id")
-        if has_accepted_binding and not isinstance(sandbox_id, str) and isinstance(runtime_sandbox_id, str) and provider.get(runtime_sandbox_id) is not None:
-            sandbox_id = runtime_sandbox_id
-            prebound = True
-        if has_accepted_binding and isinstance(sandbox_id, str) and provider.get(sandbox_id) is not None and not has_accepted_skill_isolation(provider, sandbox_id):
-            provider.release(sandbox_id)
-            sandbox_id = None
-        acquired = not isinstance(sandbox_id, str) or provider.get(sandbox_id) is None
-        if has_accepted_binding:
-            # The projection material provisions and binds as one step; a
-            # sandbox the run already holds is rebound in place. Either way
-            # the projection's consumer refcount owns the park, so the
-            # execution lease only borrows the sandbox.
-            if acquired:
-                sandbox_id = provision_runtime_accepted_skill_projection(
-                    provider,
-                    runtime,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                )
-            else:
-                bind_runtime_accepted_skill_projection(
-                    provider,
-                    runtime,
-                    sandbox_id=sandbox_id,
-                    user_id=user_id,
-                )
-            self._borrow_accepted_sandbox(
-                sandbox_id,
-                thread_id=thread_id,
-                user_id=user_id,
-                owner_id=owner_id,
-            )
-        elif acquired:
-            # Eager acquisition on a full deployment must not kill a turn that may
-            # not need a sandbox at all. An explicit skill policy is projected
-            # before the first model so a restricted agent cannot see the shared
-            # view -- but nothing has been handed out yet, so there is nothing to
-            # leak by not acquiring: the lazy path re-runs this decision at the
-            # first sandbox-backed tool call, where the same refusal becomes a
-            # tool result the run survives and a turn that never touches a tool
-            # answers normally. The accepted branch is deliberately not caught: it
-            # runs here only when acquisition is eager or the run already holds a
-            # sandbox, and its refusal is a run terminal
-            # (`runtime/runs/worker.py`), not a skip.
+            if runtime.context is not None:
+                runtime.context["sandbox_id"] = sandbox_id
             try:
-                sandbox_id = self._acquire_sandbox(
-                    thread_id,
-                    user_id=user_id,
-                    owner_id=owner_id,
-                )
-            except SandboxCapacityExceededError:
-                logger.info("Every sandbox slot is in use; deferring this turn's acquisition to its first sandbox-backed tool call (thread_id=%s)", thread_id)
-                return None
-        elif owner_id is not None:
-            # A live checkpointed sandbox is reused under this execution's lease
-            # so the last holder, not the first, parks it.
-            get_sandbox_lease_manager(provider).retain(
-                owner_id,
-                sandbox_id,
-                thread_id=thread_id,
-                user_id=user_id,
-            )
-        if projection is not None:
-            try:
-                provider.sync_agent_skills(
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    projection=projection,
-                )
+                if projection is not None:
+                    provider.sync_agent_skills(
+                        sandbox_id,
+                        thread_id=thread_id,
+                        user_id=user_id,
+                        projection=projection,
+                    )
             except BaseException:
                 if owner_id is not None:
                     get_sandbox_lease_manager(provider).release(owner_id)
                 else:
                     provider.release(sandbox_id)
+                if runtime.context is not None:
+                    runtime.context.pop("sandbox_id", None)
                 raise
-        if runtime.context is not None:
-            runtime.context["sandbox_id"] = sandbox_id
-        if acquired or prebound or projection is not None:
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             if existing_sandbox_id == sandbox_id:
                 return super().before_agent(state, runtime)
@@ -470,6 +301,17 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                     "sandbox": Overwrite({"sandbox_id": sandbox_id}),
                 }
             return {"sandbox": {"sandbox_id": sandbox_id}}
+        retained_id = self._retain_existing_sandbox(
+            state,
+            thread_id=thread_id,
+            user_id=user_id,
+            owner_id=owner_id,
+        )
+        if retained_id is not None:
+            if runtime.context is not None:
+                runtime.context["sandbox_id"] = retained_id
+            if retained_id != existing_sandbox_id:
+                return {"sandbox": Overwrite({"sandbox_id": retained_id})}
         return super().before_agent(state, runtime)
 
     def _apply_network_policy_response(self, state: SandboxMiddlewareState, runtime: Runtime) -> None:
@@ -505,158 +347,65 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if not provider.decide_network_policy_request(sandbox_id, response["request_id"], decision):
             raise SandboxRuntimeError("The sandbox network approval is stale or does not belong to this sandbox")
         applied.add(marker)
-        facts: dict[str, str | int | bool] = {"request_ref": response["request_id"], "decision": decision}
-        if decision == "allow_temporary":
-            facts["ttl_seconds"] = provider.sandbox_network_temporary_grant_ttl()
-        record_sandbox_diagnostic(context, "egress.decided", facts=facts, sandbox_ref=sandbox_id)
 
     @override
     async def abefore_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        has_accepted_binding = accepted_skill_snapshot_id_from_runtime(runtime) is not _NO_BINDING
         thread_id = (runtime.context or {}).get("thread_id")
         if thread_id is None:
             return await super().abefore_agent(state, runtime)
-        await asyncio.to_thread(self._apply_network_policy_response, state, runtime)
+        await run_sync_lifecycle_operation(self._apply_network_policy_response, state, runtime)
         user_id = resolve_runtime_user_id(runtime)
-        declared = declared_sandbox()
-        if declared is not None:
+        projection = await asyncio.to_thread(
+            self._prepare_agent_skill_projection,
+            thread_id,
+            user_id=user_id,
+        )
+        owner_id = ensure_sandbox_lease_owner(runtime.context)
+
+        if self._lazy_init and projection is None:
+            return await super().abefore_agent(state, runtime)
+
+        existing_sandbox_id = self._read_sandbox_id_from_state(state)
+        if existing_sandbox_id is None or projection is not None:
+            # Phase 3: enforce sandbox:execute authorization before acquiring
+            # (eager path, async counterpart of the gate in before_agent). On
+            # deny, shared-view runs skip and defer to the lazy tool gate;
+            # policy-scoped runs abort before an older sandbox can be reused.
             try:
                 await authorize_sandbox_execution_async(
                     context=runtime.context or {},
                     app_config=await safe_app_config_async(),
                 )
             except SandboxAuthorizationError:
-                logger.info(
-                    "Accepted sandbox execution denied for this role (thread_id=%s)",
-                    thread_id,
-                )
+                if projection is not None:
+                    raise
+                logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
                 return None
-            existing_sandbox_id = self._read_sandbox_id_from_state(state)
-            if existing_sandbox_id == declared.id:
-                return await super().abefore_agent(state, runtime)
-            if existing_sandbox_id is not None:
-                return {
-                    "sandbox": Overwrite({"sandbox_id": declared.id}),
-                }
-            return {"sandbox": {"sandbox_id": declared.id}}
-        projection = (
-            None
-            if has_accepted_binding
-            else await asyncio.to_thread(
-                self._prepare_agent_skill_projection,
+            provider = get_sandbox_provider()
+            self._require_projection_support(provider, projection)
+            sandbox_id = await self._acquire_sandbox_async(
                 thread_id,
-                user_id=user_id,
-            )
-        )
-        owner_id = ensure_sandbox_lease_owner(runtime.context)
-
-        # Same rule as the sync path: accepted material is bound by the first
-        # sandbox-backed tool call, so a turn that uses none never waits for
-        # a slot. Only a sandbox this run already holds is borrowed here.
-        if self._lazy_init and projection is None and not (has_accepted_binding and _holds_run_sandbox(runtime)):
-            record_acquire_reason("lazy_deferred")
-            return await super().abefore_agent(state, runtime)
-
-        # Why this turn acquires before the model call rather than on first tool
-        # use: a policy-scoped view, eager initialization, or a sandbox this
-        # accepted run already holds.
-        record_acquire_reason(
-            "accepted_binding" if has_accepted_binding else ("skill_projection" if projection is not None else "eager_configured"),
-        )
-
-        existing_sandbox_id = self._read_sandbox_id_from_state(state)
-        sandbox_id = existing_sandbox_id
-        if isinstance(sandbox_id, str) and not has_accepted_binding and projection is None:
-            retained_id = await self._retain_existing_sandbox_async(
-                state,
-                thread_id=thread_id,
                 user_id=user_id,
                 owner_id=owner_id,
             )
-            if retained_id is not None and runtime.context is not None:
-                runtime.context["sandbox_id"] = retained_id
-            return await super().abefore_agent(state, runtime)
-        try:
-            await authorize_sandbox_execution_async(
-                context=runtime.context or {},
-                app_config=await safe_app_config_async(),
-            )
-        except SandboxAuthorizationError:
-            if projection is not None:
-                raise
-            logger.info("Sandbox execution denied for this role; skipping eager sandbox acquisition (thread_id=%s)", thread_id)
-            return None
-        provider = get_sandbox_provider()
-        self._require_projection_support(provider, projection)
-        prebound = False
-        runtime_sandbox_id = (runtime.context or {}).get("sandbox_id")
-        if has_accepted_binding and not isinstance(sandbox_id, str) and isinstance(runtime_sandbox_id, str) and provider.get(runtime_sandbox_id) is not None:
-            sandbox_id = runtime_sandbox_id
-            prebound = True
-        if has_accepted_binding and isinstance(sandbox_id, str) and provider.get(sandbox_id) is not None and not has_accepted_skill_isolation(provider, sandbox_id):
-            await self._release_sandbox_async(sandbox_id, owner_id=None)
-            sandbox_id = None
-        acquired = not isinstance(sandbox_id, str) or provider.get(sandbox_id) is None
-        with phase_span(TurnPhase.SANDBOX_ACQUIRE):
-            if has_accepted_binding:
-                if acquired:
-                    sandbox_id = await provision_runtime_accepted_skill_projection_async(
-                        provider,
-                        runtime,
+            if runtime.context is not None:
+                runtime.context["sandbox_id"] = sandbox_id
+            try:
+                if projection is not None:
+                    await provider.sync_agent_skills_async(
+                        sandbox_id,
                         thread_id=thread_id,
                         user_id=user_id,
+                        projection=projection,
                     )
-                else:
-                    record_acquisition_source(AcquisitionSource.ACCEPTED_ACTIVE)
-                    with phase_span(TurnPhase.SANDBOX_BINDING):
-                        await bind_runtime_accepted_skill_projection_async(
-                            provider,
-                            runtime,
-                            sandbox_id=sandbox_id,
-                            user_id=user_id,
-                        )
-                await self._borrow_accepted_sandbox_async(
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    owner_id=owner_id,
-                )
-            elif acquired:
-                # Same deferral as the sync path above, for the same reason.
-                try:
-                    sandbox_id = await self._acquire_sandbox_async(
-                        thread_id,
-                        user_id=user_id,
-                        owner_id=owner_id,
-                    )
-                except SandboxCapacityExceededError:
-                    logger.info("Every sandbox slot is in use; deferring this turn's acquisition to its first sandbox-backed tool call (thread_id=%s)", thread_id)
-                    return None
-            elif owner_id is not None:
-                record_acquisition_source(AcquisitionSource.IN_PROCESS)
-                await get_sandbox_lease_manager(provider).retain_async(
-                    owner_id,
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                )
-        if projection is not None:
-            try:
-                await provider.sync_agent_skills_async(
-                    sandbox_id,
-                    thread_id=thread_id,
-                    user_id=user_id,
-                    projection=projection,
-                )
             except BaseException:
                 await self._release_sandbox_async(
                     sandbox_id,
                     owner_id=owner_id,
                 )
+                if runtime.context is not None:
+                    runtime.context.pop("sandbox_id", None)
                 raise
-        if runtime.context is not None:
-            runtime.context["sandbox_id"] = sandbox_id
-        if acquired or prebound or projection is not None:
             logger.info(f"Assigned sandbox {sandbox_id} to thread {thread_id}")
             if existing_sandbox_id == sandbox_id:
                 return await super().abefore_agent(state, runtime)
@@ -665,20 +414,21 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
                     "sandbox": Overwrite({"sandbox_id": sandbox_id}),
                 }
             return {"sandbox": {"sandbox_id": sandbox_id}}
+        retained_id = await self._retain_existing_sandbox_async(
+            state,
+            thread_id=thread_id,
+            user_id=user_id,
+            owner_id=owner_id,
+        )
+        if retained_id is not None:
+            if runtime.context is not None:
+                runtime.context["sandbox_id"] = retained_id
+            if retained_id != existing_sandbox_id:
+                return {"sandbox": Overwrite({"sandbox_id": retained_id})}
         return await super().abefore_agent(state, runtime)
 
     @override
     def after_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        if declared_sandbox() is not None:
-            # The declaring execution owns the terminal; the agent loop is a
-            # holder inside it and must not retire the session on its way out.
-            return None
-        from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY, SkillProjectionConsumerToken
-
-        token = (runtime.context or {}).get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
-        if isinstance(token, SkillProjectionConsumerToken):
-            release_accepted_skill_consumer(token)
-            return None
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
@@ -712,16 +462,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
 
     @override
     async def aafter_agent(self, state: SandboxMiddlewareState, runtime: Runtime) -> dict | None:
-        if declared_sandbox() is not None:
-            # The declaring execution owns the terminal; the agent loop is a
-            # holder inside it and must not retire the session on its way out.
-            return None
-        from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY, SkillProjectionConsumerToken
-
-        token = (runtime.context or {}).get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
-        if isinstance(token, SkillProjectionConsumerToken):
-            await asyncio.to_thread(release_accepted_skill_consumer, token)
-            return None
         sandbox, fork_restored = unwrap_sandbox(state.get("sandbox"))
         if sandbox is not None:
             sandbox_id = sandbox["sandbox_id"]
@@ -775,7 +515,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         return sandbox_id if isinstance(sandbox_id, str) else None
 
     @staticmethod
-    def _attach_sandbox_update(result: ToolMessage | Command, sandbox_id: str) -> ToolMessage | Command:
+    def _attach_sandbox_update(
+        result: ToolMessage | Command,
+        sandbox_id: str,
+        *,
+        overwrite: bool = False,
+    ) -> ToolMessage | Command:
         """Wrap or merge ``result`` so that ``sandbox.sandbox_id`` is persisted.
 
         - ``ToolMessage`` -> ``Command(update={"sandbox": ..., "messages": [msg]})``
@@ -784,7 +529,10 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         - ``Command`` with non-dict / None update -> leave it untouched to
           avoid silent data loss on unknown update shapes.
         """
-        sandbox_update = {"sandbox": {"sandbox_id": sandbox_id}}
+        sandbox_value: object = {"sandbox_id": sandbox_id}
+        if overwrite:
+            sandbox_value = Overwrite(sandbox_value)
+        sandbox_update = {"sandbox": sandbox_value}
 
         if isinstance(result, ToolMessage):
             return Command(update={**sandbox_update, "messages": [result]})
@@ -812,8 +560,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         prev_sandbox_id = self._read_sandbox_id_from_request(request)
         result = handler(request)
         curr_sandbox_id = self._read_sandbox_id_from_request(request)
-        if prev_sandbox_id is None and curr_sandbox_id is not None:
-            result = self._attach_sandbox_update(result, curr_sandbox_id)
+        if curr_sandbox_id is not None and curr_sandbox_id != prev_sandbox_id:
+            result = self._attach_sandbox_update(
+                result,
+                curr_sandbox_id,
+                overwrite=prev_sandbox_id is not None,
+            )
         return self._maybe_request_network_approval(request, result, curr_sandbox_id or prev_sandbox_id)
 
     @override
@@ -825,8 +577,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         prev_sandbox_id = self._read_sandbox_id_from_request(request)
         result = await handler(request)
         curr_sandbox_id = self._read_sandbox_id_from_request(request)
-        if prev_sandbox_id is None and curr_sandbox_id is not None:
-            result = self._attach_sandbox_update(result, curr_sandbox_id)
+        if curr_sandbox_id is not None and curr_sandbox_id != prev_sandbox_id:
+            result = self._attach_sandbox_update(
+                result,
+                curr_sandbox_id,
+                overwrite=prev_sandbox_id is not None,
+            )
         sandbox_id = curr_sandbox_id or prev_sandbox_id
         if sandbox_id is None:
             return result
@@ -836,12 +592,9 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return result
         if provider.sandbox_network_mode() != "allowlist":
             return result
-        denial_reason = _egress_denial_reason(context)
-        if denial_reason is not None:
-            drained = await provider.deny_pending_network_policy_events_async(sandbox_id)
-            if not drained:
+        if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
+            if not await provider.deny_pending_network_policy_events_async(sandbox_id):
                 logger.warning("Failed to drain sandbox network policy events for non-interactive sandbox %s", sandbox_id)
-            self._record_egress_denial(context, sandbox_id, reason=denial_reason, drained=drained)
             return result
         events = await provider.consume_network_policy_events_async(sandbox_id)
         return self._network_approval_result(request, result, sandbox_id, events)
@@ -860,26 +613,12 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
             return result
         if provider.sandbox_network_mode() != "allowlist":
             return result
-        denial_reason = _egress_denial_reason(context)
-        if denial_reason is not None:
-            drained = provider.deny_pending_network_policy_events(sandbox_id)
-            if not drained:
+        if _network_approval_is_non_interactive(context) or context.get("is_subagent"):
+            if not provider.deny_pending_network_policy_events(sandbox_id):
                 logger.warning("Failed to drain sandbox network policy events for non-interactive sandbox %s", sandbox_id)
-            self._record_egress_denial(context, sandbox_id, reason=denial_reason, drained=drained)
             return result
         events = provider.consume_network_policy_events(sandbox_id)
         return self._network_approval_result(request, result, sandbox_id, events)
-
-    @staticmethod
-    def _record_egress_denial(context: Mapping[str, object], sandbox_id: str, *, reason: str, drained: bool) -> None:
-        """Record once per sandbox that pending egress requests are denied unasked."""
-        record_sandbox_diagnostic(
-            context,
-            "egress.denied",
-            facts={"reason": reason, "drained": drained},
-            sandbox_ref=sandbox_id,
-            once=True,
-        )
 
     def _network_approval_result(
         self,
@@ -897,11 +636,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         if not isinstance(request_id, str) or not isinstance(host, str) or not isinstance(port, int):
             logger.warning("Ignoring malformed trusted sandbox network event: %r", event)
             return result
-        blocked_facts: dict[str, str | int | bool] = {"request_ref": request_id, "host": host, "port": port}
-        method = event.get("method")
-        if isinstance(method, str):
-            blocked_facts["method"] = method
-        record_sandbox_diagnostic(getattr(request.runtime, "context", None) or {}, "egress.blocked", facts=blocked_facts, sandbox_ref=sandbox_id)
         tool_call_id = str(request.tool_call.get("id") or "")
         tool_name = str(request.tool_call.get("name") or "sandbox")
         ttl_seconds = get_sandbox_provider().sandbox_network_temporary_grant_ttl()
@@ -933,5 +667,6 @@ class SandboxMiddleware(AgentMiddleware[SandboxMiddlewareState]):
         )
         update: dict = {"messages": [message], "sandbox": {"sandbox_id": sandbox_id}}
         if isinstance(result, Command) and isinstance(result.update, dict):
-            update = {**result.update, **update}
+            update = {**result.update, "messages": [message]}
+            update.setdefault("sandbox", {"sandbox_id": sandbox_id})
         return Command(update=update, goto=END)

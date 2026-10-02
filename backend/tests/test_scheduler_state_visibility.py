@@ -1,11 +1,9 @@
 """Does the product admit that nothing is going to run these schedules?
 
-A tenant-class upgrade found a task row enabled, its next run dated
-September 9 and its last run September 8, on a Gateway whose scheduler was not
-running at all. Nothing had gone wrong with the data -- the upgrade neither
-activated, deleted, rescheduled nor executed it -- but every surface a person
-could read said "enabled, next run September 9", eight days after that date had
-passed, and none of them said the one fact that explains it.
+An upgrade can leave a task row enabled, with its next run dated in the past,
+on a Gateway whose scheduler is not running at all. Nothing is wrong with the
+data, but every surface a person can read says "enabled, next run <a date that
+has passed>", and none of them says the one fact that explains it.
 
 These tests pin the fact itself: whether the scheduler is actually running,
 answered from the running service rather than from a hot-reloadable config file
@@ -20,7 +18,7 @@ from types import SimpleNamespace
 
 from _router_auth_helpers import call_unwrapped
 
-from app.gateway.routers import scheduled_tasks
+from app.gateway.routers import scheduler_state
 
 
 def _request(service: object | None) -> SimpleNamespace:
@@ -31,7 +29,7 @@ def _request(service: object | None) -> SimpleNamespace:
 
 def _with_config(monkeypatch, *, enabled: bool) -> None:
     monkeypatch.setattr(
-        scheduled_tasks,
+        scheduler_state,
         "get_config",
         lambda: SimpleNamespace(scheduler=SimpleNamespace(enabled=enabled)),
     )
@@ -41,17 +39,17 @@ def test_a_running_scheduler_says_so_and_gives_no_reason(monkeypatch):
     _with_config(monkeypatch, enabled=True)
     request = _request(SimpleNamespace(running=True))
 
-    state = asyncio.run(call_unwrapped(scheduled_tasks.get_scheduler_state, request))
+    state = asyncio.run(call_unwrapped(scheduler_state.get_scheduler_state, request))
 
     assert state.model_dump() == {"version": 1, "running": True, "configured": True, "state": "running"}
 
 
 def test_a_scheduler_turned_off_by_configuration_names_that(monkeypatch):
-    """The tenant case: the rows are real, and nothing will run them."""
+    """The rows are real, and nothing will run them."""
     _with_config(monkeypatch, enabled=False)
     request = _request(SimpleNamespace(running=False))
 
-    state = asyncio.run(call_unwrapped(scheduled_tasks.get_scheduler_state, request))
+    state = asyncio.run(call_unwrapped(scheduler_state.get_scheduler_state, request))
 
     assert state.model_dump() == {
         "version": 1,
@@ -72,7 +70,7 @@ def test_a_scheduler_that_is_configured_on_but_not_running_is_a_distinct_answer(
     _with_config(monkeypatch, enabled=True)
     request = _request(SimpleNamespace(running=False))
 
-    state = asyncio.run(call_unwrapped(scheduled_tasks.get_scheduler_state, request))
+    state = asyncio.run(call_unwrapped(scheduler_state.get_scheduler_state, request))
 
     assert state.model_dump() == {
         "version": 1,
@@ -92,7 +90,7 @@ def test_a_gateway_with_no_scheduler_service_answers_instead_of_failing(monkeypa
     _with_config(monkeypatch, enabled=False)
     request = _request(None)
 
-    state = asyncio.run(call_unwrapped(scheduled_tasks.get_scheduler_state, request))
+    state = asyncio.run(call_unwrapped(scheduler_state.get_scheduler_state, request))
 
     assert state.model_dump() == {
         "version": 1,
@@ -117,6 +115,20 @@ def test_reading_the_state_starts_nothing(monkeypatch):
         async def trigger(self, *_args, **_kwargs) -> None:
             calls.append("trigger")
 
-    asyncio.run(call_unwrapped(scheduled_tasks.get_scheduler_state, _request(_Service())))
+    asyncio.run(call_unwrapped(scheduler_state.get_scheduler_state, _request(_Service())))
 
     assert calls == []
+
+
+def test_the_gateway_serves_the_state_where_the_product_reads_it():
+    from app.gateway.app import create_app
+
+    paths = [getattr(route, "path", "") for route in create_app().routes]
+
+    assert "/api/scheduler" in paths
+
+
+def test_the_bounded_service_reports_whether_its_loop_is_live():
+    from app.scheduler import ScheduledTaskService
+
+    assert isinstance(ScheduledTaskService.running, property)

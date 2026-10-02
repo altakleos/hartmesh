@@ -13,20 +13,11 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 
 from app.gateway.authz import require_permission
-from app.gateway.deps import get_current_user, get_feedback_repo, get_run_event_store, get_run_manager, get_stream_bridge
+from app.gateway.deps import get_feedback_repo, get_run_event_store, get_run_manager, get_run_store, get_stream_bridge
 from app.gateway.pagination import trim_run_message_page
 from app.gateway.run_models import RunCreateRequest
-from app.gateway.services import (
-    build_checkpoint_state_accessor,
-    build_invocation_runtime,
-    invocation_principal_from_request,
-    raise_for_invocation_authorization,
-    sse_consumer,
-    start_run,
-    wait_for_run_completion,
-)
-from app.runtime import NotFoundOrInvisible
-from deerflow.runtime import RunRecord, serialize_channel_values_for_api
+from app.gateway.services import abuild_checkpoint_state_accessor, sse_consumer, start_run, wait_for_run_completion
+from deerflow.runtime import serialize_channel_values_for_api
 from deerflow.utils.thread_id import resolve_thread_id
 
 logger = logging.getLogger(__name__)
@@ -37,10 +28,6 @@ def _resolve_thread_id(body: RunCreateRequest) -> str:
     """Return the thread_id from the request body, or generate a new one."""
     thread_id = ((body.config or {}).get("configurable") or {}).get("thread_id")
     return resolve_thread_id(thread_id)
-
-
-def _has_explicit_thread_id(body: RunCreateRequest) -> bool:
-    return ((body.config or {}).get("configurable") or {}).get("thread_id") is not None
 
 
 @router.post("/stream")
@@ -55,12 +42,7 @@ async def stateless_stream(body: RunCreateRequest, request: Request) -> Streamin
     thread_id = _resolve_thread_id(body)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(
-        body,
-        thread_id,
-        request,
-        thread_id_explicit=_has_explicit_thread_id(body),
-    )
+    record = await start_run(body, thread_id, request)
 
     return StreamingResponse(
         sse_consumer(bridge, record, request, run_mgr),
@@ -86,12 +68,7 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
     thread_id = _resolve_thread_id(body)
     bridge = get_stream_bridge(request)
     run_mgr = get_run_manager(request)
-    record = await start_run(
-        body,
-        thread_id,
-        request,
-        thread_id_explicit=_has_explicit_thread_id(body),
-    )
+    record = await start_run(body, thread_id, request)
 
     completed = True
     if record.task is not None:
@@ -99,7 +76,7 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
 
     if completed:
         try:
-            accessor, config = build_checkpoint_state_accessor(
+            accessor, config = await abuild_checkpoint_state_accessor(
                 request,
                 thread_id=thread_id,
                 assistant_id=body.assistant_id,
@@ -119,19 +96,13 @@ async def stateless_wait(body: RunCreateRequest, request: Request) -> dict:
 # ---------------------------------------------------------------------------
 
 
-async def _resolve_run(run_id: str, request: Request) -> RunRecord:
+async def _resolve_run(run_id: str, request: Request) -> dict:
     """Fetch run by run_id with user ownership check. Raises 404 if not found."""
-    result = await build_invocation_runtime(request).observe_run(
-        run_id,
-        await invocation_principal_from_request(
-            request,
-            user_id=await get_current_user(request),
-        ),
-    )
-    raise_for_invocation_authorization(result, operation="observe")
-    if result is NotFoundOrInvisible.not_found_or_invisible:
+    run_store = get_run_store(request)
+    record = await run_store.get(run_id)  # user_id=AUTO filters by contextvar
+    if record is None:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
-    return result
+    return record
 
 
 @router.get("/{run_id}/messages")
@@ -155,7 +126,7 @@ async def run_messages(
     run = await _resolve_run(run_id, request)
     event_store = get_run_event_store(request)
     rows = await event_store.list_messages_by_run(
-        run.thread_id,
+        run["thread_id"],
         run_id,
         limit=limit + 1,
         before_seq=before_seq,
@@ -171,4 +142,4 @@ async def run_feedback(run_id: str, request: Request) -> list[dict]:
     """Return all feedback for a run."""
     run = await _resolve_run(run_id, request)
     feedback_repo = get_feedback_repo(request)
-    return await feedback_repo.list_by_run(run.thread_id, run_id)
+    return await feedback_repo.list_by_run(run["thread_id"], run_id)

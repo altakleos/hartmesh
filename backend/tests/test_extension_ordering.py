@@ -91,12 +91,27 @@ def test_every_duplicate_participant_must_satisfy_the_constraint():
 
 
 def test_core_constraints_are_declared():
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
     from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
+    from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.extensions.ordering import core_ordering_constraints
 
+    core_ordering_constraints.cache_clear()  # Prior wiring tests temporarily replace middleware modules.
     pairs = {(c.outer, c.inner) for c in core_ordering_constraints()}
     assert (ToolProgressMiddleware, ToolErrorHandlingMiddleware) in pairs
+    assert (DeferredToolPromotionAuditMiddleware, SkillToolPolicyMiddleware) in pairs
+
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+    from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
+    from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+    from deerflow.guardrails.middleware import GuardrailMiddleware
+
+    for policy in (GuardrailMiddleware, SandboxAuditMiddleware, ReadBeforeWriteMiddleware, ToolProgressMiddleware):
+        assert (ArtifactResolutionMiddleware, policy) in pairs
+    assert (ToolReceiptMiddleware, ArtifactResolutionMiddleware) in pairs
+    core_ordering_constraints.cache_clear()
 
 
 def test_core_constraints_are_a_plain_tuple():
@@ -153,28 +168,3 @@ def test_resolution_stays_deferred_until_first_use():
     assert result.returncode == 0, result.stderr
     assert "after_import []" in result.stdout, "importing extensions.ordering must not load the middleware layer"
     assert "after_call ['deerflow.agents.middlewares.tool_error_handling_middleware', 'deerflow.agents.middlewares.tool_progress_middleware']" in result.stdout
-
-
-def test_core_constraints_require_receipt_outer_of_sandbox_middleware():
-    """SandboxMiddleware rebuilds tool results into Commands and, once upstream's
-    egress approval card lands, can replace a result and end the turn. A receipt
-    closed outside it would commit to a result the model never sees."""
-    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
-    from deerflow.extensions.ordering import core_ordering_constraints
-    from deerflow.sandbox.middleware import SandboxMiddleware
-
-    core_ordering_constraints.cache_clear()
-    matching = [constraint for constraint in core_ordering_constraints() if constraint.outer is ToolReceiptMiddleware and constraint.inner is SandboxMiddleware]
-    assert len(matching) == 1
-    assert "receipt" in matching[0].reason.lower()
-
-
-def test_sandbox_middleware_outside_the_receipt_is_a_core_violation():
-    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
-    from deerflow.extensions.ordering import core_ordering_constraints
-    from deerflow.sandbox.middleware import SandboxMiddleware
-
-    core_ordering_constraints.cache_clear()
-    assert_ordering([ToolReceiptMiddleware(), SandboxMiddleware(lazy_init=True)], {})
-    with pytest.raises(RuntimeError, match="ToolReceiptMiddleware must be outer"):
-        assert_ordering([SandboxMiddleware(lazy_init=True), ToolReceiptMiddleware()], {})

@@ -21,12 +21,7 @@ from typing import Any
 
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
-from deerflow.authz.runtime import (
-    authorization_provider_from_context,
-    construct_authorization_provider,
-    resolve_authorization_provider,
-    resolve_authorization_provider_spec,
-)
+from deerflow.authz.runtime import construct_authorization_provider, resolve_authorization_provider, resolve_authorization_provider_spec
 from deerflow.config.app_config import AppConfig
 from deerflow.sandbox.exceptions import SandboxAuthorizationError
 
@@ -81,9 +76,7 @@ def _resolve_authorization_inputs(
     # decision as authorize() errors — a raw ValueError here would otherwise
     # effectively deny under fail_open (inverted semantics).
     try:
-        provider = authorization_provider_from_context(context)
-        if provider is None:
-            provider = resolve_authorization_provider(authz_config)
+        provider = resolve_authorization_provider(authz_config)
     except Exception:
         logger.warning("Failed to resolve authorization provider for sandbox:execute", exc_info=True)
         if authz_config.fail_closed:

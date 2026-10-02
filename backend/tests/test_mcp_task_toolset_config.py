@@ -103,8 +103,8 @@ def test_task_toolsets_reject_reusing_one_raw_tool_across_groups() -> None:
 @pytest.mark.parametrize(
     ("server_name", "task_name", "match"),
     [
-        ("   ", "reports", "cannot prefix callable tool names"),
-        ("s" * 129, "reports", "server identifier.*128"),
+        ("   ", "reports", "server name.*128"),
+        ("s" * 129, "reports", "server name.*128"),
         ("reports", "   ", "task toolset name must not be empty"),
         ("reports", "t" * 256, "at most 255"),
     ],

@@ -1,6 +1,6 @@
 """Query validation for thread message and run event read endpoints."""
 
-from unittest.mock import ANY, AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -35,6 +35,8 @@ def _make_app():
         ("/api/threads/thread-1/messages", -1),
         ("/api/threads/thread-1/runs/run-1/events", 0),
         ("/api/threads/thread-1/runs/run-1/events", -1),
+        ("/api/threads/thread-1/runs/page", 0),
+        ("/api/threads/thread-1/runs/page", -1),
     ],
 )
 def test_read_endpoints_reject_non_positive_limits(path: str, limit: int):
@@ -77,13 +79,7 @@ def test_read_endpoints_accept_positive_limits_and_hit_store():
     assert run_messages.status_code == 200
     assert run_events.status_code == 200
     assert len(thread_messages.json()) == 1
-    app.state.run_event_store.list_messages.assert_awaited_once_with(
-        "thread-1",
-        limit=thread_runs.THREAD_MESSAGE_LEGACY_SCAN_BATCH,
-        before_seq=None,
-        user_id=ANY,
-    )
-    assert app.state.run_event_store.list_messages.await_args.kwargs["user_id"]
+    app.state.run_event_store.list_messages.assert_awaited_once_with("thread-1", limit=thread_runs.THREAD_MESSAGE_LEGACY_SCAN_BATCH, before_seq=None, user_id=None)
     app.state.run_event_store.list_messages_by_run.assert_awaited_once_with(
         "thread-1",
         "run-1",
@@ -99,3 +95,21 @@ def test_read_endpoints_accept_positive_limits_and_hit_store():
         limit=1,
         after_seq=None,
     )
+
+
+@pytest.mark.parametrize("params", [{"before_created_at": "2026-01-01T00:00:00+00:00"}, {"before_run_id": "run-1"}])
+def test_runs_page_rejects_split_cursor(params: dict):
+    with TestClient(_make_app()) as client:
+        response = client.get("/api/threads/thread-1/runs/page", params=params)
+
+    assert response.status_code == 422
+
+
+def test_runs_page_rejects_invalid_created_at_cursor():
+    with TestClient(_make_app()) as client:
+        response = client.get(
+            "/api/threads/thread-1/runs/page",
+            params={"before_created_at": "not-a-timestamp", "before_run_id": "run-1"},
+        )
+
+    assert response.status_code == 422

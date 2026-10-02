@@ -1,20 +1,16 @@
 """Redis backend and provider factory for the checkpoint history cache."""
 
-import asyncio
-from types import MappingProxyType
 from typing import Any
 
 import pytest
 from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
 
 from deerflow.config.app_config import AppConfig
-from deerflow.config.deployment_config import DeploymentConfig
 from deerflow.runtime.checkpoint_cache.provider import (
     checkpoint_cache_db_hash,
     checkpoint_cache_key_prefix,
     make_checkpoint_cache,
 )
-from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
 
 
 class _FakeRedis:
@@ -24,7 +20,6 @@ class _FakeRedis:
         self.store: dict[str, bytes] = {}
         self.ttls: dict[str, int | None] = {}
         self.unlinked: list[tuple[str, ...]] = []
-        self.scan_calls = 0
 
     async def mget(self, keys: list[str]) -> list[bytes | None]:
         return [self.store.get(k) for k in keys]
@@ -36,7 +31,6 @@ class _FakeRedis:
     async def scan(self, cursor: int = 0, match: str | None = None, count: int = 500) -> tuple[int, list[str]]:
         import fnmatch
 
-        self.scan_calls += 1
         keys = sorted(self.store)
         batch = keys[cursor : cursor + count]
         if match is not None:
@@ -87,36 +81,6 @@ class _FailingRedis(_FakeRedis):
         from redis.exceptions import RedisError
 
         raise RedisError("connection refused")
-
-
-class _PermissionDeniedRedis(_FakeRedis):
-    async def scan(self, cursor: int = 0, match: str | None = None, count: int = 500) -> tuple[int, list[str]]:
-        from redis.exceptions import NoPermissionError
-
-        self.scan_calls += 1
-        raise NoPermissionError("NOPERM this user has no permissions to run the 'scan' command")
-
-
-class _UnlinkPermissionDeniedRedis(_FakeRedis):
-    async def unlink(self, *keys: str) -> int:
-        from redis.exceptions import NoPermissionError
-
-        raise NoPermissionError("NOPERM this user has no permissions to run the 'unlink' command")
-
-
-class _ConcurrentPermissionDeniedRedis(_FakeRedis):
-    def __init__(self) -> None:
-        super().__init__()
-        self._both_scans_started = asyncio.Event()
-
-    async def scan(self, cursor: int = 0, match: str | None = None, count: int = 500) -> tuple[int, list[str]]:
-        from redis.exceptions import NoPermissionError
-
-        self.scan_calls += 1
-        if self.scan_calls == 2:
-            self._both_scans_started.set()
-        await self._both_scans_started.wait()
-        raise NoPermissionError("NOPERM this user has no permissions to run the 'scan' command")
 
 
 def _make_cache(monkeypatch: pytest.MonkeyPatch, fake: _FakeRedis, ttl_seconds: int = 60, **kwargs: Any):
@@ -225,76 +189,6 @@ async def test_adelete_thread_outage_degrades_without_raising(monkeypatch: pytes
 
 
 @pytest.mark.anyio
-async def test_adelete_thread_disables_purge_after_scan_permission_denial(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    fake = _PermissionDeniedRedis()
-    cache = _make_cache(monkeypatch, fake, ttl_seconds=60)
-
-    with caplog.at_level("WARNING"):
-        await cache.adelete_thread("p", "t1")
-
-    assert cache._purge_disabled is True
-    assert fake.scan_calls == 1
-    assert "ACL denies checkpoint-cache purge (SCAN or UNLINK); entries expire via TTL (60s)" in caplog.text
-
-
-@pytest.mark.anyio
-async def test_adelete_thread_disables_purge_after_unlink_permission_denial(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    fake = _UnlinkPermissionDeniedRedis()
-    fake.store["p:t1:entry"] = b"payload"
-    cache = _make_cache(monkeypatch, fake, ttl_seconds=60)
-
-    with caplog.at_level("WARNING"):
-        await cache.adelete_thread("p", "t1")
-
-    assert cache._purge_disabled is True
-    assert fake.scan_calls == 1
-    assert "ACL denies checkpoint-cache purge (SCAN or UNLINK); entries expire via TTL (60s)" in caplog.text
-
-
-@pytest.mark.anyio
-async def test_adelete_thread_warns_once_for_concurrent_permission_denials(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    fake = _ConcurrentPermissionDeniedRedis()
-    cache = _make_cache(monkeypatch, fake, ttl_seconds=60)
-
-    with caplog.at_level("DEBUG", logger="deerflow.runtime.checkpoint_cache.redis"):
-        await asyncio.gather(
-            cache.adelete_thread("p", "t1"),
-            cache.adelete_thread("p", "t2"),
-        )
-
-    assert fake.scan_calls == 2
-    assert caplog.text.count("ACL denies checkpoint-cache purge (SCAN or UNLINK)") == 1
-    assert "thread purge skipped because ACL denies checkpoint-cache purge" in caplog.text
-
-
-@pytest.mark.anyio
-async def test_adelete_thread_skips_redis_after_permission_denial(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    fake = _PermissionDeniedRedis()
-    cache = _make_cache(monkeypatch, fake)
-    await cache.adelete_thread("p", "t1")
-    caplog.clear()
-
-    with caplog.at_level("DEBUG", logger="deerflow.runtime.checkpoint_cache.redis"):
-        await cache.adelete_thread("p", "t2")
-
-    assert fake.scan_calls == 1
-    assert all(record.levelname != "WARNING" for record in caplog.records)
-    assert "thread purge skipped because ACL denies checkpoint-cache purge" in caplog.text
-
-
-@pytest.mark.anyio
-async def test_adelete_thread_non_permission_errors_keep_warning_per_call(monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
-    cache = _make_cache(monkeypatch, _FailingRedis())
-
-    with caplog.at_level("WARNING"):
-        await cache.adelete_thread("p", "t1")
-        await cache.adelete_thread("p", "t2")
-
-    assert cache._purge_disabled is False
-    assert caplog.text.count("checkpoint history cache thread purge failed") == 2
-
-
-@pytest.mark.anyio
 async def test_provider_memory_default():
     from deerflow.runtime.checkpoint_cache.memory import MemoryCheckpointHistoryCache
 
@@ -349,47 +243,3 @@ def test_key_prefix_override_wins():
     assert checkpoint_cache_key_prefix(app_config) == "custom:"
     default = checkpoint_cache_key_prefix(_app_config({"backend": "sqlite"}))
     assert default.startswith("ckpt-hist:v1:")
-
-
-def test_key_prefix_env_override_wins(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX", "from-env")
-    app_config = _app_config(
-        {
-            "backend": "sqlite",
-            "checkpoint_cache": {"key_prefix": "from-config"},
-        }
-    )
-
-    assert checkpoint_cache_key_prefix(app_config) == "from-env"
-
-
-def test_key_prefix_is_derived_from_server_tenant_namespace() -> None:
-    identity = TenantIdentityV1.resolve(
-        deployment_config=DeploymentConfig(tenant_id="tenant-a"),
-        environ=MappingProxyType({}),
-    )
-    app_config = _app_config({"backend": "sqlite"})
-
-    assert checkpoint_cache_key_prefix(
-        app_config,
-        identity.namespace(TenantSubsystem.REDIS),
-    ) == (f"{identity.namespace(TenantSubsystem.REDIS).key_prefix}ckpt-hist:v1")
-
-
-def test_tenant_bound_cache_rejects_conflicting_legacy_prefix() -> None:
-    identity = TenantIdentityV1.resolve(
-        deployment_config=DeploymentConfig(tenant_id="tenant-a"),
-        environ=MappingProxyType({}),
-    )
-    app_config = _app_config(
-        {
-            "backend": "sqlite",
-            "checkpoint_cache": {"key_prefix": "another-tenant"},
-        }
-    )
-
-    with pytest.raises(ValueError, match="database.checkpoint_cache.key_prefix"):
-        checkpoint_cache_key_prefix(
-            app_config,
-            identity.namespace(TenantSubsystem.REDIS),
-        )

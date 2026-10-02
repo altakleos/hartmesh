@@ -20,13 +20,6 @@ from deerflow.runtime import END_SENTINEL, MemoryStreamBridge, RunManager
 from deerflow.runtime.checkpointer import async_provider as checkpointer_module
 from deerflow.runtime.events import store as event_store_module
 from deerflow.runtime.runs.store.memory import MemoryRunStore
-from deerflow.runtime.tenant_identity import (
-    LegacyRedisPrefixRecordV1,
-    TenantIdentityError,
-    TenantIdentityV1,
-)
-
-_TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("local")
 
 
 @asynccontextmanager
@@ -38,15 +31,7 @@ class _FakeRunManager:
     """RunManager double that records startup reconciliation calls."""
 
     instances: list[_FakeRunManager] = []
-    recovered_runs = [
-        SimpleNamespace(
-            run_id="run-1",
-            thread_id="thread-1",
-            recovery_projection_owner_worker_id="dead-worker",
-            recovery_projection_active_state_version=1,
-            checkpoint_terminal_state_version=2,
-        )
-    ]
+    recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
     latest_by_thread: dict[str, list[SimpleNamespace]] = {}
 
     def __init__(
@@ -56,13 +41,11 @@ class _FakeRunManager:
         run_ownership_config=None,
         event_store=None,
         on_orphans_recovered=None,
-        tenant=None,
     ):
         self.store = store
         self.run_ownership_config = run_ownership_config
         self.event_store = event_store
         self.on_orphans_recovered = on_orphans_recovered
-        self.tenant = tenant
         self.reconcile_calls: list[dict] = []
         self.list_by_thread_calls: list[dict] = []
         self.shutdown_calls: int = 0
@@ -88,34 +71,18 @@ class _FakeRunManager:
     async def stop_heartbeat(self) -> None:
         pass
 
-    # Gateway startup arms both observers of a cancellation, so the double has
-    # to carry both: the lease heartbeat, and the watch that covers the
-    # deployments where no heartbeat runs.
-    async def start_cancellation_watch(self) -> None:
-        pass
-
-    async def stop_cancellation_watch(self) -> None:
-        pass
-
-    async def shutdown(self, *, timeout: float = 5.0) -> bool:
+    async def shutdown(self, *, timeout: float = 5.0) -> None:
         # No in-flight tasks in these startup-recovery tests; langgraph_runtime
         # drains the manager on teardown, so the double must accept the call.
         self.shutdown_calls += 1
-        return True
 
 
 class _FakeThreadStore:
-    def __init__(self, *, project_result: bool = True) -> None:
-        self.project_result = project_result
-        self.run_projections: list[tuple[object, str | None]] = []
+    def __init__(self) -> None:
         self.status_updates: list[tuple[str, str, str | None]] = []
 
     async def update_status(self, thread_id: str, status: str, *, user_id=None) -> None:
         self.status_updates.append((thread_id, status, user_id))
-
-    async def project_run(self, projection, *, user_id=None) -> bool:
-        self.run_projections.append((projection, user_id))
-        return self.project_result
 
 
 class _FakeStreamBridge:
@@ -199,8 +166,8 @@ async def test_shutdown_flushes_delayed_recovered_stream_cleanup_immediately():
 
 
 @pytest.mark.anyio
-async def test_periodic_recovery_terminalizes_stream_and_projects_with_exact_authority():
-    """Periodic recovery must close streams and use its exact terminal fence."""
+async def test_periodic_recovery_terminalizes_stream_without_thread_projection():
+    """Periodic recovery must close streams without racing thread projection."""
     store = MemoryRunStore()
     stream_bridge = _RetainedMemoryStreamBridge()
     thread_store = _FakeThreadStore()
@@ -220,10 +187,6 @@ async def test_periodic_recovery_terminalizes_stream_and_projects_with_exact_aut
             stream_bridge,
             recovered_runs,
             cleanup_delay=60.0,
-        )
-        await gateway_deps._project_recovered_threads_error(
-            thread_store,
-            recovered_runs,
         )
 
     manager = RunManager(
@@ -251,124 +214,12 @@ async def test_periodic_recovery_terminalizes_stream_and_projects_with_exact_aut
     assert received[-1] is END_SENTINEL
     assert stream_bridge.cleanup_calls == [("periodic-orphan", 60.0)]
     assert thread_store.status_updates == []
-    assert len(thread_store.run_projections) == 1
-    projection, user_id = thread_store.run_projections[0]
-    assert projection.run_id == "periodic-orphan"
-    assert projection.thread_id == "thread-1"
-    assert projection.owner_worker_id == "dead-worker"
-    assert projection.active_state_version == 2
-    assert projection.terminal_state_version == 3
-    assert projection.status == "error"
-    assert user_id is None
-
-
-@pytest.mark.anyio
-async def test_recovery_terminalizes_foreign_tenant_before_hydration_or_execution(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tenant_a = TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference()
-    tenant_b = TenantIdentityV1.from_canonical_id("tenant-b").to_persisted_reference()
-    store = MemoryRunStore()
-    expired = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
-    await store.put(
-        "foreign-run",
-        thread_id="foreign-thread",
-        status="running",
-        owner_worker_id="dead-worker",
-        lease_expires_at=expired,
-        created_at=expired,
-        tenant=tenant_b,
-    )
-    manager = RunManager(store=store, tenant=tenant_a)
-
-    def fail_hydration(_row):
-        raise AssertionError("foreign accepted evidence must not be hydrated")
-
-    monkeypatch.setattr(manager, "_record_from_store", fail_hydration)
-
-    recovered = await manager.reconcile_orphaned_inflight_runs(
-        error="ordinary recovery",
-    )
-    row = await store.get("foreign-run")
-
-    assert recovered == []
-    assert row is not None
-    assert row["status"] == "error"
-    assert row["stop_reason"] == "tenant_identity_mismatch"
-
-
-@pytest.mark.anyio
-async def test_admission_rejects_foreign_accepted_tenant_before_store_write() -> None:
-    tenant_a = TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference()
-    tenant_b = TenantIdentityV1.from_canonical_id("tenant-b").to_persisted_reference()
-    store = MemoryRunStore()
-    manager = RunManager(store=store, tenant=tenant_a)
-
-    with pytest.raises(TenantIdentityError) as error:
-        await manager.create_or_reject(
-            "foreign-thread",
-            accepted_invocation=SimpleNamespace(tenant=tenant_b),
-        )
-
-    assert error.value.code == "tenant_identity_mismatch"
-    assert await store.list_by_thread("foreign-thread") == []
-
-
-@pytest.mark.anyio
-async def test_admission_rejects_tenant_bound_invocation_without_manager_identity() -> None:
-    tenant = TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference()
-    store = MemoryRunStore()
-    manager = RunManager(store=store)
-
-    with pytest.raises(TenantIdentityError) as error:
-        await manager.create_or_reject(
-            "tenant-bound-thread",
-            accepted_invocation=SimpleNamespace(tenant=tenant),
-        )
-
-    assert error.value.code == "tenant_identity_mismatch"
-    assert await store.list_by_thread("tenant-bound-thread") == []
-
-
-@pytest.mark.anyio
-async def test_tenantless_recovery_terminalizes_bound_row_before_hydration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tenant = TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference()
-    store = MemoryRunStore()
-    expired = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
-    await store.put(
-        "bound-run",
-        thread_id="bound-thread",
-        status="running",
-        owner_worker_id="dead-worker",
-        lease_expires_at=expired,
-        created_at=expired,
-        tenant=tenant,
-    )
-    manager = RunManager(store=store)
-
-    def fail_hydration(_row):
-        raise AssertionError("tenant-bound rows must not be hydrated without process identity")
-
-    monkeypatch.setattr(manager, "_record_from_store", fail_hydration)
-
-    recovered = await manager.reconcile_orphaned_inflight_runs(
-        error="ordinary recovery",
-    )
-    row = await store.get("bound-run")
-
-    assert recovered == []
-    assert row is not None
-    assert row["status"] == "error"
-    assert row["stop_reason"] == "tenant_identity_mismatch"
 
 
 @pytest.mark.anyio
 async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     """SQLite startup should recover stale active runs before serving requests."""
     app = FastAPI()
-    app.state.tenant_identity = _TENANT_IDENTITY
     config = SimpleNamespace(
         database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)),
         run_events=SimpleNamespace(backend="memory"),
@@ -377,15 +228,7 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     thread_store = _FakeThreadStore()
     stream_bridge = _FakeStreamBridge(existing_streams={"run-1"})
     _FakeRunManager.instances.clear()
-    _FakeRunManager.recovered_runs = [
-        SimpleNamespace(
-            run_id="run-1",
-            thread_id="thread-1",
-            recovery_projection_owner_worker_id="dead-worker",
-            recovery_projection_active_state_version=4,
-            checkpoint_terminal_state_version=5,
-        )
-    ]
+    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="run-1", thread_id="thread-1")]
     _FakeRunManager.latest_by_thread = {}
 
     async def fake_init_engine_from_config(_database):
@@ -397,16 +240,13 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     monkeypatch.setattr(engine_module, "init_engine_from_config", fake_init_engine_from_config)
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: None)
     monkeypatch.setattr(engine_module, "close_engine", fake_close_engine)
-    monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config, **_kwargs: _fake_context(stream_bridge))
-    monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config, **_kwargs: _fake_context(object()))
+    monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(stream_bridge))
+    monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
-    monkeypatch.setattr(
-        thread_meta_module,
-        "make_thread_store",
-        lambda _sf, _store, *, run_store=None: thread_store,
-    )
-    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
+    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
+    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
+
     async with gateway_deps.langgraph_runtime(app, config):
         pass
     await anyio.sleep(0)
@@ -415,17 +255,8 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
     assert _FakeRunManager.instances[0].reconcile_calls
     assert _FakeRunManager.instances[0].reconcile_calls[0]["error"]
     assert _FakeRunManager.instances[0].reconcile_calls[0]["stop_reason"] == runtime_module.ORPHAN_RECOVERY_STOP_REASON
-    assert _FakeRunManager.instances[0].list_by_thread_calls == []
-    assert thread_store.status_updates == []
-    assert len(thread_store.run_projections) == 1
-    projection, user_id = thread_store.run_projections[0]
-    assert projection.run_id == "run-1"
-    assert projection.thread_id == "thread-1"
-    assert projection.owner_worker_id == "dead-worker"
-    assert projection.active_state_version == 4
-    assert projection.terminal_state_version == 5
-    assert projection.status == "error"
-    assert user_id is None
+    assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
+    assert thread_store.status_updates == [("thread-1", "error", None)]
     assert stream_bridge.publish_end_calls == ["run-1"]
     assert stream_bridge.cleanup_calls == [("run-1", 60.0)]
 
@@ -433,7 +264,6 @@ async def test_sqlite_runtime_reconciles_orphaned_runs_on_startup(monkeypatch):
 @pytest.mark.anyio
 async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
     app = FastAPI()
-    app.state.tenant_identity = _TENANT_IDENTITY
     config = SimpleNamespace(
         database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)),
         run_events=SimpleNamespace(backend="memory"),
@@ -446,38 +276,15 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
     async def noop(*_args, **_kwargs):
         return None
 
-    async def fake_tenant_binding(*_args, **_kwargs):
-        return SimpleNamespace(legacy_redis_prefixes=LegacyRedisPrefixRecordV1())
-
     monkeypatch.setattr(engine_module, "init_engine_from_config", noop)
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: session_factory)
     monkeypatch.setattr(engine_module, "close_engine", noop)
-    monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config, **_kwargs: _fake_context(_FakeStreamBridge()))
-    monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config, **_kwargs: _fake_context(object()))
+    monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(_FakeStreamBridge()))
+    monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
-    monkeypatch.setattr(
-        thread_meta_module,
-        "make_thread_store",
-        lambda _sf, _store, *, run_store=None: _FakeThreadStore(),
-    )
-    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
+    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: _FakeThreadStore())
+    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
-    monkeypatch.setattr(
-        "deerflow.persistence.run.sql.RunRepository.initialize_lifecycle",
-        noop,
-    )
-    monkeypatch.setattr(
-        "deerflow.persistence.mcp_tasks.McpTaskRepository.verify_schema_writer_compatibility",
-        noop,
-    )
-    monkeypatch.setattr(
-        "deerflow.persistence.subagent_batches.SubagentBatchRepository.verify_schema_writer_compatibility",
-        noop,
-    )
-    monkeypatch.setattr(
-        "deerflow.persistence.tenant_binding.ensure_schema_tenant_binding",
-        fake_tenant_binding,
-    )
 
     async with gateway_deps.langgraph_runtime(app, config):
         assert app.state.scheduled_task_repo._run_repository is app.state.run_store
@@ -485,27 +292,18 @@ async def test_sql_runtime_shares_run_repository_with_scheduler(monkeypatch):
 
 
 @pytest.mark.anyio
-async def test_sqlite_runtime_delegates_stale_recovery_to_projection_authority(monkeypatch):
-    """Gateway must let the atomic store seam reject an older recovered run."""
+async def test_sqlite_runtime_does_not_mark_thread_error_when_newer_run_is_success(monkeypatch):
+    """Startup recovery should not let an old orphaned run overwrite a newer terminal thread state."""
     app = FastAPI()
-    app.state.tenant_identity = _TENANT_IDENTITY
     config = SimpleNamespace(
         database=SimpleNamespace(backend="sqlite", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)),
         run_events=SimpleNamespace(backend="memory"),
         stream_bridge=SimpleNamespace(recovered_stream_cleanup_delay_seconds=60.0),
     )
-    thread_store = _FakeThreadStore(project_result=False)
+    thread_store = _FakeThreadStore()
     stream_bridge = _FakeStreamBridge(existing_streams={"old-running"})
     _FakeRunManager.instances.clear()
-    _FakeRunManager.recovered_runs = [
-        SimpleNamespace(
-            run_id="old-running",
-            thread_id="thread-1",
-            recovery_projection_owner_worker_id="dead-worker",
-            recovery_projection_active_state_version=9,
-            checkpoint_terminal_state_version=10,
-        )
-    ]
+    _FakeRunManager.recovered_runs = [SimpleNamespace(run_id="old-running", thread_id="thread-1")]
     _FakeRunManager.latest_by_thread = {"thread-1": [SimpleNamespace(run_id="newer-success", thread_id="thread-1", status="success")]}
 
     async def fake_init_engine_from_config(_database):
@@ -517,15 +315,11 @@ async def test_sqlite_runtime_delegates_stale_recovery_to_projection_authority(m
     monkeypatch.setattr(engine_module, "init_engine_from_config", fake_init_engine_from_config)
     monkeypatch.setattr(engine_module, "get_session_factory", lambda: None)
     monkeypatch.setattr(engine_module, "close_engine", fake_close_engine)
-    monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config, **_kwargs: _fake_context(stream_bridge))
-    monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config, **_kwargs: _fake_context(object()))
+    monkeypatch.setattr(runtime_module, "make_stream_bridge", lambda _config: _fake_context(stream_bridge))
+    monkeypatch.setattr(checkpointer_module, "make_checkpointer", lambda _config: _fake_context(object()))
     monkeypatch.setattr(runtime_module, "make_store", lambda _config: _fake_context(object()))
-    monkeypatch.setattr(
-        thread_meta_module,
-        "make_thread_store",
-        lambda _sf, _store, *, run_store=None: thread_store,
-    )
-    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config, **_kwargs: object())
+    monkeypatch.setattr(thread_meta_module, "make_thread_store", lambda _sf, _store: thread_store)
+    monkeypatch.setattr(event_store_module, "make_run_event_store", lambda _config: object())
     monkeypatch.setattr(gateway_deps, "RunManager", _FakeRunManager)
 
     async with gateway_deps.langgraph_runtime(app, config):
@@ -533,14 +327,7 @@ async def test_sqlite_runtime_delegates_stale_recovery_to_projection_authority(m
     await anyio.sleep(0)
 
     assert len(_FakeRunManager.instances) == 1
-    assert _FakeRunManager.instances[0].list_by_thread_calls == []
+    assert _FakeRunManager.instances[0].list_by_thread_calls == [{"thread_id": "thread-1", "user_id": None, "limit": 1}]
     assert thread_store.status_updates == []
-    assert len(thread_store.run_projections) == 1
-    projection, user_id = thread_store.run_projections[0]
-    assert projection.run_id == "old-running"
-    assert projection.owner_worker_id == "dead-worker"
-    assert projection.active_state_version == 9
-    assert projection.terminal_state_version == 10
-    assert user_id is None
     assert stream_bridge.publish_end_calls == ["old-running"]
     assert stream_bridge.cleanup_calls == [("old-running", 60.0)]

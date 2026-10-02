@@ -1,20 +1,18 @@
 # AGENTS.md
 
-Coding-agent source of truth; `CLAUDE.md` imports it. Module guides own depth:
+This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with code in this repository. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
+
+It is the **monorepo orientation layer**: it maps the whole repo and points to the
+module guides that own the depth. For anything inside a module, read that module's
+guide rather than expecting full detail here:
 
 - **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
   middleware chain, sandbox, MCP, skills, memory, IM channels, persistence/migrations,
   config system, test layout.
-- **[frontend-hm/AGENTS.md](frontend-hm/AGENTS.md)** — frontend depth: Next.js App Router layout,
+- **[frontend/AGENTS.md](frontend/AGENTS.md)** — frontend depth: Next.js App Router layout,
   thread/streaming data flow, code style, commands.
 
 ## What is DeerFlow
-
-Hartmesh's product UI lives in `frontend-hm/`. `frontend/` is an exact upstream
-snapshot pinned by `.github/upstream-frontend.json`; never edit it for Hartmesh,
-including version bumps, formatting, or guidance. `make check-frontend-isolation`
-checks the snapshot and direct source references. Port upstream UI fixes into
-`frontend-hm/` deliberately; see [the isolation guide](docs/FRONTEND_ISOLATION.md).
 
 DeerFlow is a LangGraph-based AI super-agent system with a full-stack architecture. The
 backend runs a "super agent" with sandboxed execution, persistent memory, subagent
@@ -33,51 +31,21 @@ A single `make dev` / Docker stack runs four cooperating services:
 | **Frontend**    | `3000` | Next.js web interface                                               |
 | **Provisioner** | `8002` | Optional — only when sandbox is configured for provisioner/K8s mode |
 
-Nginx is the single public entry: it serves the frontend, proxies
-`/api/langgraph/*` to the Gateway's LangGraph runtime (rewritten to native
-`/api/*`), and passes other `/api/*` to the Gateway REST routers; see
-[backend/AGENTS.md](backend/AGENTS.md). One tenant is frozen per Gateway
-([contract](backend/docs/TENANT_IDENTITY.md)). It compresses HTML and
-configured textual assets but not SSE, fonts, images, audio, or video.
+Nginx is the single public entry: it proxies `/api/*` to the Gateway, rewriting
+`/api/langgraph/*` onto the Gateway's native routes, and serves the frontend — see
+[backend/AGENTS.md](backend/AGENTS.md) for the runtime and router detail. It compresses
+HTML and configured textual assets, deliberately leaving SSE, fonts, images, audio, and
+video uncompressed at the proxy layer.
 
-Both compose files publish that entry as
-`"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"` — **loopback by default**; a
-bare `"${PORT}:2026"` binds `0.0.0.0`. Root `PORT` is Docker ingress only;
-local orchestration pins Next.js to `3000` so `.env` cannot make `make dev`
-wait on the wrong port. Nginx listens `default_server` (IPv4+IPv6) and the
-Gateway binds `0.0.0.0:8001` on purpose, both container-internal: the published
-nginx port is the entire external surface and `8001` stays unpublished. Any new
-published port needs an explicit bind address;
-`backend/tests/test_compose_default_bind_host.py` pins this for every service.
-Both files that pin a network subnet do so away from any range the host must
-still route, because a bridge is a connected route: `docker-compose-dev.yaml`
-(`${DEER_FLOW_DEV_SUBNET:-...}`) and the tenant VM profile, which interpolates
-`${HARTMESH_APP_SUBNET:-...}` into both the IPAM config and the Gateway's
-`AUTH_TRUSTED_PROXIES` — moving one without the other silently drops nginx's
-forwarded client address. That profile's `models:` comes from `providers/`
-unless the optional `HARTMESH_MODELS_FILE` names an operator file on the tenant
-data disk: that list is then authoritative (a provider key adds tools, never
-models) and a bad one refuses to render instead of falling back. It also sets
-`sandbox.ready_timeout: 120` (one-CPU gVisor cold starts measured 80 to 91 s);
-the optional `SANDBOX_READY_TIMEOUT` overrides it within 60 to 600 or refuses.
-Its sandboxes run the image's slim services profile (`sandbox.environment`
-carries the six `DISABLE_*` switches as quoted strings; browser, VNC, Jupyter,
-code-server and the Node REPL stay off) in two 1 GiB slots at two CPUs
-(`replicas: 2`, 256 pids) on the 5.0 GiB line; four 512 MiB slots had no
-headroom (tenant-class `.18`). `deploy/compose/scripts/measure-sandbox-boot.sh` measures boot, idle
-and a command under exactly those limits, and the compose README's "Slim
-services profile" section holds the figures. The Gateway image carries
-`skills/public`; the profile's `gateway/run.sh` seeds it onto the tenant
-data disk at every start minus `EXCLUDED_PUBLIC_SKILLS` (reasons in
-`run.sh`); see that README's "Public skills" section.
-
-`durable_two_gateway_v1` covers only its exact two-replica PostgreSQL + Redis +
-AIO/RWX artifact, not arbitrary scaling, IM HA, cross-region operation, or
-zero-downtime upgrades. No passing artifact exists here; operator claims cannot
-unlock production rendering or startup. The chart's optional pre-created
-`sandboxNamespace` split (`K8S_NAMESPACE` selects sandbox resources,
-`PROVISIONER_GATEWAY_NAMESPACE` the release namespace for Gateway
-ServiceAccount validation) is documented in the Helm README.
+Both compose files publish that entry as `"${BIND_HOST:-127.0.0.1}:${PORT:-2026}:2026"`
+— **loopback by default**, matching the README's documented deployment model; a bare
+`"${PORT}:2026"` binds `0.0.0.0`, which does not. The root `PORT` value is Docker ingress
+configuration only; local orchestration pins Next.js to `3000` so loading `.env` cannot
+make `make dev` wait on the wrong port. Nginx listening `default_server` on IPv4+IPv6 and
+the Gateway binding `0.0.0.0:8001` are container-internal on purpose: the published nginx
+port is the entire external surface. Any new published port needs an explicit bind
+address; `backend/tests/test_compose_default_bind_host.py` pins this for every service in
+both compose files.
 
 ## Repository Map
 
@@ -89,64 +57,61 @@ deer-flow/
 ├── backend/                        # Python backend — see backend/AGENTS.md
 │   ├── Makefile                    # Per-module backend commands (dev, gateway, test, lint, migrate-rev)
 │   ├── extensions/sources/         # Deployable snapshots of locally installed Python extensions
-│   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*), the public contract
+│   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
-│   ├── packages/runtime-api/       # deerflow-runtime-api — stdlib-only embedded durable runtime contracts
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
-├── frontend-hm/                    # Hartmesh Next.js app — see frontend-hm/AGENTS.md
-├── frontend/                       # Pinned upstream reference; no Hartmesh edits
-├── deploy/                         # compose/ tenant VM profile (.env contract, image pins); helm/ chart
+├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
 │                                    # Integration credentials and enabled state remain per-user
-├── contracts/                      # Cross-component JSON contracts (business_report/: the report skill's report.json)
-├── examples/deerflow-extension-example/ # Standalone package demonstrating all extension contribution kinds
-├── scripts/                        # Root orchestration and release scripts invoked by the Makefile
-├── tests/                          # Root-level tests (tests/skills/: earlier public-skill tests, not run in CI; new skill tests live in backend/tests/skills/)
+├── contracts/                      # Cross-component JSON contracts (e.g. subagent status, skill review)
+├── examples/                       # Extension examples: deerflow-extension-{example,bookmarks}
+├── scripts/                        # Root orchestration scripts invoked by the Makefile (check, configure, doctor, support_bundle, serve, nginx, docker, deploy, setup_wizard)
+├── tests/                          # Root-level tests (currently tests/skills/ — public skill tests)
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
 
-Third-party extensions come from the operator-controlled top-level `plugins:`
-list in `config.yaml` (never API-writable `extensions_config.json`) because
-they import code. They contribute middleware, lifecycle, model observers,
-Gateway services, and routers ([reference extension](examples/deerflow-extension-example/));
-manage via `deerflow extensions` / `make extension-*`, restart required.
-Provenance records admitted bytes/config, but extensions run with Gateway
-privileges and must be trusted. See the
-[extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md) and
-[provenance guide](docs/EXTENSION_ARTIFACT_PROVENANCE.md).
+Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
+(operator-controlled on purpose — that list causes code to be imported, so it is deliberately
+kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
+middleware, lifecycle observers, Gateway services, FastAPI HTTP routers, and experimental
+full-stack plugins. Manage them with `deerflow extensions install/upgrade/list/enable/disable/remove` or the root
+`make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
+hooks and extension code execute with Gateway privileges, so only trusted operator sources
+belong in this path. The manager transaction, accepted source forms, lock discipline, and
+contribution contract live in
+[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md); the user manual
+is `frontend/src/content/{en,zh}/harness/extensions/`.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
-servers + skills). Both real files are gitignored. The default governed tool plane
-requires stage→validate→promote for writes; direct routes require
-`tool_plane.enabled: false`. It separates deployment material from user overlays,
-binds accepted runs, detects drift, and mounts no exact-two mutation/bootstrap
-routes. See the
-[operator guide](docs/GOVERNED_TOOL_PLANE.md).
+servers + skills). Both real files are gitignored and may be edited at runtime via the
+Gateway API. Config schema and resolution order are documented in
+[backend/AGENTS.md](backend/AGENTS.md).
 
-Upstream offers: see [docs/UPSTREAM_OFFERS.md](docs/UPSTREAM_OFFERS.md).
+Skill quality review note:
+- `skills/public/skill-reviewer/` is the built-in read-only skill quality reviewer.
+  It uses the harness-layer `review_skill_package` tool and contracts in
+  `contracts/skill_review/`. Model-visible review data is compact and
+  tag-neutralized; full raw payloads stay in tool artifacts. See
+  [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
+  `skill-creator` ownership boundaries.
+- CI waivers live in `.github/skill-review-waivers.v1.json` and are enforced by
+  `scripts/review_changed_public_skills.py`. Pull requests may validate waiver
+  edits from their head revision, but only the manifest from the trusted base
+  revision can suppress that run. Entries match one error finding exactly,
+  include the reviewed file's SHA-256 and an expiry date, remain visible in CI
+  output, and can never waive blocker findings. An entry may also preapprove
+  future full-file SHA-256 values, effective only once the manifest change lands
+  in the trusted base — so relying on a waiver takes two merges: the manifest
+  first, the skill change after, then promote the consumed hash to `file_sha256`
+  in a follow-up cleanup.
 
-Durable-runtime invariants (accepted admission, `deerflow-runtime-api`,
-execution budgets and evidence projections, run evidence bundles, durable
-batches, MCP tasks and replay keys, scheduled tasks, exact-two qualification)
-live in [backend/AGENTS.md](backend/AGENTS.md) and the `docs/` files it links.
-Missing qualification infrastructure is an unpassed gate, never a skip.
-
-Skill review: `skills/public/skill-reviewer/` is the read-only reviewer using
-the `review_skill_package` tool and `contracts/skill_review/`; model-visible
-data is compact and tag-neutralized, raw payloads stay in tool artifacts.
-Every admission snapshots effective skills and executes only that immutable
-snapshot at `/mnt/skills/.accepted` (durable profiles need a qualified
-materializer, `local_development` the provider's projection); live edits
-affect later invocations only. CI skill-review waivers
-(`.github/skill-review-waivers.v1.json`, enforced by
-`scripts/review_changed_public_skills.py`) come only from the trusted base
-manifest, bind one error to its file SHA-256 and expiry, stay visible, and never
-waive blockers; an entry may preapprove future full-file SHA-256 values,
-effective once that manifest lands in the trusted base. Merge the waiver before
-changing the skill, then promote the consumed hash to `file_sha256`.
+Scheduled-task note:
+- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
+- Scheduled background runs are intentionally non-interactive: the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. That key, `disable_clarification`, and `github_token` are honored only for internally-authenticated callers; client-supplied copies are dropped from both `body.context` and `body.config`.
+- Busy scheduled occurrences are persisted as `queued`; `launching` is a short lease-fenced claim, `running` remains the normal Gateway run lifecycle, and `scheduler.queue_timeout_seconds` bounds the durable wait. Do not reintroduce skip-on-overlap or count waiting rows against `max_concurrent_runs`.
 
 ## Commands: Root vs. Module
 
@@ -160,20 +125,26 @@ make config      # Generate local config files from the examples
 make check       # Check that required tools are installed
 make install     # Install all dependencies (frontend + backend + pre-commit hooks)
 make extension-install SOURCE=...  # Install and enable a trusted Python extension
-make extension-list / extension-enable NAME=... / extension-disable NAME=... / extension-remove NAME=...  # restart required
+make extension-upgrade SOURCE=...  # Replace an installed extension and keep its config
+make extension-list                # List configured Python extensions
+make extension-enable NAME=...     # Enable an installed extension (restart required)
+make extension-disable NAME=...    # Disable without uninstalling (restart required)
+make extension-remove NAME=...     # Remove package and config entry (restart required)
 make dev         # Start all services with hot-reload (Gateway + Frontend + Nginx)
-make start       # Production mode locally; SKIP_FRONTEND_BUILD=1 reuses the last frontend build
+make start       # Start all services in production mode (local, optimized); SKIP_FRONTEND_BUILD=1 reuses the last frontend build
 make stop        # Stop all running services
 make up / down   # Build/stop the production Docker stack (browser at localhost:2026)
 make docker-start / docker-stop / docker-logs   # Docker development environment
 ```
 
-Production startup uses the image's pre-built Python environment (`uv run
---no-sync`) and a real Gateway `/health` probe; `make up` waits for that probe
-before its success banner, and a readiness failure must surface Compose status
-and recent Gateway logs rather than claim the stack is running. Docker
-log/restart commands resolve `DEER_FLOW_ROOT` from the current checkout,
-matching start and stop.
+Production startup uses the image's pre-built Python environment with `uv run
+--no-sync`, gives the Gateway a real `/health` probe, and makes `make up` wait
+for that probe before printing its success banner. A readiness failure must
+surface Compose status and recent Gateway logs instead of claiming the stack is
+running.
+
+Docker log and restart commands resolve `DEER_FLOW_ROOT` from the current
+checkout before invoking Compose, matching the start and stop commands.
 
 Run `make help` for the full list.
 
@@ -187,16 +158,19 @@ cd backend && make test-blocking-io  # Strict blocking-I/O suite
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
-# Frontend (see frontend-hm/AGENTS.md for the full set)
-cd frontend-hm && pnpm dev    # Dev server: Webpack by default (override with DEER_FLOW_DEV_BUNDLER=turbo)
-cd frontend-hm && pnpm check  # Lint + type check (run before committing)
-cd frontend-hm && pnpm test   # Unit tests
+# Frontend (see frontend/AGENTS.md for the full set)
+cd frontend && pnpm dev       # Dev server: Webpack by default (override with DEER_FLOW_DEV_BUNDLER=turbo)
+cd frontend && pnpm check     # Lint + type check (run before committing)
+cd frontend && pnpm test      # Unit tests
 ```
 
-Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend-hm/`
+Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
 (`pnpm`) = per-module work.**
 
-Hartmesh's host-side pnpm consumers use `scripts/pnpm.py --project frontend-hm --`: it prefers direct `pnpm`/`pnpm.cmd`, falls back to `corepack pnpm`, and resolves executable paths before changing to the selected project. The no-selector form retains `frontend/` for upstream Makefile compatibility. `make frontend-config` initializes the new app's ignored `.env`, preserving an existing destination or migrating the old app's settings.
+Host pnpm calls use `scripts/pnpm.py`: native Windows tries `pnpm.cmd` before
+`pnpm`; POSIX reverses the order. Its Corepack fallback applies the same ordering
+to `corepack.cmd` and `corepack`. The runner operates from `frontend/` so
+Corepack honors its pinned package-manager version.
 
 ### Prerequisites before `make dev`
 
@@ -208,8 +182,8 @@ make install     # install frontend + backend deps and pre-commit hooks
 make dev         # then start everything
 ```
 
-Without `config.yaml` present, services fail to boot. `config.yaml` hot-reloads from
-disk; `extensions_config.json` is API-writable. Both are gitignored, never commit them.
+Without `config.yaml` present, services fail to boot. `config.yaml` / `extensions_config.json`
+may be edited at runtime via the Gateway API but are gitignored, so never commit them.
 
 ### Run a single test
 
@@ -219,7 +193,7 @@ cd backend && python -m pytest tests/test_compose_default_bind_host.py -q
 cd backend && python -m pytest tests/path/to/test.py::test_func -q
 
 # Frontend (rstest)
-cd frontend-hm && pnpm rstest run <pattern>  # e.g. pnpm rstest run my-component
+cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ```
 
 ### Logs
@@ -232,11 +206,10 @@ cd frontend-hm && pnpm rstest run <pattern>  # e.g. pnpm rstest run my-component
 ## Where to Go Next
 
 - Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
-- Frontend work → **[frontend-hm/AGENTS.md](frontend-hm/AGENTS.md)**
+- Frontend work → **[frontend/AGENTS.md](frontend/AGENTS.md)**
 - Setup & install → **[Install.md](Install.md)**, **[CONTRIBUTING.md](CONTRIBUTING.md)**
 - Project overview & usage → **[README.md](README.md)** (translations: `README_zh.md`,
-  `README_ja.md`, `README_fr.md`, `README_ru.md`, `README_es.md`, `README_pt.md`,
-  `README_de.md`)
+  `README_ja.md`, `README_fr.md`, `README_ru.md`)
 - Security policy → **[SECURITY.md](SECURITY.md)**
 - Changes → **[CHANGELOG.md](CHANGELOG.md)**
 - Cutting a release → **[RELEASING.md](RELEASING.md)**
@@ -250,17 +223,19 @@ These apply repo-wide; module guides own the module-specific detail.
   the same change set.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
-  frontend tests live in `frontend-hm/tests/`.
+  frontend tests live in `frontend/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
   Python utilities that read or write them must pass `encoding="utf-8"` rather than
   relying on the platform locale.
-- **Version sources must stay in lockstep** — `backend/pyproject.toml`, the
-  root `deer-flow` entry in `backend/uv.lock`, `frontend-hm/package.json`, and
-  `deploy/helm/deer-flow/Chart.yaml` (`version` + `appVersion`) must match. A
-  `v*` tag triggers `scripts/verify_versions.sh` in CI and **blocks all
-  publishing** on drift. Bump with `scripts/bump_version.sh <ver>`, verify with
-  `scripts/verify_versions.sh <ver>`. See [RELEASING.md](RELEASING.md).
+- **Version sources must stay in lockstep** — a release version must match identically in
+  `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
+  (`version` + `appVersion`), and `backend/uv.lock` must record the same version for the root
+  package (uv stores its PEP 440 form, e.g. `2.1.0rc0`). Pushing a `v*` git tag triggers CI
+  that runs `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts.
+  Before bumping a version, run `scripts/bump_version.sh <ver>` (aligns the four fields and
+  refreshes `backend/uv.lock` at once — it needs `uv` on `PATH`) and
+  `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
 - **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
   belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.

@@ -69,21 +69,6 @@ graph TB
 
 `ContextVar` 是这里的核心边界。上层 Gateway 负责写入身份，下层 persistence / file path 只读取结构化的当前用户，不反向依赖 `app.gateway.auth` 具体类型。
 
-### 自动化凭据证据
-
-浏览器 session、PAT、内部服务与受支持的 IM channel 最终都由 Gateway
-生成 `CredentialEvidenceV1`。它只记录认证方法、可选的安全凭据引用、规范化
-权限摘要/粗粒度类别以及有界时间；不会记录 Bearer、PAT digest、cookie、
-凭据名称或服务 secret。该证据与现有 `InvocationIdentityV1`（principal 与
-可选 acting service）、`SealedOriginV1`（source）和 `TenantReferenceV1`
-组合，不创建第二套身份模型。PAT 始终是用户凭据，不是 acting service。
-
-新 durable invocation 将它绑定到 `TrustedRunContextV1` v4。历史证据在
-撤销后保持不变，但每次新的提交、观察、控制或导出仍会重新认证并检查当前
-权限；旧记录不是 capability token。完整 schema、PAT 路由/权限矩阵、审计
-策略和恢复语义见
-[`docs/AUDITABLE_AUTOMATION_IDENTITIES.md`](../../docs/AUDITABLE_AUTOMATION_IDENTITIES.md)。
-
 可以把 repository 调用的用户参数理解成一个三态 ADT：
 
 ```scala
@@ -114,7 +99,7 @@ enum UserScope:
 5. 服务端确认当前没有 admin，创建 `system_role="admin"`、`needs_setup=false` 的用户。
 6. 服务端设置 `access_token` HttpOnly cookie，用户进入 workspace。
 
-`/api/v1/auth/initialize` 只在没有 admin 时可用。并发初始化由数据库唯一约束兜底，失败方返回 409。
+`/api/v1/auth/initialize` 只在没有 admin 时可用。并发初始化由存储层的原子认领兜底：admin 计数与插入在同一个事务内完成，且写入先被串行化（SQLite 使用 `BEGIN IMMEDIATE`，PostgreSQL 使用事务级 advisory lock），因此同时到达的两个首次初始化请求不会都看到空系统，失败方返回 409。邮箱唯一约束只覆盖相同邮箱的重复提交，无法阻止两个不同邮箱同时成为 admin。
 
 ### 普通登录
 
@@ -125,25 +110,7 @@ enum UserScope:
 - 成功后签发 JWT，放入 `access_token` HttpOnly cookie。
 - 响应体只返回 `expires_in` 和 `needs_setup`，不返回 token。
 
-登录失败**按账号计数**，不按客户端 IP。对同一个邮箱地址连续失败 `auth.local.account_max_attempts` 次（默认 5），该账号被锁定 `auth.local.account_lockout_seconds` 秒（默认 300），与请求来自哪个地址无关。此前按 IP 计数会让整个公司被锁在自己的部署之外：一间办公室的全部员工共用一个出口地址；未设置 `AUTH_TRUSTED_PROXIES` 时，所有人共用的更是反向代理的容器地址。
-
-另有一道**宽松得多的来源防护**，用于账号喷洒（per-account 锁定看不到这种攻击）：一个来源地址在 `source_window_seconds`（默认 900 秒）内，最多对 `source_max_distinct_accounts`（默认 50）个不同账号失败、共计 `source_max_failures`（默认 300）次，超过任一上限即锁定该地址 `source_lockout_seconds` 秒。地址解析仍只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。
-
-该窗口是**固定窗口，不是滑动窗口**：从该地址的第一次计入失败开始，`source_window_seconds` 秒后关闭，下一次失败重新开一个；窗口内的计数不会衰减（redis 后端即在第一次 INCR 时给计数器设置该 TTL）。
-
-两个默认值都高于一间小型办公室的预期用量，但都**不是**「正常办公室永远碰不到」的保证：对已锁定账号的重试同样计入总量（锁定账号的响应与密码错误完全一致，没有任何提示让人停手），拼错的邮箱也各算一个不同账号。已知规模的部署应据此调整总量上限——N 名员工各自触发账号锁定后再重试，代价是 N x（`account_max_attempts` + 重试次数）；租户 Compose 配置就是这样设定的（见 `deploy/compose/config.yaml`）。任何一道上限都不能让一个与恶意用户共用出口地址的办公室免受影响。
-
-调高上限**不会**解锁已经被锁定的地址：与按账号的锁定（每次检查都按当前阈值重新判定）不同，来源锁定是一份已写下的判决，只能等 `source_lockout_seconds` 到期或由管理员清除。
-
-被锁定的账号返回的响应与密码错误、账号不存在**完全一致**（401 `invalid_credentials`），并同样消耗一次口令校验，因此锁定不会成为账号枚举信道；只有来源防护返回 429。
-
-计数器位置由 `auth.local.lockout_store` 决定：`memory`（默认，进程内）或 `redis`（跨 worker/副本共享，键按租户命名空间隔离）。存储不可用时登录路径**失败关闭**（503），而不是放行。
-
-`max_login_attempts` / `lockout_seconds` 是上述两个 account 键的**废弃别名**：已设置的数值继续生效，但含义已从"每个客户端地址"变为"每个账号"，配置加载时会打印警告。
-
-以上均为每次登录实时读取，改配置后下一次登录即生效，无需重启 Gateway（最小值 2：单次失败不得锁定账号。时长热改按方向生效：下调可提前释放进行中的锁定、收紧阈值会保留已计数的失败；上调只延长仍在锁定期内的锁定，不会复活已服满原时长的锁定）。
-
-管理员（会话认证，非 PAT）可通过 `GET /api/v1/auth/lockouts` 查看当前被锁定的账号与来源地址，并用 `POST /api/v1/auth/lockouts/clear`（`{"account": ...}` 或 `{"source": ...}`）解除，无需重启 Gateway。
+登录失败会按客户端 IP 计数。IP 解析只在 TCP peer 属于 `AUTH_TRUSTED_PROXIES` 时信任 `X-Real-IP`，不使用 `X-Forwarded-For`。阈值与锁定时长可通过 `auth.local.max_login_attempts`（默认 5）和 `auth.local.lockout_seconds`（默认 300 秒）配置，按次实时读取，改配置后下一次登录即生效，无需重启 Gateway（`max_login_attempts` 最小为 2：单次失败不得锁定 IP。时长热改按方向生效：下调可提前释放进行中的锁定、收紧阈值会保留已计数的失败；上调只延长仍在锁定期内的锁定，不会复活已服满原时长的锁定）。
 
 ### 注册
 
@@ -188,7 +155,6 @@ enum UserScope:
 - `/api/v1/auth/setup-status`
 - `/api/v1/auth/initialize`
 - `/api/v1/auth/providers`
-- `/api/product`（产品名称，登录页在登录前显示）
 - `/api/v1/auth/oauth/` (所有子路径)
 - `/api/v1/auth/callback/` (所有子路径)
 
@@ -466,31 +432,6 @@ PYTHONPATH=. python scripts/migrate_user_isolation.py --user-id <target-user-id>
 - 只有迁移脚本和 admin CLI 可以显式传 `user_id=None` 绕过隔离。
 - 本地文件路径必须通过 `Paths` 和 sandbox path validation 解析，不能拼接未校验的用户输入。
 - 捕获认证、迁移、后台任务异常必须记录日志；不能空 catch。
-
-## Durable invocation 操作授权
-
-`config.yaml` 中的 `authorization.invocation_operations` 是仅由操作者配置、启动时快照的
-完整 opt-in：`start_enabled`、`observe_enabled`、`cancel_enabled` 默认均为 `false`，
-`timeout_seconds` 默认 2 秒。任一开关启用时，Gateway 要求
-`authorization.enabled=true` 且 Capability Host 恰好解析出一个 provider，否则启动失败。
-这组开关不从 API 可写的 `extensions_config.json` 读取，也不参与 legacy provider 的热更新
-signature；provider 配置变化仍可原子替换同一个 resolver generation。
-
-三种请求统一使用既有 `AuthorizationProvider`，不引入第二套 policy 接口：
-
-- start：`resource="invocation"`、`action="start"`、
-  `target="agent:<id>@sha256:<revision>"`；在可信 principal、Origin、thread/context、
-  request digest 与 agent revision 封存后、`RunRow` admission 前执行。
-- observe：先执行既有 owner/route 可见性，再对单 run 使用 `run:<run-id>`，对 thread feed
-  每个请求只使用一次 `context:<thread-id>`。
-- cancel：先执行可见性，再以 `run:<run-id>` 授权，之后才进入原有原子 cancel receipt/CAS。
-
-deny 返回拒绝；timeout、exception、malformed decision 或 provider unavailable 返回
-indeterminate，两者都 fail closed。未知或不可见资源不调用 provider。observe/cancel 不缓存，
-始终采用当前 policy。已知幂等 row 不重跑 start，而是在 fresh observe 后使用 row 中已接受的
-revision/generation/contributor evidence 比较 digest。允许的 start 只在
-`decision_evidence_json` 保存有界 authorization generation、policy ID、reason code 与 evidence
-digest；不保存 provider metadata、message 或 claim。
 
 ## 已知边界
 

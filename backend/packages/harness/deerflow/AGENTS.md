@@ -29,6 +29,10 @@ Tests: the `tests/test_trace_*` and `tests/test_worker_trace_binding.py` suites,
 
 ### Managed Lark CLI credentials (`integrations/lark_cli.py`)
 
+Installed `lark-shared` guidance points to Capability Center > Plugins > Lark
+(`/workspace/capabilities?tab=plugins&plugin=lark`). Guidance changes bump the
+version marker; reinstalling the managed skill pack refreshes the stored text.
+
 App registration and direct app switching replace the per-user Lark credential
 tree transactionally. Clear the old OAuth data before running `lark-cli config
 init`: on Linux that command writes the new app secret into the file-backed
@@ -48,46 +52,43 @@ drift.
 
 ### Embedded Client (`packages/harness/deerflow/client.py`)
 
-`DeerFlowClient` provides direct in-process access to all DeerFlow capabilities without HTTP services. All return types align with the Gateway API response schemas, so consumer code works identically in HTTP and embedded modes.
-
-**Architecture**: Imports the same `deerflow` modules that Gateway API uses. Shares the same config files and data directories. No FastAPI dependency.
+`DeerFlowClient` embeds the harness without HTTP/FastAPI, sharing Gateway modules, config, data directories, and response schemas.
 
 **Agent Conversation**:
-- `chat(message, thread_id)` — synchronous, accumulates streaming deltas per message-id and returns the final AI text
+- `chat(message, thread_id)` — synchronous; returns final AI text.
 - `stream(message, thread_id)` — subscribes to LangGraph `stream_mode=["values", "messages", "custom"]` and yields `StreamEvent`:
-  - `"values"` — full state snapshot (title, messages, artifacts); AI text already delivered via `messages` mode is **not** re-synthesized here to avoid duplicate deliveries; serialized `ToolMessage` entries preserve a non-`None` native `artifact`
-  - `"messages-tuple"` — per-chunk update: for AI text this is a **delta** (concat per `id` to rebuild the full message); tool calls and tool results are emitted once each, and tool results preserve a non-`None` native `artifact`
+  - `"values"` — state snapshot (title, messages, artifacts, summary_text). Always forward `summary_text` (current summary or `None`), including unchanged values/resets. Never re-emit AI text delivered via `messages`; serialized `ToolMessage` entries retain non-`None` native `artifact`
+  - `"messages-tuple"` — current-turn AI text **deltas** by `id` and each tool call/result once; excludes resumed history and preserves result `artifact`
   - `"custom"` — forwarded from `StreamWriter`; DeerFlow-built-in custom events are dual-emitted through `deerflow.utils.custom_events`, so `astream_events(version="v2")` consumers also receive one `on_custom_event` with `name=payload["type"]` and the unchanged payload as `data`
-  - `"end"` — stream finished (carries cumulative `usage` counted once per message id)
-- **Custom-event invariant** — production DeerFlow emitters must use `emit_custom_event` / `aemit_custom_event`, not call `StreamWriter` alone. Every built-in payload must carry a non-empty string `type`; typeless payloads remain writer-only and are intentionally absent from `astream_events`. The writer runs first and remains authoritative for Gateway, Web UI, and embedded-client compatibility; callback dispatch is best-effort and must not break that path. Async graph hooks must await the async helper rather than invoking synchronous dispatch on a running event loop.
-- Agent created lazily via `create_agent()` + `build_middlewares()`, same as `make_lead_agent`
+  - `"end"` — current-turn cumulative `usage`, counted once per message id
+- **Custom-event invariant** — use `emit_custom_event` / `aemit_custom_event`, never `StreamWriter` alone. Built-in payloads require a non-empty string `type`; typeless payloads stay writer-only, absent from `astream_events`. The writer runs first and is authoritative for Gateway/Web UI/embedded clients; best-effort callbacks must not break it. Async graph hooks must await the async helper, never dispatch synchronously on a running event loop.
+- Lazy graph creation uses `create_agent()` + `build_middlewares()`.
+- Cache graphs by storage `user_id` and the unordered set of named-agent `mcp_plugins`. `stream()` materializes `user_id` before worker/loop boundaries in every auth mode.
 - Supports `checkpointer` parameter for state persistence across turns
-- `reset_agent()` forces agent recreation (e.g. after memory or skill changes)
-- See [docs/STREAMING.md](../../../docs/STREAMING.md) for the full design: why Gateway and DeerFlowClient are parallel paths, LangGraph's `stream_mode` semantics, the per-id dedup invariants, and regression testing strategy
+- `reset_agent()` reloads AgentConfig and rebuilds the graph. Every run's metadata carries `mcp_plugins` for delegation, including cache hits.
+- [Streaming design](../../../docs/STREAMING.md): Gateway/client parallel paths, LangGraph `stream_mode`, per-id deduplication, and regression tests
 
 **Gateway Equivalent Methods** (replaces Gateway API):
 
 | Category | Methods | Return format |
 |----------|---------|---------------|
 | Models | `list_models()`, `get_model(name)` | `{"models": [...]}`, `{name, display_name, ...}` |
-| MCP | `get_mcp_config()`, legacy `update_mcp_config(servers)` | `{"mcp_servers": {...}}` |
-| Skills | `list_skills()`, `get_skill(name)`, legacy `update_skill(name, enabled)` / `install_skill(path)` | `{"skills": [...]}` |
+| MCP | `get_mcp_config()`, `update_mcp_config(servers)` | `{"mcp_servers": {...}}` |
+| Skills | `list_skills()`, `get_skill(name)`, `update_skill(name, enabled)`, `install_skill(path)` | `{"skills": [...]}` |
 | Goals | `get_goal(thread_id)`, `set_goal(thread_id, objective, max_continuations=8)`, `clear_goal(thread_id)` | `{"goal": {...}}` or `{"goal": None}` |
 | Memory | `get_memory()`, `reload_memory()`, `get_memory_config()`, `get_memory_status()` | dict |
 | Uploads | `upload_files(thread_id, files)`, `list_uploads(thread_id)`, `delete_upload(thread_id, filename)` | `{"success": true, "files": [...]}`, `{"files": [...], "count": N}` |
 | Artifacts | `get_artifact(thread_id, path)` → `(bytes, mime_type)` | tuple |
 
-**Key difference from Gateway**: Upload takes local `Path` objects, rejects directories, and reuses one conversion worker inside active event loops; artifacts return `(bytes, mime_type)`. Gateway-only thread cleanup has no client method. Embedded MCP/skill mutations are legacy-only: governance makes them fail, while permitted writes invalidate the agent cache.
+**Gateway differences**: Upload takes local `Path`, not `UploadFile`, rejects directories before copying, and reuses one conversion worker inside an active event loop. Artifacts return `(bytes, mime_type)`, not HTTP Response. Gateway alone deletes `.deer-flow/threads/{thread_id}` after LangGraph thread deletion; the client has no equivalent. `update_mcp_config()` and `update_skill()` invalidate the cached agent.
 
-**Tests**: `tests/test_client.py` (offline unit tests including
-`TestGatewayConformance`), `tests/test_client_live.py` (live integration tests,
-requires a root `config.yaml`, valid API credentials, and explicit opt-in via
-`make test-live` or `DEER_FLOW_RUN_LIVE_TESTS=1`). The live suite calls real
-external APIs and may incur API costs or create local sandboxes, artifacts, and
-files. It is marked `live`, excluded from `make test`, and skipped in default
-CI.
+**Tests**: `tests/test_client.py` is offline, including `TestGatewayConformance`.
+`tests/test_client_live.py` requires root `config.yaml`, valid API credentials,
+and opt-in via `make test-live` or `DEER_FLOW_RUN_LIVE_TESTS=1`. It calls real
+APIs (possible costs) and may create local sandboxes, artifacts, and files.
+Marked `live`, it is excluded from `make test` and skipped in default CI.
 
-**Gateway Conformance Tests** (`TestGatewayConformance`): Validate that every dict-returning client method conforms to the corresponding Gateway Pydantic response model. Each test parses the client output through the Gateway model — if Gateway adds a required field that the client doesn't provide, Pydantic raises `ValidationError` and CI catches the drift. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
+**Gateway Conformance Tests** (`TestGatewayConformance`): Parse every dict-returning client method's output through its Gateway Pydantic model so missing required fields raise `ValidationError` in CI. Covers: `ModelsListResponse`, `ModelResponse`, `SkillsListResponse`, `SkillResponse`, `SkillInstallResponse`, `McpConfigResponse`, `UploadResponse`, `MemoryConfigResponse`, `MemoryStatusResponse`.
 
 ### AIO Sandbox Network Policy
 
@@ -101,24 +102,48 @@ policy or network-mode mismatch; only the provider may replace it after the
 orphan grace, local teardown reservation, and cross-instance teardown lease.
 Destroy the sandbox, sidecar, and both networks together.
 
+### Tenki `sticky`
+
+Env values stay strings; parse booleans before SDK calls (`bool("false")` is true).
+
 ### E2B Mount Uploads
 
-The E2B provider uploads host mounts during sandbox creation as binary file
-objects. Limits: 100 MiB per file, and 512 MiB / 2,000 files per mount and per
-creation pass (skill projections and configured mounts share that budget),
-checked before upload and rechecked per opened descriptor against its preflight
-size. A cooperative deadline (`mount_upload_deadline_seconds`, default 120) is
-checked before each mount, during directory preflight, and before each SDK
-write, but never interrupts an active filesystem or SDK call. An invalid mount
-does not block later mounts; each upload logs source, destination, counts, and
-elapsed time, and a stopped pass logs its limit reason with attempted and
-completed totals separately. `E2BSandbox.mount_upload_result` carries the
-creation-time `MountUploadResult`; `truncated` is set only by a resource limit
-(deadline, file cap, byte budget), never by an individual mount failure, and is
-`None` when unavailable. Policy-scoped turns clear the four managed remote
-skill categories and upload the prepared projection inside one
-per-user/thread/skills-root critical section shared with acquire and release;
-the canonical root is snapshotted at startup and carried through warm-pool
-identity and E2B metadata, a VM from another root is never adopted, and a
-second policy sync cannot reset the remote tree before the first upload pass
-completes.
+E2B uploads host mounts during sandbox creation using binary file objects.
+Per-mount limits: 100 MiB/file, 512 MiB total, 2,000 files. The full creation
+pass shares a 512 MiB / 2,000-file budget across skill projections and mounts.
+
+The pass has a cooperative deadline controlled by
+``mount_upload_deadline_seconds`` (default: 120 seconds). The provider checks it before
+each mount, during directory preflight, and before each SDK write. The deadline
+does not interrupt active filesystem or E2B SDK calls.
+
+The provider checks mount limits before upload. It rechecks each opened file descriptor against its preflight size before SDK upload.
+
+For policy-scoped turns, clearing the four managed remote skill categories and
+uploading their prepared projection is one per-user/thread/skills-root critical
+section, shared with acquire and release. The provider snapshots that canonical
+root at startup and carries it through warm-pool identity and E2B metadata; a VM
+from another root is never adopted. A second policy sync cannot reset the remote
+tree until the first upload pass has completed.
+
+An invalid mount does not block later mounts.
+
+Each successful upload logs its source, destination, file count, byte count, and elapsed time.
+
+A stopped pass logs its limit reason and elapsed time. It reports attempted and completed upload totals separately.
+
+After creation, ``E2BSandbox.mount_upload_result`` holds a ``MountUploadResult``.
+``result.truncated`` is true only for resource-limit stops (deadline, file count,
+bytes), not logged mount failures (missing paths, SDK errors). A provider-level
+map preserves creation results within the Gateway process; ``None`` on a
+reclaimed sandbox means unavailable.
+
+### Workspace Snapshot Cancellation (`workspace_changes/recorder.py`)
+
+After `_prepare_capture()` hands off roots, cancellation must drain text scans
+(`include_text=True`) before removing the cache the worker may still access.
+Metadata scans (`include_text=False`) own no cache: cancel promptly, let the worker
+continue, and consume/log its outcome in a completion callback. Prepare-stage
+cancellation retains its handoff/reclaim path. Regressions in
+`tests/blocking_io/test_workspace_changes_cancellation.py` must cover prompt
+metadata cancellation and text-cache drain/cleanup.

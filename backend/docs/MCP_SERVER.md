@@ -14,6 +14,34 @@ DeerFlow supports configurable MCP servers and skills to extend its capabilities
 3. Configure each server’s command, arguments, and environment variables as needed.
 4. Restart the application to load and register MCP tools.
 
+## Stdio Working Directory
+
+Set `cwd` when a stdio server needs to resolve its entrypoint or data files
+relative to a specific directory:
+
+```json
+{
+  "mcpServers": {
+    "local": {
+      "type": "stdio",
+      "command": "python",
+      "args": ["server.py"],
+      "cwd": "/absolute/path/to/server"
+    }
+  }
+}
+```
+
+The directory must exist on the Gateway host (inside the container for Docker).
+Use an absolute path for consistent behavior across launch locations; a
+whole-string environment reference such as `"$MCP_SERVER_CWD"` is also supported.
+The configured directory applies to discovery and subsequent tool calls.
+When `cwd` is omitted, `null`, or an empty string (including an unset environment
+reference), discovery inherits the Gateway's working directory and pooled calls
+use the thread workspace. HTTP/SSE servers ignore it.
+Files created outside the thread's user-data tree are not exposed through the
+sandbox/artifact API.
+
 ## OpenViking MCP Tools
 
 OpenViking's official server exposes a Streamable HTTP MCP endpoint at `/mcp`.
@@ -46,7 +74,12 @@ authentication fails and DeerFlow skips that MCP server, so no OpenViking tools
 appear. Changing only the environment variable does not invalidate DeerFlow's
 already-populated, file-signature-based MCP tool cache; after setting or fixing
 the key, restart DeerFlow, modify and re-save the extensions config, or call the
-MCP cache-reset endpoint at `POST /api/mcp/cache/reset`.
+MCP cache-reset endpoint at `POST /api/mcp/cache/reset`. In a multi-worker
+deployment whose workers share the writable extensions-config directory, that
+endpoint publishes a shared generation so every worker refreshes before its
+next MCP lookup. The response reports `scope: shared_config` to identify that
+transport (it reaches only workers mounting that directory), or `scope: process`
+if no config path can be resolved.
 
 OpenViking owns the tool schemas and behavior. DeerFlow performs the standard
 MCP initialization and discovery flow, prefixes the discovered names with
@@ -79,6 +112,50 @@ are model-selected operations.
 For Docker, point `url` at the OpenViking address reachable from the Gateway
 container, such as `http://openviking:1933/mcp` for a shared Compose network or
 `http://host.docker.internal:1933/mcp` for a host-installed server.
+
+## Parallel Search (optional)
+
+The `parallel-search` entry in `extensions_config.example.json` is disabled by
+default. To opt in, copy that entry into `mcpServers` in your root
+`extensions_config.json`, set `"enabled": true`, and restart DeerFlow. It connects
+to `https://search.parallel.ai/mcp` over HTTP and adds Parallel's search and fetch
+tools. With DeerFlow's default tool-name prefix, the agent sees
+`parallel-search_web_search` and `parallel-search_web_fetch`. Existing search
+providers and defaults stay unchanged.
+
+This is a third-party service operated by Parallel.ai. Search calls send
+objectives and queries to Parallel; fetch calls send requested page URLs and
+any extraction objective. These inputs can contain information from your
+conversation, so enable it only if you are comfortable sending that data to
+Parallel.
+
+Access is anonymous by default: no API key or authentication headers are needed.
+Keep `"User-Agent": "deer-flow"` in the entry's `headers`. This stable,
+project-wide identity lets Parallel measure aggregate usage from this
+integration to understand adoption and support it; it does not identify an
+individual user or installation. Preserve it on search and fetch HTTP requests
+if the transport changes. Existing configurations can add the same header.
+
+For higher rate limits, optionally add authorization to the `headers` field of the
+`parallel-search` entry in your local `extensions_config.json`:
+
+```json
+{
+  "headers": {
+    "User-Agent": "deer-flow",
+    "Authorization": "$PARALLEL_AUTHORIZATION"
+  }
+}
+```
+
+Set `PARALLEL_AUTHORIZATION` in the DeerFlow backend's environment to the full
+value `Bearer <your-parallel-api-key>`, then restart DeerFlow. Include `Bearer `
+in the environment variable because DeerFlow expands only whole-string
+`$ENV_VAR` references, not `Bearer $ENV_VAR`. Keep the actual key out of committed
+files. Remove only `Authorization` and restart DeerFlow to return to anonymous
+access. See the
+[Parallel Search MCP documentation](https://docs.parallel.ai/integrations/mcp/search-mcp)
+for details.
 
 ## Routing Hints
 
@@ -162,24 +239,31 @@ backward compatibility. Disable it only when every resulting tool name remains
 unique across the enabled servers. Stdio tools continue to use DeerFlow's
 persistent per-thread session pool regardless of this setting.
 
-Server configuration keys are case-sensitive non-control UTF-8 strings limited
-to 128 bytes. Callable MCP tool names and tool-override keys are case-sensitive
-ASCII `[A-Za-z0-9_-]{1,128}`. If a server key contains spaces, Unicode, or any
-other character outside the callable-tool grammar, set `tool_name_prefix` to
-`false`; configuration preflight rejects the default prefix mode with this
-action instead of allowing discovery to drop the resulting tools later. Names
-are never truncated, hashed, or treated as plugin contribution identifiers. A
-prefix-enabled server key is limited to 126 ASCII characters so the separator
-and at least one tool-name character still fit the 128-character callable bound.
+Session reuse also requires the same owning event loop. Parallel synchronous
+tool calls from the embedded client use separate loops and separate stdio
+sessions, so they can finish independently without cancelling a sibling's
+connection. They do not share server-side state. The synchronous wrapper closes
+its loop after each call; use the asynchronous path on a shared loop when
+session continuity is required. Explicit pool cleanup covers all loops for the
+selected server/thread scope.
+
+If you manage event loops manually, close the pool or cancel and await its owner
+tasks before closing their loop. Calling `loop.close()` with pending owners
+prevents transport teardown and completion callbacks. Abandoned live-registry
+records can be removed by LRU eviction or explicit cleanup, but those operations
+cannot finish transport cleanup on a loop that has already closed.
 
 ## Server Timeouts
 
 Two independent settings bound stdio MCP servers and durable HTTP/SSE task
 calls. `session_init_timeout` covers server bring-up — tool discovery
 (subprocess spawn + `initialize` + `tools/list`) and persistent-session
-initialization — plus ephemeral HTTP/SSE task-session initialization. It
-defaults to 60s so a hung server (e.g. `npx` blocked on a package download, or
-a server that never answers `initialize`) cannot block agent construction or
+initialization — plus ephemeral HTTP/SSE task-session connection setup and
+initialization under a single deadline. This includes waiting for an SSE
+`endpoint` event. Once initialization succeeds, this deadline is disabled;
+the tool call uses its independent `tool_call_timeout`.
+The initialization timeout defaults to 60s so a hung server (e.g. `npx` blocked
+on a package download, or a server that never answers `initialize`) cannot block agent construction or
 the task poller indefinitely. Set it to `null` to disable:
 
 ```json
@@ -236,37 +320,6 @@ mcp_tasks:
   max_concurrent_polls: 8
 ```
 
-Supply a dedicated, versioned replay keyring through the Gateway environment
-before enabling the runtime:
-
-```bash
-export MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID=v1
-export MCP_TASK_REPLAY_HMAC_KEYS='{"v1":"<unpadded-base64url-secret-of-at-least-32-bytes>"}'
-```
-
-These secrets are independent of JWT, OAuth, and webhook keys. The keyring is
-captured once at startup, accepts at most eight keys, and never enters task
-lineage or an API response. Rotation is additive: install the new key, switch
-the active key ID, and retain older keys while rows written under them may be
-replayed. Startup fails before publishing the MCP task capability when the
-runtime is enabled without a valid keyring. Polling and cancellation of an
-already-durable task do not require replaying its request.
-
-Each encoded value must decode to 32–128 bytes generated by a cryptographically
-secure random source; merely repeating a character to meet the length bound is
-not sufficient. The confirmation is a deterministic equality verifier, so its
-safe non-secret treatment depends on that key entropy.
-
-For `durable_two_gateway_v1`, both replicas must receive the same complete
-keyring from a Secret. Before topology registration, each process derives a
-versioned non-secret confirmation covering every retained key ID and byte plus
-the active ID; only that confirmation enters the topology fingerprint. Same IDs
-with different secret bytes, a missing retained key, an additive key, or an
-active-ID change therefore fail compatibility without exposing secrets. Even an
-additive rotation changes the exact-two topology tuple, so drain and restart the
-profile through its documented maintenance procedure rather than rolling one
-replica at a time.
-
 Then bind exact remote tool names in `extensions_config.json`. These names are
 the server's raw names, before DeerFlow adds any `<server_name>_` prefix:
 
@@ -277,8 +330,6 @@ the server's raw names, before DeerFlow adds any `<server_name>_` prefix:
       "enabled": true,
       "type": "http",
       "url": "https://reports.example.com/mcp",
-      "credential_binding_id": "reports-production",
-      "credential_version": 1,
       "session_init_timeout": 60,
       "tool_call_timeout": 60,
       "task_toolsets": [
@@ -308,8 +359,8 @@ are never parsed as a task protocol:
   actual terminal status: `cancelled`, `completed`, or `failed`.
 
 For the status tool, `isError: true` means that the status call itself failed;
-DeerFlow replaces provider text with a stable safe error code and retries with
-capped exponential backoff. It does not infer that the remote task failed,
+DeerFlow records a bounded snippet of its first text content block and retries
+with capped exponential backoff. It does not infer that the remote task failed,
 because MCP tool errors do not distinguish transient from permanent conditions.
 A server must report a permanent remote-task failure through a normal tool
 result (`isError: false` or omitted) whose `structuredContent` contains
@@ -336,80 +387,7 @@ Only submit remains in the Agent's normal tool list. Status and cancel are
 runtime-internal. Query the current thread through:
 
 - `GET /api/threads/{thread_id}/mcp-tasks`
-- `POST /api/threads/{thread_id}/mcp-tasks`
 - `GET /api/threads/{thread_id}/mcp-tasks/{task_id}`
-
-The Agent-facing submit wrapper creates `agent_tool` lineage. It requires the
-currently active durable `started` tool receipt and the parent invocation's
-accepted tenant, authenticated principal, run, lead-or-frozen-subagent task,
-agent revision, assembly, catalog/definition, extension generation/manifest,
-and Origin commitments. If any anchor is missing or disagrees, submission fails
-with `mcp_task_lineage_unavailable` before the MCP server is called.
-
-Authenticated callers can instead create a `standalone_api` task with the POST
-route. Its body contains `server_name`, configured task-toolset `task_name`,
-`arguments`, and an `idempotency_key`; unknown fields are ignored. Tenant,
-principal reference, lineage, parent IDs, accepted evidence, tool name, and
-credential selector are always server-derived. Standalone lineage has null parent
-run/task/receipt fields rather than invented invocation IDs. Replaying the same
-key and request returns the same task and lineage; reusing it for different input
-fails before another remote submit.
-
-The public lineage remains a redacted structural commitment. Exact replay
-equality uses a separate private HMAC over the complete canonical execution
-request; SQL stores only its algorithm version, public key ID, and digest. Raw
-arguments and key material are never persisted. A legacy row without that
-commitment, or a row whose historical key is no longer installed, fails replay
-closed instead of falling back to structural equality.
-
-Both submission paths traverse configured compatibility and required MCP call
-preparation. Standalone requests intentionally have no accepted Agent invocation
-or tool-authorization receipt, so a deployment that requires those facts fails a
-standalone submit closed before network dispatch instead of bypassing the required
-capability. Agent submissions supply the accepted runtime and receipt normally.
-
-List/detail responses return a bounded lineage summary. Parent execution,
-receipt, revision, assembly, catalog/definition, and Origin fields appear only
-after the caller is independently authorized for the parent run. Detail
-responses likewise include `links.parent_run_id` and
-`links.notification_run_id` only when the caller can also observe those exact
-runs. A caller authorized for the task but not a linked run still receives the
-task with those parent facts and link omitted, so the API does not reveal
-whether an inaccessible run exists. The parent runtime endpoint can opt into the
-inverse indexed page with
-`GET /api/runtime/v1/invocations/{run_id}?include_mcp_tasks=true`; its independent
-`mcp_task_limit` is 1–100 and `mcp_task_cursor` is bound to the tenant, owner, and
-parent run.
-
-Lineage is immutable after insertion. Poll, cancellation, recovery, result, and
-notification updates mutate lifecycle columns only. Parent-run cancellation does
-not request remote-task cancellation; use the task cancel route or task management
-tool explicitly. The first task cancellation intent separately records a
-tenant-scoped pseudonymous actor reference and the fixed `user_api` or `agent_tool`
-reason code; retries preserve that original attribution. The deployer's
-`accounts disable` cancels a turned-off person's tasks with `account_disabled`,
-attributed to the accounts command rather than to the person (migration
-`0046_mcp_task_disable_reason`). A completion
-notification is a new accepted invocation, not a continuation of the parent. Its
-stable admission key commits to tenant, task, event version, and notification
-kind, while its accepted Origin contains only the task/lineage/parent-receipt and
-result digest/status references. Raw task results remain outside that Origin.
-
-MCP task lineage records who submitted a task and how its completion was correlated. It does not guarantee exactly-once execution by the remote MCP server.
-
-The schema writer marker also fences rollback. Before any lineage-v2 task has
-been written, revision 0026 may downgrade while leaving its additive nullable
-columns and tenant constraints in place and restoring the predecessor
-user/server/remote-task uniqueness rule. Once a v2 row exists, the downgrade
-aborts with `mcp_task_schema_writer_rollback_blocked`; a pre-0026 binary then
-rejects the unknown database revision at startup instead of mutating newer task
-rows.
-
-Revision 0028 adds the private request commitment and writer version 3. Before
-any v3 row exists it can downgrade to the exact 0027 shape, restoring the four
-pre-tenant MCP indexes. Once a v3 row exists, downgrade aborts with
-`mcp_task_request_commitment_rollback_blocked`; there is no mode that silently
-reverts to structural replay equality.
 
 Task toolsets require `database.backend: sqlite` or `postgres`; startup fails
 instead of falling back to a synchronous submit when persistence or the task
@@ -418,80 +396,32 @@ the task alive and recognize its ID after DeerFlow reconnects. A stdio server
 must therefore persist its own tasks; multi-instance deployments should
 normally use an independently running HTTP/SSE service.
 
-Configured OAuth, per-user authentication, and static server authentication work
-during background polling under their existing policies. Request-scoped secrets
-from a particular Agent run are not durable task credentials and are unavailable
-to later polls. `headers_from_context` applies only to the submit call, which is
-awaited inside the Agent run; status and cancel polls use the server's static or
-OAuth credentials. Consequently, `on_missing: "deny"` guards submission but not
-those later polls, and declaring both server-level and request-scoped
-authentication logs a warning at startup.
-
-`credential_binding_id` is an optional non-secret stable name for the configured
-binding; `credential_version` defaults to `1` and should be incremented when an
-older binding must no longer satisfy recovery. Lineage stores only that numeric
-version and a tenant/principal/server/binding/version commitment. It never stores
-the binding ID, token, key, header, environment variable name, scope, refresh
-state, or failure text. If the current binding/version does not reproduce the
-stored commitment after restart, status and cancellation fail safely with
-`mcp_task_credential_binding_unavailable` rather than selecting another
-identity. Restart DeerFlow after changing
+Server-level OAuth works during background polling and refreshes normally.
+When `user_auth` is enabled on an HTTP/SSE server, background status and
+cancellation calls use the persisted task owner's configured credential,
+including after a Gateway restart.
+Only the user ID is carried from the task record; no request credential is stored.
+An unmapped owner remains denied unless `user_auth.on_missing` is `passthrough`.
+Request-scoped secrets from a particular Agent run are not durable task
+credentials and are unavailable to later background polls; use configured
+authentication for a task toolset. `headers_from_context` follows the same
+rule: submit is awaited inside the Agent run and carries the mapped headers,
+while status and cancel polls skip them and authenticate with the server's
+static/OAuth credentials or the owner's configured `user_auth` credential — so
+`headers_from_context.on_missing: "deny"` guards the submit but not
+those polls. Declaring both on one server logs a warning at startup.
+When a request header overrides `user_auth` on submit, ensure that both
+credentials can access the same remote task. If the background credential
+cannot access it and the status tool returns a normal structured
+`error_code: "task_not_found"` result, the task becomes permanently `failed`,
+not a retryable authentication error.
+Restart DeerFlow after changing
 `mcp_tasks`, `task_toolsets`, `mcpInterceptors`, or any connection,
 authentication, transport, or timeout setting on a task-enabled server.
 DeerFlow rejects task-tool reloads that no longer match the Gateway's startup
 snapshot instead of discovering tools with new settings while the background
 poller still calls the old endpoint. Agent-facing description/routing changes
 and changes to servers without task toolsets remain hot-reloadable.
-
-### Operator correlation and troubleshooting
-
-Start with the task detail route and record its safe task ID plus lineage digest.
-When authorized, follow `links.parent_run_id` to the parent invocation and request
-`include_tool_receipts=true`; the lineage's `parent_tool_receipt_id` identifies the
-exact submit attempt. Request `include_mcp_tasks=true` on that parent to verify the
-inverse child page. After a notification is admitted, follow
-`links.notification_run_id` and inspect its accepted Origin references for the
-same task ID, lineage digest, parent receipt, event version, result digest/status,
-and notification kind.
-
-`legacy_unavailable` means the task predates durable lineage; do not fabricate a
-parent. `mcp_task_tenant_mismatch` indicates a process/schema binding mismatch.
-`mcp_task_request_commitment_legacy_unavailable` means an older task cannot be
-proven equal to a new replay. `mcp_task_request_commitment_key_unavailable`
-means the row's historical HMAC key ID was removed and must be restored before
-replay. `mcp_task_request_conflict` means the exact canonical request differs.
-`mcp_task_credential_binding_unavailable` means the configured credential selector
-or version drifted and requires an operator decision; do not rotate silently and
-claim the old lineage. `mcp_task_notification_lineage_conflict` means a stable
-notification admission key was replayed with different source evidence. Logs and
-support bundles intentionally contain safe IDs, digest prefixes, and stable codes,
-not MCP arguments, results, remote handles, credentials, principal identities, or
-provider exception text.
-
-## Recognized MCP retrieval evidence
-
-MCP lineage and retrieval evidence are separate contracts. DeerFlow emits a
-`retrieval.observation.v1` for an MCP tool only when a trusted adapter attaches
-explicit `deerflow_retrieval_v1` metadata with a provider, tool kind, adapter
-capability version, complete protected-argument list, and optional bounded
-`mcp_evidence_ref`. Names, descriptions, server prefixes, and result shapes are
-never used to infer that an arbitrary MCP tool is retrieval.
-
-The adapter must enforce endpoint, redirect, source, count, byte, timeout, and
-credential policy and return only source facts the shared retrieval service can
-normalize. The observation may link the independently authorized MCP evidence
-reference, but it does not copy MCP arguments, response content, remote handles,
-headers, or credentials. The outer durable tool receipt remains the sole owner
-of the final model-visible result digest. See
-[Evidence-Bearing External Retrieval](EVIDENCE_BEARING_RETRIEVAL.md).
-
-Portable run evidence export uses an internal bounded form of the indexed
-parent-lineage page. It keeps the ordinary runtime API projection unchanged,
-but additionally revalidates lineage version/kind, tenant and parent execution,
-accepted revision/assembly/catalog/origin/extension anchors, the private request
-commitment's state/version, and the accepted server's `tool_name_prefix` naming
-rule. The private HMAC commitment, key ID, principal reference, request
-projection, remote handle, and result remain excluded.
 
 ## OAuth Support (HTTP/SSE MCP Servers)
 
@@ -601,64 +531,16 @@ The caller supplies the values on each run request:
 - Durable background tasks are the one exception, and only half of one: a
   `task_toolsets` submit is awaited inside the Agent run and carries these
   headers, but the status and cancel polls run after that run ends, so they skip
-  them and use the server's static/OAuth credentials. See *Durable Background
+  them and use configured static/OAuth credentials or the persisted owner's
+  `user_auth` credential. See *Durable Background
   Tasks* above.
 
 Use `user_auth` instead when the credential belongs to a configured DeerFlow
 user rather than to the individual request.
 
+## Custom Tool Interceptors
 
-## Required Operator MCP Call Preparation
-
-Operator-installed Python plugins can contribute authoritative MCP call preparation with
-the typed `McpInterceptorDescriptor` contract from `deerflow-extension-api`. Register the
-plugin under top-level `config.yaml -> plugins` and require its stable contribution ID:
-
-```yaml
-plugins:
-  - use: example_mcp_credentials:install
-    required: true
-
-required_capabilities:
-  - mcp_interceptor:example.credential_broker
-```
-
-The Gateway Capability Host owns this boundary. For every protected MCP call it first uses
-the exact provider identity and `AuthzRequest` already allowed by the operation-time
-`GuardrailAuthorizationAdapter`; it does not reconstruct or repeat the decision. Only an
-allow is followed by compatibility credential hooks, fresh health verification, and
-deterministic, two-second-bounded `prepare_call(...)` calls for every required contribution.
-Trusted preparation is the final fence after compatibility header changes and immediately
-before the network handler. The projection contains the same immutable trusted run context
-used by invocation authorization and subagents, including the final contributor-enriched
-Origin, plus thread/run/agent/generation references, MCP server/tool names, and only a
-canonical arguments digest. A prepared result may add bounded transient headers and safe
-evidence references; the plugin never receives or invokes the network handler.
-
-The underlying MCP handler runs exactly once only when authorization allows and every
-required preparation succeeds. Missing or mismatched generation, missing/stale/unhealthy
-capability state, rejection, indeterminate or invalid output, exception, timeout, or
-conflicting case-insensitive header writes fails closed before the handler. Header values
-exist only for that call and are never stored in checkpoints, run rows, lifecycle or rich
-events, manifests, logs, or diagnostics. Audit evidence contains only bounded contribution
-IDs, the pinned generation, and safe evidence references.
-
-This is operational credential/evidence preparation, not another permission provider. It
-cannot override an authorization denial. Plugin changes require a Gateway restart and
-required health participates in `GET /ready`.
-
-## Legacy Optional Custom Tool Interceptors
-
-For compatibility, `extensions_config.json` may still name raw class-path interceptors that
-run before every MCP tool call. This path is API-writable, optional, and warning-and-skip;
-it is not a trusted Capability Host registration and can never satisfy
-`required_capabilities`. When a required operator interceptor is configured, these hooks
-run inside the host-owned authorization-to-network boundary: authorization is already
-fixed, then compatibility headers are applied, then trusted preparation is the final
-network fence. A compatibility hook therefore cannot override a policy denial, satisfy a
-required contribution, or write a conflicting trusted header.
-
-This legacy path can inject per-request headers, logging, or metrics:
+You can register custom interceptors that run before every MCP tool call. This is useful for injecting per-request headers (e.g., user auth tokens from the LangGraph execution context), logging, or metrics.
 
 Declare interceptors in `extensions_config.json` using the `mcpInterceptors` field:
 

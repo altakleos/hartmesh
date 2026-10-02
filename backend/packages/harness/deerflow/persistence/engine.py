@@ -13,9 +13,10 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import Literal
 
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
+
+from deerflow.utils.file_io import await_drained
 
 # Recycle pooled Postgres connections before stale idle sockets can hang
 # pool_pre_ping. The command timeout bounds stalled ORM queries independently.
@@ -32,7 +33,6 @@ def _postgres_engine_kwargs(
     *,
     echo: bool,
     pool_size: int,
-    pool_max_overflow: int = 10,
     pool_recycle: int = POSTGRES_POOL_RECYCLE_SECONDS,
     command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
     connect_args: dict[str, object] | None = None,
@@ -43,12 +43,7 @@ def _postgres_engine_kwargs(
         merged_connect_args["command_timeout"] = command_timeout
     return {
         "echo": echo,
-        # SQLAlchemy otherwise renders bound parameter values in echoed SQL
-        # and StatementError text. Credential digests are query parameters on
-        # the PAT authentication path, so parameter hiding is unconditional.
-        "hide_parameters": True,
         "pool_size": pool_size,
-        "max_overflow": pool_max_overflow,
         "pool_pre_ping": True,
         "pool_recycle": pool_recycle,
         "connect_args": merged_connect_args,
@@ -80,17 +75,17 @@ async def _auto_create_postgres_db(url: str) -> None:
 
     # Connect to the default 'postgres' database to issue CREATE DATABASE
     maint_url = parsed.set(database="postgres")
-    maint_engine = create_async_engine(
-        maint_url,
-        isolation_level="AUTOCOMMIT",
-        hide_parameters=True,
-    )
+    maint_engine = create_async_engine(maint_url, isolation_level="AUTOCOMMIT")
     try:
         async with maint_engine.connect() as conn:
             await conn.execute(text(f'CREATE DATABASE "{db_name}"'))
         logger.info("Auto-created PostgreSQL database: %s", db_name)
     finally:
-        await maint_engine.dispose()
+        # Drain: the maintenance engine is local to this helper, so an
+        # abandoned dispose leaves its pool to the ``postgres`` database with
+        # nothing left to close it. Host cancellation must therefore be
+        # delivered only after disposal actually finishes.
+        await await_drained(maint_engine.dispose())
 
 
 async def init_engine(
@@ -99,12 +94,10 @@ async def init_engine(
     url: str = "",
     echo: bool = False,
     pool_size: int = 5,
-    pool_max_overflow: int = 10,
     pool_recycle: int = POSTGRES_POOL_RECYCLE_SECONDS,
     command_timeout: float | None = POSTGRES_COMMAND_TIMEOUT_SECONDS,
     sqlite_dir: str = "",
     postgres_schema: str = "",
-    migration_mode: Literal["upgrade", "verify"] = "upgrade",
 ) -> None:
     """Create the async engine and session factory, then auto-create tables.
 
@@ -113,7 +106,6 @@ async def init_engine(
         url: SQLAlchemy async URL (for sqlite/postgres).
         echo: Echo SQL to log.
         pool_size: Postgres connection pool size.
-        pool_max_overflow: Maximum Postgres overflow connections.
         pool_recycle: Seconds before Postgres connections are recycled.
         command_timeout: Timeout in seconds for app ORM Postgres commands, or None to disable.
         sqlite_dir: Directory to create for SQLite (ensured to exist).
@@ -123,11 +115,6 @@ async def init_engine(
             before tables are auto-created. Ignored for non-postgres.
     """
     global _engine, _session_factory
-
-    if migration_mode not in {"upgrade", "verify"}:
-        raise ValueError("migration_mode must be 'upgrade' or 'verify'")
-    if migration_mode == "verify" and backend != "postgres":
-        raise ValueError("verify-only migration mode requires PostgreSQL")
 
     if backend == "memory":
         logger.info("Persistence backend=memory -- ORM engine not initialized")
@@ -158,12 +145,7 @@ async def init_engine(
         # syscall) blocks it during startup. Mirrors the #1912 fix for the
         # checkpointer's ``ensure_sqlite_parent_dir``.
         await asyncio.to_thread(os.makedirs, sqlite_dir or ".", exist_ok=True)
-        _engine = create_async_engine(
-            url,
-            echo=echo,
-            hide_parameters=True,
-            json_serializer=_json_serializer,
-        )
+        _engine = create_async_engine(url, echo=echo, json_serializer=_json_serializer)
 
         # Enable WAL on every new connection. SQLite PRAGMA settings are
         # per-connection, so we wire the listener instead of running PRAGMA
@@ -199,7 +181,6 @@ async def init_engine(
             **_postgres_engine_kwargs(
                 echo=echo,
                 pool_size=pool_size,
-                pool_max_overflow=pool_max_overflow,
                 pool_recycle=pool_recycle,
                 command_timeout=command_timeout,
                 connect_args=pg_connect_args,
@@ -219,7 +200,7 @@ async def init_engine(
     # alembic's own connections in env.py) -- multi-process SQLite bootstrap
     # is best-effort, gated by SQLite's natural file-level write lock.
     # See deerflow.persistence.bootstrap for the full state machine.
-    from deerflow.persistence.bootstrap import bootstrap_schema, verify_schema_head
+    from deerflow.persistence.bootstrap import bootstrap_schema
 
     async def _ensure_postgres_schema() -> None:
         # CREATE SCHEMA is DDL and is unaffected by search_path, so it is
@@ -234,17 +215,10 @@ async def init_engine(
                 await conn.execute(CreateSchema(postgres_schema, if_not_exists=True))
 
     try:
-        if migration_mode == "upgrade":
-            await _ensure_postgres_schema()
-            await bootstrap_schema(
-                _engine,
-                backend=backend,
-                postgres_schema=postgres_schema,
-            )
-        else:
-            await verify_schema_head(_engine)
+        await _ensure_postgres_schema()
+        await bootstrap_schema(_engine, backend=backend, postgres_schema=postgres_schema)
     except Exception as exc:
-        if migration_mode == "upgrade" and backend == "postgres" and "does not exist" in str(exc):
+        if backend == "postgres" and "does not exist" in str(exc):
             # Database not yet created -- attempt to auto-create it, then retry.
             await _auto_create_postgres_db(url)
             # Rebuild engine against the now-existing database. The rebuilt
@@ -256,7 +230,6 @@ async def init_engine(
                 **_postgres_engine_kwargs(
                     echo=echo,
                     pool_size=pool_size,
-                    pool_max_overflow=pool_max_overflow,
                     pool_recycle=pool_recycle,
                     command_timeout=command_timeout,
                     connect_args=pg_connect_args,
@@ -271,11 +244,7 @@ async def init_engine(
     logger.info("Persistence engine initialized: backend=%s", backend)
 
 
-async def init_engine_from_config(
-    config,
-    *,
-    migration_mode: Literal["upgrade", "verify"] = "upgrade",
-) -> None:
+async def init_engine_from_config(config) -> None:
     """Convenience: init engine from a DatabaseConfig object."""
     if config.backend == "memory":
         await init_engine("memory")
@@ -285,12 +254,10 @@ async def init_engine_from_config(
         url=config.app_sqlalchemy_url,
         echo=config.echo_sql,
         pool_size=config.pool_size,
-        pool_max_overflow=config.pool_max_overflow,
         pool_recycle=config.pool_recycle,
         command_timeout=config.command_timeout,
         sqlite_dir=config.sqlite_dir if config.backend == "sqlite" else "",
         postgres_schema=config.postgres_schema if config.backend == "postgres" else "",
-        migration_mode=migration_mode,
     )
 
 
@@ -305,10 +272,21 @@ def get_engine() -> AsyncEngine | None:
 
 
 async def close_engine() -> None:
-    """Dispose the engine, release all connections."""
+    """Dispose the engine before releasing the process-global ownership."""
     global _engine, _session_factory
-    if _engine is not None:
-        await _engine.dispose()
+
+    engine = _engine
+    if engine is None:
+        _session_factory = None
+        return
+
+    async def dispose_and_clear() -> None:
+        global _engine, _session_factory
+
+        await engine.dispose()
         logger.info("Persistence engine closed")
-    _engine = None
-    _session_factory = None
+        if _engine is engine:
+            _engine = None
+            _session_factory = None
+
+    await await_drained(dispose_and_clear())

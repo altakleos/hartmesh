@@ -2,16 +2,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 from fastapi import HTTPException
 
 from app.gateway.app import create_app
 from app.gateway.routers import mcp_tasks
-from deerflow.config.extensions_config import ExtensionsConfig
-from deerflow.runtime import RunManager
-from deerflow.runtime.tenant_identity import TenantIdentityV1
-
-_TENANT_IDENTITY = TenantIdentityV1.from_canonical_id("test")
 
 
 class FakeRepository:
@@ -19,27 +13,17 @@ class FakeRepository:
         self.rows = rows
         self.list_calls = []
         self.get_calls = []
-        self.tenant = _TENANT_IDENTITY.to_persisted_reference()
 
-    async def list_by_thread(self, thread_id, *, user_id, limit, tenant_digest):
-        assert tenant_digest == self.tenant.digest
-        self.list_calls.append((thread_id, user_id, limit))
+    async def list_by_thread(self, thread_id, *, user_id, thread_incarnation, limit):
+        self.list_calls.append((thread_id, user_id, thread_incarnation, limit))
         return list(self.rows)
 
-    async def get(self, task_id, *, user_id, tenant_digest):
-        assert tenant_digest == self.tenant.digest
-        self.get_calls.append((task_id, user_id))
-        return next((row for row in self.rows if row["id"] == task_id and row["user_id"] == user_id), None)
-
-
-class FakeRunManager:
-    def __init__(self, allowed=()):
-        self.allowed = frozenset(allowed)
-        self.calls = []
-
-    async def get(self, run_id, *, user_id, raise_on_store_error):
-        self.calls.append((run_id, user_id, raise_on_store_error))
-        return SimpleNamespace(run_id=run_id, user_id=user_id) if run_id in self.allowed else None
+    async def get(self, task_id, *, user_id, thread_id, thread_incarnation):
+        self.get_calls.append((task_id, user_id, thread_id, thread_incarnation))
+        return next(
+            (row for row in self.rows if row["id"] == task_id and row["user_id"] == user_id and row["thread_id"] == thread_id),
+            None,
+        )
 
 
 def _record(**overrides):
@@ -65,11 +49,6 @@ def _record(**overrides):
         "remote_task_id": "must-not-leak",
         "driver_data": {"status_tool": "must-not-leak"},
         "server_name": "must-not-leak",
-        "request_commitment_version": 1,
-        "request_commitment_key_id": "must-not-leak",
-        "request_commitment_digest": "must-not-leak",
-        "lineage_status": "legacy_unavailable",
-        "lineage": None,
         **overrides,
     }
 
@@ -80,6 +59,15 @@ def _request(repo):
             state=SimpleNamespace(
                 mcp_task_repo=repo,
                 mcp_task_service=SimpleNamespace(tracking_degraded_after_errors=3),
+                thread_store=SimpleNamespace(
+                    get=AsyncMock(
+                        return_value={
+                            "thread_id": "thread-1",
+                            "user_id": "user-1",
+                            "incarnation": "incarnation-1",
+                        }
+                    )
+                ),
             )
         )
     )
@@ -89,6 +77,93 @@ def test_gateway_mounts_thread_scoped_mcp_task_routes() -> None:
     paths = {route.path for route in create_app().routes}
     assert "/api/threads/{thread_id}/mcp-tasks" in paths
     assert "/api/threads/{thread_id}/mcp-tasks/{task_id}" in paths
+
+
+@pytest.mark.asyncio
+async def test_current_thread_incarnation_rejects_missing_thread() -> None:
+    request = _request(FakeRepository([]))
+    request.app.state.thread_store.get = AsyncMock(side_effect=[None, None])
+
+    with pytest.raises(HTTPException) as exc_info:
+        await mcp_tasks._current_thread_incarnation(
+            request,
+            thread_id="missing-thread",
+            user_id="user-1",
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_current_thread_incarnation_accepts_shared_fallback() -> None:
+    request = _request(FakeRepository([]))
+    request.app.state.thread_store.get = AsyncMock(
+        side_effect=[
+            None,
+            {
+                "thread_id": "shared-thread",
+                "user_id": None,
+                "incarnation": "shared-incarnation",
+            },
+        ]
+    )
+
+    incarnation = await mcp_tasks._current_thread_incarnation(
+        request,
+        thread_id="shared-thread",
+        user_id="user-1",
+    )
+
+    assert incarnation == "shared-incarnation"
+    assert request.app.state.thread_store.get.await_args_list[1].kwargs == {"user_id": None}
+
+
+@pytest.mark.asyncio
+async def test_current_thread_incarnation_rejects_foreign_unscoped_fallback() -> None:
+    request = _request(FakeRepository([]))
+    request.app.state.thread_store.get = AsyncMock(
+        side_effect=[
+            None,
+            {
+                "thread_id": "foreign-thread",
+                "user_id": "user-2",
+                "incarnation": "foreign-incarnation",
+            },
+        ]
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await mcp_tasks._current_thread_incarnation(
+            request,
+            thread_id="foreign-thread",
+            user_id="user-1",
+        )
+
+    assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("incarnation", ["", 7, False])
+async def test_current_thread_incarnation_rejects_malformed_value(
+    incarnation,
+) -> None:
+    request = _request(FakeRepository([]))
+    request.app.state.thread_store.get = AsyncMock(
+        return_value={
+            "thread_id": "thread-1",
+            "user_id": "user-1",
+            "incarnation": incarnation,
+        }
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await mcp_tasks._current_thread_incarnation(
+            request,
+            thread_id="thread-1",
+            user_id="user-1",
+        )
+
+    assert exc_info.value.status_code == 404
 
 
 @pytest.mark.asyncio
@@ -102,7 +177,7 @@ async def test_list_returns_only_safe_current_user_thread_fields(monkeypatch) ->
         limit=25,
     )
 
-    assert repo.list_calls == [("thread-1", "user-1", 25)]
+    assert repo.list_calls == [("thread-1", "user-1", "incarnation-1", 25)]
     assert response == [
         {
             "task_id": "mcp-task-1",
@@ -113,7 +188,6 @@ async def test_list_returns_only_safe_current_user_thread_fields(monkeypatch) ->
             "error": None,
             "tracking_degraded": True,
             "cancel_requested": False,
-            "lineage": {"status": "legacy_unavailable"},
         }
     ]
 
@@ -152,261 +226,6 @@ async def test_detail_exposes_bounded_result_but_not_remote_handle(monkeypatch) 
     assert "remote_task_id" not in response
     assert "driver_data" not in response
     assert "server_name" not in response
-    assert "request_commitment_version" not in response
-    assert "request_commitment_key_id" not in response
-    assert "request_commitment_digest" not in response
-    assert response["lineage"] == {"status": "legacy_unavailable"}
-    assert response["links"] == {}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("allowed", "expected"),
-    [
-        ((), {}),
-        (("run-parent",), {"parent_run_id": "run-parent"}),
-        (("run-notification",), {"notification_run_id": "run-notification"}),
-        (
-            ("run-parent", "run-notification"),
-            {
-                "parent_run_id": "run-parent",
-                "notification_run_id": "run-notification",
-            },
-        ),
-    ],
-)
-async def test_detail_links_require_independent_run_authorization(
-    monkeypatch,
-    allowed,
-    expected,
-) -> None:
-    repo = FakeRepository(
-        [
-            _record(
-                parent_run_id="run-parent",
-                notification_run_id="run-notification",
-            )
-        ]
-    )
-    request = _request(repo)
-    manager = FakeRunManager(allowed)
-    request.app.state.run_manager = manager
-    monkeypatch.setattr(mcp_tasks, "get_current_user", AsyncMock(return_value="user-1"))
-
-    response = await mcp_tasks.get_mcp_task.__wrapped__(
-        thread_id="thread-1",
-        task_id="mcp-task-1",
-        request=request,
-    )
-
-    assert response["links"] == expected
-    assert manager.calls == [
-        ("run-parent", "user-1", True),
-        ("run-notification", "user-1", True),
-    ]
-
-
-@pytest.mark.asyncio
-async def test_active_local_parent_link_requires_matching_run_owner() -> None:
-    manager = RunManager()
-    parent = await manager.create("private-thread", user_id="user-b")
-    request = SimpleNamespace(
-        app=SimpleNamespace(state=SimpleNamespace(run_manager=manager)),
-    )
-
-    links = await mcp_tasks._authorized_links(
-        request,
-        {"parent_run_id": parent.run_id},
-        user_id="user-a",
-    )
-
-    assert links == {}
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("parent_authorized", [False, True])
-async def test_parent_lineage_projection_requires_parent_authorization(
-    monkeypatch,
-    parent_authorized: bool,
-) -> None:
-    lineage = {
-        "kind": "agent_tool",
-        "digest": "1" * 64,
-        "principal_ref": "principal-" + "2" * 24,
-        "parent_execution_task_id": "execution-task-secret",
-        "parent_execution_kind": "subagent",
-        "parent_subagent_name": "private-worker",
-        "parent_tool_receipt_id": "tr_" + "3" * 64,
-        "agent_revision_digest": "4" * 64,
-        "assembly_fingerprint": "5" * 64,
-        "subagent_catalog_digest": "6" * 64,
-        "subagent_definition_digest": "7" * 64,
-        "extension_generation": 2,
-        "extension_manifest_digest": "8" * 64,
-        "accepted_origin_digest": "9" * 64,
-        "mcp_server_name": "reports",
-        "mcp_tool_name": "submit_report",
-        "request_projection_digest": "a" * 64,
-        "credential_selector_ref": None,
-        "credential_selector_version": None,
-    }
-    repo = FakeRepository(
-        [
-            _record(
-                lineage_status="verified",
-                lineage=lineage,
-                parent_run_id="run-parent",
-            )
-        ]
-    )
-    request = _request(repo)
-    request.app.state.run_manager = FakeRunManager(
-        ("run-parent",) if parent_authorized else (),
-    )
-    monkeypatch.setattr(mcp_tasks, "get_current_user", AsyncMock(return_value="user-1"))
-
-    response = await mcp_tasks.get_mcp_task.__wrapped__(
-        thread_id="thread-1",
-        task_id="mcp-task-1",
-        request=request,
-    )
-
-    parent_fields = {
-        "parent_execution_task_id",
-        "parent_execution_kind",
-        "parent_subagent_name",
-        "parent_tool_receipt_id",
-        "agent_revision_digest",
-        "assembly_fingerprint",
-        "subagent_catalog_digest",
-        "subagent_definition_digest",
-        "accepted_origin_digest",
-    }
-    if parent_authorized:
-        assert response["lineage"]["parent_execution_task_id"] == "execution-task-secret"
-        assert parent_fields <= response["lineage"].keys()
-    else:
-        assert not (parent_fields & response["lineage"].keys())
-        assert response["links"] == {}
-
-
-@pytest.mark.asyncio
-async def test_parent_visibility_does_not_grant_task_visibility(monkeypatch) -> None:
-    repo = FakeRepository([_record(parent_run_id="run-parent")])
-    request = _request(repo)
-    manager = FakeRunManager(("run-parent",))
-    request.app.state.run_manager = manager
-    monkeypatch.setattr(mcp_tasks, "get_current_user", AsyncMock(return_value="user-2"))
-
-    with pytest.raises(HTTPException) as exc_info:
-        await mcp_tasks.get_mcp_task.__wrapped__(
-            thread_id="thread-1",
-            task_id="mcp-task-1",
-            request=request,
-        )
-
-    assert exc_info.value.status_code == 404
-    assert manager.calls == []
-
-
-@pytest.mark.asyncio
-async def test_standalone_create_ignores_forged_lineage_and_binds_authenticated_values(
-    monkeypatch,
-) -> None:
-    repo = FakeRepository([])
-    service = AsyncMock()
-    service.tracking_degraded_after_errors = 3
-
-    async def submit(**kwargs):
-        task_request = kwargs["request"]
-        return _record(
-            id="mcp-task-created",
-            status="submitted",
-            lineage_status="verified",
-            lineage=task_request.lineage.to_persisted_json(),
-            parent_run_id=None,
-            notification_run_id=None,
-        )
-
-    service.submit.side_effect = submit
-    request = _request(repo)
-    request.state = SimpleNamespace()
-    request.app.state.mcp_task_service = service
-    request.app.state.mcp_tasks_available = True
-    request.app.state.tenant_identity = _TENANT_IDENTITY
-    request.app.state.capability_manifest = SimpleNamespace(
-        extension_generation=4,
-        digest="a" * 64,
-    )
-    request.app.state.mcp_task_extensions_config = ExtensionsConfig.model_validate(
-        {
-            "mcpServers": {
-                "reports": {
-                    "type": "stdio",
-                    "command": "reports-mcp",
-                    "task_toolsets": [
-                        {
-                            "name": "report-generation",
-                            "submit_tool": "submit_report",
-                            "status_tool": "status_report",
-                            "cancel_tool": "cancel_report",
-                        }
-                    ],
-                }
-            }
-        }
-    )
-    identity = InvocationIdentityV1(
-        effective_subject=EffectiveSubjectV1(
-            kind="human",
-            subject_id="user-1",
-            role="member",
-        )
-    )
-    monkeypatch.setattr(mcp_tasks, "get_current_user", AsyncMock(return_value="user-1"))
-    monkeypatch.setattr(
-        mcp_tasks,
-        "invocation_principal_from_request",
-        AsyncMock(return_value=SimpleNamespace(identity=identity)),
-    )
-    body = mcp_tasks.CreateMcpTaskBody.model_validate(
-        {
-            "server_name": "reports",
-            "task_name": "report-generation",
-            "arguments": {"topic": "MCP"},
-            "idempotency_key": "client-key-1",
-            "lineage": {"kind": "agent_tool"},
-            "tenant": "forged",
-            "parent_run_id": "forged-run",
-            "parent_tool_receipt_id": "tr_" + "f" * 64,
-            "credential_selector_ref": "f" * 64,
-        }
-    )
-
-    response = await mcp_tasks.create_mcp_task.__wrapped__(
-        thread_id="thread-1",
-        body=body,
-        request=request,
-    )
-
-    submitted = service.submit.await_args.kwargs["request"]
-    assert submitted.lineage.kind == "standalone_api"
-    assert submitted.lineage.tenant == repo.tenant
-    assert submitted.lineage.parent_run_id is None
-    assert submitted.lineage.parent_tool_receipt_id is None
-    assert submitted.lineage.principal_ref.startswith("principal-")
-    assert submitted.local_task_id.startswith("mcp-task-")
-    assert "client-key-1" not in submitted.local_task_id
-    assert response["lineage"]["kind"] == "standalone_api"
-
-    await mcp_tasks.create_mcp_task.__wrapped__(
-        thread_id="thread-2",
-        body=body,
-        request=request,
-    )
-    other_thread = service.submit.await_args.kwargs["request"]
-    assert other_thread.local_task_id != submitted.local_task_id
-    assert other_thread.lineage.digest != submitted.lineage.digest
 
 
 @pytest.mark.asyncio
@@ -454,53 +273,10 @@ async def test_cancel_uses_service_with_exact_user_and_thread_scope(monkeypatch)
         task_id="mcp-task-1",
         thread_id="thread-1",
         user_id="user-1",
-        reason_code="user_api",
+        thread_incarnation="incarnation-1",
     )
     assert response["status"] == "working"
     assert response["cancel_requested"] is True
-
-
-@pytest.mark.asyncio
-async def test_cancel_audit_failure_prevents_service_mutation(monkeypatch) -> None:
-    repo = FakeRepository([_record()])
-    service = AsyncMock()
-    service.tracking_degraded_after_errors = 3
-    request = _request(repo)
-    request.app.state.mcp_task_service = service
-    request.app.state.mcp_tasks_available = True
-    monkeypatch.setattr(
-        mcp_tasks,
-        "get_current_user",
-        AsyncMock(return_value="user-1"),
-    )
-    audit = AsyncMock(
-        side_effect=HTTPException(
-            status_code=503,
-            detail="Required audit record unavailable",
-        )
-    )
-    monkeypatch.setattr(
-        mcp_tasks,
-        "require_audited_permission",
-        audit,
-        raising=False,
-    )
-
-    with pytest.raises(HTTPException) as excinfo:
-        await mcp_tasks.cancel_mcp_task.__wrapped__(
-            thread_id="thread-1",
-            task_id="mcp-task-1",
-            request=request,
-        )
-
-    assert excinfo.value.status_code == 503
-    audit.assert_awaited_once_with(
-        request,
-        "threads",
-        "write",
-        route_category="mcp_tasks",
-    )
-    service.cancel_task.assert_not_awaited()
 
 
 @pytest.mark.asyncio

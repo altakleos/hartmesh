@@ -16,9 +16,9 @@ Every address the request would touch, before it is touched:
 
 * the URL is ``http`` or ``https`` with a host (``validate_public_http_url``);
 * the host resolves, and *every* resolved address is public: none in the
-  canonical ``NEVER_ALLOWED_NETWORKS`` set the sandbox egress policy and the
-  provisioner share (private, loopback, link-local, carrier NAT, multicast,
-  documentation, cloud metadata), none the stdlib flags as non-global;
+  ``NEVER_ALLOWED_NETWORKS`` set below (private, loopback, link-local,
+  carrier NAT, multicast, documentation, cloud metadata), none the stdlib
+  flags as non-global;
 * the connection is made to the address that was checked, not to a second
   resolution the client would do on its own: the request goes to the IP
   literal with ``Host`` and the TLS ``sni_hostname`` set to the name, so the
@@ -58,7 +58,6 @@ import httpx
 
 from deerflow.community.url_safety import aresolve_host_addresses, is_blocked_address, validate_public_http_url
 from deerflow.community.web_fetch_outcome import FetchRefusal
-from deerflow.sandbox.egress import NEVER_ALLOWED_NETWORKS
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +86,33 @@ READABLE_CONTENT_TYPES = frozenset({"text/html", "application/xhtml+xml", "text/
 #: The same honest identity the search client sends. Not a browser string.
 USER_AGENT = "Mozilla/5.0 (compatible; DeerFlow/1.0)"
 
+#: Ranges a fetch never connects to, whatever name resolved to them.
+NEVER_ALLOWED_NETWORKS: tuple[str, ...] = (
+    "0.0.0.0/8",
+    "10.0.0.0/8",
+    "100.64.0.0/10",
+    "127.0.0.0/8",
+    "169.254.0.0/16",
+    "172.16.0.0/12",
+    "192.0.0.0/24",
+    "192.0.2.0/24",
+    "192.88.99.0/24",
+    "192.168.0.0/16",
+    "198.18.0.0/15",
+    "198.51.100.0/24",
+    "203.0.113.0/24",
+    "224.0.0.0/4",
+    "240.0.0.0/4",
+    "::/128",
+    "::1/128",
+    "::ffff:0:0/96",
+    "64:ff9b:1::/48",
+    "100::/64",
+    "2001:db8::/32",
+    "fc00::/7",
+    "fe80::/10",
+    "ff00::/8",
+)
 _NEVER_ALLOWED = tuple(ipaddress.ip_network(value) for value in NEVER_ALLOWED_NETWORKS)
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 _BODY_CHUNK = 64 * 1024

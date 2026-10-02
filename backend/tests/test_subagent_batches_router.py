@@ -29,23 +29,6 @@ class Repository:
             {"id": "item-2", "batch_id": "batch-1", "item_key": "two", "status": "failed", "error": "bad"},
         ]
         self.include_result_calls = []
-        self.observations = [
-            {
-                "version": 1,
-                "event": "batch.accepted",
-                "batch_id": "batch-1",
-                "acceptance_digest": "a" * 64,
-            }
-        ]
-        self.attempts = [
-            {
-                "version": 1,
-                "attempt_id": "attempt-1",
-                "batch_id": "batch-1",
-                "item_id": "item-1",
-                "terminal_code": "succeeded",
-            }
-        ]
 
     async def get_batch(self, batch_id, *, user_id):
         if batch_id != self.batch["id"] or user_id != self.batch["user_id"]:
@@ -64,19 +47,6 @@ class Repository:
             values = [item for item in values if item["status"] == status]
         return values[offset : offset + limit]
 
-    async def list_observations(self, batch_id, *, user_id, limit):
-        assert (batch_id, user_id, limit) == ("batch-1", "user-1", 100)
-        return self.observations
-
-    async def list_attempts(self, batch_id, *, user_id, item_id, limit):
-        assert (batch_id, user_id, item_id, limit) == (
-            "batch-1",
-            "user-1",
-            "item-1",
-            100,
-        )
-        return self.attempts
-
 
 def _request(repo, *, available=True, service=None):
     return SimpleNamespace(
@@ -94,8 +64,6 @@ def test_gateway_mounts_subagent_batch_routes() -> None:
     paths = {route.path for route in create_app().routes}
     assert "/api/threads/{thread_id}/subagent-batches" in paths
     assert "/api/threads/{thread_id}/subagent-batches/{batch_id}/items" in paths
-    assert "/api/threads/{thread_id}/subagent-batches/{batch_id}/attempts" in paths
-    assert "/api/threads/{thread_id}/subagent-batches/{batch_id}/observations" in paths
     assert "/api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl" in paths
 
 
@@ -113,38 +81,6 @@ async def test_list_and_detail_are_owner_scoped(monkeypatch) -> None:
 
     with pytest.raises(HTTPException) as cross_thread:
         await subagent_batches.get_batch.__wrapped__(thread_id="thread-2", batch_id="batch-1", request=request)
-    assert cross_thread.value.status_code == 404
-
-
-@pytest.mark.asyncio
-async def test_attempt_observations_use_the_same_owner_and_thread_scope(
-    monkeypatch,
-) -> None:
-    repo = Repository()
-    request = _request(repo)
-    monkeypatch.setattr(
-        subagent_batches,
-        "get_current_user",
-        AsyncMock(return_value="user-1"),
-    )
-
-    observed = await subagent_batches.list_batch_attempts.__wrapped__(
-        thread_id="thread-1",
-        batch_id="batch-1",
-        request=request,
-        item_id="item-1",
-        limit=100,
-    )
-
-    assert observed == repo.attempts
-    with pytest.raises(HTTPException) as cross_thread:
-        await subagent_batches.list_batch_attempts.__wrapped__(
-            thread_id="other-thread",
-            batch_id="batch-1",
-            request=request,
-            item_id="item-1",
-            limit=100,
-        )
     assert cross_thread.value.status_code == 404
 
 
@@ -170,90 +106,6 @@ async def test_cancel_requires_running_worker_and_exact_owner(monkeypatch) -> No
             request=_request(repo, available=False, service=service),
         )
     assert unavailable.value.status_code == 503
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("handler", "extra"),
-    [
-        ("pause_batch", {}),
-        ("resume_batch", {}),
-        ("cancel_batch", {}),
-        ("retry_batch_item", {"item_id": "item-1"}),
-    ],
-)
-async def test_every_batch_control_fails_before_mutation_when_audit_fails(
-    monkeypatch,
-    handler,
-    extra,
-) -> None:
-    repo = Repository()
-    service = AsyncMock()
-    request = _request(repo, service=service)
-    monkeypatch.setattr(
-        subagent_batches,
-        "get_current_user",
-        AsyncMock(return_value="user-1"),
-    )
-    audit = AsyncMock(
-        side_effect=HTTPException(
-            status_code=503,
-            detail="Required audit record unavailable",
-        )
-    )
-    monkeypatch.setattr(
-        subagent_batches,
-        "require_audited_permission",
-        audit,
-        raising=False,
-    )
-
-    with pytest.raises(HTTPException) as excinfo:
-        await getattr(subagent_batches, handler).__wrapped__(
-            thread_id="thread-1",
-            batch_id="batch-1",
-            request=request,
-            **extra,
-        )
-
-    assert excinfo.value.status_code == 503
-    audit.assert_awaited_once_with(
-        request,
-        "threads",
-        "write",
-        route_category="subagent_batches",
-    )
-    service.cancel_batch.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_lifecycle_observations_use_the_same_owner_and_thread_scope(
-    monkeypatch,
-) -> None:
-    repo = Repository()
-    request = _request(repo)
-    monkeypatch.setattr(
-        subagent_batches,
-        "get_current_user",
-        AsyncMock(return_value="user-1"),
-    )
-
-    observed = await subagent_batches.list_batch_observations.__wrapped__(
-        thread_id="thread-1",
-        batch_id="batch-1",
-        request=request,
-        limit=100,
-    )
-
-    assert observed == repo.observations
-    with pytest.raises(HTTPException) as cross_thread:
-        await subagent_batches.list_batch_observations.__wrapped__(
-            thread_id="other-thread",
-            batch_id="batch-1",
-            request=request,
-            limit=100,
-        )
-    assert cross_thread.value.status_code == 404
 
 
 @pytest.mark.asyncio

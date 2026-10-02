@@ -12,6 +12,7 @@ const extensionMap: Record<string, string> = {
   // Text
   txt: "text",
   csv: "csv",
+  tsv: "tsv",
   log: "text",
   conf: "text",
   config: "text",
@@ -108,7 +109,8 @@ const extensionMap: Record<string, string> = {
   lua: "lua",
   r: "r",
   matlab: "matlab",
-  julia: "jl",
+  julia: "julia",
+  jl: "julia",
   elm: "elm",
   haskell: "haskell",
   hs: "haskell",
@@ -171,7 +173,7 @@ export function getFileName(filepath: string) {
 }
 
 export function getFileExtension(filepath: string) {
-  return filepath.split(".").pop()!.toLocaleLowerCase();
+  return getFileName(filepath).split(".").pop()!.toLocaleLowerCase();
 }
 
 export function checkCodeFile(
@@ -233,6 +235,8 @@ export function getFileIcon(filepath: string, className?: string) {
     case "jpg":
     case "jpeg":
     case "png":
+    case "apng":
+    case "avif":
     case "gif":
     case "bmp":
     case "tiff":
@@ -253,6 +257,7 @@ export function getFileIcon(filepath: string, className?: string) {
     case "mp4":
     case "mov":
     case "m4v":
+    case "webm":
       return <FilePlayIcon className={className} />;
     default:
       if (isCodeFile) {

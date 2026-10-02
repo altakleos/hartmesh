@@ -17,45 +17,32 @@ unset, the route is not mounted at all (`/api/webhooks/github` responds
 anyway for local development or loopback testing — every delivery is
 then accepted unverified with a WARNING log line.
 
-After verification the route passes an immutable request attestation to
-:func:`fanout_event`. The dispatcher combines it with the trusted installation,
-owner, canonical agent, and repository match to create a verified route binding;
-the raw payload cannot supply that binding. In PostgreSQL mode the resulting
-bounded messages are atomically retained as leased receipts before the route
-acknowledges; the channel bus carries only receipt wake-ups. The
-:class:`GitHubChannel` (registered alongside
+After verification the payload is fanned out by :func:`fanout_event` into
+:class:`InboundMessage` instances on the channel bus, one per matching
+custom agent binding. The :class:`GitHubChannel` (registered alongside
 Feishu/Slack/etc.) takes care of posting the agent's reply back to GitHub.
 """
 
 from __future__ import annotations
 
 import hashlib
+import hmac
 import json
 import logging
+import os
 from typing import Any
 
 from fastapi import APIRouter, Header, HTTPException, Request
 
-from app.channels.inbound_receipts import InboundReceiptReplayConflict
-from app.gateway.github.dispatcher import (
-    VerifiedGitHubWebhookRequest,
-    fanout_event,
-)
-from app.gateway.github.webhook_auth import (
-    ALLOW_UNVERIFIED_GITHUB_WEBHOOKS_ENV,
-    GITHUB_WEBHOOK_SECRET_ENV,
-    GitHubWebhookAuth,
-    GitHubWebhookAuthMode,
-    resolve_github_webhook_auth,
-)
-from deerflow.deployment import DeploymentProfile
+from app.gateway.github.dispatcher import fanout_event
+from app.gateway.utils import constant_time_equals
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/webhooks", tags=["webhooks"])
 
-_SECRET_ENV_VAR = GITHUB_WEBHOOK_SECRET_ENV
-_ALLOW_UNVERIFIED_ENV_VAR = ALLOW_UNVERIFIED_GITHUB_WEBHOOKS_ENV
+_SECRET_ENV_VAR = "GITHUB_WEBHOOK_SECRET"
+_ALLOW_UNVERIFIED_ENV_VAR = "DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS"
 
 # Events we explicitly recognise. Anything else still returns 200 (so
 # GitHub does not retry) but is logged as "unhandled" for visibility.
@@ -72,21 +59,31 @@ _KNOWN_EVENTS: frozenset[str] = frozenset(
 
 
 def _get_webhook_secret() -> str | None:
-    """Compatibility accessor delegated to the canonical auth Module."""
+    """Return the configured webhook secret, or None if unset.
 
-    return resolve_github_webhook_auth().secret
+    Read at request time so operators can rotate the secret without a
+    full process restart. Treats empty strings as "unset" so a stray
+    ``GITHUB_WEBHOOK_SECRET=`` in ``.env`` does not silently disable
+    signature verification.
+    """
+    value = os.environ.get(_SECRET_ENV_VAR)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _unverified_webhooks_allowed() -> bool:
-    """Compatibility accessor delegated to the canonical auth Module."""
+    """Return True iff the explicit dev opt-in for unverified deliveries is set.
 
-    return resolve_github_webhook_auth().mode is GitHubWebhookAuthMode.unverified_development
+    Truthy values: ``1``, ``true``, ``yes``, ``on`` (case-insensitive).
+    Anything else (including unset) is False.
+    """
+    raw = os.environ.get(_ALLOW_UNVERIFIED_ENV_VAR, "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
 
 
-def is_route_enabled(
-    *,
-    deployment_profile: object = DeploymentProfile.local_development,
-) -> bool:
+def is_route_enabled() -> bool:
     """Return True iff the GitHub webhook route should be mounted.
 
     Mounted when either:
@@ -99,18 +96,22 @@ def is_route_enabled(
     even by accident. Called by :mod:`app.gateway.app` at router
     inclusion time.
     """
-    return resolve_github_webhook_auth(
-        deployment_profile=deployment_profile,
-    ).route_enabled
+    return _get_webhook_secret() is not None or _unverified_webhooks_allowed()
 
 
 def _verify_signature(secret: str, body: bytes, signature_header: str | None) -> bool:
-    """Compatibility helper delegated to the canonical auth Module."""
+    """Verify the GitHub ``X-Hub-Signature-256`` HMAC.
 
-    return GitHubWebhookAuth(
-        mode=GitHubWebhookAuthMode.hmac_sha256_verified,
-        secret=secret,
-    ).verify(body, signature_header)
+    Expected header format: ``sha256=<hex>``. Returns False if the header
+    is missing, malformed, or fails constant-time comparison.
+    """
+    if not signature_header:
+        return False
+    if not signature_header.startswith("sha256="):
+        return False
+    provided = signature_header.removeprefix("sha256=").strip()
+    expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    return constant_time_equals(provided, expected)
 
 
 def _summarise_event(event: str, payload: dict[str, Any]) -> str:
@@ -219,17 +220,9 @@ async def receive_github_webhook(
     """
     body = await request.body()
 
-    deployment_profile = getattr(
-        request.app.state,
-        "deployment_profile",
-        DeploymentProfile.local_development,
-    )
-    authentication = resolve_github_webhook_auth(
-        deployment_profile=deployment_profile,
-    )
-    verified_request: VerifiedGitHubWebhookRequest | None = None
-    if authentication.mode is not GitHubWebhookAuthMode.hmac_sha256_verified:
-        if authentication.mode is GitHubWebhookAuthMode.disabled:
+    secret = _get_webhook_secret()
+    if secret is None:
+        if not _unverified_webhooks_allowed():
             # Should be unreachable if startup-time is_route_enabled() was honored,
             # but a runtime rotation that cleared the secret without a restart
             # would land here. Refuse the delivery.
@@ -251,27 +244,16 @@ async def receive_github_webhook(
             _ALLOW_UNVERIFIED_ENV_VAR,
         )
     else:
-        if not authentication.verify(body, x_hub_signature_256):
+        if not _verify_signature(secret, body, x_hub_signature_256):
             logger.warning(
                 "github_webhook: signature verification FAILED (event=%s delivery=%s)",
                 x_github_event,
                 x_github_delivery,
             )
             raise HTTPException(status_code=401, detail="Invalid or missing X-Hub-Signature-256")
+
     if not x_github_event:
         raise HTTPException(status_code=400, detail="Missing X-GitHub-Event header")
-    if authentication.mode is GitHubWebhookAuthMode.hmac_sha256_verified:
-        try:
-            verified_request = VerifiedGitHubWebhookRequest.attest(
-                x_github_delivery,
-                event=x_github_event,
-                body=body,
-            )
-        except (TypeError, ValueError):
-            raise HTTPException(
-                status_code=400,
-                detail="Invalid verified GitHub delivery identity",
-            ) from None
 
     # Parse JSON payload after signature is verified (verify-then-parse).
     try:
@@ -368,32 +350,23 @@ async def receive_github_webhook(
             # ``is_route_enabled`` check still covers fail-closed
             # *configuration* errors.
             try:
-                verified_sink = getattr(service, "accept_verified_inbound_batch", None)
                 dispatch_result = await fanout_event(
                     service.bus,
                     x_github_event,
                     x_github_delivery,
                     payload,
                     operator_default_mention_login=operator_default_mention_login,
-                    verified_request=verified_request,
-                    inbound_sink=(verified_sink if verified_request is not None and callable(verified_sink) else None),
                 )
-            except InboundReceiptReplayConflict:
-                raise HTTPException(
-                    status_code=409,
-                    detail="verified delivery identity conflicts with retained event evidence",
-                ) from None
-            except Exception as exc:  # noqa: BLE001 — translated below
-                delivery_correlation = hashlib.sha256((x_github_delivery or "missing").encode("utf-8")).hexdigest()[:16]
-                logger.error(
-                    "github_webhook: fanout failed code=verified_inbound_unavailable delivery_correlation=%s exception_class=%s",
-                    delivery_correlation,
-                    type(exc).__name__,
+            except Exception as exc:  # noqa: BLE001 — re-raised as 503 below
+                logger.exception(
+                    "github_webhook: fanout failed (delivery=%s event=%s) — returning 503 (recoverable via manual/API redelivery)",
+                    x_github_delivery,
+                    x_github_event,
                 )
                 raise HTTPException(
                     status_code=503,
-                    detail="fan-out failed: verified inbound receipt storage is unavailable",
-                ) from None
+                    detail=f"fan-out failed for delivery {x_github_delivery!r}: {exc!r}",
+                ) from exc
     else:
         logger.info(
             "github_webhook delivery=%s | unhandled event=%s action=%s repo=%s",

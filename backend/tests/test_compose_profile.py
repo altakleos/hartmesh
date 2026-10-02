@@ -827,7 +827,7 @@ def test_profile_nginx_conf_is_a_verbatim_copy_of_the_compose_nginx_conf() -> No
     source = (PROFILE / "nginx" / "nginx.conf").read_text(encoding="utf-8")
     assert "${" not in source
     assert set(_BARE_VARIABLE.findall(source)) == NGINX_VARIABLES
-    assert len(_BARE_VARIABLE.findall(source)) == 99
+    assert len(_BARE_VARIABLE.findall(source)) == 104
 
 
 def _render_nginx(tmp_path: Path, environ: dict[str, str], *, source: Path | None = None) -> subprocess.CompletedProcess[str]:
@@ -887,7 +887,8 @@ def test_template_matches_the_example_version_provider_and_local_backend(render_
     assert template["sandbox"]["network"]["approval"] == "prompt"
     assert template["skills"]["path"].startswith("/srv/hartmesh/")
     assert template["auth"]["local"]["lockout_store"] == "redis", "the login lockout must survive a restart so an admin unlock is not an outage (README: Login lockout)"
-    assert template["deployment"]["profile"] == "local_development"
+    assert "deployment" not in template and "tool_plane" not in template, "this build carries no deployment profile and no tool plane"
+    assert template["run_ownership"]["heartbeat_enabled"] is True, "the lease renewal is where the worker reads a cancellation the accounts command asked for"
     assert template["run_events"]["backend"] == "db"
     assert template["database"]["postgres_url"] == "$DATABASE_URL"
 
@@ -1324,12 +1325,10 @@ def test_the_profile_ships_the_scheduler_on_with_values_chosen_for_two_sandbox_s
     the replicas: two slots, one left out of its reach), bounds a run's clock,
     and lets a queued occurrence wait for the runs ahead of it.
     """
-    from deerflow.config.execution_policy_config import ExecutionPolicyConfig
     from deerflow.config.scheduler_config import SchedulerConfig
 
     template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
     scheduler = SchedulerConfig(**template["scheduler"])
-    policy = ExecutionPolicyConfig(**template.get("execution_policy", {}))
 
     assert scheduler.enabled is True
     # A person always has a slot the scheduler cannot take.
@@ -1341,12 +1340,10 @@ def test_the_profile_ships_the_scheduler_on_with_values_chosen_for_two_sandbox_s
     # An occurrence queued behind the run ahead of it outlasts several full-length runs before it is failed.
     assert scheduler.queue_timeout_seconds >= 8 * scheduler.max_run_seconds
     # Model calls: a scheduled run does the work a person would ask for, so it keeps the interactive numbers
-    # (the graph's step limit, about 11 steps a model turn on the lead-agent graph, ends a run near 90 turns,
-    # before the 500-turn execution budget could). The profile changes wall time and concurrency only.
+    # (the graph's step limit, about 11 steps a model turn on the lead-agent graph, ends a run near 90 turns).
+    # The profile changes wall time and concurrency only.
     assert "recursion_limit" not in template["scheduler"]
     assert scheduler.recursion_limit == SchedulerConfig().recursion_limit == 1000
-    assert "execution_policy" not in template, "the execution budget is the default"
-    assert policy == ExecutionPolicyConfig()
 
     # The renderer copies the block through unchanged, so what the tenant runs is what is pinned here.
     rendered, _ = render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), _base_environ())

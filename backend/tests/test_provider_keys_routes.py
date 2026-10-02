@@ -164,6 +164,48 @@ def test_an_administrator_sets_replaces_and_removes_a_key_and_reads_back_only_it
         assert (refused.status_code, refused.json()["detail"]["code"]) == (422, "limit_invalid")
 
 
+def _test(client: TestClient, provider: str, body) -> object:
+    return client.post(f"/api/provider-keys/{provider}/test", json=body, headers=_csrf(client))
+
+
+def test_an_administrator_tests_a_key_without_setting_it(gateway, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.gateway.provider_keys.probe import ProbeOutcome
+
+    asked: list[dict] = []
+
+    async def probe(entry, key) -> ProbeOutcome:
+        asked.append(dict(entry))
+        return ProbeOutcome("rejected")
+
+    monkeypatch.setattr(gateway.state.provider_keys, "_probe", probe)
+    admin = _admin(gateway)
+
+    tested = _test(admin, "anthropic", {"key": SENTINEL})
+
+    assert tested.status_code == 200, tested.text
+    assert tested.headers["cache-control"] == "no-store"
+    assert tested.json() == {"provider": "anthropic", "kind": "models", "result": "rejected", "reason": None, "model": "claude-sonnet-4"}
+    assert SENTINEL not in tested.text
+    assert asked[0]["api_key"] == SENTINEL
+    # Tested, not set: the provider still has no key and nothing was recorded.
+    sources = {provider["provider"]: provider["source"] for provider in admin.get("/api/provider-keys").json()["providers"]}
+    assert sources["anthropic"] == "none"
+    assert admin.get("/api/provider-keys/events").json()["events"] == []
+    assert "claude-sonnet-4" not in [model["name"] for model in admin.get("/api/models").json()["models"]]
+
+
+def test_a_test_refuses_what_a_write_refuses(gateway) -> None:
+    admin = _admin(gateway)
+    unknown = _test(admin, "acme", {"key": SENTINEL})
+    assert (unknown.status_code, unknown.json()["detail"]["code"]) == (404, "unknown_provider")
+    unreadable = _test(admin, "openai", {"api_key": SENTINEL})
+    assert (unreadable.status_code, unreadable.json()["detail"]["code"]) == (422, "body_invalid")
+    assert SENTINEL not in unreadable.text
+    gateway.state.provider_keys = None
+    absent = _test(admin, "openai", {"key": SENTINEL})
+    assert (absent.status_code, absent.json()["detail"]["code"]) == (409, "not_available")
+
+
 def test_no_route_that_returns_configuration_returns_the_key(gateway, caplog: pytest.LogCaptureFixture) -> None:
     """Every GET the Gateway mounts without a path parameter, and every model by name, after a key is set."""
     admin = _admin(gateway)
@@ -193,14 +235,14 @@ def test_a_person_who_is_not_an_administrator_is_refused_every_route(gateway) ->
     assert person.get("/api/provider-keys/events").status_code == 403
     assert _put(person, "openai", {"key": SENTINEL}).status_code == 403
     assert person.request("DELETE", "/api/provider-keys/openai", headers=_csrf(person)).status_code == 403
+    assert _test(person, "openai", {"key": SENTINEL}).status_code == 403
 
 
 def test_an_administrators_personal_access_token_is_refused_every_route(gateway) -> None:
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
-    gateway.state.pat_repo = PersonalAccessTokenRepository(get_session_factory(), tenant=TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference())
+    gateway.state.pat_repo = PersonalAccessTokenRepository(get_session_factory())
     admin = _admin(gateway)
     minted = admin.post("/api/v1/auth/pats", json={"name": "automation", "scopes": ["threads:read", "threads:write"]}, headers=_csrf(admin))
     assert minted.status_code == 201, minted.text
@@ -208,6 +250,7 @@ def test_an_administrators_personal_access_token_is_refused_every_route(gateway)
     assert bearer.get("/api/provider-keys").status_code in {401, 403}
     assert bearer.put("/api/provider-keys/openai", json={"key": SENTINEL}).status_code in {401, 403}
     assert bearer.delete("/api/provider-keys/openai").status_code in {401, 403}
+    assert bearer.post("/api/provider-keys/openai/test", json={"key": SENTINEL}).status_code in {401, 403}
     assert bearer.get("/api/provider-keys/events").status_code in {401, 403}
     assert _put(admin, "openai", {"key": SENTINEL}).status_code == 200
 

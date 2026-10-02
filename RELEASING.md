@@ -6,66 +6,25 @@ the maintainer bumps the version sources, updates the changelog, commits, and
 tags. The helper scripts below keep the version sources in lockstep, and CI
 gates the release on them agreeing with the tag.
 
-## Fork releases
-
-HartMesh releases use `X.Y.Z+hartmesh.N`: `X.Y.Z` is the upstream version base
-and `N` is the monotonically increasing HartMesh patch-set number on that base.
-The build-metadata suffix keeps the fork's identity explicit without claiming a
-new upstream version. The exact string is valid in the Python, npm, and Helm
-version sources; registries derive two transport-safe spellings from it.
-
-For `2.1.0+hartmesh.1`, the published spellings are:
-
-| Use | Spelling |
-| --- | --- |
-| Git tag | `v2.1.0+hartmesh.1` |
-| Helm chart version / `helm --version` | `2.1.0+hartmesh.1` |
-| Chart OCI tag | `2.1.0_hartmesh.1` (Helm maps build metadata for OCI storage) |
-| Container image tag | `v2.1.0-hartmesh.1` (the metadata action sanitizes the git tag) |
-| Commit lookup image tag | `sha-<first-7-commit-characters>` |
-
-The shared implementation of the two registry spellings is
-`scripts/release_tag_spellings.sh`; release workflows must call it instead of
-reimplementing the substitutions. Published image repositories are
-`ghcr.io/<owner>/<repo>-backend`, `-frontend`, `-provisioner`, `-sandbox`, and
-`-sandbox-network-proxy` (the restricted-sandbox policy sidecar, built under
-the fork's own name because upstream's proxy workflow never publishes from a
-fork and its `:latest` is a moving tag). The chart is
-`oci://ghcr.io/<owner>/charts/deer-flow`. The separately managed upstream base
-cache is `ghcr.io/<owner>/<repo>-sandbox-base`; it is not a deployable HartMesh
-image.
-
-The tenant VM compose profile under `deploy/compose/` is the second released
-deployment path. Its `images.txt` and its image references must be digest
-pins in the tagged tree (see [Compose profile pins](#compose-profile-pins)),
-which is why a release now builds its images *before* the tag exists.
-
 ## Version sources
 
-A release version must appear, identically, in five fields:
+A release version must appear, identically, in four places:
 
 | File                                   | Field                |
 | -------------------------------------- | -------------------- |
 | `backend/pyproject.toml`               | `version = "X.Y.Z"`  |
-| `backend/uv.lock`                      | root `deer-flow` package `version = "X.Y.Z"` |
-| `frontend-hm/package.json`                | `"version": "X.Y.Z"` |
+| `frontend/package.json`                | `"version": "X.Y.Z"` |
 | `deploy/helm/deer-flow/Chart.yaml`     | `version: X.Y.Z`     |
 | `deploy/helm/deer-flow/Chart.yaml`     | `appVersion: "X.Y.Z"`|
 
-Plus the git tag `v<version>` itself, which is the canonical release identifier.
-
-The retained `frontend/package.json` is an upstream snapshot and is excluded
-from Hartmesh version bumps. The `frontend` image component is built from
-`frontend-hm/Dockerfile` and keeps the existing image repository and
-`/app/frontend` runtime path. Candidate publishing and digest pinning still
-precede tagging; changing the source directory does not update published pins.
+Plus the git tag `vX.Y.Z` itself, which is the canonical release identifier.
 
 Container images are tagged from the git tag (not from these files), and the
 Helm chart version is validated against the tag — so if any source lags the
 tag, the release is blocked (see [Version gate](#version-gate)).
 
 The frontend's in-app About page (Settings ▸ About) is a *derived* consumer, not
-an additional source: it reads `frontend-hm/package.json`'s version at build time, so it
+a fifth source: it reads `frontend/package.json`'s version at build time, so it
 tracks the table above automatically with no bump needed. Nightly builds override
 it with the chart's nightly string (`<base>-nightly.<YYYYMMDD>-<short_sha>`) via
 the `APP_VERSION` build-arg in `nightly.yaml`, so a nightly image's About page
@@ -73,317 +32,70 @@ distinguishes it from a release.
 
 ## Helper scripts
 
-- `scripts/bump_version.sh <version>` — set all five fields at once, running
-  `uv lock` to update the root package entry before self-verification. The
-  helper requires `uv` and tolerates a leading `v` (e.g.
-  `v2.1.0+hartmesh.1`).
+- `scripts/bump_version.sh <version>` — set all four fields at once, refresh
+  `backend/uv.lock`, then self-verify. Tolerates a leading `v` (e.g. `v2.1.0`).
+  Needs `uv` on `PATH` (`backend/uv.lock` pins the root package version too, and
+  lint CI runs `uv lock --check`); the script fails before editing anything when
+  `uv` is missing.
   ```bash
-  scripts/bump_version.sh 2.1.0+hartmesh.1
+  scripts/bump_version.sh 2.1.0
   ```
 - `scripts/verify_versions.sh [version]` — check that all sources agree. With
   no argument it requires mutual equality; with an argument it requires every
   source to equal it. Exits non-zero on mismatch. Run it locally before tagging
   to catch drift early:
   ```bash
-  scripts/verify_versions.sh 2.1.0+hartmesh.1
+  scripts/verify_versions.sh 2.1.0
   ```
 
-## Fork release procedure
+## Release procedure
 
-1. **Choose the fork version.** Increment `N` for every attempted release once
-   that chart version has been published. Do not reuse an upstream-only version.
-2. **Bump the version** across all five fields:
+1. **Bump the version** across all sources (this refreshes
+   `backend/uv.lock` too):
    ```bash
-   scripts/bump_version.sh 2.1.0+hartmesh.1
+   scripts/bump_version.sh 2.1.0
    ```
-3. **Update `CHANGELOG.md`** by adding a fork release section **above** the
-   upstream `## [Unreleased]` block. Leave that upstream block and its link
-   reference untouched. List the fork PRs included in this cut:
+2. **Update `CHANGELOG.md`**: rename the `## [Unreleased]` section to
+   `## [2.1.0] — YYYY-MM-DD` (note the em dash `—`), and add a link reference
+   at the bottom of the file:
    ```
-   ## [2.1.0+hartmesh.1] — YYYY-MM-DD
-
-   - hartmesh#123 — concise change summary
+   [2.1.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.1.0
    ```
-   Add a matching link reference for the fork release using this repository's
-   owner and name:
-   ```
-   [2.1.0+hartmesh.1]: https://github.com/<owner>/<repo>/releases/tag/v2.1.0+hartmesh.1
-   ```
-4. **Verify and commit** the version + changelog changes, and push that
-   commit (a branch is fine; the candidate build reads the ref you dispatch):
+   Start a fresh `## [Unreleased]` section above it for the next cycle.
+3. **Commit** the version + changelog changes:
    ```bash
-   scripts/verify_versions.sh 2.1.0+hartmesh.1
    git add -A
-   git commit -m "release: v2.1.0+hartmesh.1"
-   git push origin HEAD
+   git commit -m "release: v2.1.0"
    ```
-5. **Build the candidate images** from that commit under the release tag
-   spelling, before any tag exists. The dispatch verifies the version sources
-   against the input and publishes all five images as `:v2.1.0-hartmesh.1` and
-   `:sha-<short-commit>`:
+4. **Tag and push**:
    ```bash
-   gh workflow run container.yaml --ref <that branch> -f version=2.1.0+hartmesh.1
+   git tag v2.1.0
+   git push origin v2.1.0
    ```
-   A dispatch builds every component regardless of the pins the tree carries;
-   it never adopts. Wait for every matrix job to succeed, and confirm all five
-   built (the adopt step's output is `adopted=false` for each).
-6. **Pin the compose profile** to the digests the candidate build published,
-   then commit the pins (see [Compose profile pins](#compose-profile-pins)):
-   ```bash
-   scripts/pin_compose_images.py --release 2.1.0+hartmesh.1
-   scripts/pin_compose_images.py --check
-   git add deploy/compose
-   git commit -m "release: pin compose profile for v2.1.0+hartmesh.1"
-   ```
-   `--release` is what points the four fork lines at this release's candidate
-   images before anything is resolved; without it the script refuses, because
-   the tree's placeholders name the previous release and the tag build would
-   re-tag that release's digests as this one with every check green. Compare
-   the `resolved ... -> sha256:...` lines it prints with the candidate build's
-   digests before committing. The pin commit changes only `deploy/compose/`,
-   which no image contains, so the candidate images are the release's code.
-7. **Tag and push** the pin commit:
-   ```bash
-   git tag v2.1.0+hartmesh.1
-   git push origin v2.1.0+hartmesh.1
-   ```
-   Pushing the tag triggers the publishing workflows below. The container
-   workflow does not rebuild a component the profile pins: it re-tags the
-   pinned digest *unchanged* (`crane tag`, which re-pushes the same manifest
-   bytes) with the release tag and the tag commit's `sha-` tag. Before
-   re-tagging it asserts that the release tag already resolves to the pin,
-   which only the candidate build under this version can have arranged, and
-   afterwards that both tags resolve to the pin with the pin's media type; it
-   fails if a pin is still tag-form or names a digest the registry lacks. Wait
-   for the chart and all five container jobs to succeed before recording the
-   release identity.
-8. **Mirror and record identities.** Follow
-   [Manual release workflows](#manual-release-workflows), then perform the
-   first-publish visibility checks if these packages are new.
+   Pushing the tag triggers the publishing workflows (below).
 
-## Compose profile pins
+### Release candidates
 
-`deploy/compose/images.txt` is what the operator's golden VM image pre-pulls:
-one `<repository>@sha256:<64 hex>` per line, no tags, no comments. The
-property it promises, that a tenant's first start pulls nothing, holds only
-when `deploy/compose/compose.yaml` and the `sandbox.image` /
-`network.proxy_image` values in `deploy/compose/config.yaml` are the same
-strings. `scripts/pin_compose_images.py` keeps the three files in lockstep:
-
-- `--release <version>` (the fork's `X.Y.Z+hartmesh.N`, leading `v`
-  tolerated) first rewrites every fork image line, whatever it said before, to
-  `<repository>:<image tag spelling of the release>` (the same `+` → `-` and
-  leading `v` as `scripts/release_tag_spellings.sh`), then resolves every
-  tag-form line through `crane digest` (or `docker buildx imagetools inspect`
-  when crane is absent), rewrites the matching references in both YAML files,
-  writes `images.txt` from the same strings, verifies, and prints each fork
-  line's resolved reference and digest. The script takes no version otherwise,
-  and the tree's fork lines belong to the previous release between cuts, so a
-  pin without `--release` would pin that release's images and nothing
-  downstream could tell; it refuses instead while any fork line is tag-form.
-  Third-party lines are resolved as written.
-- `--check` verifies only and exits non-zero while any reference still carries
-  a tag or the three files disagree. `release-manifest.yaml` runs it on the
-  tagged tree and additionally requires each fork image line to equal the
-  published release digest, so the release asset cross-checks the commit.
-
-Between cuts the tree carries the **previous release's digest pins**: the pin
-commit is the last thing a release changes and nothing restores placeholders.
-The candidate build ignores them (a dispatch never adopts, so all five images
-are built), and `--release` rewrites every fork line to the new release before
-resolving, so the previous pins never reach the next release. Eight lines are
-pinned: backend, frontend, sandbox, the network proxy, `postgres`, `redis`,
-`nginx`, and `searxng/searxng`. To bump a third-party image, replace its
-digest string with the new tag form (`postgres:16`; SearXNG has no stable
-line, so use the dated build tag the registry lists, `searxng/searxng:2026.9.17-274b63b67`
-for the current pin) in all three files and run
-`scripts/pin_compose_images.py` (no `--release`); the script resolves it and
-rewrites the three files in lockstep. After a SearXNG re-pin, confirm the
-instance's `/config` still lists exactly the engines the profile names:
-the engine parsers are upstream code with no contract.
-
-## Durable runtime qualification evidence
-
-The administrator deployment report is not remote attestation. With no reference it reports
-`status: unqualified` and `trust: none_declared`. When an operator configures a bounded
-Kubernetes qualification reference, v1 retains `status: qualified` for wire compatibility
-but reports `trust: operator_asserted`. That state proves only that the operator declared an
-artifact digest.
-
-For a release gate, obtain the evidence artifact through an independently controlled path or
-artifact store, then run `backend/scripts/verify_qualification_evidence.py`. Supply the
-declared report digest and independently expected qualification ID, image digest, chart
-version/digest, rendered configuration digest, Alembic head, scope, namespace, and every
-required scenario. Only exit zero with `status: verified` and
-`trust: external_evidence_verified` is exact-artifact evidence. A missing artifact, a default
-Kubernetes test skip, or an operator-asserted reference is an unpassed release gate. The full
-offline command is in the [Helm deployment guide](deploy/helm/deer-flow/README.md#deployment-identity-and-qualification).
-
-The verifier performs no network fetch and does not validate signatures. Its current proof is
-the canonical artifact SHA-256 plus exact subject and complete passing-scenario match.
-
-OpenSandbox is not an accepted-material release target. Its committed Phase 0
-artifact is a deterministic `no_go`, not a qualification artifact: server
-0.1.14 / SDK 0.1.15 lack atomic ownership claims and independently resolved image
-digest readback; candidate trusted-setup surfaces remain live-unqualified. A release must keep
-`accepted_materialization_profile: disabled`, must not publish the scope
-`durable_one_replica_opensandbox_immutable_skills_v1`, and must not reinterpret
-the SDK-surface artifact, a skipped live test, or an operator reference as a
-pass. See
-[`OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md`](backend/docs/OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md)
-and upstream [issue #1690](https://github.com/opensandbox-group/OpenSandbox/issues/1690).
+Release-candidate tags must include the same prerelease suffix in all four
+version fields. For example, before tagging `v2.1.0-rc0`, run
+`bash scripts/bump_version.sh 2.1.0-rc0` and run
+`bash scripts/verify_versions.sh 2.1.0-rc0` from the repository root. Commit
+the version and lockfile changes before creating the tag. Python lockfiles
+normalize this version to `2.1.0rc0` — `bump_version.sh` leaves the normalizing
+to `uv lock` — while the source version fields checked by the release gate
+retain `2.1.0-rc0`. Re-running a failed workflow on an unchanged tag does not
+pick up a later version-fix commit.
 
 ## What CI publishes on a `v*` tag
 
-- `.github/workflows/container.yaml` — publishes `backend`, `frontend`,
-  `provisioner`, `sandbox`, and `sandbox-network-proxy` images to `ghcr.io`,
-  tagged with the release tag's registry-safe image spelling and
-  `sha-<short-commit>`. A component pinned by digest in
-  `deploy/compose/images.txt` is re-tagged from that digest rather than
-  rebuilt; the others are built from the tagged commit. The same workflow's
-  `workflow_dispatch` builds the candidate images for a version before its
-  tag exists. The sandbox image adapts the upstream AIO runtime to uid 1000
-  and the Kubernetes Pod Security `restricted` profile; build-time source
-  assertions deliberately stop publication when the pinned vendor entrypoint
-  changes. It also layers pinned Python libraries for skill scripts
-  (`duckdb`, imported by the data-analysis skill; `python-docx`, used by the
-  business-report skill's Word render) on the base image's pandas, openpyxl,
-  xlrd, matplotlib, jinja2 and WeasyPrint, and pre-builds matplotlib's font
-  cache for the runtime user (about seven seconds per fresh sandbox
-  otherwise). The build imports the libraries once as root; the smoke
-  workflow imports them again as uid 1000, runs the data-analysis script,
-  and builds and renders a business report (PDF, DOCX, XLSX) on the image,
-  so skill scripts install nothing at runtime. Changing either layer changes
-  the sandbox digest and therefore needs a release cut. The public skill
-  library must not run ahead of the pinned image: from the first release
-  that ships these layers on, `data-analysis` and `business-report` require
-  them and exit with a message naming the image when they are missing. The
-  backend image carries that library itself (`skills/public` copied to
-  `/app/skills/public` as its last layer), and the compose profile seeds it
-  onto each tenant's data disk at every start, so a change to a public skill
-  reaches tenants only through a cut that rebuilds the backend image.
+- `.github/workflows/container.yaml` — builds and pushes `backend`,
+  `frontend`, and `provisioner` images to `ghcr.io`, tagged with the release
+  version (and `latest` on the default branch).
 - `.github/workflows/chart.yaml` — packages the Helm chart and pushes it as an
   OCI artifact to `ghcr.io`. Users install with:
   ```bash
-  helm install deer-flow oci://ghcr.io/<owner>/charts/deer-flow \
-    --version 2.1.0+hartmesh.1
+  helm install deer-flow oci://ghcr.io/<owner>/charts/deer-flow --version 2.1.0
   ```
-
-## Manual release workflows
-
-Before the first hardened-sandbox build, mirror its exact upstream base digest.
-The workflow rejects floating sources, copies by digest, verifies the
-destination digest, and prints the cached reference:
-
-```bash
-gh workflow run sandbox-image-mirror.yaml \
-  -f 'source=<source-registry>/<sandbox-image>@sha256:<64-lowercase-hex>' \
-  -f version=2.1.0+hartmesh.1
-```
-
-The destination is
-`ghcr.io/<owner>/<repo>-sandbox-base@sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7`.
-The release sandbox build consumes that cache by digest, so a tag build does
-not depend on the third-party registry. The mirror has a distinct package name
-because `.github/workflows/container.yaml` is the sole publisher of the
-deployable `<repo>-sandbox` package.
-
-After the tag-triggered chart and five image jobs succeed, dispatch the
-manifest workflow without a sandbox input:
-
-```bash
-gh workflow run release-manifest.yaml \
-  -f version=2.1.0+hartmesh.1
-```
-
-The manifest workflow checks out the exact tag, cross-checks each release image
-against its `sha-` tag when present, resolves the chart, creates the GitHub
-Release if needed, and attaches `release-manifest.json` as both a workflow
-artifact and a release asset. A missing `sha-` tag is recorded as
-`revision_check: tag-not-found`; a resolved digest mismatch remains fatal. The
-schema-3 manifest always records all five built images under `images`,
-including `images.sandbox` and `images.sandbox_network_proxy`, with the same
-repository, digest, tag, and revision-check shape, plus `compose_profile`: the
-SHA-256 of the tagged tree's `deploy/compose/images.txt` and its lines, each
-fork line verified equal to the published digest and each third-party line
-verified resolvable. The backend entry additionally records the embedded extension artifact
-manifest digest, pinned extension API version, entry count, and OCI provenance
-subject. The workflow exports the exact backend image by digest, extracts
-`/app/hartmesh/extension-artifacts.json`, verifies its canonical digest, and
-fails if it is missing or malformed. Container publishing already creates the
-GitHub build-provenance attestation for that image subject.
-
-Verify a downloaded release document without network access:
-
-```bash
-python3 scripts/verify_release_manifest.py release-manifest.json
-```
-
-For the strongest local check, also supply the manifest extracted from the
-Gateway image and its expected image digest:
-
-```bash
-python3 scripts/verify_release_manifest.py release-manifest.json \
-  --artifact-manifest extension-artifacts.json \
-  --gateway-image-digest sha256:<64-lowercase-hex>
-```
-
-Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source.
-
-Do not dispatch the manifest while a publish job is pending or failed: a
-missing image or a tag/digest mismatch intentionally fails the workflow. The
-sandbox base must be mirrored before the sandbox build can publish.
-
-### First-publish GHCR visibility
-
-GHCR creates each package as private on first publish, and package visibility
-cannot be changed by these workflows or a GHCR API. In the GitHub Packages UI,
-open package settings and change visibility to **Public** for all six
-deployment packages:
-
-- `<repo>-backend`
-- `<repo>-frontend`
-- `<repo>-provisioner`
-- `<repo>-sandbox`
-- `<repo>-sandbox-network-proxy`
-- `charts/deer-flow`
-
-Log out of GHCR (or use a clean shell with no registry credentials) and verify
-each image tag plus the chart OCI tag. Every command must succeed without
-authentication:
-
-```bash
-crane manifest <ref> >/dev/null
-```
-
-For example, check the five image references from `release-manifest.json` and
-`ghcr.io/<owner>/charts/deer-flow:2.1.0_hartmesh.1`. A successful authenticated
-pull is not evidence that visibility was changed.
-
-### Bumping the sandbox base
-
-The Dockerfile default and release workflow currently pin upstream AIO base
-digest
-`sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7`.
-To move it:
-
-1. Resolve the new upstream image to a digest and verify that every exact
-   `grep -q` source line in `docker/sandbox/Dockerfile` is present. Stop if any
-   line moved; review the vendor change instead of guessing a substitution.
-2. Dispatch `sandbox-image-mirror.yaml` with the digest-pinned upstream
-   reference and the upcoming release version. Confirm the destination digest
-   matches.
-3. Update both the Dockerfile's `BASE_IMAGE` default and the sandbox job's
-   `BASE_IMAGE` build argument in `.github/workflows/container.yaml` to that
-   same digest.
-4. Build once with one pinned source string deliberately changed and retain the
-   failed assertion output, then revert it. Run the restricted-profile smoke
-   workflow before merging.
-
-Keeping the third-party reference as the Dockerfile default makes local builds
-portable; the release workflow repoints it to the authenticated GHCR
-`<repo>-sandbox-base` cache so a release does not depend on the third-party
-registry.
 
 ## Nightly builds
 
@@ -437,14 +149,18 @@ Both features stay opt-in: the provisioner ignores them until
 
 Both publishing workflows call `.github/workflows/verify-versions.yml` as their
 first job. It runs `scripts/verify_versions.sh` against the tag (minus the
-`v`). If any of the five version fields doesn't match the tag, the verify job
+`v`). If any of the four version sources doesn't match the tag, the verify job
 fails and **all** publish jobs are skipped — no images, no chart.
+
+The gate covers those four fields. `backend/uv.lock` is refreshed to the same
+version by `scripts/bump_version.sh` and checked by `uv lock --check` in lint CI,
+which fails on a stale lock.
 
 When it fails, the job annotation names the offending file and suggests the
 fix:
 
 ```
-::error::frontend-hm/package.json is '2.0.0' but expected '2.1.0'.
+::error::frontend/package.json is '2.0.0' but expected '2.1.0'.
 Tip: run scripts/bump_version.sh 2.1.0 to align all sources.
 ```
 
@@ -460,27 +176,159 @@ scripts/bump_version.sh 2.1.0-rc1
 # update CHANGELOG, commit, tag v2.1.0-rc1, push
 ```
 
-## Release failure handling
+## Recovering from a failed gate
 
-| Failure | Recovery |
-| --- | --- |
-| Version gate fails | Nothing was published. Fix the sources with `scripts/bump_version.sh`, commit, delete and recreate the tag on the fixed commit, then push it again. |
-| A container job fails after the gate | Re-run the failed job on the **same workflow run**. Image tags are mutable, so the missing image can be completed without changing the release identity. |
-| The chart version was published | The chart version is immutable. Never move or re-push that tag; increment the `hartmesh.N` patch-set number and make a new release. |
-| The manifest's compose cross-check fails | The chart version is published. A release tag must resolve to its pin, so fix the workflow by PR and cut the next `N`; never re-point a published release's tags. |
+If the gate failed because a source was forgotten:
 
-Deleting and recreating a tag is safe only when the version gate failed before
-any artifact was published. If the chart job might have succeeded, inspect the
-package first and use a new `N`.
+1. Run `scripts/bump_version.sh <version>` to align the sources.
+2. Amend or add a follow-up commit.
+3. Delete and re-create the tag, then push it:
+   ```bash
+   git tag -d v2.1.0
+   git tag v2.1.0
+   git push origin :refs/tags/v2.1.0
+   git push origin v2.1.0
+   ```
+
+Re-pushing the tag re-triggers the workflows. Because the gate blocks **all**
+artifacts when it fails, nothing was published under the bad tag, so re-tagging
+is safe — no images or chart were pushed to overwrite.
 
 ## Post-release
 
-The `release-manifest` workflow creates the **GitHub Release** if it is absent
-and attaches the resolved identity. Expand its notes from the corresponding
-`CHANGELOG.md` section after the workflow succeeds; keep the manifest asset
-attached unchanged.
+Optionally draft a **GitHub Release** from the tag, pasting the corresponding
+`CHANGELOG.md` section as the release notes. The changelog link references
+point at these release URLs.
 
 For the 2.1.0 chart release (the first chart release), pre-`charts/` nightly
 builds remain at the legacy bare `ghcr.io/<owner>/deer-flow` package. That
 package receives no new versions after 2.1.0; delete it or revoke its
 visibility once nothing still pulls from it.
+
+## HartMesh distribution releases
+
+Everything above is upstream's release process and is kept as upstream wrote
+it. This section is what this repository does instead. HartMesh is a
+distribution of DeerFlow: upstream's `main` is merged in regularly, and what a
+release ships is the single-VM profile under `deploy/compose/` with the five
+container images it runs. The Helm chart in this tree is upstream's, unchanged
+and not qualified against this build; a release tag here does not publish it.
+
+### Version
+
+A HartMesh release is `X.Y.Z+hartmesh.N`: `X.Y.Z` is the upstream version the
+build is based on and `N` increases with every release. The same string goes
+in the four version sources (`deploy/helm/deer-flow/Chart.yaml`,
+`backend/pyproject.toml`, `backend/uv.lock`, `frontend-hm/package.json`);
+`scripts/bump_version.sh` writes all of them and `scripts/verify_versions.sh`
+checks them. Between releases the tree carries upstream's own version.
+
+For `2.1.0+hartmesh.1` the spellings are: git tag `v2.1.0+hartmesh.1`,
+container image tag `v2.1.0-hartmesh.1`, and `sha-<first seven characters of
+the commit>` for lookup by commit. `scripts/release_tag_spellings.sh` is the
+one implementation; workflows call it. The images are
+`ghcr.io/<owner>/<repo>-backend`, `-frontend`, `-provisioner`, `-sandbox` and
+`-sandbox-network-proxy`. `ghcr.io/<owner>/<repo>-sandbox-base` is a private
+cache of the sandbox's upstream base image, not something to deploy.
+
+### Procedure
+
+The compose profile must reference its images by digest in the tagged tree,
+so a release builds its images before the tag exists.
+
+Every release's `CHANGELOG.md` entry must include a `### Schema changes`
+section comparing its database schema with the previous HartMesh release.
+Describe added, changed or removed tables and columns, migration revisions,
+and the upgrade behavior or required operator action. If the database schema
+is unchanged, state explicitly: "No database schema changes since v<previous
+release>." Changes to a manifest or configuration format should be described
+separately from the database schema.
+
+Before committing the release version, rename `## [Unreleased]` to the chosen
+version, keep its schema section, and start a new Unreleased section. Preview
+the notes with `python3 scripts/release_notes.py <version>`. The manifest
+workflow requires a nonempty schema section and publishes that release's
+changelog entry as the GitHub Release notes; rerunning it updates those notes
+from the same tagged source.
+
+1. **Choose the version** and write it to every source:
+   ```bash
+   scripts/bump_version.sh 2.1.0+hartmesh.1
+   scripts/verify_versions.sh 2.1.0+hartmesh.1
+   ```
+2. **Commit and push** that change (a branch is fine; the candidate build
+   reads the ref it is dispatched on).
+3. **Build the candidate images** from that commit:
+   ```bash
+   gh workflow run container.yaml --ref <that branch> -f version=2.1.0+hartmesh.1
+   ```
+   A dispatch builds all five images under the release's tag spelling and
+   never reuses a pinned digest, whatever `deploy/compose/images.txt` carries.
+   Wait for every job to succeed.
+4. **Pin the compose profile** to the digests that build published, and
+   commit the pins:
+   ```bash
+   scripts/pin_compose_images.py --release 2.1.0+hartmesh.1
+   scripts/pin_compose_images.py --check
+   git add deploy/compose
+   git commit -m "release: pin compose profile for v2.1.0+hartmesh.1"
+   ```
+   `--release` first points the four profile lines for this repository's
+   images at this release's candidate tags and then resolves every tag to a
+   digest, in `deploy/compose/images.txt`, `compose.yaml` and `config.yaml`
+   together. Without it the script refuses while any of those lines is a tag:
+   between releases the tree carries the previous release's pins, and pinning
+   them again would ship the previous release under the new name.
+5. **Tag and push** the pin commit:
+   ```bash
+   git tag v2.1.0+hartmesh.1
+   git push origin v2.1.0+hartmesh.1
+   ```
+   The container workflow does not rebuild an image the profile pins. It
+   re-tags the pinned digest unchanged, after checking that the release tag
+   already resolves to it, which only this version's candidate build can have
+   arranged.
+6. **Record the release**, once the five image jobs have succeeded:
+   ```bash
+   gh workflow run release-manifest.yaml -f version=2.1.0+hartmesh.1
+   ```
+   It checks out the tag, resolves each image, checks every line of
+   `deploy/compose/images.txt` against what was published, and attaches
+   `release-manifest.json` to the GitHub Release. The manifest (schema 4)
+   lists the five images by repository, tag and digest, and the compose
+   profile's `images.txt` with its SHA-256. Verify a downloaded copy offline:
+   ```bash
+   python3 scripts/verify_release_manifest.py release-manifest.json
+   ```
+
+A package GHCR creates is private until its visibility is changed in the
+package's settings; do that once for each of the five images.
+
+### The sandbox base image
+
+`docker/sandbox/Dockerfile` builds on upstream's all-in-one sandbox image,
+pinned by digest. The release build reads that base from this repository's
+own `-sandbox-base` cache so that a release does not depend on a third-party
+registry. To move the base: mirror the new digest with
+`gh workflow run sandbox-image-mirror.yaml -f source=<registry>/<image>@sha256:<digest> -f version=<next version>`,
+then change the digest in both `docker/sandbox/Dockerfile` and the sandbox
+entry of `.github/workflows/container.yaml`, and run the sandbox smoke
+workflow before merging.
+
+### Merging upstream
+
+Three things in this tree follow upstream by hand, each checked by a test or a
+gate so that a merge cannot leave one behind:
+
+- **`frontend/`** is upstream's application and is never edited here; the
+  product's own is `frontend-hm/`. After a merge, record the upstream commit
+  the merged `frontend/` is a copy of, and commit the result with the merge:
+  ```bash
+  python3 scripts/verify_frontend_isolation.py --pin <upstream remote>/main
+  ```
+- **Database migrations.** This distribution's revisions follow upstream's
+  newest one in a single chain. When upstream adds a revision, point the first
+  distribution revision's `down_revision` at it and update
+  `backend/tests/test_migration_chain_head.py`, which names both ends.
+- **Version sources.** When upstream changes its version, the four sources
+  must agree again: `scripts/verify_versions.sh` says which one does not.

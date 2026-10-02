@@ -146,7 +146,7 @@ class TestDataclasses:
         assert p.role == "admin"
         assert p.oauth_provider == "github"
         assert p.oauth_id == "gh-123"
-        assert p.is_internal is False
+        assert p.is_internal is True
 
     def test_authz_request(self):
         p = Principal(user_id="u1", role="user")
@@ -165,7 +165,7 @@ class TestDataclasses:
     def test_authz_decision_defaults(self):
         d = AuthzDecision(allow=True)
         assert d.allow is True
-        assert d.reasons == ()
+        assert d.reasons == []
         assert d.policy_id is None
         assert d.metadata == {}
 
@@ -176,42 +176,6 @@ class TestDataclasses:
         assert d.reasons[0].code == "denied"
         assert d.reasons[0].message == "no access"
         assert d.policy_id == "p1"
-
-    def test_authorization_records_defensively_freeze_nested_provider_data(self):
-        context = {"nested": {"roles": ["reader"]}}
-        metadata = {"evidence": [{"id": "rule-1"}]}
-        reasons = [AuthzReason(code="allowed")]
-        request = AuthzRequest(
-            principal=Principal(user_id="u1"),
-            resource="invocation",
-            action="observe",
-            target="run:run-1",
-            context=context,
-        )
-        decision = AuthzDecision(
-            allow=True,
-            reasons=reasons,
-            metadata=metadata,
-        )
-
-        context["nested"]["roles"].append("admin")
-        metadata["evidence"][0]["id"] = "mutated"
-        reasons.append(AuthzReason(code="late"))
-
-        assert request.context["nested"]["roles"] == ("reader",)
-        assert decision.metadata["evidence"][0]["id"] == "rule-1"
-        assert tuple(reason.code for reason in decision.reasons) == ("allowed",)
-        with pytest.raises(TypeError):
-            request.context["new"] = "value"
-        with pytest.raises(TypeError):
-            decision.metadata["new"] = "value"
-        with pytest.raises(AttributeError):
-            decision.reasons.append(AuthzReason(code="later"))
-
-        first = decision.to_dict()
-        second = decision.to_dict()
-        first["metadata"]["evidence"][0]["id"] = "wire-mutation"
-        assert second["metadata"]["evidence"][0]["id"] == "rule-1"
 
 
 # --- filter_resources ---
@@ -337,14 +301,14 @@ class TestGuardrailAuthorizationAdapter:
         assert authz_req.principal.oauth_provider == "github"
         assert authz_req.principal.oauth_id == "gh-42"
         assert authz_req.principal.channel_user_id == "channel-42"
-        assert authz_req.principal.is_internal is False
+        assert authz_req.principal.is_internal is True
         assert authz_req.principal.attributes == {"department": "engineering"}
         assert authz_req.resource == "tool"
         assert authz_req.action == "call"
         assert authz_req.target == "write_file"
 
-    def test_evaluate_does_not_promote_legacy_human_internal_flag(self):
-        """A legacy internal flag cannot promote a user effective subject."""
+    def test_evaluate_maps_is_internal_true(self):
+        """is_internal=True on GuardrailRequest maps to Principal.is_internal=True."""
         captured: list[AuthzRequest] = []
 
         class _CapturingProvider:
@@ -363,26 +327,6 @@ class TestGuardrailAuthorizationAdapter:
         adapter = GuardrailAuthorizationAdapter(_CapturingProvider())
         gr_req = _make_guardrail_request(user_role="user", is_internal=True)
         adapter.evaluate(gr_req)
-        assert captured[0].principal.is_internal is False
-
-    def test_evaluate_preserves_legacy_service_internal_flag(self):
-        captured: list[AuthzRequest] = []
-
-        class _CapturingProvider:
-            name = "capturing"
-
-            def authorize(self, request: AuthzRequest) -> AuthzDecision:
-                captured.append(request)
-                return AuthzDecision(allow=True)
-
-            async def aauthorize(self, request: AuthzRequest) -> AuthzDecision:
-                return self.authorize(request)
-
-            def filter_resources(self, principal: Principal, resource_type: str, candidates: list[str]) -> list[str]:
-                return list(candidates)
-
-        adapter = GuardrailAuthorizationAdapter(_CapturingProvider())
-        adapter.evaluate(_make_guardrail_request(user_id="scheduler", user_role="service", is_internal=True))
         assert captured[0].principal.is_internal is True
 
     def test_evaluate_maps_is_internal_false(self):

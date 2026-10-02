@@ -4,12 +4,10 @@ from __future__ import annotations
 
 import ast
 import json
-from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from deerflow_extension_api import TenantReferenceV1
 from jsonschema import Draft202012Validator, FormatChecker
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, LLMResult
@@ -20,23 +18,17 @@ from deerflow.runtime.events.catalog import (
     MIDDLEWARE_EVENT_PATTERN,
     MIDDLEWARE_EVENT_TAG_MAX_LENGTH,
     MIDDLEWARE_EVENT_TAGS,
+    MIDDLEWARE_TOOL_PROGRESS_TAG,
+    MIDDLEWARE_TOOL_PROMOTION_TAG,
     RUN_EVENT_CATEGORY_MAX_LENGTH,
     RUN_EVENT_TYPE_MAX_LENGTH,
-    RUN_EXECUTION_STARTED_EVENT,
     SUBAGENT_RUN_EVENT_DEFINITIONS,
-    WORKER_DISPATCH_RUN_EVENT_DEFINITIONS,
     WORKSPACE_RUN_EVENT_DEFINITIONS,
     RunEventDefinition,
     RunEventPattern,
 )
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.journal import RunJournal
-from deerflow.runtime.memory_observation import MemoryObservationV1
-from deerflow.runtime.tool_evidence import (
-    DurableToolReceiptV1,
-    ToolAttemptContextV1,
-    receipt_event_metadata,
-)
 from deerflow.subagents.step_events import SUBAGENT_STEP_MAX_CHARS, capture_step_message, subagent_run_event
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -75,193 +67,6 @@ def _make_llm_response(content: str = "answer", usage: dict | None = None) -> LL
         usage_metadata=usage,
     )
     return LLMResult(generations=[[ChatGeneration(message=message)]])
-
-
-def _tool_receipt_event(*, outcome: bool) -> dict:
-    started = DurableToolReceiptV1.started(
-        context=ToolAttemptContextV1(
-            run_id="run-receipt",
-            execution_task_id="run-receipt",
-            execution_kind="lead",
-            subagent_name=None,
-            tool_call_id="call-1",
-            attempt=1,
-            owner_id="worker-1",
-            lease_epoch=4,
-            agent_revision_digest="a" * 64,
-            assembly_fingerprint="b" * 64,
-            extension_generation=3,
-            subagent_catalog_digest="c" * 64,
-            subagent_definition_digest=None,
-        ),
-        tool_name="web_search",
-        request_projection_digest="d" * 64,
-        occurred_at=datetime(2026, 8, 30, tzinfo=UTC),
-    )
-    receipt = (
-        started.outcome(
-            phase="succeeded",
-            result_projection_digest="e" * 64,
-            result_kind="tool_message",
-            safe_error_code=None,
-        )
-        if outcome
-        else started
-    )
-    return {
-        "thread_id": "thread-receipt",
-        "run_id": "run-receipt",
-        "event_type": ("tool_receipt.outcome.v1" if outcome else "tool_receipt.started.v1"),
-        "category": "tool",
-        "content": receipt.to_event_body(),
-        "metadata": receipt_event_metadata(
-            receipt,
-            writer_owner_id="worker-1",
-            writer_lease_epoch=4,
-        ),
-        "idempotency_key": receipt.idempotency_key,
-        "seq": 1 if not outcome else 2,
-        "created_at": "2026-08-30T00:00:00+00:00",
-    }
-
-
-def test_tool_receipt_contract_matches_runtime_strictness() -> None:
-    started = _tool_receipt_event(outcome=False)
-    outcome = _tool_receipt_event(outcome=True)
-    _assert_fixed_event_valid(started, persisted=True)
-    _assert_fixed_event_valid(outcome, persisted=True)
-
-    started_schema = _contract_events()[started["event_type"]]["content_schema"]
-    missing_nullable = dict(started["content"])
-    missing_nullable.pop("result_kind")
-    assert list(Draft202012Validator(started_schema).iter_errors(missing_nullable))
-
-    outcome_schema = _contract_events()[outcome["event_type"]]["content_schema"]
-    unsafe_code = {**outcome["content"], "safe_error_code": "raw_exception"}
-    assert list(Draft202012Validator(outcome_schema).iter_errors(unsafe_code))
-    loose_context = {
-        **outcome["content"],
-        "context": {**outcome["content"]["context"], "unknown": "field"},
-    }
-    assert list(Draft202012Validator(outcome_schema).iter_errors(loose_context))
-
-
-def test_retrieval_safe_constraints_contract_is_closed() -> None:
-    schema = _contract_events()["retrieval.observation.v1"]["content_schema"]["properties"]["draft"]["properties"]["safe_constraints"]
-    validator = Draft202012Validator(schema)
-
-    assert list(
-        validator.iter_errors(
-            {
-                "version": 1,
-                "provider_id": "serply",
-                "query": "must never be portable",
-            }
-        )
-    )
-    assert not list(
-        validator.iter_errors(
-            {
-                "version": 1,
-                "provider_id": "serply",
-                "policy_status": "denied",
-            }
-        )
-    )
-
-
-def _retrieval_draft(**overrides: object):
-    from datetime import UTC, datetime
-
-    from deerflow.retrieval.contracts import RetrievalObservationDraftV1
-
-    started = datetime.now(UTC)
-    fields: dict[str, object] = {
-        "tenant_ref": "tenant-0123456789abcdef",
-        "tenant_digest": "a" * 64,
-        "run_id": "run-contract",
-        "receipt_id": "tr_" + "b" * 64,
-        "attempt": 1,
-        "provider_id": "duckduckgo",
-        "tool_kind": "web_search",
-        "adapter_capability_version": "ddgs-controlled-http-v1",
-        "policy_digest": "c" * 64,
-        "safe_constraints": {
-            "version": 1,
-            "provider_id": "duckduckgo",
-            "policy_status": "not_evaluated",
-        },
-        "started_at": started,
-        "provider_finished_at": started,
-        "provider_status": "empty",
-        "safe_reason": "no_results",
-        "result_count": 0,
-        "source_count": 0,
-        "source_references": (),
-        "truncated": False,
-        "partial": False,
-        "safe_provider_request_ref": None,
-    }
-    fields.update(overrides)
-    return RetrievalObservationDraftV1(**fields)  # type: ignore[arg-type]
-
-
-_GOVERNED_DRAFT_FIELDS = {
-    "tool_plane_base_revision_digest": "d" * 64,
-    "tool_plane_user_overlay_digest": "e" * 64,
-    "tool_plane_projection_digest": "f" * 64,
-    "tool_plane_effective_digest": "0" * 64,
-}
-
-
-def test_the_published_contract_accepts_what_a_retrieval_observation_actually_writes() -> None:
-    """Validate real drafts, not only a sub-schema's shape.
-
-    The observation body is what a consumer reads and what the contract
-    promises; a schema checked only against hand-written fragments can drift
-    from the bytes the runtime emits without anything failing.
-    """
-
-    schema = _contract_events()["retrieval.observation.v1"]["content_schema"]["properties"]["draft"]
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
-
-    governed = _retrieval_draft(**_GOVERNED_DRAFT_FIELDS).to_event_projection()
-    unmanaged = _retrieval_draft(tool_plane_mode="unmanaged").to_event_projection()
-
-    assert not list(validator.iter_errors(governed)), list(validator.iter_errors(governed))
-    assert not list(validator.iter_errors(unmanaged)), list(validator.iter_errors(unmanaged))
-
-
-def test_the_contract_refuses_an_ungoverned_claim_carrying_a_governed_digest() -> None:
-    schema = _contract_events()["retrieval.observation.v1"]["content_schema"]["properties"]["draft"]
-    validator = Draft202012Validator(schema, format_checker=FormatChecker())
-
-    forged = _retrieval_draft(**_GOVERNED_DRAFT_FIELDS).to_event_projection()
-    forged["tool_plane"] = {**forged["tool_plane"], "mode": "unmanaged"}  # type: ignore[index]
-    assert list(validator.iter_errors(forged)), "a mode that keeps the digests must not validate"
-
-    hollow = _retrieval_draft(tool_plane_mode="unmanaged").to_event_projection()
-    hollow["tool_plane"] = {name: value for name, value in hollow["tool_plane"].items() if name != "mode"}  # type: ignore[union-attr]
-    assert list(validator.iter_errors(hollow)), "null digests without the mode must not validate"
-
-
-def test_a_governed_observation_serializes_exactly_as_it_did_before_the_mode_existed() -> None:
-    """The projection is the digest's input, so its bytes are a contract.
-
-    Every persisted observation is re-derived and compared on read. A key
-    added to the governed shape would change that digest and make every row
-    written by an earlier release unreadable -- unresumable runs, evidence
-    bundles that stop building, observations dropped as invalid.
-    """
-
-    projection = _retrieval_draft(**_GOVERNED_DRAFT_FIELDS).to_event_projection()
-
-    assert projection["tool_plane"] == {
-        "base_revision_digest": "d" * 64,
-        "user_overlay_digest": "e" * 64,
-        "projection_digest": "f" * 64,
-        "effective_digest": "0" * 64,
-    }
 
 
 def _subagent_batch() -> list[dict]:
@@ -326,12 +131,6 @@ def test_contract_and_runtime_catalog_have_the_same_fixed_events():
 
     assert RunEventRow.__table__.c.event_type.type.length == RUN_EVENT_TYPE_MAX_LENGTH
     assert RunEventRow.__table__.c.category.type.length == RUN_EVENT_CATEGORY_MAX_LENGTH
-
-
-def test_execution_started_is_a_worker_dispatch_event_not_a_journal_event():
-    assert WORKER_DISPATCH_RUN_EVENT_DEFINITIONS == (RUN_EXECUTION_STARTED_EVENT,)
-    assert RUN_EXECUTION_STARTED_EVENT not in JOURNAL_RUN_EVENT_DEFINITIONS
-    assert RUN_EXECUTION_STARTED_EVENT in FIXED_RUN_EVENT_DEFINITIONS
 
 
 @pytest.mark.parametrize(
@@ -518,31 +317,7 @@ async def test_run_journal_observed_events_exactly_match_its_catalog():
     journal.on_llm_error(RuntimeError("model failed"), run_id=uuid4())
     journal.on_chain_error(ValueError("run failed"), run_id=uuid4())
     journal.on_chain_end({"messages": []}, run_id=root_run_id, parent_run_id=None)
-    journal.record_terminal_summary(
-        status="error",
-        stop_reason="run_failed",
-    )
     journal.record_memory_context(content_sha256="a" * 64)
-    await journal.persist_memory_observations(
-        (
-            MemoryObservationV1(
-                version=1,
-                backend="honcho",
-                tenant=TenantReferenceV1(
-                    version=1,
-                    public_ref=f"tenant-{'b' * 16}",
-                    digest="b" * 64,
-                ),
-                workspace_ref=f"honcho-workspace-{'c' * 24}",
-                operation="get_context",
-                status="succeeded",
-                safe_projection_digest="d" * 64,
-                item_count=1,
-                truncated=False,
-                occurred_at=datetime(2026, 8, 31, tzinfo=UTC),
-            ),
-        )
-    )
     await journal.flush()
 
     events = await store.list_events("thread-1", "run-1")
@@ -592,6 +367,24 @@ def test_dynamic_middleware_event_rejects_tags_that_do_not_fit_persistence(tag):
             action="record",
             changes={},
         )
+
+
+def test_tool_promotion_tag_is_declared_and_fits_the_persisted_event_type():
+    pattern = _load_contract()["dynamic_event_patterns"][0]
+
+    assert MIDDLEWARE_TOOL_PROMOTION_TAG == "tool_promotion"
+    assert MIDDLEWARE_TOOL_PROMOTION_TAG in MIDDLEWARE_EVENT_TAGS
+    assert MIDDLEWARE_TOOL_PROMOTION_TAG in pattern["known_tags"]
+    assert len(MIDDLEWARE_EVENT_PATTERN.event_type(MIDDLEWARE_TOOL_PROMOTION_TAG)) <= RUN_EVENT_TYPE_MAX_LENGTH
+
+
+def test_tool_progress_tag_is_declared_and_fits_the_persisted_event_type():
+    pattern = _load_contract()["dynamic_event_patterns"][0]
+
+    assert MIDDLEWARE_TOOL_PROGRESS_TAG == "tool_progress"
+    assert MIDDLEWARE_TOOL_PROGRESS_TAG in MIDDLEWARE_EVENT_TAGS
+    assert MIDDLEWARE_TOOL_PROGRESS_TAG in pattern["known_tags"]
+    assert len(MIDDLEWARE_EVENT_PATTERN.event_type(MIDDLEWARE_TOOL_PROGRESS_TAG)) <= RUN_EVENT_TYPE_MAX_LENGTH
 
 
 def test_subagent_observed_events_exactly_match_its_catalog_and_payloads():

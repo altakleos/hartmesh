@@ -17,54 +17,18 @@ Architecture:
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import posixpath
-import re
-import secrets
-import threading
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 import requests
 
 from deerflow.constants import DEFAULT_SKILLS_CONTAINER_PATH
-from deerflow.qualification_evidence import AcceptedSandboxRuntimeTopologyV1
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.sandbox.accepted_material import AcceptedMaterialExecutionClaimV1
-from deerflow.sandbox.egress import EgressAllowanceV1
 from deerflow.skills.storage import user_should_see_legacy_skills
 
-from .backend import DestroyOutcome, SandboxBackend
-from .sandbox_info import (
-    PROVENANCE_CREATED,
-    PROVENANCE_REDISCOVERED,
-    PROVENANCE_UNKNOWN,
-    AcceptedSkillMaterialReceipt,
-    AcceptedSkillMaterialReceiptV1,
-    AcceptedSkillMaterialReceiptV2,
-    SandboxInfo,
-)
-
-_ACCEPTED_SKILL_PROFILE = "rwx_verified_copy_v2"
-_PROVISIONER_PROVENANCE = {"created": PROVENANCE_CREATED, "rediscovered": PROVENANCE_REDISCOVERED}
-
-
-def _provisioner_provenance(data: dict[str, object]) -> str:
-    """Map the provisioner's ``provenance`` word onto ``SandboxInfo.provenance``.
-
-    ``POST /api/sandboxes`` is idempotent: an existing Pod is returned rather
-    than recreated. A provisioner that says which happened is believed; one
-    that does not (an older image) leaves the provenance unknown, and unknown
-    is never treated as freshly created.
-    """
-    raw = data.get("provenance")
-    if isinstance(raw, str) and raw in _PROVISIONER_PROVENANCE:
-        return _PROVISIONER_PROVENANCE[raw]
-    return PROVENANCE_UNKNOWN
-
-
-_SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$", re.ASCII)
+from .backend import SandboxBackend
+from .sandbox_info import SandboxInfo
 
 logger = logging.getLogger(__name__)
 
@@ -90,64 +54,7 @@ _RESERVED_SANDBOX_MOUNT_PATHS = (
 _LARK_CLI_RUNTIME_CONTAINER_PATH = "/mnt/integrations/lark-cli/runtime"
 _LARK_CLI_CONFIG_CONTAINER_PATH = "/mnt/integrations/lark-cli/config"
 _LARK_CLI_DATA_CONTAINER_PATH = "/mnt/integrations/lark-cli/data"
-
-_RECEIPT_V1_FIELDS = {
-    "version",
-    "profile",
-    "attempt_id",
-    "snapshot_id",
-    "content_digest",
-    "run_id",
-    "generation",
-    "pod_uid",
-    "lease_uid",
-    "runtime_image_ids_digest",
-    "verifier_receipt_digest",
-    "materialization_evidence_digest",
-}
-_RECEIPT_V2_FIELDS = _RECEIPT_V1_FIELDS | {
-    "pod_isolation_digest",
-    "network_policy_uid",
-    "network_policy_spec_digest",
-    "evidence_secret_uid",
-    "evidence_secret_digest",
-    "capability_secret_uid",
-    "capability_secret_digest",
-    "sandbox_image_digest",
-    "accepted_skill_runtime_image_digest",
-}
-
-
-def _parse_accepted_skill_material_receipt(
-    raw: object,
-    *,
-    require_v2: bool = False,
-) -> AcceptedSkillMaterialReceipt:
-    """Strictly parse v1 compatibility or complete v2 material evidence."""
-
-    if not isinstance(raw, dict):
-        raise RuntimeError("accepted_skill_snapshot_receipt_invalid")
-    version = raw.get("version")
-    fields = _RECEIPT_V2_FIELDS if version == 2 else _RECEIPT_V1_FIELDS
-    if version not in {1, 2} or set(raw) != fields or (require_v2 and version != 2):
-        raise RuntimeError("accepted_skill_snapshot_receipt_invalid")
-    materialization_wire = {key: raw[key] for key in fields if key != "materialization_evidence_digest"}
-    materialization_digest = hashlib.sha256(
-        json.dumps(
-            materialization_wire,
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8"),
-    ).hexdigest()
-    if materialization_digest != raw["materialization_evidence_digest"]:
-        raise RuntimeError("accepted_skill_snapshot_receipt_invalid")
-    try:
-        values = {key: raw[key] for key in fields if key != "version"}
-        if version == 1:
-            return AcceptedSkillMaterialReceiptV1(**values)
-        return AcceptedSkillMaterialReceiptV2(**values)
-    except (KeyError, TypeError, ValueError) as exc:
-        raise RuntimeError("accepted_skill_snapshot_receipt_invalid") from exc
+_AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
 
 
 def _normalize_skills_container_path(container_path: str) -> str:
@@ -239,7 +146,9 @@ class RemoteSandboxBackend(SandboxBackend):
         self,
         provisioner_url: str,
         api_key: str = "",
-        service_account_token_file: str = "",
+        max_shell_sessions: int | None = None,
+        *,
+        required_shell_sessions: int = 0,
     ):
         """Initialize with the provisioner service URL and optional API key.
 
@@ -248,154 +157,30 @@ class RemoteSandboxBackend(SandboxBackend):
                              (e.g., ``http://provisioner:8002``).
             api_key: Value sent as ``X-API-Key`` header on every request.
                      Leave empty to send no authentication header.
+            max_shell_sessions: Optional AIO shell-session capacity forwarded
+                                to each provisioned sandbox Pod.
+            required_shell_sessions: Minimum usable capacity, even when new Pods use the image default.
         """
-        if api_key and service_account_token_file:
-            raise ValueError(
-                "provisioner API key and ServiceAccount token are mutually exclusive",
-            )
         self._provisioner_url = provisioner_url.rstrip("/")
         self._api_key = api_key
-        self._service_account_token_file = service_account_token_file
-        self._attempt_capabilities: dict[str, str] = {}
-        self._attempt_execution_claims: dict[
-            str,
-            AcceptedMaterialExecutionClaimV1,
-        ] = {}
-        self._attempt_capabilities_lock = threading.Lock()
+        self._max_shell_sessions = max_shell_sessions
+        self._required_shell_sessions = max(required_shell_sessions, max_shell_sessions or 0)
 
     @property
     def provisioner_url(self) -> str:
         return self._provisioner_url
 
     def _auth_headers(self) -> dict[str, str]:
-        if self._api_key:
-            return {"X-API-Key": self._api_key}
-        if not self._service_account_token_file:
-            return {}
-        try:
-            token = (
-                Path(self._service_account_token_file)
-                .read_text(
-                    encoding="utf-8",
-                )
-                .strip()
-            )
-        except (OSError, UnicodeError) as exc:
-            raise RuntimeError("provisioner_service_account_token_unavailable") from exc
-        if not token or len(token.encode("utf-8")) > 16 * 1024 or any(ord(character) < 32 for character in token):
-            raise RuntimeError("provisioner_service_account_token_invalid")
-        return {"Authorization": f"Bearer {token}"}
+        return {"X-API-Key": self._api_key} if self._api_key else {}
 
-    def _accepted_skill_projection_capabilities(self) -> dict[str, object]:
-        try:
-            readiness = requests.get(
-                f"{self._provisioner_url}/ready",
-                headers=self._auth_headers(),
-                timeout=5,
-            )
-            readiness.raise_for_status()
-            if readiness.json() != {"status": "ready"}:
-                raise RuntimeError(
-                    "accepted_skill_projection_preflight_unavailable",
-                )
-            response = requests.get(
-                f"{self._provisioner_url}/api/capabilities",
-                headers=self._auth_headers(),
-                timeout=5,
-            )
-            response.raise_for_status()
-            payload = response.json()
-        except (requests.RequestException, RuntimeError, ValueError) as exc:
-            raise RuntimeError("accepted_skill_projection_preflight_unavailable") from exc
-        if not isinstance(payload, dict) or payload.get(
-            "accepted_skill_projection_profiles",
-        ) != [_ACCEPTED_SKILL_PROFILE]:
-            raise RuntimeError("accepted_skill_projection_preflight_unavailable")
-        return payload
-
-    def accepted_skill_projection_ready(self) -> bool:
-        """Authenticate and require exact provisioner profile advertisement."""
-
-        try:
-            self._runtime_image_subjects_from_capabilities(
-                self._accepted_skill_projection_capabilities(),
-            )
-        except RuntimeError:
+    def _requires_shell_capacity_replacement(self, payload: dict[str, object]) -> bool:
+        if self._required_shell_sessions == 0:
             return False
-        return True
-
-    @staticmethod
-    def _runtime_image_subjects_from_capabilities(
-        payload: dict[str, object],
-    ) -> tuple[str, str]:
-        sandbox_digest, verifier_digest, _topology = RemoteSandboxBackend._runtime_qualification_subjects_from_capabilities(
-            payload,
-        )
-        return sandbox_digest, verifier_digest
-
-    @staticmethod
-    def _runtime_qualification_subjects_from_capabilities(
-        payload: dict[str, object],
-    ) -> tuple[str, str, AcceptedSandboxRuntimeTopologyV1]:
-        accepted = payload.get("accepted_skill_projection")
-        if not isinstance(accepted, dict) or set(accepted) != {
-            "profile",
-            "sandbox_image_digest",
-            "accepted_skill_runtime_image_digest",
-            "runtime_topology",
-        }:
-            raise RuntimeError("accepted_skill_projection_preflight_unavailable")
-        sandbox_digest = accepted.get("sandbox_image_digest")
-        verifier_digest = accepted.get("accepted_skill_runtime_image_digest")
-        if (
-            accepted.get("profile") != _ACCEPTED_SKILL_PROFILE
-            or not isinstance(sandbox_digest, str)
-            or _SHA256_PATTERN.fullmatch(sandbox_digest) is None
-            or not isinstance(verifier_digest, str)
-            or _SHA256_PATTERN.fullmatch(verifier_digest) is None
-        ):
-            raise RuntimeError("accepted_skill_projection_preflight_unavailable")
+        reported = payload.get("max_shell_sessions", _AIO_DEFAULT_MAX_SHELL_SESSIONS)
         try:
-            topology = AcceptedSandboxRuntimeTopologyV1.from_dict(
-                accepted.get("runtime_topology"),
-            )
-        except (TypeError, ValueError) as exc:
-            raise RuntimeError(
-                "accepted_skill_projection_preflight_unavailable",
-            ) from exc
-        if topology.profile != accepted.get("profile") or topology.sandbox_image_digest != sandbox_digest or topology.verifier_image_digest != verifier_digest:
-            raise RuntimeError("accepted_skill_projection_preflight_unavailable")
-        return sandbox_digest, verifier_digest, topology
-
-    @classmethod
-    def _runtime_image_digest_from_capabilities(
-        cls,
-        payload: dict[str, object],
-    ) -> str:
-        return cls._runtime_image_subjects_from_capabilities(payload)[0]
-
-    def accepted_material_runtime_image_digest(self) -> str:
-        """Return the exact sandbox image digest advertised by qualified preflight."""
-
-        return self._runtime_image_digest_from_capabilities(
-            self._accepted_skill_projection_capabilities(),
-        )
-
-    def accepted_material_runtime_subjects(self) -> tuple[str, str]:
-        """Return exact sandbox and verifier image digests from preflight."""
-
-        return self._runtime_image_subjects_from_capabilities(
-            self._accepted_skill_projection_capabilities(),
-        )
-
-    def accepted_material_runtime_qualification_subjects(
-        self,
-    ) -> tuple[str, str, AcceptedSandboxRuntimeTopologyV1]:
-        """Return image subjects and a fresh live Kubernetes topology sample."""
-
-        return self._runtime_qualification_subjects_from_capabilities(
-            self._accepted_skill_projection_capabilities(),
-        )
+            return int(reported) < self._required_shell_sessions
+        except (TypeError, ValueError):
+            return True
 
     # ── SandboxBackend interface ──────────────────────────────────────────
 
@@ -409,62 +194,29 @@ class RemoteSandboxBackend(SandboxBackend):
         skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
-        accepted_skills_only: bool = False,
-        accepted_skill_binding: object | None = None,
-        accepted_execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
-        egress_allowance: EgressAllowanceV1 | None = None,
     ) -> SandboxInfo:
         """Create a sandbox Pod + Service via the provisioner.
 
         Calls ``POST /api/sandboxes`` which creates a dedicated Pod +
         NodePort Service in k3s.
         """
-        kwargs = {
-            "user_id": user_id,
-            "skills_container_path": skills_container_path,
-            "provision_lark_cli_runtime": provision_lark_cli_runtime,
-            "provision_lark_cli_broker": provision_lark_cli_broker,
-        }
-        if accepted_skills_only:
-            kwargs["accepted_skills_only"] = True
-        if accepted_skill_binding is not None:
-            kwargs["accepted_skill_binding"] = accepted_skill_binding
-        if accepted_execution_claim is not None:
-            kwargs["accepted_execution_claim"] = accepted_execution_claim
-        if egress_allowance is not None:
-            kwargs["egress_allowance"] = egress_allowance
         return self._provisioner_create(
             thread_id,
             sandbox_id,
             extra_mounts,
-            **kwargs,
+            user_id=user_id,
+            skills_container_path=skills_container_path,
+            provision_lark_cli_runtime=provision_lark_cli_runtime,
+            provision_lark_cli_broker=provision_lark_cli_broker,
         )
 
-    def destroy(self, info: SandboxInfo) -> DestroyOutcome:
-        """Destroy a sandbox Pod + Service via the provisioner.
-
-        The provisioner's DELETE is the only observation available here. A
-        2xx answer means the provisioner accepted the deletion: it issued the
-        Pod and Service deletes (a 404 on either member is tolerated, a partial
-        cleanup is a 5xx and raises). Kubernetes removes them asynchronously,
-        so this is deletion accepted, trusted as before, not a verified
-        absence. ``UNKNOWN`` is never returned because the request either
-        completes or fails loudly.
-        """
-        if info.accepted_skill_material is None:
-            self._provisioner_destroy(info.sandbox_id)
-        else:
-            self._provisioner_destroy(
-                info.sandbox_id,
-                info.accepted_skill_material,
-            )
-        return DestroyOutcome.ABSENT
+    def destroy(self, info: SandboxInfo) -> None:
+        """Destroy a sandbox Pod + Service via the provisioner."""
+        self._provisioner_destroy(info.sandbox_id)
 
     def is_alive(self, info: SandboxInfo) -> bool:
         """Check whether the sandbox Pod is running."""
-        if info.accepted_skill_material is None:
-            return self._provisioner_is_alive(info.sandbox_id)
-        return self._provisioner_is_alive(info.sandbox_id, info.accepted_skill_material)
+        return self._provisioner_is_alive(info.sandbox_id)
 
     def discover(self, sandbox_id: str) -> SandboxInfo | None:
         """Discover an existing sandbox via the provisioner.
@@ -512,7 +264,13 @@ class RemoteSandboxBackend(SandboxBackend):
                 sandbox_id = sandbox.get("sandbox_id")
                 sandbox_url = sandbox.get("sandbox_url")
                 if isinstance(sandbox_id, str) and sandbox_id and isinstance(sandbox_url, str) and sandbox_url:
-                    infos.append(SandboxInfo(sandbox_id=sandbox_id, sandbox_url=sandbox_url))
+                    infos.append(
+                        SandboxInfo(
+                            sandbox_id=sandbox_id,
+                            sandbox_url=sandbox_url,
+                            requires_replacement=self._requires_shell_capacity_replacement(sandbox),
+                        )
+                    )
 
             logger.info("Provisioner list_running: %d sandbox(es) found", len(infos))
             return infos
@@ -530,15 +288,8 @@ class RemoteSandboxBackend(SandboxBackend):
         skills_container_path: str = DEFAULT_SKILLS_CONTAINER_PATH,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
-        accepted_skills_only: bool = False,
-        accepted_skill_binding: object | None = None,
-        accepted_execution_claim: AcceptedMaterialExecutionClaimV1 | None = None,
-        egress_allowance: EgressAllowanceV1 | None = None,
     ) -> SandboxInfo:
         """POST /api/sandboxes → create Pod + Service."""
-        if egress_allowance is not None and not isinstance(egress_allowance, EgressAllowanceV1):
-            raise TypeError("egress_allowance must be EgressAllowanceV1 or None")
-        accepted_skills_only = accepted_skills_only or accepted_skill_binding is not None
         effective_user_id = user_id or get_effective_user_id()
         include_legacy_skills = user_should_see_legacy_skills(effective_user_id)
         normalized_skills_container_path = _normalize_skills_container_path(skills_container_path)
@@ -551,46 +302,8 @@ class RemoteSandboxBackend(SandboxBackend):
             "provision_lark_cli_runtime": provision_lark_cli_runtime,
             "provision_lark_cli_broker": provision_lark_cli_broker,
         }
-        if accepted_skills_only:
-            payload["accepted_skills_only"] = True
-        attempt_capability: str | None = None
-        if accepted_skill_binding is not None:
-            from deerflow.runtime.skill_projection import SkillProjectionEvidence
-            from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingV1
-
-            if not isinstance(accepted_skill_binding, AcceptedSkillSandboxBindingV1):
-                raise RuntimeError("accepted_skill_snapshot_binding_invalid")
-            evidence = accepted_skill_binding.evidence
-            if not isinstance(evidence, SkillProjectionEvidence) or evidence.snapshot_id != accepted_skill_binding.snapshot_id:
-                raise RuntimeError("accepted_skill_snapshot_evidence_invalid")
-            if evidence.snapshot_id is not None:
-                with self._attempt_capabilities_lock:
-                    attempt_capability = self._attempt_capabilities.setdefault(
-                        sandbox_id,
-                        secrets.token_urlsafe(32),
-                    )
-                payload["attempt_capability"] = attempt_capability
-                payload["accepted_skill_projection"] = {
-                    "profile": _ACCEPTED_SKILL_PROFILE,
-                    "snapshot_id": evidence.snapshot_id,
-                    "content_digest": evidence.content_digest,
-                    "run_id": accepted_skill_binding.run_id,
-                    "generation": accepted_skill_binding.generation,
-                    "projections": [item.to_json() for item in evidence.projections],
-                    "file_count": evidence.file_count,
-                    "total_bytes": evidence.total_bytes,
-                }
-                if accepted_execution_claim is not None:
-                    if accepted_execution_claim.run_id != accepted_skill_binding.run_id:
-                        raise RuntimeError(
-                            "accepted_material_execution_claim_mismatch",
-                        )
-                    payload["accepted_execution_claim"] = accepted_execution_claim.to_wire()
-                if egress_allowance is not None:
-                    # The accepted Kind's run-bound egress. The provisioner
-                    # renders it into the Pod's NetworkPolicy and must echo the
-                    # digest it rendered; see the attestation check below.
-                    payload["egress_allowance"] = egress_allowance.to_json()
+        if self._max_shell_sessions is not None:
+            payload["max_shell_sessions"] = self._max_shell_sessions
         provisioner_extra_mounts = _provisioner_extra_mounts_payload(
             extra_mounts,
             skills_container_path=normalized_skills_container_path,
@@ -600,137 +313,43 @@ class RemoteSandboxBackend(SandboxBackend):
         if provisioner_extra_mounts:
             payload["extra_mounts"] = provisioner_extra_mounts
         try:
-            resp = None
-            for attempt in range(2):
-                try:
-                    resp = requests.post(
-                        f"{self._provisioner_url}/api/sandboxes",
-                        json=payload,
-                        headers=self._auth_headers(),
-                        timeout=30,
-                    )
-                    break
-                except requests.RequestException:
-                    if attempt:
-                        raise
-                    logger.warning(
-                        "Provisioner create response was unavailable for %s; retrying the same fenced attempt",
-                        sandbox_id,
-                    )
-            assert resp is not None
+            resp = requests.post(
+                f"{self._provisioner_url}/api/sandboxes",
+                json=payload,
+                headers=self._auth_headers(),
+                timeout=30,
+            )
             resp.raise_for_status()
             data = resp.json()
+            if self._max_shell_sessions is not None and "max_shell_sessions" not in data:
+                raise RuntimeError("Provisioner did not report max_shell_sessions; Gateway/provisioner version skew prevents shell-capacity validation")
+            if self._requires_shell_capacity_replacement(data):
+                raise RuntimeError(f"Provisioner returned sandbox {sandbox_id} with insufficient shell-session capacity")
             logger.info(f"Provisioner created sandbox {sandbox_id}: sandbox_url={data['sandbox_url']}")
-            receipt = None
-            if attempt_capability is not None:
-                raw_receipt = data.get("accepted_skill_material")
-                if not isinstance(raw_receipt, dict):
-                    raise RuntimeError("accepted_skill_snapshot_receipt_missing")
-                receipt = _parse_accepted_skill_material_receipt(
-                    raw_receipt,
-                    require_v2=True,
-                )
-                if (
-                    not isinstance(receipt, AcceptedSkillMaterialReceiptV2)
-                    or receipt.profile != _ACCEPTED_SKILL_PROFILE
-                    or receipt.snapshot_id != accepted_skill_binding.snapshot_id
-                    or receipt.content_digest != accepted_skill_binding.snapshot_id
-                    or receipt.run_id != accepted_skill_binding.run_id
-                    or receipt.generation != accepted_skill_binding.generation
-                    or not receipt.pod_uid
-                    or not receipt.attempt_id
-                    or not receipt.lease_uid
-                ):
-                    raise RuntimeError("accepted_skill_snapshot_receipt_mismatch")
-                if egress_allowance is not None and data.get("egress_allowance_digest") != egress_allowance.digest:
-                    # A provisioner that ignored the allowance would leave the
-                    # Pod on the cluster default while the run's evidence
-                    # claims a bound allowance. Fail closed: tear the Pod down
-                    # before anything can execute in it.
-                    self._discard_unattested_accepted_pod(sandbox_id, receipt)
-                    raise RuntimeError("accepted_egress_allowance_unattested")
-                if accepted_execution_claim is not None:
-                    with self._attempt_capabilities_lock:
-                        self._attempt_execution_claims[sandbox_id] = accepted_execution_claim
             return SandboxInfo(
                 sandbox_id=sandbox_id,
                 sandbox_url=data["sandbox_url"],
-                request_headers=({"Authorization": f"Bearer {attempt_capability}"} if attempt_capability is not None else {}),
-                accepted_skill_material=receipt,
-                provenance=_provisioner_provenance(data),
             )
         except requests.RequestException as exc:
-            if attempt_capability is not None:
-                with self._attempt_capabilities_lock:
-                    self._attempt_capabilities.pop(sandbox_id, None)
-            logger.error(
-                "Provisioner create failed for %s: %s",
-                sandbox_id,
-                type(exc).__name__,
-            )
-            raise RuntimeError("Provisioner create failed") from exc
+            logger.error(f"Provisioner create failed for {sandbox_id}: {exc}")
+            raise RuntimeError(f"Provisioner create failed: {exc}") from exc
 
-    def _discard_unattested_accepted_pod(
-        self,
-        sandbox_id: str,
-        receipt: AcceptedSkillMaterialReceipt | None,
-    ) -> None:
-        """Best-effort teardown of a Pod whose egress the provisioner did not attest."""
-
-        with self._attempt_capabilities_lock:
-            self._attempt_capabilities.pop(sandbox_id, None)
-            self._attempt_execution_claims.pop(sandbox_id, None)
-        try:
-            self._provisioner_destroy(sandbox_id, receipt)
-        except RuntimeError:
-            logger.error(
-                "Accepted sandbox %s was created without an attested egress allowance and could not be destroyed",
-                sandbox_id,
-            )
-
-    def _provisioner_destroy(
-        self,
-        sandbox_id: str,
-        receipt: AcceptedSkillMaterialReceipt | None = None,
-    ) -> None:
+    def _provisioner_destroy(self, sandbox_id: str) -> None:
         """DELETE /api/sandboxes/{sandbox_id} → destroy Pod + Service."""
-        request_kwargs: dict[str, object] = {
-            "headers": self._auth_headers(),
-            "timeout": 15,
-        }
-        if receipt is not None:
-            request_kwargs["params"] = {
-                "pod_uid": receipt.pod_uid,
-                "lease_uid": receipt.lease_uid,
-            }
         try:
             resp = requests.delete(
                 f"{self._provisioner_url}/api/sandboxes/{sandbox_id}",
-                **request_kwargs,
+                headers=self._auth_headers(),
+                timeout=15,
             )
             if resp.ok:
-                with self._attempt_capabilities_lock:
-                    self._attempt_capabilities.pop(sandbox_id, None)
-                    self._attempt_execution_claims.pop(sandbox_id, None)
-                logger.info("Provisioner destroyed sandbox")
+                logger.info(f"Provisioner destroyed sandbox {sandbox_id}")
             else:
-                logger.warning(
-                    "Provisioner destroy returned HTTP %s",
-                    resp.status_code,
-                )
-                raise RuntimeError("Provisioner destroy failed")
+                logger.warning(f"Provisioner destroy returned {resp.status_code}: {resp.text}")
         except requests.RequestException as exc:
-            logger.warning(
-                "Provisioner destroy request failed: %s",
-                type(exc).__name__,
-            )
-            raise RuntimeError("Provisioner destroy failed") from None
+            logger.warning(f"Provisioner destroy failed for {sandbox_id}: {exc}")
 
-    def _provisioner_is_alive(
-        self,
-        sandbox_id: str,
-        receipt: AcceptedSkillMaterialReceipt | None = None,
-    ) -> bool:
+    def _provisioner_is_alive(self, sandbox_id: str) -> bool:
         """GET /api/sandboxes/{sandbox_id} → check Pod phase."""
         try:
             resp = requests.get(
@@ -747,57 +366,7 @@ class RemoteSandboxBackend(SandboxBackend):
             raise RuntimeError(f"Provisioner health check failed for {sandbox_id}: HTTP {resp.status_code} {resp.text}")
 
         data = resp.json()
-        if receipt is not None:
-            current = data.get("accepted_skill_material")
-            if current != receipt.to_wire():
-                raise RuntimeError("accepted_skill_snapshot_pod_replaced")
         return data.get("status") == "Running"
-
-    def renew_accepted_attempt(self, info: SandboxInfo) -> bool:
-        """Renew the exact provisioner Lease for a still-owned sandbox."""
-
-        receipt = info.accepted_skill_material
-        if receipt is None:
-            return True
-        try:
-            payload = {
-                "pod_uid": receipt.pod_uid,
-                "lease_uid": receipt.lease_uid,
-                "materialization_evidence_digest": (receipt.materialization_evidence_digest),
-            }
-            with self._attempt_capabilities_lock:
-                execution_claim = self._attempt_execution_claims.get(
-                    info.sandbox_id,
-                )
-                capability = self._attempt_capabilities.get(info.sandbox_id)
-            if execution_claim is not None and capability is not None:
-                payload.update(
-                    {
-                        "owner_worker_id": execution_claim.owner_worker_id,
-                        "owner_state_version": execution_claim.state_version,
-                        "owner_capability": capability,
-                    },
-                )
-            response = requests.post(
-                f"{self._provisioner_url}/api/sandboxes/{info.sandbox_id}/accepted-attempt/renew",
-                headers=self._auth_headers(),
-                json=payload,
-                timeout=10,
-            )
-        except requests.RequestException:
-            logger.warning(
-                "accepted sandbox attempt renewal unavailable: sandbox=%s",
-                info.sandbox_id,
-            )
-            return False
-        if not response.ok:
-            logger.warning(
-                "accepted sandbox attempt renewal rejected: sandbox=%s status=%s",
-                info.sandbox_id,
-                response.status_code,
-            )
-            return False
-        return True
 
     def _provisioner_discover(self, sandbox_id: str) -> SandboxInfo | None:
         """GET /api/sandboxes/{sandbox_id} → discover existing sandbox."""
@@ -811,14 +380,10 @@ class RemoteSandboxBackend(SandboxBackend):
                 return None
             resp.raise_for_status()
             data = resp.json()
-            if data.get("accepted_skill_material") is not None:
-                # A process restart intentionally cannot recover the ephemeral
-                # per-attempt capability. Lost workers terminalize; they never
-                # adopt a Pod with unprovable data-plane identity.
-                return None
             return SandboxInfo(
                 sandbox_id=sandbox_id,
                 sandbox_url=data["sandbox_url"],
+                requires_replacement=self._requires_shell_capacity_replacement(data),
             )
         except requests.RequestException as exc:
             logger.debug(f"Provisioner discover failed for {sandbox_id}: {exc}")

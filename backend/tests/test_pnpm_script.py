@@ -2,15 +2,19 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
+import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PNPM_SCRIPT = REPO_ROOT / "scripts" / "pnpm.py"
 FRONTEND_DIR = REPO_ROOT / "frontend"
+PNPM_MODULE = runpy.run_path(str(PNPM_SCRIPT))
 HARTMESH_DIR = REPO_ROOT / "frontend-hm"
 
 
@@ -100,6 +104,30 @@ def test_runner_prefers_direct_pnpm_and_forwards_arguments(tmp_path: Path):
     assert "via Corepack" not in result.stderr
 
 
+def test_runner_prefers_cmd_shim_on_windows(monkeypatch):
+    paths = {
+        "pnpm": r"C:\tools\pnpm.exe",
+        "pnpm.cmd": r"C:\tools\pnpm.cmd",
+    }
+    find_pnpm_command = PNPM_MODULE["find_pnpm_command"]
+    monkeypatch.setitem(find_pnpm_command.__globals__, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setitem(find_pnpm_command.__globals__, "shutil", SimpleNamespace(which=paths.get))
+
+    assert find_pnpm_command() == [paths["pnpm.cmd"]]
+
+
+def test_runner_prefers_corepack_cmd_shim_on_windows(monkeypatch):
+    paths = {
+        "corepack": r"C:\tools\corepack.exe",
+        "corepack.cmd": r"C:\tools\corepack.cmd",
+    }
+    find_pnpm_command = PNPM_MODULE["find_pnpm_command"]
+    monkeypatch.setitem(find_pnpm_command.__globals__, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setitem(find_pnpm_command.__globals__, "shutil", SimpleNamespace(which=paths.get))
+
+    assert find_pnpm_command() == [paths["corepack.cmd"], "pnpm"]
+
+
 def test_runner_uses_corepack_pnpm_from_frontend_directory(tmp_path: Path):
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
@@ -167,6 +195,7 @@ def test_official_entrypoints_route_pnpm_through_shared_runner():
     assert 'project_root / "scripts" / "pnpm.py"' in support_bundle_script
 
 
+@pytest.mark.skipif(shutil.which("make") is None, reason="GNU make is not on PATH (not bundled with Git Bash on Windows)")
 def test_make_install_dry_run_does_not_invoke_bare_pnpm():
     result = subprocess.run(
         ["make", "-n", "install"],

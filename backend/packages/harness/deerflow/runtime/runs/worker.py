@@ -25,29 +25,27 @@ import sys
 import threading
 import time
 import weakref
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
-from contextlib import AbstractAsyncContextManager, nullcontext
+from collections.abc import Callable, Coroutine, Mapping
+from contextlib import AbstractAsyncContextManager
 from contextvars import Context
-from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from dataclasses import dataclass, field
+from datetime import datetime
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Final, Literal, cast
+from typing import Any, Final, Literal, cast
 
-from deerflow_extension_api import TenantReferenceV1, VerifiedActorContextV1
 from langgraph.checkpoint.base import empty_checkpoint
-from langgraph.errors import GraphRecursionError
 from langgraph.types import Overwrite
 
 from deerflow.agents.goal_state import GoalEvaluation, GoalState
-from deerflow.agents.middlewares.input_sanitization_middleware import (
-    neutralize_untrusted_tags,
-)
-from deerflow.agents.middlewares.tool_error_handling_middleware import TOOL_REFUSAL_REASON_CONTEXT_KEY
-from deerflow.authz.provider import AuthorizationProvider
+from deerflow.agents.middlewares.input_sanitization_middleware import neutralize_untrusted_tags
 from deerflow.config.app_config import AppConfig
 from deerflow.config.database_config import CheckpointChannelMode
-from deerflow.constants import TOOL_RESULTS_DIRNAME
-from deerflow.runtime.assembly_evidence import AssemblyEvidenceError
+from deerflow.constants import CONVERSATION_READER_CONTEXT_KEY, TOOL_RESULTS_DIRNAME
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+)
 from deerflow.runtime.checkpoint_mode import (
     aensure_checkpoint_mode_compatible,
     inject_checkpoint_mode,
@@ -59,21 +57,14 @@ from deerflow.runtime.checkpoint_state import (
     graph_state_schema,
     graph_writable_channels,
 )
-from deerflow.runtime.constraints import ConstraintFenceError
-from deerflow.runtime.context_keys import CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY
-from deerflow.runtime.events.appender import (
-    FencedRunEventAppender,
-    RuntimeEventAuthority,
-    RuntimeEventOwnershipLost,
-)
-from deerflow.runtime.events.catalog import (
-    RUN_EXECUTION_STARTED_EVENT,
-    SANDBOX_DIAGNOSTIC_EVENT,
-    SANDBOX_LIFECYCLE_EVENT,
+from deerflow.runtime.context_keys import (
+    CHECKPOINT_AGENT_NAME_METADATA_KEY,
+    CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+    DEFAULT_AGENT_NAME_METADATA_VALUE,
+    PROJECT_CONTEXT_KEY,
+    checkpoint_agent_binding_metadata,
 )
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
-from deerflow.runtime.execution_policy import ExecutionPolicyError
-from deerflow.runtime.failure_evidence import RuntimeFailureV1, map_runtime_failure
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
     DEFAULT_MAX_NO_PROGRESS_CONTINUATIONS,
@@ -95,74 +86,45 @@ from deerflow.runtime.goal import (
 )
 from deerflow.runtime.keyed_lock import AsyncKeyedLockTable
 from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
-from deerflow.runtime.runs.delivery import (
-    DELIVERY_INCOMPLETE_ERROR,
-    DELIVERY_INCOMPLETE_STOP_REASON,
-    MAX_DISCLOSED_UNDELIVERED_PATHS,
-    presented_paths,
-    undelivered_paths,
-)
+from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.serialization import serialize
 from deerflow.runtime.stream_bridge import StreamBridge
-from deerflow.runtime.stream_modes import (
-    normalize_stream_modes,
-    to_langgraph_stream_modes,
-)
-from deerflow.runtime.tenant_identity import TENANT_REFERENCE_CONTEXT_KEY
+from deerflow.runtime.stream_modes import normalize_stream_modes, to_langgraph_stream_modes
 from deerflow.runtime.turn_phases import TurnPhase, TurnPhaseCallbackHandler, current_turn_phases, mark_phase, phase_span
 from deerflow.runtime.user_context import get_current_user, get_effective_user_id, resolve_runtime_user_id
-from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id, resolve_trace_id
 from deerflow.tracing import inject_langfuse_metadata
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
-from deerflow.workspace_changes import (
-    capture_workspace_snapshot,
-    get_changed_output_paths,
-    record_workspace_changes,
-)
+from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
-from .manager import RunManager, RunRecord, RunStartOutcome
+from .delivery import DELIVERY_INCOMPLETE_STOP_REASON, publish_delivery_failure
+from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
-from .recovery import (
-    RECOVERY_CHECKPOINT_UNAVAILABLE_STOP_REASON,
-    RECOVERY_TOOL_ATTEMPT_INDETERMINATE_STOP_REASON,
-    ExecutionRecoveryDecision,
-    ExecutionRecoveryDisposition,
-)
-from .schemas import RunStatus
-from .store.base import BindAssemblyEvidenceOutcome, LifecycleType, RecoveryPolicy
-
-if TYPE_CHECKING:
-    from deerflow.runtime.turn_progress import TurnProgressPublisher
-    from deerflow.sandbox.accepted_material import (
-        AcceptedExecutionEvidence,
-        AcceptedMaterializer,
-        AcceptedMaterialLeaseV1,
-        AcceptedMaterialRequest,
-        AcceptedSandboxSessionBridge,
-        AcceptedSkillExecutionEvidence,
-    )
-    from deerflow.sandbox.sandbox import Sandbox
-    from deerflow.sandbox.sandbox_provider import SandboxProvider
+from .schemas import RunStatus, ThreadOperationKind
 
 logger = logging.getLogger(__name__)
-
-# What a person sees when the deployment has no room to start their sandbox.
-# A constant, not the exception's message: the terminal handler's disclosure
-# rule is that nothing untrusted reaches a run row, and "chosen by type" is how
-# this stays inside it while still saying something true.
-SANDBOX_CAPACITY_MESSAGE = "This workspace is already running as many sandboxes as it has room for. Your turn did not start; try again once the other work finishes."
-SANDBOX_CAPACITY_STOP_REASON = SandboxCapacityExceededError.run_stop_reason
-# The run's step limit (``recursion_limit``) ended it. The failure the person
-# reads is still the generic reference: only the run's typed ``stop_reason``
-# says which bound it hit, so a host that reports the run (the scheduler) can.
-RECURSION_LIMIT_STOP_REASON = "recursion_limit_reached"
+_THREAD_INCARNATION_UNSET = object()
 
 
-class _ExecutionRecoveryTerminalized(RuntimeError):
-    """The manager durably closed a takeover after worker preflight."""
+def _log_cancelled_stream_close_failure(
+    exc: asyncio.CancelledError,
+    *,
+    run_id: str,
+    abort_requested: bool,
+) -> None:
+    close_failure = exc.__cause__
+    if not isinstance(close_failure, Exception):
+        return
+    log = logger.warning if abort_requested else logger.debug
+    message = "Could not close aborted agent stream for run %s" if abort_requested else "Could not close agent stream for run %s"
+    log(
+        message,
+        run_id,
+        exc_info=(type(close_failure), close_failure, close_failure.__traceback__),
+    )
 
 
 _checkpoint_locks = AsyncKeyedLockTable[str]()
@@ -236,16 +198,6 @@ def _schedule_terminal_cycle_collection() -> None:
     loop.call_later(delay, _start_collection, context=Context())
 
 
-async def _close_agent_stream(stream: Any) -> None:
-    """Close a LangGraph stream deterministically after completion or early exit."""
-    close = getattr(stream, "aclose", None)
-    if close is None:
-        return
-    result = close()
-    if inspect.isawaitable(result):
-        await result
-
-
 def _remove_callback(config: dict[str, Any], handler: Any) -> None:
     callbacks = config.get("callbacks")
     if isinstance(callbacks, list):
@@ -268,6 +220,7 @@ def _release_run_scoped_references(
     internal_context_keys = {
         "__run_journal",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
+        CONVERSATION_READER_CONTEXT_KEY,
     }
     try:
         from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
@@ -291,6 +244,7 @@ def _release_run_scoped_references(
         configurable = runnable_config.get("configurable")
         if isinstance(configurable, dict):
             configurable.pop("__pregel_runtime", None)
+            configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         context = runnable_config.get("context")
         if isinstance(context, dict):
             for key in internal_context_keys:
@@ -309,612 +263,7 @@ def _checkpoint_thread_lock(thread_id: str) -> AbstractAsyncContextManager[None]
 
 
 _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS = (0.1, 0.5)
-_SKILL_PROJECTION_CLAIM_POLL_SECONDS = 0.05
-_SKILL_PROJECTION_CLAIM_TIMEOUT_SECONDS = 5.0
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
-
-
-class AcceptedSkillExecutionFenceError(RuntimeError):
-    """The exact accepted sandbox attempt is no longer authoritative."""
-
-
-@dataclass(slots=True)
-class _AcceptedMaterializationResult:
-    """Process-local adapter state paired with persisted execution evidence."""
-
-    # ``None`` when the tenant profile's projection is deferred to the first
-    # sandbox-backed tool call; there is no evidence then either.
-    sandbox_id: str | None
-    evidence: AcceptedExecutionEvidence | AcceptedSkillExecutionEvidence | None
-    provider: SandboxProvider | None
-    materializer: AcceptedMaterializer | None = None
-    lease: AcceptedMaterialLeaseV1 | None = None
-    sandbox: Sandbox | None = None
-    request: AcceptedMaterialRequest | None = None
-
-    def _projection(self):
-        if self.provider is None:
-            return None
-        from deerflow.sandbox.accepted_projection import accepted_skill_projection
-
-        return accepted_skill_projection(self.provider)
-
-    async def validate(self) -> bool:
-        if self.evidence is None:
-            return True
-        if self.materializer is not None:
-            from deerflow.sandbox.accepted_material import (
-                AcceptedExecutionEvidenceV1,
-                AcceptedExecutionEvidenceV2,
-                AcceptedMaterialLeaseV1,
-            )
-
-            if not isinstance(
-                self.evidence,
-                (AcceptedExecutionEvidenceV1, AcceptedExecutionEvidenceV2),
-            ) or not isinstance(self.lease, AcceptedMaterialLeaseV1):
-                return False
-            return await self.materializer.validate(self.lease, self.evidence)
-        projection = self._projection()
-        if projection is None:
-            return False
-        return await projection.validate_accepted_skill_execution_async(
-            self.sandbox_id,
-            self.evidence,
-        )
-
-    async def renew(self) -> bool:
-        if self.evidence is None:
-            return True
-        if self.materializer is not None:
-            from deerflow.sandbox.accepted_material import AcceptedMaterialLeaseV1
-
-            if not isinstance(self.lease, AcceptedMaterialLeaseV1):
-                return False
-            self.lease = await self.materializer.renew(self.lease)
-            return True
-        projection = self._projection()
-        if projection is None:
-            return False
-        return await projection.renew_accepted_skill_execution_async(
-            self.sandbox_id,
-            self.evidence,
-        )
-
-    async def release(self) -> None:
-        if self.materializer is not None and self.lease is not None:
-            await self.materializer.release(self.lease)
-
-
-async def _await_accepted_skill_projection_claim(
-    *,
-    user_id: str,
-    thread_id: str,
-    run_id: str,
-    material: Any,
-    abort_event: asyncio.Event,
-) -> bool:
-    """Wait boundedly for an interrupted predecessor's exact projection release."""
-    from deerflow.runtime.skill_projection import (
-        SkillProjectionBusyError,
-        SkillProjectionEvidence,
-        get_skill_projection_coordinator,
-    )
-
-    snapshot = material.skill_snapshot
-    snapshot_id = None if snapshot is None else snapshot.snapshot_id
-    evidence = SkillProjectionEvidence.from_snapshot(snapshot)
-    coordinator = get_skill_projection_coordinator()
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _SKILL_PROJECTION_CLAIM_TIMEOUT_SECONDS
-    while not abort_event.is_set():
-        if coordinator.try_claim_committed_run(
-            user_id=user_id,
-            thread_id=thread_id,
-            run_id=run_id,
-            snapshot_id=snapshot_id,
-            evidence=evidence,
-        ):
-            return True
-        remaining = deadline - loop.time()
-        if remaining <= 0:
-            # The predecessor may be held by a release whose provider work
-            # never confirmed, with nobody holding the consumer token that
-            # would retry it. Finish it here, where the alternative is
-            # refusing this turn outright; an unconfirmed clear changes
-            # nothing and still refuses.
-            from deerflow.sandbox.accepted_projection import (
-                complete_pending_projection_clear,
-            )
-
-            # The claim, not the bool, decides: parking the sandbox is the one
-            # step that runs after the fence is already released, so a refusal
-            # there can report failure over a thread that is genuinely free.
-            await asyncio.to_thread(
-                complete_pending_projection_clear,
-                user_id=user_id,
-                thread_id=thread_id,
-            )
-            if coordinator.try_claim_committed_run(
-                user_id=user_id,
-                thread_id=thread_id,
-                run_id=run_id,
-                snapshot_id=snapshot_id,
-                evidence=evidence,
-            ):
-                return True
-            raise SkillProjectionBusyError()
-        try:
-            await asyncio.wait_for(
-                abort_event.wait(),
-                timeout=min(_SKILL_PROJECTION_CLAIM_POLL_SECONDS, remaining),
-            )
-        except TimeoutError:
-            pass
-    return False
-
-
-def _durable_admission_required(app_config: AppConfig | None) -> bool:
-    """Whether the configured deployment promise makes this admission durable.
-
-    Every Gateway run has a record, so a record's presence says nothing about
-    durability; the deployment profile does. ``local_development`` promises
-    no durable execution, and its accepted nonempty material runs through the
-    accepted-skills projection (an ordinary Kind: thread resource key, park
-    terminal, ``.accepted`` as the only skills mount). The durable profiles
-    admit only a qualified materializer and fail closed without one. A
-    missing configuration or profile counts as durable, so nothing degrades
-    by accident.
-    """
-    from deerflow.deployment.topology import coerce_deployment_profile
-
-    if not isinstance(app_config, AppConfig):
-        return True
-    profile = getattr(getattr(app_config, "deployment", None), "profile", None)
-    if profile is None:
-        return True
-    try:
-        return coerce_deployment_profile(profile).is_durable
-    except ValueError:
-        return True
-
-
-async def _materialize_accepted_skill_projection(
-    runtime: object,
-    *,
-    user_id: str,
-    record: RunRecord | None = None,
-    claim_validator: Callable[[object], Awaitable[bool]] | None = None,
-) -> _AcceptedMaterializationResult:
-    """Prove accepted material before the authoritative running transition."""
-
-    from deerflow.sandbox import get_sandbox_provider
-    from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
-    from deerflow.sandbox.accepted_projection import (
-        accepted_skill_material_binding_from_runtime,
-        ensure_accepted_skill_binding,
-        invalidate_runtime_skill_projection_token,
-        release_accepted_skill_consumer,
-        require_accepted_skill_projection,
-        require_runtime_accepted_skill_isolation,
-    )
-
-    context = getattr(runtime, "context", None)
-    if not isinstance(context, dict):
-        raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
-    thread_id = context.get("thread_id")
-    if not isinstance(thread_id, str):
-        raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
-    binding = accepted_skill_material_binding_from_runtime(
-        runtime,
-        user_id=user_id,
-    )
-    if binding is None:
-        raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
-    provider = None
-    sandbox_id: str | None = None
-    sandbox = None
-    request = None
-    token = None
-    materializer = None
-    materialization_lease = None
-    try:
-        from deerflow.authz.sandbox_authz import (
-            authorize_sandbox_execution_async,
-            safe_app_config_async,
-        )
-        from deerflow.runtime.kubernetes_qualification import (
-            accepted_sandbox_qualification_candidate_enabled,
-        )
-        from deerflow.sandbox.accepted_material import (
-            AcceptedMaterialError,
-            AcceptedMaterialExecutionClaimV1,
-            AcceptedMaterialRequestV1,
-            AcceptedMaterialRequestV2,
-            accepted_scope_reference,
-            capture_accepted_file_manifest,
-            resolve_accepted_materializer,
-            validate_accepted_materialization,
-        )
-
-        configured_app = context.get("app_config")
-        # One span, not two under this name: a phase is read back by its first
-        # record, so a second span under the same name is measured and then
-        # discarded, and its cost reappears as unexplained residual.
-        with phase_span(TurnPhase.ACCEPTED_AUTHORIZATION):
-            resolved_app = configured_app if isinstance(configured_app, AppConfig) else await safe_app_config_async()
-            await authorize_sandbox_execution_async(
-                context=context,
-                app_config=resolved_app,
-            )
-            provider = get_sandbox_provider()
-            durable_admission = record is not None and _durable_admission_required(resolved_app)
-            selection = await resolve_accepted_materializer(
-                provider,
-                binding=binding,
-                thread_id=thread_id,
-                user_id=user_id,
-                require_durable_one_replica=record is not None,
-                require_exact_two=(record is not None and record.recovery_policy is RecoveryPolicy.exact_two_takeover_v1),
-                allow_qualification_candidate=(record is not None and accepted_sandbox_qualification_candidate_enabled()),
-            )
-        if selection is not None:
-            from deerflow.runtime.accepted_invocation import (
-                AcceptedInvocation,
-                ResolvedAgentMaterialV1,
-            )
-            from deerflow.runtime.agent_revision import (
-                RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
-            )
-            from deerflow.subagents.batch_acceptance import (
-                PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
-            )
-
-            material = context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
-            tenant = context.get(TENANT_REFERENCE_CONTEXT_KEY)
-            revision_digest = context.get("accepted_agent_revision_digest")
-            snapshot = getattr(material, "skill_snapshot", None)
-            skill_scopes = getattr(material, "skill_scopes", None)
-            if not isinstance(material, ResolvedAgentMaterialV1) or snapshot is None or not isinstance(tenant, TenantReferenceV1) or not isinstance(revision_digest, str) or skill_scopes is None:
-                raise RuntimeError("accepted_skill_snapshot_runtime_identity_missing")
-            with phase_span(TurnPhase.ACCEPTED_MATERIAL_VERIFY):
-                await asyncio.to_thread(material.verify_process_material)
-                file_manifest = await asyncio.to_thread(
-                    capture_accepted_file_manifest,
-                    snapshot.root,
-                )
-                await asyncio.to_thread(material.verify_process_material)
-            request_arguments = dict(
-                run_id=binding.run_id,
-                attempt_id=accepted_scope_reference(
-                    tenant,
-                    kind="attempt",
-                    value=f"{binding.run_id}:{binding.generation}",
-                ),
-                tenant=tenant,
-                user_ref=accepted_scope_reference(
-                    tenant,
-                    kind="user",
-                    value=user_id,
-                ),
-                thread_ref=accepted_scope_reference(
-                    tenant,
-                    kind="thread",
-                    value=thread_id,
-                ),
-                agent_revision_digest=revision_digest,
-                skill_snapshot_digest=snapshot.snapshot_id,
-                skill_scope_digest=skill_scopes.digest,
-                file_manifest=file_manifest,
-                runtime_image_digest=selection.runtime_image_digest,
-                lease_expires_at=datetime.now(UTC) + selection.lease_duration,
-            )
-            accepted_invocation = context.get(
-                PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
-            )
-            tool_plane = accepted_invocation.tool_plane_revision if isinstance(accepted_invocation, AcceptedInvocation) else None
-            if isinstance(accepted_invocation, AcceptedInvocation) and accepted_invocation.tenant == tenant and accepted_invocation.thread_id == thread_id and tool_plane is not None:
-                request = AcceptedMaterialRequestV2.build(
-                    **request_arguments,
-                    accepted_invocation_ref=accepted_scope_reference(
-                        tenant,
-                        kind="invocation",
-                        value=(f"{binding.run_id}:{accepted_invocation.runtime_identity_digest}"),
-                    ),
-                    accepted_invocation_digest=(accepted_invocation.runtime_identity_digest),
-                    tool_plane_base_revision_digest=tool_plane["base_revision_digest"],
-                    tool_plane_user_overlay_digest=tool_plane["user_overlay_digest"],
-                    tool_plane_projection_digest=tool_plane["projection_digest"],
-                    tool_plane_effective_digest=tool_plane["effective_digest"],
-                    batch_child_attempt_ref=None,
-                    capability_profile_digest=selection.capability_profile.digest,
-                    egress_allowance=accepted_invocation.egress_allowance,
-                )
-            else:
-                request = AcceptedMaterialRequestV1.build(**request_arguments)
-            materializer = selection.materializer
-            execution_claim = None
-            if record is not None:
-                owner_worker_id = record.owner_worker_id
-                if not isinstance(owner_worker_id, str) or not owner_worker_id or type(record.state_version) is not int:
-                    raise RuntimeError(
-                        "accepted_material_execution_owner_unavailable",
-                    )
-                expected_materialization_digest = None
-                if record.execution_takeover:
-                    persisted_evidence = record.execution_evidence_json
-                    if isinstance(persisted_evidence, dict):
-                        expected_materialization_digest = persisted_evidence.get(
-                            "materialization_digest",
-                        )
-                    if not isinstance(expected_materialization_digest, str):
-                        raise RuntimeError(
-                            "accepted_material_recovery_evidence_unavailable",
-                        )
-                execution_claim = AcceptedMaterialExecutionClaimV1(
-                    version=1,
-                    tenant_digest=tenant.digest,
-                    run_id=binding.run_id,
-                    owner_worker_id=owner_worker_id,
-                    state_version=record.state_version,
-                    execution_takeover=record.execution_takeover,
-                    expected_materialization_digest=(expected_materialization_digest),
-                )
-            if execution_claim is None:
-                with phase_span(TurnPhase.SKILL_PROJECTION):
-                    (
-                        sandbox,
-                        materialization_lease,
-                        evidence,
-                    ) = await materializer.acquire_and_materialize(request)
-            else:
-                if claim_validator is None:
-                    raise AcceptedMaterialError(
-                        "accepted_material_claim_lost",
-                    )
-                try:
-                    claim_current = await claim_validator(execution_claim)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    raise AcceptedMaterialError(
-                        "accepted_material_claim_lost",
-                    ) from None
-                if claim_current is not True:
-                    raise AcceptedMaterialError(
-                        "accepted_material_claim_lost",
-                    )
-                with phase_span(TurnPhase.SKILL_PROJECTION):
-                    (
-                        sandbox,
-                        materialization_lease,
-                        evidence,
-                    ) = await materializer.acquire_and_materialize(
-                        request,
-                        execution_claim=execution_claim,
-                    )
-                try:
-                    claim_current = await claim_validator(execution_claim)
-                except asyncio.CancelledError:
-                    raise
-                except Exception:
-                    raise AcceptedMaterialError(
-                        "accepted_material_claim_lost",
-                    ) from None
-                if claim_current is not True:
-                    raise AcceptedMaterialError(
-                        "accepted_material_claim_lost",
-                    )
-            validate_accepted_materialization(
-                selection=selection,
-                request=request,
-                lease=materialization_lease,
-                evidence=evidence,
-            )
-            sandbox_id = sandbox.id
-        elif not durable_admission and not accepted_sandbox_qualification_candidate_enabled():
-            # The accepted-skills projection: the provider's own parked,
-            # per-thread sandbox with the snapshot bound as its only skills
-            # mount. This is the released tenant profile's execution path,
-            # not a fallback from a durable one it never promised.
-            #
-            # It is acquired where it is first needed, not here. The first
-            # sandbox-backed tool call binds this same admitted snapshot
-            # through ``provision_runtime_accepted_skill_projection_async``,
-            # behind the same authorization, isolation and binding checks, and
-            # the projection carries no start evidence to bind before running.
-            # A turn that calls no sandbox tool therefore never takes, waits
-            # for or evicts a slot: with every slot busy it still answers.
-            require_accepted_skill_projection(provider)
-            return _AcceptedMaterializationResult(sandbox_id=None, evidence=None, provider=provider)
-        else:
-            raise AcceptedMaterialError("sandbox_provider_unqualified")
-        require_runtime_accepted_skill_isolation(
-            provider,
-            runtime,
-            sandbox_id=sandbox_id,
-        )
-        bound, token, _created = ensure_accepted_skill_binding(
-            runtime,
-            sandbox_id=sandbox_id,
-            user_id=user_id,
-        )
-        if bound is None:
-            raise RuntimeError("accepted_skill_snapshot_binding_missing")
-        # A provider that binds while it provisions has already published this
-        # snapshot inside SKILL_PROJECTION; for it, this is the idempotent
-        # receipt check: the published view is verified in place (one digest
-        # pass) and a copy is staged only when that verification fails. The
-        # span says what it costs either way.
-        with phase_span(TurnPhase.SKILL_SNAPSHOT_BIND):
-            await require_accepted_skill_projection(provider).bind_accepted_skill_snapshot_async(
-                sandbox_id,
-                thread_id=thread_id,
-                user_id=user_id,
-                binding=bound,
-            )
-        context["sandbox_id"] = sandbox_id
-        return _AcceptedMaterializationResult(
-            sandbox_id=sandbox_id,
-            evidence=evidence,
-            provider=provider,
-            materializer=materializer,
-            lease=materialization_lease,
-            sandbox=sandbox,
-            request=request,
-        )
-    except BaseException as exc:
-        deferred_interrupt = exc if not isinstance(exc, Exception) else None
-        invalidate_runtime_skill_projection_token(runtime, token)
-        if token is not None:
-            try:
-                # Said by ``release_accepted_skill_consumer`` itself when it
-                # refuses, so this path only has to report an outright failure.
-                await asyncio.to_thread(release_accepted_skill_consumer, token)
-            except Exception:
-                logger.warning(
-                    "Failed to release rejected accepted skill consumer",
-                    exc_info=True,
-                )
-            except BaseException as cleanup_exc:
-                if deferred_interrupt is None:
-                    deferred_interrupt = cleanup_exc
-                logger.warning(
-                    "Rejected accepted skill consumer cleanup interrupted",
-                )
-        elif materializer is None and sandbox_id is not None and provider is not None:
-            try:
-                await asyncio.to_thread(provider.release, sandbox_id)
-            except Exception:
-                logger.warning(
-                    "Failed to release rejected accepted sandbox",
-                    exc_info=True,
-                )
-            except BaseException as cleanup_exc:
-                if deferred_interrupt is None:
-                    deferred_interrupt = cleanup_exc
-                logger.warning(
-                    "Rejected accepted sandbox cleanup interrupted",
-                )
-        if materializer is not None and materialization_lease is not None:
-            try:
-                await materializer.release(materialization_lease)
-            except Exception:
-                logger.warning(
-                    "Failed to release rejected accepted materialization",
-                    exc_info=True,
-                )
-            except BaseException as cleanup_exc:
-                if deferred_interrupt is None:
-                    deferred_interrupt = cleanup_exc
-                logger.warning(
-                    "Rejected accepted materialization cleanup interrupted",
-                )
-        if deferred_interrupt is not None:
-            raise deferred_interrupt
-        if isinstance(exc, SandboxCapacityExceededError):
-            # Not a materialization fault: the deployment is full. The refusal
-            # is typed, carries no internal detail, and has its own terminal
-            # (the capacity state, or the cancellation that raced it), so it
-            # keeps its type instead of becoming the opaque error below.
-            raise exc
-        # The boundary error is deliberately opaque to callers; the reason
-        # code behind it is what an operator needs to read in the log.
-        logger.error(
-            "Accepted skill materialization failed run_id=%s error_class=%s reason=%r",
-            binding.run_id,
-            type(exc).__name__,
-            str(exc)[:500],
-        )
-        logger.debug("Accepted skill materialization failure detail", exc_info=True)
-        raise AcceptedSkillSandboxBindingError(
-            "accepted_skill_snapshot_materialization_failed",
-        ) from None
-
-
-async def _publish_accepted_sandbox_lifecycle(
-    event_appender: Any | None,
-    session: AcceptedSandboxSessionBridge,
-    *,
-    start_index: int,
-) -> int:
-    """Publish newly observed safe diagnostics without making them authority."""
-
-    observations = session.lifecycle_observations
-    for observation in observations[start_index:]:
-        logger.info(
-            "Accepted sandbox lifecycle run_id=%s kind=%s provider_kind=%s qualification_scope=%s reason_code=%s evidence_digest=%s",
-            observation.run_id,
-            observation.kind.value,
-            observation.provider_kind,
-            observation.qualification_scope,
-            observation.reason_code,
-            observation.execution_evidence_digest,
-        )
-        if event_appender is None:
-            continue
-        try:
-            await event_appender.put(
-                thread_id=event_appender.authority.thread_id,
-                run_id=observation.run_id,
-                event_type=SANDBOX_LIFECYCLE_EVENT.event_type,
-                category=SANDBOX_LIFECYCLE_EVENT.category,
-                content=observation.to_persisted(),
-                metadata={},
-            )
-        except Exception:
-            logger.warning(
-                "Accepted sandbox lifecycle observation could not be persisted run_id=%s kind=%s",
-                observation.run_id,
-                observation.kind.value,
-            )
-    return len(observations)
-
-
-async def _publish_sandbox_diagnostics(
-    event_appender: Any | None,
-    run_id: str,
-    *,
-    start_sequence: int,
-) -> int:
-    """Publish the run's newly recorded sandbox diagnostics; never authority.
-
-    Both session kinds record into one bounded stream; each observation is
-    appended as its own ``sandbox.diagnostic.v1`` event with its sequence and
-    the count the stream has dropped so far, so a reader can tell a quiet run
-    from a truncated one.
-    """
-    from deerflow.sandbox.diagnostics import sandbox_diagnostics
-
-    stream = sandbox_diagnostics(run_id)
-    next_sequence = start_sequence
-    for sequence, observation in stream.since(start_sequence):
-        next_sequence = sequence + 1
-        logger.info(
-            "Sandbox diagnostic run_id=%s kind=%s session_kind=%s sandbox_ref=%s",
-            run_id,
-            observation.kind,
-            observation.session_kind.value,
-            observation.sandbox_ref,
-        )
-        if event_appender is None:
-            continue
-        try:
-            await event_appender.put(
-                thread_id=event_appender.authority.thread_id,
-                run_id=run_id,
-                event_type=SANDBOX_DIAGNOSTIC_EVENT.event_type,
-                category=SANDBOX_DIAGNOSTIC_EVENT.category,
-                content=observation.to_persisted(),
-                metadata={"sequence": sequence, "dropped": stream.dropped},
-            )
-        except Exception:
-            logger.warning(
-                "Sandbox diagnostic could not be persisted run_id=%s kind=%s",
-                run_id,
-                observation.kind,
-            )
-    return next_sequence
 
 
 def _project_background_tasks(task_rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -955,45 +304,35 @@ async def _persist_delivery_receipt(
                 content=content,
             )
             return True
-        except RuntimeEventOwnershipLost:
-            raise
-        except Exception as exc:
-            failure = map_runtime_failure(
-                code="delivery_receipt_write_failed",
-                error=exc,
-            )
+        except Exception:
             if attempt == attempts - 1:
                 logger.warning(
-                    "Delivery receipt write failed run_id=%s attempts=%d code=%s error_class=%s correlation_id=%s; applying terminal delivery semantics without a receipt",
+                    "Failed to persist delivery receipt for run %s after %d attempts; applying terminal delivery semantics without a receipt",
                     run_id,
                     attempts,
-                    failure.code,
-                    failure.error_class,
-                    failure.correlation_id,
+                    exc_info=True,
                 )
                 return False
             delay = _DELIVERY_RECEIPT_RETRY_DELAYS_SECONDS[attempt]
             logger.warning(
-                "Delivery receipt write failed run_id=%s attempt=%d/%d retry_seconds=%.1f code=%s error_class=%s correlation_id=%s",
+                "Failed to persist delivery receipt for run %s (attempt %d/%d); retrying in %.1fs",
                 run_id,
                 attempt + 1,
                 attempts,
                 delay,
-                failure.code,
-                failure.error_class,
-                failure.correlation_id,
+                exc_info=True,
             )
             await asyncio.sleep(delay)
 
     return False  # pragma: no cover - loop always returns
 
 
-_DELIVERY_INCOMPLETE_ERROR = DELIVERY_INCOMPLETE_ERROR
+_DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
 _DELIVERY_RECEIPT_FAILED_ERROR = "Artifact delivery verification failed: terminal delivery receipt could not be persisted"
 
 
 def _empty_delivery_content() -> dict[str, Any]:
-    return {"presented": 0, "paths": [], "by_tool": {}, "presented_files": []}
+    return {"presented": 0, "paths": [], "by_tool": {}}
 
 
 def _presented_path_covers_output(presented_path: str, produced_path: str) -> bool:
@@ -1008,55 +347,42 @@ def _delivery_content_with_outputs(
 ) -> dict[str, Any]:
     """Attach a delivery verdict when this run created or modified outputs.
 
-    ``runtime_presented`` is what ``RuntimeDeliveryMiddleware`` handed over
-    inside the graph. It reaches here through
-    ``runtime.context`` rather than the journal because the journal records
-    presentations it observes at tool end, and a runtime presentation is a
-    state update at the end of the agent, not a tool result. Counting it is
-    what keeps the fence from failing a run whose files were just delivered.
-
-    The merged set is written back to ``presented_files`` -- the one field the
-    receipt has always meant by "what this run presented", and the field
-    ``presented_paths()`` and therefore the archive route and the evidence
-    bundle read. A second key holding the same set would leave those readers
-    on the older, narrower one: a run the runtime completed would succeed and
-    then answer 409 to the download of the very file it handed over.
-    ``presented_by`` is attribution, not a second set.
+    Presented means: what ``present_files`` put in ``artifacts``, what any
+    tool result tagged as presented (``deerflow.runtime.presented_files``,
+    for example ``bash`` with ``present``), and ``runtime_presented``, which
+    is what ``RuntimeDeliveryMiddleware`` handed over inside the graph and
+    reaches here through ``runtime.context``.
     """
     if not produced_paths:
         return content
 
-    model_presented = presented_paths(content)
     by_runtime = list(dict.fromkeys(runtime_presented or []))
-    presented = list(dict.fromkeys([*model_presented, *by_runtime]))
-    matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented)]
+    tagged = content.get("presented_files", [])
+    presented_paths = list(dict.fromkeys([*content.get("by_tool", {}).get("present_files", []), *(tagged if isinstance(tagged, list) else []), *by_runtime]))
+    matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented_paths)]
     satisfied = bool(matched_paths)
-    return {
+    verdict = {
         **content,
         "verification": {
             "source": "outputs_changed",
-            "requirement": "presentation_matches_produced_output",
+            "requirement": "present_files_matches_produced_output",
         },
         "produced_paths": produced_paths,
-        "presented_files": presented,
-        # Who handed each set over, so a reader of the receipt can tell a
-        # turn the model curated from one the runtime completed.
-        "presented_by": {"model": model_presented, "runtime": by_runtime},
+        "presented_paths": presented_paths,
         "matched_paths": matched_paths,
-        "stage": "presented" if satisfied else ("mismatched" if presented else "not_started"),
+        "stage": "presented" if satisfied else ("mismatched" if presented_paths else "not_started"),
         "satisfied": satisfied,
     }
+    if by_runtime:
+        # Who handed these over, so a reader of the receipt can tell a turn
+        # the model curated from one the runtime completed.
+        verdict["presented_by_runtime"] = by_runtime
+    return verdict
 
 
-def _runtime_presented_files(runtime_context: Mapping[str, Any] | None) -> list[str]:
-    """What the runtime handed over inside the graph, read off the run context.
-
-    The same channel the guard middlewares use for ``stop_reason``: a
-    middleware writes a fact the worker needs after the graph has finished.
-    Types are checked here because this value crosses a boundary the worker
-    does not own.
-    """
-    value = runtime_context.get(RUNTIME_PRESENTED_FILES_CONTEXT_KEY) if isinstance(runtime_context, Mapping) else None
+def _runtime_presented_files(runtime_context: Any) -> list[str]:
+    """What the runtime handed over inside the graph, read off the run context."""
+    value = runtime_context.get(RUNTIME_PRESENTED_FILES_CONTEXT_KEY) if isinstance(runtime_context, dict) else None
     if not isinstance(value, list):
         return []
     return list(dict.fromkeys(path for path in value if isinstance(path, str) and path))
@@ -1067,90 +393,6 @@ def _delivery_error(content: dict[str, Any]) -> str | None:
     if not content.get("produced_paths") or content.get("satisfied") is True:
         return None
     return _DELIVERY_INCOMPLETE_ERROR
-
-
-# A client learns a run's outcome from the stream, and every other terminal
-# error branch below publishes an ``error`` frame before the end marker. The
-# delivery fence is the exception that mattered: it runs *after* an ordinary
-# graph completion, so a run that produced files and never presented them was
-# ``error`` in SQL and in the journal while the browser showed confident prose
-# followed by a normal end.
-#
-# It stays the exception, deliberately. ``event: error`` means "this stream
-# carries no valid assistant turn": the LangGraph SDK stops reading there,
-# discards the ``end`` marker, throws, and skips the ``onSuccess`` that settles
-# the turn onto canonical history. Asserting that about a turn whose graph
-# completed and whose answer is checkpointed is false, and the client pays for
-# it — measured: a spurious reconnect, an aborted follow-up request, and (once
-# the SDK's one-shot reconnect latch is spent) a composer pinned in a failed
-# state for the rest of the thread. Orphan recovery already ships the honest
-# shape: ``app/gateway/deps.py`` durably marks a run ``error`` and publishes
-# only the end marker.
-#
-# So the verdict rides one advisory ``custom`` frame for live clients and
-# ``stop_reason`` on the run record for everyone else. ``/wait``, the IM
-# follow-up watcher and every reconnect already re-read the record after the end
-# marker, and ``RunResponse.stop_reason`` rides the exact call the browser makes
-# on every rejoin. A client that never negotiated ``custom`` therefore loses
-# nothing, which is what makes publishing this frame outside the negotiated mode
-# set acceptable rather than load-bearing.
-_DELIVERY_INCOMPLETE_EVENT_TYPE = "artifact_delivery_incomplete"
-_DELIVERY_UNVERIFIED_EVENT_TYPE = "artifact_delivery_unverified"
-_DELIVERY_RECEIPT_STOP_REASON = "delivery_receipt_failed"
-
-# The bound, the stop reason and the produced-minus-presented rule are shared
-# with the durable projection a rejoining client reads, so the frame and the
-# receipt cannot describe the same run differently.
-_DELIVERY_INCOMPLETE_STOP_REASON = DELIVERY_INCOMPLETE_STOP_REASON
-_undelivered_paths = undelivered_paths
-
-
-async def _publish_delivery_failure(
-    bridge: Any,
-    run_id: str,
-    *,
-    event_type: str,
-    message: str,
-    content: dict[str, Any] | None = None,
-) -> None:
-    """Tell live clients this run failed delivery, and what it is still holding.
-
-    Advisory by contract. The authority is the run record — ``status``,
-    ``error`` and ``stop_reason`` — plus the durable ``run.delivery`` receipt,
-    which carries the full path set this bounded frame truncates. A client that
-    reloads, gaps, or never negotiated ``custom`` reads the same verdict over
-    HTTP; this frame only saves a live client the round-trip, so losing it
-    degrades latency rather than correctness.
-
-    Deliberately not an ``error`` frame. The graph completed, ``run.end`` was
-    appended and the answer is checkpointed: every frame the client already
-    consumed is valid and final. ``error`` asserts the opposite, and the SDK
-    acts on that assertion by discarding the rest of the stream and skipping the
-    settle.
-
-    Best-effort publication, whole body guarded: the run's terminal status is
-    already committed or staged when this runs, and the fence calls it from the
-    ``try`` body where an escaping error — a transport failure or a malformed
-    ``content`` — would be caught below and stage a second terminal status over
-    the one already written.
-    """
-    try:
-        payload: dict[str, Any] = {
-            "type": event_type,
-            "run_id": run_id,
-            "message": message,
-        }
-        if content is not None:
-            undelivered = _undelivered_paths(content)
-            payload["undelivered_paths"] = undelivered[:MAX_DISCLOSED_UNDELIVERED_PATHS]
-            payload["undelivered_count"] = len(undelivered)
-        await bridge.publish(run_id, "custom", payload)
-    except Exception:
-        logger.error(
-            "Failed to publish delivery verdict for run %s",
-            run_id,
-            exc_info=True,
-        )
 
 
 def _workspace_excluded_dir_names(app_config: AppConfig | None) -> frozenset[str]:
@@ -1182,19 +424,10 @@ async def _produced_output_paths(
     if before is None:
         return []
     try:
-        after = await capture_workspace_snapshot(
-            thread_id,
-            user_id=user_id,
-            include_text=False,
-            extra_excluded_dir_names=extra_excluded_dir_names,
-        )
+        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
         return get_changed_output_paths(before, after)
     except Exception:
-        logger.warning(
-            "Could not detect produced output artifacts for run thread %s",
-            thread_id,
-            exc_info=True,
-        )
+        logger.warning("Could not detect produced output artifacts for run thread %s", thread_id, exc_info=True)
         return []
 
 
@@ -1330,27 +563,23 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
         {
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
-            "__deerflow_accepted_parent_batch_context_v1",
-            "__deerflow_recovery_executor_v1",
+            CONVERSATION_READER_CONTEXT_KEY,
+            THREAD_INCARNATION_CONTEXT_KEY,
+            THREAD_INCARNATION_METADATA_GUARD_KEY,
+            "is_subagent",
+            "agent_id",
+            "__run_loop_detection_recorder",
+            "__run_tool_promotion_recorder",
+            "__run_tool_progress_recorder",
+            # The Gateway pins the run's project snapshot under this key at
+            # admission (spec §7.1); a caller-supplied value in
+            # ``config['context']`` must never be merged (§12).
+            PROJECT_CONTEXT_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 )
-
-# Every fact admission stamps about what it accepted shares one prefix, and no
-# caller may supply one: a forged stamp is read as an admission decision by
-# whatever trusts it. Matching the prefix rather than a list means a stamp
-# added later is covered the day it is added.
-_SERVER_OWNED_RUNTIME_CONTEXT_PREFIXES: Final[tuple[str, ...]] = ("accepted_",)
-
-
-def _is_server_owned_context_key(key: object) -> bool:
-    return isinstance(key, str) and (key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS or key.startswith(_SERVER_OWNED_RUNTIME_CONTEXT_PREFIXES))
-
-
-# Safe current-executor evidence for an exact-two recovery. This never
-# replaces the accepted admission actor stored in TrustedRunContextV1.
-RECOVERY_EXECUTOR_CONTEXT_KEY: Final[str] = "__deerflow_recovery_executor_v1"
 
 
 def _build_runtime_context(
@@ -1360,7 +589,9 @@ def _build_runtime_context(
     app_config: AppConfig | None = None,
     task_store: Any | None = None,
     extensions: Any | None = None,
-    authorization_provider: AuthorizationProvider | None = None,
+    conversation_reader: Any | None = None,
+    *,
+    thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -1375,13 +606,17 @@ def _build_runtime_context(
     ``langgraph.pregel.main`` where ``parent_runtime.merge(...)`` is invoked.
     """
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+    if thread_incarnation is not _THREAD_INCARNATION_UNSET:
+        runtime_ctx[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
     if isinstance(caller_context, dict):
         for key, value in caller_context.items():
-            if _is_server_owned_context_key(key):
+            if key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
                 continue
             runtime_ctx.setdefault(key, value)
     if app_config is not None:
         runtime_ctx["app_config"] = app_config
+    if conversation_reader is not None:
+        runtime_ctx[CONVERSATION_READER_CONTEXT_KEY] = conversation_reader
     if task_store is not None:
         from deerflow_extension_api import EXTENSION_TASK_STORE_KEY
 
@@ -1397,51 +632,24 @@ def _build_runtime_context(
         runtime_ctx[EXTENSION_SNAPSHOT_CONTEXT_KEY] = extensions
     else:
         runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
-    from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
-
-    if authorization_provider is not None:
-        runtime_ctx[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = authorization_provider
-    else:
-        runtime_ctx.pop(AUTHORIZATION_PROVIDER_CONTEXT_KEY, None)
-    from deerflow.runtime.constraints import (
-        INVOCATION_CONSTRAINTS_CONTEXT_KEY,
-        SUBAGENT_RESERVATION_CONTEXT_KEY,
-    )
-
-    # These objects exist only after accepted evidence passes the construction
-    # fence below. A caller-provided value, including an in-process one, is not
-    # an accepted projection or reservation.
-    runtime_ctx.pop(INVOCATION_CONSTRAINTS_CONTEXT_KEY, None)
-    runtime_ctx.pop(SUBAGENT_RESERVATION_CONTEXT_KEY, None)
-    from deerflow.extensions.mcp import MCP_INVOCATION_FACTS_CONTEXT_KEY
-
-    runtime_ctx.pop(MCP_INVOCATION_FACTS_CONTEXT_KEY, None)
-    from deerflow.runtime.accepted_invocation import (
-        INVOCATION_IDENTITY_CONTEXT_KEY,
-        INVOCATION_ORIGIN_CONTEXT_KEY,
-        TRUSTED_RUN_CONTEXT_KEY,
-    )
-
-    runtime_ctx.pop(INVOCATION_IDENTITY_CONTEXT_KEY, None)
-    runtime_ctx.pop(INVOCATION_ORIGIN_CONTEXT_KEY, None)
-    runtime_ctx.pop(TRUSTED_RUN_CONTEXT_KEY, None)
-    runtime_ctx.pop(RECOVERY_EXECUTOR_CONTEXT_KEY, None)
-    runtime_ctx.pop(TENANT_REFERENCE_CONTEXT_KEY, None)
-    from deerflow.runtime.assembly_evidence import strip_assembly_evidence_requirement
-
-    strip_assembly_evidence_requirement(runtime_ctx)
-    from deerflow.runtime.tool_evidence import strip_tool_evidence_context
-
-    # Tool evidence objects are executable host capabilities. A request may
-    # use a lookalike key but can never inject a sink, fence, or anchor.
-    strip_tool_evidence_context(runtime_ctx)
-    from deerflow.subagents.batch_acceptance import (
-        strip_parent_batch_acceptance_context,
-    )
-
-    strip_parent_batch_acceptance_context(runtime_ctx)
-    runtime_ctx.pop("authz_attributes", None)
     return runtime_ctx
+
+
+def _pin_admission_project_context(config: dict, runtime_context: dict[str, Any]) -> None:
+    """Re-inject the admission-pinned project snapshot into the runtime context.
+
+    The Gateway resolves and stamps ``config['context'][PROJECT_CONTEXT_KEY]``
+    after stripping client-supplied values at admission (``build_run_config``
+    drops ``__``-prefixed context keys; the services pop-set covers both
+    sections), so a value surviving to this point is server-authoritative.
+    ``_build_runtime_context`` refuses server-owned keys from the caller
+    merge, and ``_install_runtime_context`` treats the runtime context as the
+    authoritative view — hoisting here is what lets middleware and tools read
+    exactly the snapshot admission pinned.
+    """
+    caller_context = config.get("context")
+    if isinstance(caller_context, dict) and PROJECT_CONTEXT_KEY in caller_context:
+        runtime_context[PROJECT_CONTEXT_KEY] = caller_context[PROJECT_CONTEXT_KEY]
 
 
 @dataclass(frozen=True)
@@ -1460,208 +668,40 @@ class RunContext:
     thread_store: Any | None = field(default=None)
     mcp_task_repo: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
-    authorization_provider: AuthorizationProvider | None = field(default=None)
-    # Server-owned identity resolved once at process startup. Recovery compares
-    # accepted evidence to this reference before resolving material or starting
-    # any model/tool work.
-    tenant: TenantReferenceV1 | None = field(default=None)
     extensions: Any | None = field(default=None)
-    capability_manifest_digest: str | None = field(default=None)
     checkpoint_channel_mode: CheckpointChannelMode = "full"
     # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
     # this process" (embedded/tests) and resolves to the config default.
     checkpoint_snapshot_frequency: int | None = None
     on_run_completed: Any | None = field(default=None)
-    # Restart-only seam: resolve current agent material once for a persisted
-    # accepted revision. The accepting process uses the captured material on
-    # RunRecord and does not call this resolver.
-    agent_revision_resolver: Any | None = field(default=None, repr=False)
-    # Host-owned clock used by both accepted-constraint worker fences.
-    constraint_clock: Any | None = field(default=None, repr=False)
-    # Exact-two recovery only: called after accepted material and assembly
-    # revalidation, but before the durable graph-dispatch marker and any
-    # model/tool work. The callback waits for RunManager to validate/release
-    # the returned decision.
-    execution_recovery_gate: (
-        Callable[
-            [RunRecord, object],
-            Awaitable[ExecutionRecoveryDecision],
-        ]
-        | None
-    ) = field(default=None, repr=False)
-    # Exact-two recovery only: the currently authenticated internal executor,
-    # separate from the original accepted actor in trusted_context.
-    recovery_executor: VerifiedActorContextV1 | None = field(
-        default=None,
-        repr=False,
-    )
-    # Startup-frozen private policy keyring. Accepted rows persist only its
-    # public key id; recovery must find that exact historical key here.
-    execution_policy_keyring: Any | None = field(default=None, repr=False)
-
-    def __post_init__(self) -> None:
-        if self.recovery_executor is not None and not isinstance(
-            self.recovery_executor,
-            VerifiedActorContextV1,
-        ):
-            raise TypeError("recovery_executor must be VerifiedActorContextV1 or None")
+    # The host binds this capability to one run's authenticated reader and references.
+    conversation_reader: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
-    from deerflow.runtime.assembly_evidence import (
-        REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY,
-        strip_assembly_evidence_requirement,
-    )
-
+    # Configurable participates in lead-agent option merging and checkpoint
+    # persistence; the reader capability belongs only to host-owned context.
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
-        strip_assembly_evidence_requirement(configurable)
-        from deerflow.runtime.tool_evidence import strip_tool_evidence_context
-
-        strip_tool_evidence_context(configurable)
-        from deerflow.subagents.batch_acceptance import (
-            strip_parent_batch_acceptance_context,
-        )
-
-        strip_parent_batch_acceptance_context(configurable)
+        configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
-        strip_assembly_evidence_requirement(existing_context)
-        from deerflow.runtime.tool_evidence import (
-            TOOL_EVIDENCE_CONTEXT_KEY,
-            TOOL_EVIDENCE_SINK_KEY,
-            strip_tool_evidence_context,
-        )
-
-        strip_tool_evidence_context(existing_context)
-        from deerflow.subagents.batch_acceptance import (
-            PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
-            strip_parent_batch_acceptance_context,
-        )
-
-        strip_parent_batch_acceptance_context(existing_context)
-        if REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY in runtime_context:
-            existing_context[REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY] = runtime_context[REQUIRE_ASSEMBLY_EVIDENCE_CONTEXT_KEY]
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
         existing_context.setdefault("run_id", runtime_context["run_id"])
         # Keep both context views authoritative. A server-owned value is
         # assigned from the runtime context when present and removed otherwise,
         # so an embedded caller cannot preserve a forged lifecycle identity in
         # ``config['context']`` after it was rejected by _build_runtime_context.
-        server_owned = set(_SERVER_OWNED_RUNTIME_CONTEXT_KEYS)
-        server_owned.update(key for key in (*existing_context, *runtime_context) if _is_server_owned_context_key(key))
-        for key in server_owned:
+        for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
             if key in runtime_context:
                 existing_context[key] = runtime_context[key]
             else:
                 existing_context.pop(key, None)
         if "app_config" in runtime_context:
             existing_context["app_config"] = runtime_context["app_config"]
-        from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
-
-        if AUTHORIZATION_PROVIDER_CONTEXT_KEY in runtime_context:
-            existing_context[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = runtime_context[AUTHORIZATION_PROVIDER_CONTEXT_KEY]
-        from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
-
-        for internal_key in (
-            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
-            PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
-            "accepted_agent_revision_digest",
-            "accepted_extension_generation",
-            "accepted_extension_manifest_digest",
-            "accepted_extension_artifact_manifest_digest",
-            "accepted_extension_configuration_digest",
-            "accepted_execution_budget",
-            "execution_policy_keyring",
-        ):
-            if internal_key in runtime_context:
-                existing_context[internal_key] = runtime_context[internal_key]
-        from deerflow.runtime.constraints import (
-            INVOCATION_CONSTRAINTS_CONTEXT_KEY,
-            SUBAGENT_RESERVATION_CONTEXT_KEY,
-        )
-
-        for internal_key in (
-            INVOCATION_CONSTRAINTS_CONTEXT_KEY,
-            SUBAGENT_RESERVATION_CONTEXT_KEY,
-            TENANT_REFERENCE_CONTEXT_KEY,
-        ):
-            if internal_key in runtime_context:
-                existing_context[internal_key] = runtime_context[internal_key]
-            else:
-                existing_context.pop(internal_key, None)
-        from deerflow.extensions.mcp import MCP_INVOCATION_FACTS_CONTEXT_KEY
-
-        if MCP_INVOCATION_FACTS_CONTEXT_KEY in runtime_context:
-            existing_context[MCP_INVOCATION_FACTS_CONTEXT_KEY] = runtime_context[MCP_INVOCATION_FACTS_CONTEXT_KEY]
-        else:
-            existing_context.pop(MCP_INVOCATION_FACTS_CONTEXT_KEY, None)
-        from deerflow.runtime.accepted_invocation import (
-            INVOCATION_IDENTITY_CONTEXT_KEY,
-            INVOCATION_ORIGIN_CONTEXT_KEY,
-            TRUSTED_RUN_CONTEXT_KEY,
-        )
-
-        for internal_key in (
-            INVOCATION_IDENTITY_CONTEXT_KEY,
-            INVOCATION_ORIGIN_CONTEXT_KEY,
-            TRUSTED_RUN_CONTEXT_KEY,
-        ):
-            if internal_key in runtime_context:
-                existing_context[internal_key] = runtime_context[internal_key]
-            else:
-                existing_context.pop(internal_key, None)
-        for internal_key in (
-            TOOL_EVIDENCE_CONTEXT_KEY,
-            TOOL_EVIDENCE_SINK_KEY,
-        ):
-            if internal_key in runtime_context:
-                existing_context[internal_key] = runtime_context[internal_key]
-        if INVOCATION_ORIGIN_CONTEXT_KEY in runtime_context:
-            existing_context.pop("authz_attributes", None)
-            for compatibility_key in (
-                "user_id",
-                "user_role",
-                "oauth_provider",
-                "oauth_id",
-                "channel_user_id",
-                "is_internal",
-            ):
-                if compatibility_key in runtime_context:
-                    existing_context[compatibility_key] = runtime_context[compatibility_key]
-                else:
-                    existing_context.pop(compatibility_key, None)
         return
 
     config["context"] = dict(runtime_context)
-
-
-def _install_pinned_agent_facts(runtime_context: dict[str, Any], material: Any) -> None:
-    """Replace mutable factory inputs with the facts covered by the revision."""
-    defaults = material.runtime_defaults
-    for key in (
-        "agent_name",
-        "is_bootstrap",
-        "thinking_enabled",
-        "reasoning_effort",
-        "is_plan_mode",
-        "subagent_enabled",
-        "max_concurrent_subagents",
-        "max_total_subagents",
-        "non_interactive",
-        "channel_name",
-    ):
-        if key not in defaults:
-            continue
-        value = defaults[key]
-        if value is None:
-            runtime_context.pop(key, None)
-        else:
-            runtime_context[key] = value
-    selected_model = material.model_profile.get("name")
-    if isinstance(selected_model, str) and selected_model:
-        runtime_context["model_name"] = selected_model
-        runtime_context.pop("model", None)
 
 
 def _compute_agent_factory_supports_app_config(agent_factory: Any) -> bool:
@@ -1684,14 +724,26 @@ def _agent_factory_supports_app_config(agent_factory: Any) -> bool:
         return _compute_agent_factory_supports_app_config(agent_factory)
 
 
-def _split_agent_factory_result(agent_result: Any) -> tuple[Any, Any | None]:
-    """Split a host assembly while retaining bare-graph compatibility."""
-
+def _agent_graph(agent_result: Any) -> Any:
+    """Unwrap the lead assembly, leaving any other factory result untouched."""
     try:
-        from deerflow.agents.lead_agent.agent import split_agent_factory_result
+        from deerflow.agents.lead_agent.agent import unwrap_agent_graph
     except Exception:
-        return agent_result, None
-    return split_agent_factory_result(agent_result)
+        # A custom factory must keep working even if importing the lead
+        # assembly type fails.
+        return agent_result
+    return unwrap_agent_graph(agent_result)
+
+
+def _assembled_model_name(agent_result: Any) -> str | None:
+    """Return the selected model only for the trusted lead assembly result."""
+    try:
+        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
+    except Exception:
+        return None
+    if isinstance(agent_result, LeadAgentAssembly):
+        return agent_result.effective_model
+    return None
 
 
 class _SubagentEventBuffer:
@@ -1747,27 +799,40 @@ class _SubagentEventBuffer:
             return
         batch = self._pending
         self._pending = []
-        try:
-            await self._event_store.put_batch(batch)
-        except RuntimeEventOwnershipLost:
-            self._pending = batch + self._pending
-            raise
-        except Exception as exc:
+        write_task = asyncio.create_task(self._event_store.put_batch(batch))
+        cancellation: asyncio.CancelledError | None = None
+        failure: Exception | None = None
+        while True:
+            try:
+                await asyncio.shield(write_task)
+                break
+            except asyncio.CancelledError as exc:
+                host_task = asyncio.current_task()
+                if host_task is None or not host_task.cancelling():
+                    # The store task itself was cancelled. It did not confirm
+                    # durability, so retain the batch for a later flush.
+                    self._pending = batch + self._pending
+                    raise
+                if cancellation is None:
+                    cancellation = exc
+                while host_task.cancelling():
+                    host_task.uncancel()
+            except Exception as exc:
+                failure = exc
+                break
+
+        if failure is not None:
             # Re-buffer the failed batch (ahead of any events queued since) so a
             # transient store error does not silently drop subagent step events.
             self._pending = batch + self._pending
-            failure = map_runtime_failure(
-                code="subagent_event_write_failed",
-                error=exc,
-            )
             logger.warning(
-                "Subagent event write failed run_id=%s events=%d code=%s error_class=%s correlation_id=%s",
+                "Run %s: failed to persist %d subagent step event(s)",
                 self._run_id,
                 len(batch),
-                failure.code,
-                failure.error_class,
-                failure.correlation_id,
+                exc_info=(type(failure), failure, failure.__traceback__),
             )
+        if cancellation is not None:
+            raise cancellation
 
 
 def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
@@ -1796,78 +861,75 @@ def _bind_trace_id(config: dict[str, Any], runtime_ctx: dict[str, Any]) -> str:
     return trace_id
 
 
-async def run_agent(
-    bridge: StreamBridge,
-    run_manager: RunManager,
-    record: RunRecord,
-    *,
-    ctx: RunContext,
-    agent_factory: Any,
-    graph_input: dict,
-    config: dict,
-    stream_modes: list[str] | None = None,
-    stream_subgraphs: bool = False,
-    interrupt_before: list[str] | Literal["*"] | None = None,
-    interrupt_after: list[str] | Literal["*"] | None = None,
-) -> None:
+def _defer_finalization_interrupt(
+    deferred: BaseException | None,
+    interrupt: BaseException,
+) -> BaseException:
+    """Preserve the first interrupt while allowing terminal awaits to finish."""
+    if isinstance(interrupt, asyncio.CancelledError):
+        task = asyncio.current_task()
+        if task is not None:
+            while task.cancelling():
+                task.uncancel()
+    return deferred if deferred is not None else interrupt
+
+
+async def _await_task_stop_after_host_cancellation(
+    task: asyncio.Task[None],
+    deferred: BaseException | None,
+) -> BaseException | None:
+    """Wait for one task-stop fan-out despite repeated host cancellation."""
+    while True:
+        try:
+            await asyncio.shield(task)
+            return deferred
+        except asyncio.CancelledError as exc:
+            host = asyncio.current_task()
+            if host is None or not host.cancelling():
+                # The fan-out task itself was cancelled rather than the host.
+                raise
+            deferred = _defer_finalization_interrupt(deferred, exc)
+
+
+async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRecord, **kwargs: Any) -> None:
     """Execute an agent in the background, publishing events to *bridge*.
 
     This wrapper exists only to measure the turn. It opens the phase journal
-    before any run work so admission and assembly are inside the same monotonic
-    window as the model call, registers it under the run id so the SSE consumer
-    -- which runs in the Gateway request task, not this one -- can mark the
-    first outgoing assistant text, and emits it once when the run is over.
+    before any run work so assembly is inside the same monotonic window as the
+    model call, registers it under the run id so the SSE consumer -- which
+    runs in the Gateway request task, not this one -- can mark the first
+    outgoing assistant text, and emits it once when the run is over. Every
+    argument is passed through to :func:`_run_agent` as given.
     """
 
-    from deerflow.runtime.turn_phases import TurnPhase, turn_phases
+    from deerflow.runtime.turn_phases import turn_phases
     from deerflow.runtime.turn_progress import TurnProgressPublisher
 
     with turn_phases(correlation_id=resolve_trace_id(), run_id=record.run_id) as journal:
         # The person waiting hears the phases they can act on as they begin,
-        # from admission onward and before any model token, as one advisory
-        # ``custom`` frame per stage (``turn_progress.py``). Registered before
-        # the first mark so admission itself is announced.
+        # before any model token, as one advisory ``custom`` frame per stage
+        # (``turn_progress.py``). Registered before the first mark so
+        # admission itself is announced.
         progress = TurnProgressPublisher(
             loop=asyncio.get_running_loop(),
             run_id=record.run_id,
             publish=lambda payload: bridge.publish(record.run_id, "custom", payload),
         )
         journal.observe(progress)
-        # The route's own interval -- request received to this point -- is
-        # measured by the launch and handed over on the record; the journal
-        # cannot see it from here and must not guess it.
-        launch_timings = getattr(record, "launch_timings", None)
-        if launch_timings is not None:
-            journal.set_launch(launch_timings)
         journal.mark(TurnPhase.ADMISSION)
         # Submit-to-first-rendered-text belongs to the browser: it includes
         # ingress, transfer and render, none of which a server timestamp can
         # stand in for. Recorded as a limitation rather than approximated.
         journal.unobservable("browser_first_text", "requires a browser measurement through public ingress")
         try:
-            await _run_agent(
-                bridge,
-                run_manager,
-                record,
-                ctx=ctx,
-                agent_factory=agent_factory,
-                graph_input=graph_input,
-                config=config,
-                stream_modes=stream_modes,
-                stream_subgraphs=stream_subgraphs,
-                interrupt_before=interrupt_before,
-                interrupt_after=interrupt_after,
-                progress=progress,
-            )
+            await _run_agent(bridge, run_manager, record, progress=progress, **kwargs)
         finally:
             progress.close()
             journal.mark(TurnPhase.TERMINAL)
             journal.set_outcome(str(getattr(record, "status", "unknown")))
-            # The SSE mark is per-process and live-window only: a join stream
-            # on another Gateway replica, or a Last-Event-ID replay after this
-            # point, cannot reach this journal. If the provider produced text
-            # and no consumer here marked it, say so rather than let the
-            # missing phase read as "no visible text".
+            # The SSE mark is per-process and live-window only. If the
+            # provider produced text and no consumer here marked it, say so
+            # rather than let the missing phase read as "no visible text".
             _snapshot = journal.snapshot()
             if _snapshot.phase_at_ms(TurnPhase.FIRST_PROVIDER_TEXT) is not None and _snapshot.phase_at_ms(TurnPhase.FIRST_STREAM_TEXT) is None:
                 journal.unobservable(TurnPhase.FIRST_STREAM_TEXT, "no SSE consumer in this process marked it before terminal")
@@ -1883,11 +945,13 @@ async def _run_agent(
     agent_factory: Any,
     graph_input: dict,
     config: dict,
+    thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     stream_modes: list[str] | None = None,
     stream_subgraphs: bool = False,
     interrupt_before: list[str] | Literal["*"] | None = None,
     interrupt_after: list[str] | Literal["*"] | None = None,
-    progress: TurnProgressPublisher | None = None,
+    knowledge_scope: dict[str, Any] | None = None,
+    progress: Any | None = None,
 ) -> None:
     """Execute an agent in the background, publishing events to *bridge*."""
 
@@ -1901,6 +965,7 @@ async def _run_agent(
 
     run_id = record.run_id
     thread_id = record.thread_id
+
     from deerflow_extension_api import ExtensionData, TaskInfo
 
     from deerflow.extensions import get_loaded_extensions
@@ -1910,62 +975,11 @@ async def _run_agent(
         notify_task_start,
         notify_task_stop,
     )
-    from deerflow.persistence.thread_meta.base import ThreadMetaRunProjection
 
     extensions = ctx.extensions if ctx.extensions is not None else get_loaded_extensions()
     task_store: ExtensionData | None = None
     task_info: TaskInfo | None = None
-    deferred_stop_interrupt: BaseException | None = None
-
-    def _defer_stop_interrupt(exc: BaseException) -> None:
-        """Retain the first control-flow interruption until cleanup is done."""
-
-        nonlocal deferred_stop_interrupt
-        if deferred_stop_interrupt is None:
-            deferred_stop_interrupt = exc
-
-    async def _await_terminal_cleanup(
-        awaitable: Awaitable[Any],
-        *,
-        interrupted_result: Any = None,
-        interrupt_current: bool = False,
-        propagate_inner_interrupt: bool = False,
-    ) -> Any:
-        """Finish one cleanup await despite repeated caller cancellation.
-
-        Observer hooks remain interruptible so shutdown cannot wait forever on
-        third-party code. All ownership and resource cleanup is shielded and
-        drained before the first interruption is re-raised.
-        """
-
-        cleanup_task = asyncio.ensure_future(awaitable)
-        if interrupt_current and deferred_stop_interrupt is not None:
-            cleanup_task.cancel()
-        while True:
-            try:
-                return await asyncio.shield(cleanup_task)
-            except Exception:
-                raise
-            except BaseException as exc:
-                _defer_stop_interrupt(exc)
-                if interrupt_current and not cleanup_task.done():
-                    cleanup_task.cancel()
-                if not cleanup_task.done():
-                    continue
-                if cleanup_task.cancelled():
-                    if propagate_inner_interrupt:
-                        cleanup_task.result()
-                    return interrupted_result
-                try:
-                    return cleanup_task.result()
-                except Exception:
-                    raise
-                except BaseException as cleanup_exc:
-                    _defer_stop_interrupt(cleanup_exc)
-                    if propagate_inner_interrupt:
-                        raise cleanup_exc
-                    return interrupted_result
-
+    deferred_finalization_interrupt: BaseException | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
@@ -1985,15 +999,13 @@ async def _run_agent(
     accessor: CheckpointStateAccessor | None = None
     rollback_point: RollbackPoint | None = None
     journal = None
-    event_appender: Any | None = None
-    terminal_failure: RuntimeFailureV1 | None = None
-    runtime_event_authority_rejected = False
     runtime_ctx: dict[str, Any] | None = None
     runtime: Any | None = None
     agent: Any | None = None
     runnable_configs: list[dict[str, Any]] = [config]
     goal_evaluator_model: Any | None = None
     delivery_content: dict[str, Any] | None = None
+    goal_completion: _GoalCompletionCandidate | None = None
     produced_output_paths: list[str] | None = None
     # Journal construction moved ahead of preflight so every terminal run can
     # emit a receipt. Completion persistence keeps its prior boundary: before
@@ -2001,74 +1013,12 @@ async def _run_agent(
     # checkpoint failures / cancellation while waiting did not write an empty
     # completion snapshot into RunStore.
     persist_completion = False
+    completion_data: dict[str, Any] | None = None
     # Buffers subagent step events for batched persistence (#3779); assigned once
     # streaming starts and flushed in the finally block. Pre-bound to None so the
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
     started = False
-    accepted_constraints = None
-    accepted_for_cleanup = record.accepted_invocation
-    requires_assembly_evidence = accepted_for_cleanup is not None and run_manager.requires_assembly_evidence
-    requires_tool_receipt_evidence = accepted_for_cleanup is not None and accepted_for_cleanup.tool_receipt_evidence_version in (1, 2, 3)
-    assembly_evidence_bound = False
-    pinned_material_for_cleanup = accepted_for_cleanup.agent_revision.material if accepted_for_cleanup is not None else None
-    skill_binding_user_id: str | None = None
-    materialization: _AcceptedMaterializationResult | None = None
-    materialization_evidence = None
-    accepted_sandbox_session: AcceptedSandboxSessionBridge | None = None
-    accepted_sandbox_lifecycle_count = 0
-    sandbox_diagnostic_sequence = 0
-    dispatch_ledger = None
-    thread_projection_owner_id: str | None = None
-    thread_projection_active_state_version: int | None = None
-
-    async def _publish_accepted_sandbox_lifecycle_during_cleanup() -> None:
-        nonlocal accepted_sandbox_lifecycle_count, deferred_stop_interrupt
-
-        if accepted_sandbox_session is None:
-            return
-        try:
-            accepted_sandbox_lifecycle_count = await _publish_accepted_sandbox_lifecycle(
-                event_appender,
-                accepted_sandbox_session,
-                start_index=accepted_sandbox_lifecycle_count,
-            )
-        except BaseException as exc:
-            if deferred_stop_interrupt is None:
-                deferred_stop_interrupt = exc
-                logger.warning(
-                    "Accepted sandbox lifecycle publication interrupted for run %s; completing terminal cleanup first",
-                    run_id,
-                )
-            else:
-                logger.warning(
-                    "Accepted sandbox lifecycle publication failed while another terminal interruption was pending for run %s",
-                    run_id,
-                    exc_info=True,
-                )
-
-    async def _publish_sandbox_diagnostics_during_cleanup() -> None:
-        nonlocal sandbox_diagnostic_sequence, deferred_stop_interrupt
-
-        try:
-            sandbox_diagnostic_sequence = await _publish_sandbox_diagnostics(
-                event_appender,
-                run_id,
-                start_sequence=sandbox_diagnostic_sequence,
-            )
-        except BaseException as exc:
-            if deferred_stop_interrupt is None:
-                deferred_stop_interrupt = exc
-                logger.warning(
-                    "Sandbox diagnostic publication interrupted for run %s; completing terminal cleanup first",
-                    run_id,
-                )
-            else:
-                logger.warning(
-                    "Sandbox diagnostic publication failed while another terminal interruption was pending for run %s",
-                    run_id,
-                    exc_info=True,
-                )
 
     async def _finish_cancellation(
         action: str,
@@ -2076,19 +1026,14 @@ async def _run_agent(
         restore_checkpoint: bool = True,
     ) -> None:
         nonlocal checkpoint_rollback_completed
-        if requires_assembly_evidence and not assembly_evidence_bound:
-            restore_checkpoint = False
         await run_manager.set_finalizing(run_id, True)
         if action == "rollback":
             await run_manager.set_status(
                 run_id,
                 RunStatus.error,
                 error="Rolled back by user",
-                lifecycle_type=LifecycleType.cancelled,
                 **terminal_status_kwargs,
             )
-            if record.ownership_lost:
-                return
             if not restore_checkpoint:
                 return
             try:
@@ -2115,7 +1060,6 @@ async def _run_agent(
             await run_manager.set_status(
                 run_id,
                 RunStatus.interrupted,
-                lifecycle_type=LifecycleType.cancelled,
                 **terminal_status_kwargs,
             )
             logger.info("Run %s was cancelled", run_id)
@@ -2132,124 +1076,26 @@ async def _run_agent(
         if event_store is not None:
             from deerflow.runtime.journal import RunJournal
 
-            owner_id = record.owner_worker_id
-            lease_epoch = record.state_version
-            if not isinstance(owner_id, str) or not owner_id or type(lease_epoch) is not int:
-                raise RuntimeEventOwnershipLost("runtime_event_authority_unavailable")
-            authority = RuntimeEventAuthority(
-                tenant=ctx.tenant,
-                thread_id=thread_id,
-                run_id=run_id,
-                owner_id=owner_id,
-                lease_epoch=lease_epoch,
-            )
-
-            async def _current_runtime_event_authority() -> RuntimeEventAuthority:
-                current_owner = record.owner_worker_id
-                current_epoch = record.state_version
-                if record.ownership_lost or not isinstance(current_owner, str) or not current_owner or type(current_epoch) is not int:
-                    raise RuntimeEventOwnershipLost("runtime_event_ownership_lost")
-                return RuntimeEventAuthority(
-                    tenant=ctx.tenant,
-                    thread_id=thread_id,
-                    run_id=run_id,
-                    owner_id=current_owner,
-                    lease_epoch=current_epoch,
-                )
-
-            async def _process_local_authority_is_current(
-                candidate: RuntimeEventAuthority,
-            ) -> bool:
-                return bool(
-                    not record.ownership_lost
-                    and candidate.run_id == record.run_id
-                    and candidate.thread_id == record.thread_id
-                    and candidate.owner_id == record.owner_worker_id
-                    and candidate.lease_epoch == record.state_version
-                    and candidate.tenant == ctx.tenant
-                )
-
-            event_appender = FencedRunEventAppender(
-                event_store,
-                authority,
-                process_local_validator=(None if run_manager.heartbeat_enabled else _process_local_authority_is_current),
-                authority_provider=_current_runtime_event_authority,
-            )
             journal = RunJournal(
                 run_id=run_id,
                 thread_id=thread_id,
-                event_store=event_appender,
+                event_store=event_store,
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
-
-        accepted_tenant = accepted_for_cleanup.tenant if accepted_for_cleanup is not None else None
-        if accepted_for_cleanup is not None and accepted_tenant != ctx.tenant:
-            error = "Accepted invocation tenant does not match this deployment"
-            cancel_action = await run_manager.set_status_if_not_cancelled(
-                run_id,
-                RunStatus.error,
-                error=error,
-                stop_reason="tenant_identity_mismatch",
-                **terminal_status_kwargs,
-            )
-            if cancel_action is not None:
-                await _finish_cancellation(cancel_action, restore_checkpoint=False)
-            else:
-                await bridge.publish(
-                    run_id,
-                    "error",
-                    {
-                        "message": error,
-                        "name": "TenantIdentityMismatchError",
-                    },
-                )
-            return
-
-        if accepted_for_cleanup is not None and accepted_for_cleanup.extension_artifact_manifest_digest is not None:
-            process_tuple = (
-                int(getattr(extensions, "generation", -1)),
-                ctx.capability_manifest_digest,
-                getattr(extensions, "artifact_manifest_digest", None),
-                getattr(extensions, "extension_configuration_digest", None),
-            )
-            accepted_tuple = (
-                accepted_for_cleanup.extension_generation,
-                accepted_for_cleanup.extension_manifest_digest,
-                accepted_for_cleanup.extension_artifact_manifest_digest,
-                accepted_for_cleanup.extension_configuration_digest,
-            )
-            if process_tuple != accepted_tuple:
-                error = "Accepted extension provenance does not match this process"
-                cancel_action = await run_manager.set_status_if_not_cancelled(
-                    run_id,
-                    RunStatus.error,
-                    error=error,
-                    stop_reason="extension_provenance_mismatch",
-                    **terminal_status_kwargs,
-                )
-                if cancel_action is not None:
-                    await _finish_cancellation(cancel_action, restore_checkpoint=False)
-                else:
-                    await bridge.publish(
-                        run_id,
-                        "error",
-                        {
-                            "message": error,
-                            "name": "ExtensionProvenanceMismatchError",
-                        },
-                    )
-                return
 
         # Keep cancellable preflight work under the worker's terminal guard so
         # cancellation cannot strand a pending RunRecord or stream subscriber.
         if ctx.mcp_task_repo is not None and record.user_id is not None:
             try:
+                if thread_incarnation is _THREAD_INCARNATION_UNSET:
+                    raise RuntimeError("MCP task projection requires a server-owned thread incarnation")
+                assert thread_incarnation is None or isinstance(thread_incarnation, str)
                 task_rows = await ctx.mcp_task_repo.list_by_thread(
                     thread_id,
                     user_id=record.user_id,
+                    thread_incarnation=thread_incarnation,
                     limit=20,
-                    tenant_digest=ctx.mcp_task_repo.tenant.digest,
                 )
                 graph_input = {
                     **graph_input,
@@ -2264,19 +1110,41 @@ async def _run_agent(
             abort_event=record.abort_event,
         )
 
-        if pinned_material_for_cleanup is not None:
-            skill_binding_user_id = record.user_id or get_effective_user_id()
-            await _await_accepted_skill_projection_claim(
-                user_id=skill_binding_user_id,
-                thread_id=thread_id,
-                run_id=run_id,
-                material=pinned_material_for_cleanup,
-                abort_event=record.abort_event,
-            )
+        start_outcome = await run_manager.try_start(run_id)
+        if start_outcome is not RunStartOutcome.started:
+            if record.abort_event.is_set():
+                await _finish_cancellation(
+                    record.abort_action,
+                    restore_checkpoint=False,
+                )
+            return
+        started = True
 
         task_id = lead_task_id(run_id)
         if extensions.needs_task_store:
             task_store = ExtensionData(task_id)
+
+        if extensions.has_task_lifecycle:
+            task_info = TaskInfo(
+                task_id=task_id,
+                run_id=run_id,
+                thread_id=thread_id,
+                kind="lead",
+                agent_name=record.assistant_id,
+            )
+            assert task_store is not None
+            await notify_task_start(
+                extensions,
+                task_store,
+                task_info,
+                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
+            )
+
+        if not record.ownership_lost and thread_store is not None:
+            try:
+                await thread_store.update_status(thread_id, "running")
+            except Exception:
+                logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
         mode = ctx.checkpoint_channel_mode
         inject_checkpoint_mode(config, mode)
         checkpoint_config = {
@@ -2285,8 +1153,12 @@ async def _run_agent(
                 "checkpoint_ns": "",
             }
         }
-        checkpoint_preflight_configs = [checkpoint_config]
         if checkpointer is not None:
+            await aensure_checkpoint_mode_compatible(
+                checkpointer,
+                checkpoint_config,
+                mode,
+            )
             configurable = config["configurable"]
             selected_configurable = {
                 "thread_id": thread_id,
@@ -2299,14 +1171,11 @@ async def _run_agent(
                 "configurable": selected_configurable,
             }
             if selected_checkpoint_config != checkpoint_config:
-                checkpoint_preflight_configs.append(selected_checkpoint_config)
-            if not requires_assembly_evidence:
-                for preflight_config in checkpoint_preflight_configs:
-                    await aensure_checkpoint_mode_compatible(
-                        checkpointer,
-                        preflight_config,
-                        mode,
-                    )
+                await aensure_checkpoint_mode_compatible(
+                    checkpointer,
+                    selected_checkpoint_config,
+                    mode,
+                )
 
         persist_completion = True
 
@@ -2323,11 +1192,7 @@ async def _run_agent(
                     extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
             except Exception:
-                logger.warning(
-                    "Could not capture pre-run workspace snapshot for run %s",
-                    run_id,
-                    exc_info=True,
-                )
+                logger.warning("Could not capture pre-run workspace snapshot for run %s", run_id, exc_info=True)
 
         # 2. Publish metadata — useStream needs both run_id AND thread_id
         await bridge.publish(
@@ -2358,12 +1223,27 @@ async def _run_agent(
             ctx.app_config,
             task_store,
             extensions,
-            ctx.authorization_provider,
+            ctx.conversation_reader,
+            thread_incarnation=thread_incarnation,
         )
-        if ctx.recovery_executor is not None:
-            if not record.execution_takeover:
-                raise ValueError("recovery executor evidence requires execution takeover")
-            runtime_ctx[RECOVERY_EXECUTOR_CONTEXT_KEY] = ctx.recovery_executor
+        # Bind every checkpoint produced by this run to the effective agent
+        # identity that produced its state. Manual compaction uses only this
+        # server-overwritten value for memory policy; request metadata cannot
+        # forge it, and an explicit default sentinel distinguishes new default
+        # checkpoints from unbound legacy state.
+        if "agent_name" in runtime_ctx:
+            checkpoint_agent_name = runtime_ctx["agent_name"]
+        else:
+            configurable = config.get("configurable")
+            checkpoint_agent_name = configurable.get("agent_name") if isinstance(configurable, dict) else None
+        checkpoint_metadata = config.get("metadata")
+        if not isinstance(checkpoint_metadata, dict):
+            checkpoint_metadata = {}
+            config["metadata"] = checkpoint_metadata
+        checkpoint_metadata[CHECKPOINT_AGENT_NAME_METADATA_KEY] = DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name
+        _pin_admission_project_context(config, runtime_ctx)
+        if knowledge_scope is not None:
+            runtime_ctx[KNOWLEDGE_SCOPE_RUNTIME_KEY] = execution_scope(knowledge_scope)
         deerflow_trace_id = _bind_trace_id(config, runtime_ctx)
         # Expose the run-scoped journal under a sentinel key so middleware can
         # write audit events (e.g. SafetyFinishReasonMiddleware recording
@@ -2373,7 +1253,6 @@ async def _run_agent(
             runtime_ctx["__run_journal"] = journal
         _install_runtime_context(config, runtime_ctx)
         runtime = Runtime(context=cast(Any, runtime_ctx), store=store)
-        skill_binding_user_id = resolve_runtime_user_id(runtime)
         config.setdefault("configurable", {})["__pregel_runtime"] = runtime
 
         # Inject RunJournal as a LangChain callback handler.
@@ -2383,25 +1262,11 @@ async def _run_agent(
 
         # Model-side phases ride the same callback seam, on the turn journal's
         # monotonic clock, so the model request and the provider's first text
-        # are comparable with the sandbox phases rather than with a wall clock.
+        # are comparable with the other phases rather than with a wall clock.
         _turn_phases = current_turn_phases()
         if _turn_phases is not None:
             _turn_phases.mark(TurnPhase.ASSEMBLY)
             config.setdefault("callbacks", []).append(TurnPhaseCallbackHandler(_turn_phases))
-
-        # Inject Langfuse trace-attribute metadata so the langchain CallbackHandler
-        # can lift session_id / user_id / trace_name / tags onto the root trace.
-        # Shared helper with ``DeerFlowClient.stream`` so both entry points stay
-        # in sync; caller-provided metadata wins via setdefault inside the helper.
-        inject_langfuse_metadata(
-            config,
-            thread_id=thread_id,
-            user_id=resolve_runtime_user_id(runtime),
-            assistant_id=record.assistant_id,
-            model_name=record.model_name,
-            environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
-            deerflow_trace_id=deerflow_trace_id,
-        )
 
         # Resolve after runtime context installation so context/configurable reflect
         # the agent name that this run will actually execute.
@@ -2420,917 +1285,33 @@ async def _run_agent(
             runnable_configs.append(continuation)
             return continuation
 
-        async def _fail_unavailable_subagent_catalog() -> None:
-            error = "Accepted subagent catalog is unavailable"
-            cancel_action = await run_manager.set_status_if_not_cancelled(
-                run_id,
-                RunStatus.error,
-                error=error,
-                stop_reason="subagent_catalog_unavailable",
-                **terminal_status_kwargs,
-            )
-            if cancel_action is not None:
-                await _finish_cancellation(cancel_action, restore_checkpoint=False)
-            else:
-                await bridge.publish(
-                    run_id,
-                    "error",
-                    {
-                        "message": error,
-                        "name": "SubagentCatalogUnavailableError",
-                    },
-                )
-
-        accepted = record.accepted_invocation
-        if accepted is not None:
-            from deerflow.runtime.accepted_invocation import (
-                ResolvedAgentMaterialV1,
-                ResolvedAgentRevision,
-            )
-            from deerflow.runtime.agent_revision import (
-                RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
-            )
-
-            if accepted.agent_revision.subagent_catalog is None:
-                await _fail_unavailable_subagent_catalog()
-                return
-
-            pinned_material = accepted.agent_revision.material
-            if pinned_material is None:
-                candidate = runtime_ctx.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
-                if isinstance(candidate, ResolvedAgentMaterialV1):
-                    pinned_material = candidate
-            if pinned_material is None and ctx.agent_revision_resolver is not None:
-                resolved = ctx.agent_revision_resolver(record, config)
-                if inspect.isawaitable(resolved):
-                    resolved = await resolved
-                if isinstance(resolved, ResolvedAgentRevision):
-                    pinned_material = resolved.material
-                elif isinstance(resolved, ResolvedAgentMaterialV1):
-                    pinned_material = resolved
-            if isinstance(pinned_material, ResolvedAgentMaterialV1):
-                accepted_catalog = accepted.agent_revision.subagent_catalog
-                accepted_scopes = accepted.agent_revision.skill_scopes
-                if accepted_scopes is None:
-                    await _fail_unavailable_subagent_catalog()
-                    return
-                # A restart resolver may rebuild the lead's other immutable
-                # inputs from their normal stores, but managed definitions are
-                # prospective state. Rebind the already-validated persisted
-                # catalog before digest comparison; never compare it to live
-                # managed rows.
-                if pinned_material.subagent_catalog != accepted_catalog or pinned_material.skill_scopes != accepted_scopes:
-                    pinned_material = replace(
-                        pinned_material,
-                        subagent_catalog=accepted_catalog,
-                        skill_scopes=accepted_scopes,
-                    )
-            if isinstance(pinned_material, ResolvedAgentMaterialV1):
-                pinned_material_for_cleanup = pinned_material
-                try:
-                    await asyncio.to_thread(pinned_material.verify_process_material)
-                except Exception as exc:
-                    from deerflow.runtime.subagent_snapshot import (
-                        SubagentCatalogError,
-                    )
-
-                    if isinstance(exc, SubagentCatalogError):
-                        stop_reason = exc.code
-                        error = "Accepted subagent skill material is unavailable"
-                        error_name = "SubagentSkillMaterialError"
-                    else:
-                        stop_reason = "agent_revision_drift"
-                        error = "Accepted skill snapshot no longer matches captured material"
-                        error_name = "AgentRevisionDriftError"
-                    cancel_action = await run_manager.set_status_if_not_cancelled(
-                        run_id,
-                        RunStatus.error,
-                        error=error,
-                        stop_reason=stop_reason,
-                        **terminal_status_kwargs,
-                    )
-                    if cancel_action is not None:
-                        await _finish_cancellation(cancel_action, restore_checkpoint=False)
-                    else:
-                        await bridge.publish(
-                            run_id,
-                            "error",
-                            {
-                                "message": error,
-                                "name": error_name,
-                            },
-                        )
-                    return
-            actual_revision = ResolvedAgentRevision.from_material(pinned_material) if isinstance(pinned_material, ResolvedAgentMaterialV1) else None
-            if actual_revision is None or actual_revision.digest != accepted.agent_revision.digest:
-                error = "Accepted agent revision no longer matches current resolved material"
-                cancel_action = await run_manager.set_status_if_not_cancelled(
-                    run_id,
-                    RunStatus.error,
-                    error=error,
-                    stop_reason="agent_revision_drift",
-                    **terminal_status_kwargs,
-                )
-                if cancel_action is not None:
-                    await _finish_cancellation(cancel_action, restore_checkpoint=False)
-                else:
-                    await bridge.publish(
-                        run_id,
-                        "error",
-                        {"message": error, "name": "AgentRevisionDriftError"},
-                    )
-                return
-            # Bind the exact object that passed the digest check. The factory
-            # consumes it directly and never performs a second mutable read.
-            runtime_ctx[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = pinned_material
-            from deerflow.subagents.batch_acceptance import (
-                PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY,
-            )
-
-            runtime_ctx[PARENT_BATCH_ACCEPTANCE_CONTEXT_KEY] = accepted
-            if accepted.tenant is not None:
-                runtime_ctx[TENANT_REFERENCE_CONTEXT_KEY] = accepted.tenant
-            runtime_ctx["accepted_agent_revision_digest"] = actual_revision.digest
-            runtime_ctx["accepted_extension_generation"] = accepted.extension_generation
-            if accepted.extension_manifest_digest is not None:
-                runtime_ctx["accepted_extension_manifest_digest"] = accepted.extension_manifest_digest
-            if accepted.extension_artifact_manifest_digest is not None:
-                runtime_ctx["accepted_extension_artifact_manifest_digest"] = accepted.extension_artifact_manifest_digest
-            if accepted.extension_configuration_digest is not None:
-                runtime_ctx["accepted_extension_configuration_digest"] = accepted.extension_configuration_digest
-            if accepted.tool_plane_revision is not None:
-                runtime_ctx["accepted_tool_plane_revision"] = accepted.tool_plane_revision
-            if accepted.tool_plane_unmanaged is not None:
-                from deerflow.config.app_config import get_app_config
-                from deerflow.runtime.accepted_invocation import (
-                    unmanaged_tool_plane_is_honourable,
-                )
-
-                if not unmanaged_tool_plane_is_honourable(
-                    accepted.tool_plane_unmanaged,
-                    durable_deployment=get_app_config().deployment.profile.is_durable,
-                ):
-                    raise AssemblyEvidenceError("tool_plane_unmanaged_not_durable")
-                runtime_ctx["accepted_tool_plane_unmanaged"] = accepted.tool_plane_unmanaged
-            execution_budget = accepted.execution_budget
-            if execution_budget is not None:
-                from deerflow.runtime.events.catalog import (
-                    EXECUTION_POLICY_DECISION_EVENT,
-                )
-                from deerflow.runtime.execution_policy import (
-                    EXECUTION_POLICY_OBSERVER_CONTEXT_KEY,
-                    ExecutionPolicyEvaluator,
-                    ExecutionPolicyObservationV1,
-                    ExecutionPolicyStateV1,
-                    PolicyDecision,
-                    ToolEquivalenceKeyring,
-                    normalizer_manifest_digest,
-                )
-                from deerflow.runtime.runs.store.base import (
-                    ApplyExecutionPolicyStateOutcome,
-                )
-
-                policy_keyring = ctx.execution_policy_keyring
-                try:
-                    if not isinstance(policy_keyring, ToolEquivalenceKeyring):
-                        raise ExecutionPolicyError("policy_equivalence_key_unavailable")
-                    policy_keyring.require_key(execution_budget.equivalence_key_id)
-                    if execution_budget.equivalence_normalizer_manifest_digest != normalizer_manifest_digest():
-                        raise ExecutionPolicyError("policy_equivalence_normalizer_unavailable")
-                except ExecutionPolicyError as exc:
-                    cancel_action = await run_manager.set_status_if_not_cancelled(
-                        run_id,
-                        RunStatus.error,
-                        error="Accepted execution policy is unavailable",
-                        stop_reason=exc.code,
-                        **terminal_status_kwargs,
-                    )
-                    if cancel_action is not None:
-                        await _finish_cancellation(cancel_action, restore_checkpoint=False)
-                    else:
-                        await bridge.publish(
-                            run_id,
-                            "error",
-                            {
-                                "message": "Accepted execution policy is unavailable",
-                                "name": "ExecutionPolicyUnavailableError",
-                            },
-                        )
-                    return
-                runtime_ctx["accepted_execution_budget"] = execution_budget
-                runtime_ctx["execution_policy_keyring"] = policy_keyring
-
-                async def _flush_policy_decision_outbox(
-                    state: ExecutionPolicyStateV1,
-                ) -> ExecutionPolicyStateV1:
-                    """Publish the row-backed outbox once under the live fence."""
-
-                    if not state.decision_outbox:
-                        return state
-                    if event_store is None or event_appender is None:
-                        raise ExecutionPolicyError("policy_state_inconsistent")
-                    existing = await event_store.list_events(
-                        thread_id,
-                        run_id,
-                        event_types=[EXECUTION_POLICY_DECISION_EVENT.event_type],
-                        limit=65,
-                    )
-                    published_state_digests = {content.get("state_digest") for event in existing if isinstance((content := event.get("content")), dict)}
-                    for pending in state.decision_outbox:
-                        if pending.state_digest in published_state_digests:
-                            continue
-                        await event_appender.put(
-                            event_type=EXECUTION_POLICY_DECISION_EVENT.event_type,
-                            category=EXECUTION_POLICY_DECISION_EVENT.category,
-                            content={
-                                "version": 1,
-                                "decision": pending.decision.value,
-                                "reason_code": pending.reason_code,
-                                "current": pending.current,
-                                "limit": pending.limit,
-                                "budget_digest": execution_budget.digest,
-                                "state_digest": pending.state_digest,
-                                "summary_key": pending.summary_key,
-                            },
-                            metadata={},
-                        )
-                    cleared = replace(state, decision_outbox=())
-                    cleared_outcome = await run_manager.apply_execution_policy_state(
-                        run_id,
-                        expected_digest=state.digest,
-                        state=cleared,
-                    )
-                    if cleared_outcome is not ApplyExecutionPolicyStateOutcome.applied:
-                        raise ExecutionPolicyError("policy_state_inconsistent")
-                    return cleared
-
-                try:
-                    if record.execution_policy_state_json is None:
-                        if record.execution_policy_state_digest is not None:
-                            raise ExecutionPolicyError("policy_state_inconsistent")
-                        policy_state = ExecutionPolicyStateV1.initial(execution_budget)
-                        initial_outcome = await run_manager.apply_execution_policy_state(
-                            run_id,
-                            expected_digest=None,
-                            state=policy_state,
-                        )
-                        if initial_outcome is not ApplyExecutionPolicyStateOutcome.applied:
-                            raise ExecutionPolicyError("policy_state_inconsistent")
-                    else:
-                        policy_state = ExecutionPolicyStateV1.from_json(record.execution_policy_state_json)
-                        if policy_state.digest != record.execution_policy_state_digest or policy_state.budget_digest != execution_budget.digest:
-                            raise ExecutionPolicyError("policy_state_inconsistent")
-                    policy_state = await _flush_policy_decision_outbox(policy_state)
-                    if policy_state.terminal_reason is not None:
-                        raise ExecutionPolicyError(policy_state.terminal_reason)
-                except ExecutionPolicyError as exc:
-                    cancel_action = await run_manager.set_status_if_not_cancelled(
-                        run_id,
-                        RunStatus.error,
-                        error="Accepted execution policy state is unavailable",
-                        stop_reason=exc.code,
-                        **terminal_status_kwargs,
-                    )
-                    if cancel_action is not None:
-                        await _finish_cancellation(cancel_action, restore_checkpoint=False)
-                    else:
-                        await bridge.publish(
-                            run_id,
-                            "error",
-                            {
-                                "message": "Accepted execution policy state is unavailable",
-                                "name": "ExecutionPolicyStateError",
-                            },
-                        )
-                    return
-
-                policy_lock = asyncio.Lock()
-                evaluator = ExecutionPolicyEvaluator()
-
-                async def _observe_execution_policy(
-                    observation: ExecutionPolicyObservationV1,
-                ):
-                    nonlocal policy_state
-                    if not isinstance(observation, ExecutionPolicyObservationV1):
-                        raise TypeError("invalid execution policy observation")
-                    async with policy_lock:
-                        evaluation = evaluator.evaluate(
-                            execution_budget,
-                            policy_state,
-                            observation,
-                        )
-                        outcome = await run_manager.apply_execution_policy_state(
-                            run_id,
-                            expected_digest=policy_state.digest,
-                            state=evaluation.next_state,
-                        )
-                        if outcome is not ApplyExecutionPolicyStateOutcome.applied:
-                            raise ExecutionPolicyError("policy_state_inconsistent")
-                        policy_state = await _flush_policy_decision_outbox(evaluation.next_state)
-                        if evaluation.decision is PolicyDecision.stop:
-                            runtime_ctx["stop_reason"] = evaluation.reason_code
-                            runtime_ctx["execution_policy_stopped"] = True
-                        return evaluation
-
-                runtime_ctx[EXECUTION_POLICY_OBSERVER_CONTEXT_KEY] = _observe_execution_policy
-            from deerflow_extension_api import SafeContextReferenceV1, SealedOriginV1
-
-            from deerflow.runtime.accepted_invocation import (
-                INVOCATION_IDENTITY_CONTEXT_KEY,
-                INVOCATION_ORIGIN_CONTEXT_KEY,
-                TRUSTED_RUN_CONTEXT_KEY,
-            )
-
-            trusted_context = accepted.trusted_context
-            if trusted_context is not None and trusted_context.runtime_reference_count and not trusted_context.runtime_state_complete:
-                error = "Accepted runtime-only contributor context is unavailable after process recovery"
-                cancel_action = await run_manager.set_status_if_not_cancelled(
-                    run_id,
-                    RunStatus.error,
-                    error=error,
-                    stop_reason="trusted_context_unavailable",
-                    **terminal_status_kwargs,
-                )
-                if cancel_action is not None:
-                    await _finish_cancellation(cancel_action, restore_checkpoint=False)
-                else:
-                    await bridge.publish(
-                        run_id,
-                        "error",
-                        {"message": error, "name": "TrustedRunContextUnavailableError"},
-                    )
-                return
-            bound_trusted_context = trusted_context.bind_run(run_id) if trusted_context is not None else None
-            if bound_trusted_context is not None:
-                runtime_ctx[TRUSTED_RUN_CONTEXT_KEY] = bound_trusted_context
-                runtime_ctx[INVOCATION_IDENTITY_CONTEXT_KEY] = bound_trusted_context.identity
-                runtime_ctx[INVOCATION_ORIGIN_CONTEXT_KEY] = bound_trusted_context.origin
-            elif accepted.principal.identity is not None:
-                runtime_ctx[INVOCATION_IDENTITY_CONTEXT_KEY] = accepted.principal.identity
-            runtime_ctx.pop("authz_attributes", None)
-            for field_name, field_value in (
-                ("user_id", accepted.principal.user_id),
-                ("user_role", accepted.principal.role),
-                ("oauth_provider", accepted.principal.oauth_provider),
-                ("oauth_id", accepted.principal.oauth_id),
-                ("channel_user_id", accepted.principal.channel_user_id),
-            ):
-                if field_value is None:
-                    runtime_ctx.pop(field_name, None)
-                else:
-                    runtime_ctx[field_name] = field_value
-            runtime_ctx["is_internal"] = accepted.principal.is_internal
-            if bound_trusted_context is None:
-                runtime_ctx[INVOCATION_ORIGIN_CONTEXT_KEY] = SealedOriginV1(
-                    source_kind=accepted.origin.source_kind,
-                    references=tuple(
-                        SafeContextReferenceV1(
-                            key=key,
-                            value=value,
-                            storage_class="persistable",
-                            purpose="correlation",
-                        )
-                        for key, value in sorted(accepted.origin.references.items())
-                    ),
-                    digest=accepted.base_origin_digest,
-                )
-            from deerflow.extensions.mcp import (
-                MCP_INVOCATION_FACTS_CONTEXT_KEY,
-                McpInvocationFacts,
-            )
-
-            runtime_ctx[MCP_INVOCATION_FACTS_CONTEXT_KEY] = McpInvocationFacts.from_accepted(accepted, run_id=run_id)
-            _install_pinned_agent_facts(runtime_ctx, pinned_material)
-            from deerflow.runtime.constraints import (
-                INVOCATION_CONSTRAINTS_CONTEXT_KEY,
-                SUBAGENT_RESERVATION_CONTEXT_KEY,
-                InvocationSubagentDispatchLedger,
-                validate_constraint_fence,
-            )
-
-            accepted_constraints = validate_constraint_fence(
-                accepted,
-                request_digest=record.request_digest,
-                clock=ctx.constraint_clock,
-            )
-            if accepted_constraints is not None:
-                runtime_ctx[INVOCATION_CONSTRAINTS_CONTEXT_KEY] = accepted_constraints
-                limit = accepted_constraints.max_total_subagents
-                if limit is not None:
-                    runtime_ctx["max_total_subagents"] = limit
-                    dispatch_ledger = InvocationSubagentDispatchLedger(limit)
-                    runtime_ctx[SUBAGENT_RESERVATION_CONTEXT_KEY] = dispatch_ledger
-            if run_manager.requires_assembly_evidence:
-                from deerflow.runtime.assembly_evidence import (
-                    install_assembly_evidence_requirement,
-                )
-
-                install_assembly_evidence_requirement(runtime_ctx)
-            _install_runtime_context(config, runtime_ctx)
-            _install_pinned_agent_facts(config["context"], pinned_material)
-            if accepted_constraints is not None:
-                config["context"][INVOCATION_CONSTRAINTS_CONTEXT_KEY] = accepted_constraints
-                if accepted_constraints.max_total_subagents is not None:
-                    config["context"]["max_total_subagents"] = accepted_constraints.max_total_subagents
-                    config["context"][SUBAGENT_RESERVATION_CONTEXT_KEY] = runtime_ctx[SUBAGENT_RESERVATION_CONTEXT_KEY]
-            initial_runnable_config = RunnableConfig(**config)
-
-        # What this turn is, for the phase journal: the session Kind and the
-        # verified snapshot facts the guard below decides on. Presence and
-        # package count are recorded as separate fields on purpose -- zero
-        # packages alone does not establish a deferrable state, and the guard
-        # is ``skill_snapshot is not None``, not the count. Evidence for a
-        # later optimization, never a reason to reorder execution here.
-        _turn_phases = current_turn_phases()
-        if _turn_phases is not None:
-            _pinned_snapshot = None if pinned_material_for_cleanup is None else pinned_material_for_cleanup.skill_snapshot
-            _turn_phases.set_session_kind("accepted" if accepted is not None else "ordinary")
-            _turn_phases.set_snapshot_facts(
-                present=_pinned_snapshot is not None,
-                package_count=None if _pinned_snapshot is None else len(getattr(_pinned_snapshot, "skills", ()) or ()),
-                mandatory_materialization=accepted is not None and _pinned_snapshot is not None,
-            )
-
-        if accepted is not None and pinned_material_for_cleanup is not None and pinned_material_for_cleanup.skill_snapshot is not None:
-            from deerflow.runtime.kubernetes_qualification import (
-                qualification_barrier,
-                qualification_counter,
-            )
-
-            await qualification_counter("materialization_starts", record)
-            await qualification_barrier(
-                "accepted_before_materialization",
-                record,
-            )
-
-            async def _validate_pending_material_claim(claim: object) -> bool:
-                from deerflow.sandbox.accepted_material import (
-                    AcceptedMaterialExecutionClaimV1,
-                )
-
-                if (
-                    not isinstance(claim, AcceptedMaterialExecutionClaimV1)
-                    or claim.run_id != run_id
-                    or claim.owner_worker_id != record.owner_worker_id
-                    or claim.state_version != record.state_version
-                    or record.ownership_lost
-                    or record.abort_event.is_set()
-                ):
-                    return False
-                async with run_manager.hold_execution_fence(
-                    run_id,
-                    owner_worker_id=claim.owner_worker_id,
-                    state_version=claim.state_version,
-                    allowed_active_statuses=("pending", "running"),
-                ) as active:
-                    sampled = active
-                return bool(sampled and not record.ownership_lost and not record.abort_event.is_set())
-
-            # The accepted preparation before the model: on a durable profile the
-            # whole materialization, with the sandbox phases it records nested
-            # inside; on the projection profile only the authorization, since
-            # the sandbox is acquired by the first sandbox-backed tool call.
-            with phase_span(TurnPhase.SKILL_MATERIALIZATION):
-                raw_materialization = await _materialize_accepted_skill_projection(
-                    runtime,
-                    user_id=skill_binding_user_id,
-                    record=record,
-                    claim_validator=_validate_pending_material_claim,
-                )
-            if isinstance(raw_materialization, _AcceptedMaterializationResult):
-                materialization = raw_materialization
-            else:
-                # Compatibility for focused worker tests that replace the helper
-                # with the historical two-tuple seam.
-                materialization_sandbox_id, materialization_evidence = raw_materialization
-                from deerflow.sandbox import get_sandbox_provider
-
-                materialization = _AcceptedMaterializationResult(
-                    sandbox_id=materialization_sandbox_id,
-                    evidence=materialization_evidence,
-                    provider=(None if materialization_evidence is None else get_sandbox_provider()),
-                )
-            materialization_evidence = materialization.evidence
-            if materialization_evidence is not None:
-                if not run_manager.heartbeat_enabled:
-                    raise AcceptedSkillExecutionFenceError(
-                        "accepted_skill_execution_lease_unavailable",
-                    )
-
-        if materialization_evidence is None:
-            start_outcome = await run_manager.try_start(run_id)
-        else:
-            start_outcome = await run_manager.try_start(
-                run_id,
-                execution_evidence=materialization_evidence,
-            )
-        if start_outcome is not RunStartOutcome.started:
-            if record.abort_event.is_set():
-                await _finish_cancellation(
-                    record.abort_action,
-                    restore_checkpoint=False,
-                )
-            return
-        started = True
-        if isinstance(record.owner_worker_id, str) and record.owner_worker_id and type(record.state_version) is int:
-            thread_projection_owner_id = record.owner_worker_id
-            thread_projection_active_state_version = record.state_version
-
-        if materialization_evidence is not None:
-            assert materialization is not None
-            from deerflow.sandbox.accepted_material import (
-                AcceptedExecutionEvidenceV1,
-                AcceptedExecutionEvidenceV2,
-                AcceptedMaterialExecutionClaimV1,
-                AcceptedMaterialLeaseV1,
-                AcceptedMaterialRequestV1,
-                AcceptedMaterialRequestV2,
-                AcceptedSandboxSession,
-                declare_accepted_sandbox_session,
-            )
-            from deerflow.sandbox.session import (
-                sandbox_mount_scope,
-                set_current_sandbox_session,
-            )
-
-            neutral_tuple = (
-                materialization.sandbox,
-                materialization.materializer,
-                materialization.lease,
-                materialization.request,
-            )
-            if all(value is not None for value in neutral_tuple) and isinstance(
-                materialization.evidence,
-                (AcceptedExecutionEvidenceV1, AcceptedExecutionEvidenceV2),
-            ):
-                if not isinstance(
-                    materialization.lease,
-                    AcceptedMaterialLeaseV1,
-                ) or not isinstance(
-                    materialization.request,
-                    (AcceptedMaterialRequestV1, AcceptedMaterialRequestV2),
-                ):
-                    raise AcceptedSkillExecutionFenceError(
-                        "accepted_skill_execution_fence_failed",
-                    )
-                owner_worker_id = record.owner_worker_id
-                state_version = record.state_version
-                if not isinstance(owner_worker_id, str) or not owner_worker_id or type(state_version) is not int:
-                    raise AcceptedSkillExecutionFenceError(
-                        "accepted_skill_execution_fence_failed",
-                    )
-                running_claim = AcceptedMaterialExecutionClaimV1(
-                    version=1,
-                    tenant_digest=materialization.request.tenant.digest,
-                    run_id=run_id,
-                    owner_worker_id=owner_worker_id,
-                    state_version=state_version,
-                    execution_takeover=record.execution_takeover,
-                    expected_materialization_digest=(materialization.evidence.materialization_digest if record.execution_takeover else None),
-                )
-
-                async def _validate_running_claim(
-                    claim: AcceptedMaterialExecutionClaimV1,
-                ) -> bool:
-                    if claim is not running_claim or record.ownership_lost or record.abort_event.is_set():
-                        return False
-                    async with run_manager.hold_execution_fence(
-                        run_id,
-                        owner_worker_id=claim.owner_worker_id,
-                        state_version=claim.state_version,
-                    ) as active:
-                        sampled = active
-                    return bool(sampled and not record.ownership_lost and not record.abort_event.is_set())
-
-                from deerflow.runtime.kubernetes_qualification import (
-                    accepted_sandbox_qualification_candidate_enabled,
-                    qualification_barrier,
-                    qualification_counter,
-                )
-                from deerflow.runtime.tool_evidence import (
-                    get_active_tool_receipt,
-                )
-
-                before_delegate = None
-                if accepted_sandbox_qualification_candidate_enabled():
-
-                    async def _qualification_before_delegate() -> None:
-                        await qualification_counter(
-                            "accepted_sandbox_validations",
-                            record,
-                        )
-                        await qualification_barrier(
-                            "accepted_sandbox_after_validation",
-                            record,
-                        )
-
-                    before_delegate = _qualification_before_delegate
-
-                def _active_tool_receipt_ref() -> str | None:
-                    receipt = get_active_tool_receipt()
-                    return None if receipt is None else receipt.receipt_id
-
-                # Provisioned before declared, never lazily: the session already
-                # holds its materialized sandbox and lease. Declaring registers
-                # its public ref with the session provider; binding it here makes
-                # it this run's sandbox for every task and thread the run spawns
-                # from now on, in-run subagents included. Nothing is installed in
-                # the runtime context: the declaration is the only carrier.
-                accepted_sandbox_session = declare_accepted_sandbox_session(
-                    AcceptedSandboxSession(
-                        sandbox=materialization.sandbox,
-                        materializer=materialization.materializer,
-                        lease=materialization.lease,
-                        evidence=materialization.evidence,
-                        execution_claim=running_claim,
-                        run_fence_validator=_validate_running_claim,
-                        before_delegate=before_delegate,
-                        tool_receipt_ref_resolver=_active_tool_receipt_ref,
-                    ),
-                    mount_scope=sandbox_mount_scope(
-                        runtime_ctx.get("user_id"),
-                        runtime_ctx.get("thread_id"),
-                    ),
-                )
-                set_current_sandbox_session(accepted_sandbox_session.declaration)
-                from deerflow.sandbox.accepted_material import rendered_egress_allowance
-
-                accepted_sandbox_session.record_egress_allowance(
-                    rendered_egress_allowance(materialization.request),
-                )
-                _install_runtime_context(config, runtime_ctx)
-                accepted_sandbox_lifecycle_count = await _publish_accepted_sandbox_lifecycle(
-                    event_appender,
-                    accepted_sandbox_session,
-                    start_index=accepted_sandbox_lifecycle_count,
-                )
-
-                async def _renew_materialization() -> bool:
-                    assert accepted_sandbox_session is not None
-                    await accepted_sandbox_session.renew()
-                    return True
-
-            else:
-
-                async def _renew_materialization() -> bool:
-                    assert materialization is not None
-                    return await materialization.renew()
-
-            await run_manager.set_execution_lease_renewal(
-                run_id,
-                _renew_materialization,
-            )
-
-        if checkpointer is not None and getattr(
-            run_manager,
-            "heartbeat_enabled",
-            False,
-        ):
-            from deerflow.runtime.checkpointer.fenced_saver import (
-                FencedCheckpointSaver,
-            )
-            from deerflow.runtime.kubernetes_qualification import (
-                qualification_counter,
-            )
-
-            checkpoint_owner_id = record.owner_worker_id
-            if not isinstance(checkpoint_owner_id, str) or not checkpoint_owner_id or type(record.state_version) is not int:
-                raise RuntimeError("run_checkpoint_ownership_fence_unavailable")
-            checkpoint_state_version = record.state_version
-            record.checkpoint_terminal_state_version = None
-            record.checkpoint_execution_fence_revoked = False
-
-            async def _checkpoint_rejected(operation: str) -> None:
-                del operation
-                await qualification_counter(
-                    "checkpoint_stale_rejections",
-                    record,
-                )
-
-            checkpointer = FencedCheckpointSaver(
-                checkpointer,
-                fence=lambda: run_manager.hold_execution_fence(
-                    run_id,
-                    owner_worker_id=checkpoint_owner_id,
-                    state_version=checkpoint_state_version,
-                    terminal_state_version=(record.checkpoint_terminal_state_version),
-                    revoked=record.checkpoint_execution_fence_revoked,
-                ),
-                on_rejected=_checkpoint_rejected,
-            )
-
-        if materialization_evidence is not None:
-            assert materialization is not None
-            if record.ownership_lost or not await materialization.validate():
-                raise AcceptedSkillExecutionFenceError(
-                    "accepted_skill_execution_fence_failed",
-                )
-            from deerflow.runtime.kubernetes_qualification import (
-                qualification_barrier,
-                qualification_counter,
-            )
-
-            await qualification_counter("materialization_validations", record)
-            await qualification_barrier(
-                "post_materialization_before_checkpoint",
-                record,
-            )
-
-        assembly_anchors = None
-        if requires_assembly_evidence:
-            from deerflow.runtime.assembly_evidence import (
-                build_accepted_assembly_anchors,
-            )
-
-            if accepted is None or pinned_material_for_cleanup is None:
-                raise AssemblyEvidenceError("assembly_descriptor_missing")
-            assembly_anchors = build_accepted_assembly_anchors(
-                run_id=record.run_id,
-                accepted=accepted,
-                material=pinned_material_for_cleanup,
-                app_config=ctx.app_config,
-                accepted_constraints=accepted_constraints,
-            )
-
         agent_factory_kwargs: dict[str, Any] = {"config": initial_runnable_config}
         if ctx.app_config is not None and _agent_factory_supports_app_config(agent_factory):
             agent_factory_kwargs["app_config"] = ctx.app_config
         from deerflow.extensions import bind_agent_build_extensions
 
-        # Building the graph is one of the four pre-model phases: a warm
-        # turn spends seconds between admission and its model request, and
-        # before these an operator could see that only as a gap.
-        with phase_span(TurnPhase.AGENT_BUILD), bind_agent_build_extensions(extensions):
-            agent_result = agent_factory(**agent_factory_kwargs)
-        agent, assembly_descriptor = _split_agent_factory_result(agent_result)
+        with bind_agent_build_extensions(extensions):
+            # Assemble off-loop: agent construction re-enters
+            # get_available_tools(), which may block on MCP cache
+            # initialization — it must not stall the calling event loop
+            # (issue #5172).
+            with phase_span(TurnPhase.AGENT_BUILD):
+                agent_result = await run_assembly(agent_factory, **agent_factory_kwargs)
+            agent = _agent_graph(agent_result)
 
-        if requires_assembly_evidence:
-            from deerflow.runtime.assembly_evidence import (
-                build_assembly_evidence,
-            )
-
-            if assembly_descriptor is None:
-                raise AssemblyEvidenceError("assembly_descriptor_missing")
-            if assembly_anchors is None:
-                raise AssemblyEvidenceError("assembly_descriptor_missing")
-            evidence = build_assembly_evidence(
-                assembly_descriptor,
-                anchors=assembly_anchors,
-            )
-            bind_outcome = await run_manager.bind_assembly_evidence(run_id, evidence)
-            if bind_outcome in (
-                BindAssemblyEvidenceOutcome.bound,
-                BindAssemblyEvidenceOutcome.already_matching,
-            ):
-                assembly_evidence_bound = True
-            elif bind_outcome is BindAssemblyEvidenceOutcome.mismatch:
-                raise AssemblyEvidenceError("assembly_evidence_mismatch")
-            else:
-                record.ownership_lost = True
-                raise AssemblyEvidenceError("assembly_evidence_fence_lost")
-
-            if requires_tool_receipt_evidence:
-                if event_store is None:
-                    raise AssemblyEvidenceError("tool_receipt_sink_unavailable")
-                from deerflow.runtime.tool_evidence import (
-                    RunEventToolReceiptSink,
-                    ToolEvidenceRuntimeBinding,
-                    install_tool_evidence_context,
-                )
-
-                owner_id = record.owner_worker_id
-                lease_epoch = record.state_version
-                if not isinstance(owner_id, str) or not owner_id or type(lease_epoch) is not int:
-                    raise AssemblyEvidenceError("tool_receipt_fence_unavailable")
-                catalog = pinned_material_for_cleanup.subagent_catalog
-
-                async def _receipt_ownership_lost(operation: str) -> None:
-                    del operation
-                    from deerflow.runtime.kubernetes_qualification import (
-                        qualification_counter,
-                    )
-
-                    await qualification_counter(
-                        "receipt_stale_rejections",
-                        record,
-                    )
-
-                async def _receipt_cancellation_fence(held: tuple[str, int]) -> tuple[str, int] | None:
-                    held_owner, held_epoch = held
-                    epoch = await run_manager.adopt_cancellation_epoch(run_id, owner_id=held_owner, held_epoch=held_epoch)
-                    return None if epoch is None else (held_owner, epoch)
-
-                install_tool_evidence_context(
-                    runtime_ctx,
-                    binding=ToolEvidenceRuntimeBinding(
-                        run_id=run_id,
-                        execution_task_id=run_id,
-                        execution_kind="lead",
-                        subagent_name=None,
-                        owner_id=owner_id,
-                        lease_epoch=lease_epoch,
-                        agent_revision_digest=evidence.accepted_agent_revision_digest,
-                        assembly_fingerprint=evidence.fingerprint,
-                        extension_generation=evidence.extension_generation,
-                        capability_manifest_digest=(evidence.accepted_capability_manifest_digest),
-                        artifact_manifest_digest=(evidence.accepted_artifact_manifest_digest),
-                        extension_configuration_digest=(evidence.accepted_extension_configuration_digest),
-                        subagent_catalog_digest=catalog.digest,
-                        subagent_definition_digest=None,
-                        tenant=evidence.tenant,
-                    ),
-                    sink=RunEventToolReceiptSink(
-                        event_store,
-                        on_ownership_lost=_receipt_ownership_lost,
-                        refresh_cancellation_fence=_receipt_cancellation_fence,
-                    ),
-                )
-                _install_runtime_context(config, runtime_ctx)
-
-            if checkpointer is not None:
-                for preflight_config in checkpoint_preflight_configs:
-                    await aensure_checkpoint_mode_compatible(
-                        checkpointer,
-                        preflight_config,
-                        mode,
-                    )
-
-        # A takeover worker is attached behind the manager's release barrier.
-        # Only after accepted material and the rebuilt assembly have validated
-        # may Gateway inspect the actual host-sealed tool recovery policy. The
-        # gate owns any unsafe terminal CAS; no lifecycle observer, mutable
-        # thread projection, graph, model, or tool work precedes this decision.
-        execution_recovery_decision: ExecutionRecoveryDecision | None = None
-        execution_dispatch_marked = False
-        if record.execution_takeover:
-            recovery_gate = ctx.execution_recovery_gate
-            if recovery_gate is None:
-                raise RuntimeError(
-                    "execution_recovery_coordinator_unavailable",
-                )
-            execution_recovery_decision = await recovery_gate(
-                record,
-                assembly_descriptor,
-            )
-            if execution_recovery_decision.disposition in {
-                ExecutionRecoveryDisposition.terminalize_checkpoint_unavailable,
-                ExecutionRecoveryDisposition.terminalize_tool_attempt_indeterminate,
-            }:
-                raise _ExecutionRecoveryTerminalized(
-                    execution_recovery_decision.disposition.value,
-                )
-            if execution_recovery_decision.disposition in {
-                ExecutionRecoveryDisposition.resume_checkpoint,
-                ExecutionRecoveryDisposition.resume_reconciled_tool,
-            }:
-                # Continue the stored graph state; applying accepted caller
-                # input or attempting to rewrite the already-durable dispatch
-                # singleton would duplicate/conflict with this turn.
-                graph_input = None
-                recovery_configurable = dict(
-                    config.get("configurable", {}) or {},
-                )
-                recovery_configurable["checkpoint_ns"] = ""
-                recovery_configurable.pop("checkpoint_id", None)
-                recovery_configurable.pop("checkpoint_map", None)
-                config["configurable"] = recovery_configurable
-                initial_runnable_config = RunnableConfig(**config)
-                execution_dispatch_marked = True
-
-        if extensions.has_task_lifecycle:
-            task_info = TaskInfo(
-                task_id=task_id,
-                run_id=run_id,
+        # Assembly resolves request, agent, and authorization fallbacks. Trace the
+        # model that will run, rather than the model name originally requested.
+        effective_model = _assembled_model_name(agent_result) or record.model_name
+        for trace_config in (config, initial_runnable_config):
+            inject_langfuse_metadata(
+                trace_config,
                 thread_id=thread_id,
-                kind="lead",
-                agent_name=record.assistant_id,
-                resumed=record.execution_takeover,
+                user_id=resolve_runtime_user_id(runtime),
+                assistant_id=record.assistant_id,
+                model_name=effective_model,
+                environment=os.environ.get("DEER_FLOW_ENV") or os.environ.get("ENVIRONMENT"),
+                deerflow_trace_id=deerflow_trace_id,
             )
-            assert task_store is not None
-            await notify_task_start(
-                extensions,
-                task_store,
-                task_info,
-                timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
-            )
-
-        if not record.ownership_lost and thread_store is not None and thread_projection_owner_id is not None and thread_projection_active_state_version is not None:
-            try:
-                await thread_store.project_run(
-                    ThreadMetaRunProjection(
-                        run_id=run_id,
-                        thread_id=thread_id,
-                        owner_worker_id=thread_projection_owner_id,
-                        active_state_version=(thread_projection_active_state_version),
-                        status="running",
-                    ),
-                    user_id=record.user_id,
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to project running thread_meta status for %s (non-fatal)",
-                    thread_id,
-                )
 
         mark_phase(TurnPhase.CHECKPOINT_PREFLIGHT)
         accessor = CheckpointStateAccessor.bind(
@@ -3357,11 +1338,7 @@ async def _run_agent(
                     rollback_point = await _capture_rollback_point(accessor, checkpointer, checkpoint_config)
                 except Exception:
                     snapshot_capture_failed = True
-                    logger.warning(
-                        "Could not capture pre-run checkpoint snapshot for run %s",
-                        run_id,
-                        exc_info=True,
-                    )
+                    logger.warning("Could not capture pre-run checkpoint snapshot for run %s", run_id, exc_info=True)
                 if rollback_point is not None:
                     pre_run_checkpoint_id = rollback_point.config.get("configurable", {}).get("checkpoint_id")
                     pre_existing_message_ids = _collect_pre_existing_message_ids({"messages": list(rollback_point.messages)})
@@ -3389,17 +1366,6 @@ async def _run_agent(
         runtime_ctx[CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY] = frozenset(pre_existing_message_ids)
         _install_runtime_context(config, runtime_ctx)
 
-        from deerflow.runtime.kubernetes_qualification import (
-            qualification_barrier,
-            qualification_counter,
-        )
-
-        await qualification_counter("checkpoint_preflight_starts", record)
-        await qualification_barrier(
-            "post_checkpoint_before_graph",
-            record,
-        )
-
         # Capture the effective (resolved) model name from the agent's metadata.
         # _resolve_model_name in agent.py may return the default model if the
         # requested name is not in the allowlist — this update ensures the
@@ -3423,17 +1389,12 @@ async def _run_agent(
         if interrupt_after:
             agent.interrupt_after_nodes = interrupt_after
 
-        logger.info(
-            "Run %s: streaming with modes %s (requested: %s)",
-            run_id,
-            lg_modes,
-            requested_modes,
-        )
+        logger.info("Run %s: streaming with modes %s (requested: %s)", run_id, lg_modes, requested_modes)
 
         # Buffer subagent step events and persist them in batches (#3779) instead
         # of one low-frequency put() per step on the hot stream loop. Flushed in
         # the finally block so buffered steps survive abort/exception paths too.
-        subagent_events = _SubagentEventBuffer(event_appender, thread_id, run_id)
+        subagent_events = _SubagentEventBuffer(event_store, thread_id, run_id)
 
         def _get_goal_evaluator_model() -> Any:
             nonlocal goal_evaluator_model
@@ -3444,170 +1405,51 @@ async def _run_agent(
                 )
             return goal_evaluator_model
 
-        constraint_start_validated = False
-        qualification_graph_start_recorded = False
-        execution_recovery_resume_counted = False
         # Built once per run, not per _stream_once call: goal continuations
         # re-enter the stream and would otherwise discard the resolved seqs.
         seq_stamper = _build_seq_stamper(event_store, thread_id, journal) if "values" in requested_modes else None
 
         async def _stream_once(input_payload: Any, stream_config: RunnableConfig) -> None:
-            nonlocal llm_error_fallback_message, constraint_start_validated, qualification_graph_start_recorded, execution_dispatch_marked, execution_recovery_resume_counted
+            nonlocal llm_error_fallback_message
             # Marked per attempt rather than once: a retried or resumed stream
-            # is a second graph start, and a turn that paid for two should say
-            # so rather than report the first.
+            # is a second graph start, and a turn that paid for two says so.
             mark_phase(TurnPhase.GRAPH_START)
             file_tool_chunk_batcher = _LargeFileToolChunkBatcher() if "messages-tuple" in requested_modes else None
             try:
                 async with _checkpoint_thread_lock(thread_id):
-                    if not constraint_start_validated and accepted_constraints is not None:
-                        from deerflow.runtime.constraints import (
-                            validate_constraint_fence,
-                        )
-
-                        validate_constraint_fence(
-                            accepted,
-                            request_digest=record.request_digest,
-                            clock=ctx.constraint_clock,
-                        )
-                        constraint_start_validated = True
-                    if not execution_dispatch_marked:
-                        if event_appender is None:
-                            if record.execution_takeover:
-                                raise RuntimeError(
-                                    "execution_dispatch_marker_unavailable",
-                                )
-                        else:
-                            dispatch_baseline_checkpoint_id = None
-                            if checkpointer is not None:
-                                dispatch_baseline_checkpoint_id = _checkpoint_id(
-                                    await checkpointer.aget_tuple(
-                                        checkpoint_config,
-                                    )
-                                )
-                            await event_appender.put_if_absent(
-                                thread_id=thread_id,
-                                run_id=run_id,
-                                event_type=(RUN_EXECUTION_STARTED_EVENT.event_type),
-                                category=(RUN_EXECUTION_STARTED_EVENT.category),
-                                content={
-                                    "version": 1,
-                                    "pre_graph_checkpoint_id": (dispatch_baseline_checkpoint_id),
-                                },
-                                metadata={},
-                            )
-                        execution_dispatch_marked = True
-                        # This qualification-only seam is deliberately after
-                        # the durable singleton and before every graph/model
-                        # or takeover-resume counter. A replacement that sees
-                        # the marker without a newer checkpoint must fail
-                        # closed; it must not re-enter this barrier.
-                        await qualification_barrier(
-                            "post_dispatch_marker_before_graph",
-                            record,
-                        )
-                    if record.execution_takeover and not execution_recovery_resume_counted:
-                        from deerflow.runtime.kubernetes_qualification import (
-                            qualification_counter,
-                        )
-
-                        await qualification_counter(
-                            "execution_takeover_resumes",
-                            record,
-                        )
-                        execution_recovery_resume_counted = True
-                    if not qualification_graph_start_recorded:
-                        from deerflow.runtime.kubernetes_qualification import (
-                            qualification_counter,
-                        )
-
-                        await qualification_counter("graph_starts", record)
-                        qualification_graph_start_recorded = True
-                    if materialization_evidence is not None:
-                        assert materialization is not None
-                        if record.ownership_lost or not await materialization.validate():
-                            raise AcceptedSkillExecutionFenceError(
-                                "accepted_skill_execution_fence_failed",
-                            )
-                    observation_scope = nullcontext()
-                    if journal is not None and accepted_for_cleanup is not None:
-                        from deerflow.agents.memory.observations import (
-                            bind_memory_observation_sink,
-                        )
-
-                        observation_scope = bind_memory_observation_sink(journal, ctx.tenant)
                     if len(lg_modes) == 1 and not stream_subgraphs:
                         # Single mode, no subgraphs: astream yields raw chunks
                         single_mode = lg_modes[0]
-                        with observation_scope:
-                            stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
-                            broke_on_abort = False
-                            try:
-                                async for chunk in stream:
-                                    if record.abort_event.is_set():
-                                        broke_on_abort = True
-                                        logger.info("Run %s abort requested — stopping", run_id)
-                                        break
-                                    llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                                    sse_event = _lg_mode_to_sse_event(single_mode)
-                                    single_payload = serialize(chunk, mode=single_mode)
-                                    if single_mode == "values" and seq_stamper is not None:
-                                        single_payload = await seq_stamper.stamp(single_payload)
-                                    await bridge.publish(run_id, sse_event, single_payload)
-                                    if single_mode == "custom":
-                                        await subagent_events.add(chunk)
-                            finally:
-                                close_error = sys.exception()
-                                try:
-                                    await _close_agent_stream(stream)
-                                except Exception:
-                                    abort_requested = broke_on_abort or record.abort_event.is_set()
-                                    if close_error is None and not abort_requested:
-                                        raise
-                                    if abort_requested:
-                                        logger.warning("Could not close aborted agent stream for run %s", run_id, exc_info=True)
-                                    else:
-                                        logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
-                        return
-                    # Multiple modes or subgraphs: astream yields tuples
-                    with observation_scope:
-                        stream = agent.astream(
-                            input_payload,
-                            config=stream_config,
-                            stream_mode=lg_modes,
-                            subgraphs=stream_subgraphs,
-                        )
+                        stream = agent.astream(input_payload, config=stream_config, stream_mode=single_mode)
                         broke_on_abort = False
                         try:
-                            async for item in stream:
+                            async for chunk in stream:
                                 if record.abort_event.is_set():
                                     broke_on_abort = True
                                     logger.info("Run %s abort requested — stopping", run_id)
                                     break
-
-                                mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
-                                if mode is None:
-                                    continue
-
-                                if not namespace:
-                                    # Only root-graph frames may decide the parent run's error
-                                    # fallback: a delegated subagent's marked fallback is the
-                                    # executor's to map (task_failed), not this run's.
+                                if single_mode != "custom":
+                                    # Custom frames carry task_* events whose payload can hold a delegated
+                                    # subagent's messages; see the multi-mode branch below.
                                     llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
-                                await _publish_stream_item(
-                                    bridge=bridge,
-                                    run_id=run_id,
-                                    mode=mode,
-                                    chunk=chunk,
-                                    namespace=namespace,
-                                    file_tool_chunk_batcher=file_tool_chunk_batcher,
-                                    subagent_events=subagent_events,
-                                    seq_stamper=seq_stamper,
-                                )
+                                sse_event = _lg_mode_to_sse_event(single_mode)
+                                single_payload = serialize(chunk, mode=single_mode)
+                                if single_mode == "values" and seq_stamper is not None:
+                                    single_payload = await seq_stamper.stamp(single_payload)
+                                await bridge.publish(run_id, sse_event, single_payload)
+                                if single_mode == "custom":
+                                    await subagent_events.add(chunk)
                         finally:
                             close_error = sys.exception()
                             try:
-                                await _close_agent_stream(stream)
+                                await close_agent_stream(stream)
+                            except asyncio.CancelledError as exc:
+                                _log_cancelled_stream_close_failure(
+                                    exc,
+                                    run_id=run_id,
+                                    abort_requested=broke_on_abort or record.abort_event.is_set(),
+                                )
+                                raise
                             except Exception:
                                 abort_requested = broke_on_abort or record.abort_event.is_set()
                                 if close_error is None and not abort_requested:
@@ -3616,24 +1458,72 @@ async def _run_agent(
                                     logger.warning("Could not close aborted agent stream for run %s", run_id, exc_info=True)
                                 else:
                                     logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
+                        return
+                    # Multiple modes or subgraphs: astream yields tuples
+                    stream = agent.astream(
+                        input_payload,
+                        config=stream_config,
+                        stream_mode=lg_modes,
+                        subgraphs=stream_subgraphs,
+                    )
+                    broke_on_abort = False
+                    try:
+                        async for item in stream:
+                            if record.abort_event.is_set():
+                                broke_on_abort = True
+                                logger.info("Run %s abort requested — stopping", run_id)
+                                break
+
+                            mode, chunk, namespace = _unpack_stream_item(item, lg_modes, stream_subgraphs)
+                            if mode is None:
+                                continue
+
+                            if not namespace and mode != "custom":
+                                # Only root-graph frames may decide the parent run's error
+                                # fallback: a delegated subagent's marked fallback is the
+                                # executor's to map (task_failed), not this run's. That
+                                # includes the child messages task_running custom events
+                                # carry, which are root frames too.
+                                llm_error_fallback_message = llm_error_fallback_message or _extract_llm_error_fallback_message(chunk, pre_existing_message_ids)
+                            await _publish_stream_item(
+                                bridge=bridge,
+                                run_id=run_id,
+                                mode=mode,
+                                chunk=chunk,
+                                namespace=namespace,
+                                file_tool_chunk_batcher=file_tool_chunk_batcher,
+                                subagent_events=subagent_events,
+                                seq_stamper=seq_stamper,
+                            )
+                    finally:
+                        close_error = sys.exception()
+                        try:
+                            await close_agent_stream(stream)
+                        except asyncio.CancelledError as exc:
+                            _log_cancelled_stream_close_failure(
+                                exc,
+                                run_id=run_id,
+                                abort_requested=broke_on_abort or record.abort_event.is_set(),
+                            )
+                            raise
+                        except Exception:
+                            abort_requested = broke_on_abort or record.abort_event.is_set()
+                            if close_error is None and not abort_requested:
+                                raise
+                            if abort_requested:
+                                logger.warning("Could not close aborted agent stream for run %s", run_id, exc_info=True)
+                            else:
+                                logger.debug("Could not close agent stream for run %s", run_id, exc_info=True)
             finally:
                 stream_error = sys.exception()
                 if file_tool_chunk_batcher is not None:
                     try:
                         for publish_chunk in file_tool_chunk_batcher.finish():
-                            await bridge.publish(
-                                run_id,
-                                "messages",
-                                serialize(publish_chunk, mode="messages"),
-                            )
+                            await bridge.publish(run_id, "messages", serialize(publish_chunk, mode="messages"))
                     except Exception:
                         if stream_error is None:
                             raise
-                        logger.debug(
-                            "Could not flush pending file-tool chunks for run %s",
-                            run_id,
-                            exc_info=True,
-                        )
+                        logger.debug("Could not flush pending file-tool chunks for run %s", run_id, exc_info=True)
 
         # 7. Stream the requested turn, then optionally continue hidden goal turns.
         # Clear any stale stop_reason before the first (user-visible) turn only.
@@ -3642,7 +1532,6 @@ async def _run_agent(
         # turns complete cleanly afterward (#4176 review).
         if isinstance(runtime.context, dict):
             runtime.context.pop("stop_reason", None)
-            runtime.context.pop(TOOL_REFUSAL_REASON_CONTEXT_KEY, None)
         await _stream_once(graph_input, initial_runnable_config)
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
@@ -3659,7 +1548,11 @@ async def _run_agent(
                 deerflow_trace_id=deerflow_trace_id,
                 task_store=task_store,
                 extensions=extensions,
+                run_stop_reason=runtime.context.get("stop_reason") if isinstance(runtime.context, dict) else None,
             )
+            if isinstance(continuation_input, _GoalCompletionCandidate):
+                goal_completion = continuation_input
+                break
             if continuation_input is None or record.abort_event.is_set():
                 break
             await _stream_once(continuation_input, _continuation_runnable_config())
@@ -3668,11 +1561,10 @@ async def _run_agent(
         if record.abort_event.is_set():
             await _finish_cancellation(record.abort_action)
         elif llm_error_fallback_message or (journal is not None and journal.had_llm_error_fallback):
-            terminal_failure = map_runtime_failure(
-                code="llm_provider_failed",
-                error_class="LLMProviderFailure",
-            )
-            error_msg = terminal_failure.public_message
+            error_msg = llm_error_fallback_message
+            if error_msg is None and journal is not None:
+                error_msg = journal.llm_error_fallback_message
+            error_msg = error_msg or "LLM provider failed after retries"
             await _ensure_finalizing_before_edit_failure(run_manager, record)
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
@@ -3699,11 +1591,6 @@ async def _run_agent(
             # collects the most severe / first / all reasons) instead of each
             # guard writing directly to the same key.
             stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
-            if stop_reason is None and runtime_context is not None and runtime_context.get("sandbox_id") is None:
-                # A refused sandbox call the run survived, and no later call got
-                # the sandbox: the turn's sandboxed work never ran. A guard's stop
-                # wins, and a turn whose retry found a slot is not refused.
-                stop_reason = runtime_context.get(TOOL_REFUSAL_REASON_CONTEXT_KEY)
             produced_output_paths = await _produced_output_paths(
                 pre_run_workspace_snapshot,
                 thread_id=thread_id,
@@ -3717,24 +1604,10 @@ async def _run_agent(
             )
             delivery_error = _delivery_error(delivery_content)
             if delivery_error is not None:
-                terminal_failure = map_runtime_failure(
-                    code="artifact_delivery_incomplete",
-                    error_class="ArtifactDeliveryFailure",
-                )
                 # The terminal status being reported is the delivery error, so
-                # the reason has to explain that one; a guard cap that fired
-                # earlier in this turn stays on the journal's middleware
-                # evidence. These two delivery branches were the only
-                # terminal-error branches in this worker that left
-                # ``stop_reason`` unset, which is what made a fenced run
-                # indistinguishable over HTTP from a generic ``RuntimeFailure``
-                # — the half of that repair which outlives the stream.
-                stop_reason = _DELIVERY_INCOMPLETE_STOP_REASON
-            if accepted_sandbox_session is not None:
-                # Success is not staged from a provider lease that was lost
-                # after the final graph operation. The subsequent run-store
-                # transition independently rechecks the SQL execution fence.
-                await accepted_sandbox_session.validate()
+                # the reason has to explain that one; without it a client that
+                # reloads cannot tell this run from any other failed run.
+                stop_reason = DELIVERY_INCOMPLETE_STOP_REASON
             cancel_action = await run_manager.set_status_if_not_cancelled(
                 run_id,
                 RunStatus.error if delivery_error else RunStatus.success,
@@ -3745,219 +1618,19 @@ async def _run_agent(
             if cancel_action is not None:
                 await _finish_cancellation(cancel_action)
             elif delivery_error is not None and not record.ownership_lost:
-                # Guarded and shielded like the receipt path below:
-                # ``set_status_if_not_cancelled`` also returns None on the
-                # ownership-loss outcomes, and a fenced worker must not narrate
-                # a terminal outcome onto a stream a peer now owns. The shield
-                # keeps a cancellation on this await from routing into
-                # ``_finish_cancellation`` and rewriting the error just
-                # committed as ``interrupted``.
-                await _await_terminal_cleanup(
-                    _publish_delivery_failure(
-                        bridge,
-                        run_id,
-                        event_type=_DELIVERY_INCOMPLETE_EVENT_TYPE,
-                        message=delivery_error,
-                        content=delivery_content,
-                    ),
-                )
-
-    except _ExecutionRecoveryTerminalized as exc:
-        # RunManager already committed the bounded terminal lifecycle under
-        # this takeover's exact owner/epoch fence. The worker must release
-        # material and end the stream without attempting a second status,
-        # receipt outcome, checkpoint, or thread projection write.
-        record.ownership_lost = True
-        disposition = ExecutionRecoveryDisposition(str(exc))
-        if disposition is ExecutionRecoveryDisposition.terminalize_tool_attempt_indeterminate:
-            message = "Recovery stopped because a prior tool attempt could not be safely reconciled."
-            stop_reason = RECOVERY_TOOL_ATTEMPT_INDETERMINATE_STOP_REASON
-        else:
-            message = "Recovery stopped because no safe durable execution checkpoint is available."
-            stop_reason = RECOVERY_CHECKPOINT_UNAVAILABLE_STOP_REASON
-        await bridge.publish(
-            run_id,
-            "error",
-            {
-                "message": message,
-                "name": "ExecutionRecoveryError",
-                "stop_reason": stop_reason,
-            },
-        )
+                await publish_delivery_failure(bridge, run_id, message=delivery_error, content=delivery_content)
 
     except asyncio.CancelledError:
         await _finish_cancellation(record.abort_action)
 
-    except ConstraintFenceError as exc:
-        error_msg = f"Invocation constraint fence failed: {exc.reason}"
-        logger.warning("Run %s failed constraint fence: %s", run_id, exc.reason)
-        await _ensure_finalizing_before_edit_failure(run_manager, record)
-        cancel_action = await run_manager.set_status_if_not_cancelled(
-            run_id,
-            RunStatus.error,
-            error=error_msg,
-            stop_reason=exc.reason,
-            **terminal_status_kwargs,
-        )
-        if cancel_action is not None:
-            await _finish_cancellation(cancel_action)
-        else:
-            await bridge.publish(
-                run_id,
-                "error",
-                {"message": error_msg, "name": "ConstraintFenceError"},
-            )
-
-    except AcceptedSkillExecutionFenceError as exc:
-        reason = str(exc)
-        error_msg = "Accepted sandbox material is no longer executable"
-        logger.warning("Run %s failed accepted sandbox fence: %s", run_id, reason)
-        await _ensure_finalizing_before_edit_failure(run_manager, record)
-        cancel_action = await run_manager.set_status_if_not_cancelled(
-            run_id,
-            RunStatus.error,
-            error=error_msg,
-            stop_reason=reason,
-            **terminal_status_kwargs,
-        )
-        if cancel_action is not None:
-            await _finish_cancellation(cancel_action)
-        else:
-            await bridge.publish(
-                run_id,
-                "error",
-                {
-                    "message": error_msg,
-                    "name": "AcceptedSkillExecutionFenceError",
-                },
-            )
-
-    except AssemblyEvidenceError as exc:
-        fence_lost = exc.code == "assembly_evidence_fence_lost"
-        unavailable = exc.code in {
-            "assembly_descriptor_missing",
-        }
-        stop_reason = "assembly_evidence_unavailable" if unavailable else "agent_assembly_drift"
-        error_msg = "Agent assembly evidence is unavailable" if unavailable else "Agent assembly does not match the accepted durable execution"
-        logger.warning("Run %s failed agent assembly evidence: %s", run_id, exc.code)
-        if fence_lost:
-            record.ownership_lost = True
-            await bridge.publish(
-                run_id,
-                "error",
-                {
-                    "message": "Agent assembly evidence ownership fence was lost",
-                    "name": "AssemblyEvidenceFenceLostError",
-                },
-            )
-        else:
-            await _ensure_finalizing_before_edit_failure(run_manager, record)
-            cancel_action = await run_manager.set_status_if_not_cancelled(
-                run_id,
-                RunStatus.error,
-                error=error_msg,
-                stop_reason=stop_reason,
-                **terminal_status_kwargs,
-            )
-            if cancel_action is not None:
-                await _finish_cancellation(cancel_action)
-            else:
-                await bridge.publish(
-                    run_id,
-                    "error",
-                    {
-                        "message": error_msg,
-                        "name": "AssemblyEvidenceError",
-                    },
-                )
-
-    except ExecutionPolicyError as exc:
-        error_msg = "Accepted execution policy stopped this run"
-        await _ensure_finalizing_before_edit_failure(run_manager, record)
-        cancel_action = await run_manager.set_status_if_not_cancelled(
-            run_id,
-            RunStatus.error,
-            error=error_msg,
-            stop_reason=exc.code,
-            **terminal_status_kwargs,
-        )
-        if cancel_action is not None:
-            await _finish_cancellation(cancel_action)
-        else:
-            await bridge.publish(
-                run_id,
-                "error",
-                {
-                    "message": error_msg,
-                    "name": "ExecutionPolicyError",
-                    "stop_reason": exc.code,
-                },
-            )
-
-    except SandboxCapacityExceededError as exc:
-        # Not a crash, and it must not read like one. A durable profile
-        # materializes before the run starts, so its refusal never passes a
-        # tool boundary (the tenant profile's is raised from the first sandbox
-        # tool call and ends as a tool result instead), and the generic handler below
-        # would give the person "Runtime operation failed (reference: <hex>)"
-        # -- indistinguishable from a real fault, and nothing an operator or a
-        # tenant can act on. The message is a first-party constant chosen from
-        # the exception's type, never its text, so the disclosure discipline
-        # the generic handler exists for is unchanged.
-        error_msg = SANDBOX_CAPACITY_MESSAGE
-        logger.warning(
-            "Run %s could not start: every sandbox slot is in use (replicas=%s, retry after %.0fs)",
-            run_id,
-            exc.replicas,
-            exc.retry_after_seconds,
-        )
-        await _ensure_finalizing_before_edit_failure(run_manager, record)
-        cancel_action = await run_manager.set_status_if_not_cancelled(
-            run_id,
-            RunStatus.error,
-            error=error_msg,
-            stop_reason=SANDBOX_CAPACITY_STOP_REASON,
-            **terminal_status_kwargs,
-        )
-        if cancel_action is not None:
-            await _finish_cancellation(cancel_action)
-        else:
-            await bridge.publish(
-                run_id,
-                "error",
-                {
-                    "message": error_msg,
-                    "name": "SandboxCapacityExceededError",
-                    "stop_reason": SANDBOX_CAPACITY_STOP_REASON,
-                },
-            )
-
-    except RuntimeEventOwnershipLost:
-        runtime_event_authority_rejected = True
-        logger.warning(
-            "Run %s stopped after its runtime-event write authority changed",
-            run_id,
-        )
-
     except Exception as exc:
-        terminal_failure = map_runtime_failure(
-            code="run_execution_failed",
-            error=exc,
-        )
-        error_msg = terminal_failure.public_message
-        logger.error(
-            "Run failed run_id=%s code=%s error_class=%s correlation_id=%s",
-            run_id,
-            terminal_failure.code,
-            terminal_failure.error_class,
-            terminal_failure.correlation_id,
-        )
+        error_msg = f"{exc}"
+        logger.exception("Run %s failed: %s", run_id, error_msg)
         await _ensure_finalizing_before_edit_failure(run_manager, record)
         cancel_action = await run_manager.set_status_if_not_cancelled(
             run_id,
             RunStatus.error,
             error=error_msg,
-            stop_reason=RECURSION_LIMIT_STOP_REASON if isinstance(exc, GraphRecursionError) else None,
             **terminal_status_kwargs,
         )
         if cancel_action is not None:
@@ -3968,449 +1641,226 @@ async def _run_agent(
                 "error",
                 {
                     "message": error_msg,
-                    "name": "RuntimeFailure",
+                    "name": type(exc).__name__,
                 },
             )
 
     finally:
-        active_terminal_exception = sys.exception()
-        if active_terminal_exception is not None and not isinstance(
-            active_terminal_exception,
-            Exception,
-        ):
-            _defer_stop_interrupt(active_terminal_exception)
-        if accepted_sandbox_session is not None:
-            await _await_terminal_cleanup(
-                _publish_accepted_sandbox_lifecycle_during_cleanup(),
-                interrupt_current=True,
-            )
-        await _await_terminal_cleanup(
-            _publish_sandbox_diagnostics_during_cleanup(),
-            interrupt_current=True,
-        )
-        if started and getattr(run_manager, "heartbeat_enabled", False) and not record.ownership_lost:
-            try:
-                refreshed_cancel = await _await_terminal_cleanup(
-                    run_manager.refresh_owned_cancellation(run_id),
-                )
-            except Exception as exc:
-                failure = map_runtime_failure(
-                    code="runtime_event_authority_refresh_failed",
-                    error=exc,
-                )
+        try:
+            if record.ownership_lost:
                 logger.warning(
-                    "Runtime-event authority refresh failed run_id=%s code=%s error_class=%s correlation_id=%s",
+                    "Skipping durable finalization for run %s because this worker no longer owns its lease",
                     run_id,
-                    failure.code,
-                    failure.error_class,
-                    failure.correlation_id,
                 )
-                refreshed_cancel = None
-            if refreshed_cancel is not None:
-                await _await_terminal_cleanup(
-                    _finish_cancellation(refreshed_cancel),
-                )
-            elif runtime_event_authority_rejected:
-                record.ownership_lost = True
 
-        if materialization_evidence is not None:
-            try:
-                await _await_terminal_cleanup(
-                    run_manager.set_execution_lease_renewal(run_id, None),
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to clear accepted sandbox renewal for run %s",
-                    run_id,
-                    exc_info=True,
-                )
-        if record.ownership_lost:
-            logger.warning(
-                "Skipping durable finalization for run %s because this worker no longer owns its lease",
-                run_id,
-            )
-
-        checkpoint_access_authorized = not requires_assembly_evidence or assembly_evidence_bound
-
-        if not record.ownership_lost and checkpoint_access_authorized and _is_edit_replay_run(record) and record.status != RunStatus.success:
-            if not record.finalizing:
-                await _await_terminal_cleanup(
-                    run_manager.set_finalizing(run_id, True),
-                )
-            try:
-                if not checkpoint_rollback_completed:
-                    checkpoint_rollback_completed = await _await_terminal_cleanup(
-                        _rollback_to_pre_run_checkpoint(
+            if not record.ownership_lost and _is_edit_replay_run(record) and record.status != RunStatus.success:
+                if not record.finalizing:
+                    await run_manager.set_finalizing(run_id, True)
+                try:
+                    if not checkpoint_rollback_completed:
+                        checkpoint_rollback_completed = await _rollback_to_pre_run_checkpoint(
                             accessor=accessor,
                             checkpointer=checkpointer,
                             thread_id=thread_id,
                             run_id=run_id,
                             rollback_point=rollback_point,
                             snapshot_capture_failed=snapshot_capture_failed,
-                        ),
-                        interrupted_result=False,
-                    )
-                if checkpoint_rollback_completed:
-                    await _await_terminal_cleanup(
-                        _publish_restored_checkpoint_values(
+                        )
+                    if checkpoint_rollback_completed:
+                        await _publish_restored_checkpoint_values(
                             bridge=bridge,
                             run_id=run_id,
                             accessor=accessor,
                             thread_id=thread_id,
-                        ),
-                    )
-                    logger.info(
-                        "Run %s edit replay restored pre-run checkpoint %s",
-                        run_id,
-                        pre_run_checkpoint_id,
-                    )
-            except Exception:
-                logger.warning("Run %s edit replay rollback failed", run_id, exc_info=True)
+                        )
+                        logger.info("Run %s edit replay restored pre-run checkpoint %s", run_id, pre_run_checkpoint_id)
+                except Exception:
+                    logger.warning("Run %s edit replay rollback failed", run_id, exc_info=True)
 
-        # Persist any subagent step events still buffered (#3779) — including on
-        # abort/exception paths, where the stream loop broke before its own flush.
-        if not record.ownership_lost and subagent_events is not None:
-            try:
-                await _await_terminal_cleanup(subagent_events.flush())
-            except RuntimeEventOwnershipLost:
-                record.ownership_lost = True
+            # Persist any subagent step events still buffered (#3779) — including on
+            # abort/exception paths, where the stream loop broke before its own flush.
+            if not record.ownership_lost and subagent_events is not None:
+                await subagent_events.flush()
 
-        if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
-            try:
-                await _await_terminal_cleanup(
-                    record_workspace_changes(
-                        event_appender,
+            if not record.ownership_lost and event_store is not None and pre_run_workspace_snapshot is not None:
+                try:
+                    await record_workspace_changes(
+                        event_store,
                         thread_id,
                         run_id,
                         pre_run_workspace_snapshot,
                         user_id=workspace_changes_user_id,
                         extra_excluded_dir_names=workspace_excluded_dir_names,
-                    ),
-                )
-            except RuntimeEventOwnershipLost:
-                record.ownership_lost = True
-            except Exception as exc:
-                failure = map_runtime_failure(
-                    code="workspace_event_write_failed",
-                    error=exc,
-                )
-                logger.warning(
-                    "Workspace event write failed run_id=%s code=%s error_class=%s correlation_id=%s",
-                    run_id,
-                    failure.code,
-                    failure.error_class,
-                    failure.correlation_id,
-                )
+                    )
+                except Exception:
+                    logger.warning("Failed to record workspace changes for run %s", run_id, exc_info=True)
 
-        # Flush buffered journal events before the terminal receipt. The
-        # receipt uses a run-scoped idempotent write shared with recovery, then
-        # the staged terminal status is persisted. This ordering closes the
-        # crash window where a terminal run could otherwise outlive its receipt.
-        # A fenced worker leaves receipt recovery to the peer that claimed it.
-        if not record.ownership_lost and journal is not None:
-            try:
-                await _await_terminal_cleanup(journal.flush())
-            except RuntimeEventOwnershipLost:
-                record.ownership_lost = True
-            except Exception as exc:
-                failure = map_runtime_failure(
-                    code="run_journal_write_failed",
-                    error=exc,
-                )
-                logger.warning(
-                    "Run journal write failed run_id=%s code=%s error_class=%s correlation_id=%s",
-                    run_id,
-                    failure.code,
-                    failure.error_class,
-                    failure.correlation_id,
-                )
+            # Flush buffered journal events before the terminal receipt. The
+            # receipt uses a run-scoped idempotent write shared with recovery, then
+            # the staged terminal status is persisted. This ordering closes the
+            # crash window where a terminal run could otherwise outlive its receipt.
+            # A fenced worker leaves receipt recovery to the peer that claimed it.
+            if not record.ownership_lost and journal is not None:
+                try:
+                    await journal.flush()
+                except Exception:
+                    logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
 
-            if not record.ownership_lost and delivery_content is None:
-                if produced_output_paths is None:
-                    produced_output_paths = await _await_terminal_cleanup(
-                        _produced_output_paths(
+                if delivery_content is None:
+                    if produced_output_paths is None:
+                        produced_output_paths = await _produced_output_paths(
                             pre_run_workspace_snapshot,
                             thread_id=thread_id,
                             user_id=workspace_changes_user_id,
                             extra_excluded_dir_names=workspace_excluded_dir_names,
-                        ),
-                        interrupted_result=[],
+                        )
+                    delivery_content = _delivery_content_with_outputs(
+                        journal.get_delivery_content(),
+                        produced_output_paths,
+                        _runtime_presented_files(getattr(runtime, "context", None)),
                     )
-                delivery_content = _delivery_content_with_outputs(
-                    journal.get_delivery_content(),
-                    produced_output_paths,
-                    _runtime_presented_files(runtime.context if isinstance(getattr(runtime, "context", None), dict) else None),
+                receipt_persisted = await _persist_delivery_receipt(
+                    event_store,
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    content=delivery_content,
                 )
-            if not record.ownership_lost:
-                try:
-                    receipt_persisted = await _await_terminal_cleanup(
-                        _persist_delivery_receipt(
-                            event_appender,
-                            thread_id=thread_id,
-                            run_id=run_id,
-                            content=delivery_content,
-                        ),
-                        interrupted_result=False,
-                    )
-                except RuntimeEventOwnershipLost:
-                    record.ownership_lost = True
-                    receipt_persisted = False
-            if not record.ownership_lost and produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
-                terminal_failure = map_runtime_failure(
-                    code="delivery_receipt_failed",
-                    error_class="DeliveryReceiptFailure",
-                )
-                await _await_terminal_cleanup(
-                    run_manager.set_status(
+                if produced_output_paths and record.status == RunStatus.success and not receipt_persisted:
+                    await run_manager.set_status(
                         run_id,
                         RunStatus.error,
                         error=_DELIVERY_RECEIPT_FAILED_ERROR,
-                        stop_reason=_DELIVERY_RECEIPT_STOP_REASON,
                         persist=False,
-                    ),
-                )
-                await _await_terminal_cleanup(
-                    _publish_delivery_failure(
-                        bridge,
-                        run_id,
-                        event_type=_DELIVERY_UNVERIFIED_EVENT_TYPE,
-                        message=_DELIVERY_RECEIPT_FAILED_ERROR,
-                    ),
-                )
+                    )
 
-            if not record.ownership_lost:
-                journal.record_terminal_summary(
-                    status=record.status.value,
-                    stop_reason=record.stop_reason,
-                    failure=terminal_failure,
-                )
+            if not record.ownership_lost and journal is not None and persist_completion:
                 try:
-                    await _await_terminal_cleanup(journal.flush())
-                except RuntimeEventOwnershipLost:
-                    record.ownership_lost = True
-                except Exception as exc:
-                    failure = map_runtime_failure(
-                        code="terminal_summary_write_failed",
-                        error=exc,
-                    )
-                    logger.warning(
-                        "Terminal summary write failed run_id=%s code=%s error_class=%s correlation_id=%s",
-                        run_id,
-                        failure.code,
-                        failure.error_class,
-                        failure.correlation_id,
-                    )
+                    # Advance the final completion fields and timestamp without
+                    # terminalizing the durable row. That active row continues to
+                    # fence peer checkpoint writers through the duration write.
+                    completion_data = journal.get_completion_data()
+                    await run_manager.update_finalizing_progress(run_id, **completion_data)
+                except Exception:
+                    logger.warning("Failed to persist finalizing run progress for %s (non-fatal)", run_id, exc_info=True)
 
-        # Persist run duration to checkpoint metadata while the durable run row
-        # is still active. This keeps a peer checkpoint writer from entering
-        # between the final graph output and the attribution write.
-        if started and not record.ownership_lost and checkpoint_access_authorized and checkpointer is not None and record.status == RunStatus.success:
-            try:
-                created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
-                updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
-                # Match legacy history semantics: turn_duration is the whole
-                # RunRecord lifetime in integer seconds, including admission
-                # delay. Persist zero for sub-second successful turns.
-                duration = max(0, int((updated - created).total_seconds()))
-                await _await_terminal_cleanup(
-                    _persist_run_duration(
+            # Keep the durable run row active through its final duration checkpoint
+            # write. A peer Gateway admits history migration from the durable row,
+            # not this worker's staged terminal status; terminalizing first would
+            # let that migration read an unfinished lifetime and race this write.
+            if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.success:
+                try:
+                    created = datetime.fromisoformat(record.created_at.replace("Z", "+00:00"))
+                    updated = datetime.fromisoformat(record.updated_at.replace("Z", "+00:00"))
+                    # Match legacy history semantics: turn_duration is the whole
+                    # RunRecord lifetime in integer seconds, including admission
+                    # delay. Persist zero for sub-second successful turns.
+                    duration = max(0, int((updated - created).total_seconds()))
+                    await _persist_run_duration(
                         checkpointer=checkpointer,
                         thread_id=thread_id,
                         run_id=run_id,
                         duration_seconds=duration,
-                    ),
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to persist run duration for thread %s run %s (non-fatal)",
-                    thread_id,
-                    run_id,
-                )
-
-        if not record.ownership_lost and event_store is not None and accepted_sandbox_session is not None:
-            try:
-                # Re-sample both authorities immediately before the durable
-                # terminal CAS. Earlier validation cannot cover delivery,
-                # lifecycle, or checkpoint awaits in this cleanup path.
-                await _await_terminal_cleanup(
-                    accepted_sandbox_session.validate(),
-                    propagate_inner_interrupt=True,
-                )
-            except Exception:
-                record.ownership_lost = True
-                logger.warning(
-                    "Skipping terminal persistence after accepted sandbox authority loss for run %s",
-                    run_id,
-                )
-            except BaseException as exc:
-                record.ownership_lost = True
-                if deferred_stop_interrupt is None:
-                    deferred_stop_interrupt = exc
-                logger.warning(
-                    "Accepted sandbox terminal validation interrupted for run %s; completing cleanup first",
-                    run_id,
-                )
-
-        if not record.ownership_lost and event_store is not None:
-            try:
-                from deerflow.runtime.kubernetes_qualification import (
-                    qualification_barrier,
-                    qualification_counter,
-                )
-
-                await _await_terminal_cleanup(
-                    qualification_counter("terminal_commit_attempts", record),
-                )
-                await _await_terminal_cleanup(
-                    qualification_barrier(
-                        "terminal_before_lifecycle_commit",
-                        record,
-                    ),
-                )
-                # Even after bounded receipt retries are exhausted, persist the
-                # real worker outcome. Leaving a successful row inflight would
-                # let lease recovery rewrite it as an error with a synthetic
-                # zero receipt.
-                if record.abort_event.is_set():
-                    await _await_terminal_cleanup(
-                        run_manager.persist_current_status(run_id),
                     )
-                else:
-                    cancel_action = await _await_terminal_cleanup(
-                        run_manager.set_status_if_not_cancelled(
+                except Exception:
+                    logger.debug("Failed to persist run duration for thread %s run %s (non-fatal)", thread_id, run_id)
+
+            if not record.ownership_lost and event_store is not None:
+                try:
+                    # Even after bounded receipt retries are exhausted, persist the
+                    # real worker outcome. Leaving a successful row inflight would
+                    # let lease recovery rewrite it as an error with a synthetic
+                    # zero receipt.
+                    if record.abort_event.is_set():
+                        await run_manager.persist_current_status(run_id)
+                    else:
+                        cancel_action = await run_manager.set_status_if_not_cancelled(
                             run_id,
                             record.status,
                             error=record.error,
                             stop_reason=record.stop_reason,
-                        ),
-                    )
-                    if cancel_action is not None:
-                        await _await_terminal_cleanup(
-                            _finish_cancellation(cancel_action),
                         )
-                        await _await_terminal_cleanup(
-                            run_manager.persist_current_status(run_id),
-                        )
-            except Exception:
-                logger.warning(
-                    "Failed to persist terminal status for run %s after delivery receipt attempts",
-                    run_id,
-                    exc_info=True,
-                )
+                        if cancel_action is not None:
+                            await _finish_cancellation(cancel_action)
+                            await run_manager.persist_current_status(run_id)
+                except Exception:
+                    logger.warning("Failed to persist terminal status for run %s after delivery receipt attempts", run_id, exc_info=True)
 
-        if not record.ownership_lost and journal is not None and persist_completion:
-            try:
-                # Persist token usage + convenience fields to RunStore
-                completion = journal.get_completion_data()
-                await _await_terminal_cleanup(
-                    run_manager.update_run_completion(
-                        run_id,
-                        status=record.status.value,
-                        **completion,
-                    ),
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to persist run completion for %s (non-fatal)",
-                    run_id,
-                    exc_info=True,
-                )
+            if not record.ownership_lost and journal is not None and persist_completion:
+                try:
+                    # Persist token usage + convenience fields to RunStore
+                    completion_data = completion_data or journal.get_completion_data()
+                    await run_manager.update_run_completion(run_id, status=record.status.value, **completion_data)
+                except Exception:
+                    logger.warning("Failed to persist run completion for %s (non-fatal)", run_id, exc_info=True)
 
-        if started and not record.ownership_lost and checkpoint_access_authorized and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
-            try:
-                await _await_terminal_cleanup(
-                    run_manager.wait_for_prior_finalizing(thread_id, run_id),
-                )
-                has_later_started_run = await _await_terminal_cleanup(
-                    run_manager.has_later_started_run(thread_id, run_id),
-                    interrupted_result=True,
-                )
-                if not has_later_started_run:
-                    await _await_terminal_cleanup(
-                        _ensure_interrupted_title(
+            # A satisfied evaluator is only a candidate until artifact delivery,
+            # receipt persistence and durable cancellation arbitration have ended.
+            # Status writes are best-effort in single-worker mode: confirm the
+            # existing outcome before deleting recoverable goal state.
+            if goal_completion is not None and record.status == RunStatus.success and not record.abort_event.is_set() and not record.ownership_lost:
+                try:
+                    if await run_manager.persist_current_status(run_id):
+                        await _clear_completed_goal(
+                            candidate=goal_completion,
+                            record=record,
+                            run_manager=run_manager,
+                            bridge=bridge,
+                            accessor=accessor,
                             checkpointer=checkpointer,
-                            thread_id=thread_id,
-                            app_config=ctx.app_config,
-                            graph_input=graph_input,
-                        ),
+                        )
+                except Exception:
+                    logger.warning("Could not finalize satisfied goal for thread %s", thread_id, exc_info=True)
+
+            if started and not record.ownership_lost and checkpointer is not None and record.status == RunStatus.interrupted and not _is_edit_replay_run(record):
+                try:
+                    await run_manager.wait_for_prior_finalizing(thread_id, run_id)
+                    if not await run_manager.has_later_started_run(thread_id, run_id):
+                        await _ensure_interrupted_title(checkpointer=checkpointer, thread_id=thread_id, app_config=ctx.app_config, graph_input=graph_input)
+                except Exception:
+                    logger.debug("Failed to generate interrupted title for thread %s (non-fatal)", thread_id)
+
+            # Sync title from checkpoint to threads_meta.display_name
+            if started and not record.ownership_lost and checkpointer is not None and thread_store is not None:
+                try:
+                    ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
+                    ckpt_tuple = await checkpointer.aget_tuple(ckpt_config)
+                    if ckpt_tuple is not None:
+                        ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
+                        title = ckpt.get("channel_values", {}).get("title")
+                        if title:
+                            await thread_store.update_display_name(thread_id, title)
+                except Exception:
+                    logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
+
+            # Update threads_meta status based on run outcome
+            if started and not record.ownership_lost and thread_store is not None:
+                try:
+                    final_status = "idle" if record.status == RunStatus.success else record.status.value
+                    await thread_store.update_status(thread_id, final_status)
+                except Exception:
+                    logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
+
+            if not record.ownership_lost and ctx.on_run_completed is not None:
+                try:
+                    await ctx.on_run_completed(record)
+                except Exception:
+                    logger.warning("Run completion hook failed for %s (non-fatal)", run_id, exc_info=True)
+                except BaseException as exc:
+                    # A terminal hook must not leave replacement runs blocked or
+                    # stream consumers waiting indefinitely.
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
                     )
-            except Exception:
-                logger.debug(
-                    "Failed to generate interrupted title for thread %s (non-fatal)",
-                    thread_id,
-                )
+                    logger.warning(
+                        "Run completion hook interrupted for %s; completing finalization first",
+                        run_id,
+                    )
 
-        projected_title: str | None = None
-        if started and not record.ownership_lost and checkpoint_access_authorized and checkpointer is not None:
-            try:
-                ckpt_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
-                ckpt_tuple = await _await_terminal_cleanup(
-                    checkpointer.aget_tuple(ckpt_config),
-                )
-                if ckpt_tuple is not None:
-                    ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
-                    title = ckpt.get("channel_values", {}).get("title")
-                    if isinstance(title, str) and title:
-                        projected_title = title
-            except Exception:
-                logger.debug(
-                    "Failed to read projected title for thread %s (non-fatal)",
-                    thread_id,
-                )
-
-        # Project title/status together only when this worker owns the exact
-        # terminal capability and this run remains the latest admission.
-        terminal_projection_owner_id = record.terminal_projection_owner_worker_id
-        terminal_projection_active_version = record.terminal_projection_active_state_version
-        if started and not record.ownership_lost and thread_store is not None and terminal_projection_owner_id is not None and terminal_projection_active_version is not None and type(record.checkpoint_terminal_state_version) is int:
-            try:
-                final_status = "idle" if record.status == RunStatus.success else record.status.value
-                await _await_terminal_cleanup(
-                    thread_store.project_run(
-                        ThreadMetaRunProjection(
-                            run_id=run_id,
-                            thread_id=thread_id,
-                            owner_worker_id=terminal_projection_owner_id,
-                            active_state_version=(terminal_projection_active_version),
-                            terminal_state_version=(record.checkpoint_terminal_state_version),
-                            status=final_status,
-                            display_name=projected_title,
-                        ),
-                        user_id=record.user_id,
-                    ),
-                )
-            except Exception:
-                logger.debug(
-                    "Failed to project terminal thread_meta fields for %s (non-fatal)",
-                    thread_id,
-                )
-
-        if not record.ownership_lost and ctx.on_run_completed is not None:
-            try:
-                await _await_terminal_cleanup(
-                    ctx.on_run_completed(record),
-                    interrupt_current=True,
-                )
-            except Exception:
-                logger.warning(
-                    "Run completion hook failed for %s (non-fatal)",
-                    run_id,
-                    exc_info=True,
-                )
-            except BaseException as exc:
-                # A cancellation or other control-flow interruption must not
-                # bypass stream closure and local reference cleanup.
-                _defer_stop_interrupt(exc)
-                logger.warning(
-                    "Run completion hook interrupted for run %s; completing cleanup first",
-                    run_id,
-                )
-
-        if not record.ownership_lost and task_info is not None and task_store is not None:
-            # Keep the finalizing barrier held until stop observers finish, so
-            # a same-thread replacement cannot overlap this task's lifecycle.
-            try:
-                await _await_terminal_cleanup(
+            if task_info is not None and task_store is not None:
+                # Keep the finalizing barrier held until stop observers finish, so
+                # a same-thread replacement cannot overlap this task's lifecycle.
+                task_stop = asyncio.create_task(
                     notify_task_stop(
                         extensions,
                         task_store,
@@ -4421,187 +1871,169 @@ async def _run_agent(
                         ),
                         timeout=_EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS,
                     ),
-                    interrupt_current=True,
+                    name=f"extension-task-stop-{run_id}",
                 )
-            except Exception:
-                logger.warning(
-                    "Extension task-stop notification failed for run %s (non-fatal)",
-                    run_id,
-                    exc_info=True,
-                )
-            except BaseException as exc:
-                # Cancellation here must not strand the finalizing barrier or
-                # leave stream consumers waiting for the end frame.
-                _defer_stop_interrupt(exc)
-                logger.warning(
-                    "Extension task-stop notification interrupted for run %s; completing cleanup first",
-                    run_id,
-                )
-        if record.finalizing:
-            await _await_terminal_cleanup(
-                run_manager.set_finalizing(run_id, False),
-            )
-
-        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-        projection_coordinator = get_skill_projection_coordinator()
-        projection_token = None
-        if skill_binding_user_id is not None:
-            projection_token = projection_coordinator.token_for_consumer(
-                user_id=skill_binding_user_id,
-                thread_id=thread_id,
-                run_id=run_id,
-                consumer_id=f"run:{run_id}:lead",
-            )
-        if projection_token is not None:
-            from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
-
-            try:
-                await _await_terminal_cleanup(
-                    asyncio.to_thread(
-                        release_accepted_skill_consumer,
-                        projection_token,
-                    ),
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to release accepted skill projection consumer for run %s",
-                    run_id,
-                    exc_info=True,
-                )
-        elif skill_binding_user_id is not None:
-            projection_coordinator.release_unactivated_run(
-                user_id=skill_binding_user_id,
-                thread_id=thread_id,
-                run_id=run_id,
-            )
-
-        if accepted_sandbox_session is not None:
-            try:
-                await _await_terminal_cleanup(
-                    accepted_sandbox_session.close(),
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to release accepted materialization for run %s",
-                    run_id,
-                    exc_info=True,
-                )
-            except BaseException as exc:
-                # Preserve cancellation/interrupt semantics, but do not let an
-                # interrupted provider release bypass lifecycle publication or
-                # the rest of the worker's terminal cleanup.
-                _defer_stop_interrupt(exc)
-                logger.warning(
-                    "Accepted materialization cleanup interrupted for run %s; completing terminal cleanup first",
-                    run_id,
-                )
-            await _await_terminal_cleanup(
-                _publish_accepted_sandbox_lifecycle_during_cleanup(),
-                interrupt_current=True,
-            )
-            from deerflow.sandbox.accepted_material import (
-                withdraw_accepted_sandbox_session,
-            )
-
-            withdraw_accepted_sandbox_session(accepted_sandbox_session)
-        elif materialization is not None:
-            try:
-                await _await_terminal_cleanup(materialization.release())
-            except Exception:
-                logger.warning(
-                    "Failed to release accepted materialization for run %s",
-                    run_id,
-                    exc_info=True,
-                )
-        # Both session kinds: publish what the run's sandbox recorded after the
-        # last release, then forget the stream so a later run starts clean.
-        await _await_terminal_cleanup(
-            _publish_sandbox_diagnostics_during_cleanup(),
-            interrupt_current=True,
-        )
-        from deerflow.sandbox.diagnostics import discard_sandbox_diagnostics
-
-        discard_sandbox_diagnostics(run_id)
-
-        if pinned_material_for_cleanup is not None:
-            try:
-                await _await_terminal_cleanup(
-                    asyncio.to_thread(
-                        pinned_material_for_cleanup.release_process_material,
-                    ),
-                )
-            except Exception:
-                logger.warning(
-                    "Failed to release accepted skill snapshot for run %s",
-                    run_id,
-                    exc_info=True,
-                )
-        if dispatch_ledger is not None:
-            dispatch_ledger.close()
-        if not record.ownership_lost:
-            try:
-                await _await_terminal_cleanup(bridge.publish_end(run_id))
-            except BaseException as exc:
-                if deferred_stop_interrupt is None:
-                    deferred_stop_interrupt = exc
-                else:
+                try:
+                    deferred_finalization_interrupt = await _await_task_stop_after_host_cancellation(
+                        task_stop,
+                        deferred_finalization_interrupt,
+                    )
+                except Exception:
                     logger.warning(
-                        "Stream end publication failed while another terminal interruption was pending for run %s",
+                        "Extension task-stop notification failed for run %s (non-fatal)",
                         run_id,
                         exc_info=True,
                     )
+                except BaseException as exc:
+                    # Cancellation here must not strand the finalizing barrier or
+                    # leave stream consumers waiting for the end frame.
+                    deferred_finalization_interrupt = _defer_finalization_interrupt(
+                        deferred_finalization_interrupt,
+                        exc,
+                    )
+                    logger.warning(
+                        "Extension task-stop notification interrupted for run %s; completing cleanup first",
+                        run_id,
+                    )
+            if record.finalizing:
+                await run_manager.set_finalizing(run_id, False)
 
-        if journal is not None:
+            await bridge.publish_end(run_id)
+
+            if deferred_finalization_interrupt is not None:
+                raise deferred_finalization_interrupt
+        finally:
             try:
-                await _await_terminal_cleanup(
-                    journal.close(flush=not record.ownership_lost),
-                )
-            except Exception:
-                logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
-        try:
-            from deerflow.sandbox.lease import release_sandbox_execution_lease_async
+                if journal is not None:
+                    try:
+                        await journal.close(flush=not record.ownership_lost)
+                    except Exception:
+                        logger.warning("Failed to close journal for run %s", run_id, exc_info=True)
+            finally:
+                lease_cleanup_interrupt: BaseException | None = None
+                try:
+                    from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
-            # release_async completes the underlying cleanup before it re-raises
-            # cancellation; _await_terminal_cleanup defers that interruption until
-            # the worker has dropped its other run-scoped references too.
-            await _await_terminal_cleanup(release_sandbox_execution_lease_async(runtime_ctx))
-        except Exception:
-            logger.warning("Failed to release sandbox execution lease for run %s", run_id, exc_info=True)
+                    await release_sandbox_execution_lease_async(runtime_ctx)
+                except Exception:
+                    logger.warning("Failed to release sandbox execution lease for run %s", run_id, exc_info=True)
+                except BaseException as exc:
+                    # release_async completes the underlying cleanup before it
+                    # re-raises cancellation. Defer that interruption until the
+                    # worker has dropped all other run-scoped references too.
+                    lease_cleanup_interrupt = exc
+                    logger.warning(
+                        "Sandbox execution lease cleanup was interrupted for run %s; completing local cleanup first",
+                        run_id,
+                    )
+                finally:
+                    _release_run_scoped_references(
+                        runnable_configs,
+                        runtime_ctx,
+                        journal,
+                    )
+                # Drop graph and per-run payload references before the terminal
+                # worker task itself becomes collectable.
+                agent = None
+                agent_result = None
+                accessor = None
+                runtime = None
+                runtime_ctx = None
+                rollback_point = None
+                subagent_events = None
+                goal_evaluator_model = None
+                goal_completion = None
+                task_store = None
+                task_info = None
+                pre_run_workspace_snapshot = None
+                delivery_content = None
+                produced_output_paths = None
+                graph_input = {}
 
-        _release_run_scoped_references(
-            runnable_configs,
-            runtime_ctx,
-            journal,
-        )
-        # Drop graph and per-run payload references before the terminal worker
-        # task itself becomes collectable.
-        agent = None
-        accessor = None
-        runtime = None
-        runtime_ctx = None
-        rollback_point = None
-        subagent_events = None
-        goal_evaluator_model = None
-        task_store = None
-        task_info = None
-        pre_run_workspace_snapshot = None
-        delivery_content = None
-        produced_output_paths = None
-        graph_input = {}
+                # Durable finalization and terminal publication may depend on
+                # external backends, but local housekeeping must always run.
+                _create_contextless_task(bridge.cleanup(run_id, delay=60))
+                # Preserve the existing five-minute grace period for local
+                # join/status paths, then release the terminal record, completed
+                # task, and request payload. Durable run history remains available
+                # through RunStore.
+                _create_contextless_task(run_manager.cleanup(run_id))
+                _schedule_terminal_cycle_collection()
 
-        # Local housekeeping must run even when durable finalization was fenced.
-        _create_contextless_task(bridge.cleanup(run_id, delay=60))
-        _create_contextless_task(run_manager.cleanup(run_id))
-        _schedule_terminal_cycle_collection()
-
-        if deferred_stop_interrupt is not None:
-            raise deferred_stop_interrupt
+                if lease_cleanup_interrupt is not None:
+                    raise lease_cleanup_interrupt
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class _GoalCompletionCandidate:
+    goal: GoalState
+    conversation_signature: str
+
+
+async def _clear_completed_goal(
+    *,
+    candidate: _GoalCompletionCandidate,
+    record: RunRecord,
+    run_manager: RunManager,
+    bridge: StreamBridge,
+    accessor: CheckpointStateAccessor,
+    checkpointer: Any,
+) -> None:
+    """Clear only the evaluated goal after the run has successfully finalized."""
+    try:
+        # Terminal status has released the run's admission. Use the same durable
+        # reservation as other out-of-run checkpoint writers; a peer that already
+        # admitted a new run wins, even before it has written any checkpoint.
+        async with (
+            goal_thread_lock(record.thread_id),
+            run_manager.reserve_thread_operation(record.thread_id, kind=ThreadOperationKind.checkpoint_write, user_id=record.user_id),
+        ):
+            checkpoint_tuple = await _call_checkpointer_method(
+                checkpointer,
+                "aget_tuple",
+                "get_tuple",
+                {"configurable": {"thread_id": record.thread_id, "checkpoint_ns": ""}},
+            )
+            if checkpoint_tuple is None:
+                logger.debug("Skipping goal completion for run %s: checkpoint is unavailable", record.run_id)
+                return
+            # Full equality is intentional: even same-instance goal updates must win over clearing.
+            if _read_checkpoint_goal(checkpoint_tuple) != candidate.goal:
+                logger.debug("Skipping goal completion for run %s: goal snapshot changed", record.run_id)
+                return
+            messages = await _materialized_checkpoint_messages(accessor, record.thread_id)
+            if visible_conversation_signature(messages) != candidate.conversation_signature:
+                logger.debug("Skipping goal completion for run %s: visible conversation changed", record.run_id)
+                return
+            if record.status != RunStatus.success or record.abort_event.is_set() or record.ownership_lost:
+                logger.debug(
+                    "Skipping goal completion for run %s: status=%s, aborted=%s, ownership_lost=%s",
+                    record.run_id,
+                    record.status.value,
+                    record.abort_event.is_set(),
+                    record.ownership_lost,
+                )
+                return
+            # Duration bookkeeping may advance the checkpoint after evaluation.
+            # Compare goal/conversation above, then guard against stale writes.
+            values = await write_thread_goal(
+                checkpointer,
+                record.thread_id,
+                None,
+                as_node="goal_evaluator",
+                expected_checkpoint_id=_checkpoint_id(checkpoint_tuple),
+            )
+            await bridge.publish(record.run_id, "values", serialize(values, mode="values"))
+    except GoalWriteConflict:
+        logger.debug("Skipping goal completion for run %s: checkpoint changed before the goal write", record.run_id)
+        return
+    except ConflictError:
+        return
 
 
 def _checkpoint_id(checkpoint_tuple: Any) -> str | None:
@@ -4663,6 +2095,24 @@ def _has_durable_goal_turn_receipt(checkpoint_tuple: Any, messages: list[Any]) -
     if not visible_messages:
         return False
     return _message_type(visible_messages[-1]) == "ai"
+
+
+def _ends_on_human_input_request(messages: list[Any]) -> bool:
+    """Return true when the turn ended on a Human Input Card the user has not answered.
+
+    ``ask_clarification`` and the sandbox network prompt put the request in a
+    ToolMessage artifact and end the graph there, so it sits in the trailing run of
+    tool results. Continuing would tell the agent to keep going while the question is
+    still open, so the evaluator is not asked.
+    """
+    for message in reversed(messages):
+        if _message_type(message) != "tool":
+            return False
+        artifact = message.get("artifact") if isinstance(message, dict) else getattr(message, "artifact", None)
+        human_input = artifact.get("human_input") if isinstance(artifact, Mapping) else None
+        if isinstance(human_input, Mapping) and human_input.get("kind") == "human_input_request":
+            return True
+    return False
 
 
 def _stand_down_reason(goal: GoalState, evaluation: GoalEvaluation, no_progress_count: int) -> str | None:
@@ -4764,8 +2214,9 @@ async def _prepare_goal_continuation_input(
     deerflow_trace_id: str | None = None,
     task_store: Any | None = None,
     extensions: Any | None = None,
-) -> dict[str, Any] | None:
-    """Evaluate the active goal and return a hidden continuation input if needed.
+    run_stop_reason: str | None = None,
+) -> dict[str, Any] | _GoalCompletionCandidate | None:
+    """Return a continuation input or a completion candidate for finalization.
 
     NOTE: The re-reads below catch a racing user message or ``/goal clear``
     before we queue a continuation. Goal writes then serialize per thread and
@@ -4780,12 +2231,7 @@ async def _prepare_goal_continuation_input(
     try:
         goal = await read_thread_goal(checkpointer, thread_id)
     except Exception:
-        logger.warning(
-            "Could not read goal for thread %s after run %s",
-            thread_id,
-            run_id,
-            exc_info=True,
-        )
+        logger.warning("Could not read goal for thread %s after run %s", thread_id, run_id, exc_info=True)
         return None
     if not goal or goal.get("status") != "active":
         return None
@@ -4826,6 +2272,19 @@ async def _prepare_goal_continuation_input(
         conversation_signature_before = visible_conversation_signature(messages)
         evidence_signature = latest_visible_assistant_signature(messages)
 
+        if _ends_on_human_input_request(messages):
+            # The agent asked the user something. Continuing would tell it to keep
+            # going while the question is still open on screen.
+            evaluation = GoalEvaluation(
+                satisfied=False,
+                blocker="needs_user_input",
+                reason="The turn ended on a question to the user that has not been answered.",
+                evidence_summary="",
+            )
+            no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason=_stand_down_reason(goal, evaluation, no_progress_count))
+            return None
+
         if not _has_durable_goal_turn_receipt(checkpoint_tuple, messages):
             evaluation = GoalEvaluation(
                 satisfied=False,
@@ -4834,16 +2293,16 @@ async def _prepare_goal_continuation_input(
                 evidence_summary="",
             )
             no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
-            await _persist(
-                goal,
-                evaluation,
-                no_progress_count,
-                stand_down_reason="no_durable_end_of_turn",
-            )
+            await _persist(goal, evaluation, no_progress_count, stand_down_reason="no_durable_end_of_turn")
             return None
 
         if abort_event is not None and abort_event.is_set():
             return None
+    except Exception:
+        logger.warning("Could not prepare goal evaluation for thread %s after run %s", thread_id, run_id, exc_info=True)
+        return None
+
+    try:
         evaluator_model = evaluator_model_factory() if evaluator_model_factory is not None else None
         evaluation = await evaluate_goal_completion(
             goal,
@@ -4857,15 +2316,23 @@ async def _prepare_goal_continuation_input(
             task_store=task_store,
             extensions=extensions,
         )
+    except Exception as exc:
+        logger.warning("Goal evaluator failed for thread %s after run %s", thread_id, run_id, exc_info=True)
         if abort_event is not None and abort_event.is_set():
             return None
-    except Exception:
-        logger.warning(
-            "Goal evaluator failed for thread %s after run %s",
-            thread_id,
-            run_id,
-            exc_info=True,
+        # Record the failure like the other stand-downs; otherwise the goal keeps the
+        # previous run's verdict, or none. Only the exception type is stored: a provider's
+        # error message can carry request details, and the traceback is logged above.
+        evaluation = GoalEvaluation(
+            satisfied=False,
+            blocker="run_failed",
+            reason=f"The goal evaluator did not return a verdict ({type(exc).__name__}).",
+            evidence_summary="",
         )
+        no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
+        await _persist(goal, evaluation, no_progress_count, stand_down_reason="evaluator_failed")
+        return None
+    if abort_event is not None and abort_event.is_set():
         return None
 
     no_progress_count = compute_no_progress_count(goal, evaluation, evidence_signature=evidence_signature)
@@ -4875,11 +2342,7 @@ async def _prepare_goal_continuation_input(
     try:
         current_goal, current_checkpoint_tuple = await _reread_goal_and_checkpoint(checkpointer, thread_id)
     except Exception:
-        logger.warning(
-            "Could not re-check goal state for thread %s after evaluation",
-            thread_id,
-            exc_info=True,
-        )
+        logger.warning("Could not re-check goal state for thread %s after evaluation", thread_id, exc_info=True)
         return None
 
     if not _goal_instance_matches(goal, current_goal) or current_checkpoint_tuple is None:
@@ -4888,43 +2351,18 @@ async def _prepare_goal_continuation_input(
     checkpoint_changed = _checkpoint_id(current_checkpoint_tuple) != checkpoint_id_before
     messages_changed = visible_conversation_signature(await _materialized_checkpoint_messages(accessor, thread_id)) != conversation_signature_before
     if checkpoint_changed or messages_changed:
-        await _persist(
-            current_goal,
-            evaluation,
-            no_progress_count,
-            stand_down_reason="thread_changed_after_evaluation",
-        )
+        await _persist(current_goal, evaluation, no_progress_count, stand_down_reason="thread_changed_after_evaluation")
         return None
 
     if evaluation["satisfied"]:
-        try:
-            async with goal_thread_lock(thread_id):
-                latest_checkpoint_tuple = await _call_checkpointer_method(
-                    checkpointer,
-                    "aget_tuple",
-                    "get_tuple",
-                    {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}},
-                )
-                if latest_checkpoint_tuple is None:
-                    return None
-                latest_goal = _read_checkpoint_goal(latest_checkpoint_tuple)
-                if latest_goal is None or not _goal_instance_matches(goal, latest_goal):
-                    return None
-                values = await write_thread_goal(
-                    checkpointer,
-                    thread_id,
-                    None,
-                    as_node="goal_evaluator",
-                    expected_checkpoint_id=_checkpoint_id(latest_checkpoint_tuple),
-                )
-            await bridge.publish(run_id, "values", serialize(values, mode="values"))
-        except GoalWriteConflict:
-            return None
-        except Exception:
-            logger.warning("Could not clear satisfied goal for thread %s", thread_id, exc_info=True)
-        return None
+        return _GoalCompletionCandidate(copy.deepcopy(current_goal), conversation_signature_before)
 
     stand_down_reason = _stand_down_reason(goal, evaluation, no_progress_count)
+    if stand_down_reason is None and run_stop_reason == "token_capped":
+        # The run already used up its token budget, and continuations share that
+        # budget, so another hidden turn would spend one more model call only to
+        # have its tool calls stripped.
+        stand_down_reason = "token_capped"
     if stand_down_reason is not None or not should_continue_goal(goal, evaluation, no_progress_count=no_progress_count):
         await _persist(goal, evaluation, no_progress_count, stand_down_reason=stand_down_reason)
         return None
@@ -4939,11 +2377,7 @@ async def _prepare_goal_continuation_input(
     try:
         latest_goal, latest_checkpoint_tuple = await _reread_goal_and_checkpoint(checkpointer, thread_id)
     except Exception:
-        logger.warning(
-            "Could not verify queued goal continuation for thread %s",
-            thread_id,
-            exc_info=True,
-        )
+        logger.warning("Could not verify queued goal continuation for thread %s", thread_id, exc_info=True)
         return None
     if not _goal_instance_matches(updated_goal, latest_goal) or latest_checkpoint_tuple is None:
         return None
@@ -5139,27 +2573,18 @@ async def _linearize_delta_checkpoint_resume(
         # Selecting the head is already linear — no sibling can exist yet.
         return None
 
-    source_config: dict[str, Any] = {
-        "configurable": {
-            "thread_id": thread_id,
-            "checkpoint_ns": "",
-            "checkpoint_id": checkpoint_id,
-        }
-    }
+    source_config: dict[str, Any] = {"configurable": {"thread_id": thread_id, "checkpoint_ns": "", "checkpoint_id": checkpoint_id}}
     snapshot = await accessor.aget(source_config)
     values = getattr(snapshot, "values", None) or {}
     messages = values.get("messages") if isinstance(values, dict) else None
     if not isinstance(messages, list):
         raise RuntimeError(f"Run {run_id} could not materialize resume checkpoint {checkpoint_id}")
+    head_config["metadata"] = checkpoint_agent_binding_metadata(getattr(snapshot, "metadata", None))
 
     # Write through the thread's effective schema so every application and
     # middleware channel can be restored. Reducer channels need Overwrite to
     # replace their already-aggregated value instead of merging it again.
-    mutation_graph = build_state_mutation_graph(
-        "checkpoint_resume",
-        accessor.mode,
-        graph_state_schema(getattr(accessor, "graph", None)),
-    )
+    mutation_graph = build_state_mutation_graph("checkpoint_resume", accessor.mode, graph_state_schema(getattr(accessor, "graph", None)))
     selected_values = dict(values)
     head_values = getattr(head, "values", None) or {}
     head_values = dict(head_values) if isinstance(head_values, dict) else {}
@@ -5175,12 +2600,7 @@ async def _linearize_delta_checkpoint_resume(
     await mutation_accessor.aupdate(head_config, replacement_values, as_node="checkpoint_resume")
     configurable.pop("checkpoint_id", None)
     configurable.pop("checkpoint_map", None)
-    logger.info(
-        "Run %s linearized a delta-mode resume of checkpoint %s onto thread %s",
-        run_id,
-        checkpoint_id,
-        thread_id,
-    )
+    logger.info("Run %s linearized a delta-mode resume of checkpoint %s onto thread %s", run_id, checkpoint_id, thread_id)
     return list(messages)
 
 
@@ -5229,11 +2649,7 @@ async def _rollback_to_pre_run_checkpoint(
     # Compile with the thread's effective schema so middleware-contributed
     # channels survive (the base ThreadState fallback would silently drop
     # them).
-    mutation_graph = build_state_mutation_graph(
-        "rollback_restore",
-        accessor.mode,
-        graph_state_schema(getattr(accessor, "graph", None)),
-    )
+    mutation_graph = build_state_mutation_graph("rollback_restore", accessor.mode, graph_state_schema(getattr(accessor, "graph", None)))
     mutation_accessor = CheckpointStateAccessor.bind(mutation_graph, checkpointer, mode=accessor.mode)
     if accessor.mode == "delta":
         # A delta rollback fork has the same write-ownership problem as a
@@ -5253,8 +2669,13 @@ async def _rollback_to_pre_run_checkpoint(
             operation="rollback",
         )
     else:
-        restore_config = rollback_point.config
+        restore_config = {
+            **rollback_point.config,
+            "configurable": dict(rollback_point.config.get("configurable", {})),
+        }
         replacement_values = {"messages": Overwrite(list(rollback_point.messages))}
+
+    restore_config["metadata"] = checkpoint_agent_binding_metadata(rollback_point.metadata)
 
     restored_config = await mutation_accessor.aupdate(
         restore_config,
@@ -5508,13 +2929,7 @@ async def _persist_run_duration(
     )
 
 
-async def _ensure_interrupted_title(
-    *,
-    checkpointer: Any,
-    thread_id: str,
-    app_config: AppConfig | None,
-    graph_input: Any | None = None,
-) -> str | None:
+async def _ensure_interrupted_title(*, checkpointer: Any, thread_id: str, app_config: AppConfig | None, graph_input: Any | None = None) -> str | None:
     """Persist a local fallback title for interrupted first-turn runs.
 
     Returns the title that is now persisted (existing or newly written), or
@@ -5535,10 +2950,7 @@ async def _ensure_interrupted_title(
         if existing_title:
             return existing_title
 
-        result = middleware._generate_title_result(
-            _title_generation_state(channel_values, graph_input),
-            allow_partial_exchange=True,
-        )
+        result = middleware._generate_title_result(_title_generation_state(channel_values, graph_input), allow_partial_exchange=True)
         title = result.get("title") if isinstance(result, dict) else None
         if not title:
             return None
@@ -5587,13 +2999,7 @@ async def _ensure_interrupted_title(
         # Parent to the checkpoint this write was derived from - a parentless
         # raw write would sever Delta-channel replay ancestry (and truncate
         # full-mode history walks).
-        write_config = {
-            "configurable": {
-                "thread_id": thread_id,
-                "checkpoint_ns": checkpoint_ns,
-                "checkpoint_id": latest_identity,
-            }
-        }
+        write_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": checkpoint_ns, "checkpoint_id": latest_identity}}
         await _call_checkpointer_method(
             checkpointer,
             "aput",

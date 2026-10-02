@@ -25,37 +25,11 @@ from deerflow.runtime.checkpointer.provider import POSTGRES_INSTALL
 from deerflow.runtime.store import get_store, reset_store
 from deerflow.runtime.store.provider import POSTGRES_STORE_INSTALL
 
-# A deadlock guard, not a performance assertion. The concurrency tests below
-# claim that eight threads get one instance, not that they get it quickly, so
-# a loaded box -- CI, or a developer running the suite in parallel -- must not
-# read as a failure. Only a genuine hang should trip these.
-_DEADLOCK_GUARD_S = 30
-
-
-def _prime_app_config() -> None:
-    """Take the lazy ``config.yaml`` load before a test installs an override.
-
-    The first ``get_app_config()`` in a process re-applies every singleton
-    section, the checkpointer's included, and can call ``reset_checkpointer()``
-    on the way. Left to happen inside a test, it discards the config that test
-    just loaded; left to happen inside the concurrency tests it also puts eight
-    simultaneous file parses and a singleton reset inside the window under
-    test. Production loads the file at startup, so this puts these tests on the
-    same side of it.
-    """
-    from deerflow.config.app_config import get_app_config
-
-    try:
-        get_app_config()
-    except FileNotFoundError:
-        pass  # No config.yaml to load, so nothing can clobber an override.
-
 
 @pytest.fixture(autouse=True)
 def reset_state():
     """Reset singleton state before each test."""
     app_config_module._app_config = None
-    _prime_app_config()
     set_checkpointer_config(None)
     reset_checkpointer()
     reset_store()
@@ -77,7 +51,7 @@ class _BlockingSingletonContext:
         with self._stats["lock"]:
             self._stats["enters"] += 1
             self._entered.set()
-        assert self._release.wait(timeout=_DEADLOCK_GUARD_S), "timed out waiting to release singleton initialization"
+        assert self._release.wait(timeout=3), "timed out waiting to release singleton initialization"
         return self._value
 
     def __exit__(self, exc_type, exc, tb):
@@ -135,13 +109,13 @@ def _call_getter_concurrently(getter, workers: int = 8) -> list[object]:
     ready = Barrier(workers + 1)
 
     def worker():
-        ready.wait(timeout=_DEADLOCK_GUARD_S)
+        ready.wait(timeout=3)
         return getter()
 
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(worker) for _ in range(workers)]
-        ready.wait(timeout=_DEADLOCK_GUARD_S)
-        return [future.result(timeout=_DEADLOCK_GUARD_S) for future in futures]
+        ready.wait(timeout=3)
+        return [future.result(timeout=3) for future in futures]
 
 
 # ---------------------------------------------------------------------------
@@ -193,12 +167,6 @@ class TestCheckpointerConfig:
         assert get_checkpointer_config() is None
 
     def test_ensure_config_loaded_loads_app_config_when_uninitialized(self):
-        # This one is about the uninitialized state, which ``reset_state``
-        # deliberately leaves behind: ``ensure_config_loaded`` returns early
-        # once ``_app_config`` is set. State the precondition here rather than
-        # inherit it, so the fixture stays free to mirror a started process.
-        app_config_module._app_config = None
-
         def fake_get_app_config():
             load_checkpointer_config_from_dict({"type": "memory"})
 
@@ -240,7 +208,7 @@ class TestHarnessPackaging:
         assert "postgres" in optional_dependencies
         assert optional_dependencies["postgres"] == [
             "asyncpg>=0.29",
-            "langgraph-checkpoint-postgres>=3.1.1,<3.2",
+            "langgraph-checkpoint-postgres>=3.1.2,<3.2",
             "psycopg[binary]>=3.3.3",
             "psycopg-pool>=3.3.0",
         ]
@@ -524,10 +492,10 @@ class TestSyncSingletonThreadSafety:
             futures_started = ThreadPoolExecutor(max_workers=1)
             try:
                 result_future = futures_started.submit(_call_getter_concurrently, get_checkpointer)
-                assert factory.entered.wait(timeout=_DEADLOCK_GUARD_S)
+                assert factory.entered.wait(timeout=3)
                 factory.release.wait(timeout=0.05)
                 factory.release.set()
-                results = result_future.result(timeout=_DEADLOCK_GUARD_S)
+                results = result_future.result(timeout=3)
             finally:
                 futures_started.shutdown(wait=True)
 
@@ -542,10 +510,10 @@ class TestSyncSingletonThreadSafety:
             futures_started = ThreadPoolExecutor(max_workers=1)
             try:
                 result_future = futures_started.submit(_call_getter_concurrently, get_store)
-                assert factory.entered.wait(timeout=_DEADLOCK_GUARD_S)
+                assert factory.entered.wait(timeout=3)
                 factory.release.wait(timeout=0.05)
                 factory.release.set()
-                results = result_future.result(timeout=_DEADLOCK_GUARD_S)
+                results = result_future.result(timeout=3)
             finally:
                 futures_started.shutdown(wait=True)
 
@@ -593,7 +561,7 @@ class TestSyncSingletonThreadSafety:
             ThreadPoolExecutor(max_workers=2) as executor,
         ):
             get_future = executor.submit(get_checkpointer)
-            assert factory.entered.wait(timeout=_DEADLOCK_GUARD_S)
+            assert factory.entered.wait(timeout=3)
 
             reset_started = Event()
 
@@ -602,15 +570,15 @@ class TestSyncSingletonThreadSafety:
                 reset_checkpointer()
 
             reset_future = executor.submit(reset_worker)
-            assert reset_started.wait(timeout=_DEADLOCK_GUARD_S)
+            assert reset_started.wait(timeout=3)
             factory.release.wait(timeout=0.05)
 
             assert not reset_future.done()
             assert factory.exit_count() == 0
 
             factory.release.set()
-            assert get_future.result(timeout=_DEADLOCK_GUARD_S) is factory.value
-            reset_future.result(timeout=_DEADLOCK_GUARD_S)
+            assert get_future.result(timeout=3) is factory.value
+            reset_future.result(timeout=3)
 
         assert factory.exit_count() == 1
 
@@ -623,7 +591,7 @@ class TestSyncSingletonThreadSafety:
             ThreadPoolExecutor(max_workers=2) as executor,
         ):
             get_future = executor.submit(get_store)
-            assert factory.entered.wait(timeout=_DEADLOCK_GUARD_S)
+            assert factory.entered.wait(timeout=3)
 
             reset_started = Event()
 
@@ -632,15 +600,15 @@ class TestSyncSingletonThreadSafety:
                 reset_store()
 
             reset_future = executor.submit(reset_worker)
-            assert reset_started.wait(timeout=_DEADLOCK_GUARD_S)
+            assert reset_started.wait(timeout=3)
             factory.release.wait(timeout=0.05)
 
             assert not reset_future.done()
             assert factory.exit_count() == 0
 
             factory.release.set()
-            assert get_future.result(timeout=_DEADLOCK_GUARD_S) is factory.value
-            reset_future.result(timeout=_DEADLOCK_GUARD_S)
+            assert get_future.result(timeout=3) is factory.value
+            reset_future.result(timeout=3)
 
         assert factory.exit_count() == 1
 
@@ -1187,6 +1155,92 @@ class TestStoreDatabaseConfig:
         with patch("deerflow.runtime.store.provider.get_app_config", return_value=app_config):
             with store_context() as store:
                 assert isinstance(store, InMemoryStore)
+
+
+# ---------------------------------------------------------------------------
+# SQLite URI connection strings
+# ---------------------------------------------------------------------------
+
+# LangGraph's SQLite ``from_conn_string`` factories connect without
+# ``uri=True``, so SQLite treats a ``file:`` URI as a literal filename.
+SQLITE_URIS = [
+    "file:rel.db?mode=rwc",
+    "file::memory:?cache=shared",
+    "file:memdb1?mode=memory&cache=shared",
+]
+
+
+class TestSqliteUriRejection:
+    """A ``file:`` URI must fail closed instead of creating a file named after it."""
+
+    @pytest.mark.parametrize("conn_string", SQLITE_URIS)
+    def test_resolve_rejects_uri(self, conn_string):
+        from deerflow.runtime.store._sqlite_utils import resolve_sqlite_conn_str
+
+        with pytest.raises(ValueError, match="SQLite URI"):
+            resolve_sqlite_conn_str(conn_string)
+
+    def test_resolve_keeps_memory_and_resolves_paths(self, tmp_path):
+        from deerflow.runtime.store._sqlite_utils import resolve_sqlite_conn_str
+
+        assert resolve_sqlite_conn_str(":memory:") == ":memory:"
+        assert resolve_sqlite_conn_str(str(tmp_path / "cp.db")) == str(tmp_path / "cp.db")
+
+    @pytest.mark.parametrize("conn_string", ["FILE:x.db", "File:x.db"])
+    def test_resolve_treats_non_lowercase_file_prefix_as_path(self, conn_string):
+        """SQLite only recognizes a lowercase ``file:`` prefix as a URI, even with ``uri=True``."""
+        from deerflow.config.paths import resolve_path
+        from deerflow.runtime.store._sqlite_utils import resolve_sqlite_conn_str
+
+        assert resolve_sqlite_conn_str(conn_string) == str(resolve_path(conn_string))
+
+    @pytest.mark.parametrize("conn_string", SQLITE_URIS)
+    def test_sync_checkpointer_rejects_uri(self, conn_string, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": conn_string})
+
+        with pytest.raises(ValueError, match="SQLite URI"):
+            get_checkpointer()
+
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.parametrize("conn_string", SQLITE_URIS)
+    def test_sync_store_rejects_uri(self, conn_string, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        load_checkpointer_config_from_dict({"type": "sqlite", "connection_string": conn_string})
+
+        with pytest.raises(ValueError, match="SQLite URI"):
+            get_store()
+
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("conn_string", SQLITE_URIS)
+    async def test_async_checkpointer_rejects_uri(self, conn_string, tmp_path, monkeypatch):
+        from deerflow.runtime.checkpointer.async_provider import make_checkpointer
+
+        monkeypatch.chdir(tmp_path)
+        app_config = SimpleNamespace(checkpointer=CheckpointerConfig(type="sqlite", connection_string=conn_string), database=None)
+
+        with pytest.raises(ValueError, match="SQLite URI"):
+            async with make_checkpointer(app_config):
+                pass
+
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("conn_string", SQLITE_URIS)
+    async def test_async_store_rejects_uri(self, conn_string, tmp_path, monkeypatch):
+        from deerflow.runtime.store.async_provider import make_store
+
+        monkeypatch.chdir(tmp_path)
+        app_config = SimpleNamespace(checkpointer=CheckpointerConfig(type="sqlite", connection_string=conn_string), database=None)
+
+        with pytest.raises(ValueError, match="SQLite URI"):
+            async with make_store(app_config):
+                pass
+
+        assert list(tmp_path.iterdir()) == []
 
 
 # ---------------------------------------------------------------------------

@@ -27,7 +27,6 @@ from deerflow.community.direct_fetch.client import (
     FetchedPage,
 )
 from deerflow.community.web_fetch_outcome import FetchRefusal, describe_refusal, refusal_meta
-from deerflow.retrieval import RETRIEVAL_TOOL_METADATA_KEY, retrieval_tool_declaration
 
 PUBLIC = ipaddress.ip_address("93.184.216.34")
 PUBLIC_V6 = ipaddress.ip_address("2606:2800:220:1:248:1893:25c8:1946")
@@ -293,7 +292,6 @@ def test_only_a_bounded_number_of_pages_are_read_at_once(monkeypatch: pytest.Mon
         finally:
             live -= 1
 
-    monkeypatch.setattr(fetch_tools, "get_active_retrieval_handoff", lambda: None)
     monkeypatch.setattr(fetch_tools, "get_app_config", lambda: object())
     monkeypatch.setattr(
         fetch_tools,
@@ -317,7 +315,6 @@ def test_only_a_bounded_number_of_pages_are_read_at_once(monkeypatch: pytest.Mon
 
 
 def _tool_result(url: str, wire: _Wire, monkeypatch: pytest.MonkeyPatch, resolver: Any = None) -> Command:
-    monkeypatch.setattr(fetch_tools, "get_active_retrieval_handoff", lambda: None)
     monkeypatch.setattr(fetch_tools, "_client_from_config", lambda _cfg: DirectFetchClient(resolver=resolver or _resolver([PUBLIC]), transport=wire.transport))
     monkeypatch.setattr(fetch_tools, "get_app_config", lambda: object())
     result = asyncio.run(fetch_tools.web_fetch_tool.coroutine(url, tool_call_id="call-1"))
@@ -365,14 +362,6 @@ def test_a_provider_refusal_reads_as_unavailable_for_the_turn_and_is_stamped_pro
     assert "unavailable for the rest of this turn" in text and "Do not call it again" in text
     meta = ToolResultMeta(**refusal_meta(refusal))
     assert meta.error_scope == "provider" and meta.recoverable_by_model is False and meta.recommended_next_action == "stop"
-
-
-def test_the_tool_declares_itself_as_evidence_bearing_retrieval() -> None:
-    declaration = retrieval_tool_declaration(fetch_tools.web_fetch_tool)
-    assert declaration is not None
-    assert declaration.provider_id == fetch_tools.PROVIDER_ID and declaration.tool_kind == "web_fetch"
-    assert declaration.protected_argument_fields == ("url",)
-    assert RETRIEVAL_TOOL_METADATA_KEY in fetch_tools.web_fetch_tool.metadata
 
 
 def test_the_url_is_the_models_only_visible_argument() -> None:

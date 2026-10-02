@@ -16,6 +16,13 @@ A user-owned IM channel connection is a **per-DeerFlow-user bind layer** layered
 2. **One-time bind codes** — the browser Connect flow mints a short-lived `secrets.token_urlsafe(16)` code (600 s TTL, single-use) and surfaces it only in the initiating user's browser. The platform worker consumes `/connect <code>` (Telegram uses `/start <code>` over a deep link) before applying any `allowed_users` filter, so a not-yet-allowlisted user can complete their first bind.
 3. **Strict ownership transfer** — the latest successful bind wins; `upsert_connection` revokes other owners' active rows for the same external identity. The DB-enforced partial unique index `uq_channel_connection_active_identity` (`WHERE status != 'revoked'`) makes the invariant race-free across concurrent writers.
 
+### Conversation-scoped Custom Agents
+
+Connected users can run `/agent list` to inspect the Custom Agents in their own DeerFlow user bucket, then `/agent use <name>` to start a new conversation with one.
+The selection is written to the new Gateway thread's channel metadata and, for a Custom Agent, to the canonical `agent_name` routing metadata used by the Web UI. It is cached by `ChannelManager` for subsequent turns; on restart, the manager reads the channel metadata before the first resumed turn. Opening that thread from Web search therefore continues under the same Custom Agent instead of falling back to the default runtime.
+Because selecting an agent always creates a new thread instead of mutating the current one, an existing conversation keeps its original runtime, prompt, skills, and checkpoint lineage.
+`/agent use lead_agent` starts a new conversation with the default agent.
+
 Connect codes are deliberately **bind-time defenses**, not chat-time defenses. After binding, ordinary `allowed_users` continue to gate regular messages exactly as before.
 
 ## Connect-code Flow
@@ -455,14 +462,6 @@ Connection records live in SQL tables under `deerflow.persistence.channel_connec
 - `channel_credentials`: reserved for future provider-token flows, not used by the local/private binding flow.
 
 Incoming messages that resolve to a connection carry `connection_id`, `owner_user_id`, and `workspace_id`. `ChannelManager` uses `owner_user_id` as the DeerFlow run user id and preserves the raw platform user id as `channel_user_id`.
-After re-reading that connection by provider identity and matching its active owner,
-the host creates the `connection` source binding used by durable idempotency and
-sealed Origin evidence. The ordinary path performs that read in `ChannelManager`;
-Buzz performs the same repository lookup in its signed relay adapter before its
-channel-specific manager policy. A claimed connection or binding on the message is
-not sufficient. Signed webhook channels such as GitHub do not create a synthetic
-connection row: they use a separate authenticated route binding and keep their
-thread mapping in the ordinary channel store.
 
 Runtime provider credentials are deployment-level bot secrets, not user-owned
 connection credentials. They can come from `channels.*` in `config.yaml` or

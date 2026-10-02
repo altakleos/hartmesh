@@ -230,9 +230,6 @@ class SandboxBackend(ABC):
         user_id: str | None = None,
         provision_lark_cli_runtime: bool = False,
         provision_lark_cli_broker: bool = False,
-        accepted_skills_only: bool = False,
-        accepted_skill_binding: object | None = None,
-        egress_allowance: object | None = None,
     ) -> SandboxInfo:
         """Create/provision a new sandbox.
 
@@ -249,13 +246,6 @@ class SandboxBackend(ABC):
                 broker sidecar (Pattern B, issue #4338) so credentials stay out of
                 the sandbox. Supersedes ``provision_lark_cli_runtime`` when the
                 backend supports it; backends that can't do this ignore it.
-            accepted_skill_binding: Optional immutable accepted-skill request.
-                Only a backend with a verified materialization contract may use it.
-            accepted_skills_only: Exclude every mutable live-skill projection even
-                when the accepted set is empty.
-            egress_allowance: The accepted Kind's run-bound ``EgressAllowanceV1``.
-                Only a backend that renders it into the sandbox's network policy
-                and attests the rendered digest may accept it.
 
         Returns:
             SandboxInfo with connection details.
@@ -292,16 +282,6 @@ class SandboxBackend(ABC):
             True if the sandbox appears to be alive.
         """
         ...
-
-    def renew_accepted_attempt(self, info: SandboxInfo) -> bool:
-        """Renew a backend-native accepted-material attempt when present.
-
-        Backends without an expiring native attempt keep their existing
-        lifecycle semantics. Remote Kubernetes overrides this fail-closed seam.
-        """
-
-        del info
-        return True
 
     @abstractmethod
     def discover(self, sandbox_id: str) -> SandboxInfo | None:

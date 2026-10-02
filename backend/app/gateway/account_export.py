@@ -73,14 +73,73 @@ from typing import Any
 
 from app.gateway import transcript
 from app.gateway.artifact_archive import ArtifactArchiveError, copy_file, reserved_dir_names, unsafe_entry_parts
-from app.gateway.routers.agents import owned_agent_documents
-from app.gateway.routers.memory import memory_export_document
+from deerflow.config import agents_config
 from deerflow.config.account_export_config import AccountExportConfig
+from deerflow.config.agents_api_config import get_agents_api_config
 from deerflow.config.paths import Paths
 from deerflow.constants import MCP_INTERNAL_DIRNAME
-from deerflow.runtime.owner_holdings import Ended
+from deerflow.persistence.agents import get_agent_store
+from deerflow.persistence.agents.file import FileAgentStore
 
 logger = logging.getLogger(__name__)
+
+
+def owned_agent_documents(user_id: str) -> list[dict] | None:
+    """Each custom agent this person made, as ``GET /agents`` describes it; ``None`` where the feature is off.
+
+    Blocking IO (the agent store); call it off the event loop.
+    """
+    from app.gateway.routers.agents import _agent_config_to_response
+
+    if not get_agents_api_config().enabled:
+        return None
+    documents = []
+    unreadable = 0
+    store = get_agent_store()
+    if isinstance(store, FileAgentStore):
+        # Only the person's own directory: the store's listing also offers the
+        # legacy shared agents, which everyone sees and nobody owns. Read one
+        # by one so an unreadable agent is counted and never named in a log.
+        root = agents_config.get_paths().user_agents_dir(user_id)
+        names = sorted(entry.name for entry in root.iterdir() if not entry.is_symlink() and entry.is_dir() and (entry / "config.yaml").is_file()) if root.is_dir() else []
+        owned = []
+        for name in names:
+            try:
+                owned.append(store.get(name, user_id=user_id))
+            except Exception:  # noqa: BLE001 - one bad agent must not hide the rest; its message can quote the person's file
+                unreadable += 1
+    else:
+        owned = store.list(user_id=user_id)
+    for agent in owned:
+        try:
+            documents.append(_agent_config_to_response(agent, include_soul=True, user_id=user_id).model_dump(mode="json"))
+        except Exception:  # noqa: BLE001 - one agent that cannot be read must not keep the rest from the person; its message can quote the file
+            unreadable += 1
+    if unreadable:
+        logger.warning("Left %d unreadable custom agents out of a listing", unreadable)
+    return documents
+
+
+async def memory_export_document(user_id: str, *, agent_name: str | None = None) -> dict[str, Any] | None:
+    """The document ``GET /memory/export`` answers for this person, or ``None`` when the backend keeps no full document.
+
+    ``agent_name``: what that custom agent remembers instead of the person's
+    own memory.
+    """
+    from fastapi import HTTPException
+
+    from app.gateway.routers import memory as memory_router
+
+    manager = await asyncio.to_thread(memory_router.get_memory_manager)
+    try:
+        selected_agent = memory_router._management_agent_name_or_501(manager, agent_name)
+        memory_data = await memory_router._get_memory_or_501(manager, user_id, "export memory", agent_name=selected_agent)
+    except HTTPException as exc:
+        if exc.status_code == 501:
+            return None
+        raise
+    return memory_router.MemoryResponse(**memory_data).model_dump(mode="json", exclude_none=True)
+
 
 MANIFEST_NAME = "manifest.json"
 README_NAME = "README.md"
@@ -556,9 +615,9 @@ class AccountExportService:
         logger.info("Account export for user %s removed (%s)", user_id, job.state)
         return True
 
-    def end_for_owners(self, owners: frozenset[str]) -> dict[str, Ended]:
-        """A refused person's export is thrown away: nobody may download it now (``OwnerHoldings`` source)."""
-        ended = {owner: Ended(1) for owner in owners if self.discard(owner)}
+    def end_for_owners(self, owners: frozenset[str]) -> dict[str, int]:
+        """A refused person's export is thrown away: nobody may download it now."""
+        ended = {owner: 1 for owner in owners if self.discard(owner)}
         if ended:
             logger.info("Discarded %d account exports of refused accounts", len(ended))
         return ended

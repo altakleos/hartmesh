@@ -1,7 +1,6 @@
-# Copilot Onboarding Instructions for Hartmesh
+# Copilot Onboarding Instructions for DeerFlow
 
-`AGENTS.md` is the source of truth for this repository. This onboarding guide
-supplements it; use the module guides for current command and architecture depth.
+Use this file as the default operating guide for this repository. Follow it first, and only search the codebase when this file is incomplete or incorrect.
 
 ## 1) Repository Summary
 
@@ -67,14 +66,13 @@ CI parity:
 
 ### C. Frontend validation
 
-Run from `frontend-hm/`.
+Run from `frontend/`.
 
 Recommended reliable sequence:
 
 ```bash
-pnpm format
-pnpm check
-pnpm test
+pnpm lint
+pnpm typecheck
 BETTER_AUTH_SECRET=local-dev-secret pnpm build
 ```
 
@@ -83,8 +81,7 @@ Observed failure modes and workarounds:
 - `pnpm build` fails without `BETTER_AUTH_SECRET` in production-mode env validation.
 - Workaround: set `BETTER_AUTH_SECRET` (best) or set `SKIP_ENV_VALIDATION=1`.
 - Even with `SKIP_ENV_VALIDATION=1`, Better Auth can still warn/error in logs about default secret; prefer setting a real non-default secret.
-- `pnpm check` runs ESLint and TypeScript. Hartmesh checks target `frontend-hm/`;
-  the sibling `frontend/` is a pinned upstream snapshot and must not be edited.
+- `pnpm check` currently fails (`next lint` invocation is incompatible here and resolves to an invalid directory). Do not rely on `pnpm check`; run `pnpm lint` and `pnpm typecheck` explicitly.
 
 ### D. Run locally (all services)
 
@@ -129,7 +126,7 @@ Use this exact order for local code changes:
 1. `make check`
 2. `make install` (if frontend fails with proxy errors, rerun frontend install with proxy vars unset)
 3. Backend checks: `cd backend && make lint && make test`
-4. Frontend checks: `cd frontend-hm && pnpm check`
+4. Frontend checks: `cd frontend && pnpm lint && pnpm typecheck`
 5. Frontend build (if UI changes or release-sensitive changes): `BETTER_AUTH_SECRET=... pnpm build`
 
 Always run backend lint/tests before opening PRs because that is what CI enforces.
@@ -158,13 +155,13 @@ Backend core:
 
 Frontend core:
 
-- `frontend-hm/src/app/` - Next.js routes/pages
-- `frontend-hm/src/components/` - UI components
-- `frontend-hm/src/core/` - app logic (threads, tools, API, models)
-- `frontend-hm/src/env.js` - env schema/validation (critical for build behavior)
-- `frontend-hm/package.json` - scripts/deps
-- `frontend-hm/eslint.config.js` - lint rules
-- `frontend-hm/tsconfig.json` - TS config
+- `frontend/src/app/` - Next.js routes/pages
+- `frontend/src/components/` - UI components
+- `frontend/src/core/` - app logic (threads, tools, API, models)
+- `frontend/src/env.js` - env schema/validation (critical for build behavior)
+- `frontend/package.json` - scripts/deps
+- `frontend/eslint.config.js` - lint rules
+- `frontend/tsconfig.json` - TS config
 
 Skills and assets:
 
@@ -175,7 +172,7 @@ Skills and assets:
 Before submitting changes, run at minimum:
 
 - Backend: `cd backend && make lint && make test`
-- Frontend (if touched): `cd frontend-hm && pnpm check`
+- Frontend (if touched): `cd frontend && pnpm lint && pnpm typecheck`
 - Frontend build when changing env/auth/routing/build-sensitive files: `BETTER_AUTH_SECRET=... pnpm build`
 
 If touching orchestration/config (`Makefile`, `docker/*`, `config*.yaml`), also run `make dev` and verify the four services start.
@@ -194,8 +191,7 @@ Important root entries:
 
 - `.github/`
 - `backend/`
-- `frontend-hm/` — Hartmesh product app
-- `frontend/` — pinned upstream reference; see `docs/FRONTEND_ISOLATION.md`
+- `frontend/`
 - `docker/`
 - `skills/`
 - `scripts/`
@@ -208,7 +204,7 @@ Important root entries:
 
 ## 9) Instruction Priority
 
-Follow root and module `AGENTS.md` instructions first.
+Trust this onboarding guide first.
 
 Only do broad repo searches (`grep/find/code search`) when:
 

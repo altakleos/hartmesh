@@ -4,14 +4,9 @@ from __future__ import annotations
 
 import enum
 import logging
-from typing import Any
 
-from deerflow.community.aio_sandbox.ownership.factory import (
-    resolve_ownership_key_prefix,
-    resolve_ownership_redis_url,
-)
+from deerflow.community.aio_sandbox.ownership.factory import resolve_ownership_redis_url
 from deerflow.config.sandbox_config import SandboxOwnershipConfig
-from deerflow.runtime.tenant_identity import TenantNamespaceV1
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +184,6 @@ class RedisE2BCapacityStore:
         redis_url: str,
         hard_limit: int,
         key_prefix: str = "deerflow:sandbox:owner",
-        client: Any | None = None,
     ) -> None:
         if hard_limit < 1:
             raise ValueError("hard_limit must be at least 1")
@@ -202,13 +196,12 @@ class RedisE2BCapacityStore:
         self._hard_limit = hard_limit
         self._key = f"{key_prefix.rstrip(':')}:e2b-capacity"
         self._redis_error = RedisError
-        self._redis = client or Redis.from_url(
+        self._redis = Redis.from_url(
             redis_url,
             decode_responses=True,
             socket_timeout=_SOCKET_TIMEOUT_SECONDS,
             socket_connect_timeout=_SOCKET_TIMEOUT_SECONDS,
         )
-        self._owns_client = client is None
         self._script = self._redis.register_script(_LEDGER_SCRIPT)
 
     @property
@@ -269,8 +262,6 @@ class RedisE2BCapacityStore:
         return status == "APPLIED"
 
     def close(self) -> None:
-        if not self._owns_client:
-            return
         try:
             self._redis.close()
         except Exception as error:  # pragma: no cover - teardown best effort
@@ -281,20 +272,15 @@ def make_e2b_capacity_store(
     ownership: SandboxOwnershipConfig,
     *,
     hard_limit: int,
-    tenant_namespace: TenantNamespaceV1 | None = None,
 ) -> RedisE2BCapacityStore | None:
     """Enable the shared ledger only with Redis ownership."""
     if ownership.type == "memory":
         return None
     if ownership.type != "redis":
         raise ValueError(f"Unknown sandbox ownership type: {ownership.type!r}")
-    key_prefix = resolve_ownership_key_prefix(
-        ownership,
-        tenant_namespace=tenant_namespace,
-    )
-    logger.info("E2B deployment capacity: redis (key_prefix=%s, hard_limit=%d)", key_prefix, hard_limit)
+    logger.info("E2B deployment capacity: redis (key_prefix=%s, hard_limit=%d)", ownership.key_prefix, hard_limit)
     return RedisE2BCapacityStore(
         redis_url=resolve_ownership_redis_url(ownership),
         hard_limit=hard_limit,
-        key_prefix=key_prefix,
+        key_prefix=ownership.key_prefix,
     )

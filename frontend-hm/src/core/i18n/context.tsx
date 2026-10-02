@@ -30,7 +30,7 @@ export function I18nProvider({
 }: {
   children: ReactNode;
   initialLocale: Locale;
-  /** Read by the server layout from `GET /api/product`; a plain string, so it crosses the RSC boundary. */
+  /** Read by the server layout from `GET /api/v1/auth/product`; a plain string, so it crosses the RSC boundary. */
   productName?: string;
 }) {
   const [locale, setLocale] = useState<Locale>(initialLocale);

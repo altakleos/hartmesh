@@ -32,17 +32,16 @@ def commit(root: Path) -> str:
     return git(root, "rev-parse", "HEAD")
 
 
-def pin(root: Path, upstream: str, seed: str | None = None) -> None:
+def pin(root: Path, upstream: str) -> None:
     write(
         root,
         MARKER,
         json.dumps(
             {
-                "schema_version": 1,
+                "schema_version": 2,
                 "upstream_repository": "https://github.com/bytedance/deer-flow.git",
                 "upstream_commit": upstream,
                 "frontend_tree": git(root, "rev-parse", f"{upstream}:frontend"),
-                "hartmesh_seed_commit": seed or upstream,
             }
         ),
     )
@@ -118,7 +117,7 @@ def test_ignored_settings_and_outputs_do_not_count_as_snapshot_drift(repo: Path)
     assert "PRIVATE" not in result.stdout + result.stderr
 
 
-@pytest.mark.parametrize("field,value", [("frontend_tree", "0" * 40), ("upstream_commit", "0" * 40), ("schema_version", 2)])
+@pytest.mark.parametrize("field,value", [("frontend_tree", "0" * 40), ("upstream_commit", "0" * 40), ("schema_version", 1), ("hartmesh_seed_commit", "0" * 40)])
 def test_invalid_marker_is_rejected(repo: Path, field: str, value):
     marker = json.loads((repo / MARKER).read_text(encoding="utf-8"))
     marker[field] = value
@@ -194,3 +193,33 @@ def test_upstream_edit_add_delete_merge_leaves_hartmesh_untouched(repo: Path):
     commit(repo)
     result = check(repo, "--revision", "HEAD")
     assert result.returncode == 0, result.stderr
+
+
+def test_pinning_after_an_upstream_merge_rewrites_the_marker_and_passes(repo: Path):
+    """The one step a merge of upstream needs: the merged frontend/ no longer matches the old pin."""
+    git(repo, "switch", "-q", "upstream")
+    write(repo, "frontend/app.ts", "export const value = 'upstream, a week later';\n")
+    newer = commit(repo)
+    git(repo, "switch", "-q", "main")
+    git(repo, "merge", "-q", "--no-edit", "upstream")
+    assert check(repo).returncode == 1, "the old pin must not pass for a newer frontend/"
+
+    pinned = check(repo, "--pin", "upstream")
+
+    assert pinned.returncode == 0, pinned.stderr
+    marker = json.loads((repo / MARKER).read_text(encoding="utf-8"))
+    assert marker == {
+        "schema_version": 2,
+        "upstream_repository": "https://github.com/bytedance/deer-flow.git",
+        "upstream_commit": newer,
+        "frontend_tree": git(repo, "rev-parse", f"{newer}:frontend"),
+    }
+    commit(repo)
+    assert check(repo, "--revision", "HEAD").returncode == 0
+
+
+def test_pinning_an_unknown_revision_changes_nothing(repo: Path):
+    before = (repo / MARKER).read_text(encoding="utf-8")
+
+    assert check(repo, "--pin", "no-such-revision").returncode == 1
+    assert (repo / MARKER).read_text(encoding="utf-8") == before

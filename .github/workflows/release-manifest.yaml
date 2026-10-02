@@ -21,6 +21,13 @@ jobs:
         with:
           ref: refs/tags/v${{ inputs.version }}
 
+      - name: Validate and prepare release notes
+        env:
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_notes.py "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+
       - name: Install crane
         uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
 
@@ -42,22 +49,16 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$GH_TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
-          printf '%s' "$GH_TOKEN" | helm registry login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
       - name: Resolve and cross-check published artifacts
         id: resolve
         env:
           VERSION: ${{ inputs.version }}
-          REPOSITORY_PATH: ${{ github.repository }}
           IMAGE_BASE: ghcr.io/${{ github.repository }}
           IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
           SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
-          CHART_OCI_TAG: ${{ steps.identity.outputs.chart_oci_tag }}
         run: |
           set -euo pipefail
-
-          OWNER="${REPOSITORY_PATH%%/*}"
-          CHART_REPOSITORY="oci://ghcr.io/${OWNER}/charts/deer-flow"
 
           assert_digest() {
             if ! printf '%s' "$2" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
@@ -97,67 +98,7 @@ jobs:
             printf '%s_repository=%s\n' "$COMPONENT" "$IMAGE_REPOSITORY" >> "$GITHUB_OUTPUT"
             printf '%s_digest=%s\n' "$COMPONENT" "$TAG_DIGEST" >> "$GITHUB_OUTPUT"
             printf '%s_revision_check=%s\n' "$COMPONENT" "$REVISION_CHECK" >> "$GITHUB_OUTPUT"
-            if [ "$COMPONENT" = "backend" ]; then
-              BACKEND_DIGEST="$TAG_DIGEST"
-            fi
           done
-
-          CHART_MANIFEST_DIGEST="$(crane digest "ghcr.io/${OWNER}/charts/deer-flow:${CHART_OCI_TAG}")"
-          assert_digest "chart OCI tag" "$CHART_MANIFEST_DIGEST"
-          CHART_DIRECTORY="$RUNNER_TEMP/release-chart"
-          mkdir --parents "$CHART_DIRECTORY"
-          helm pull "$CHART_REPOSITORY" --version "$VERSION" --destination "$CHART_DIRECTORY"
-          CHART_PACKAGE="$CHART_DIRECTORY/deer-flow-${VERSION}.tgz"
-          if [ ! -f "$CHART_PACKAGE" ]; then
-            echo "::error::helm pull did not produce $CHART_PACKAGE"
-            exit 1
-          fi
-          if ! tar -xzOf "$CHART_PACKAGE" deer-flow/Chart.yaml | grep -Fx "version: ${VERSION}" >/dev/null; then
-            echo "::error::pulled chart $CHART_PACKAGE does not declare requested version $VERSION"
-            exit 1
-          fi
-          PACKAGE_SHA256="$(sha256sum "$CHART_PACKAGE" | awk '{print $1}')"
-          printf 'chart_repository=%s\n' "$CHART_REPOSITORY" >> "$GITHUB_OUTPUT"
-          printf 'chart_manifest_digest=%s\n' "$CHART_MANIFEST_DIGEST" >> "$GITHUB_OUTPUT"
-          printf 'package_sha256=%s\n' "$PACKAGE_SHA256" >> "$GITHUB_OUTPUT"
-
-          BACKEND_ROOTFS="$RUNNER_TEMP/backend-rootfs.tar"
-          EXTENSION_ARTIFACT_MANIFEST="$RUNNER_TEMP/extension-artifacts.json"
-          crane export "${IMAGE_BASE}-backend@${BACKEND_DIGEST}" "$BACKEND_ROOTFS"
-          python3 - "$BACKEND_ROOTFS" "$EXTENSION_ARTIFACT_MANIFEST" <<'PY'
-          import sys
-          import tarfile
-
-          archive_path, output_path = sys.argv[1:]
-          with tarfile.open(archive_path, "r:*") as archive:
-              matches = [
-                  item
-                  for item in archive.getmembers()
-                  if item.name.lstrip("./") == "app/hartmesh/extension-artifacts.json"
-              ]
-              if len(matches) != 1 or not matches[0].isfile():
-                  raise SystemExit("Gateway image must contain exactly one extension artifact manifest")
-              source = archive.extractfile(matches[0])
-              if source is None:
-                  raise SystemExit("Gateway extension artifact manifest could not be extracted")
-              payload = source.read()
-          with open(output_path, "wb") as output:
-              output.write(payload)
-          PY
-          python3 - "$EXTENSION_ARTIFACT_MANIFEST" "$GITHUB_OUTPUT" <<'PY'
-          import sys
-          from pathlib import Path
-
-          from scripts.verify_release_manifest import verify_artifact_manifest
-
-          manifest_path, output_path = sys.argv[1:]
-          digest, api_version, entry_count = verify_artifact_manifest(Path(manifest_path))
-          with open(output_path, "a", encoding="utf-8") as output:
-              output.write(f"extension_artifact_path={manifest_path}\n")
-              output.write(f"extension_artifact_digest={digest}\n")
-              output.write(f"extension_api_version={api_version}\n")
-              output.write(f"extension_entry_count={entry_count}\n")
-          PY
 
       - name: Cross-check the compose profile pins against the published digests
         id: compose
@@ -217,13 +158,9 @@ jobs:
           VERSION: ${{ inputs.version }}
           COMMIT: ${{ steps.identity.outputs.commit }}
           IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
-          CHART_OCI_TAG: ${{ steps.identity.outputs.chart_oci_tag }}
           BACKEND_REPOSITORY: ${{ steps.resolve.outputs.backend_repository }}
           BACKEND_DIGEST: ${{ steps.resolve.outputs.backend_digest }}
           BACKEND_REVISION_CHECK: ${{ steps.resolve.outputs.backend_revision_check }}
-          EXTENSION_ARTIFACT_DIGEST: ${{ steps.resolve.outputs.extension_artifact_digest }}
-          EXTENSION_API_VERSION: ${{ steps.resolve.outputs.extension_api_version }}
-          EXTENSION_ENTRY_COUNT: ${{ steps.resolve.outputs.extension_entry_count }}
           FRONTEND_REPOSITORY: ${{ steps.resolve.outputs.frontend_repository }}
           FRONTEND_DIGEST: ${{ steps.resolve.outputs.frontend_digest }}
           FRONTEND_REVISION_CHECK: ${{ steps.resolve.outputs.frontend_revision_check }}
@@ -238,9 +175,6 @@ jobs:
           SANDBOX_NETWORK_PROXY_REVISION_CHECK: ${{ steps.resolve.outputs.sandbox_network_proxy_revision_check }}
           COMPOSE_IMAGES_TXT_SHA256: ${{ steps.compose.outputs.images_txt_sha256 }}
           COMPOSE_IMAGES_JSON: ${{ steps.compose.outputs.images_json }}
-          CHART_REPOSITORY: ${{ steps.resolve.outputs.chart_repository }}
-          CHART_MANIFEST_DIGEST: ${{ steps.resolve.outputs.chart_manifest_digest }}
-          PACKAGE_SHA256: ${{ steps.resolve.outputs.package_sha256 }}
         run: |
           python3 - <<'PY'
           import json
@@ -250,7 +184,7 @@ jobs:
           with open(os.environ["COMPOSE_IMAGES_JSON"], encoding="utf-8") as compose_images:
               compose_profile_images = json.load(compose_images)
           manifest = {
-              "schema": 3,
+              "schema": 4,
               "version": os.environ["VERSION"],
               "tag": f"v{os.environ['VERSION']}",
               "commit": os.environ["COMMIT"],
@@ -260,31 +194,12 @@ jobs:
                       "tag": image_tag,
                       "digest": os.environ[f"{name.upper()}_DIGEST"],
                       "revision_check": os.environ[f"{name.upper()}_REVISION_CHECK"],
-                      **(
-                          {
-                              "extension_artifact_manifest_digest": os.environ["EXTENSION_ARTIFACT_DIGEST"],
-                              "extension_api_version": os.environ["EXTENSION_API_VERSION"],
-                              "extension_entry_count": int(os.environ["EXTENSION_ENTRY_COUNT"]),
-                              "provenance_reference": (
-                                  f"oci://{os.environ['BACKEND_REPOSITORY']}@{os.environ['BACKEND_DIGEST']}"
-                              ),
-                          }
-                          if name == "backend"
-                          else {}
-                      ),
                   }
                   for name in ("backend", "frontend", "provisioner", "sandbox", "sandbox_network_proxy")
               },
               "compose_profile": {
                   "images_txt_sha256": os.environ["COMPOSE_IMAGES_TXT_SHA256"],
                   "images": compose_profile_images,
-              },
-              "chart": {
-                  "repository": os.environ["CHART_REPOSITORY"],
-                  "version": os.environ["VERSION"],
-                  "oci_tag": os.environ["CHART_OCI_TAG"],
-                  "manifest_digest": os.environ["CHART_MANIFEST_DIGEST"],
-                  "package_sha256": os.environ["PACKAGE_SHA256"],
               },
           }
           with open("release-manifest.json", "w", encoding="utf-8") as output:
@@ -295,10 +210,8 @@ jobs:
       - name: Verify release manifest offline
         env:
           BACKEND_DIGEST: ${{ steps.resolve.outputs.backend_digest }}
-          EXTENSION_ARTIFACT_PATH: ${{ steps.resolve.outputs.extension_artifact_path }}
         run: |
           python3 scripts/verify_release_manifest.py release-manifest.json \
-            --artifact-manifest "$EXTENSION_ARTIFACT_PATH" \
             --gateway-image-digest "$BACKEND_DIGEST"
 
       - name: Upload manifest workflow artifact
@@ -315,10 +228,12 @@ jobs:
         run: |
           set -euo pipefail
           TAG="v${VERSION}"
-          if ! gh release view "$TAG" >/dev/null 2>&1; then
-            gh release create "$TAG" --verify-tag --notes "see CHANGELOG.md"
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
-          gh release upload "$TAG" release-manifest.json --clobber
+          gh release upload "$TAG" release-manifest.json --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Summarize resolved digests
         run: |
@@ -332,6 +247,4 @@ jobs:
             echo '| sandbox | `${{ steps.resolve.outputs.sandbox_repository }}@${{ steps.resolve.outputs.sandbox_digest }}` | `${{ steps.resolve.outputs.sandbox_revision_check }}` |'
             echo '| sandbox-network-proxy | `${{ steps.resolve.outputs.sandbox_network_proxy_repository }}@${{ steps.resolve.outputs.sandbox_network_proxy_digest }}` | `${{ steps.resolve.outputs.sandbox_network_proxy_revision_check }}` |'
             echo '| compose profile images.txt SHA-256 | `${{ steps.compose.outputs.images_txt_sha256 }}` | n/a |'
-            echo '| chart manifest | `${{ steps.resolve.outputs.chart_manifest_digest }}` | n/a |'
-            echo '| chart package SHA-256 | `${{ steps.resolve.outputs.package_sha256 }}` | n/a |'
           } >> "$GITHUB_STEP_SUMMARY"

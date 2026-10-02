@@ -20,6 +20,15 @@
       "tool_call_timeout": 60,
       "description": "GitHub MCP server for repository operations"
     },
+    "parallel-search": {
+      "enabled": false,
+      "type": "http",
+      "url": "https://search.parallel.ai/mcp",
+      "headers": {
+        "User-Agent": "deer-flow"
+      },
+      "description": "Optional anonymous Parallel Search tools for web search and fetching requested URLs"
+    },
     "openviking": {
       "enabled": false,
       "type": "http",
@@ -70,8 +79,6 @@
       "type": "http",
       "url": "https://reports.example.com/mcp",
       "description": "Example ordinary MCP background-task contract",
-      "credential_binding_id": "reports-production",
-      "credential_version": 1,
       "session_init_timeout": 60,
       "tool_call_timeout": 60,
       "task_toolsets": [

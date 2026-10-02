@@ -42,6 +42,13 @@ from test_runtime_lifecycle_e2e import (
     _wait_for_status,
 )
 
+# These tests run the real business-report script, which uses the document
+# libraries the sandbox image ships (docker/sandbox/Dockerfile). They are not
+# part of this project's locked dependencies, so the module is skipped where
+# one is missing; the "Skill script tests" workflow installs them and runs it.
+for _library in ("docx", "jinja2", "matplotlib"):
+    pytest.importorskip(_library)
+
 pytestmark = pytest.mark.no_auto_user
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -56,10 +63,8 @@ models:
     api_key: $OPENAI_API_KEY
     base_url: $OPENAI_API_BASE
 sandbox:
-  use: _seeded_skill_sandbox_provider:ProjectionProvider
+  use: deerflow.sandbox.local:LocalSandboxProvider
   allow_host_bash: true
-deployment:
-  profile: local_development
 tool_groups:
   - name: file:read
   - name: bash

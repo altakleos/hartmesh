@@ -181,7 +181,7 @@ def test_the_operator_list_is_the_whole_model_section_even_with_provider_keys_pr
     assert tools["web_fetch"]["use"] == "deerflow.community.direct_fetch.tools:web_fetch_tool"
     # ... and so is every non-model setting of the profile.
     baseline = _render(render_config, catalog, _base_environ(OPENAI_API_KEY="secret", ANTHROPIC_API_KEY="secret", TAVILY_API_KEY="secret"))
-    for section in ("auth", "database", "sandbox", "skills", "tools", "tool_plane", "deployment", "checkpointer"):
+    for section in ("auth", "database", "sandbox", "skills", "tools", "run_ownership", "checkpointer"):
         assert document[section] == baseline[section], section
     assert "secret" not in yaml.safe_dump(document)
 
@@ -485,7 +485,6 @@ SENTINEL = "FAKE-CREDENTIAL-SENTINEL-NOT-A-KEY"
 # *backend* rejects, so it rendered a config.yaml the Gateway could not load.
 SCHEMA_COUNTEREXAMPLES = {
     "zero context window": {**ACME_CHAT, "context_window": 0},
-    "empty identity": {**ACME_CHAT, "name": ""},
     "capability flag that is not a boolean": {**ACME_CHAT, "supports_vision": "banana"},
 }
 

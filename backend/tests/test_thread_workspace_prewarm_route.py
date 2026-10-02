@@ -1,7 +1,7 @@
 """``POST /api/threads/{id}/workspace/prewarm``: the sandbox built while the person types.
 
 The route is thin on purpose: it names the thread, takes the request's own
-user identity, and hands the provider's prewarm capability to the background.
+user identity, and hands the provider's prewarm to the background.
 What these tests pin is the contract the client relies on -- it always answers
 quickly, it never surfaces a build failure, it says honestly when it built
 nothing -- and the identity the build is scoped to.
@@ -12,34 +12,31 @@ from __future__ import annotations
 from _router_auth_helpers import make_authed_test_app
 from fastapi.testclient import TestClient
 
-from app.gateway.routers import threads
-from deerflow.sandbox.capabilities import WorkspacePrewarm
+from app.gateway.routers import thread_workspace
 
 
-class _PrewarmingProvider(WorkspacePrewarm):
+class _PrewarmingProvider:
     def __init__(self, *, fail: bool = False, park: bool = True) -> None:
         self.calls: list[tuple[str, str]] = []
-        self.snapshots: list[object | None] = []
         self.fail = fail
         self.park = park
 
-    async def prewarm_accepted_skills_async(self, thread_id: str, *, user_id: str, resolve_skill_snapshot=None) -> str | None:
+    async def prewarm_async(self, thread_id: str, *, user_id: str) -> str | None:
         self.calls.append((thread_id, user_id))
-        self.snapshots.append(None if resolve_skill_snapshot is None else resolve_skill_snapshot())
         if self.fail:
             raise RuntimeError("daemon refused")
         return f"sandbox-{thread_id}" if self.park else None
 
 
 class _PlainProvider:
-    """A provider with no prewarm capability at all."""
+    """A provider that cannot prewarm at all."""
 
 
 def _client(monkeypatch, provider: object, *, user_id: str | None = "user-7") -> TestClient:
     app = make_authed_test_app()
-    app.include_router(threads.router)
-    monkeypatch.setattr(threads, "get_sandbox_provider", lambda: provider)
-    monkeypatch.setattr(threads, "get_effective_user_id", lambda: user_id)
+    app.include_router(thread_workspace.router)
+    monkeypatch.setattr(thread_workspace, "get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr(thread_workspace, "get_effective_user_id", lambda: user_id)
     return TestClient(app)
 
 
@@ -66,8 +63,8 @@ def test_an_unavailable_provider_is_not_an_error(monkeypatch):
         raise RuntimeError("sandbox not configured")
 
     app = make_authed_test_app()
-    app.include_router(threads.router)
-    monkeypatch.setattr(threads, "get_sandbox_provider", _no_provider)
+    app.include_router(thread_workspace.router)
+    monkeypatch.setattr(thread_workspace, "get_sandbox_provider", _no_provider)
 
     response = TestClient(app).post("/api/threads/thread-open/workspace/prewarm")
 

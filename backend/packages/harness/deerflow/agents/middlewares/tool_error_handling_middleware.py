@@ -1,5 +1,6 @@
 """Tool error handling middleware and shared runtime middleware builders."""
 
+import asyncio
 import logging
 import secrets
 from collections.abc import Awaitable, Callable
@@ -13,11 +14,16 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.skill_context import (
+    SKILL_CONTEXT_DENIED_KEY,
     SKILL_CONTEXT_ENTRY_KEY,
+    _tool_call_id,
     _tool_call_path,
     build_skill_entry_metadata_from_read,
+    skill_name_from_path,
 )
+from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, build_skill_usage
 from deerflow.agents.middlewares.tool_result_meta import (
+    TOOL_META_KEY,
     normalize_tool_result,
     stamp_exception_meta,
 )
@@ -53,39 +59,54 @@ def _stamp_task_exception_status(message: ToolMessage, *, tool_name: str, error:
     return message
 
 
-TOOL_REFUSAL_REASON_CONTEXT_KEY = "tool_refusal_reason"
-"""Where a refused tool call leaves its run-level reason for the worker."""
-
-
-def _record_run_stop_reason(request: ToolCallRequest, exc: Exception) -> None:
-    """Carry an exception's declared run-level reason to the run record.
-
-    A tool-time refusal becomes a result the run survives, so the worker never
-    sees the exception; it reads this off the runtime context. It is kept
-    apart from ``stop_reason``, which the loop and budget guards read as the
-    reason that already stopped the turn: the worker records a guard's stop
-    first and this only when none stopped it. Declared by the exception's type
-    (``run_stop_reason``), never read from its text; the first refusal in a
-    turn is the one kept.
-    """
-    reason = getattr(exc, "run_stop_reason", None)
-    context = getattr(getattr(request, "runtime", None), "context", None)
-    if isinstance(reason, str) and reason and isinstance(context, dict):
-        context.setdefault(TOOL_REFUSAL_REASON_CONTEXT_KEY, reason)
-
-
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     """Convert tool exceptions into error ToolMessages so the run can continue."""
 
-    def __init__(self, *, app_config: AppConfig | None = None) -> None:
+    def __init__(self, *, app_config: AppConfig | None = None, skill_authorization=None, user_id: str | None = None) -> None:
         super().__init__()
         self._app_config = app_config
+        self._skill_authorization = skill_authorization
+        self._user_id = user_id
         if app_config is None:
             self._skill_read_tool_names = frozenset(DEFAULT_SKILL_FILE_READ_TOOL_NAMES)
             self._skills_root = DEFAULT_SKILLS_CONTAINER_PATH
         else:
             self._skill_read_tool_names = frozenset(app_config.summarization.skill_file_read_tool_names)
             self._skills_root = app_config.skills.container_path
+
+    def _storage(self):
+        # Same resolution order as SkillActivationMiddleware/SkillToolPolicyMiddleware:
+        # the registry must be the user-scoped one when a user context exists,
+        # or per-user custom skills would never resolve to their Skill.name.
+        from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
+
+        if self._user_id is not None:
+            return get_or_new_user_skill_storage(self._user_id, app_config=self._app_config)
+        if self._app_config is not None:
+            return get_or_new_skill_storage(app_config=self._app_config)
+        return get_or_new_skill_storage()
+
+    def _canonical_skill_name(self, skill_md_path: str) -> str:
+        """Skill name the authorization layers speak for this SKILL.md path.
+
+        Resolves the container path against the live (user-scoped) registry so
+        the ``skill:activate`` target is the declared ``Skill.name`` — the
+        directory name and the declared name differ for bundled skills (e.g.
+        ``skills/public/vercel-deploy-claimable`` declares ``vercel-deploy``),
+        and Layer 1 / slash / describe all authorize the declared name.
+        Blocking (skill-tree read): sync handlers and worker threads only.
+        Falls back to the path-derived name when the registry can't resolve
+        the path (uninstalled skill) — downstream consumers skip those paths
+        against the same registry anyway.
+        """
+        from deerflow.skills.container_registry import build_container_path_registry, canonical_skill_name
+
+        try:
+            registry = build_container_path_registry(self._storage())
+        except Exception:
+            logger.warning("Failed to load the skill registry while resolving a skill read", exc_info=True)
+            return skill_name_from_path(skill_md_path)
+        return canonical_skill_name(registry, skill_md_path) or skill_name_from_path(skill_md_path)
 
     def _build_error_message(self, request: ToolCallRequest, exc: Exception) -> ToolMessage:
         tool_name = str(request.tool_call.get("name") or "unknown_tool")
@@ -96,10 +117,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
 
         content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. {_RECOVERY_HINT}"
         # A failure category says what went wrong; some of them cannot say
-        # what to do about it, and "unavailable" reads as "try again" when
-        # the truth is that this deployment has no working provider. An
-        # adapter that knows better attaches one bounded sentence, and it
-        # replaces the generic retry advice rather than sitting beside it.
+        # what to do about it. An exception that knows better attaches one
+        # bounded sentence (``guidance``), and it replaces the generic retry
+        # advice rather than sitting beside it.
         guidance = getattr(exc, "guidance", None)
         if isinstance(guidance, str) and guidance.strip():
             content = f"Error: Tool '{tool_name}' failed: {guidance.strip()}"
@@ -114,7 +134,6 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         # carry the same structured metadata.
         structured_error = f"{exc.__class__.__name__}: {detail}"
         message = _stamp_task_exception_status(message, tool_name=tool_name, error=structured_error)
-        _record_run_stop_reason(request, exc)
         return stamp_exception_meta(message, structured_error, exc=exc)
 
     def _stamp_skill_read_metadata(
@@ -123,10 +142,25 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         *,
         tool_name: str,
+        activation_allowed: bool | None = None,
+        skill_name: str | None = None,
     ) -> ToolMessage:
+        """Stamp the skill-read metadata for one completed read tool result.
+
+        *activation_allowed* carries a ``skill:activate`` decision already
+        resolved by the caller — the async path awaits ``aauthorize()`` on the
+        event loop before calling this. ``None`` (the sync-path default)
+        resolves the decision here with the synchronous ``authorize()``.
+        *skill_name* is the already-canonicalized authorization target (the
+        async caller resolves it in a worker thread); when omitted, the sync
+        path resolves it here.
+        """
         if tool_name not in self._skill_read_tool_names:
             return message
         if getattr(message, "status", "success") == "error":
+            return message
+        tool_meta = message.additional_kwargs.get(TOOL_META_KEY)
+        if isinstance(tool_meta, dict) and tool_meta.get("status") == "error":
             return message
         content = message.content if isinstance(message.content, str) else None
         if content is None:
@@ -137,17 +171,145 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         entry = build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root)
         if entry is None:
             return message
+        # Phase 3: a completed SKILL.md read only *activates* a skill (durable
+        # skill_context entry, allowed-tools policy, autonomous secret binding)
+        # when the action-scoped ``skill:activate`` decision allows it. The
+        # catalog/visibility layer (Layer 1) may expose the file itself — the
+        # action decision is what gates the autonomous activation path the
+        # model drives through describe_skill + read_file. A denied read gets
+        # the denial marker instead of entry metadata, so extract_skills skips
+        # it without the "missing skill read metadata" warning.
+        if self._skill_authorization is not None:
+            if skill_name is None:
+                skill_name = self._canonical_skill_name(entry["path"])
+            if activation_allowed is None:
+                from deerflow.authz.skill_filter import skill_activation_allowed
+
+                activation_allowed = skill_activation_allowed(self._skill_authorization, skill_name)
+        elif activation_allowed is None:
+            # Authorization disabled — visibility (Layer 1) already decided
+            # membership, so the read activates unconditionally.
+            activation_allowed = True
+        if not activation_allowed:
+            logger.info(
+                "Skill file read for '%s' did not activate it: skill:activate denied",
+                skill_name or skill_name_from_path(entry["path"]),
+            )
+            existing = dict(message.additional_kwargs or {})
+            existing[SKILL_CONTEXT_DENIED_KEY] = True
+            message.additional_kwargs = existing
+            return message
         existing = dict(message.additional_kwargs or {})
         existing[SKILL_CONTEXT_ENTRY_KEY] = dict(entry)
+        args = request.tool_call.get("args") or {}
+        usage = build_skill_usage(
+            path,
+            content,
+            skills_root=self._skills_root,
+            partial=args.get("start_line") is not None or args.get("end_line") is not None,
+        )
+        if usage is not None:
+            existing[SKILL_USAGE_KEY] = usage
         message.additional_kwargs = existing
         return message
 
+    async def _amaybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
+        """Async twin of ``_maybe_stamp`` for ``awrap_tool_call``.
+
+        Mirrors the sync structure (plain ToolMessage or Command-carried
+        results, tool_call_id matching, untrusted tool-returned kwargs
+        scrubbed before stamping) while resolving the canonical authorization
+        target and the ``skill:activate`` decision off the event loop in the
+        right order: the registry lookup (skill-tree read) goes to a worker
+        thread, the provider call is awaited on the loop with
+        ``aauthorize()`` — a synchronous ``authorize()`` here would hand
+        loop-affine providers the wrong API.
+        """
+        tool_name = str(request.tool_call.get("name") or "")
+        tool_call_id = _tool_call_id(request.tool_call)
+
+        async def stamp(message: ToolMessage) -> None:
+            # Tool-returned kwargs are untrusted. Only this middleware may add
+            # skill evidence after checking the configured producer and path.
+            existing = dict(message.additional_kwargs or {})
+            existing.pop(SKILL_CONTEXT_ENTRY_KEY, None)
+            existing.pop(SKILL_USAGE_KEY, None)
+            message.additional_kwargs = existing
+            if tool_call_id is None or str(message.tool_call_id) == tool_call_id:
+                allowed: bool | None = None
+                skill_name: str | None = None
+                probe = self._resolve_skill_read_entry(message, request, tool_name=tool_name)
+                if probe is not None and self._skill_authorization is not None:
+                    from deerflow.authz.skill_filter import skill_activation_allowed_async
+
+                    skill_name = await asyncio.to_thread(self._canonical_skill_name, probe["path"])
+                    allowed = await skill_activation_allowed_async(self._skill_authorization, skill_name)
+                self._stamp_skill_read_metadata(message, request, tool_name=tool_name, activation_allowed=allowed, skill_name=skill_name)
+
+        if isinstance(result, ToolMessage):
+            await stamp(result)
+            return result
+        update = getattr(result, "update", None)
+        if not isinstance(update, dict):
+            return result
+        messages = update.get("messages")
+        if isinstance(messages, ToolMessage):
+            await stamp(messages)
+        elif isinstance(messages, (list, tuple)):
+            for message in messages:
+                if isinstance(message, ToolMessage):
+                    await stamp(message)
+        return result
+
+    def _resolve_skill_read_entry(
+        self,
+        message: ToolMessage,
+        request: ToolCallRequest,
+        *,
+        tool_name: str,
+    ) -> dict | None:
+        """Resolve the skill_context entry a completed read would stamp, if any."""
+        if tool_name not in self._skill_read_tool_names:
+            return None
+        if getattr(message, "status", "success") == "error":
+            return None
+        content = message.content if isinstance(message.content, str) else None
+        if content is None:
+            return None
+        path = _tool_call_path(request.tool_call)
+        if path is None:
+            return None
+        return build_skill_entry_metadata_from_read(path, content, skills_root=self._skills_root)
+
     def _maybe_stamp(self, result: ToolMessage | Command, request: ToolCallRequest) -> ToolMessage | Command:
         """Apply producer-bound metadata for tool results that need it."""
-        if not isinstance(result, ToolMessage):
-            return result
         tool_name = str(request.tool_call.get("name") or "")
-        return self._stamp_skill_read_metadata(result, request, tool_name=tool_name)
+        tool_call_id = _tool_call_id(request.tool_call)
+
+        def stamp(message: ToolMessage) -> None:
+            # Tool-returned kwargs are untrusted. Only this middleware may add
+            # skill evidence after checking the configured producer and path.
+            existing = dict(message.additional_kwargs or {})
+            existing.pop(SKILL_CONTEXT_ENTRY_KEY, None)
+            existing.pop(SKILL_USAGE_KEY, None)
+            message.additional_kwargs = existing
+            if tool_call_id is None or str(message.tool_call_id) == tool_call_id:
+                self._stamp_skill_read_metadata(message, request, tool_name=tool_name)
+
+        if isinstance(result, ToolMessage):
+            stamp(result)
+            return result
+        update = getattr(result, "update", None)
+        if not isinstance(update, dict):
+            return result
+        messages = update.get("messages")
+        if isinstance(messages, ToolMessage):
+            stamp(messages)
+        elif isinstance(messages, (list, tuple)):
+            for message in messages:
+                if isinstance(message, ToolMessage):
+                    stamp(message)
+        return result
 
     @override
     def wrap_tool_call(
@@ -163,9 +325,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (sync): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(
-            self._maybe_stamp(result, request),
-            tool_call_id=str(request.tool_call.get("id") or ""),
+        return self._maybe_stamp(
+            normalize_tool_result(result, tool_call_id=str(request.tool_call.get("id") or "")),
+            request,
         )
 
     @override
@@ -182,9 +344,9 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         except Exception as exc:
             logger.exception("Tool execution failed (async): name=%s id=%s", request.tool_call.get("name"), request.tool_call.get("id"))
             return self._build_error_message(request, exc)
-        return normalize_tool_result(
-            self._maybe_stamp(result, request),
-            tool_call_id=str(request.tool_call.get("id") or ""),
+        return await self._amaybe_stamp(
+            normalize_tool_result(result, tool_call_id=str(request.tool_call.get("id") or "")),
+            request,
         )
 
 
@@ -199,15 +361,16 @@ def _build_runtime_middlewares(
     authorization_infrastructure_tool_names: frozenset[str] = frozenset(),
     available_skills: set[str] | None = None,
     owns_agent_skill_projection: bool = True,
+    skill_authorization=None,
+    user_id: str | None = None,
 ) -> list[AgentMiddleware]:
     """Build shared base middlewares for agent execution."""
     from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+    from deerflow.agents.middlewares.knowledge_scope_middleware import KnowledgeScopeMiddleware
     from deerflow.agents.middlewares.llm_error_handling_middleware import LLMErrorHandlingMiddleware
     from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
     from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
-    from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
     from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
-    from deerflow.agents.middlewares.unbound_tool_call_middleware import UnboundToolCallMiddleware
     from deerflow.sandbox.middleware import SandboxMiddleware
 
     # Layer 1 — outermost wrap_model_call wrappers (listed outer→inner).
@@ -220,22 +383,20 @@ def _build_runtime_middlewares(
     # the raw tool output first; the budget wrapper then truncates the already
     # neutralized text.
     outer_wrappers: list[AgentMiddleware] = [
-        # Outermost of all, because the receipt below writes durable start
-        # evidence before any inner code runs: a name that could never be a
-        # receipt identity has to be refused before that, while the model can
-        # still correct it.
-        UnboundToolCallMiddleware(),
-        # One outer observation sees the final, sanitized/budgeted model-visible
-        # result on return while writing durable start evidence before any inner
-        # authorization or tool code. Display stamping is independently gated.
-        ToolReceiptMiddleware(
-            render_mode=receipts_render_mode,
-            display_enabled=app_config.verification.receipts_enabled,
-        ),
         InputSanitizationMiddleware(),
+        KnowledgeScopeMiddleware(),
         ToolOutputBudgetMiddleware.from_app_config(app_config),
         ToolResultSanitizationMiddleware(),
     ]
+    if app_config.pii_redaction.enabled:
+        from deerflow.agents.middlewares.pii_redaction_middleware import PiiRedactionMiddleware
+
+        # Listed last so it is the innermost Layer-1 wrapper: tool results are
+        # PII-redacted before ToolResultSanitizationMiddleware neutralizes tags
+        # and ToolOutputBudgetMiddleware externalizes oversized copies to disk
+        # (so those copies hold redacted text), and user messages reach it
+        # after the other request rewrites (issue #3190).
+        outer_wrappers.append(PiiRedactionMiddleware(app_config.pii_redaction))
 
     # Layer 2 — before_agent hooks that read/annotate thread-scoped data.
     thread_hooks: list[AgentMiddleware] = [
@@ -276,6 +437,19 @@ def _build_runtime_middlewares(
     # normal results (ToolErrorHandling stamps it on the inner return path)
     # and on self-stamped short-circuit messages; the remainder fall back to
     # message.status (see make_tool_receipt).
+    verification_config = app_config.verification
+    if verification_config.receipts_enabled:
+        from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+
+        tail.append(ToolReceiptMiddleware(render_mode=receipts_render_mode))
+
+    # Resolve handles before any policy inspects arguments. Receipts enclose
+    # this layer too, so unknown-handle errors remain part of the ledger.
+    if app_config.tool_artifacts.enabled and app_config.tool_artifacts.resolve_handles_in_args:
+        from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
+
+        tail.append(ArtifactResolutionMiddleware(config=app_config.tool_artifacts))
+
     # Authorization uses the existing GuardrailMiddleware so execution-time
     # deny, audit, and fail-closed handling stay in one proven implementation.
     # It is appended before an explicit guardrail provider, making authorization
@@ -299,7 +473,6 @@ def _build_runtime_middlewares(
                         infrastructure_tool_names=authorization_infrastructure_tool_names,
                     ),
                     fail_closed=authorization_config.fail_closed,
-                    decision_kind="authorization",
                 )
             )
 
@@ -334,11 +507,13 @@ def _build_runtime_middlewares(
     # the model hasn't read in their current version.  It must sit outside ToolProgress
     # and ToolErrorHandling so that a blocked write returns immediately without consuming
     # a ToolProgress slot.  The middleware stamps deerflow_tool_meta on the blocked
-    # ToolMessage itself so downstream callers receive a well-formed result.
+    # ToolMessage itself so downstream callers receive a well-formed result, and its
+    # wrap_model_call elides the dead payload of blocked calls from model-bound
+    # requests (config-gated, state untouched).
     if app_config.read_before_write.enabled:
         from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
 
-        tail.append(ReadBeforeWriteMiddleware())
+        tail.append(ReadBeforeWriteMiddleware(config=app_config.read_before_write))
 
     # ToolProgressMiddleware must be outer (lower index) so its wrap_tool_call handler
     # chain includes ToolErrorHandlingMiddleware (inner), which stamps deerflow_tool_meta
@@ -358,7 +533,19 @@ def _build_runtime_middlewares(
 
     tail.append(ProviderRefusalMiddleware())
 
-    tail.append(ToolErrorHandlingMiddleware(app_config=app_config))
+    tail.append(ToolErrorHandlingMiddleware(app_config=app_config, skill_authorization=skill_authorization, user_id=user_id))
+    # Artifact capture is a `before_model` hook that reads state messages, so
+    # its position in the tool-execution wrap chain is functionally irrelevant:
+    # it always sees the normalized results stored in state, and error results
+    # (status == "error") are skipped at extraction. It is appended after
+    # ToolErrorHandlingMiddleware purely for readability. It captures
+    # lightweight metadata only, so ToolOutputBudgetMiddleware truncating the
+    # content does not affect it. The configured cap (max_entries) is enforced
+    # inside the middleware when it emits updates; no assembly-time side effect.
+    if app_config.tool_artifacts.enabled:
+        from deerflow.agents.middlewares.artifact_capture_middleware import ArtifactCaptureMiddleware
+
+        tail.append(ArtifactCaptureMiddleware(config=app_config.tool_artifacts))
 
     middlewares = [*outer_wrappers, *thread_hooks, *tail]
 
@@ -377,6 +564,8 @@ def build_lead_runtime_middlewares(
     deferred_setup: "DeferredToolSetup | None" = None,
     available_skills: set[str] | None = None,
     owns_agent_skill_projection: bool = True,
+    skill_authorization=None,
+    user_id: str | None = None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by lead agent runtime before lead-only middlewares."""
     return _build_runtime_middlewares(
@@ -390,6 +579,8 @@ def build_lead_runtime_middlewares(
         authorization_provider=authorization_provider,
         available_skills=available_skills,
         owns_agent_skill_projection=owns_agent_skill_projection,
+        skill_authorization=skill_authorization,
+        user_id=user_id,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
     )
 
@@ -405,6 +596,7 @@ def build_subagent_runtime_middlewares(
     available_skills: set[str] | None = None,
     user_id: str | None = None,
     authorization_provider=None,
+    skill_authorization=None,
     extensions=None,
 ) -> list[AgentMiddleware]:
     """Middlewares shared by subagent runtime before subagent-only middlewares."""
@@ -428,6 +620,8 @@ def build_subagent_runtime_middlewares(
         authorization_provider=authorization_provider,
         authorization_infrastructure_tool_names=(frozenset({deferred_setup.tool_search_tool.name}) if authorization_provider is not None and deferred_setup is not None and deferred_setup.tool_search_tool is not None else frozenset()),
         owns_agent_skill_projection=False,
+        skill_authorization=skill_authorization,
+        user_id=user_id,
     )
 
     # Enabled/configured skills are discoverable metadata, not automatically
@@ -444,14 +638,22 @@ def build_subagent_runtime_middlewares(
             app_config=app_config,
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
+            skill_authorization=skill_authorization,
         )
     )
+    if deferred_setup is not None and deferred_setup.deferred_names:
+        from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
+
+        middlewares.append(DeferredToolPromotionAuditMiddleware(deferred_setup.deferred_names, deferred_setup.catalog_hash))
     middlewares.append(
         SkillToolPolicyMiddleware(
             available_skills=available_skills,
             app_config=app_config,
             user_id=user_id,
             slash_source_owner_token=slash_source_owner_token,
+            # Persisted skill_context entries are re-authorized against the
+            # skill:activate decision before their allowed-tools apply.
+            skill_authorization=skill_authorization,
             # A subagent sees only its own messages, not a build the lead has
             # already run and delivered, so it is not held to a first command.
             first_command_order=False,
@@ -558,6 +760,13 @@ def build_subagent_runtime_middlewares(
         DurableContextMiddleware(
             skills_container_path=app_config.skills.container_path,
             skill_file_read_tool_names=app_config.summarization.skill_file_read_tool_names,
+            inject_tool_artifacts=app_config.tool_artifacts.enabled and app_config.tool_artifacts.inject_model_context,
+            pii_redaction_config=getattr(app_config, "pii_redaction", None),
+            # The rendered "Active skills" reminder hides entries the provider
+            # denies; decisions are published per step by the activation
+            # middleware under the shared chain token.
+            skill_authorization=skill_authorization,
+            entry_decisions_owner_token=slash_source_owner_token,
         )
     )
 
@@ -598,6 +807,7 @@ def build_subagent_runtime_middlewares(
     summarization_middleware = create_summarization_middleware(
         app_config=app_config,
         skip_memory_flush=True,
+        archive_task_history=False,
         # The subagent's resolved model is the source of truth for null-model
         # summarization: the subagent context/configurable does not carry the child
         # model (it inherits the parent's), so passing it directly is what makes a

@@ -1,45 +1,32 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import json
 import logging
 import socket
 import uuid
 from collections.abc import Awaitable, Callable
-from dataclasses import replace
-from datetime import UTC, datetime
+from contextvars import ContextVar
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from app.mcp_tasks.errors import PermanentNotificationError
-from app.mcp_tasks.replay_commitment import (
-    McpTaskReplayCommitmentError,
-    McpTaskReplayKeyring,
-    McpTaskRequestCommitment,
-)
-from app.runtime.invocation import OwnerRefusedLaunchError
 from deerflow.constants import (
-    MCP_TASK_OWNER_CANCEL_REASON_CODES,
     MCP_TASK_POLL_AFTER_MAX_SECONDS,
     MCP_TASK_REMOTE_ID_MAX_LENGTH,
     MCP_TASK_RESULT_ARTIFACT_MAX_BYTES,
 )
 from deerflow.mcp.tasks import (
     McpTaskDriverRegistry,
-    McpTaskLineageError,
     McpTaskProtocolError,
     TaskReference,
     TaskSnapshot,
     TaskStatus,
     TaskSubmitRequest,
 )
-from deerflow.persistence.mcp_tasks import (
-    DuplicateMcpRemoteTaskError,
-    DuplicateMcpTaskIdError,
-    DuplicateMcpTaskLineageError,
-    McpTaskRepository,
-)
+from deerflow.persistence.mcp_tasks import DuplicateMcpRemoteTaskError
+from deerflow.runtime.cancellation import wait_for_task_until
 from deerflow.runtime.runs.manager import ConflictError
 from deerflow.runtime.runs.schemas import RunStatus
 
@@ -48,20 +35,32 @@ logger = logging.getLogger(__name__)
 _MAX_PERSISTED_ERROR_CHARS = 4_000
 _MAX_INPUT_REQUIRED_BYTES = 65_536
 _MAX_NOTIFICATION_ATTEMPTS = 5
+_CANCELLATION_DRAIN_TIMEOUT_SECONDS = 5.0
 
-#: Why a notification ended without launching: its owner is turned off. The
-#: accounts command ends the waiting ones with it, and a launch refused for
-#: the same reason ends with it too.
-NOTIFICATION_OWNER_REFUSED_ERROR = "mcp_task_notification_owner_refused"
-_UNTRACKED_TASK_COMPENSATION_WAIT_SECONDS = 5.0
-_CANCEL_ACTOR_REF_DOMAIN = b"deerflow.mcp-task.cancel-actor/v1\0"
-_SAFE_PROPAGATED_ERROR_CODES = frozenset(
-    {
-        "mcp_task_credential_binding_unavailable",
-        "mcp_task_lineage_invalid",
-        "mcp_task_notification_lineage_conflict",
-        "mcp_task_tenant_mismatch",
-    }
+
+@dataclass(slots=True)
+class _BatchRecordState:
+    record: dict[str, Any]
+    ordinary_release_task: asyncio.Future[Any] | None = None
+    ordinary_release_terminal: bool = False
+    cancellation_release_task: asyncio.Future[Any] | None = None
+    cancellation_release_terminal: bool = False
+
+
+@dataclass(slots=True)
+class _BatchState:
+    cancellation_requested: bool = False
+
+
+@dataclass(slots=True)
+class _ClaimOwner:
+    claim_task: asyncio.Future[list[dict[str, Any]]]
+    handoff_task: asyncio.Task[None] | None = None
+
+
+_current_batch_record: ContextVar[_BatchRecordState | None] = ContextVar(
+    "mcp_task_current_batch_record",
+    default=None,
 )
 
 
@@ -71,42 +70,24 @@ def _bound_error(error: str | None) -> str | None:
     return error[:_MAX_PERSISTED_ERROR_CHARS]
 
 
-def _safe_error_code(error: BaseException, fallback: str) -> str:
-    code = getattr(error, "code", None)
-    if code in _SAFE_PROPAGATED_ERROR_CODES:
-        return code
-    return fallback
+def _notification_completion_time(*, not_before: datetime) -> datetime:
+    """Return notification completion time without moving before the claim."""
+    return max(not_before, datetime.now(UTC))
 
 
-def _safe_remote_snapshot_error(snapshot: TaskSnapshot) -> str | None:
-    if snapshot.error is None:
-        return None
-    if snapshot.status == TaskStatus.FAILED:
-        return "mcp_task_remote_failed"
-    if snapshot.status == TaskStatus.CANCELLED:
-        return "mcp_task_remote_cancelled"
-    return "mcp_task_remote_error"
+def _consume_task_error(task: asyncio.Future[Any]) -> BaseException | None:
+    try:
+        return task.exception()
+    except asyncio.CancelledError as exc:
+        return exc
 
 
-def _cancel_actor_ref(*, tenant_digest: str, user_id: str) -> str:
-    """Derive a tenant-scoped pseudonymous actor reference for cancellation."""
-
-    if not isinstance(user_id, str):
-        raise TypeError("MCP task cancellation user identity must be text")
-    encoded_user_id = user_id.encode("utf-8")
-    if not encoded_user_id or len(encoded_user_id) > 128 or any(ord(character) < 32 or ord(character) == 127 for character in user_id):
-        raise ValueError("MCP task cancellation user identity is invalid")
-    return hashlib.sha256(_CANCEL_ACTOR_REF_DOMAIN + tenant_digest.encode("ascii") + b"\0" + encoded_user_id).hexdigest()
-
-
-#: Who a deployer's cancellation is attributed to: the accounts command, not the person.
-_DEPLOYER_ACTOR = "deployer:accounts-command"
-
-
-def deployer_cancel_actor_ref(*, tenant_digest: str) -> str:
-    """The pseudonymous actor reference the accounts command records when it cancels a person's task."""
-
-    return _cancel_actor_ref(tenant_digest=tenant_digest, user_id=_DEPLOYER_ACTOR)
+def _task_has_cancelled_terminal_state(task: asyncio.Future[Any]) -> bool:
+    if not task.done():
+        return False
+    if task.cancelled():
+        return True
+    return isinstance(_consume_task_error(task), asyncio.CancelledError)
 
 
 class McpTaskService:
@@ -115,7 +96,7 @@ class McpTaskService:
     def __init__(
         self,
         *,
-        repository: McpTaskRepository,
+        repository,
         drivers: McpTaskDriverRegistry,
         poll_interval_seconds: int,
         lease_seconds: int,
@@ -127,10 +108,8 @@ class McpTaskService:
         result_preview_max_chars: int = 2_000,
         launch_notification: Callable[..., Awaitable[dict[str, Any]]] | None = None,
         get_run: Callable[..., Awaitable[Any | None]] | None = None,
-        request_commitment_keyring: McpTaskReplayKeyring | None = None,
     ) -> None:
         self._repository = repository
-        self._tenant = repository.tenant
         self._drivers = drivers
         self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
@@ -142,13 +121,14 @@ class McpTaskService:
         self._result_preview_max_chars = result_preview_max_chars
         self._launch_notification = launch_notification
         self._get_run = get_run
-        self._request_commitment_keyring = request_commitment_keyring or McpTaskReplayKeyring.from_environment(required=False)
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task[None] | None = None
-        self._submit_tasks: set[asyncio.Task[Any]] = set()
-        self._compensation_tasks: set[asyncio.Task[Any]] = set()
+        self._stopping_task: asyncio.Task[None] | None = None
+        self._stop_deadline: float | None = None
+        self._stop_timeout_logged = False
+        self._compensation_tasks: set[asyncio.Future[Any]] = set()
+        self._claim_owners: dict[str, _ClaimOwner] = {}
         self._stop = asyncio.Event()
-        self._force_stop = asyncio.Event()
 
     @property
     def drivers(self) -> McpTaskDriverRegistry:
@@ -158,11 +138,159 @@ class McpTaskService:
     def tracking_degraded_after_errors(self) -> int:
         return self._tracking_degraded_after_errors
 
-    @property
-    def running(self) -> bool:
-        """Return whether this replica's durable MCP poller is live."""
+    def _observe_batch_release_task(
+        self,
+        state: _BatchRecordState,
+        task: asyncio.Future[Any],
+        *,
+        ordinary: bool,
+        action: str,
+    ) -> None:
+        terminal_field = "ordinary_release_terminal" if ordinary else "cancellation_release_terminal"
+        if getattr(state, terminal_field) or not task.done():
+            return
+        setattr(state, terminal_field, True)
+        error = _consume_task_error(task)
+        if error is None:
+            return
+        self._log_batch_release_error(
+            error,
+            action=action,
+            task_id=state.record.get("id"),
+        )
 
-        return self._task is not None and not self._task.done()
+    @staticmethod
+    def _log_batch_release_error(error: BaseException, *, action: str, task_id: Any) -> None:
+        logger.error(
+            "MCP task batch release failed (%s, task_id=%s): %s",
+            action,
+            task_id,
+            error,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+    @staticmethod
+    def _log_claim_error(error: BaseException, *, action: str) -> None:
+        logger.error(
+            "MCP task claim operation failed (%s, task_id=batch): %s",
+            action,
+            error,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+    def _track_batch_release_task(
+        self,
+        state: _BatchRecordState,
+        task: asyncio.Future[Any],
+        *,
+        ordinary: bool,
+        action: str,
+    ) -> None:
+        def finalize(completed: asyncio.Future[Any]) -> None:
+            self._observe_batch_release_task(
+                state,
+                completed,
+                ordinary=ordinary,
+                action=action,
+            )
+
+        task.add_done_callback(finalize)
+
+    def _retain_batch_release_task(self, task: asyncio.Future[Any]) -> None:
+        """Transfer a timed-out ordinary release to service ownership."""
+        if task in self._compensation_tasks:
+            return
+        self._compensation_tasks.add(task)
+        task.add_done_callback(self._compensation_tasks.discard)
+
+    async def _release_ordinary_batch_record(
+        self,
+        record: dict[str, Any],
+        *,
+        release: Callable[[], Awaitable[Any]],
+        action: str,
+    ) -> None:
+        state = _current_batch_record.get()
+        if state is None:
+            release_task = asyncio.ensure_future(release())
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(release_task),
+                    timeout=_CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                )
+            except asyncio.CancelledError:
+                self._track_compensation_task(
+                    release_task,
+                    action=action,
+                    task_id=str(record.get("id") or "unknown"),
+                )
+                raise
+            except TimeoutError:
+                self._track_compensation_task(
+                    release_task,
+                    action=action,
+                    task_id=str(record.get("id") or "unknown"),
+                )
+                logger.warning(
+                    "Timed out after %.1f seconds waiting for MCP task release; it continues in the background (%s, task_id=%s)",
+                    _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                    action,
+                    record.get("id"),
+                )
+            return
+
+        if state.cancellation_release_task is not None:
+            self._observe_batch_release_task(
+                state,
+                state.cancellation_release_task,
+                ordinary=False,
+                action="cancellation release",
+            )
+            return
+
+        task = state.ordinary_release_task
+        if task is None:
+            task = asyncio.create_task(
+                release(),
+                name=f"mcp-{action.replace(' ', '-')}-ordinary-release-{record.get('id', 'unknown')}",
+            )
+            state.ordinary_release_task = task
+            self._track_batch_release_task(
+                state,
+                task,
+                ordinary=True,
+                action=action,
+            )
+        try:
+            await asyncio.wait_for(
+                asyncio.shield(task),
+                timeout=_CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            # The release is still in flight past the drain deadline on the
+            # uncancelled path; it stays tracked by the batch state and settles
+            # in the background instead of blocking the poller.
+            self._retain_batch_release_task(task)
+            self._observe_batch_release_task(state, task, ordinary=True, action=action)
+            logger.warning(
+                "Timed out after %.1f seconds waiting for MCP task release; it continues in the background (%s, task_id=%s)",
+                _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                action,
+                record.get("id"),
+            )
+            return
+        except asyncio.CancelledError:
+            self._observe_batch_release_task(state, task, ordinary=True, action=action)
+            if state.ordinary_release_terminal and not asyncio.current_task().cancelling():
+                # The release cancelled itself and the caller is not cancelling:
+                # consume it once and return without re-raising.
+                return
+            raise
+        except Exception:
+            self._observe_batch_release_task(state, task, ordinary=True, action=action)
+            raise
+        else:
+            self._observe_batch_release_task(state, task, ordinary=True, action=action)
 
     async def submit(
         self,
@@ -172,73 +300,14 @@ class McpTaskService:
         now: datetime | None = None,
     ) -> dict:
         """Submit through one driver and persist the remote handle before returning."""
-        if self._stop.is_set():
-            raise RuntimeError("MCP task service is not accepting submissions")
-        submit_task = asyncio.current_task()
-        if submit_task is None:
-            raise RuntimeError("MCP task submission requires an asyncio task")
-        self._submit_tasks.add(submit_task)
-        try:
-            return await self._submit(
-                driver_name=driver_name,
-                request=request,
-                now=now,
-            )
-        finally:
-            self._submit_tasks.discard(submit_task)
-
-    async def _submit(
-        self,
-        *,
-        driver_name: str,
-        request: TaskSubmitRequest,
-        now: datetime | None = None,
-    ) -> dict:
         driver = self._drivers.get(driver_name)
         if driver is None:
             raise LookupError(f"No MCP task driver registered as {driver_name!r}")
-        if request.lineage.tenant != self._tenant:
-            raise McpTaskLineageError("mcp_task_tenant_mismatch")
 
-        request_commitment = self._request_commitment(
-            driver_name=driver_name,
-            request=request,
-        )
-
-        local_task_id = request.local_task_id or ("mcp-task-" + hashlib.sha256((self._tenant.digest + ":" + request.lineage.digest).encode("ascii")).hexdigest()[:48])
-        existing = await self._repository.get_by_lineage_digest(
-            request.lineage.digest,
-            user_id=request.user_id,
-            tenant_digest=self._tenant.digest,
-        )
-        if existing is not None:
-            self._require_same_submission(
-                existing,
-                request=request,
-                driver_name=driver_name,
-                local_task_id=local_task_id,
-            )
-            return existing
-        existing_id = await self._repository.get(
-            local_task_id,
-            user_id=request.user_id,
-            tenant_digest=self._tenant.digest,
-        )
-        if existing_id is not None:
-            self._require_same_submission(
-                existing_id,
-                request=request,
-                driver_name=driver_name,
-                local_task_id=local_task_id,
-            )
-            return existing_id
+        submitted_at = now or datetime.now(UTC)
+        local_task_id = request.local_task_id or f"mcp-task-{uuid.uuid4().hex}"
         driver_request = replace(request, local_task_id=local_task_id)
-        try:
-            submission = await driver.submit(driver_request)
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            raise McpTaskProtocolError("mcp_task_remote_submit_failed") from None
+        submission = await driver.submit(driver_request)
         driver_data = {**request.driver_data, **submission.driver_data}
         task_reference = TaskReference(
             local_task_id=local_task_id,
@@ -246,26 +315,25 @@ class McpTaskService:
             thread_id=request.thread_id,
             server_name=request.server_name,
             remote_task_id=submission.remote_task_id,
+            thread_incarnation=request.thread_incarnation,
             driver_data=driver_data,
-            lineage=request.lineage,
         )
         try:
             if len(submission.remote_task_id) > MCP_TASK_REMOTE_ID_MAX_LENGTH:
                 raise McpTaskProtocolError(f"MCP task remote_task_id must not exceed {MCP_TASK_REMOTE_ID_MAX_LENGTH} characters")
             snapshot = self._normalize_snapshot(submission.snapshot)
-            next_poll_after_seconds = self._next_poll_after_seconds(snapshot)
+            next_poll_at = self._next_poll_at(snapshot, now=submitted_at)
             return await self._repository.create(
                 task_id=local_task_id,
                 user_id=request.user_id,
                 thread_id=request.thread_id,
-                lineage=request.lineage,
-                tenant_digest=self._tenant.digest,
+                expected_thread_incarnation=request.thread_incarnation,
+                run_id=request.run_id,
+                tool_call_id=request.tool_call_id,
+                server_name=request.server_name,
                 driver_name=driver_name,
                 remote_task_id=submission.remote_task_id,
                 task_name=request.task_name,
-                request_commitment_version=request_commitment.version,
-                request_commitment_key_id=request_commitment.key_id,
-                request_commitment_digest=request_commitment.digest,
                 status=snapshot.status.value,
                 result=snapshot.result,
                 result_preview=snapshot.result_preview,
@@ -273,43 +341,9 @@ class McpTaskService:
                 result_artifact=snapshot.result_artifact,
                 error=snapshot.error,
                 input_required=snapshot.input_required,
-                next_poll_after_seconds=next_poll_after_seconds,
+                next_poll_at=next_poll_at,
                 driver_data=driver_data,
             )
-        except (DuplicateMcpTaskLineageError, DuplicateMcpTaskIdError) as exc:
-            existing = await self._repository.get_by_lineage_digest(
-                request.lineage.digest,
-                user_id=request.user_id,
-                tenant_digest=self._tenant.digest,
-            )
-            replay_error: McpTaskLineageError | None = None
-            if existing is not None:
-                try:
-                    self._require_same_submission(
-                        existing,
-                        request=request,
-                        driver_name=driver_name,
-                        local_task_id=local_task_id,
-                    )
-                except McpTaskLineageError as mismatch:
-                    replay_error = mismatch
-                else:
-                    if existing.get("remote_task_id") != submission.remote_task_id:
-                        await self._cancel_untracked_task(
-                            driver=driver,
-                            task_reference=task_reference,
-                            driver_name=driver_name,
-                            reason="concurrent lineage replay",
-                        )
-                    return existing
-            if existing is None or existing.get("remote_task_id") != submission.remote_task_id:
-                await self._cancel_untracked_task(
-                    driver=driver,
-                    task_reference=task_reference,
-                    driver_name=driver_name,
-                    reason="conflicting lineage replay",
-                )
-            raise (replay_error or McpTaskLineageError("mcp_task_request_conflict")) from exc
         except DuplicateMcpRemoteTaskError:
             # This handle already has a durable owner. Cancelling it as
             # compensation would terminate the pre-existing tracked task.
@@ -334,90 +368,6 @@ class McpTaskService:
             )
             raise
 
-    @staticmethod
-    def _request_commitment_value(
-        *,
-        driver_name: str,
-        request: TaskSubmitRequest,
-    ) -> dict[str, Any]:
-        return {
-            "driver_name": driver_name,
-            "user_id": request.user_id,
-            "thread_id": request.thread_id,
-            "lineage_digest": request.lineage.digest,
-            "task_name": request.task_name,
-            "arguments": request.arguments,
-            "driver_data": request.driver_data,
-            "local_task_id": request.local_task_id,
-        }
-
-    def _request_commitment(
-        self,
-        *,
-        driver_name: str,
-        request: TaskSubmitRequest,
-        key_id: str | None = None,
-        version: int = 1,
-    ) -> McpTaskRequestCommitment:
-        keyring = self._request_commitment_keyring
-        if keyring is None:
-            raise McpTaskLineageError("mcp_task_request_commitment_unavailable")
-        try:
-            return keyring.commit(
-                self._request_commitment_value(
-                    driver_name=driver_name,
-                    request=request,
-                ),
-                key_id=key_id,
-                version=version,
-            )
-        except McpTaskReplayCommitmentError as exc:
-            raise McpTaskLineageError(exc.code) from exc
-
-    def _require_same_submission(
-        self,
-        record: dict[str, Any],
-        *,
-        request: TaskSubmitRequest,
-        driver_name: str,
-        local_task_id: str,
-    ) -> None:
-        lineage = record.get("lineage")
-        if not (
-            record.get("id") == local_task_id
-            and record.get("user_id") == request.user_id
-            and record.get("thread_id") == request.thread_id
-            and record.get("driver_name") == driver_name
-            and record.get("task_name") == request.task_name
-            and isinstance(lineage, dict)
-            and lineage.get("digest") == request.lineage.digest
-        ):
-            raise McpTaskLineageError("mcp_task_request_conflict")
-        version = record.get("request_commitment_version")
-        key_id = record.get("request_commitment_key_id")
-        digest = record.get("request_commitment_digest")
-        if version is None and key_id is None and digest is None:
-            raise McpTaskLineageError("mcp_task_request_commitment_legacy_unavailable")
-        if (
-            type(version) is not int
-            or not isinstance(key_id, str)
-            or not 1 <= len(key_id) <= 32
-            or key_id[0] not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-            or any(character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-" for character in key_id)
-            or not isinstance(digest, str)
-            or len(digest) != 64
-            or any(character not in "0123456789abcdef" for character in digest)
-        ):
-            raise McpTaskLineageError("mcp_task_request_commitment_invalid")
-        expected = self._request_commitment(
-            driver_name=driver_name,
-            request=request,
-            key_id=key_id,
-            version=version,
-        )
-        if not hmac.compare_digest(expected.digest, digest):
-            raise McpTaskLineageError("mcp_task_request_conflict")
-
     async def _cancel_untracked_task(
         self,
         *,
@@ -432,66 +382,315 @@ class McpTaskService:
         )
         self._compensation_tasks.add(compensation)
 
-        def finalize(task: asyncio.Task[Any]) -> None:
+        def finalize(task: asyncio.Future[Any]) -> None:
             self._compensation_tasks.discard(task)
-            try:
-                error = task.exception()
-            except asyncio.CancelledError as exc:
-                error = exc
+            error = _consume_task_error(task)
             if error is None:
                 return
             logger.error(
-                "Failed to cancel untracked MCP task after %s (task_id=%s, driver=%s, error_code=mcp_task_compensation_failed)",
+                "Failed to cancel untracked MCP task after %s (task_id=%s, driver=%s, remote_task_id=%s)",
                 reason,
                 task_reference.local_task_id,
                 driver_name,
+                task_reference.remote_task_id,
+                exc_info=(type(error), error, error.__traceback__),
             )
 
         compensation.add_done_callback(finalize)
-        if self._force_stop.is_set():
-            compensation.cancel()
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + _UNTRACKED_TASK_COMPENSATION_WAIT_SECONDS
-        while not compensation.done():
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                logger.warning(
-                    "Timed out after %.1f seconds waiting for untracked MCP task compensation after %s; cancellation continues in the background (task_id=%s, driver=%s, error_code=mcp_task_compensation_timeout)",
-                    _UNTRACKED_TASK_COMPENSATION_WAIT_SECONDS,
-                    reason,
-                    task_reference.local_task_id,
-                    driver_name,
+        deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
+        if not await wait_for_task_until(compensation, deadline=deadline):
+            logger.warning(
+                "Timed out after %.1f seconds waiting for untracked MCP task compensation after %s; cancellation continues in the background (task_id=%s, driver=%s, remote_task_id=%s)",
+                _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                reason,
+                task_reference.local_task_id,
+                driver_name,
+                task_reference.remote_task_id,
+            )
+
+    def _track_compensation_task(self, task: asyncio.Future[Any], *, action: str, task_id: str) -> None:
+        if task in self._compensation_tasks:
+            return
+        self._compensation_tasks.add(task)
+
+        def finalize(completed: asyncio.Future[Any]) -> None:
+            self._compensation_tasks.discard(completed)
+            error = _consume_task_error(completed)
+            if error is None:
+                return
+            logger.error(
+                "MCP task cancellation operation failed (%s, task_id=%s): %s",
+                action,
+                task_id,
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+
+        task.add_done_callback(finalize)
+
+    async def _drain_cancellation_task(
+        self,
+        task: asyncio.Future[Any],
+        *,
+        action: str,
+        task_id: str,
+        deadline: float,
+    ) -> tuple[bool, Any]:
+        if not await wait_for_task_until(task, deadline=deadline):
+            self._track_compensation_task(task, action=action, task_id=task_id)
+            logger.warning(
+                "Timed out after %.1f seconds waiting for MCP task cancellation operation; it continues in the background (%s, task_id=%s)",
+                _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                action,
+                task_id,
+            )
+            return False, None
+
+        error = _consume_task_error(task)
+        if error is not None:
+            logger.error(
+                "MCP task cancellation operation failed (%s, task_id=%s): %s",
+                action,
+                task_id,
+                error,
+                exc_info=(type(error), error, error.__traceback__),
+            )
+            return False, None
+        return True, task.result()
+
+    async def _drain_cancellation_compensation(
+        self,
+        compensation: Awaitable[Any],
+        *,
+        action: str,
+        task_id: str,
+    ) -> tuple[bool, Any]:
+        task = asyncio.ensure_future(compensation)
+        deadline = asyncio.get_running_loop().time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
+        return await self._drain_cancellation_task(
+            task,
+            action=action,
+            task_id=task_id,
+            deadline=deadline,
+        )
+
+    async def _release_owned_batch_record(
+        self,
+        state: _BatchRecordState,
+        *,
+        release: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        ordinary_task = state.ordinary_release_task
+        if ordinary_task is not None:
+            self._observe_batch_release_task(
+                state,
+                ordinary_task,
+                ordinary=True,
+                action="ordinary retry release",
+            )
+            return
+
+        task = state.cancellation_release_task
+        if task is None:
+            task = asyncio.create_task(
+                release(state.record),
+                name=f"mcp-cancellation-release-{state.record.get('id', 'unknown')}",
+            )
+            state.cancellation_release_task = task
+            self._track_batch_release_task(
+                state,
+                task,
+                ordinary=False,
+                action="cancellation release",
+            )
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._observe_batch_release_task(
+                state,
+                task,
+                ordinary=False,
+                action="cancellation release",
+            )
+        except Exception:
+            self._observe_batch_release_task(
+                state,
+                task,
+                ordinary=False,
+                action="cancellation release",
+            )
+        else:
+            self._observe_batch_release_task(
+                state,
+                task,
+                ordinary=False,
+                action="cancellation release",
+            )
+
+    async def _finish_cancelled_batch(
+        self,
+        supervisor: asyncio.Task[list[Any]],
+        children: list[asyncio.Task[Any]],
+        states: list[_BatchRecordState],
+        *,
+        release: Callable[[dict[str, Any]], Awaitable[None]],
+        action: str,
+    ) -> None:
+        # The handoff owns both the supervisor and every release task. Keeping
+        # all of them in this frame lets a timed-out handoff finish safely in
+        # the background without starting a second release.
+        async def release_uncompleted(state: _BatchRecordState) -> None:
+            if state.ordinary_release_task is not None:
+                try:
+                    await state.ordinary_release_task
+                except asyncio.CancelledError:
+                    pass
+                except Exception:
+                    pass
+                self._observe_batch_release_task(
+                    state,
+                    state.ordinary_release_task,
+                    ordinary=True,
+                    action="ordinary retry release",
                 )
                 return
+            await self._release_owned_batch_record(state, release=release)
+
+        release_tasks = [
+            asyncio.create_task(
+                release_uncompleted(state),
+                name=f"mcp-{action.replace(' ', '-')}-release-{index}-{state.record.get('id', 'unknown')}",
+            )
+            for index, state in enumerate(states)
+        ]
+        results = await asyncio.gather(supervisor, *release_tasks, return_exceptions=True)
+        supervisor_result = results[0]
+        if isinstance(supervisor_result, BaseException):
+            logger.error(
+                "MCP task batch supervisor failed during cancellation handoff (action=%s): %s",
+                action,
+                supervisor_result,
+                exc_info=(type(supervisor_result), supervisor_result, supervisor_result.__traceback__),
+            )
+        for state, child in zip(states, children, strict=True):
+            if child.done():
+                error = _consume_task_error(child)
+                if error is None or isinstance(error, asyncio.CancelledError):
+                    continue
+                failure_action = "cancellation" if action == "cancel" else action
+                lease_suffix = "; the lease will expire for recovery" if action in {"poll", "cancel"} else ""
+                logger.error(
+                    "Unexpected MCP task %s failure (task_id=%s)%s",
+                    failure_action,
+                    state.record.get("id"),
+                    lease_suffix,
+                    exc_info=(type(error), error, error.__traceback__),
+                )
+
+    async def _run_claimed_batch(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        operation: Callable[[dict[str, Any]], Awaitable[Any]],
+        release: Callable[[dict[str, Any]], Awaitable[None]],
+        action: str,
+    ) -> tuple[list[_BatchRecordState], list[Any]]:
+        states = [_BatchRecordState(record) for record in records]
+        batch_state = _BatchState()
+        parent_task = asyncio.current_task()
+
+        async def run_one(state: _BatchRecordState) -> Any:
+            context_token = _current_batch_record.set(state)
             try:
-                await asyncio.wait({compensation}, timeout=remaining)
+                if parent_task is not None and parent_task.cancelling():
+                    batch_state.cancellation_requested = True
+                if batch_state.cancellation_requested:
+                    return None
+                return await operation(state.record)
             except asyncio.CancelledError:
-                # Repeated caller cancellation does not propagate through
-                # asyncio.wait() to the compensation task. Keep waiting only
-                # until the original deadline.
-                continue
+                await self._release_owned_batch_record(state, release=release)
+                raise
+            finally:
+                _current_batch_record.reset(context_token)
+                if batch_state.cancellation_requested:
+                    await self._release_owned_batch_record(state, release=release)
+
+        task_prefix = action.replace(" ", "-")
+        tasks = [
+            asyncio.create_task(
+                run_one(state),
+                name=f"mcp-{task_prefix}-{index}-{state.record.get('id', 'unknown')}",
+            )
+            for index, state in enumerate(states)
+        ]
+
+        async def supervise() -> list[Any]:
+            return await asyncio.gather(*tasks, return_exceptions=True)
+
+        supervisor = asyncio.create_task(
+            supervise(),
+            name=f"mcp-{task_prefix}-supervisor",
+        )
+        try:
+            results = await asyncio.shield(supervisor)
+        except asyncio.CancelledError as original_cancel:
+            batch_state.cancellation_requested = True
+            for task in tasks:
+                task.cancel()
+            handoff = asyncio.create_task(
+                self._finish_cancelled_batch(
+                    supervisor,
+                    tasks,
+                    states,
+                    release=release,
+                    action=action,
+                ),
+                name=f"mcp-{task_prefix}-cancellation-handoff",
+            )
+            await self._drain_cancellation_task(
+                handoff,
+                action=f"finish {action} batch handoff",
+                task_id="batch",
+                deadline=asyncio.get_running_loop().time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            )
+            # A task that was cancelled before entering this handler stores a
+            # special cancelled state; raising that same exception object can
+            # make asyncio discard its message when the task is awaited.
+            # Recreate it with the first cancellation's args instead.
+            raise asyncio.CancelledError(*original_cancel.args)
+
+        return states, results
 
     async def run_once(self, *, now: datetime) -> None:
         await self._run_cancellations(now=now)
 
-        claimed = await self._repository.claim_due_tasks(
-            now=now,
-            lease_owner=self._lease_owner,
-            lease_seconds=self._lease_seconds,
-            limit=self._max_concurrent_polls,
-            tenant_digest=self._tenant.digest,
+        claimed = await self._claim_with_cancellation_release(
+            lambda: self._repository.claim_due_tasks(
+                now=now,
+                lease_owner=self._lease_owner,
+                lease_seconds=self._lease_seconds,
+                limit=self._max_concurrent_polls,
+            ),
+            phase="poll",
+            action="poll claim",
+            release=self._release_poll_after_cancellation,
         )
         if claimed:
-            results = await asyncio.gather(
-                *(self._poll_one(task, now=now) for task in claimed),
-                return_exceptions=True,
+            states, results = await self._run_claimed_batch(
+                claimed,
+                operation=lambda record: self._poll_one_claimed(record, now=now),
+                release=self._release_poll_after_cancellation,
+                action="poll",
             )
-            for record, result in zip(claimed, results, strict=True):
-                if isinstance(result, BaseException):
-                    logger.error(
-                        "Unexpected MCP task poll failure (task_id=%s, error_code=mcp_task_poll_persistence_failed); the lease will expire for recovery",
-                        record.get("id"),
-                    )
+            for state, result in zip(states, results, strict=True):
+                if not isinstance(result, BaseException) or isinstance(result, asyncio.CancelledError):
+                    continue
+                logger.error(
+                    "Unexpected MCP task poll failure (task_id=%s); the lease will expire for recovery",
+                    state.record.get("id"),
+                    exc_info=(type(result), result, result.__traceback__),
+                )
 
         await self._run_notifications(now=datetime.now(UTC))
 
@@ -500,15 +699,16 @@ class McpTaskService:
         *,
         thread_id: str,
         user_id: str,
+        thread_incarnation: str | None,
         limit: int = 50,
         active_only: bool = False,
     ) -> list[dict[str, Any]]:
         return await self._repository.list_by_thread(
             thread_id,
             user_id=user_id,
+            thread_incarnation=thread_incarnation,
             limit=limit,
             active_only=active_only,
-            tenant_digest=self._tenant.digest,
         )
 
     async def cancel_task(
@@ -517,24 +717,15 @@ class McpTaskService:
         task_id: str,
         thread_id: str,
         user_id: str,
-        reason_code: str,
+        thread_incarnation: str | None,
         now: datetime | None = None,
     ) -> dict[str, Any] | None:
-        """Persist the first owner-scoped cancellation intent and attribution."""
-
-        if not isinstance(reason_code, str) or reason_code not in MCP_TASK_OWNER_CANCEL_REASON_CODES:
-            raise ValueError("Unsupported MCP task cancellation reason")
         return await self._repository.request_cancel(
             task_id,
             user_id=user_id,
             thread_id=thread_id,
+            thread_incarnation=thread_incarnation,
             requested_at=now or datetime.now(UTC),
-            actor_ref=_cancel_actor_ref(
-                tenant_digest=self._tenant.digest,
-                user_id=user_id,
-            ),
-            reason_code=reason_code,
-            tenant_digest=self._tenant.digest,
         )
 
     async def cancel_matching_task(
@@ -542,11 +733,15 @@ class McpTaskService:
         *,
         thread_id: str,
         user_id: str,
+        thread_incarnation: str | None,
         task: str | None = None,
     ) -> dict[str, Any]:
-        """Resolve one Agent-selected active task and record its cancel intent."""
-
-        active = await self.list_tasks(thread_id=thread_id, user_id=user_id, active_only=True)
+        active = await self.list_tasks(
+            thread_id=thread_id,
+            user_id=user_id,
+            thread_incarnation=thread_incarnation,
+            active_only=True,
+        )
         if task:
             normalized = task.casefold().strip()
             matches = [item for item in active if item["id"] == task or str(item.get("task_name") or "").casefold() == normalized]
@@ -561,7 +756,7 @@ class McpTaskService:
             task_id=matches[0]["id"],
             thread_id=thread_id,
             user_id=user_id,
-            reason_code="agent_tool",
+            thread_incarnation=thread_incarnation,
         )
         if result is None:
             raise LookupError("The selected background task no longer exists")
@@ -571,26 +766,34 @@ class McpTaskService:
         claim = getattr(self._repository, "claim_cancel_requests", None)
         if claim is None:
             return
-        records = await claim(
-            now=now,
-            lease_owner=self._lease_owner,
-            lease_seconds=self._lease_seconds,
-            limit=self._max_concurrent_polls,
-            tenant_digest=self._tenant.digest,
+        records = await self._claim_with_cancellation_release(
+            lambda: claim(
+                now=now,
+                lease_owner=self._lease_owner,
+                lease_seconds=self._lease_seconds,
+                limit=self._max_concurrent_polls,
+            ),
+            phase="cancel",
+            action="cancel claim",
+            release=self._release_cancel_after_cancellation,
         )
         if records:
-            results = await asyncio.gather(
-                *(self._cancel_one(record) for record in records),
-                return_exceptions=True,
+            states, results = await self._run_claimed_batch(
+                records,
+                operation=self._cancel_one_claimed,
+                release=self._release_cancel_after_cancellation,
+                action="cancel",
             )
-            for record, result in zip(records, results, strict=True):
-                if isinstance(result, BaseException):
-                    logger.error(
-                        "Unexpected MCP task cancellation failure (task_id=%s, error_code=mcp_task_cancel_persistence_failed); the lease will expire for recovery",
-                        record.get("id"),
-                    )
+            for state, result in zip(states, results, strict=True):
+                if not isinstance(result, BaseException) or isinstance(result, asyncio.CancelledError):
+                    continue
+                logger.error(
+                    "Unexpected MCP task cancellation failure (task_id=%s); the lease will expire for recovery",
+                    state.record.get("id"),
+                    exc_info=(type(result), result, result.__traceback__),
+                )
 
-    async def _cancel_one(self, record: dict[str, Any]) -> None:
+    async def _cancel_one_claimed(self, record: dict[str, Any]) -> None:
         driver_name = str(record.get("driver_name") or "")
         driver = self._drivers.get(driver_name)
         try:
@@ -602,6 +805,7 @@ class McpTaskService:
             await self._repository.apply_cancel_snapshot(
                 record["id"],
                 lease_owner=self._lease_owner,
+                lease_token=record["lease_token"],
                 status=snapshot.status.value,
                 result=snapshot.result,
                 result_preview=snapshot.result_preview,
@@ -610,159 +814,169 @@ class McpTaskService:
                 error=snapshot.error,
                 input_required=snapshot.input_required,
                 completed_at=datetime.now(UTC),
-                tenant_digest=self._tenant.digest,
             )
         except Exception as exc:  # noqa: BLE001 - remote cancellation is retryable
             attempts = max(0, int(record.get("cancel_attempt_count") or 1) - 1)
             retry_seconds = min(self._poll_interval_seconds * (2 ** min(attempts, 16)), self._max_poll_backoff_seconds)
-            await self._repository.release_cancel_claim(
-                record["id"],
-                lease_owner=self._lease_owner,
-                retry_after_seconds=retry_seconds,
-                error=_safe_error_code(exc, "mcp_task_remote_cancel_failed"),
-                tenant_digest=self._tenant.digest,
+            failed_at = datetime.now(UTC)
+            retry_error = _bound_error(str(exc) or type(exc).__name__)
+            await self._release_ordinary_batch_record(
+                record,
+                release=lambda: self._repository.release_cancel_claim(
+                    record["id"],
+                    lease_owner=self._lease_owner,
+                    lease_token=record["lease_token"],
+                    next_cancel_at=failed_at + timedelta(seconds=retry_seconds),
+                    error=retry_error,
+                ),
+                action="release cancel retry",
             )
 
     async def _run_notifications(self, *, now: datetime) -> None:
         if self._launch_notification is None or self._get_run is None:
             return
-        records = await self._repository.claim_notification_work(
-            now=now,
-            lease_owner=self._lease_owner,
-            lease_seconds=self._lease_seconds,
-            limit=self._max_concurrent_polls,
-            tracking_degraded_after_errors=self._tracking_degraded_after_errors,
-            tenant_digest=self._tenant.digest,
+        records = await self._claim_with_cancellation_release(
+            lambda: self._repository.claim_notification_work(
+                now=now,
+                lease_owner=self._lease_owner,
+                lease_seconds=self._lease_seconds,
+                limit=self._max_concurrent_polls,
+                tracking_degraded_after_errors=self._tracking_degraded_after_errors,
+            ),
+            phase="notification",
+            action="notification claim",
+            release=self._release_notification_after_cancellation,
         )
         if records:
-            results = await asyncio.gather(
-                *(self._notify_one(record, now=now) for record in records),
-                return_exceptions=True,
+            await self._run_claimed_batch(
+                records,
+                operation=lambda record: self._notify_one_claimed_safely(record, now=now),
+                release=self._release_notification_after_cancellation,
+                action="notification",
             )
-            for record, result in zip(records, results, strict=True):
-                if not isinstance(result, BaseException):
-                    continue
-                error = _safe_error_code(
-                    result,
-                    "mcp_task_notification_processing_failed",
-                )
-                logger.error(
-                    "Unexpected MCP task notification failure (task_id=%s, error_code=%s)",
-                    record.get("id"),
-                    error,
-                )
-                try:
-                    await self._repository.release_notification_lease(
-                        record["id"],
-                        lease_owner=self._lease_owner,
-                        retry_after_seconds=self._notification_retry_seconds(
-                            record,
-                        ),
-                        error=error,
-                        count_failure=True,
-                        tenant_digest=self._tenant.digest,
-                    )
-                except Exception:  # noqa: BLE001 - retain the original task-scoped failure
-                    logger.error(
-                        "Failed to release MCP task notification lease (task_id=%s, error_code=mcp_task_notification_lease_release_failed)",
-                        record.get("id"),
-                    )
 
-    async def _notify_one(self, record: dict[str, Any], *, now: datetime) -> None:
+    async def _notify_one_claimed_safely(self, record: dict[str, Any], *, now: datetime) -> None:
+        try:
+            await self._notify_one_claimed(record, now=now)
+        except Exception as exc:  # noqa: BLE001 - isolate one notification from its claimed siblings
+            error = _bound_error(str(exc) or type(exc).__name__) or type(exc).__name__
+            logger.error(
+                "Unexpected MCP task notification failure (task_id=%s)",
+                record.get("id"),
+                exc_info=(type(exc), exc, exc.__traceback__),
+            )
+            await self._release_notification_failure(record, now=now, error=error)
+
+    async def _notify_one_claimed(self, record: dict[str, Any], *, now: datetime) -> None:
         task_id = record["id"]
         dispatch_version = int(record.get("dispatch_version") or 0)
         notification_attempts = max(0, int(record.get("notification_attempt_count") or 0))
-        if notification_attempts >= _MAX_NOTIFICATION_ATTEMPTS:
-            await self._repository.dead_letter_notification(
-                task_id,
-                lease_owner=self._lease_owner,
-                dispatch_version=dispatch_version,
-                error="mcp_task_notification_retry_exhausted",
-                count_failure=False,
-                now=now,
-                tenant_digest=self._tenant.digest,
-            )
-            return
 
         if record.get("notification_status") == "dispatched":
             run = await self._get_run(record.get("notification_run_id"), user_id=record["user_id"])
+            completed_at = _notification_completion_time(not_before=now)
             status = getattr(run, "status", None)
             if run is None:
                 run_id = record.get("notification_run_id")
                 await self._repository.finish_notification_run(
                     task_id,
                     lease_owner=self._lease_owner,
+                    notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
                     delivered=False,
-                    retry_after_seconds=self._notification_retry_seconds(
-                        record,
-                    ),
-                    error=_bound_error(f"mcp_task_notification_run_missing:{run_id}"),
-                    now=now,
-                    tenant_digest=self._tenant.digest,
+                    next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
+                    error=_bound_error(f"Notification run {run_id!r} was not found"),
+                    now=completed_at,
                 )
             elif status == RunStatus.success:
                 await self._repository.finish_notification_run(
                     task_id,
                     lease_owner=self._lease_owner,
+                    notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
                     delivered=True,
-                    retry_after_seconds=None,
+                    next_notification_at=None,
                     error=None,
-                    now=now,
-                    tenant_digest=self._tenant.digest,
+                    now=completed_at,
                 )
             elif status in {RunStatus.error, RunStatus.timeout, RunStatus.interrupted}:
                 await self._repository.finish_notification_run(
                     task_id,
                     lease_owner=self._lease_owner,
+                    notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
                     delivered=False,
-                    retry_after_seconds=self._notification_retry_seconds(
-                        record,
-                    ),
-                    error="mcp_task_notification_run_failed",
-                    now=now,
-                    tenant_digest=self._tenant.digest,
+                    next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
+                    error=_bound_error(getattr(run, "error", None) or f"Notification run ended with {status}"),
+                    now=completed_at,
                 )
             else:
                 await self._repository.defer_dispatched_notification(
                     task_id,
                     lease_owner=self._lease_owner,
+                    notification_lease_token=record["notification_lease_token"],
                     dispatch_version=dispatch_version,
-                    retry_after_seconds=self._poll_interval_seconds,
-                    now=now,
-                    tenant_digest=self._tenant.digest,
+                    next_notification_at=completed_at + timedelta(seconds=self._poll_interval_seconds),
+                    now=completed_at,
                 )
             return
 
+        if record.get("notification_status") != "launching" and notification_attempts >= _MAX_NOTIFICATION_ATTEMPTS:
+            previous_error = record.get("notification_error") or "delivery failed"
+            completed_at = _notification_completion_time(not_before=now)
+            await self._repository.dead_letter_notification(
+                task_id,
+                lease_owner=self._lease_owner,
+                notification_lease_token=record["notification_lease_token"],
+                dispatch_version=dispatch_version,
+                error=_bound_error(f"Notification delivery stopped after {notification_attempts} failed attempts: {previous_error}"),
+                count_failure=False,
+                now=completed_at,
+            )
+            return
+
         source_run = await self._get_run(record.get("run_id"), user_id=record["user_id"]) if record.get("run_id") else None
-        event = dict(record.get("dispatch_event") or {})
-        notification_kind = "tracking_degraded" if event.get("tracking_degraded") else "terminal" if event.get("status") in {"completed", "failed", "cancelled"} else str(event.get("status") or "task_update")
-        result_digest = record.get("event_fingerprint")
-        if not isinstance(result_digest, str) or len(result_digest) != 64:
-            result_digest = hashlib.sha256(
-                json.dumps(
-                    event,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                    default=str,
-                ).encode("utf-8")
-            ).hexdigest()
-        source = {
-            "version": 1,
-            "tenant_digest": self._tenant.digest,
-            "task_id": task_id,
-            "task_lineage_digest": record.get("lineage_digest"),
-            "lineage_status": record.get("lineage_status") or "legacy_unavailable",
-            "parent_run_id": record.get("parent_run_id"),
-            "parent_tool_receipt_id": record.get("parent_tool_receipt_id"),
-            "terminal_result_version": dispatch_version,
-            "notification_kind": notification_kind,
-            "result_digest": result_digest,
-            "result_status": str(event.get("status") or record.get("status") or "unknown"),
-        }
+        launch_started_at = _notification_completion_time(not_before=now)
+        recovering_launch = record.get("notification_status") == "launching"
+        # Reservation commit outcome is ambiguous under cancellation. Prefer a
+        # phase-preserving lease release until the await returns definitively.
+        record["notification_status"] = "launching"
+        launch_reserved = await self._repository.begin_notification_launch(
+            task_id,
+            lease_owner=self._lease_owner,
+            notification_lease_token=record["notification_lease_token"],
+            dispatch_version=dispatch_version,
+            lease_seconds=self._lease_seconds,
+            now=launch_started_at,
+        )
+        if not launch_reserved:
+            if recovering_launch:
+                await self._release_ordinary_batch_record(
+                    record,
+                    release=lambda: self._repository.release_notification_lease(
+                        task_id,
+                        lease_owner=self._lease_owner,
+                        notification_lease_token=record["notification_lease_token"],
+                        next_notification_at=launch_started_at,
+                        error=record.get("notification_error"),
+                        count_failure=False,
+                    ),
+                    action="release expired notification launch",
+                )
+                return
+            await self._release_ordinary_batch_record(
+                record,
+                release=lambda: self._repository.release_notification_claim(
+                    task_id,
+                    lease_owner=self._lease_owner,
+                    notification_lease_token=record["notification_lease_token"],
+                    next_notification_at=launch_started_at,
+                    error=record.get("notification_error"),
+                    replace_with_latest=True,
+                ),
+                action="release stale notification launch",
+            )
+            return
         try:
             result = await self._launch_notification(
                 thread_id=record["thread_id"],
@@ -770,67 +984,90 @@ class McpTaskService:
                 owner_user_id=record["user_id"],
                 task_id=task_id,
                 dispatch_version=dispatch_version,
-                source=source,
-                event=event,
+                dispatch_attempt=int(record.get("dispatch_attempt") or 0),
+                event=dict(record.get("dispatch_event") or {}),
             )
-        except OwnerRefusedLaunchError:
-            # Its owner is turned off. A retry would launch once they are
-            # enabled again, and nothing queued before that may run then.
-            await self._repository.dead_letter_notification(
-                task_id,
-                lease_owner=self._lease_owner,
-                dispatch_version=dispatch_version,
-                error=NOTIFICATION_OWNER_REFUSED_ERROR,
-                count_failure=False,
-                now=now,
-                tenant_digest=self._tenant.digest,
-            )
-            return
         except PermanentNotificationError as exc:
+            completed_at = _notification_completion_time(not_before=now)
             await self._repository.dead_letter_notification(
                 task_id,
                 lease_owner=self._lease_owner,
+                notification_lease_token=record["notification_lease_token"],
                 dispatch_version=dispatch_version,
-                error=_safe_error_code(
-                    exc,
-                    "mcp_task_notification_permanent_failure",
-                ),
+                error=_bound_error(str(exc) or type(exc).__name__),
                 count_failure=True,
-                now=now,
-                tenant_digest=self._tenant.digest,
+                now=completed_at,
             )
             return
-        except ConflictError:
-            await self._repository.release_notification_claim(
-                task_id,
-                lease_owner=self._lease_owner,
-                retry_after_seconds=self._poll_interval_seconds,
-                error="mcp_task_notification_thread_busy",
-                replace_with_latest=True,
-                tenant_digest=self._tenant.digest,
-            )
+        except ConflictError as exc:
+            completed_at = _notification_completion_time(not_before=now)
+            retry_error = _bound_error(str(exc))
+            if record.get("notification_status") == "launching":
+                await self._release_ordinary_batch_record(
+                    record,
+                    release=lambda: self._repository.release_notification_lease(
+                        task_id,
+                        lease_owner=self._lease_owner,
+                        notification_lease_token=record["notification_lease_token"],
+                        next_notification_at=completed_at + timedelta(seconds=self._poll_interval_seconds),
+                        error=retry_error,
+                        count_failure=False,
+                    ),
+                    action="release recovered notification conflict",
+                )
+            else:
+                await self._release_ordinary_batch_record(
+                    record,
+                    release=lambda: self._repository.release_notification_claim(
+                        task_id,
+                        lease_owner=self._lease_owner,
+                        notification_lease_token=record["notification_lease_token"],
+                        next_notification_at=completed_at + timedelta(seconds=self._poll_interval_seconds),
+                        error=retry_error,
+                        replace_with_latest=True,
+                    ),
+                    action="release notification conflict retry",
+                )
             return
         except Exception as exc:  # noqa: BLE001 - retry the same idempotency key
-            await self._repository.release_notification_claim(
-                task_id,
-                lease_owner=self._lease_owner,
-                retry_after_seconds=self._notification_retry_seconds(record),
-                error=_safe_error_code(
-                    exc,
-                    "mcp_task_notification_launch_failed",
-                ),
-                replace_with_latest=True,
-                count_failure=True,
-                tenant_digest=self._tenant.digest,
-            )
+            completed_at = _notification_completion_time(not_before=now)
+            retry_error = _bound_error(str(exc) or type(exc).__name__)
+            if record.get("notification_status") == "launching":
+                await self._release_ordinary_batch_record(
+                    record,
+                    release=lambda: self._repository.release_notification_lease(
+                        task_id,
+                        lease_owner=self._lease_owner,
+                        notification_lease_token=record["notification_lease_token"],
+                        next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
+                        error=retry_error,
+                        count_failure=False,
+                    ),
+                    action="release uncertain notification launch",
+                )
+            else:
+                await self._release_ordinary_batch_record(
+                    record,
+                    release=lambda: self._repository.release_notification_claim(
+                        task_id,
+                        lease_owner=self._lease_owner,
+                        notification_lease_token=record["notification_lease_token"],
+                        next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
+                        error=retry_error,
+                        replace_with_latest=True,
+                        count_failure=True,
+                    ),
+                    action="release notification retry",
+                )
             return
+        completed_at = _notification_completion_time(not_before=now)
         await self._repository.mark_notification_dispatched(
             task_id,
             lease_owner=self._lease_owner,
+            notification_lease_token=record["notification_lease_token"],
             dispatch_version=dispatch_version,
             run_id=result["run_id"],
-            now=now,
-            tenant_digest=self._tenant.digest,
+            now=completed_at,
         )
 
     def _notification_retry_seconds(self, record: dict[str, Any]) -> int:
@@ -840,66 +1077,315 @@ class McpTaskService:
             self._max_poll_backoff_seconds,
         )
 
-    async def _poll_one(self, record: dict, *, now: datetime) -> None:
-        driver_name = str(record.get("driver_name") or "")
-        driver = self._drivers.get(driver_name)
-        if driver is None:
-            await self._release_after_error(
-                record,
-                now=now,
-                error="mcp_task_driver_unavailable",
+    async def _claim_with_cancellation_release(
+        self,
+        claim: Callable[[], Awaitable[list[dict[str, Any]]]],
+        *,
+        phase: str,
+        action: str,
+        release: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> list[dict[str, Any]]:
+        if phase in self._claim_owners:
+            logger.warning(
+                "Skipping MCP %s claim because the previous claim/handoff is still unresolved",
+                phase,
+            )
+            return []
+
+        claim_task = asyncio.ensure_future(claim())
+        owner = _ClaimOwner(claim_task=claim_task)
+        self._claim_owners[phase] = owner
+        try:
+            records = await asyncio.wait_for(
+                asyncio.shield(claim_task),
+                timeout=_CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            )
+        except TimeoutError:
+            self._start_claim_owner_handoff(
+                owner,
+                phase=phase,
+                action=action,
+                release=release,
+            )
+            logger.warning(
+                "Timed out after %.1f seconds waiting for MCP task claim; it continues in the background (%s, task_id=batch)",
+                _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+                action,
+            )
+            return []
+        except asyncio.CancelledError:
+            caller_cancelling = asyncio.current_task().cancelling()
+            claim_cancelled = _task_has_cancelled_terminal_state(claim_task)
+            if claim_cancelled and not caller_cancelling:
+                error = _consume_task_error(claim_task)
+                if error is not None:
+                    self._log_claim_error(error, action=action)
+                if self._claim_owners.get(phase) is owner:
+                    self._claim_owners.pop(phase, None)
+                return []
+            handoff = self._start_claim_owner_handoff(
+                owner,
+                phase=phase,
+                action=action,
+                release=release,
+            )
+            loop = asyncio.get_running_loop()
+            await self._drain_cancellation_task(
+                handoff,
+                action=f"finish {action} handoff",
+                task_id="batch",
+                deadline=loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+            )
+            raise
+        except Exception:
+            if self._claim_owners.get(phase) is owner:
+                self._claim_owners.pop(phase, None)
+            raise
+        else:
+            if self._claim_owners.get(phase) is owner:
+                self._claim_owners.pop(phase, None)
+            return records
+
+    def _start_claim_owner_handoff(
+        self,
+        owner: _ClaimOwner,
+        *,
+        phase: str,
+        action: str,
+        release: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> asyncio.Task[None]:
+        if owner.handoff_task is None:
+            owner.handoff_task = asyncio.create_task(
+                self._finish_cancelled_claim_handoff(
+                    owner.claim_task,
+                    owner=owner,
+                    phase=phase,
+                    action=action,
+                    release=release,
+                ),
+                name=f"mcp-{action.replace(' ', '-')}-handoff",
+            )
+            self._track_compensation_task(owner.handoff_task, action=f"finish {action} handoff", task_id="batch")
+        return owner.handoff_task
+
+    async def _finish_cancelled_claim_handoff(
+        self,
+        claim_task: asyncio.Future[list[dict[str, Any]]],
+        *,
+        owner: _ClaimOwner,
+        phase: str,
+        action: str,
+        release: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        try:
+            try:
+                records = await claim_task
+            except asyncio.CancelledError:
+                logger.error("MCP task claim operation was cancelled (%s, task_id=batch)", action)
+                return
+            except Exception as exc:  # noqa: BLE001 - claim recovery is best-effort
+                logger.error(
+                    "MCP task claim operation failed (%s, task_id=batch): %s",
+                    action,
+                    exc,
+                    exc_info=(type(exc), exc, exc.__traceback__),
+                )
+                return
+            # The claim's durable outcome is now known. Release the phase owner
+            # immediately: per-claim token fencing already rejects a stale release
+            # against a newer claim, so the phase no longer needs this owner to
+            # guard the ambiguous claim. Returned rows are released as bounded,
+            # service-owned background work, so a stuck release cannot lock the
+            # whole phase until process restart.
+            if self._claim_owners.get(phase) is owner:
+                self._claim_owners.pop(phase, None)
+            if records:
+                await self._release_claimed_records(records, release=release)
+        finally:
+            if self._claim_owners.get(phase) is owner:
+                self._claim_owners.pop(phase, None)
+
+    async def _release_claimed_records(
+        self,
+        records: list[dict[str, Any]],
+        *,
+        release: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        async def release_one(record: dict[str, Any]) -> None:
+            try:
+                await release(record)
+            except asyncio.CancelledError:
+                raise
+            except Exception:  # noqa: BLE001 - release every record in the claimed batch
+                logger.exception(
+                    "Unexpected MCP task claim release failure (task_id=%s)",
+                    record.get("id"),
+                )
+
+        release_tasks = [
+            asyncio.create_task(
+                release_one(record),
+                name=f"mcp-release-claimed-{record.get('id', 'unknown')}",
+            )
+            for record in records
+        ]
+        completion = asyncio.gather(*release_tasks, return_exceptions=True)
+        deadline = asyncio.get_running_loop().time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
+        if not await wait_for_task_until(completion, deadline=deadline):
+            self._track_compensation_task(
+                completion,
+                action="release claimed MCP task batch",
+                task_id="batch",
+            )
+            logger.warning(
+                "Timed out after %.1f seconds waiting for MCP task claim releases; they continue in the background",
+                _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
             )
             return
 
-        from deerflow.runtime.kubernetes_qualification import (
-            qualification_service_barrier,
+        results = completion.result()
+        for record, result in zip(records, results, strict=True):
+            if isinstance(result, asyncio.CancelledError):
+                logger.error(
+                    "MCP task claim release was cancelled (task_id=%s); the lease will expire for recovery",
+                    record.get("id"),
+                )
+
+    async def _release_notification_failure(
+        self,
+        record: dict[str, Any],
+        *,
+        now: datetime,
+        error: str,
+    ) -> None:
+        completed_at = _notification_completion_time(not_before=now)
+        try:
+            await self._release_ordinary_batch_record(
+                record,
+                release=lambda: self._repository.release_notification_lease(
+                    record["id"],
+                    lease_owner=self._lease_owner,
+                    notification_lease_token=record["notification_lease_token"],
+                    next_notification_at=completed_at + timedelta(seconds=self._notification_retry_seconds(record)),
+                    error=error,
+                    count_failure=record.get("notification_status") != "launching",
+                ),
+                action="release notification failure",
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - retain the task-scoped failure
+            logger.exception(
+                "Failed to release MCP task notification lease (task_id=%s)",
+                record.get("id"),
+            )
+
+    async def _release_cancel_after_cancellation(self, record: dict[str, Any]) -> None:
+        await self._drain_cancellation_compensation(
+            self._repository.release_cancel_claim(
+                record["id"],
+                lease_owner=self._lease_owner,
+                lease_token=record["lease_token"],
+                next_cancel_at=datetime.now(UTC),
+                error=record.get("last_cancel_error"),
+            ),
+            action="release cancel claim",
+            task_id=record["id"],
         )
 
-        await qualification_service_barrier(
-            scenario="mcp_task_notification",
-            point="poll_claimed",
-            subject_id=str(record["id"]),
+    async def _release_notification_after_cancellation(
+        self,
+        record: dict[str, Any],
+    ) -> None:
+        task_id = record["id"]
+        if record.get("notification_status") in {"launching", "dispatched"}:
+            compensation = self._repository.release_notification_lease(
+                task_id,
+                lease_owner=self._lease_owner,
+                notification_lease_token=record["notification_lease_token"],
+                next_notification_at=datetime.now(UTC),
+                error=record.get("notification_error"),
+                count_failure=False,
+            )
+            action = "release in-flight notification lease"
+        else:
+            compensation = self._repository.release_notification_claim(
+                task_id,
+                lease_owner=self._lease_owner,
+                notification_lease_token=record["notification_lease_token"],
+                next_notification_at=datetime.now(UTC),
+                error=record.get("notification_error"),
+                replace_with_latest=False,
+            )
+            action = "release notification claim"
+        await self._drain_cancellation_compensation(
+            compensation,
+            action=action,
+            task_id=task_id,
         )
+
+    async def _release_poll_after_cancellation(self, record: dict[str, Any]) -> None:
+        await self._drain_cancellation_compensation(
+            self._repository.release_poll_claim_after_cancellation(
+                record["id"],
+                lease_owner=self._lease_owner,
+                lease_token=record["lease_token"],
+            ),
+            action="release poll claim",
+            task_id=record["id"],
+        )
+
+    async def _poll_one_claimed(self, record: dict, *, now: datetime) -> None:
+        driver_name = str(record.get("driver_name") or "")
+        driver = self._drivers.get(driver_name)
+        if driver is None:
+            await self._release_ordinary_batch_record(
+                record,
+                release=lambda: self._release_after_error(
+                    record,
+                    now=now,
+                    error=f"No MCP task driver registered as {driver_name!r}",
+                ),
+                action="release poll retry",
+            )
+            return
 
         try:
             snapshot = self._normalize_snapshot(await driver.get_status(TaskReference.from_record(record)))
-        except McpTaskProtocolError:
+        except McpTaskProtocolError as exc:
             logger.error(
-                "MCP task status contract failed permanently (task_id=%s, driver=%s, error_code=mcp_task_remote_protocol_invalid)",
+                "MCP task status contract failed permanently (task_id=%s, driver=%s): %s",
                 record.get("id"),
                 driver_name,
+                exc,
             )
             await self._apply_snapshot(
                 record,
-                TaskSnapshot(
-                    status=TaskStatus.FAILED,
-                    error="mcp_task_remote_protocol_invalid",
-                ),
+                TaskSnapshot(status=TaskStatus.FAILED, error=_bound_error(str(exc))),
                 polled_at=datetime.now(UTC),
             )
             return
         except Exception as exc:  # noqa: BLE001 - driver boundary; retry on the next poll
             polled_at = datetime.now(UTC)
-            error = _safe_error_code(exc, "mcp_task_remote_poll_failed")
             logger.warning(
-                "MCP task status poll failed (task_id=%s, driver=%s, error_code=%s); retrying",
+                "MCP task status poll failed (task_id=%s, driver=%s); retrying",
                 record.get("id"),
                 driver_name,
-                error,
+                exc_info=True,
             )
-            await self._release_after_error(
+            retry_error = str(exc) or type(exc).__name__
+            await self._release_ordinary_batch_record(
                 record,
-                now=polled_at,
-                error=error,
+                release=lambda: self._release_after_error(
+                    record,
+                    now=polled_at,
+                    error=retry_error,
+                ),
+                action="release poll retry",
             )
             return
 
         polled_at = datetime.now(UTC)
-        await qualification_service_barrier(
-            scenario="mcp_task_notification",
-            point="polled_before_apply",
-            subject_id=str(record["id"]),
-        )
         await self._apply_snapshot(record, snapshot, polled_at=polled_at)
 
     async def _apply_snapshot(
@@ -912,6 +1398,7 @@ class McpTaskService:
         applied = await self._repository.apply_snapshot(
             record["id"],
             lease_owner=self._lease_owner,
+            lease_token=record["lease_token"],
             status=snapshot.status.value,
             result=snapshot.result,
             result_preview=snapshot.result_preview,
@@ -919,9 +1406,8 @@ class McpTaskService:
             result_artifact=snapshot.result_artifact,
             error=snapshot.error,
             input_required=snapshot.input_required,
-            next_poll_after_seconds=self._next_poll_after_seconds(snapshot),
+            next_poll_at=self._next_poll_at(snapshot, now=polled_at),
             polled_at=polled_at,
-            tenant_digest=self._tenant.digest,
         )
         if not applied:
             logger.info(
@@ -929,17 +1415,14 @@ class McpTaskService:
                 record.get("id"),
             )
 
-    def _next_poll_after_seconds(
-        self,
-        snapshot: TaskSnapshot,
-    ) -> float | int | None:
+    def _next_poll_at(self, snapshot: TaskSnapshot, *, now: datetime) -> datetime | None:
         if not snapshot.is_pollable:
             return None
         interval = snapshot.poll_after_seconds or self._poll_interval_seconds
         if snapshot.status == TaskStatus.INPUT_REQUIRED:
             interval = max(interval, self._input_required_poll_interval_seconds)
         interval = min(interval, MCP_TASK_POLL_AFTER_MAX_SECONDS)
-        return interval
+        return now + timedelta(seconds=interval)
 
     async def _release_after_error(self, record: dict, *, now: datetime, error: str) -> None:
         consecutive_errors = max(0, int(record.get("consecutive_poll_error_count") or 0))
@@ -952,18 +1435,15 @@ class McpTaskService:
         await self._repository.release_claim(
             record["id"],
             lease_owner=self._lease_owner,
-            retry_after_seconds=retry_seconds,
+            lease_token=record["lease_token"],
+            next_poll_at=now + timedelta(seconds=retry_seconds),
             error=bounded_error,
             tracking_degraded_after_errors=self._tracking_degraded_after_errors,
-            tenant_digest=self._tenant.digest,
         )
 
     def _normalize_snapshot(self, snapshot: TaskSnapshot) -> TaskSnapshot:
         """Bound remote payloads without ever storing truncated JSON."""
-        snapshot = replace(
-            snapshot,
-            error=_safe_remote_snapshot_error(snapshot),
-        )
+        snapshot = replace(snapshot, error=_bound_error(snapshot.error))
         if snapshot.result_artifact is not None:
             encoded_artifact = self._encode_json_payload(
                 snapshot.result_artifact,
@@ -1010,99 +1490,62 @@ class McpTaskService:
     async def start(self) -> None:
         if self._task is not None:
             return
-        self._force_stop.clear()
         self._stop.clear()
-        self._task = asyncio.create_task(self._run_loop(), name="deerflow-mcp-task-poller")
+        self._stopping_task = None
+        self._stop_deadline = None
+        self._stop_timeout_logged = False
+        task = asyncio.create_task(self._run_loop(), name="deerflow-mcp-task-poller")
+        self._task = task
+        task.add_done_callback(self._poller_done)
+
+    def _poller_done(self, task: asyncio.Task[None]) -> None:
+        if self._task is task:
+            self._task = None
+            self._stopping_task = None
+            self._stop_deadline = None
+            self._stop_timeout_logged = False
+        error = _consume_task_error(task)
+        if error is None or isinstance(error, asyncio.CancelledError):
+            return
+        logger.error(
+            "MCP task poller failed: %s",
+            error,
+            exc_info=(type(error), error, error.__traceback__),
+        )
+
+    def _log_stop_timeout(self, task: asyncio.Task[None]) -> None:
+        if self._stopping_task is not task or self._stop_timeout_logged:
+            return
+        self._stop_timeout_logged = True
+        logger.warning(
+            "Timed out after %.1f seconds waiting for MCP task poller cleanup; cleanup continues in the background",
+            _CANCELLATION_DRAIN_TIMEOUT_SECONDS,
+        )
 
     async def stop(self) -> None:
-        poller = self._task
-        self._stop.set()
-        current = asyncio.current_task()
-        submit_tasks = tuple(task for task in self._submit_tasks if task is not current)
-        if poller is not None:
-            poller.cancel()
-        for submit_task in submit_tasks:
-            submit_task.cancel()
-        cleanup = asyncio.create_task(
-            self._finish_stop(
-                poller=poller,
-                submit_tasks=submit_tasks,
-            ),
-            name="deerflow-mcp-task-stop",
-        )
-        outer_cancelled = False
-        try:
-            while not cleanup.done():
-                try:
-                    await asyncio.shield(cleanup)
-                except asyncio.CancelledError:
-                    current = asyncio.current_task()
-                    if current is None or current.cancelling() == 0:
-                        raise
-                    outer_cancelled = True
-                    self._force_stop.set()
-                    for submit_task in tuple(self._submit_tasks):
-                        if submit_task is not current:
-                            submit_task.cancel()
-                    for compensation in tuple(self._compensation_tasks):
-                        compensation.cancel()
-            cleanup.result()
-        finally:
-            self._task = None
-        if outer_cancelled:
-            raise asyncio.CancelledError
-
-    async def _finish_stop(
-        self,
-        *,
-        poller: asyncio.Task[None] | None,
-        submit_tasks: tuple[asyncio.Task[Any], ...],
-    ) -> None:
-        tasks: tuple[asyncio.Task[Any], ...] = (
-            *((poller,) if poller is not None else ()),
-            *submit_tasks,
-        )
-        if tasks:
-            await asyncio.gather(*tasks, return_exceptions=True)
-        await self._drain_submit_compensations()
-
-    async def _drain_submit_compensations(self) -> None:
-        """Boundedly drain compensations, including under outer cancellation."""
-
-        # Remote-submit compensation outlives the caller by design. Shutdown
-        # must therefore drain it even when the poller was never started;
-        # otherwise driver teardown can abandon a live remote job that has no
-        # durable local row. The finalizer also runs when the Gateway's outer
-        # phase budget cancels ``stop()``.
+        task = self._task
+        if task is None:
+            return
         loop = asyncio.get_running_loop()
-        deadline = loop.time() + _UNTRACKED_TASK_COMPENSATION_WAIT_SECONDS
-        while compensations := tuple(self._compensation_tasks):
-            if self._force_stop.is_set():
-                pending = set(compensations)
-            else:
-                _, pending = await asyncio.wait(
-                    compensations,
-                    timeout=max(0.0, deadline - loop.time()),
-                )
-            if not pending:
-                continue
-            for compensation in pending:
-                compensation.cancel()
-
-            # Give cooperative coroutines one scheduling turn to observe the
-            # cancellation.  Never gather the remaining tasks without a
-            # deadline: a broken driver may suppress ``CancelledError`` and
-            # would otherwise own Gateway process shutdown forever.  Keep the
-            # task strongly referenced so the coordinator can treat producer
-            # quiescence as unproven and leave its dependencies open.
-            await asyncio.sleep(0)
-            incomplete = tuple(task for task in pending if not task.done())
-            if incomplete:
-                logger.error(
-                    "MCP task compensation did not quiesce before shutdown; runtime dependencies must remain open (count=%d, error_code=mcp_task_compensation_shutdown_incomplete)",
-                    len(incomplete),
-                )
-                raise RuntimeError("mcp_task_compensation_shutdown_incomplete")
+        if self._stopping_task is not task:
+            self._stopping_task = task
+            self._stop_deadline = loop.time() + _CANCELLATION_DRAIN_TIMEOUT_SECONDS
+            self._stop_timeout_logged = False
+            task.cancel()
+        self._stop.set()
+        deadline = self._stop_deadline
+        assert deadline is not None
+        try:
+            done, _ = await asyncio.wait(
+                {task},
+                timeout=max(0.0, deadline - loop.time()),
+            )
+        except asyncio.CancelledError:
+            if not await wait_for_task_until(task, deadline=deadline):
+                self._log_stop_timeout(task)
+            raise
+        if task not in done:
+            self._log_stop_timeout(task)
 
     async def _run_loop(self) -> None:
         while not self._stop.is_set():
@@ -1111,7 +1554,7 @@ class McpTaskService:
                 # recover at startup without a separate destructive sweep.
                 await self.run_once(now=datetime.now(UTC))
             except Exception:
-                logger.error("MCP task poll failed; retrying next interval error_code=mcp_task_worker_iteration_failed")
+                logger.exception("MCP task poll failed; retrying next interval")
             try:
                 await asyncio.wait_for(
                     self._stop.wait(),

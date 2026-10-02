@@ -7,4 +7,4 @@ metadata:
     {{- include "deer-flow.labels" . | nindent 4 }}
 data:
   config.yaml: |
-{{ include "deer-flow.renderedConfig" . | indent 4 }}
+{{ .Values.config | default "" | indent 4 }}

@@ -166,9 +166,8 @@ def test_the_local_doors_stay_shut_when_the_database_holds_a_local_admin(users_d
 def test_a_personal_access_token_of_a_local_account_is_refused(users_db, monkeypatch: pytest.MonkeyPatch) -> None:
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
-    repo = PersonalAccessTokenRepository(get_session_factory(), tenant=TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference())
+    repo = PersonalAccessTokenRepository(get_session_factory())
     local = _client(monkeypatch, _local_config())
     local.app.state.pat_repo = repo
     assert local.post("/api/v1/auth/initialize", json=_ADMIN).status_code == 201
@@ -183,7 +182,7 @@ def test_a_personal_access_token_of_a_local_account_is_refused(users_db, monkeyp
     assert accepted.status_code == 503, accepted.text
     from app.gateway.auth.pat import authenticate_pat
 
-    user, _scopes, _record = asyncio.run(authenticate_pat(local.app, f"Bearer {token}"))
+    user, _scopes = asyncio.run(authenticate_pat(local.app, f"Bearer {token}"))
     assert user.email == _ADMIN["email"]
 
     client = _client(monkeypatch, _sign_on_only_config())

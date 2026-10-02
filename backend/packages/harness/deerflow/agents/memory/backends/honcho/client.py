@@ -39,16 +39,13 @@ class HonchoClient:
         try:
             response = self._http.post(path, json=payload)
             response.raise_for_status()
-        except httpx.HTTPError:
-            # Provider exceptions may contain the full URL, workspace path,
-            # proxy response text, or credential-bearing headers. Keep one
-            # stable code at the adapter boundary and suppress that cause.
-            raise HonchoRequestError("honcho_request_failed") from None
+        except httpx.HTTPError as exc:
+            raise HonchoRequestError(f"Honcho request failed: POST {path}: {exc}") from exc
         if response.content:
             try:
                 return response.json()
-            except ValueError:
-                raise HonchoRequestError("honcho_response_invalid") from None
+            except ValueError as exc:
+                raise HonchoRequestError(f"Honcho returned non-JSON response: POST {path}: {exc}") from exc
         return None
 
     def get_or_create_peer(self, workspace: str, peer_id: str) -> None:

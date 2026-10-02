@@ -43,14 +43,12 @@ def anyio_backend():
 def stores(tmp_path) -> Iterator[tuple[SQLiteUserRepository, object]]:
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
     from deerflow.persistence.run import RunRepository
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
     asyncio.run(init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/accounts-runs.db", sqlite_dir=str(tmp_path)))
     session_factory = get_session_factory()
     assert session_factory is not None
-    tenant = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
     try:
-        yield SQLiteUserRepository(session_factory), RunRepository(session_factory, tenant=tenant)
+        yield SQLiteUserRepository(session_factory), RunRepository(session_factory)
     finally:
         asyncio.run(close_engine())
 
@@ -201,14 +199,14 @@ async def test_one_run_that_refuses_the_request_does_not_hide_the_others(stores)
     account = await users.create_user(_account())
     first = await _seed_run(runs, str(account.id))
     second = await _seed_run(runs, str(account.id))
-    original = runs.request_cancel_compat
+    original = runs.request_cancel
 
     async def refuse_the_first(run_id, **kwargs):
         if run_id == first:
             raise RuntimeError("store unavailable")
         return await original(run_id, **kwargs)
 
-    runs.request_cancel_compat = refuse_the_first
+    runs.request_cancel = refuse_the_first
     document = await _command(users, runs, wait_seconds=0.2).run("disable", issuer=ISSUER, subject="sub-pat")
 
     assert document["runs_found"] == 2

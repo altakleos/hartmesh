@@ -25,19 +25,16 @@ from sqlalchemy import Engine, create_engine, delete, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
-from deerflow.config.agents_config import AgentConfig, validate_agent_name
+from deerflow.config.agents_config import AgentConfig
 from deerflow.config.paths import get_paths
 from deerflow.persistence.agents.base import (
     AgentDeleteOutcome,
     AgentExistsError,
-    AgentSnapshot,
     AgentStore,
     parse_agent_config,
-    validate_agent_config_identity,
 )
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.runtime.user_context import get_effective_user_id
-from deerflow.utils.time import coerce_iso
 
 logger = logging.getLogger(__name__)
 
@@ -96,9 +93,8 @@ def get_sync_sessionmaker(url: str) -> sessionmaker[Session]:
 _get_sessionmaker = get_sync_sessionmaker
 
 
-def _config_document(config: dict, name: str) -> dict:
+def _config_document(config: dict) -> dict:
     """Strip the natural key from the stored document (``name`` is its own column)."""
-    validate_agent_config_identity(config, name)
     return {k: v for k, v in config.items() if k != "name"}
 
 
@@ -107,7 +103,6 @@ class SqlAgentStore(AgentStore):
         self._Session = get_sync_sessionmaker(url)
 
     def _row(self, session: Session, name: str, user_id: str) -> AgentRow | None:
-        name = validate_agent_name(name)
         stmt = select(AgentRow).where(AgentRow.user_id == user_id, AgentRow.name == name.lower())
         return session.execute(stmt).scalar_one_or_none()
 
@@ -118,17 +113,6 @@ class SqlAgentStore(AgentStore):
         if row is None:
             raise FileNotFoundError(f"Agent config not found: {name} (user {effective_user})")
         return parse_agent_config(row.config or {}, row.name)
-
-    def snapshot(self, name: str, *, user_id: str | None = None) -> AgentSnapshot:
-        effective_user = user_id or get_effective_user_id()
-        with self._Session() as session:
-            row = self._row(session, name, effective_user)
-            if row is None:
-                raise FileNotFoundError(f"Agent config not found: {name} (user {effective_user})")
-            config = parse_agent_config(row.config or {}, row.name)
-            soul = row.soul or None
-            version = coerce_iso(row.updated_at) if isinstance(row.updated_at, datetime) else str(row.updated_at)
-        return AgentSnapshot(config=config, soul=soul, source="database", version=version)
 
     def exists(self, name: str, *, user_id: str | None = None) -> bool:
         effective_user = user_id or get_effective_user_id()
@@ -157,14 +141,13 @@ class SqlAgentStore(AgentStore):
         return [(r.user_id, parse_agent_config(r.config or {}, r.name)) for r in rows]
 
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
-        name = validate_agent_name(name)
         effective_user = user_id or get_effective_user_id()
         now = datetime.now(UTC)
         row = AgentRow(
             id=uuid.uuid4().hex,
             user_id=effective_user,
             name=name.lower(),
-            config=_config_document(config, name),
+            config=_config_document(config),
             soul=soul or "",
             created_at=now,
             updated_at=now,
@@ -178,7 +161,6 @@ class SqlAgentStore(AgentStore):
             raise AgentExistsError(f"Agent '{name}' already exists for user '{effective_user}'") from e
 
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
-        name = validate_agent_name(name)
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
             row = self._row(session, name, effective_user)
@@ -196,7 +178,7 @@ class SqlAgentStore(AgentStore):
                 id=uuid.uuid4().hex,
                 user_id=effective_user,
                 name=name.lower(),
-                config=_config_document(config or {}, name),
+                config=_config_document(config or {}),
                 soul=soul or "",
             )
             session.add(row)
@@ -213,12 +195,11 @@ class SqlAgentStore(AgentStore):
     @staticmethod
     def _apply_update(row: AgentRow, config: dict | None, soul: str | None) -> None:
         if config is not None:
-            row.config = _config_document(config, row.name)
+            row.config = _config_document(config)
         if soul is not None:
             row.soul = soul
 
     def delete(self, name: str, *, user_id: str | None = None) -> AgentDeleteOutcome:
-        name = validate_agent_name(name)
         effective_user = user_id or get_effective_user_id()
         with self._Session() as session:
             result = session.execute(delete(AgentRow).where(AgentRow.user_id == effective_user, AgentRow.name == name.lower()))

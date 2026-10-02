@@ -36,11 +36,9 @@ import {
   useUploadSkillArchive,
 } from "@/core/skills/hooks";
 import type { Skill } from "@/core/skills/type";
-import { useToolPlaneGovernance } from "@/core/tool-plane";
 import { env } from "@/env";
 
 import { SettingsSection } from "./settings-section";
-import { ToolPlaneGovernanceNotice } from "./tool-plane-governance-notice";
 
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
@@ -79,21 +77,13 @@ function SkillSettingsList({
   const { user } = useAuth();
   const isAdmin = user?.system_role === "admin";
   const [filter, setFilter] = useState<string>("public");
-  const baseToolPlane = useToolPlaneGovernance("deployment_base", isAdmin);
-  const overlayToolPlane = useToolPlaneGovernance("user_overlay");
-  const toolPlane = filter === "public" ? baseToolPlane : overlayToolPlane;
   const { mutate: enableSkill } = useEnableSkill();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { mutateAsync: uploadSkillArchive, isPending: isUploading } =
     useUploadSkillArchive();
   const staticReadOnly = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
-  const isArchiveUploadDisabled =
-    isUploading ||
-    !isAdmin ||
-    staticReadOnly ||
-    overlayToolPlane.legacyMutationBlocked;
-  const isCreateSkillDisabled =
-    staticReadOnly || overlayToolPlane.legacyMutationBlocked;
+  const isArchiveUploadDisabled = isUploading || !isAdmin || staticReadOnly;
+  const isCreateSkillDisabled = staticReadOnly;
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
     [skills, filter],
@@ -154,9 +144,6 @@ function SkillSettingsList({
   };
   return (
     <div className="flex w-full flex-col gap-4">
-      {(filter === "custom" || isAdmin) && (
-        <ToolPlaneGovernanceNotice {...toolPlane} />
-      )}
       <header className="flex justify-between">
         <div className="flex gap-2">
           <Tabs value={filter} onValueChange={setFilter}>
@@ -222,9 +209,7 @@ function SkillSettingsList({
             <ItemActions>
               <Switch
                 checked={skill.enabled}
-                disabled={
-                  staticReadOnly || !isAdmin || toolPlane.legacyMutationBlocked
-                }
+                disabled={staticReadOnly || !isAdmin}
                 onCheckedChange={(checked) =>
                   enableSkill({ skillName: skill.name, enabled: checked })
                 }

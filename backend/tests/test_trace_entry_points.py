@@ -99,32 +99,10 @@ def _scheduled_task(task_id: str) -> dict:
 
 
 def _make_service(rows, launch_run) -> ScheduledTaskService:
-    from app.runtime.invocation import InternalLaunchReceipt
-
-    class _InvocationRuntime:
-        async def launch(self, intent):
-            result = await launch_run(
-                thread_id=intent.thread_id,
-                assistant_id=intent.assistant_id,
-                prompt=intent.input["messages"][0]["content"],
-                owner_user_id=intent.owner_user_id,
-                metadata={
-                    "scheduled_task_id": intent.trusted_task_id,
-                    "scheduled_task_run_id": intent.task_run_id,
-                    "scheduled_trigger": intent.scheduled_trigger,
-                },
-            )
-            return InternalLaunchReceipt(
-                record=SimpleNamespace(
-                    run_id=result["run_id"],
-                    thread_id=result["thread_id"],
-                )
-            )
-
     return ScheduledTaskService(
         task_repo=_StubTaskRepo(rows),
         task_run_repo=_StubRunRepo(),
-        invocation_runtime=_InvocationRuntime(),
+        launch_run=launch_run,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -294,20 +272,7 @@ async def test_mcp_notification_launcher_binds_a_trace_context(_stub_app_config,
     notification keeps every delivery attempt separately correlatable."""
     from app.gateway.services import launch_mcp_task_notification_run
 
-    source = {
-        "version": 1,
-        "tenant_digest": "a" * 64,
-        "task_id": "task-1",
-        "task_lineage_digest": None,
-        "lineage_status": "legacy_unavailable",
-        "parent_run_id": None,
-        "parent_tool_receipt_id": None,
-        "terminal_result_version": 1,
-        "notification_kind": "terminal",
-        "result_digest": "b" * 64,
-        "result_status": "completed",
-    }
-    for _attempt in (1, 2):
+    for attempt in (1, 2):
         await launch_mcp_task_notification_run(
             app=SimpleNamespace(),
             thread_id="thread-mcp",
@@ -315,7 +280,7 @@ async def test_mcp_notification_launcher_binds_a_trace_context(_stub_app_config,
             owner_user_id="user-1",
             task_id="task-1",
             dispatch_version=1,
-            source=source,
+            dispatch_attempt=attempt,
             event={"status": "completed"},
         )
 

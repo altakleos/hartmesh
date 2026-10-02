@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
-import pytest
 from langchain.agents.middleware.types import ExtendedModelResponse, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.types import Command
@@ -13,7 +12,6 @@ from langgraph.types import Command
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
 from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
-from deerflow.runtime.execution_policy import EXECUTION_POLICY_OBSERVER_CONTEXT_KEY
 
 
 def _request(tool_name: str = "bash") -> SimpleNamespace:
@@ -340,84 +338,6 @@ def test_factory_registers_receipt_middleware_outer_of_short_circuiting_layers()
         assert receipt_index < names.index(short_circuiter), f"ToolReceiptMiddleware must be outer of {short_circuiter}"
 
 
-def test_factory_keeps_inert_durable_observer_when_display_receipts_disabled():
+def test_factory_omits_receipt_middleware_when_disabled():
     middlewares = _build({"sandbox": {"use": "test"}, "verification": {"receipts_enabled": False}})
-    receipt = next(middleware for middleware in middlewares if type(middleware).__name__ == "ToolReceiptMiddleware")
-    assert receipt._display_enabled is False
-
-
-def test_release_policy_declares_display_and_render_behavior() -> None:
-    assert ToolReceiptMiddleware(
-        render_mode="delegation_only",
-        display_enabled=False,
-    ).release_policy_parameters() == {
-        "render_mode": "delegation_only",
-        "display_enabled": False,
-    }
-
-
-@pytest.mark.asyncio
-async def test_retrieval_receipt_projects_safe_aggregate_facts_to_policy() -> None:
-    observer = AsyncMock()
-    observation = SimpleNamespace(
-        observation_id="ro_" + ("a" * 64),
-        draft=SimpleNamespace(result_count=7, source_count=3),
-    )
-
-    await ToolReceiptMiddleware._observe_retrieval_policy(
-        {EXECUTION_POLICY_OBSERVER_CONTEXT_KEY: observer},
-        observation,
-    )
-
-    projected = observer.await_args.args[0]
-    assert projected.kind == "retrieval"
-    assert projected.count == 0
-    assert projected.result_count == 7
-    assert projected.source_count == 3
-    assert projected.observation_id == observation.observation_id
-
-
-@pytest.mark.anyio
-async def test_tool_policy_observation_never_logs_raw_arguments_or_commitments(caplog) -> None:
-    import hashlib
-    import json as json_module
-
-    from deerflow.runtime.execution_policy import (
-        ExecutionBudgetV1,
-        PolicyDecision,
-        ToolEquivalenceKeyring,
-    )
-
-    keyring = ToolEquivalenceKeyring.ephemeral()
-    budget = ExecutionBudgetV1.build(equivalence_key_id=keyring.active_key_id)
-    observer = AsyncMock(return_value=SimpleNamespace(decision=PolicyDecision.allow))
-    context = {
-        EXECUTION_POLICY_OBSERVER_CONTEXT_KEY: observer,
-        "accepted_execution_budget": budget,
-        "execution_policy_keyring": keyring,
-    }
-    started = SimpleNamespace(
-        tool_name="read_file",
-        receipt_id="receipt-1",
-        context=SimpleNamespace(tenant=SimpleNamespace(digest="a" * 64), run_id="run-1"),
-    )
-    arguments = {"path": "/tmp/salient-secret-path", "start_line": 1, "end_line": 5}
-
-    with caplog.at_level("DEBUG"):
-        await ToolReceiptMiddleware._observe_tool_policy(
-            context,
-            started=started,
-            arguments=arguments,
-            retrieval=False,
-        )
-
-    observed = observer.await_args.args[0]
-    assert observed.kind == "tool_attempt"
-    commitment = observed.equivalence_commitment
-    assert commitment is not None and len(commitment) == 64
-    # The commitment is keyed: it is not any unkeyed digest of the arguments.
-    assert commitment != hashlib.sha256(json_module.dumps(arguments, sort_keys=True).encode()).hexdigest()
-    # Neither salient argument values nor the private commitment may reach logs.
-    log_text = "\n".join(f"{record.getMessage()} {record.args!r} {getattr(record, '__dict__', {})!r}" for record in caplog.records)
-    assert "salient-secret-path" not in log_text
-    assert commitment not in log_text
+    assert "ToolReceiptMiddleware" not in [type(m).__name__ for m in middlewares]

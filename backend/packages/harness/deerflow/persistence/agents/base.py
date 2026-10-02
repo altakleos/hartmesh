@@ -26,11 +26,15 @@ bucket semantics, distinct from the AUTO/None sentinel used by the async
 from __future__ import annotations
 
 import abc
+import logging
 from collections.abc import Hashable
-from dataclasses import dataclass
 from typing import Any, Literal
 
-from deerflow.config.agents_config import AgentConfig, validate_agent_name
+from pydantic import ValidationError
+
+from deerflow.config.agents_config import AgentConfig
+
+logger = logging.getLogger(__name__)
 
 
 def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
@@ -45,17 +49,17 @@ def parse_agent_config(data: dict[str, Any], name: str) -> AgentConfig:
         data["name"] = name
     known_fields = set(AgentConfig.model_fields.keys())
     data = {k: v for k, v in data.items() if k in known_fields}
-    return AgentConfig(**data)
-
-
-def validate_agent_config_identity(data: dict[str, Any], name: str) -> None:
-    """Validate natural-key and model-profile identities before persistence."""
-
-    canonical_name = validate_agent_name(name)
-    supplied_name = data.get("name", canonical_name)
-    if validate_agent_name(supplied_name) != canonical_name:
-        raise ValueError("agent config name must identify the persisted agent row or directory")
-    AgentConfig(name=canonical_name, model=data.get("model"))
+    try:
+        return AgentConfig(**data)
+    except ValidationError as exc:
+        if not any(error["loc"] == ("display_name",) for error in exc.errors()):
+            raise
+        # A cosmetic value in old/hand-edited storage must not make the agent
+        # inaccessible. Retry only without that field: other errors still fail.
+        data.pop("display_name", None)
+        config = AgentConfig(**data)
+        logger.warning("Ignoring invalid stored agent display_name for agent %r", name)
+        return config
 
 
 # Delete outcome, mirroring the agents router's result:
@@ -67,40 +71,11 @@ def validate_agent_config_identity(data: dict[str, Any], name: str) -> None:
 AgentDeleteOutcome = Literal["deleted", "legacy", "missing", "not-custom-agent"]
 
 
-@dataclass(frozen=True)
-class AgentSnapshot:
-    config: AgentConfig
-    soul: str | None
-    source: str
-    version: str
-
-
 class AgentExistsError(Exception):
     """Raised by :meth:`AgentStore.create` when ``(user_id, name)`` already exists."""
 
 
 class AgentStore(abc.ABC):
-    def snapshot(self, name: str, *, user_id: str | None = None) -> AgentSnapshot:
-        """Read config and SOUL under one verified store version.
-
-        Concrete stores may override with a transactional read. The default
-        retries if the store-wide signature changes between the two reads, so
-        callers never accept a knowingly mixed revision.
-        """
-        for _attempt in range(3):
-            before = self.signature()
-            config = self.get(name, user_id=user_id)
-            soul = self.get_soul(name, user_id=user_id)
-            after = self.signature()
-            if before == after:
-                return AgentSnapshot(
-                    config=config,
-                    soul=soul,
-                    source=f"{type(self).__module__}.{type(self).__qualname__}",
-                    version=repr(after),
-                )
-        raise RuntimeError(f"Agent {name!r} changed repeatedly while resolving its revision")
-
     @abc.abstractmethod
     def get(self, name: str, *, user_id: str | None = None) -> AgentConfig:
         """Return the agent's config.
@@ -126,10 +101,6 @@ class AgentStore(abc.ABC):
     @abc.abstractmethod
     def list(self, *, user_id: str | None = None) -> list[AgentConfig]:
         """Return every custom agent owned by ``user_id``, sorted by name."""
-
-    def list_owned(self, *, user_id: str) -> list[AgentConfig]:
-        """Return only the agents ``user_id`` made: never a shared agent another layout offers them."""
-        return self.list(user_id=user_id)
 
     @abc.abstractmethod
     def list_all(self) -> list[tuple[str, AgentConfig]]:

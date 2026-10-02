@@ -63,7 +63,7 @@ describe("getServerSideProductName", () => {
       string,
       RequestInit,
     ];
-    expect(url).toBe("http://gateway.test:8001/api/product");
+    expect(url).toBe("http://gateway.test:8001/api/v1/auth/product");
     // An operator's edit reaches the next page load, not a cached one.
     expect(init.cache).toBe("no-store");
     expect(init.signal).toBeInstanceOf(AbortSignal);

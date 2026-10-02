@@ -19,10 +19,8 @@ Two rules shape the projection:
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import os
-from collections.abc import Mapping, Sequence
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
@@ -34,9 +32,9 @@ from deerflow_extension_api import (
     collect_release_policies,
 )
 
-from deerflow.runtime.subagent_snapshot import ResolvedSubagentCatalogV1
 from deerflow.sandbox.env_policy import is_blocked_env_name
 from deerflow.tools.mcp_metadata import get_mcp_source, is_mcp_tool
+from deerflow.tools.tool_provenance import resolve_tool_provenance
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +50,10 @@ _MODEL_METADATA_FIELDS = frozenset(
         "use",
         "context_window",
         "pricing",
+        # ``reasoning`` is deliberately *not* excluded: as a bool or level
+        # string it is ChatOllama's native provider kwarg, and as a declared
+        # contract its dialect/history change the request payload. Both must
+        # move the assembly fingerprint (issue #5073, PR #5780 review).
     }
 )
 _MIDDLEWARE_PUBLIC_FIELDS = (
@@ -94,29 +96,6 @@ _DETECTOR_PARAMETER_FIELDS = (
     "_finish_reasons",
     "_stop_reasons",
 )
-_TOOL_RECOVERY_KINDS = frozenset(
-    {
-        "none",
-        "receipt_idempotent_reconcile_v1",
-    }
-)
-TOOL_RECOVERY_POLICY_KEY = "hartmesh.tool_recovery.v1"
-
-# Recovery eligibility is a host decision, not extension-authored metadata.
-# Keep the seal process-local and identity-based: the persisted descriptor
-# contains only the finite public policy string, while arbitrary tools cannot
-# opt themselves in by copying a metadata value. Extensions already execute
-# with host privileges, so this is an authority boundary in the assembly
-# contract rather than a sandbox boundary.
-_HOST_SEALED_TOOL_RECOVERY: dict[int, tuple[object, str]] = {}
-
-
-def _seal_host_tool_recovery(tool: object, recovery_kind: str) -> None:
-    """Register one host-owned tool instance for finite recovery handling."""
-
-    if recovery_kind == "none" or recovery_kind not in _TOOL_RECOVERY_KINDS:
-        raise ValueError("tool_recovery_kind_invalid")
-    _HOST_SEALED_TOOL_RECOVERY[id(tool)] = (tool, recovery_kind)
 
 
 def _plain_value(value: object) -> object | None:
@@ -233,28 +212,13 @@ def _tool_schema(tool: object) -> dict[str, object]:
 
 
 def _tool_source(tool: object) -> str:
-    if is_mcp_tool(tool):
-        source = get_mcp_source(tool)
-        return f"mcp:{source['server_name']}" if source is not None else "mcp:unknown"
-    metadata = getattr(tool, "metadata", None)
-    if isinstance(metadata, dict):
-        declared = metadata.get("deerflow_tool_source")
-        if isinstance(declared, str) and declared:
-            return declared
-    callable_object = getattr(tool, "func", None) or getattr(tool, "coroutine", None)
-    module = getattr(callable_object, "__module__", "") or ""
-    if module.startswith("deerflow.tools.builtins") or module.startswith("deerflow.agents.memory"):
-        return "builtin"
-    if "skill" in module:
-        return "skill"
-    return "community" if module else "builtin"
+    """Project the tool's display attribution (see `deerflow.tools.tool_provenance`).
 
-
-def _tool_recovery_kind(tool: object) -> str:
-    sealed = _HOST_SEALED_TOOL_RECOVERY.get(id(tool))
-    if sealed is None or sealed[0] is not tool:
-        return "none"
-    return sealed[1]
+    Delegates so the descriptor identity and the execution-time label cannot
+    disagree. Labels for sources that carry no host-written tag are unchanged.
+    """
+    provenance = resolve_tool_provenance(tool)
+    return provenance.source if provenance is not None else "builtin"
 
 
 def describe_tool(tool: object) -> ToolDescriptor:
@@ -268,22 +232,6 @@ def describe_tool(tool: object) -> ToolDescriptor:
         mcp_server=source["server_name"] if source is not None else None,
         mcp_transport=source["transport"] if source is not None else None,
     )
-
-
-def _tool_recovery_policy(tools: Sequence[object]) -> dict[str, str]:
-    """Return the finite host-owned policy for explicitly reconcilable tools."""
-
-    policy: dict[str, str] = {}
-    for tool in tools:
-        name = str(getattr(tool, "name", type(tool).__name__))
-        recovery_kind = _tool_recovery_kind(tool)
-        if recovery_kind == "none":
-            continue
-        previous = policy.get(name)
-        if previous is not None and previous != recovery_kind:
-            raise ValueError("tool_recovery_policy_conflict")
-        policy[name] = recovery_kind
-    return dict(sorted(policy.items()))
 
 
 def _probe_middleware_parameters(middleware: object) -> dict[str, object]:
@@ -464,7 +412,7 @@ def _model_parameters(model_config: object, model_overrides: dict[str, object] |
 
 
 def _skill_content_hash(skill: object) -> str | None:
-    """SHA-256 digest of the exact ``SKILL.md`` execution bytes.
+    """Digest of a skill's ``SKILL.md`` body.
 
     ``SkillActivationMiddleware`` injects this body as current-turn context
     (see ``skill_activation_middleware._read_skill_content``), so it is what
@@ -475,139 +423,16 @@ def _skill_content_hash(skill: object) -> str | None:
     cached-content field the rest of the system does not have. A skill whose
     file has gone missing or become unreadable is recorded as undescribable
     (``None``) rather than raising — assembly must not fail because a skill
-    file disappeared out from under it. The raw-byte digest intentionally
-    matches ``SkillSnapshotProjection.manifest_digest`` so accepted evidence
-    can be anchored without reopening the immutable snapshot.
+    file disappeared out from under it.
     """
     skill_file = getattr(skill, "skill_file", None)
     if not isinstance(skill_file, Path):
         return None
     try:
-        content = skill_file.read_bytes()
+        content = skill_file.read_text(encoding="utf-8")
     except OSError:
         return None
-    return hashlib.sha256(content).hexdigest()
-
-
-def _skill_catalog(
-    enabled_skills: list[object],
-    *,
-    content_hashes_by_name: Mapping[str, str] | None = None,
-) -> list[dict[str, object]]:
-    catalog: list[dict[str, object]] = []
-    for skill in enabled_skills:
-        name = str(getattr(skill, "name", ""))
-        content_hash = _skill_content_hash(skill) if content_hashes_by_name is None else content_hashes_by_name.get(name)
-        catalog.append(
-            {
-                "name": name,
-                "description": str(getattr(skill, "description", "")),
-                "allowed_tools": sorted(str(item) for item in (getattr(skill, "allowed_tools", None) or ())),
-                "content_hash": content_hash,
-                "secrets_autonomous": bool(getattr(skill, "secrets_autonomous", True)),
-                "required_secrets": sorted(f"{getattr(requirement, 'name', '')}:{bool(getattr(requirement, 'optional', False))}" for requirement in (getattr(skill, "required_secrets", None) or ())),
-            }
-        )
-    return catalog
-
-
-def skill_catalog_digest(
-    enabled_skills: list[object],
-    *,
-    content_hashes_by_name: Mapping[str, str] | None = None,
-) -> str:
-    """Digest accepted immutable skill objects exactly as assembly does."""
-
-    return canonical_hash(
-        sorted(
-            _skill_catalog(
-                enabled_skills,
-                content_hashes_by_name=content_hashes_by_name,
-            ),
-            key=lambda item: item["name"],
-        )
-    )
-
-
-def skill_catalog_digest_from_snapshot(
-    enabled_skills: list[object],
-    skill_projections: Sequence[Mapping[str, object]],
-) -> str:
-    """Digest skill metadata against manifest hashes frozen at acceptance."""
-
-    expected_names = {str(getattr(skill, "name", "")) for skill in enabled_skills}
-    if len(expected_names) != len(enabled_skills):
-        raise ValueError("accepted skill names must be unique")
-    content_hashes: dict[str, str] = {}
-    for projection in skill_projections:
-        name = projection.get("name")
-        if name not in expected_names:
-            continue
-        digest = projection.get("manifest_digest")
-        if not isinstance(name, str) or name in content_hashes or not isinstance(digest, str) or len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
-            raise ValueError("accepted skill snapshot manifest is malformed")
-        content_hashes[name] = digest
-    if set(content_hashes) != expected_names:
-        raise ValueError("accepted skill snapshot manifest is incomplete")
-    return skill_catalog_digest(
-        enabled_skills,
-        content_hashes_by_name=content_hashes,
-    )
-
-
-def subagent_release_policy(
-    app_config: object,
-    *,
-    enabled: bool,
-    max_concurrent: int,
-    max_total: int,
-    resolved_subagent_catalog: ResolvedSubagentCatalogV1 | None = None,
-) -> dict[str, object]:
-    """Project the delegation limits the assembled graph will enforce."""
-
-    policy: dict[str, object] = {
-        "enabled": enabled,
-        "max_concurrent": max_concurrent,
-        "max_total": max_total,
-        "type_allowlist": [],
-        "runtime_limits": {},
-    }
-    if resolved_subagent_catalog is not None:
-        policy["catalog_digest"] = resolved_subagent_catalog.digest
-        policy["type_allowlist"] = list(
-            resolved_subagent_catalog.allowed_names,
-        )
-        policy["runtime_limits"] = {
-            entry.name: {
-                "max_turns": entry.max_turns,
-                "timeout_seconds": entry.timeout_seconds,
-            }
-            for entry in resolved_subagent_catalog.entries
-        }
-        return policy
-    if not enabled:
-        return policy
-
-    from deerflow.subagents import (
-        get_available_subagent_names,
-        get_subagent_config,
-    )
-
-    type_allowlist = sorted(
-        set(get_available_subagent_names(app_config=app_config)),
-    )
-    runtime_limits: dict[str, object] = {}
-    for name in type_allowlist:
-        subagent_config = get_subagent_config(name, app_config=app_config)
-        if subagent_config is None:
-            continue
-        runtime_limits[name] = {
-            "max_turns": subagent_config.max_turns,
-            "timeout_seconds": subagent_config.timeout_seconds,
-        }
-    policy["type_allowlist"] = type_allowlist
-    policy["runtime_limits"] = runtime_limits
-    return policy
+    return canonical_hash(content)
 
 
 def build_assembly_descriptor(
@@ -635,7 +460,18 @@ def build_assembly_descriptor(
     hashed rather than listed field-by-field so editing a skill's body changes
     the fingerprint while the descriptor stays small.
     """
-    skill_catalog = _skill_catalog(enabled_skills)
+    skill_catalog = [
+        {
+            "name": str(getattr(skill, "name", "")),
+            "description": str(getattr(skill, "description", "")),
+            # None preserves legacy allow-all; an empty declaration allows no business tools.
+            "allowed_tools": None if (allowed_tools := getattr(skill, "allowed_tools", None)) is None else sorted(str(item) for item in allowed_tools),
+            "content_hash": _skill_content_hash(skill),
+            "secrets_autonomous": bool(getattr(skill, "secrets_autonomous", True)),
+            "required_secrets": sorted(f"{getattr(requirement, 'name', '')}:{bool(getattr(requirement, 'optional', False))}" for requirement in (getattr(skill, "required_secrets", None) or ())),
+        }
+        for skill in enabled_skills
+    ]
     assembled_tools = list(tools)
     for middleware in middlewares:
         middleware_tools = getattr(middleware, "tools", None)
@@ -643,13 +479,8 @@ def build_assembly_descriptor(
             assembled_tools.extend(middleware_tools)
 
     resolved_policies = dict(effective_policies)
-    if TOOL_RECOVERY_POLICY_KEY in resolved_policies:
-        raise ValueError("tool_recovery_policy_reserved")
-    tool_recovery_policy = _tool_recovery_policy(assembled_tools)
-    if tool_recovery_policy:
-        resolved_policies[TOOL_RECOVERY_POLICY_KEY] = tool_recovery_policy
     resolved_policies["prompt_template_id"] = prompt_template_id
-    resolved_policies["skill_catalog_hash"] = skill_catalog_digest(enabled_skills)
+    resolved_policies["skill_catalog_hash"] = canonical_hash(sorted(skill_catalog, key=lambda item: item["name"]))
 
     return AgentAssemblyDescriptor(
         namespace=namespace,
@@ -674,8 +505,4 @@ __all__ = [
     "describe_middleware",
     "describe_model_identity",
     "describe_tool",
-    "skill_catalog_digest",
-    "skill_catalog_digest_from_snapshot",
-    "subagent_release_policy",
-    "TOOL_RECOVERY_POLICY_KEY",
 ]

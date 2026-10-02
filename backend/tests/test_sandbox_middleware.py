@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import asyncio
-import logging
+import threading
 from typing import get_type_hints
 
 import pytest
-from _skill_projection_release import release_thread_projection
 from langchain.agents.middleware import AgentMiddleware
 from langchain.tools import ToolRuntime
 from langchain_core.messages import HumanMessage, ToolMessage
@@ -15,10 +14,6 @@ from langgraph.runtime import Runtime
 from langgraph.types import Command, Overwrite
 
 from deerflow.agents.thread_state import ThreadState
-from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
-from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
-from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
-from deerflow.sandbox.capabilities import AcceptedSkillProjection
 from deerflow.sandbox.exceptions import SandboxAuthorizationError, SandboxRuntimeError
 from deerflow.sandbox.lease import (
     get_sandbox_lease_manager,
@@ -27,12 +22,7 @@ from deerflow.sandbox.lease import (
 )
 from deerflow.sandbox.middleware import SandboxMiddleware, SandboxMiddlewareState
 from deerflow.sandbox.sandbox import Sandbox
-from deerflow.sandbox.sandbox_provider import (
-    SandboxProvider,
-    get_sandbox_provider,
-    reset_sandbox_provider,
-    set_sandbox_provider,
-)
+from deerflow.sandbox.sandbox_provider import SandboxProvider, reset_sandbox_provider, set_sandbox_provider
 from deerflow.sandbox.search import GrepMatch
 from deerflow.sandbox.tools import ensure_sandbox_initialized, ls_tool
 
@@ -169,62 +159,13 @@ class _AsyncOnlyProvider(SandboxProvider):
             return self.sandbox
         return None
 
+    def get_scoped(self, sandbox_id: str, *, thread_id: str, user_id: str) -> Sandbox | None:
+        del thread_id, user_id
+        return self.get(sandbox_id)
+
     def release(self, sandbox_id: str) -> None:
         self.released_ids.append(sandbox_id)
         return None
-
-
-class _IncompleteAcceptedProvider(_AsyncOnlyProvider, AcceptedSkillProjection):
-    """Claims the projection capability but omits the isolation advertisement."""
-
-    async def provision_accepted_skills_async(
-        self,
-        thread_id: str,
-        *,
-        user_id: str,
-        binding,
-    ) -> str:
-        del binding
-        self.thread_ids.append(thread_id)
-        self.user_ids.append(user_id)
-        return "async-sandbox"
-
-    async def bind_accepted_skill_snapshot_async(self, *args, **kwargs) -> None:
-        del args, kwargs
-
-
-class _AcceptedNamespaceOnlyProvider(_IncompleteAcceptedProvider):
-    def has_accepted_skill_isolation(self, sandbox_id: str) -> bool:
-        return sandbox_id == "async-sandbox"
-
-
-class _CapabilityProbeMustNotRunProvider(_AcceptedNamespaceOnlyProvider):
-    def accepted_skill_material_capability(self, sandbox_id: str):
-        raise AssertionError(f"capability probe must not run for {sandbox_id}")
-
-
-class _PrepublicationFailureProvider(_AcceptedNamespaceOnlyProvider):
-    async def bind_accepted_skill_snapshot_async(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("bind failed before publication")
-
-    def clear_accepted_skill_snapshot(self, clear) -> bool:
-        del clear
-        return False
-
-    def ensure_accepted_skill_snapshot_absent(self, clear) -> bool:
-        del clear
-        return True
-
-
-class _UnprovenPrepublicationFailureProvider(_AcceptedNamespaceOnlyProvider):
-    async def bind_accepted_skill_snapshot_async(self, *args, **kwargs) -> None:
-        del args, kwargs
-        raise RuntimeError("unproven bind failure")
-
-    def clear_accepted_skill_snapshot(self, clear) -> bool:
-        del clear
-        return False
 
 
 def test_sandbox_middleware_state_matches_thread_state_sandbox_field() -> None:
@@ -233,30 +174,6 @@ def test_sandbox_middleware_state_matches_thread_state_sandbox_field() -> None:
     thread_hints = get_type_hints(ThreadState, include_extras=True)
 
     assert middleware_hints["sandbox"] == thread_hints["sandbox"]
-
-
-def test_material_capability_probe_is_skipped_for_legacy_and_accepted_empty_runs() -> None:
-    from deerflow.sandbox.accepted_projection import require_runtime_accepted_skill_isolation
-
-    provider = _CapabilityProbeMustNotRunProvider()
-    require_runtime_accepted_skill_isolation(
-        provider,
-        Runtime(context={}),
-        sandbox_id="async-sandbox",
-    )
-    material = ResolvedAgentMaterialV1(
-        agent_id="lead-agent",
-        storage_source="test",
-        storage_version="1",
-        agent_config=None,
-        soul="",
-        model_profile={},
-    )
-    require_runtime_accepted_skill_isolation(
-        provider,
-        Runtime(context={RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material}),
-        sandbox_id="async-sandbox",
-    )
 
 
 @pytest.mark.anyio
@@ -320,63 +237,6 @@ def test_explicit_skill_policy_eagerly_acquires_and_syncs_existing_thread(
     assert provider.thread_ids == ["thread-policy"]
     assert provider.user_ids == ["owner-policy"]
     assert provider.skill_syncs == [("sync-sandbox", "thread-policy", "owner-policy", projection)]
-
-
-def test_an_eager_acquisition_at_capacity_defers_instead_of_killing_the_turn(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A full deployment must not end a turn that may never touch a sandbox.
-
-    An explicit skill policy is projected before the first model so a
-    restricted agent cannot see the shared view -- but at this point nothing
-    has been handed out, so not acquiring leaks nothing. Letting the refusal
-    out instead ends the turn with an unhandled exception: `before_agent` runs
-    inside the graph, outside every tool-result layer, so a member asking
-    "what did we decide yesterday?" would stall for the wait budget and then
-    die, for a question that needed no sandbox at all.
-    """
-    from deerflow.sandbox.exceptions import SandboxCapacityExceededError
-
-    provider = _AgentSkillSyncProvider()
-    middleware = SandboxMiddleware(lazy_init=True, available_skills=set())
-    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *_a, **_k: object())
-
-    def _refuse(*_args, **_kwargs):
-        raise SandboxCapacityExceededError(active=2, replicas=2)
-
-    monkeypatch.setattr(middleware, "_acquire_sandbox", _refuse)
-    set_sandbox_provider(provider)
-    try:
-        result = middleware.before_agent({}, Runtime(context={"thread_id": "thread-full", "user_id": "owner-full"}))
-    finally:
-        reset_sandbox_provider()
-
-    assert result is None, "the turn continues; its first sandbox-backed tool call decides"
-    assert provider.skill_syncs == [], "nothing was projected into a sandbox that was never acquired"
-
-
-@pytest.mark.anyio
-async def test_an_eager_async_acquisition_at_capacity_defers_too(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from deerflow.sandbox.exceptions import SandboxCapacityExceededError
-
-    provider = _AgentSkillSyncProvider()
-    middleware = SandboxMiddleware(lazy_init=True, available_skills=set())
-    monkeypatch.setattr(middleware, "_prepare_agent_skill_projection", lambda *_a, **_k: object())
-
-    async def _refuse(*_args, **_kwargs):
-        raise SandboxCapacityExceededError(active=2, replicas=2)
-
-    monkeypatch.setattr(middleware, "_acquire_sandbox_async", _refuse)
-    set_sandbox_provider(provider)
-    try:
-        result = await middleware.abefore_agent({}, Runtime(context={"thread_id": "thread-full-async", "user_id": "owner-full"}))
-    finally:
-        reset_sandbox_provider()
-
-    assert result is None
-    assert provider.skill_syncs == []
 
 
 def test_explicit_skill_policy_fails_closed_for_unsupported_provider(
@@ -474,310 +334,13 @@ def test_explicit_skill_policy_does_not_reuse_checkpointed_sandbox_after_auth_de
     assert provider.skill_syncs == []
 
 
-async def _first_sandbox_tool_call(provider, runtime: Runtime):
-    """Where accepted material reaches a sandbox: the turn's first sandbox tool call.
-
-    The agent's ``before_agent`` defers it (an accepted turn that calls no
-    sandbox tool never takes a slot), so it must acquire nothing; the checks
-    the material is subject to then run in ``ensure_sandbox_initialized_async``.
-    """
-    from types import SimpleNamespace
-    from unittest.mock import patch
-
-    from deerflow.sandbox.tools import ensure_sandbox_initialized_async
-
-    middleware = SandboxMiddleware(lazy_init=True)
-    with (
-        patch.object(middleware, "_acquire_sandbox_async", side_effect=AssertionError("before_agent acquired for an accepted turn")),
-        patch("deerflow.sandbox.middleware.provision_runtime_accepted_skill_projection_async", side_effect=AssertionError("before_agent provisioned for an accepted turn")),
-        patch("deerflow.sandbox.middleware.bind_runtime_accepted_skill_projection_async", side_effect=AssertionError("before_agent bound for an accepted turn")),
-    ):
-        # Outside any ``pytest.raises`` of the caller's: an assertion here is
-        # a failure of the test, not the refusal it expects.
-        try:
-            await middleware.abefore_agent({}, runtime)
-        except AssertionError as exc:
-            pytest.fail(str(exc))
-    return await ensure_sandbox_initialized_async(SimpleNamespace(context=runtime.context, state={}, config={}))
-
-
-def test_each_delegated_execution_holds_its_own_projection_consumer() -> None:
-    """A task the lead delegates before touching the sandbox must not borrow the lead's consumer.
-
-    The projection is acquired at the first sandbox tool call, so a lead that
-    delegates first hands its children no token. Each child's first sandbox
-    call activates one, and the projection is cleared only when the last
-    consumer goes: were they all the lead's ``run:<id>:lead``, the first child
-    to finish would empty the skills and park the sandbox under its siblings.
-    """
-    from types import SimpleNamespace
-
-    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-    from deerflow.sandbox.accepted_projection import ensure_accepted_skill_binding
-
-    material = ResolvedAgentMaterialV1(
-        agent_id="lead-agent",
-        storage_source="test",
-        storage_version="1",
-        agent_config=None,
-        soul="",
-        model_profile={},
-    )
-    identity = {"thread_id": "thread-delegated", "run_id": "run-delegated", "user_id": "owner-delegated", RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material}
-
-    def _child(task_id: str) -> SimpleNamespace:
-        return SimpleNamespace(context={**identity, "is_subagent": True, "sandbox_lease_owner_id": f"subagent:{task_id}"})
-
-    coordinator = get_skill_projection_coordinator()
-    try:
-        _, first, _ = ensure_accepted_skill_binding(_child("a"), sandbox_id="sandbox-delegated", user_id="owner-delegated")
-        _, second, _ = ensure_accepted_skill_binding(_child("b"), sandbox_id="sandbox-delegated", user_id="owner-delegated")
-        _, lead, _ = ensure_accepted_skill_binding(SimpleNamespace(context=dict(identity)), sandbox_id="sandbox-delegated", user_id="owner-delegated")
-
-        assert (first.consumer_id, second.consumer_id, lead.consumer_id) == ("subagent:a", "subagent:b", "run:run-delegated:lead")
-        assert coordinator.release(first) is None, "the first child to finish cleared the projection under the others"
-        assert coordinator.owns(second) and coordinator.owns(lead)
-    finally:
-        release_thread_projection(user_id="owner-delegated", thread_id="thread-delegated", run_id="run-delegated")
-
-
-@pytest.mark.anyio
-async def test_accepted_empty_skill_set_fails_closed_for_unsupported_provider() -> None:
-    provider = _AsyncOnlyProvider()
-    set_sandbox_provider(provider)
-    material = ResolvedAgentMaterialV1(
-        agent_id="lead-agent",
-        storage_source="test",
-        storage_version="1",
-        agent_config=None,
-        soul="",
-        model_profile={},
-    )
-    runtime = Runtime(
-        context={
-            "thread_id": "thread-accepted",
-            "run_id": "run-accepted",
-            "user_id": "owner-accepted",
-            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
-        }
-    )
-    try:
-        with pytest.raises(
-            AcceptedSkillSandboxBindingError,
-            match="accepted_skill_snapshot_projection_unsupported",
-        ):
-            await _first_sandbox_tool_call(provider, runtime)
-    finally:
-        reset_sandbox_provider()
-        release_thread_projection(user_id="owner-accepted", thread_id="thread-accepted", run_id="run-accepted")
-
-    # Durable accepted material selects the explicit accepted-only acquisition
-    # profile. Unsupported providers fail before creating a sandbox that might
-    # expose mutable live skill mounts.
-    assert provider.thread_ids == []
-    assert provider.released_ids == []
-
-
-@pytest.mark.anyio
-async def test_accepted_acquisition_requires_provider_isolation_advertisement() -> None:
-    provider = _IncompleteAcceptedProvider()
-    set_sandbox_provider(provider)
-    material = ResolvedAgentMaterialV1(
-        agent_id="lead-agent",
-        storage_source="test",
-        storage_version="1",
-        agent_config=None,
-        soul="",
-        model_profile={},
-    )
-    runtime = Runtime(
-        context={
-            "thread_id": "thread-incomplete",
-            "run_id": "run-incomplete",
-            "user_id": "owner-incomplete",
-            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
-        }
-    )
-    try:
-        with pytest.raises(
-            AcceptedSkillSandboxBindingError,
-            match="accepted_skill_snapshot_isolation_unverified",
-        ):
-            await _first_sandbox_tool_call(provider, runtime)
-    finally:
-        reset_sandbox_provider()
-        release_thread_projection(user_id="owner-incomplete", thread_id="thread-incomplete", run_id="run-incomplete")
-
-    assert provider.thread_ids == ["thread-incomplete"]
-    assert provider.released_ids == ["async-sandbox"]
-
-
-@pytest.mark.anyio
-async def test_bind_failure_before_publication_releases_after_absence_proof() -> None:
-    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-    provider = _PrepublicationFailureProvider()
-    set_sandbox_provider(provider)
-    material = ResolvedAgentMaterialV1(
-        agent_id="lead-agent",
-        storage_source="test",
-        storage_version="1",
-        agent_config=None,
-        soul="",
-        model_profile={},
-    )
-    runtime = Runtime(
-        context={
-            "thread_id": "thread-prepublication-failure",
-            "run_id": "run-prepublication-failure",
-            "user_id": "owner-prepublication-failure",
-            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
-        }
-    )
-    coordinator = get_skill_projection_coordinator()
-    try:
-        with pytest.raises(RuntimeError, match="bind failed before publication"):
-            await _first_sandbox_tool_call(provider, runtime)
-
-        assert provider.released_ids == ["async-sandbox"]
-        assert not coordinator.is_busy(
-            user_id="owner-prepublication-failure",
-            thread_id="thread-prepublication-failure",
-        )
-        assert coordinator.try_claim_committed_run(
-            user_id="owner-prepublication-failure",
-            thread_id="thread-prepublication-failure",
-            run_id="replacement-after-prepublication-failure",
-            snapshot_id=None,
-        )
-    finally:
-        coordinator.release_unactivated_run(
-            user_id="owner-prepublication-failure",
-            thread_id="thread-prepublication-failure",
-            run_id="replacement-after-prepublication-failure",
-        )
-        reset_sandbox_provider()
-
-
-@pytest.mark.anyio
-async def test_bind_failure_without_absence_proof_does_not_release_sandbox(caplog) -> None:
-    from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-    provider = _UnprovenPrepublicationFailureProvider()
-    set_sandbox_provider(provider)
-    material = ResolvedAgentMaterialV1(
-        agent_id="lead-agent",
-        storage_source="test",
-        storage_version="1",
-        agent_config=None,
-        soul="",
-        model_profile={},
-    )
-    runtime = Runtime(
-        context={
-            "thread_id": "thread-unproven-failure",
-            "run_id": "run-unproven-failure",
-            "user_id": "owner-unproven-failure",
-            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
-        }
-    )
-    coordinator = get_skill_projection_coordinator()
-    try:
-        with caplog.at_level(logging.WARNING, logger="deerflow.sandbox.accepted_projection"), pytest.raises(RuntimeError, match="unproven bind failure"):
-            await _first_sandbox_tool_call(provider, runtime)
-
-        assert provider.released_ids == []
-        assert coordinator.is_busy(
-            user_id="owner-unproven-failure",
-            thread_id="thread-unproven-failure",
-        )
-        # The fence that stays is no longer silent.
-        assert any("could not release its accepted-skill projection" in record.getMessage() for record in caplog.records)
-    finally:
-        token = coordinator.token_for_consumer(
-            user_id="owner-unproven-failure",
-            thread_id="thread-unproven-failure",
-            run_id="run-unproven-failure",
-            consumer_id="run:run-unproven-failure:lead",
-        )
-        if token is not None:
-            clear = coordinator.release(token)
-            if clear is not None:
-                coordinator.finalize_release(clear)
-        reset_sandbox_provider()
-
-
-@pytest.mark.anyio
-async def test_nonempty_accepted_material_requires_hard_read_only_provider(
-    tmp_path,
-    monkeypatch,
-) -> None:
-    from pathlib import Path
-
-    from deerflow.config.paths import Paths
-    from deerflow.runtime.skill_snapshot import snapshot_effective_skills
-    from deerflow.skills.parser import parse_skill_file
-    from deerflow.skills.types import SkillCategory
-
-    source = tmp_path / "source" / "immutable-skill"
-    source.mkdir(parents=True)
-    skill_file = source / "SKILL.md"
-    skill_file.write_text(
-        "---\nname: immutable-skill\ndescription: immutable\n---\naccepted bytes\n",
-        encoding="utf-8",
-    )
-    skill = parse_skill_file(
-        skill_file,
-        SkillCategory.CUSTOM,
-        relative_path=Path("immutable-skill"),
-    )
-    assert skill is not None
-    paths = Paths(base_dir=tmp_path / "state")
-    monkeypatch.setattr("deerflow.runtime.skill_snapshot.get_paths", lambda: paths)
-    snapshot = snapshot_effective_skills((skill,), user_id="owner-read-only")
-    assert snapshot is not None
-    material = ResolvedAgentMaterialV1(
-        agent_id="lead-agent",
-        storage_source="test",
-        storage_version="1",
-        agent_config=None,
-        soul="",
-        model_profile={},
-        skill_snapshot=snapshot,
-        enabled_skill_objects=snapshot.skills,
-        all_skill_objects=snapshot.skills,
-    )
-    provider = _AcceptedNamespaceOnlyProvider()
-    set_sandbox_provider(provider)
-    runtime = Runtime(
-        context={
-            "thread_id": "thread-read-only",
-            "run_id": "run-read-only",
-            "user_id": "owner-read-only",
-            RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material,
-        }
-    )
-    try:
-        with pytest.raises(
-            AcceptedSkillSandboxBindingError,
-            match="accepted_skill_snapshot_immutability_unsupported",
-        ):
-            await _first_sandbox_tool_call(provider, runtime)
-    finally:
-        reset_sandbox_provider()
-        release_thread_projection(user_id="owner-read-only", thread_id="thread-read-only", run_id="run-read-only")
-        snapshot.release()
-
-    assert provider.released_ids == ["async-sandbox"]
-
-
 @pytest.mark.anyio
 @pytest.mark.parametrize(
     ("middleware", "state", "runtime"),
     [
         (SandboxMiddleware(lazy_init=True), {}, Runtime(context={"thread_id": "thread-lazy"})),
         (SandboxMiddleware(lazy_init=False), {}, Runtime(context={})),
-        (SandboxMiddleware(lazy_init=False), {"sandbox": {"sandbox_id": "existing"}}, Runtime(context={"thread_id": "thread-existing"})),
+        (SandboxMiddleware(lazy_init=False), {"sandbox": {"sandbox_id": "async-sandbox"}}, Runtime(context={"thread_id": "thread-existing"})),
     ],
 )
 async def test_abefore_agent_delegates_to_super_when_not_acquiring(
@@ -899,16 +462,13 @@ async def test_aafter_agent_releases_sandbox_off_thread(
     monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
     set_sandbox_provider(provider)
     try:
-        installed = get_sandbox_provider()
         result = await SandboxMiddleware().aafter_agent(state, runtime)
     finally:
         reset_sandbox_provider()
 
     assert result is None
     assert provider.released_ids == [expected_sandbox_id]
-    # The installed provider is the session provider in front of the fake; its
-    # release forwards to the fake's, and that is the callable handed to to_thread.
-    assert to_thread_calls == [(installed.release, (expected_sandbox_id,))]
+    assert to_thread_calls == [(provider.release, (expected_sandbox_id,))]
 
 
 @pytest.mark.anyio
@@ -1044,17 +604,72 @@ def test_wrap_tool_call_passthrough_when_sandbox_already_in_state() -> None:
     assert result is original
 
 
-def test_wrap_tool_call_turns_trusted_proxy_denial_into_human_input() -> None:
+def test_wrap_tool_call_overwrites_a_repaired_checkpoint_sandbox() -> None:
+    middleware = SandboxMiddleware()
+    state: dict = {"sandbox": {"sandbox_id": "foreign"}}
+    request = _make_tool_call_request(state)
+
+    def handler(req: ToolCallRequest) -> ToolMessage:
+        req.runtime.state["sandbox"] = {"sandbox_id": "canonical"}
+        return ToolMessage(content="ok", tool_call_id="call-1", name="bash")
+
+    result = middleware.wrap_tool_call(request, handler)
+
+    assert isinstance(result, Command)
+    assert isinstance(result.update, dict)
+    assert isinstance(result.update["sandbox"], Overwrite)
+    assert result.update["sandbox"].value == {"sandbox_id": "canonical"}
+
+
+def test_network_prompt_preserves_repaired_checkpoint_overwrite() -> None:
+    provider = _NetworkPolicyProvider()
+    provider.events = [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
+    state: dict = {"sandbox": {"sandbox_id": "foreign"}}
+    request = _make_tool_call_request(state)
+
+    def handler(req: ToolCallRequest) -> ToolMessage:
+        req.runtime.state["sandbox"] = {"sandbox_id": "canonical"}
+        return ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
+
+    set_sandbox_provider(provider)
+    try:
+        result = SandboxMiddleware().wrap_tool_call(request, handler)
+    finally:
+        reset_sandbox_provider()
+
+    assert isinstance(result, Command)
+    assert result.goto == END
+    assert isinstance(result.update, dict)
+    assert isinstance(result.update["sandbox"], Overwrite)
+    assert result.update["sandbox"].value == {"sandbox_id": "canonical"}
+
+
+@pytest.mark.parametrize("async_path", [False, True])
+@pytest.mark.parametrize(
+    "context",
+    [
+        {},
+        {"interaction_mode": "interactive"},
+        {"interaction_mode": "interactive", "non_interactive": True, "disable_clarification": True, "channel_name": "github"},
+    ],
+)
+def test_wrap_tool_call_turns_trusted_proxy_denial_into_human_input(context: dict, async_path: bool) -> None:
     provider = _NetworkPolicyProvider()
     provider.events = [{"request_id": "req-1", "host": "pypi.org", "port": 443, "method": "CONNECT"}]
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
+    request.runtime.context.update(context)
+    original = ToolMessage(content="curl: proxy denied", tool_call_id="call-1", name="bash")
+
+    async def handler(_request: ToolCallRequest) -> ToolMessage:
+        return original
+
     set_sandbox_provider(provider)
     try:
-        result = SandboxMiddleware().wrap_tool_call(
-            request,
-            lambda _request: ToolMessage(content="curl: proxy denied", tool_call_id="call-1", name="bash"),
-        )
+        if async_path:
+            result = asyncio.run(SandboxMiddleware().awrap_tool_call(request, handler))
+        else:
+            result = SandboxMiddleware().wrap_tool_call(request, lambda _request: original)
     finally:
         reset_sandbox_provider()
 
@@ -1114,6 +729,65 @@ def test_before_agent_applies_network_approval_to_same_sandbox() -> None:
     assert provider.decisions == [("existing", "req-1", "allow_temporary")]
 
 
+@pytest.mark.anyio
+async def test_abefore_agent_drains_started_network_approval_across_cancellation() -> None:
+    provider = _NetworkPolicyProvider()
+    started = threading.Event()
+    release = threading.Event()
+
+    def decide(sandbox_id: str, request_id: str, decision: str) -> bool:
+        started.set()
+        assert release.wait(timeout=2)
+        provider.decisions.append((sandbox_id, request_id, decision))
+        return True
+
+    provider.decide_network_policy_request = decide  # type: ignore[method-assign]
+    response = HumanMessage(
+        content="Allow network access for 5 minutes",
+        additional_kwargs={
+            "hide_from_ui": True,
+            "human_input_response": {
+                "version": 1,
+                "kind": "human_input_response",
+                "source": "sandbox_network",
+                "request_id": "req-cancel",
+                "response_kind": "option",
+                "option_id": "allow_temporary",
+                "value": "Allow network access for 5 minutes",
+            },
+        },
+    )
+    state = {"sandbox": {"sandbox_id": "existing"}, "messages": [response]}
+    task = None
+    set_sandbox_provider(provider)
+    try:
+        task = asyncio.create_task(
+            SandboxMiddleware().abefore_agent(
+                state,
+                Runtime(context={"thread_id": "thread-cancel"}),
+            )
+        )
+        assert await asyncio.to_thread(started.wait, 2)
+
+        task.cancel()
+        await asyncio.sleep(0.05)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        assert not task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    finally:
+        release.set()
+        if task is not None and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        reset_sandbox_provider()
+
+    assert provider.decisions == [("existing", "req-cancel", "allow_temporary")]
+
+
 def test_before_agent_does_not_reapply_network_approval_after_new_user_turn() -> None:
     provider = _NetworkPolicyProvider()
     response = HumanMessage(
@@ -1144,13 +818,23 @@ def test_before_agent_does_not_reapply_network_approval_after_new_user_turn() ->
     assert provider.decisions == []
 
 
-@pytest.mark.parametrize("context_key", ["disable_clarification", "non_interactive"])
-def test_sync_noninteractive_network_denial_is_recorded_without_prompt(context_key: str) -> None:
+_UNATTENDED_CONTEXTS = [
+    pytest.param({"disable_clarification": True}, id="legacy-disable-clarification"),
+    pytest.param({"non_interactive": True}, id="legacy-non-interactive"),
+    pytest.param({"channel_name": "github"}, id="github-channel"),
+    pytest.param({"interaction_mode": "webhook"}, id="webhook"),
+    pytest.param({"interaction_mode": "scheduled"}, id="scheduled"),
+    pytest.param({"interaction_mode": "autonomous"}, id="autonomous"),
+]
+
+
+@pytest.mark.parametrize("context", _UNATTENDED_CONTEXTS)
+def test_sync_noninteractive_network_denial_is_recorded_without_prompt(context: dict) -> None:
     provider = _NetworkPolicyProvider()
     provider.events = [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
-    request.runtime.context[context_key] = True
+    request.runtime.context.update(context)
     original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
     set_sandbox_provider(provider)
     try:
@@ -1165,13 +849,13 @@ def test_sync_noninteractive_network_denial_is_recorded_without_prompt(context_k
 
 
 @pytest.mark.anyio
-@pytest.mark.parametrize("context_key", ["disable_clarification", "non_interactive"])
-async def test_async_noninteractive_network_denial_is_recorded_without_prompt(context_key: str) -> None:
+@pytest.mark.parametrize("context", _UNATTENDED_CONTEXTS)
+async def test_async_noninteractive_network_denial_is_recorded_without_prompt(context: dict) -> None:
     provider = _NetworkPolicyProvider()
     provider.events = [{"request_id": "req-1", "host": "example.com", "port": 443, "method": "CONNECT"}]
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
-    request.runtime.context[context_key] = True
+    request.runtime.context.update(context)
     original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
 
     async def handler(_request: ToolCallRequest) -> ToolMessage:
@@ -1195,6 +879,7 @@ def test_subagent_network_denial_fails_closed_without_prompt() -> None:
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
     request.runtime.context["is_subagent"] = True
+    request.runtime.context["interaction_mode"] = "interactive"
     original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
     set_sandbox_provider(provider)
     try:
@@ -1216,6 +901,7 @@ async def test_async_subagent_network_denial_fails_closed_without_prompt() -> No
     state: dict = {"sandbox": {"sandbox_id": "existing"}}
     request = _make_tool_call_request(state)
     request.runtime.context["is_subagent"] = True
+    request.runtime.context["interaction_mode"] = "interactive"
     original = ToolMessage(content="proxy denied", tool_call_id="call-1", name="bash")
 
     async def handler(_request: ToolCallRequest) -> ToolMessage:

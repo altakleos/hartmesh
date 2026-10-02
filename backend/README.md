@@ -61,10 +61,16 @@ Middlewares execute in strict order, each handling a specific concern:
 | 3 | **SandboxMiddleware** | Acquires sandbox environment for code execution |
 | 4 | **SummarizationMiddleware** | Reduces context when approaching token limits (optional) |
 | 5 | **TodoListMiddleware** | Tracks multi-step tasks in plan mode (optional) |
-| 6 | **TitleMiddleware** | Auto-generates conversation titles from the original user request after first exchange; attachment-only messages fall back to `New Conversation` |
+| 6 | **TitleMiddleware** | Auto-generates conversation titles from the original user request after first exchange; attachment-only messages use a sanitized file name (or `N files uploaded` for multiple attachments) |
 | 7 | **MemoryMiddleware** | Queues conversations for async memory extraction |
 | 8 | **ViewImageMiddleware** | Injects image data for vision-capable models (conditional) |
 | 9 | **ClarificationMiddleware** | Intercepts clarification requests and interrupts execution (must be last) |
+
+When `loop_detection.enabled` is set, loop detection checks both repeated
+tool-call sets and per-tool frequency. Warnings do not skip the rest of a
+tool-call batch: any hard limit reached takes precedence and stops the entire
+batch before tool execution. Warning-only batches remain fully counted and
+receive a transient hint on the next model request.
 
 ### Sandbox System
 
@@ -99,10 +105,8 @@ LLM-powered persistent context retention across conversations:
 - **Debounced updates**: Batches updates to minimize LLM calls (configurable wait time)
 - **System prompt injection**: Top facts + context injected into agent prompts
 - **Run-level memory identity**: `GET /api/threads/{thread_id}/runs/{run_id}/events?event_types=context:memory` returns the SHA-256 identity of the effective hidden memory block without copying memory text into the event store
-- **Storage**: Atomic JSON/Markdown replacement with revision-aware cache
-  invalidation; the first full-document load, reload, or compatibility save for
-  a scope removes interrupted `memory.json` temp siblings immediately after it
-  acquires the cross-process scope lock, so a live writer is never swept
+- **Read failures**: Strict backend policies (including legacy `fail_closed`) stop the turn, including at the 5-second async injection deadline. Fail-open reads continue without new context. Timeout handling does not wait for a free worker; a timed-out read may still occupy its worker until the backend returns.
+- **Storage**: JSON file with mtime-based cache invalidation and canonical normalization for legacy sections/fact metadata
 
 ### Tool Ecosystem
 
@@ -113,14 +117,6 @@ LLM-powered persistent context retention across conversations:
 | **Community** | Tavily (web search), Jina AI (web fetch), Crawl4AI (web fetch), Firecrawl (scraping), fastCRW (scraping), DuckDuckGo (image search) |
 | **MCP** | Any Model Context Protocol server (stdio, SSE, HTTP transports) |
 | **Skills** | Domain-specific workflows injected via system prompt |
-
-Supported RAGFlow, DuckDuckGo, Serply, and Tencent WSA tools add bounded
-external-retrieval observations during durable runs. Server policy is enforced
-before network access, and the terminal observation commits the existing outer
-tool receipt's exact sanitized/budgeted result digest without persisting the
-query or result text. Configuration, privacy, API, and live-qualification
-details are in
-[EVIDENCE_BEARING_RETRIEVAL.md](docs/EVIDENCE_BEARING_RETRIEVAL.md).
 
 ### Gateway API
 
@@ -137,7 +133,6 @@ FastAPI application providing REST endpoints for frontend integration:
 | `POST /api/memory/reload` | Force memory reload |
 | `GET /api/memory/config` | Memory configuration |
 | `GET /api/memory/status` | Combined config + data |
-| `GET /api/memory/writers` | Whether background memory extraction has finished. Snapshot or take a byte-exact baseline only while `idle` is true |
 | `GET /api/threads/{id}/runs/{run_id}/events` | Debug/audit events for one run; filter `event_types=context:memory` for effective memory identity |
 | `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths, auto-renames duplicate filenames in one request) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files |
@@ -488,37 +483,8 @@ does not need a pre-existing `./data/deerflow.db`. Review the generated file
 and switch raw `op.add_column` / `op.drop_column` calls to the idempotent
 helpers in `migrations/_helpers.py` before committing. There is no
 `make migrate` / `make migrate-stamp` target on purpose — Gateway startup is
-the only execution path, which keeps operational mistakes off the table. See the
-nearest `packages/harness/deerflow/persistence/migrations/AGENTS.md` for the full design.
-
-CI qualifies the durable invocation migration tail against the real PostgreSQL
-service, not SQLite: it installs an empty schema to head, then upgrades
-representative normal, auxiliary, and MCP-task rows from the real predecessor
-`0011_mcp_tasks` through HartMesh's durable invocation tail, the upstream
-result/managed-subagent/scheduled-enqueue branches, and their merges to the
-single `0036_execution_policy_state` head. It checks exact constraints and
-indexes (including lifecycle integrity, leased inbound receipts, run-event
-tool-receipt idempotency, safe tenant anchors, and the one-row deployment
-identity binding, plus tenant-scoped MCP task lineage joins) and runs concurrent admission/assembly/lifecycle/receipt contracts. The marked
-suite must not skip when `DEERFLOW_TEST_POSTGRES_URL` is configured and prints
-the PostgreSQL version and Alembic head in job output.
-
-The supported durable-invocation rollback stops at `0011_mcp_tasks`, preserving
-core MCP-task rows while dropping the later bounded-result columns. It necessarily drops invocation-tail facts that the
-predecessor cannot represent: accepted evidence, external idempotency identity,
-caller intent, state versions, lifecycle rows, inbound receipts, and execution
-evidence, including agent assembly and durable tool-receipt evidence. Re-upgrade does not reconstruct them. A further technical downgrade to
-`0010_run_cancel_request` invokes the unrelated MCP-task downgrade and destroys
-MCP-task data; it is not the supported invocation rollback. Stop writers and take
-a database backup before any rollback.
-
-Each Gateway resolves one server-owned `TenantIdentityV1` at application
-construction. New accepted work, evidence, recovery, schema binding, extension
-facts, and Redis factories share its pseudonymous reference. A nonempty legacy
-schema requires the explicit `deerflow deployment bind-tenant` operator flow;
-separate tenant releases require separate databases or PostgreSQL schemas. See
-[`docs/TENANT_IDENTITY.md`](docs/TENANT_IDENTITY.md) for configuration,
-migration, ACL, and rollback instructions.
+the only execution path, which keeps operational mistakes off the table. See
+`backend/CLAUDE.md` (Schema Migrations) for the full design.
 
 ### Code Style
 

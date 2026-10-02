@@ -10,34 +10,71 @@ signal-reentrancy deadlock described in
 from __future__ import annotations
 
 import asyncio
-import base64
-import json
 import logging
 import threading
-from contextlib import asynccontextmanager
+from contextlib import ExitStack, asynccontextmanager
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
 
-from deerflow.runtime.tenant_identity import TenantIdentityV1
 
-
-def _gateway_test_app() -> FastAPI:
-    app = FastAPI()
-    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
-    return app
+@asynccontextmanager
+async def _noop_langgraph_runtime(_app, _startup_config):
+    yield
 
 
 @asynccontextmanager
-async def _noop_langgraph_runtime(app, _startup_config):
-    class Readiness:
-        async def begin_draining(self) -> bool:
-            return True
-
-    app.state.runtime_readiness = Readiness()
+async def _langgraph_runtime_with_scheduler_repositories(app, _startup_config):
+    app.state.scheduled_task_repo = object()
+    app.state.scheduled_task_run_repo = object()
     yield
+
+
+def test_enabled_scheduler_start_failure_aborts_gateway_lifespan():
+    """An enabled scheduler must fail lifespan before channel or request admission."""
+    from app.gateway.app import lifespan
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        startup_config.scheduler.enabled = True
+        startup_config.scheduler.multi_instance = False
+        startup_config.scheduler.poll_interval_seconds = 5
+        startup_config.scheduler.lease_seconds = 120
+        startup_config.scheduler.max_concurrent_runs = 3
+        startup_config.scheduler.queue_timeout_seconds = 3600
+        startup_config.run_ownership.grace_seconds = 10
+        channel_service = MagicMock()
+        channel_service.get_status.return_value = {}
+        start_channel_service = AsyncMock(return_value=channel_service)
+        scheduler_service = MagicMock()
+        scheduler_service.start = AsyncMock(side_effect=RuntimeError("scheduled recovery failed"))
+        scheduler_service.stop = AsyncMock()
+
+        with (
+            patch("app.gateway.app.get_app_config", return_value=startup_config),
+            patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+            patch("app.gateway.app.langgraph_runtime", _langgraph_runtime_with_scheduler_repositories),
+            patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+            patch("app.channels.service.start_channel_service", start_channel_service),
+            patch("app.channels.service.stop_channel_service", AsyncMock()),
+            patch("app.scheduler.ScheduledTaskService", return_value=scheduler_service),
+            patch("deerflow.skills.projection.ensure_public_skill_projection"),
+            patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        ):
+            with pytest.raises(RuntimeError, match="scheduled recovery failed"):
+                async with lifespan(app):
+                    pass
+
+        scheduler_service.start.assert_awaited_once()
+        start_channel_service.assert_not_awaited()
+
+    asyncio.run(scenario())
 
 
 async def _run_lifespan_with_hanging_stop() -> float:
@@ -50,10 +87,9 @@ async def _run_lifespan_with_hanging_stop() -> float:
     async def hang_forever() -> None:
         await asyncio.sleep(3600)
 
-    app = _gateway_test_app()
+    app = FastAPI()
     startup_config = MagicMock()
     startup_config.log_level = "INFO"
-    startup_config.deployment.profile = "local_development"
     # Keep this test focused on the channel-hang timing: skip the memory drain.
     startup_config.memory.enabled = False
     startup_config.memory.shutdown_flush_timeout_seconds = 5.0
@@ -101,7 +137,7 @@ def test_shutdown_is_bounded_when_channel_stop_hangs():
 async def _run_lifespan_with_upload_staging_cleanup():
     from app.gateway.app import lifespan
 
-    app = _gateway_test_app()
+    app = FastAPI()
     startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char", enabled=False, shutdown_flush_timeout_seconds=30.0))
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
@@ -136,114 +172,28 @@ def test_lifespan_sweeps_upload_staging_files_on_startup():
     stop_channel_service.assert_awaited_once()
 
 
-@pytest.mark.asyncio
-async def test_lifespan_freezes_mcp_replay_keyring_before_runtime_registration(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.gateway.app import lifespan
-    from deerflow.config.app_config import AppConfig
-    from deerflow.config.sandbox_config import SandboxConfig
+def test_personal_mcp_authority_spans_runtime_startup_and_shutdown():
+    from deerflow.mcp import personal_access
 
-    startup_config = AppConfig(sandbox=SandboxConfig(use="test"))
-    startup_config.mcp_tasks.enabled = True
-    encoded_key = base64.urlsafe_b64encode(b"k" * 32).decode("ascii").rstrip("=")
-    monkeypatch.setenv(
-        "MCP_TASK_REPLAY_HMAC_KEYS",
-        json.dumps({"qualification-v1": encoded_key}),
-    )
-    monkeypatch.setenv(
-        "MCP_TASK_REPLAY_HMAC_ACTIVE_KEY_ID",
-        "qualification-v1",
-    )
-    app = _gateway_test_app()
+    events = []
+    previous = personal_access._admin_checker
 
     @asynccontextmanager
-    async def observe_runtime(runtime_app, _startup_config):
-        keyring = runtime_app.state.mcp_task_replay_keyring
-        confirmation = runtime_app.state.mcp_task_replay_keyring_confirmation
-        assert confirmation == keyring.confirmation()
-        raise RuntimeError("runtime_observed_frozen_mcp_replay_keyring")
-        yield
+    async def checked_runtime(_app, _config):
+        checker = personal_access._admin_checker
+        assert checker is not None and checker is not previous
+        events.append("start")
+        try:
+            yield
+        finally:
+            assert personal_access._admin_checker is checker
+            events.append("stop")
 
-    with (
-        patch("app.gateway.app.get_app_config", return_value=startup_config),
-        patch(
-            "app.gateway.app.get_gateway_config",
-            return_value=SimpleNamespace(host="x", port=0),
-        ),
-        patch("app.gateway.app.langgraph_runtime", observe_runtime),
-        patch("app.gateway.app.ensure_browser_runtime_available"),
-        patch("app.gateway.app.cleanup_stale_upload_staging_files", return_value=0),
-        patch("deerflow.runtime.skill_snapshot.cleanup_abandoned_skill_snapshots", return_value=0),
-        patch("deerflow.skills.projection.ensure_public_skill_projection", return_value=False),
-        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
-    ):
-        with pytest.raises(
-            RuntimeError,
-            match="runtime_observed_frozen_mcp_replay_keyring",
-        ):
-            async with lifespan(app):
-                pass
+    with patch(f"{__name__}._noop_langgraph_runtime", checked_runtime):
+        asyncio.run(_run_lifespan_with_upload_staging_cleanup())
 
-
-@pytest.mark.asyncio
-async def test_durable_gateway_startup_fails_when_receipt_channel_cannot_start(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.gateway.app import lifespan
-    from deerflow.config.app_config import AppConfig
-    from deerflow.config.sandbox_config import SandboxConfig
-
-    raw = AppConfig(sandbox=SandboxConfig(use="test")).model_dump(mode="python")
-    raw["deployment"]["profile"] = "durable_production"
-    raw["deployment"]["tenant_id"] = "test-tenant"
-    raw["database"]["backend"] = "postgres"
-    raw["run_events"]["backend"] = "db"
-    raw["channels"] = {"github": {"enabled": True}}
-    raw["memory"]["enabled"] = False
-    startup_config = AppConfig.model_validate(raw)
-    monkeypatch.setenv("GITHUB_WEBHOOK_SECRET", "startup-secret")
-    encoded_policy_key = base64.urlsafe_b64encode(b"p" * 32).decode("ascii").rstrip("=")
-    monkeypatch.setenv(
-        "EXECUTION_POLICY_HMAC_KEYS",
-        json.dumps({"qualification-v1": encoded_policy_key}),
-    )
-    monkeypatch.setenv(
-        "EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID",
-        "qualification-v1",
-    )
-    monkeypatch.delenv(
-        "DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS",
-        raising=False,
-    )
-    app = _gateway_test_app()
-
-    with (
-        patch("app.gateway.app.get_app_config", return_value=startup_config),
-        patch(
-            "app.gateway.app.get_gateway_config",
-            return_value=MagicMock(host="x", port=0),
-        ),
-        patch("app.gateway.app.ensure_browser_runtime_available"),
-        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
-        patch("app.gateway.app._ensure_admin_user", AsyncMock()),
-        patch("app.gateway.app.cleanup_stale_upload_staging_files", return_value=0),
-        patch("deerflow.runtime.skill_snapshot.cleanup_abandoned_skill_snapshots", return_value=0),
-        patch("deerflow.skills.projection.ensure_public_skill_projection", return_value=False),
-        patch("app.gateway.services.build_channel_invocation_runtime", return_value=object()),
-        patch(
-            "app.channels.service.start_channel_service",
-            side_effect=RuntimeError("database credential must stay private"),
-        ),
-    ):
-        with pytest.raises(
-            RuntimeError,
-            match="durable native ingress failed to initialize",
-        ) as caught:
-            async with lifespan(app):
-                raise AssertionError("lifespan must not start serving")
-
-    assert "credential" not in str(caught.value)
+    assert events == ["start", "stop"]
+    assert personal_access._admin_checker is previous
 
 
 async def _run_lifespan_with_mcp_task_config_snapshot() -> None:
@@ -251,7 +201,7 @@ async def _run_lifespan_with_mcp_task_config_snapshot() -> None:
     from deerflow.config.extensions_config import ExtensionsConfig
     from deerflow.mcp.tasks.runtime import McpTaskConfigurationError, validate_mcp_task_config_snapshot
 
-    app = _gateway_test_app()
+    app = FastAPI()
     startup_config = SimpleNamespace(
         log_level="INFO",
         memory=SimpleNamespace(
@@ -306,106 +256,6 @@ def test_lifespan_sets_and_clears_mcp_task_config_snapshot() -> None:
     asyncio.run(_run_lifespan_with_mcp_task_config_snapshot())
 
 
-@pytest.mark.asyncio
-async def test_gateway_restart_recreates_the_batch_worker_against_shared_repository(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from app.gateway.app import lifespan
-    from deerflow.config.app_config import AppConfig
-    from deerflow.config.extensions_config import ExtensionsConfig
-    from deerflow.config.sandbox_config import SandboxConfig
-    from deerflow.subagents.batch_service import (
-        SubagentBatchService as RealSubagentBatchService,
-    )
-
-    startup_config = AppConfig(sandbox=SandboxConfig(use="test"))
-    startup_config.subagent_batches.enabled = True
-    startup_config.subagent_batches.poll_interval_seconds = 0.1
-    services: list[RealSubagentBatchService] = []
-
-    class SharedRepository:
-        def __init__(self) -> None:
-            self.lease_owners: list[str] = []
-            self.claimed = asyncio.Event()
-
-        async def claim_items(self, **kwargs):
-            self.lease_owners.append(kwargs["lease_owner"])
-            self.claimed.set()
-            return []
-
-    repository = SharedRepository()
-
-    @asynccontextmanager
-    async def runtime(runtime_app, _startup_config):
-        runtime_app.state.subagent_batch_repo = repository
-        async with _noop_langgraph_runtime(runtime_app, _startup_config):
-            yield
-
-    def build_service(**kwargs):
-        service = RealSubagentBatchService(**kwargs)
-        services.append(service)
-        return service
-
-    channel_service = MagicMock()
-    channel_service.get_status.return_value = {}
-    memory_manager = MagicMock()
-    memory_manager.warm.return_value = None
-    monkeypatch.setattr("app.gateway.app.get_app_config", lambda: startup_config)
-    monkeypatch.setattr(
-        "app.gateway.app.get_gateway_config",
-        lambda: SimpleNamespace(host="x", port=0),
-    )
-    monkeypatch.setattr("app.gateway.app.langgraph_runtime", runtime)
-    monkeypatch.setattr("app.gateway.app.ensure_browser_runtime_available", lambda _config: None)
-    monkeypatch.setattr("app.gateway.app.cleanup_stale_upload_staging_files", lambda: 0)
-    monkeypatch.setattr("app.gateway.app._ensure_admin_user", AsyncMock())
-    monkeypatch.setattr(
-        "deerflow.runtime.skill_snapshot.cleanup_abandoned_skill_snapshots",
-        lambda: 0,
-    )
-    monkeypatch.setattr(
-        "deerflow.skills.projection.ensure_public_skill_projection",
-        lambda **_kwargs: False,
-    )
-    monkeypatch.setattr(
-        "deerflow.agents.memory.get_memory_manager",
-        lambda **_kwargs: memory_manager,
-    )
-    monkeypatch.setattr(
-        "app.channels.service.start_channel_service",
-        AsyncMock(return_value=channel_service),
-    )
-    monkeypatch.setattr("app.channels.service.stop_channel_service", AsyncMock())
-    monkeypatch.setattr(
-        "app.gateway.services.build_channel_invocation_runtime",
-        lambda _app: object(),
-    )
-    monkeypatch.setattr("app.gateway.app.auth.close_oidc_service", AsyncMock())
-    monkeypatch.setattr(
-        "deerflow.config.extensions_config.ExtensionsConfig.from_file",
-        lambda: ExtensionsConfig(),
-    )
-    monkeypatch.setattr(
-        "app.subagent_batches.SubagentBatchService",
-        build_service,
-    )
-
-    for restart_number in (1, 2):
-        repository.claimed.clear()
-        app = _gateway_test_app()
-        async with lifespan(app):
-            await asyncio.wait_for(repository.claimed.wait(), timeout=1)
-            assert app.state.subagent_batches_available is True
-            assert app.state.subagent_batch_service is services[-1]
-            assert services[-1]._poller is not None
-        assert app.state.subagent_batches_available is False
-        assert services[-1]._poller is None
-        assert len(services) == restart_number
-
-    assert len(set(repository.lease_owners)) == 2
-    assert services[0] is not services[1]
-
-
 async def _run_lifespan_with_memory_flush(
     *,
     enabled: bool,
@@ -423,7 +273,7 @@ async def _run_lifespan_with_memory_flush(
     """
     from app.gateway.app import lifespan
 
-    app = _gateway_test_app()
+    app = FastAPI()
     startup_config = SimpleNamespace(
         log_level="INFO",
         memory=SimpleNamespace(
@@ -469,9 +319,7 @@ async def _run_lifespan_with_memory_flush(
         patch("deerflow.extensions.notify.suspend_extension_system_observations", suspend_system_observations),
     ):
         async with lifespan(app):
-            if not enabled:
-                assert hasattr(app.state, "memory_manager")
-                assert app.state.memory_manager is None
+            pass
 
     return manager
 
@@ -526,49 +374,6 @@ def test_lifespan_closes_memory_manager_when_flush_raises() -> None:
     manager.close.assert_called_once_with()
 
 
-async def _run_lifespan_with_memory_init_failure() -> None:
-    from app.gateway.app import lifespan
-
-    app = _gateway_test_app()
-    startup_config = SimpleNamespace(
-        log_level="INFO",
-        memory=SimpleNamespace(
-            token_counting="char",
-            enabled=True,
-            shutdown_flush_timeout_seconds=5.0,
-        ),
-    )
-    fake_service = MagicMock()
-    fake_service.get_status.return_value = {}
-
-    async def fake_start(_startup_config, **_kwargs):
-        return fake_service
-
-    with (
-        patch("app.gateway.app.get_app_config", return_value=startup_config),
-        patch(
-            "app.gateway.app.get_gateway_config",
-            return_value=MagicMock(host="x", port=0),
-        ),
-        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
-        patch("deerflow.skills.projection.ensure_public_skill_projection"),
-        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
-        patch("app.channels.service.start_channel_service", side_effect=fake_start),
-        patch("app.channels.service.stop_channel_service", AsyncMock()),
-        patch(
-            "deerflow.agents.memory.get_memory_manager",
-            side_effect=ValueError("honcho_tenant_projection_invalid"),
-        ),
-    ):
-        async with lifespan(app):
-            pass
-
-
-def test_enabled_memory_configuration_failure_aborts_gateway_startup() -> None:
-    with pytest.raises(ValueError, match="honcho_tenant_projection_invalid"):
-        asyncio.run(_run_lifespan_with_memory_init_failure())
-
-
 # ── startup warm-up log accuracy ────────────────────────────────────────────
 
 
@@ -581,7 +386,7 @@ async def _run_lifespan_with_warm_return(warm_return: bool | None) -> MagicMock:
     """
     from app.gateway.app import lifespan
 
-    app = _gateway_test_app()
+    app = FastAPI()
     startup_config = SimpleNamespace(
         log_level="INFO",
         memory=SimpleNamespace(
@@ -639,7 +444,7 @@ def test_lifespan_warns_when_warm_returns_false(caplog) -> None:
 async def _run_lifespan_with_slow_retrieval_warm() -> float:
     from app.gateway.app import lifespan
 
-    app = _gateway_test_app()
+    app = FastAPI()
     startup_config = SimpleNamespace(
         log_level="INFO",
         memory=SimpleNamespace(
@@ -687,7 +492,7 @@ def test_lifespan_does_not_wait_for_retrieval_rebuild_before_serving() -> None:
 async def _run_shutdown_with_blocked_retrieval_warm() -> tuple[float, MagicMock]:
     from app.gateway.app import lifespan
 
-    app = _gateway_test_app()
+    app = FastAPI()
     startup_config = SimpleNamespace(
         log_level="INFO",
         memory=SimpleNamespace(
@@ -718,6 +523,7 @@ async def _run_shutdown_with_blocked_retrieval_warm() -> tuple[float, MagicMock]
         patch("app.gateway.app.get_app_config", return_value=startup_config),
         patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
         patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app._RETRIEVAL_WARM_SHUTDOWN_TIMEOUT_SECONDS", 0.01),
         patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
         patch("app.channels.service.start_channel_service", side_effect=fake_start),
         patch("app.channels.service.stop_channel_service", AsyncMock()),
@@ -746,72 +552,202 @@ def test_lifespan_preserves_flush_budget_when_retrieval_warm_is_still_running() 
 
 
 @pytest.mark.asyncio
-async def test_a_refusal_watch_that_cannot_start_fails_startup(monkeypatch):
-    """A process that never registered would read to the account command as holding nothing."""
-    from app.gateway import app as gateway_app
-    from app.gateway.refusal_watch import RefusalWatch
-    from deerflow.persistence import engine as engine_module
+async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
+    import deerflow.extensions as extensions
+    from app.gateway.app import lifespan
+    from deerflow.config.subagent_batches_config import SubagentBatchesConfig
+    from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+    from deerflow.extensions.registry import ExtensionRegistry
 
-    async def _cannot_register(self):
-        raise RuntimeError("gateway_processes is missing")
+    app = FastAPI()
+    snapshot = ExtensionRegistry().build()
+    app.state.extensions = snapshot
+    monkeypatch.setattr(extensions, "_loaded", ExtensionRegistry().build())
+    startup_config = MagicMock()
+    startup_config.log_level = "INFO"
+    startup_config.memory.enabled = False
+    startup_config.scheduler.enabled = False
+    startup_config.mcp_tasks.enabled = False
+    startup_config.subagent_batches = SubagentBatchesConfig(enabled=True)
+    startup_config.subagent_runtime = SubagentRuntimeConfig()
+    channel_service = MagicMock()
+    channel_service.get_status.return_value = {}
 
-    monkeypatch.setattr(engine_module, "get_session_factory", lambda: object())
-    monkeypatch.setattr(RefusalWatch, "start", _cannot_register)
-    with pytest.raises(RuntimeError, match="gateway_processes"):
-        await gateway_app._start_refusal_watch(SimpleNamespace(state=SimpleNamespace()))
+    @asynccontextmanager
+    async def runtime(app, _config):
+        app.state.subagent_batch_repo = object()
+        yield
+
+    with (
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", runtime),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", AsyncMock(return_value=channel_service)),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+        patch("deerflow.subagents.batch_service.SubagentBatchService.start", AsyncMock()),
+        patch("deerflow.subagents.batch_service.SubagentBatchService.stop", AsyncMock()),
+    ):
+        async with lifespan(app):
+            assert app.state.subagent_batch_service._extensions is snapshot
 
 
-@pytest.mark.asyncio
-async def test_the_refusal_watch_starts_with_what_the_process_keeps_for_people_and_what_it_cannot_reach(monkeypatch):
-    from app.gateway import app as gateway_app
-    from app.gateway import retained_state
-    from app.gateway.refusal_watch import RefusalWatch
-    from deerflow.persistence import engine as engine_module
-    from deerflow.runtime.owner_holdings import get_owner_holdings
+def _gateway_lifespan_patches(startup_config, *, pool=None, browser_manager=None):
+    """Common patch set for driving the Gateway lifespan in a unit test."""
+    channel_service = MagicMock()
+    channel_service.get_status.return_value = {}
+    patches = [
+        patch("app.gateway.app.get_app_config", return_value=startup_config),
+        patch("app.gateway.app.get_gateway_config", return_value=MagicMock(host="x", port=0)),
+        patch("app.gateway.app.langgraph_runtime", _noop_langgraph_runtime),
+        patch("app.gateway.app.auth.close_oidc_service", AsyncMock()),
+        patch("app.channels.service.start_channel_service", AsyncMock(return_value=channel_service)),
+        patch("app.channels.service.stop_channel_service", AsyncMock()),
+        patch("deerflow.skills.projection.ensure_public_skill_projection"),
+        patch("deerflow.agents.memory.get_memory_manager", return_value=MagicMock()),
+    ]
+    if pool is not None:
+        patches.append(patch("deerflow.mcp.session_pool.get_session_pool", return_value=pool))
+    if browser_manager is not None:
+        patches.append(
+            patch(
+                "deerflow.community.browser_automation.get_browser_session_manager",
+                return_value=browser_manager,
+            )
+        )
+    return patches
 
-    started: list[RefusalWatch] = []
 
-    async def _start(self):
-        started.append(self)
+def test_lifespan_closes_pooled_mcp_sessions_on_shutdown():
+    """Pooled MCP sessions must be closed while the worker is still shutting down.
 
-    monkeypatch.setattr(engine_module, "get_session_factory", lambda: object())
-    monkeypatch.setattr(RefusalWatch, "start", _start)
-    monkeypatch.setattr(retained_state, "unreached_surfaces", lambda: ("sandboxes",))
+    Each pooled session owns a live transport (a stdio subprocess, or an
+    SSE/HTTP connection) held by a dedicated owner task. Nothing else can reach
+    that task once the event loop stops, so lifespan shutdown is the only place
+    its ``__aexit__`` can run. The browser session manager is closed here for
+    the same reason; the MCP pool used to be skipped.
+    """
+    from app.gateway.app import lifespan
 
-    async def _get(thread_id, *, user_id):
-        assert user_id is None, "whoever owns it"
-        return {"thread_id": thread_id, "user_id": "pat"}
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        pool = MagicMock()
+        pool.close_all = AsyncMock()
 
-    await gateway_app._start_refusal_watch(SimpleNamespace(state=SimpleNamespace(thread_store=SimpleNamespace(get=_get), mcp_tasks_available=True)))
+        with ExitStack() as stack:
+            for patcher in _gateway_lifespan_patches(startup_config, pool=pool):
+                stack.enter_context(patcher)
+            async with lifespan(app):
+                pass
 
-    assert [watch._unreached for watch in started] == [("sandboxes",)]
-    assert set(retained_state.RETAINED_SURFACES) <= set(get_owner_holdings()._sources)
+        pool.close_all.assert_awaited_once()
+
+    asyncio.run(scenario())
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("runs_task_loop", [True, False])
-async def test_the_refusal_watch_stops_the_batch_items_the_process_executes_and_names_a_task_loop_it_does_not_run(monkeypatch, runs_task_loop):
-    """A task's cancellation is carried out by a task loop; a process that runs none says so, so a task nobody will cancel reads as not reached."""
-    from app.gateway import app as gateway_app
-    from app.gateway import retained_state
-    from app.gateway.refusal_watch import RefusalWatch
-    from deerflow.persistence import engine as engine_module
-    from deerflow.runtime.owner_holdings import get_owner_holdings
+def test_lifespan_continues_when_mcp_close_fails():
+    """A failing MCP close must not abort the remaining shutdown hooks.
 
-    started: list[RefusalWatch] = []
+    Shutdown is best-effort by design: every hook is isolated so one broken
+    teardown cannot strand the others.
+    """
+    from app.gateway.app import lifespan
 
-    async def _start(self):
-        started.append(self)
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        pool = MagicMock()
+        pool.close_all = AsyncMock(side_effect=RuntimeError("close failed"))
+        browser_manager = MagicMock()
+        browser_manager.close_all_sessions = AsyncMock(return_value=0)
 
-    async def _end_for_owners(owners):
-        return {}
+        with ExitStack() as stack:
+            for patcher in _gateway_lifespan_patches(startup_config, pool=pool, browser_manager=browser_manager):
+                stack.enter_context(patcher)
+            async with lifespan(app):
+                pass
 
-    monkeypatch.setattr(engine_module, "get_session_factory", lambda: object())
-    monkeypatch.setattr(RefusalWatch, "start", _start)
-    monkeypatch.setattr(retained_state, "unreached_surfaces", lambda: ())
-    state = SimpleNamespace(thread_store=None, subagent_batch_service=SimpleNamespace(end_for_owners=_end_for_owners), mcp_tasks_available=runs_task_loop)
+        pool.close_all.assert_awaited_once()
+        browser_manager.close_all_sessions.assert_awaited_once()
 
-    await gateway_app._start_refusal_watch(SimpleNamespace(state=state))
+    asyncio.run(scenario())
 
-    assert [watch._unreached for watch in started] == [() if runs_task_loop else ("mcp_tasks",)]
-    assert get_owner_holdings()._sources["subagent_batches"][0] is _end_for_owners
+
+def test_lifespan_closes_mcp_sessions_created_during_run_drain():
+    """An active run can acquire a session after other shutdown hooks begin."""
+    from app.gateway.app import lifespan
+    from deerflow.mcp.session_pool import MCPSessionPool
+    from deerflow.runtime import RunManager, RunStatus
+
+    async def scenario():
+        app = FastAPI()
+        startup_config = MagicMock()
+        startup_config.log_level = "INFO"
+        startup_config.memory.enabled = False
+        startup_config.memory.shutdown_flush_timeout_seconds = 5.0
+        pool = MCPSessionPool()
+        run_manager = RunManager()
+        record = await run_manager.create("mcp-shutdown-race")
+        await run_manager.set_status(record.run_id, RunStatus.running)
+        resume = asyncio.Event()
+        session_created = asyncio.Event()
+        transport_closed = asyncio.Event()
+
+        class SessionContext:
+            async def __aenter__(self):
+                self.owner = asyncio.current_task()
+                return SimpleNamespace(initialize=AsyncMock())
+
+            async def __aexit__(self, *_args):
+                assert asyncio.current_task() is self.owner
+                transport_closed.set()
+
+        async def active_run():
+            await resume.wait()
+            await pool.get_session("server", "thread", {"transport": "stdio", "command": "unused"})
+            session_created.set()
+            await asyncio.Event().wait()
+
+        @asynccontextmanager
+        async def runtime(_app, _config):
+            record.task = asyncio.create_task(active_run())
+            try:
+                yield
+            finally:
+                await run_manager.shutdown(timeout=1.0)
+
+        async def shutdown_memory_backend(**_kwargs):
+            # This hook runs before langgraph_runtime drains the active run.
+            resume.set()
+            await asyncio.wait_for(session_created.wait(), timeout=5)
+
+        try:
+            with ExitStack() as stack:
+                for patcher in _gateway_lifespan_patches(startup_config, pool=pool):
+                    stack.enter_context(patcher)
+                stack.enter_context(patch("app.gateway.app.langgraph_runtime", runtime))
+                stack.enter_context(patch("app.gateway.app._shutdown_memory_backend", shutdown_memory_backend))
+                stack.enter_context(patch("langchain_mcp_adapters.sessions.create_session", side_effect=lambda _connection: SessionContext()))
+                async with lifespan(app):
+                    pass
+
+            assert record.task is not None and record.task.done()
+            assert transport_closed.is_set()
+            assert not pool._entries
+        finally:
+            resume.set()
+            if record.task is not None and not record.task.done():
+                record.task.cancel()
+                await asyncio.gather(record.task, return_exceptions=True)
+            await pool.close_all()
+
+    asyncio.run(scenario())

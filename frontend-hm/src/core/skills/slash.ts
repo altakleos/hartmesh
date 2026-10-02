@@ -10,7 +10,9 @@ import type { Skill } from "./type";
  * command or changing the name grammar in only one language fails CI.
  */
 export const RESERVED_SLASH_SKILL_NAMES = new Set([
+  "agent",
   "bootstrap",
+  "context",
   "goal",
   "help",
   "memory",

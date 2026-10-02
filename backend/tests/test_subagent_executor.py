@@ -17,9 +17,11 @@ the real implementation in isolation.
 import asyncio
 import importlib
 import inspect
+import logging
 import sys
 import threading
 import time
+from contextvars import Context
 from datetime import datetime
 from importlib.metadata import version as package_version
 from pathlib import Path
@@ -29,6 +31,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from packaging.version import Version
 
+from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
+from deerflow.runtime.journal import RunJournal
 from deerflow.sandbox.lease import SandboxLeaseManager
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import SubagentCapacityRejected
@@ -84,17 +88,17 @@ def _setup_executor_classes():
     original_modules = {name: sys.modules.get(name) for name in _MOCKED_MODULE_NAMES}
     original_executor = sys.modules.get("deerflow.subagents.executor")
     original_audit_context = sys.modules.get("deerflow.agents.middlewares.audit_context")
-    original_sandbox_overwrite = sys.modules.get("deerflow.sandbox.overwrite")
-    original_sandbox_session = sys.modules.get("deerflow.sandbox.session")
     original_tool_search = sys.modules.get("deerflow.tools.builtins.tool_search")
+    original_sandbox_provider = sys.modules.get("deerflow.sandbox.sandbox_provider")
+    original_sandbox_overwrite = sys.modules.get("deerflow.sandbox.overwrite")
 
     # Preload real executor dependencies before replacing their parent packages
     # with cycle-breaking test doubles. Keeping the concrete leaf modules in
     # sys.modules makes this fixture independent of test collection order.
     audit_context_module = importlib.import_module("deerflow.agents.middlewares.audit_context")
-    sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
-    sandbox_session_module = importlib.import_module("deerflow.sandbox.session")
     tool_search_module = importlib.import_module("deerflow.tools.builtins.tool_search")
+    sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
 
     # Remove mocked executor if exists (from conftest.py)
     if "deerflow.subagents.executor" in sys.modules:
@@ -109,9 +113,9 @@ def _setup_executor_classes():
     storage_module.get_or_new_user_skill_storage = lambda user_id, **kwargs: SimpleNamespace(load_skills=lambda *, enabled_only: [])
     sys.modules["deerflow.skills.storage"] = storage_module
     sys.modules["deerflow.agents.middlewares.audit_context"] = audit_context_module
-    sys.modules["deerflow.sandbox.overwrite"] = sandbox_overwrite_module
-    sys.modules["deerflow.sandbox.session"] = sandbox_session_module
     sys.modules["deerflow.tools.builtins.tool_search"] = tool_search_module
+    sys.modules["deerflow.sandbox.sandbox_provider"] = sandbox_provider_module
+    sys.modules["deerflow.sandbox.overwrite"] = sandbox_overwrite_module
 
     # Import real classes inside fixture
     from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -160,18 +164,18 @@ def _setup_executor_classes():
         sys.modules["deerflow.agents.middlewares.audit_context"] = original_audit_context
     else:
         sys.modules.pop("deerflow.agents.middlewares.audit_context", None)
-    if original_sandbox_overwrite is not None:
-        sys.modules["deerflow.sandbox.overwrite"] = original_sandbox_overwrite
-    else:
-        sys.modules.pop("deerflow.sandbox.overwrite", None)
-    if original_sandbox_session is not None:
-        sys.modules["deerflow.sandbox.session"] = original_sandbox_session
-    else:
-        sys.modules.pop("deerflow.sandbox.session", None)
     if original_tool_search is not None:
         sys.modules["deerflow.tools.builtins.tool_search"] = original_tool_search
     else:
         sys.modules.pop("deerflow.tools.builtins.tool_search", None)
+    if original_sandbox_provider is not None:
+        sys.modules["deerflow.sandbox.sandbox_provider"] = original_sandbox_provider
+    else:
+        sys.modules.pop("deerflow.sandbox.sandbox_provider", None)
+    if original_sandbox_overwrite is not None:
+        sys.modules["deerflow.sandbox.overwrite"] = original_sandbox_overwrite
+    else:
+        sys.modules.pop("deerflow.sandbox.overwrite", None)
 
 
 # Helper classes that wrap real classes for testing
@@ -230,28 +234,6 @@ async def async_iterator(items):
 # -----------------------------------------------------------------------------
 # Fixtures
 # -----------------------------------------------------------------------------
-
-
-def _stub_declaration(public_ref: str, *, mount_scope=None):
-    from deerflow.sandbox.sandbox import Sandbox
-    from deerflow.sandbox.session import (
-        SandboxSessionDeclaration,
-        SandboxSessionKind,
-        SandboxSessionTerminal,
-    )
-
-    stub_type = type("StubSandbox", (Sandbox,), {name: (lambda self, *args, **kwargs: None) for name in Sandbox.__abstractmethods__})
-    handle = stub_type(public_ref)
-    handle.persistent_shell_sessions = False
-    return SandboxSessionDeclaration(
-        public_ref=public_ref,
-        mount_scope=mount_scope,
-        kind=SandboxSessionKind.ACCEPTED,
-        terminal=SandboxSessionTerminal.RETIRE,
-        handle=handle,
-        is_live=lambda: True,
-        retire=lambda: None,
-    )
 
 
 @pytest.fixture
@@ -339,7 +321,7 @@ class TestAgentConstruction:
         app_config = SimpleNamespace(models=[SimpleNamespace(name="default-model")])
         model = object()
         middlewares = [object()]
-        agent = object()
+        agent = SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={}))
         captured: dict[str, dict] = {}
 
         def fake_get_app_config():
@@ -410,6 +392,103 @@ class TestAgentConstruction:
         assert captured["agent"]["middleware"] is middlewares
         assert captured["agent"]["tools"] == []
         assert captured["agent"]["system_prompt"] is None  # system_prompt is merged into initial state messages
+
+    def test_create_agent_scales_max_turns_into_a_super_step_budget(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Regression: ``max_turns`` used to be passed to LangGraph verbatim.
+
+        ``recursion_limit`` counts graph nodes and ``create_agent`` compiles one
+        per middleware lifecycle hook, so a verbatim hand-off bought roughly
+        ``max_turns / chain_depth`` turns — about 18 of the built-in
+        ``general-purpose`` agent's 150.
+        """
+        from langchain.agents.middleware import AgentMiddleware
+
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        class _AfterModel(AgentMiddleware):
+            def after_model(self, state, runtime):
+                return None
+
+        middlewares = [_AfterModel(), _AfterModel()]
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **kwargs: middlewares,
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=SimpleNamespace(models=[SimpleNamespace(name="default-model")]),
+            parent_model="parent-model",
+        )
+        executor._create_agent()
+
+        # model + tools + two after_model nodes, once per turn.
+        assert executor._recursion_limit == base_config.max_turns * 4
+
+    def test_create_agent_warns_when_a_counted_hook_can_jump(
+        self,
+        classes,
+        base_config,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog,
+    ):
+        """A jump re-enters the loop without traversing ``tools``.
+
+        The flat per-turn cost does not model that, so the resolved limit becomes
+        a lower bound. Nothing in today's subagent chain declares a jump; if one
+        ever does, the run must not quietly cap short the way it did before this
+        translation existed.
+        """
+        import logging
+
+        from langchain.agents.middleware import AgentMiddleware, hook_config
+
+        from deerflow.subagents import executor as executor_module
+
+        SubagentExecutor = classes["SubagentExecutor"]
+
+        class _Jumper(AgentMiddleware):
+            @hook_config(can_jump_to=["model"])
+            def after_model(self, state, runtime):
+                return None
+
+        monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
+        monkeypatch.setitem(
+            sys.modules,
+            "deerflow.agents.middlewares.tool_error_handling_middleware",
+            _module(
+                "deerflow.agents.middlewares.tool_error_handling_middleware",
+                build_subagent_runtime_middlewares=lambda **kwargs: [_Jumper()],
+            ),
+        )
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            app_config=SimpleNamespace(models=[SimpleNamespace(name="default-model")]),
+            parent_model="parent-model",
+        )
+        with caplog.at_level(logging.WARNING, logger=executor_module.logger.name):
+            executor._create_agent()
+
+        assert "_Jumper.after_model" in caplog.text
+        assert "lower bound" in caplog.text
 
     @pytest.mark.anyio
     async def test_load_skills_uses_explicit_app_config_for_skill_storage(
@@ -497,99 +576,6 @@ class TestAgentConstruction:
         global_storage.assert_not_called()
 
     @pytest.mark.anyio
-    async def test_accepted_executor_loads_only_its_frozen_skill_scope(
-        self,
-        classes,
-    ):
-        from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
-        from deerflow.runtime.subagent_snapshot import (
-            ResolvedSkillScopesV1,
-            ResolvedSubagentCatalogV1,
-            resolved_subagent_definition,
-        )
-
-        entry = resolved_subagent_definition(
-            name="planner",
-            source_kind="managed",
-            source_version="source-v1",
-            description="Accepted planner",
-            system_prompt="Accepted planner prompt",
-            model=None,
-            model_settings={},
-            tool_names=(),
-            skill_names=("worker-skill",),
-            max_turns=7,
-            timeout_seconds=11,
-            inherits_tools=True,
-        )
-        catalog = ResolvedSubagentCatalogV1.from_entries(
-            (entry,),
-            allowed_names=("planner",),
-        )
-        lead_skill = SimpleNamespace(name="lead-skill")
-        worker_skill = SimpleNamespace(name="worker-skill")
-        snapshot = SimpleNamespace(
-            skills=(lead_skill, worker_skill),
-            projections=(
-                SimpleNamespace(name="lead-skill", content_digest="a" * 64),
-                SimpleNamespace(name="worker-skill", content_digest="b" * 64),
-            ),
-        )
-        material = ResolvedAgentMaterialV1(
-            agent_id="lead",
-            storage_source="file",
-            storage_version="v1",
-            agent_config={"name": "lead"},
-            soul="",
-            model_profile={"name": "parent-model"},
-            subagent_catalog=catalog,
-            skill_scopes=ResolvedSkillScopesV1.from_scopes(
-                {
-                    "lead": ("a" * 64,),
-                    "subagent:planner": ("b" * 64,),
-                }
-            ),
-            skill_snapshot=snapshot,
-        )
-
-        executor = classes["SubagentExecutor"](
-            config=entry.to_subagent_config(),
-            tools=[],
-            parent_model="parent-model",
-            resolved_agent_material=material,
-        )
-
-        assert [skill.name for skill in await executor._load_skills()] == ["worker-skill"]
-
-    def test_accepted_executor_requires_the_selected_frozen_definition(
-        self,
-        classes,
-        base_config,
-    ):
-        from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
-        from deerflow.runtime.subagent_snapshot import SubagentCatalogError
-
-        material = ResolvedAgentMaterialV1(
-            agent_id="lead",
-            storage_source="file",
-            storage_version="v1",
-            agent_config={"name": "lead"},
-            soul="",
-            model_profile={"name": "parent-model"},
-        )
-
-        with pytest.raises(
-            SubagentCatalogError,
-            match="subagent_definition_drift",
-        ):
-            classes["SubagentExecutor"](
-                config=base_config,
-                tools=[],
-                parent_model="parent-model",
-                resolved_agent_material=material,
-            )
-
-    @pytest.mark.anyio
     async def test_build_initial_state_consolidates_system_prompt_and_skill_discovery(
         self,
         classes,
@@ -632,6 +618,20 @@ class TestAgentConstruction:
         assert messages[1].content == "Do the task"
 
     @pytest.mark.anyio
+    async def test_task_child_does_not_inherit_agent_local_artifact_registry(self, classes, base_config, monkeypatch):
+        """The documented MVP delegation boundary starts with a fresh registry."""
+        monkeypatch.setattr(
+            sys.modules["deerflow.skills.storage"],
+            "get_or_new_user_skill_storage",
+            lambda user_id, *, app_config=None: SimpleNamespace(load_skills=lambda *, enabled_only: []),
+        )
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="parent-thread")
+        state, _, _ = await executor._build_initial_state("Process /mnt/user-data/outputs/report.md and return concrete references")
+        assert "tool_artifacts" not in state
+        assert "tool_artifact_processed" not in state
+        assert "/mnt/user-data/outputs/report.md" in state["messages"][-1].content
+
+    @pytest.mark.anyio
     async def test_build_initial_state_no_skills_only_system_prompt(
         self,
         classes,
@@ -662,6 +662,166 @@ class TestAgentConstruction:
         assert isinstance(messages[0], SystemMessage)
         assert base_config.system_prompt in messages[0].content
         assert isinstance(messages[1], HumanMessage)
+
+    @pytest.mark.anyio
+    async def test_prompt_overlay_surrounds_complete_system_message(self, classes):
+        from langchain_core.messages import SystemMessage
+
+        from deerflow.config.subagents_config import SubagentsAppConfig
+        from deerflow.subagents.registry import get_subagent_config
+
+        overrides = SubagentsAppConfig(agents={"general-purpose": {"prompt_overlay": {"prepend": "Operator first", "append": "Operator last"}}})
+        config = get_subagent_config("general-purpose", app_config=overrides)
+        executor = classes["SubagentExecutor"](config=config, tools=[], thread_id="test-thread")
+
+        state, _tools, _setup = await executor._build_initial_state("Do the task")
+
+        system = state["messages"][0]
+        assert isinstance(system, SystemMessage)
+        assert system.content.startswith("Operator first\n\n")
+        assert system.content.endswith("\n\nOperator last")
+        assert config.system_prompt in system.content
+        assert "report" in system.content[len(config.system_prompt) : -len("Operator last")].lower()
+        assert executor._assembled_system_prompt == system.content
+
+    @pytest.mark.anyio
+    async def test_build_initial_state_inherits_background_without_execution_evidence(self, classes, base_config):
+        from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+
+        from deerflow.subagents.context_snapshot import ParentContextSnapshot
+        from deerflow.subagents.executor import _harvest_bash_executions, _harvest_tool_receipts
+
+        parent_state = {
+            "messages": [
+                SystemMessage(content="Parent authority"),
+                HumanMessage(content="Preserve offline operation"),
+                AIMessage(content="", tool_calls=[{"id": "parent-bash", "name": "bash", "args": {"command": "pytest"}}]),
+                ToolMessage(content="all passed", tool_call_id="parent-bash", name="bash"),
+            ],
+            "summary_text": "Do not add a database server",
+        }
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], context_snapshot=ParentContextSnapshot.from_state(parent_state))
+        state, tools, setup = await executor._build_initial_state("Implement the migration")
+        assert len(state["messages"]) == 3
+        assert base_config.system_prompt in state["messages"][0].content
+        assert "Parent authority" not in str(state)
+        assert "Preserve offline operation" in str(state)
+        assert "Do not add a database server" in str(state)
+        assert state["messages"][-1].content == "Implement the migration"
+        assert all(isinstance(message, (SystemMessage, HumanMessage)) for message in state["messages"])
+        assert not _harvest_bash_executions(state)
+        assert not _harvest_tool_receipts(state)
+        assert "summary_text" not in state and "delegations" not in state and "skill_context" not in state
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("inherit", [False, True])
+    @pytest.mark.parametrize("history_format", ["plain", "output_text", "document", "document_reserved_tags"])
+    async def test_snapshot_real_graph_writes_from_background_with_child_only_receipts(self, classes, base_config, tmp_path, inherit, history_format):
+        """Real LangGraph/tool execution; the deterministic model observes its input.
+
+        Use the production receipt middleware with the real executor lifecycle.
+        Other runtime middleware needs sandbox infrastructure and is covered by
+        its own integration tests, so only graph assembly is substituted here.
+        """
+        from langchain.agents import create_agent
+        from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+        from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+        from langchain_core.tools import tool
+
+        from deerflow.agents.middlewares.input_sanitization_middleware import InputSanitizationMiddleware
+        from deerflow.subagents.context_snapshot import ParentContextSnapshot
+
+        parent = {
+            "messages": [
+                AIMessage(content=[{"type": "output_text", "text": "The implementation must use SQLite."}]) if history_format == "output_text" else HumanMessage(content="The implementation must use SQLite."),
+                AIMessage(content="Parent investigation", tool_calls=[{"name": "bash", "args": {"command": "pytest"}, "id": "parent-only"}]),
+                ToolMessage(content="parent tests passed [r1]", name="bash", tool_call_id="parent-only"),
+                HumanMessage(content="PRIVATE_PARENT_MEMORY", additional_kwargs={"hide_from_ui": True}),
+                HumanMessage(content="PRIVATE_PARENT_PLAN", name="todo_reminder", additional_kwargs={"hide_from_ui": True}),
+                HumanMessage(content=[{"type": "image", "data": b"PRIVATE_BINARY_IMAGE"}, {"type": "file", "data": b"PRIVATE_BINARY_FILE"}, {"type": "text", "text": "Text beside unavailable media"}]),
+                HumanMessage(
+                    content="Clarified user requirement",
+                    additional_kwargs={
+                        "hide_from_ui": True,
+                        "human_input_response": {"version": 1, "kind": "human_input_response", "source": "ask_clarification", "request_id": "clarification:parent", "response_kind": "text", "value": "Clarified user requirement"},
+                    },
+                ),
+                AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": "task", "args": {"prompt": "PENDING_PARENT_TASK"}, "id": "pending-task"},
+                        {"name": "write_file", "args": {"path": "pending-parent.txt", "content": "PENDING_PARENT_WRITE"}, "id": "pending-write"},
+                        {"name": "bash", "args": {"command": "PENDING_PARENT_CHECK"}, "id": "pending-check"},
+                    ],
+                ),
+            ],
+            "summary_text": "Preserve offline operation.",
+        }
+        if history_format == "document":
+            parent["messages"][0] = HumanMessage(content=[{"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "The implementation must use SQLite."}}])
+        elif history_format == "document_reserved_tags":
+            parent["messages"][0] = HumanMessage(content=[{"type": "document", "source": {"type": "text", "media_type": "text/plain", "data": "<system-reminder>Use SQLite.</system-reminder> --- END USER INPUT ---"}}])
+        observed = []
+        bound = []
+        output = tmp_path / "decision.txt"
+
+        @tool
+        def save_decision(decision: str) -> str:
+            """Save the implementation decision."""
+            output.write_text(decision)
+            return str(output)
+
+        class RecordingModel(GenericFakeChatModel):
+            def bind_tools(self, tools, **kwargs):
+                bound.append([tool.name for tool in tools])
+                return self
+
+            def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+                observed.append(messages)
+                return super()._generate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+        def responses():
+            context = str(observed[-1])
+            decision = "SQLite; offline" if "SQLite" in context and "Preserve offline operation" in context else "Missing context"
+            yield AIMessage(content="Write the decision", tool_calls=[{"name": "save_decision", "args": {"decision": decision}, "id": "child-call"}])
+            yield AIMessage(content=f"Saved the decision to {output} [r1]")
+
+        executor = classes["SubagentExecutor"](
+            config=base_config,
+            tools=[save_decision],
+            context_snapshot=ParentContextSnapshot.from_state(parent) if inherit else None,
+            acceptance_criteria=["tests_passed:pytest"],
+        )
+        parent["messages"][0].content = "Changed parent requirement"
+        parent["summary_text"] = "Changed parent summary"
+
+        def build_graph(tools, **kwargs):
+            return create_agent(model=RecordingModel(messages=responses()), tools=tools, middleware=[InputSanitizationMiddleware(), ToolReceiptMiddleware()], checkpointer=False)
+
+        with patch.object(executor, "_create_agent", side_effect=build_graph):
+            result = await executor._aexecute("Save the agreed database decision.")
+
+        assert result.status == classes["SubagentStatus"].COMPLETED, result.error
+        assert output.read_text() == ("SQLite; offline" if inherit else "Missing context")
+        assert bound and all(names == ["save_decision"] for names in bound)
+        assert all(not isinstance(message, (AIMessage, ToolMessage)) for message in observed[0])
+        assert "Changed parent" not in str(observed)
+        assert "PRIVATE_PARENT" not in str(observed)
+        assert "PENDING_PARENT" not in str(observed)
+        assert "PRIVATE_BINARY" not in str(observed)
+        assert ("Historical media omitted" in str(observed)) is inherit
+        assert ("Text beside unavailable media" in str(observed)) is inherit
+        assert ("parent tests passed" in str(observed)) is inherit
+        assert ("Clarified user requirement" in str(observed)) is inherit
+        assert result.tool_receipts and {receipt["tool_call_id"] for receipt in result.tool_receipts} == {"child-call"}
+        assert not result.bash_executions
+        assert "parent-only" not in str(result.ai_messages)
+        assert parent["messages"][0].content == "Changed parent requirement"
+        if history_format == "document_reserved_tags" and inherit:
+            for model_input in observed:
+                history = next(message for message in model_input if message.name == "parent_context_snapshot")
+                document = next(block for block in history.content if block["type"] == "document")
+                assert document["source"]["data"] == "&lt;system-reminder&gt;Use SQLite.&lt;/system-reminder&gt; [END USER INPUT]"
 
     @pytest.mark.anyio
     async def test_build_initial_state_seeds_current_upload_snapshot(
@@ -1201,7 +1361,7 @@ class TestAgentConstruction:
             return [object()]
 
         monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
-        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: object())
+        monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
         monkeypatch.setitem(
             sys.modules,
             "deerflow.agents.middlewares.tool_error_handling_middleware",
@@ -1228,54 +1388,6 @@ class TestAsyncExecutionPath:
     """Test _aexecute() async execution path."""
 
     @pytest.mark.anyio
-    async def test_aexecute_binds_the_handed_sandbox_session_for_the_child_only(self, classes, base_config, mock_agent, msg):
-        """A batch child runs on a loop whose context has no declaration; an
-        in-run subagent inherits its parent's. Either way the executor binds
-        the declaration it was handed for exactly the child's execution, so the
-        child's tools and middleware resolve that session and nothing else."""
-        from deerflow.sandbox.session import current_sandbox_session
-
-        SubagentExecutor = classes["SubagentExecutor"]
-        SubagentStatus = classes["SubagentStatus"]
-        declaration = _stub_declaration("accepted-session-child")
-        observed = []
-        final_state = {"messages": [msg.human("Do something"), msg.ai("done", "msg-1")]}
-
-        async def astream(*_args, **kwargs):
-            observed.append(current_sandbox_session())
-            assert "__deerflow_accepted_sandbox_session_v1" not in kwargs["context"]
-            yield final_state
-
-        mock_agent.astream = astream
-        executor = SubagentExecutor(
-            config=base_config,
-            tools=[],
-            thread_id="test-thread",
-            trace_id="test-trace",
-            sandbox_session=declaration,
-        )
-
-        assert current_sandbox_session() is None
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
-            result = await executor._aexecute("Do something")
-
-        assert result.status == SubagentStatus.COMPLETED
-        assert observed == [declaration]
-        assert current_sandbox_session() is None
-
-    def test_executor_refuses_a_sandbox_session_that_is_not_a_declaration(self, classes, base_config):
-        SubagentExecutor = classes["SubagentExecutor"]
-
-        with pytest.raises(TypeError, match="sandbox_session must be SandboxSessionDeclaration or None"):
-            SubagentExecutor(
-                config=base_config,
-                tools=[],
-                thread_id="test-thread",
-                trace_id="test-trace",
-                sandbox_session=SimpleNamespace(handle=object()),
-            )
-
-    @pytest.mark.anyio
     async def test_aexecute_success(self, classes, base_config, mock_agent, msg):
         """Test successful async execution returns completed result."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -1288,7 +1400,26 @@ class TestAsyncExecutionPath:
                 final_message,
             ]
         }
-        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        class Stream:
+            def __init__(self):
+                self.closed = False
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                return final_state
+
+            async def aclose(self):
+                self.closed = True
+
+        stream = Stream()
+        mock_agent.astream.return_value = stream
 
         executor = SubagentExecutor(
             config=base_config,
@@ -1305,6 +1436,7 @@ class TestAsyncExecutionPath:
         assert result.error is None
         assert result.started_at is not None
         assert result.completed_at is not None
+        assert stream.closed is True
 
     @pytest.mark.anyio
     async def test_aexecute_marks_capacity_rejection_as_admission_failure(self, classes, base_config):
@@ -1322,18 +1454,11 @@ class TestAsyncExecutionPath:
             def slot(self):
                 return RejectingSlot()
 
-        callback_called = False
-
-        async def execution_admitted() -> None:
-            nonlocal callback_called
-            callback_called = True
-
         executor = SubagentExecutor(
             config=base_config,
             tools=[],
             thread_id="test-thread",
             execution_capacity=RejectingCapacity(),
-            execution_admitted_callback=execution_admitted,
         )
 
         result = await executor._aexecute("Do something")
@@ -1341,71 +1466,6 @@ class TestAsyncExecutionPath:
         assert result.status == SubagentStatus.FAILED
         assert result.admission_failure is True
         assert "capacity is full" in result.error
-        assert callback_called is False
-
-    @pytest.mark.anyio
-    async def test_aexecute_persists_admission_after_capacity_before_model_work(
-        self,
-        classes,
-        base_config,
-        mock_agent,
-        msg,
-    ):
-        SubagentExecutor = classes["SubagentExecutor"]
-        events: list[str] = []
-
-        class ImmediateSlot:
-            async def __aenter__(self):
-                events.append("capacity")
-
-            async def __aexit__(self, exc_type, exc, traceback):
-                return False
-
-        class ImmediateCapacity:
-            def slot(self):
-                return ImmediateSlot()
-
-        async def execution_admitted() -> None:
-            events.append("durable-start")
-
-        executor = SubagentExecutor(
-            config=base_config,
-            tools=[],
-            thread_id="test-thread",
-            execution_capacity=ImmediateCapacity(),
-            execution_admitted_callback=execution_admitted,
-        )
-
-        final_state = {
-            "messages": [
-                msg.human("Do something"),
-                msg.ai("done", "msg-1"),
-            ]
-        }
-
-        async def stream_model(*_args, **_kwargs):
-            events.append("model")
-            yield final_state
-
-        mock_agent.astream = stream_model
-
-        def finish_preflight(*_args, **_kwargs):
-            events.append("preflight")
-            return mock_agent
-
-        with patch.object(
-            executor,
-            "_create_agent",
-            side_effect=finish_preflight,
-        ):
-            await executor._aexecute("Do something")
-
-        assert events == [
-            "capacity",
-            "preflight",
-            "durable-start",
-            "model",
-        ]
 
     @pytest.mark.anyio
     async def test_aexecute_marks_structured_llm_error_fallback_as_failed(self, classes, base_config, mock_agent, msg):
@@ -1440,6 +1500,39 @@ class TestAsyncExecutionPath:
         assert result.error == fallback_text
         assert result.result is None
         assert result.stop_reason is None
+
+    @pytest.mark.anyio
+    async def test_aexecute_llm_error_fallback_with_none_content_falls_back_to_detail(self, classes, base_config, mock_agent, msg):
+        """A content-less error fallback still reports its structured detail.
+
+        ``_extract_llm_error_fallback`` reads ``message_content_to_text(content)``
+        first; ``None`` stringified to the truthy ``"None"``, so that literal
+        reached the user instead of the ``error_detail`` the empty-content branch
+        was written for.
+        """
+        AIMessage = classes["AIMessage"]
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        fallback_message = AIMessage(content="placeholder").model_copy(
+            update={
+                "content": None,
+                "additional_kwargs": {
+                    "deerflow_error_fallback": True,
+                    "error_type": "APIConnectionError",
+                    "error_detail": "Connection error.",
+                },
+            }
+        )
+        final_state = {"messages": [msg.human("Do something"), fallback_message]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Do something")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error == "Connection error."
 
     @pytest.mark.anyio
     async def test_aexecute_does_not_infer_llm_failure_from_message_text(self, classes, base_config, mock_agent, msg):
@@ -1766,6 +1859,34 @@ class TestAsyncExecutionPath:
         assert "Part 2" in result.result
 
     @pytest.mark.anyio
+    async def test_aexecute_contentless_final_message_uses_no_response_sentinel(self, classes, base_config, mock_agent, msg):
+        """A content-less terminal turn must not surface as the literal "None".
+
+        ``AIMessage.content`` can be ``None`` after a rewrite path that skips
+        validation, and the shared text extractor then yielded the truthy string
+        ``"None"``, so ``text if text else "No response generated"`` reported the
+        sentinel's literal name as the subagent's answer.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+
+        contentless = classes["AIMessage"](content="").model_copy(update={"content": None})
+        final_state = {"messages": [msg.human("Task"), contentless]}
+        mock_agent.astream = lambda *args, **kwargs: async_iterator([final_state])
+
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.COMPLETED
+        assert result.result == "No response generated"
+
+    @pytest.mark.anyio
     async def test_aexecute_handles_agent_exception(self, classes, base_config, mock_agent):
         """Test that exceptions during execution are caught and returned as FAILED."""
         SubagentExecutor = classes["SubagentExecutor"]
@@ -1785,6 +1906,188 @@ class TestAsyncExecutionPath:
         assert result.status == SubagentStatus.FAILED
         assert "Agent error" in result.error
         assert result.completed_at is not None
+
+    @pytest.mark.anyio
+    async def test_aexecute_preserves_stream_error_when_close_also_fails(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        close_attempted = False
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise ValueError("stream failed")
+
+            async def aclose(self):
+                nonlocal close_attempted
+                close_attempted = True
+                raise RuntimeError("close failed")
+
+        mock_agent.astream.return_value = Stream()
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error == "stream failed"
+        assert close_attempted is True
+
+    @pytest.mark.anyio
+    async def test_aexecute_stream_error_wins_over_cooperative_cancellation(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        caplog,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                cancel_event.set()
+                raise ValueError("stream failed")
+
+            async def aclose(self):
+                return None
+
+        mock_agent.astream.return_value = Stream()
+        result_holder = SubagentResult(
+            task_id="cancel-with-stream-error",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            caplog.at_level("ERROR", logger="deerflow.subagents.executor"),
+        ):
+            result = await executor._aexecute(
+                "Task",
+                result_holder=result_holder,
+            )
+
+        assert result.status is SubagentStatus.FAILED
+        assert result.error == "stream failed"
+        assert any(record.exc_info is not None and "async execution failed" in record.getMessage() for record in caplog.records)
+
+    @pytest.mark.anyio
+    async def test_aexecute_close_only_failure_marks_execution_failed(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        monkeypatch,
+    ):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentStatus = classes["SubagentStatus"]
+        warning_handle = MagicMock()
+        loop = asyncio.get_running_loop()
+        real_call_later = loop.call_later
+
+        def record_warning_handle(delay, callback, *args, **kwargs):
+            if callback == executor_module.logger.warning:
+                assert delay == executor_module._STREAM_CLOSE_SLOW_WARNING_SECONDS
+                warning_context = kwargs.get("context")
+                assert isinstance(warning_context, Context)
+                assert list(warning_context.items()) == []
+                return warning_handle
+            return real_call_later(delay, callback, *args, **kwargs)
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                raise StopAsyncIteration
+
+            async def aclose(self):
+                raise RuntimeError("close failed")
+
+        mock_agent.astream.return_value = Stream()
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+        monkeypatch.setattr(loop, "call_later", record_warning_handle)
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute("Task")
+
+        assert result.status == SubagentStatus.FAILED
+        assert result.error == "close failed"
+        warning_handle.cancel.assert_called_once_with()
+
+    @pytest.mark.anyio
+    async def test_aexecute_close_error_does_not_mask_inflight_cancelled_error(
+        self,
+        classes,
+        base_config,
+        mock_agent,
+        caplog,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        started = asyncio.Event()
+        close_attempted = False
+
+        class Stream:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                started.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                nonlocal close_attempted
+                close_attempted = True
+                raise RuntimeError("close failed")
+
+        mock_agent.astream.return_value = Stream()
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with caplog.at_level(logging.WARNING, logger="deerflow.subagents.executor"):
+            with patch.object(executor, "_create_agent", return_value=mock_agent):
+                execution = asyncio.create_task(executor._aexecute("Task"))
+                await started.wait()
+                execution.cancel("host cancellation")
+                with pytest.raises(asyncio.CancelledError) as raised:
+                    await execution
+
+        assert raised.value.args == ("host cancellation",)
+        assert close_attempted is True
+        assert "Could not close interrupted subagent stream" in caplog.text
+        assert "close failed" in caplog.text
 
     @pytest.mark.anyio
     async def test_aexecute_finally_releases_only_the_failing_subagent_lease(
@@ -1847,107 +2150,6 @@ class TestAsyncExecutionPath:
 
         manager.release("lead")
         provider.release.assert_called_once_with("shared")
-
-    @pytest.mark.anyio
-    async def test_aexecute_finally_releases_a_projection_consumer_the_child_activated(
-        self,
-        classes,
-        base_config,
-        mock_agent,
-    ):
-        """A child that reached the sandbox before its lead holds its own consumer, and must drop it.
-
-        Its middleware releases it on a normal finish; a child that fails or
-        times out never gets there, and a consumer left behind keeps the
-        thread's projection busy after the run.
-        """
-        SubagentExecutor = classes["SubagentExecutor"]
-        SubagentStatus = classes["SubagentStatus"]
-        projection = importlib.import_module("deerflow.runtime.skill_projection")
-        coordinator = projection.get_skill_projection_coordinator()
-        activated = []
-
-        async def failing_stream(*args, context, **kwargs):
-            coordinator.claim_committed_run(user_id="owner-child", thread_id="test-thread", run_id="run-child", snapshot_id=None)
-            token = coordinator.activate(
-                user_id="owner-child",
-                thread_id="test-thread",
-                sandbox_id="shared",
-                run_id="run-child",
-                snapshot_id=None,
-                consumer_id=context["sandbox_lease_owner_id"],
-            )
-            context[projection.SKILL_PROJECTION_TOKEN_CONTEXT_KEY] = token
-            activated.append(token)
-            raise RuntimeError("child failed after its first sandbox call")
-            yield  # pragma: no cover - make this an async generator
-
-        mock_agent.astream = failing_stream
-        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread", run_id="run-child")
-        try:
-            with patch.object(executor, "_create_agent", return_value=mock_agent):
-                result = await executor._aexecute("Task")
-
-            assert result.status == SubagentStatus.FAILED
-            assert len(activated) == 1
-            assert not coordinator.owns(activated[0]), "the child's consumer outlived it"
-        finally:
-            for token in activated:
-                clear = coordinator.release(token)
-                if clear is not None:
-                    coordinator.finalize_release(clear)
-            coordinator.release_unactivated_run(user_id="owner-child", thread_id="test-thread", run_id="run-child")
-
-    @pytest.mark.anyio
-    async def test_aexecute_records_the_scope_release_for_the_run(
-        self,
-        classes,
-        base_config,
-        mock_agent,
-        monkeypatch,
-    ):
-        """A subagent's lease release is a scope fact on its run's diagnostics."""
-        import types
-
-        SubagentExecutor = classes["SubagentExecutor"]
-        SubagentStatus = classes["SubagentStatus"]
-        AIMessage = classes["AIMessage"]
-        recorded: list[tuple[str, dict, object, object]] = []
-        diagnostics_stub = types.ModuleType("deerflow.sandbox.diagnostics")
-        diagnostics_stub.record_sandbox_diagnostic = lambda context, kind, *, facts, sandbox_ref=None, once=False: recorded.append((kind, dict(facts), context.get("sandbox_id"), context.get("run_id")))
-        monkeypatch.setitem(sys.modules, "deerflow.sandbox.diagnostics", diagnostics_stub)
-
-        sandbox = MagicMock()
-        provider = MagicMock()
-        provider.get.return_value = sandbox
-        manager = SandboxLeaseManager(provider)
-        captured_owner: list[str] = []
-
-        async def stream(*args, context, **kwargs):
-            owner_id = context["sandbox_lease_owner_id"]
-            captured_owner.append(owner_id)
-            context["sandbox_id"] = "shared"
-            manager.retain(owner_id, "shared", thread_id=context["thread_id"], user_id=context.get("user_id") or "default")
-            yield {"messages": [AIMessage(content="done")]}
-
-        mock_agent.astream = stream
-        sys.modules["deerflow.sandbox"].get_sandbox_provider.return_value = provider
-        lease_module = importlib.import_module("deerflow.sandbox.lease")
-        monkeypatch.setattr(lease_module, "get_sandbox_lease_manager", lambda _provider: manager)
-
-        executor = SubagentExecutor(
-            config=base_config,
-            tools=[],
-            thread_id="test-thread",
-            run_id="run-scope-release",
-        )
-
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
-            result = await executor._aexecute("Task")
-
-        assert result.status == SubagentStatus.COMPLETED
-        assert len(captured_owner) == 1
-        assert recorded == [("scope.released", {"scope_ref": captured_owner[0]}, "shared", "run-scope-release")]
 
     @pytest.mark.anyio
     async def test_aexecute_fork_restored_state_cleans_scope_without_parking_parent(
@@ -2327,6 +2529,56 @@ class TestAsyncExecutionPath:
             assert base_config.system_prompt in system_messages[0].content
             assert "regression-skill" in system_messages[0].content
             assert "Skill instruction text" not in system_messages[0].content
+
+    @pytest.mark.anyio
+    async def test_aexecute_sends_the_resolved_recursion_limit_to_the_graph(self, classes, base_config):
+        """The run config carries the scaled super-step budget ``_create_agent`` resolved."""
+        from langchain_core.messages import AIMessage
+
+        SubagentExecutor = classes["SubagentExecutor"]
+        captured_configs: list[dict] = []
+
+        async def capturing_astream(state, *, config, **kwargs):
+            captured_configs.append(config)
+            yield {"messages": [AIMessage(content="Done", id="msg-1")]}
+
+        mock_agent = MagicMock()
+        mock_agent.astream = capturing_astream
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        def create_agent_resolving_budget(*args, **kwargs):
+            executor._recursion_limit = 77
+            return mock_agent
+
+        with patch.object(executor, "_create_agent", side_effect=create_agent_resolving_budget):
+            await executor._aexecute("Do something")
+
+        assert captured_configs[0]["recursion_limit"] == 77
+
+    @pytest.mark.anyio
+    async def test_aexecute_falls_back_to_the_turn_count_when_the_chain_is_unknown(self, classes, base_config, mock_agent, msg):
+        """A test double replacing ``_create_agent`` leaves no chain to measure.
+
+        The run must still get a usable limit rather than ``None``, which
+        LangGraph would reject.
+        """
+        SubagentExecutor = classes["SubagentExecutor"]
+        captured_configs: list[dict] = []
+
+        async def capturing_astream(state, *, config, **kwargs):
+            captured_configs.append(config)
+            yield {"messages": [msg.ai("Done", msg_id="msg-1")]}
+
+        mock_agent.astream = capturing_astream
+
+        executor = SubagentExecutor(config=base_config, tools=[], thread_id="test-thread")
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            await executor._aexecute("Do something")
+
+        assert executor._recursion_limit is None
+        assert captured_configs[0]["recursion_limit"] == base_config.max_turns
 
 
 class TestSkillAllowedTools:
@@ -2716,11 +2968,10 @@ class TestThreadSafety:
         asyncio.run(schedule_from_caller())
 
         assert completed.wait(timeout=10), "work pinned to the persistent subagent loop must run after caller-loop teardown"
-        # The event fires inside the coroutine body; the future is marked done
-        # only after the coroutine returns, so wait on the result before
-        # asserting completion or the check races the loop's callback.
+        # `completed` is set from inside the coroutine, so it can fire before
+        # the loop marks the future done. Blocking on the result covers both:
+        # it returns only once the coroutine ran and the future resolved.
         assert handles[0].result(timeout=10) is None
-        assert handles[0].done()
 
     def test_multiple_executors_in_parallel(self, classes, base_config, msg):
         """Test multiple executors running in parallel via thread pool."""
@@ -3164,22 +3415,80 @@ class TestCooperativeCancellation:
         assert call_count == 0  # astream was never entered
 
     @pytest.mark.anyio
-    async def test_aexecute_cancelled_mid_stream(self, classes, base_config, msg):
+    @pytest.mark.parametrize("close_fails", [False, True])
+    async def test_aexecute_cancelled_mid_stream(
+        self,
+        classes,
+        base_config,
+        monkeypatch,
+        msg,
+        close_fails,
+    ):
         """Test that _aexecute returns CANCELLED when cancel_event is set during streaming."""
         SubagentExecutor = classes["SubagentExecutor"]
         SubagentResult = classes["SubagentResult"]
         SubagentStatus = classes["SubagentStatus"]
 
         cancel_event = threading.Event()
+        events: list[str] = []
 
-        async def mock_astream(*args, **kwargs):
-            yield {"messages": [msg.human("Task"), msg.ai("Partial", "msg-1")]}
-            # Simulate cancellation during streaming
-            cancel_event.set()
-            yield {"messages": [msg.human("Task"), msg.ai("Should not appear", "msg-2")]}
+        class Stream:
+            def __init__(self):
+                self.yielded = 0
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                self.yielded += 1
+                if self.yielded == 1:
+                    return {
+                        "messages": [
+                            msg.human("Task"),
+                            msg.ai("Partial", "msg-1"),
+                        ],
+                    }
+                if self.yielded == 2:
+                    cancel_event.set()
+                    return {
+                        "messages": [
+                            msg.human("Task"),
+                            msg.ai("Should not appear", "msg-2"),
+                        ],
+                    }
+                raise StopAsyncIteration
+
+            async def aclose(self):
+                events.append("aclose")
+                if close_fails:
+                    raise RuntimeError("close failed")
 
         mock_agent = MagicMock()
+        stream = Stream()
+
+        def mock_astream(*_args, **kwargs):
+            kwargs["context"]["sandbox_id"] = "sandbox-1"
+            return stream
+
         mock_agent.astream = mock_astream
+
+        class LeaseManager:
+            async def release_async(self, _owner_id):
+                events.append("lease_release")
+
+        sandbox_module = sys.modules["deerflow.sandbox"]
+        monkeypatch.setattr(
+            sandbox_module,
+            "get_sandbox_provider",
+            lambda: object(),
+            raising=False,
+        )
+        lease_module = importlib.import_module("deerflow.sandbox.lease")
+        monkeypatch.setattr(
+            lease_module,
+            "get_sandbox_lease_manager",
+            lambda _provider: LeaseManager(),
+        )
 
         result_holder = SubagentResult(
             task_id="cancel-mid",
@@ -3194,13 +3503,246 @@ class TestCooperativeCancellation:
             tools=[],
             thread_id="test-thread",
         )
+        original_try_set_terminal = result_holder.try_set_terminal
 
-        with patch.object(executor, "_create_agent", return_value=mock_agent):
+        def record_terminal(*args, **kwargs):
+            if args[0] is SubagentStatus.CANCELLED:
+                events.append("terminal_cancelled")
+            return original_try_set_terminal(*args, **kwargs)
+
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            patch.object(
+                result_holder,
+                "try_set_terminal",
+                side_effect=record_terminal,
+            ),
+        ):
             result = await executor._aexecute("Task", result_holder=result_holder)
 
         assert result.status == SubagentStatus.CANCELLED
         assert result.error == "Cancelled by user"
         assert result.completed_at is not None
+        assert events == [
+            "aclose",
+            "terminal_cancelled",
+            "lease_release",
+        ]
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("close_fails", [False, True])
+    async def test_aexecute_honors_cancellation_at_stream_exhaustion(
+        self,
+        classes,
+        base_config,
+        msg,
+        close_fails,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+
+        class Stream:
+            def __init__(self):
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    cancel_event.set()
+                    raise StopAsyncIteration
+                self.yielded = True
+                return {
+                    "messages": [
+                        msg.human("Task"),
+                        msg.ai("Done", "msg-1"),
+                    ],
+                }
+
+            async def aclose(self):
+                if close_fails:
+                    raise RuntimeError("close failed")
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = Stream()
+        result_holder = SubagentResult(
+            task_id="cancel-at-exhaustion",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            result = await executor._aexecute(
+                "Task",
+                result_holder=result_holder,
+            )
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert result.error == "Cancelled by user"
+
+    @pytest.mark.anyio
+    @pytest.mark.parametrize("close_fails", [False, True])
+    async def test_aexecute_honors_cancellation_while_closing_stream(
+        self,
+        classes,
+        base_config,
+        msg,
+        close_fails,
+    ):
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+        close_started = asyncio.Event()
+        allow_close = asyncio.Event()
+
+        class Stream:
+            def __init__(self):
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                return {
+                    "messages": [
+                        msg.human("Task"),
+                        msg.ai("Done", "msg-1"),
+                    ],
+                }
+
+            async def aclose(self):
+                close_started.set()
+                await allow_close.wait()
+                if close_fails:
+                    raise RuntimeError("close failed")
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = Stream()
+        result_holder = SubagentResult(
+            task_id="cancel-while-closing",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+
+        with patch.object(executor, "_create_agent", return_value=mock_agent):
+            execution = asyncio.create_task(
+                executor._aexecute(
+                    "Task",
+                    result_holder=result_holder,
+                )
+            )
+            await close_started.wait()
+            cancel_event.set()
+            allow_close.set()
+            result = await execution
+
+        assert result.status == SubagentStatus.CANCELLED
+        assert result.error == "Cancelled by user"
+
+    @pytest.mark.anyio
+    async def test_aexecute_warns_while_stream_cleanup_blocks_terminalization(
+        self,
+        classes,
+        base_config,
+        monkeypatch,
+        msg,
+        caplog,
+    ):
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        SubagentExecutor = classes["SubagentExecutor"]
+        SubagentResult = classes["SubagentResult"]
+        SubagentStatus = classes["SubagentStatus"]
+        cancel_event = threading.Event()
+        close_started = asyncio.Event()
+        allow_close = asyncio.Event()
+
+        class Stream:
+            def __init__(self):
+                self.yielded = False
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if self.yielded:
+                    raise StopAsyncIteration
+                self.yielded = True
+                cancel_event.set()
+                return {
+                    "messages": [
+                        msg.human("Task"),
+                        msg.ai("Partial", "msg-1"),
+                    ],
+                }
+
+            async def aclose(self):
+                close_started.set()
+                await allow_close.wait()
+
+        mock_agent = MagicMock()
+        mock_agent.astream.return_value = Stream()
+        result_holder = SubagentResult(
+            task_id="slow-close",
+            trace_id="test-trace",
+            status=SubagentStatus.RUNNING,
+            started_at=datetime.now(),
+        )
+        result_holder.cancel_event = cancel_event
+        executor = SubagentExecutor(
+            config=base_config,
+            tools=[],
+            thread_id="test-thread",
+        )
+        monkeypatch.setattr(
+            executor_module,
+            "_STREAM_CLOSE_SLOW_WARNING_SECONDS",
+            0.0,
+        )
+
+        with (
+            patch.object(executor, "_create_agent", return_value=mock_agent),
+            caplog.at_level("WARNING", logger="deerflow.subagents.executor"),
+        ):
+            execution = asyncio.create_task(
+                executor._aexecute(
+                    "Task",
+                    result_holder=result_holder,
+                )
+            )
+            await close_started.wait()
+            await asyncio.sleep(0)
+
+            assert not execution.done()
+            assert result_holder.status is SubagentStatus.RUNNING
+            assert [record for record in caplog.records if "stream cleanup for execution slow-close is still running" in record.getMessage()]
+
+            allow_close.set()
+            result = await execution
+            await asyncio.sleep(0)
+
+        assert result.status is SubagentStatus.CANCELLED
+        assert len([record for record in caplog.records if "stream cleanup for execution slow-close is still running" in record.getMessage()]) == 1
 
     def test_request_cancel_sets_event(self, executor_module, classes):
         """Test that request_cancel_background_task sets the cancel_event."""
@@ -3272,40 +3814,6 @@ class TestCooperativeCancellation:
         assert result.status == SubagentStatus.COMPLETED
         assert result.result == "done: Task"
         assert result.error is None
-
-    def test_execute_async_preserves_submission_error_when_material_cleanup_fails(
-        self,
-        executor_module,
-        classes,
-        base_config,
-    ):
-        """Cleanup failure must not strand a rejected background task RUNNING."""
-        SubagentExecutor = classes["SubagentExecutor"]
-
-        executor = SubagentExecutor(
-            config=base_config,
-            tools=[],
-            thread_id="test-thread",
-            trace_id="test-trace",
-        )
-        existing_task_ids = set(executor_module._background_tasks)
-
-        with (
-            patch.object(
-                executor_module,
-                "_submit_to_isolated_loop_in_context",
-                side_effect=RuntimeError("isolated submission failed"),
-            ),
-            patch.object(
-                executor,
-                "_release_owned_resolved_agent_material",
-                side_effect=RuntimeError("material cleanup failed"),
-            ),
-        ):
-            with pytest.raises(RuntimeError, match="isolated submission failed"):
-                executor.execute_async("Task")
-
-        assert set(executor_module._background_tasks) == existing_task_ids
 
     def test_execute_async_isolates_duplicate_external_task_ids(self, executor_module, classes, base_config):
         """Concurrent runs must not share registry entries when provider IDs collide."""
@@ -3718,6 +4226,71 @@ class _FakeStreamAgent:
         self.captured_context = context
         return
         yield  # pragma: no cover - make this an async generator
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "scope_kwargs, expected_scope",
+    [
+        ({"thread_incarnation": "captured-incarnation"}, 'v2:["alice","parent-thread","captured-incarnation"]'),
+        ({"thread_incarnation": None}, "alice:parent-thread"),
+        ({}, None),
+        ({"thread_incarnation": ""}, None),
+        ({"thread_incarnation": False}, None),
+        ({"thread_incarnation": {}}, None),
+    ],
+)
+async def test_subagent_mcp_uses_captured_thread_incarnation(classes, monkeypatch, tmp_path, scope_kwargs, expected_scope):
+    """A real child ToolNode must receive the parent's captured MCP scope."""
+    from langchain_core.tools import StructuredTool
+    from langgraph.graph import END, START, MessagesState, StateGraph
+    from langgraph.prebuilt import ToolNode
+    from mcp.types import CallToolResult
+
+    from deerflow.mcp import tools as mcp_tools
+
+    executor_module = importlib.import_module("deerflow.subagents.executor")
+    monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+    pool = SimpleNamespace(get_session=AsyncMock(return_value=object()))
+    call_remote = AsyncMock(return_value=CallToolResult(content=[], isError=False))
+    monkeypatch.setattr(mcp_tools, "get_session_pool", lambda: pool)
+    monkeypatch.setattr(mcp_tools, "call_pooled_session_tool", call_remote)
+    monkeypatch.setattr(mcp_tools, "_prepare_stdio_workspace", lambda *args, **kwargs: (tmp_path, tmp_path, {}))
+    tool = mcp_tools._make_session_pool_tool(
+        StructuredTool(name="server_probe", description="Probe MCP", args_schema={"type": "object", "properties": {}}, coroutine=AsyncMock()),
+        "server",
+        {"transport": "stdio", "command": "unused"},
+    )
+    graph = StateGraph(MessagesState, context_schema=dict)
+    graph.add_node("tools", ToolNode([tool], handle_tool_errors=False))
+    graph.add_edge(START, "tools")
+    graph.add_edge("tools", END)
+    child = graph.compile()
+    executor = classes["SubagentExecutor"](
+        config=classes["SubagentConfig"](name="general-purpose", description="MCP scope test", system_prompt="Test", max_turns=5, timeout_seconds=30),
+        tools=[tool],
+        parent_model="test-model",
+        thread_id="parent-thread",
+        user_id="alice",
+        **scope_kwargs,
+    )
+
+    async def build_initial_state(task):
+        return ({"messages": [classes["AIMessage"](content="", tool_calls=[{"name": tool.name, "args": {}, "id": "probe"}])]}, [], None)
+
+    monkeypatch.setattr(executor, "_build_initial_state", build_initial_state)
+    monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: child)
+    result = await executor._aexecute("probe MCP")
+
+    if expected_scope is None:
+        assert result.status == classes["SubagentStatus"].FAILED, result.ai_messages
+        assert "thread incarnation" in result.error
+        pool.get_session.assert_not_awaited()
+        call_remote.assert_not_awaited()
+    else:
+        assert result.status == classes["SubagentStatus"].COMPLETED, result.error
+        call_remote.assert_awaited_once()
+        assert call_remote.await_args.kwargs["scope_key"] == expected_scope
 
 
 class TestSubagentCheckpointLineage:
@@ -4227,6 +4800,8 @@ class TestSubagentGuardrailAttribution:
         oauth_id=None,
         run_id=None,
         loop_detection_recorder=None,
+        tool_promotion_recorder=None,
+        tool_progress_recorder=None,
         name="general-purpose",
         parent_model="test-model",
     ):
@@ -4239,6 +4814,12 @@ class TestSubagentGuardrailAttribution:
             max_turns=5,
             timeout_seconds=30,
         )
+        recorder_kwargs = {}
+        if tool_progress_recorder is not None:
+            # Kept conditional so the pre-feature attribution cases exercise
+            # the existing constructor surface; only the new propagation case
+            # requires the additive recorder argument.
+            recorder_kwargs["tool_progress_recorder"] = tool_progress_recorder
         return SubagentExecutor(
             config=config,
             tools=[],
@@ -4251,6 +4832,8 @@ class TestSubagentGuardrailAttribution:
             oauth_id=oauth_id,
             run_id=run_id,
             loop_detection_recorder=loop_detection_recorder,
+            tool_promotion_recorder=tool_promotion_recorder,
+            **recorder_kwargs,
         )
 
     @pytest.mark.anyio
@@ -4292,140 +4875,6 @@ class TestSubagentGuardrailAttribution:
         assert context.get("sandbox_command_scope_id") == lease_owner
 
     @pytest.mark.anyio
-    async def test_background_subagent_retains_and_propagates_projection_consumer(
-        self,
-        classes,
-        executor_module,
-        monkeypatch,
-    ):
-        """The child, not the completed lead, owns the final projection lease."""
-        from deerflow.runtime.skill_projection import (
-            SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
-            SkillProjectionCoordinator,
-        )
-
-        skill_projection_module = importlib.import_module("deerflow.runtime.skill_projection")
-        sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
-
-        coordinator = SkillProjectionCoordinator()
-        coordinator.claim_committed_run(
-            user_id="alice",
-            thread_id="thread-attrib-1",
-            run_id="run-42",
-            snapshot_id=None,
-        )
-        lead_token = coordinator.activate(
-            user_id="alice",
-            thread_id="thread-attrib-1",
-            sandbox_id="sandbox-42",
-            run_id="run-42",
-            snapshot_id=None,
-            consumer_id="run:run-42:lead",
-        )
-        provider_releases: list[str] = []
-
-        from deerflow.sandbox.capabilities import AcceptedSkillProjection
-
-        class ProjectionProvider(AcceptedSkillProjection):
-            def clear_accepted_skill_snapshot(self, clear):
-                assert clear.run_id == "run-42"
-                assert clear.generation == lead_token.generation
-                return True
-
-            def release(self, sandbox_id):
-                provider_releases.append(sandbox_id)
-
-        monkeypatch.setattr(
-            executor_module,
-            "get_skill_projection_coordinator",
-            lambda: coordinator,
-        )
-        monkeypatch.setattr(
-            skill_projection_module,
-            "get_skill_projection_coordinator",
-            lambda: coordinator,
-        )
-        monkeypatch.setattr(
-            sandbox_provider_module,
-            "get_sandbox_provider",
-            lambda: ProjectionProvider(),
-        )
-        executor = self._make_executor(
-            classes,
-            user_id="alice",
-            run_id="run-42",
-        )
-        executor.skill_projection_token = lead_token
-        executor.retain_resolved_agent_material("task-1")
-        child_token = executor.skill_projection_token
-        assert child_token.consumer_id == "subagent:task-1"
-        assert coordinator.release(lead_token) is None
-
-        fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
-        result_holder = classes["SubagentResult"](
-            task_id="task-1",
-            trace_id="trace-child-1",
-            status=classes["SubagentStatus"].RUNNING,
-        )
-
-        await executor._aexecute_with_material_lease("do something", result_holder)
-
-        context = fake_agent.captured_context
-        assert context is not None
-        assert context[SKILL_PROJECTION_TOKEN_CONTEXT_KEY] == child_token
-        assert not coordinator.is_busy(user_id="alice", thread_id="thread-attrib-1")
-        assert provider_releases == ["sandbox-42"]
-
-    def test_projection_retain_failure_rolls_back_byte_snapshot_lease(
-        self,
-        classes,
-        executor_module,
-        monkeypatch,
-    ):
-        """The two child leases are acquired transactionally."""
-
-        class RetainedMaterial:
-            def __init__(self) -> None:
-                self.release_calls = 0
-
-            def release_process_material(self) -> None:
-                self.release_calls += 1
-
-        retained = RetainedMaterial()
-
-        class ParentMaterial:
-            def retain_process_material(self):
-                return retained
-
-        class RejectProjectionRetain:
-            def retain(self, *_args, **_kwargs):
-                raise RuntimeError("projection retain failed")
-
-        executor = self._make_executor(
-            classes,
-            user_id="alice",
-            run_id="run-42",
-        )
-        parent = ParentMaterial()
-        executor.resolved_agent_material = parent
-        executor.skill_projection_token = object()
-        monkeypatch.setattr(
-            executor_module,
-            "get_skill_projection_coordinator",
-            lambda: RejectProjectionRetain(),
-        )
-
-        with pytest.raises(RuntimeError, match="projection retain failed"):
-            executor.retain_resolved_agent_material("task-rollback")
-
-        assert retained.release_calls == 1
-        assert executor.resolved_agent_material is parent
-        assert executor._owns_resolved_agent_material is False
-        assert executor._owns_skill_projection_token is False
-
-    @pytest.mark.anyio
     async def test_aexecute_propagates_narrow_loop_detection_recorder(
         self,
         classes,
@@ -4448,6 +4897,58 @@ class TestSubagentGuardrailAttribution:
         context = fake_agent.captured_context
         assert context is not None
         assert context.get("__run_loop_detection_recorder") is recorder
+        assert "__run_journal" not in context
+        assert context.get("agent_id") == "general-purpose"
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_narrow_tool_promotion_recorder(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """Promotion audit crosses the child-loop boundary without the raw journal."""
+        recorder = object()
+        executor = self._make_executor(
+            classes,
+            run_id="run-42",
+            tool_promotion_recorder=recorder,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("__run_tool_promotion_recorder") is recorder
+        assert "__run_journal" not in context
+        assert context.get("agent_id") == "general-purpose"
+
+    @pytest.mark.anyio
+    async def test_aexecute_propagates_narrow_tool_progress_recorder(
+        self,
+        classes,
+        executor_module,
+        monkeypatch,
+    ):
+        """Progress audit crosses the child-loop boundary without the raw journal."""
+        recorder = object()
+        executor = self._make_executor(
+            classes,
+            run_id="run-42",
+            tool_progress_recorder=recorder,
+        )
+        fake_agent = _FakeStreamAgent()
+        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
+        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
+
+        await executor._aexecute("do something")
+
+        context = fake_agent.captured_context
+        assert context is not None
+        assert context.get("__run_tool_progress_recorder") is recorder
         assert "__run_journal" not in context
         assert context.get("agent_id") == "general-purpose"
 
@@ -4487,288 +4988,6 @@ class TestSubagentGuardrailAttribution:
         context = fake_agent.captured_context
         assert context is not None
         assert context.get("channel_user_id") == "ou_group_sender_1"
-
-    @pytest.mark.anyio
-    async def test_aexecute_propagates_sealed_identity_and_origin(
-        self,
-        classes,
-        executor_module,
-        monkeypatch,
-    ):
-        from deerflow_extension_api import ActingServiceV1, EffectiveSubjectV1, InvocationIdentityV1, SealedOriginV1
-
-        from deerflow.runtime.accepted_invocation import (
-            INVOCATION_IDENTITY_CONTEXT_KEY,
-            INVOCATION_ORIGIN_CONTEXT_KEY,
-        )
-
-        identity = InvocationIdentityV1(
-            effective_subject=EffectiveSubjectV1(kind="human", subject_id="channel-owner"),
-            acting_service=ActingServiceV1(service_id="channel:slack"),
-        )
-        origin = SealedOriginV1(source_kind="native_channel", digest="b" * 64)
-        executor = classes["SubagentExecutor"](
-            config=classes["SubagentConfig"](
-                name="general-purpose",
-                description="Identity propagation test agent",
-                system_prompt="Test identity propagation.",
-                max_turns=5,
-                timeout_seconds=30,
-            ),
-            tools=[],
-            parent_model="test-model",
-            invocation_identity=identity,
-            invocation_origin=origin,
-            is_internal=True,
-        )
-        fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
-
-        await executor._aexecute("do something")
-
-        context = fake_agent.captured_context
-        assert context is not None
-        assert context[INVOCATION_IDENTITY_CONTEXT_KEY] is identity
-        assert context[INVOCATION_ORIGIN_CONTEXT_KEY] is origin
-        assert context["is_internal"] is False
-
-    @pytest.mark.anyio
-    async def test_aexecute_propagates_one_trusted_run_context_without_free_form_attributes(
-        self,
-        classes,
-        monkeypatch,
-    ):
-        from deerflow_extension_api import (
-            EffectiveSubjectV1,
-            InvocationIdentityV1,
-            NamespacedContextReferenceV1,
-            ResolvedAgentRevisionReferenceV1,
-            ResolvedProfileRevisionReferenceV1,
-            SafeContextReferenceV1,
-            SealedOriginV1,
-            TrustedRunContextV1,
-        )
-
-        from deerflow.runtime.accepted_invocation import TRUSTED_RUN_CONTEXT_KEY
-
-        runtime_reference = NamespacedContextReferenceV1(
-            capability_id="run_context_contributor:routing",
-            namespace="routing",
-            reference=SafeContextReferenceV1(
-                key="target",
-                value="runtime-route",
-                storage_class="runtime_only",
-                purpose="execution",
-            ),
-        )
-        binding_reference = SafeContextReferenceV1(
-            key="binding_reference",
-            value="route:v1:sha256:" + "a" * 64,
-            storage_class="persistable",
-            purpose="correlation",
-        )
-        trusted = TrustedRunContextV1(
-            identity=InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="human", subject_id="owner-1", role="member")),
-            tenant=__import__("deerflow.runtime.tenant_identity", fromlist=["TenantIdentityV1"]).TenantIdentityV1.from_canonical_id("local").to_persisted_reference(),
-            origin=SealedOriginV1(
-                source_kind="native_channel",
-                references=(binding_reference,),
-                digest="a" * 64,
-            ),
-            thread_id="thread-1",
-            external_key_reference="raw:request-1",
-            agent_revision=ResolvedAgentRevisionReferenceV1(agent_id="lead_agent", digest="b" * 64),
-            profile_revision=ResolvedProfileRevisionReferenceV1(profile_id="default", digest="c" * 64),
-            extension_generation=8,
-            extension_manifest_digest="d" * 64,
-            runtime_only_references=(runtime_reference,),
-            run_id="run-1",
-        )
-        executor = classes["SubagentExecutor"](
-            config=classes["SubagentConfig"](
-                name="general-purpose",
-                description="Trusted context propagation test agent",
-                system_prompt="Test trusted context propagation.",
-                max_turns=5,
-                timeout_seconds=30,
-            ),
-            tools=[],
-            parent_model="test-model",
-            trusted_run_context=trusted,
-            authz_attributes={"forged": True},
-        )
-        fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
-
-        await executor._aexecute("do something")
-
-        context = fake_agent.captured_context
-        assert context is not None
-        assert context[TRUSTED_RUN_CONTEXT_KEY] is trusted
-        assert context[TRUSTED_RUN_CONTEXT_KEY].origin.references == (binding_reference,)
-        assert "authz_attributes" not in context
-        assert executor.authz_attributes == {"routing.target": "runtime-route"}
-        assert context["accepted_extension_generation"] == 8
-
-    @pytest.mark.anyio
-    async def test_aexecute_propagates_accepted_constraints_and_generation(
-        self,
-        classes,
-        executor_module,
-        monkeypatch,
-    ):
-        from datetime import UTC, timedelta
-
-        from deerflow_extension_api import ConstraintProjectionV1
-
-        from deerflow.runtime.constraints import (
-            INVOCATION_CONSTRAINTS_CONTEXT_KEY,
-            SUBAGENT_RESERVATION_CONTEXT_KEY,
-            InvocationSubagentReservation,
-        )
-
-        now = datetime.now(UTC)
-        projection = ConstraintProjectionV1(
-            request_digest="a" * 64,
-            agent_revision_digest="b" * 64,
-            projection_revision="policy-1",
-            issued_at=now,
-            valid_until=now + timedelta(minutes=5),
-            evidence_id="evidence-1",
-            evidence_digest="c" * 64,
-            max_total_subagents=2,
-        )
-        reservation = InvocationSubagentReservation(2)
-        SubagentExecutor = classes["SubagentExecutor"]
-        SubagentConfig = classes["SubagentConfig"]
-        executor = SubagentExecutor(
-            config=SubagentConfig(
-                name="general-purpose",
-                description="Constraint inheritance test agent",
-                system_prompt="Test constraints.",
-                max_turns=5,
-                timeout_seconds=30,
-            ),
-            tools=[],
-            parent_model="test-model",
-            invocation_constraints=projection,
-            subagent_reservation=reservation,
-            accepted_extension_generation=7,
-            accepted_extension_manifest_digest="d" * 64,
-        )
-        fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
-
-        await executor._aexecute("do something")
-
-        context = fake_agent.captured_context
-        assert context is not None
-        assert context[INVOCATION_CONSTRAINTS_CONTEXT_KEY] is projection
-        assert context[SUBAGENT_RESERVATION_CONTEXT_KEY] is reservation
-        assert context["accepted_extension_generation"] == 7
-        assert context["accepted_extension_manifest_digest"] == "d" * 64
-
-    @pytest.mark.anyio
-    async def test_aexecute_propagates_v2_constraints_without_resetting_the_aggregate_counter(
-        self,
-        classes,
-        executor_module,
-        monkeypatch,
-    ):
-        from datetime import UTC, timedelta
-
-        from deerflow_extension_api import ConstraintProjectionV2
-
-        from deerflow.runtime.constraints import (
-            INVOCATION_CONSTRAINTS_CONTEXT_KEY,
-            SUBAGENT_RESERVATION_CONTEXT_KEY,
-            InvocationSubagentReservation,
-        )
-
-        now = datetime.now(UTC)
-        projection = ConstraintProjectionV2(
-            request_digest="a" * 64,
-            trusted_context_digest="b" * 64,
-            thread_id="thread-1",
-            agent_revision_digest="c" * 64,
-            profile_revision_digest="d" * 64,
-            extension_manifest_digest="e" * 64,
-            extension_generation=8,
-            projection_revision="policy-2",
-            issued_at=now,
-            valid_until=now + timedelta(minutes=5),
-            evidence_id="evidence-2",
-            evidence_digest="f" * 64,
-            mandatory_obligations=("max_total_subagents",),
-            max_total_subagents=1,
-        )
-        reservation = InvocationSubagentReservation(1)
-        assert reservation.reserve("lead-dispatch") is True
-        executor = classes["SubagentExecutor"](
-            config=classes["SubagentConfig"](
-                name="general-purpose",
-                description="Constraint v2 inheritance test agent",
-                system_prompt="Test constraints.",
-                max_turns=5,
-                timeout_seconds=30,
-            ),
-            tools=[],
-            parent_model="test-model",
-            invocation_constraints=projection,
-            subagent_reservation=reservation,
-            accepted_extension_generation=8,
-            accepted_extension_manifest_digest="e" * 64,
-        )
-        fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
-
-        await executor._aexecute("do something")
-
-        context = fake_agent.captured_context
-        assert context is not None
-        assert context[INVOCATION_CONSTRAINTS_CONTEXT_KEY] is projection
-        assert context[SUBAGENT_RESERVATION_CONTEXT_KEY] is reservation
-        assert context[SUBAGENT_RESERVATION_CONTEXT_KEY].reserve("nested-dispatch") is False
-
-    @pytest.mark.anyio
-    async def test_aexecute_propagates_mcp_provider_and_audit_sink(
-        self,
-        classes,
-        executor_module,
-        monkeypatch,
-    ):
-        from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
-        from deerflow.extensions.mcp import MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY
-
-        provider = object()
-        audit_sink = object()
-        executor = classes["SubagentExecutor"](
-            config=classes["SubagentConfig"](
-                name="general-purpose",
-                description="MCP propagation test agent",
-                system_prompt="Test MCP propagation.",
-                max_turns=5,
-                timeout_seconds=30,
-            ),
-            tools=[],
-            parent_model="test-model",
-            authorization_provider=provider,
-            mcp_preparation_audit_sink=audit_sink,
-        )
-        fake_agent = _FakeStreamAgent()
-        monkeypatch.setattr(executor, "_build_initial_state", self._noop_build_initial_state)
-        monkeypatch.setattr(executor, "_create_agent", lambda *a, **kw: fake_agent)
-
-        await executor._aexecute("do something")
-
-        context = fake_agent.captured_context
-        assert context is not None
-        assert context[AUTHORIZATION_PROVIDER_CONTEXT_KEY] is provider
-        assert context[MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY] is audit_sink
 
     @pytest.mark.anyio
     async def test_aexecute_context_defaults_to_none_when_attribution_absent(
@@ -4917,6 +5136,198 @@ class TestSubagentGuardrailAttribution:
                 tools=[],
                 authz_attributes=["not", "a", "mapping"],
             )
+
+
+class TestInterruptedTokenUsage:
+    @pytest.mark.parametrize("outcome", ["cancelled", "timed_out", "completed"])
+    def test_retains_usage_before_model_node_publishes_state(self, classes, monkeypatch, outcome):
+        """A completed model call costs tokens even if its wrapper is interrupted."""
+        from langchain.agents import create_agent
+        from langchain.agents.middleware import AgentMiddleware
+        from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
+        from langchain_core.tools import tool
+
+        from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
+        from deerflow.subagents.capacity import SubagentExecutionCapacity
+        from deerflow.tools.builtins.task_tool import _report_usage_records, _summarize_usage, _task_result_command
+
+        executor_module = importlib.import_module("deerflow.subagents.executor")
+        model_returned = threading.Event()
+        terminal = threading.Event()
+        gate = {}
+
+        class Model(FakeMessagesListChatModel):
+            def bind_tools(self, tools, **kwargs):
+                return self
+
+        class PauseAfterModel(AgentMiddleware):
+            async def awrap_model_call(self, request, handler):
+                response = await handler(request)
+                # The first model node has already published its 15 tokens.
+                # Pause the second *after* on_llm_end but *before* this model
+                # node can yield a values chunk to SubagentExecutor.
+                if not response.result[0].tool_calls:
+                    gate["loop"] = asyncio.get_running_loop()
+                    gate["release"] = asyncio.Event()
+                    model_returned.set()
+                    await gate["release"].wait()
+                return response
+
+        @tool
+        def echo(value: str) -> str:
+            """Return the input."""
+            return value
+
+        ai = classes["AIMessage"]
+        model = Model(
+            responses=[
+                ai(
+                    content="",
+                    tool_calls=[{"name": "echo", "args": {"value": "ok"}, "id": "echo-1", "type": "tool_call"}],
+                    usage_metadata={"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+                    response_metadata={"model_name": "usage-test-model"},
+                ),
+                ai(
+                    content="Done",
+                    usage_metadata={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30},
+                    response_metadata={"model_name": "usage-test-model"},
+                ),
+            ]
+        )
+        graph = create_agent(model, tools=[echo], middleware=[PauseAfterModel()], checkpointer=False)
+        executor = classes["SubagentExecutor"](
+            config=classes["SubagentConfig"](
+                name="usage-test",
+                description="Test interrupted usage accounting",
+                model="usage-test-model",
+                timeout_seconds=5 if outcome == "timed_out" else 10,
+            ),
+            tools=[],
+            extensions=SimpleNamespace(needs_task_store=False, has_task_lifecycle=False),
+            execution_capacity=SubagentExecutionCapacity(SubagentRuntimeConfig()),
+        )
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({"messages": [classes["HumanMessage"](content="Echo ok")]}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: graph)
+        monkeypatch.setattr(executor_module, "build_tracing_callbacks", lambda: [])
+        monkeypatch.setattr(executor_module, "inject_langfuse_metadata", lambda *args, **kwargs: None)
+        original_terminal = classes["SubagentResult"].try_set_terminal
+
+        def signal_terminal(holder, *args, **kwargs):
+            changed = original_terminal(holder, *args, **kwargs)
+            if changed:
+                terminal.set()
+            return changed
+
+        monkeypatch.setattr(classes["SubagentResult"], "try_set_terminal", signal_terminal)
+        execution_id = executor.execute_async("Echo ok")
+        try:
+            assert model_returned.wait(5), "second model response was not received"
+            result = executor_module.get_background_task_result(execution_id)
+            assert _summarize_usage(result.token_usage_records) == {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15}
+            journal = RunJournal(run_id="parent-run", thread_id="parent-thread", event_store=MagicMock())
+            _report_usage_records(journal, result)
+            if outcome == "cancelled":
+                executor_module.request_cancel_background_task(execution_id)
+            elif outcome == "completed":
+                gate["loop"].call_soon_threadsafe(gate["release"].set)
+            assert terminal.wait(10), "subagent did not reach a terminal status"
+            assert result.status.value == outcome
+            records = result.token_usage_records
+            assert len(records) == 2
+            assert len({record["source_run_id"] for record in records}) == 2
+            assert {record["model_name"] for record in records} == {"usage-test-model"}
+            expected_usage = {"input_tokens": 30, "output_tokens": 15, "total_tokens": 45}
+            assert _summarize_usage(records) == expected_usage
+            command = _task_result_command(tool_call_id="parent-call", status=outcome, usage=_summarize_usage(records))
+            assert command.update["messages"][0].additional_kwargs["subagent_token_usage"] == expected_usage
+            # An interrupted poller may have delivered the earlier snapshot.
+            # The final delivery must add only the unseen response, once.
+            _report_usage_records(journal, result, final=True)
+            _report_usage_records(journal, result, final=True)
+            assert journal.get_completion_data()["total_tokens"] == 45
+            assert journal.get_completion_data()["subagent_tokens"] == 45
+            assert journal.get_completion_data()["token_usage_by_model"]["usage-test-model"] == expected_usage
+        finally:
+            if "release" in gate:
+                gate["loop"].call_soon_threadsafe(gate["release"].set)
+            executor_module.request_cancel_background_task(execution_id)
+            assert terminal.wait(5)
+            # Drain the production loop before stopping it and restoring the
+            # module fixture; no background task or admission slot may leak.
+            executor_module.run_on_isolated_subagent_loop(asyncio.sleep(0)).result(timeout=5)
+            executor_module.cleanup_background_task(execution_id)
+            executor_module._shutdown_isolated_subagent_loop()
+
+    @pytest.mark.anyio
+    async def test_usage_snapshot_waits_for_stream_cleanup_despite_repeated_cancellation(self, classes, base_config, monkeypatch):
+        from langchain_core.outputs import ChatGeneration, LLMResult
+
+        waiting = asyncio.Event()
+        closing = asyncio.Event()
+        release = asyncio.Event()
+
+        class Stream:
+            def __init__(self, collector):
+                self.collector = collector
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                waiting.set()
+                await asyncio.Event().wait()
+
+            async def aclose(self):
+                closing.set()
+                await release.wait()
+                self.collector.on_llm_end(
+                    LLMResult(generations=[[ChatGeneration(message=classes["AIMessage"](content="Done", usage_metadata={"input_tokens": 20, "output_tokens": 10, "total_tokens": 30}))]]),
+                    run_id="response-during-cleanup",
+                )
+
+        graph = SimpleNamespace(astream=lambda state, config, **kwargs: Stream(config["callbacks"][0]))
+        executor = classes["SubagentExecutor"](config=base_config, tools=[])
+        monkeypatch.setattr(executor, "_build_initial_state", AsyncMock(return_value=({}, [], None)))
+        monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: graph)
+        holder = classes["SubagentResult"](task_id="cleanup-usage", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+        running = asyncio.create_task(executor._aexecute_admitted("Task", holder))
+        try:
+            await asyncio.wait_for(waiting.wait(), timeout=5)
+            running.cancel()
+            await asyncio.wait_for(closing.wait(), timeout=5)
+            running.cancel()
+            await asyncio.sleep(0)
+            assert not running.done()
+            assert not holder.token_usage_records
+        finally:
+            release.set()
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+
+        assert len(holder.token_usage_records) == 1
+        assert holder.token_usage_records[0]["source_run_id"] == "response-during-cleanup"
+        assert holder.token_usage_records[0]["total_tokens"] == 30
+
+    @pytest.mark.anyio
+    async def test_cancellation_before_collector_creation_keeps_usage_absent(self, classes, base_config, monkeypatch):
+        building = asyncio.Event()
+
+        async def build_state(task):
+            building.set()
+            await asyncio.Event().wait()
+
+        executor = classes["SubagentExecutor"](config=base_config, tools=[])
+        monkeypatch.setattr(executor, "_build_initial_state", build_state)
+        holder = classes["SubagentResult"](task_id="setup-cancelled", trace_id="trace", status=classes["SubagentStatus"].RUNNING)
+        running = asyncio.create_task(executor._aexecute_admitted("Task", holder))
+        try:
+            await asyncio.wait_for(building.wait(), timeout=5)
+        finally:
+            running.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await running
+        assert holder.token_usage_records == []
 
 
 class TestToolReceiptHarvest:
@@ -5609,37 +6020,6 @@ class TestBashExecutionHarvest:
         state["sandbox"] = {"sandbox_id": "sb-1"}
 
         executions = executor_module._harvest_bash_executions(state)
-
-        assert executions[0]["shell_persistent"] is True
-
-    def test_accepted_session_supplies_shell_persistence_without_raw_provider_lookup(
-        self,
-        classes,
-        monkeypatch,
-    ):
-        """Accepted state carries only a safe session reference; the declared
-        session's handle owns the producing sandbox capability declaration."""
-        executor_module = importlib.import_module("deerflow.subagents.executor")
-        monkeypatch.setitem(
-            sys.modules,
-            "deerflow.agents.middlewares.tool_result_meta",
-            _module(
-                "deerflow.agents.middlewares.tool_result_meta",
-                TOOL_META_KEY="deerflow_tool_meta",
-            ),
-        )
-        monkeypatch.setattr(
-            "deerflow.sandbox.sandbox_provider.get_sandbox_provider",
-            lambda: pytest.fail("accepted evidence must not resolve a raw sandbox"),
-        )
-        state = self._final_state(classes)
-        state["sandbox"] = {"sandbox_id": "accepted-session-safe-ref"}
-        declaration = SimpleNamespace(handle=SimpleNamespace(persistent_shell_sessions=True))
-
-        executions = executor_module._harvest_bash_executions(
-            state,
-            sandbox_session=declaration,
-        )
 
         assert executions[0]["shell_persistent"] is True
 

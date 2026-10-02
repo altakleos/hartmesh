@@ -40,14 +40,14 @@ def _validate_thread_id(thread_id: str) -> str:
 
 def _validate_user_id(user_id: str) -> str:
     """Validate a user ID before using it in filesystem paths."""
-    if not _SAFE_USER_ID_RE.match(user_id):
+    if not _SAFE_USER_ID_RE.fullmatch(user_id):
         raise ValueError(f"Invalid user_id {user_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
     return user_id
 
 
 def _validate_integration_id(integration_id: str) -> str:
     """Validate an integration ID before using it in filesystem paths."""
-    if not _SAFE_INTEGRATION_ID_RE.match(integration_id):
+    if not _SAFE_INTEGRATION_ID_RE.fullmatch(integration_id):
         raise ValueError(f"Invalid integration_id {integration_id!r}: only alphanumeric characters, dots, hyphens, and underscores are allowed.")
     # The charset allows dots for names like ``some.integration``; reject the
     # bare ``.``/``..`` path components so a future caller cannot escape the
@@ -55,6 +55,13 @@ def _validate_integration_id(integration_id: str) -> str:
     if integration_id in {".", ".."}:
         raise ValueError(f"Invalid integration_id {integration_id!r}: '.' and '..' are not allowed.")
     return integration_id
+
+
+def _validate_project_id(project_id: str) -> str:
+    """Validate a project ID before using it in filesystem paths."""
+    if not _SAFE_USER_ID_RE.fullmatch(project_id):
+        raise ValueError(f"Invalid project_id {project_id!r}: only alphanumeric characters, hyphens, and underscores are allowed.")
+    return project_id
 
 
 def make_safe_user_id(raw: str) -> str:
@@ -115,22 +122,22 @@ class Paths:
     Directory layout (host side):
         {base_dir}/
         ├── memory.json
-        ├── USER.md          <-- global user profile (injected into all agents)
-        ├── agents/
+        ├── agents/                 <-- legacy shared layout (read-only fallback)
         │   └── {agent_name}/
         │       ├── config.yaml
         │       ├── SOUL.md  <-- agent personality/identity (injected alongside lead prompt)
         │       └── memory.json
-        ├── threads/
-        │   └── {thread_id}/
-        │       └── user-data/         <-- mounted as /mnt/user-data/ inside sandbox
-        │           ├── workspace/     <-- /mnt/user-data/workspace/
-        │           ├── uploads/       <-- /mnt/user-data/uploads/
-        │           └── outputs/       <-- /mnt/user-data/outputs/
-        └── users/
-            └── {user_id}/
-                ├── threads/{thread_id}/...   <-- the same layout, per user
-                └── files/             <-- /mnt/user-data/files/ in every sandbox of that user
+        ├── users/{user_id}/
+        │   ├── USER.md       <-- per-user profile (storage/retrieval via the user-profile routes)
+        │   ├── agents/...    <-- per-user custom agents (current layout)
+        │   ├── skills/...    <-- per-user custom skills
+        │   ├── files/        <-- /mnt/user-data/files/ in every sandbox of that user
+        │   └── threads/
+        │       └── {thread_id}/
+        │           └── user-data/  <-- mounted as /mnt/user-data/ inside sandbox
+        │               ├── workspace/     <-- /mnt/user-data/workspace/
+        │               ├── uploads/       <-- /mnt/user-data/uploads/
+        │               └── outputs/       <-- /mnt/user-data/outputs/
 
     BaseDir resolution (in priority order):
         1. Constructor argument `base_dir`
@@ -178,10 +185,13 @@ class Paths:
         """Path to the persisted memory file: `{base_dir}/memory.json`."""
         return self.base_dir / "memory.json"
 
-    @property
-    def user_md_file(self) -> Path:
-        """Path to the global user profile file: `{base_dir}/USER.md`."""
-        return self.base_dir / "USER.md"
+    def user_md_file(self, user_id: str) -> Path:
+        """Path to a user-scoped profile file: `{base_dir}/users/{user_id}/USER.md`.
+
+        The profile is per-user (like custom skills/agents) so one user's
+        prompt context can never be written or injected for another user.
+        """
+        return self.user_dir(user_id) / "USER.md"
 
     @property
     def agents_dir(self) -> Path:
@@ -365,65 +375,6 @@ class Paths:
         """Enabled managed integration skills exposed to one user's sandboxes."""
         return self.user_skills_view_dir(user_id) / "integrations"
 
-    @property
-    def skill_snapshots_dir(self) -> Path:
-        """Process-local accepted skill snapshots, grouped by opaque subject scope."""
-        return self.base_dir / "runtime" / "skill-snapshots"
-
-    @staticmethod
-    def skill_snapshot_scope_name(user_id: str | None) -> str:
-        """Return a bounded opaque filesystem scope without exposing an identity."""
-        if user_id is None:
-            return "system"
-        digest = hashlib.sha256(user_id.encode("utf-8")).hexdigest()[:32]
-        return f"subject-{digest}"
-
-    def skill_snapshot_scope_dir(self, user_id: str | None) -> Path:
-        """Snapshot root mounted only for the invocation's effective subject."""
-        return self.skill_snapshots_dir / self.skill_snapshot_scope_name(user_id)
-
-    def host_skill_snapshot_scope_dir(self, user_id: str | None) -> str:
-        """Host-visible counterpart of :meth:`skill_snapshot_scope_dir`."""
-        return _join_host_path(
-            self._host_base_dir_str(),
-            "runtime",
-            "skill-snapshots",
-            self.skill_snapshot_scope_name(user_id),
-        )
-
-    @property
-    def skill_snapshot_active_views_dir(self) -> Path:
-        """Stable per-thread mounts exposing only the currently bound snapshot."""
-        return self.base_dir / "runtime" / "skill-snapshot-active-views"
-
-    @staticmethod
-    def skill_snapshot_thread_scope_name(thread_id: str) -> str:
-        """Return an opaque bounded filesystem scope for a thread identity."""
-        digest = hashlib.sha256(thread_id.encode("utf-8")).hexdigest()[:32]
-        return f"thread-{digest}"
-
-    def skill_snapshot_active_view_dir(
-        self,
-        user_id: str | None,
-        thread_id: str,
-    ) -> Path:
-        """Stable mount root containing at most one accepted snapshot digest."""
-        return self.skill_snapshot_active_views_dir / self.skill_snapshot_scope_name(user_id) / self.skill_snapshot_thread_scope_name(thread_id)
-
-    def host_skill_snapshot_active_view_dir(
-        self,
-        user_id: str | None,
-        thread_id: str,
-    ) -> str:
-        """Host-visible counterpart of :meth:`skill_snapshot_active_view_dir`."""
-        return _join_host_path(
-            self._host_base_dir_str(),
-            "runtime",
-            "skill-snapshot-active-views",
-            self.skill_snapshot_scope_name(user_id),
-            self.skill_snapshot_thread_scope_name(thread_id),
-        )
-
     def thread_skills_view_dir(self, thread_id: str, *, user_id: str) -> Path:
         """Sandbox-visible skill projection scoped to one user/thread.
 
@@ -479,6 +430,43 @@ class Paths:
         Sandbox: `/mnt/user-data/outputs/`
         """
         return self.thread_dir(thread_id, user_id=user_id) / "user-data" / "outputs"
+
+    def user_projects_dir(self, user_id: str) -> Path:
+        """Host path root for one user's project shelves: ``users/{user_id}/projects/``."""
+        return self.user_dir(user_id) / "projects"
+
+    def user_project_dir(self, user_id: str, project_id: str) -> Path:
+        """Host path for one project: ``users/{user_id}/projects/{project_id}/``."""
+        return self.user_projects_dir(user_id) / _validate_project_id(project_id)
+
+    def project_documents_dir(self, user_id: str, project_id: str) -> Path:
+        """Host path for a project's document shelf.
+
+        Layout (Phase-2 spec §6.2): ``.staging/{uuid}`` for in-flight bytes,
+        then one exclusive namespace per row at
+        ``{sha256[:2]}/{sha256}/{document_id}/original/{name}`` with an
+        optional ``derived/converted.md`` companion.
+        """
+        return self.user_project_dir(user_id, project_id) / "documents"
+
+    def project_document_path(self, user_id: str, relpath: str) -> Path:
+        """Resolve a shelf ``stored_relpath`` to its absolute host path.
+
+        ``stored_relpath`` is stored relative to ``users/{user_id}/projects/``
+        (it begins with ``{project_id}/documents/``) so a restore can re-point
+        a row without moving bytes. Resolution mirrors
+        :meth:`resolve_virtual_path`: join under the user projects root,
+        resolve, then re-check confinement — a relpath that escapes the root
+        is rejected. Relpaths only ever come from server-generated content
+        addresses, never from request text (§12).
+        """
+        base = self.user_projects_dir(user_id).resolve()
+        actual = (base / relpath).resolve()
+        try:
+            actual.relative_to(base)
+        except ValueError:
+            raise ValueError("Access denied: path traversal detected") from None
+        return actual
 
     def acp_workspace_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """

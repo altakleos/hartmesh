@@ -192,6 +192,17 @@ class RuntimeDeliveryMiddleware(AgentMiddleware[AgentState]):
         return await capture_workspace_snapshot(thread_id, user_id=get_effective_user_id(), include_text=False)
 
     @override
+    def before_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        # A graph invoked synchronously (the embedded client) runs outside the
+        # Gateway's run worker, which is where a turn's delivery is judged.
+        # Nothing is snapshotted there, so ``after_agent`` hands nothing over.
+        return None
+
+    @override
+    def after_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        return None
+
+    @override
     async def abefore_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
         try:
             snapshot = await self._snapshot(runtime)

@@ -22,7 +22,6 @@ import pytest
 
 from deerflow.authz.provider import AuthzDecision, AuthzReason
 from deerflow.authz.rbac import RbacAuthorizationProvider
-from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
 from deerflow.authz.sandbox_authz import authorize_sandbox_execution
 from deerflow.config.app_config import AppConfig
 from deerflow.config.authorization_config import AuthorizationConfig, AuthorizationProviderConfig
@@ -82,23 +81,6 @@ def test_authorize_sandbox_rbac_allow(monkeypatch):
         lambda config: provider,
     )
     authorize_sandbox_execution(context=_context(), app_config=app_config)  # must not raise
-
-
-def test_authorize_sandbox_uses_runtime_context_provider(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Gateway-hosted provider identity wins over legacy config construction."""
-    provider = RbacAuthorizationProvider(roles={"user": {"sandbox": {"allow": []}}})
-    app_config = _make_app_config()
-    _enable_authz(app_config)
-    monkeypatch.setattr(
-        "deerflow.authz.sandbox_authz.resolve_authorization_provider",
-        lambda _config: (_ for _ in ()).throw(AssertionError("legacy provider must not be reconstructed")),
-    )
-
-    with pytest.raises(SandboxAuthorizationError):
-        authorize_sandbox_execution(
-            context=_context(**{AUTHORIZATION_PROVIDER_CONTEXT_KEY: provider}),
-            app_config=app_config,
-        )
 
 
 def test_authorize_sandbox_rbac_deny(monkeypatch):
@@ -421,8 +403,6 @@ def test_upload_sandbox_sync_skipped_when_denied(monkeypatch, tmp_path):
     resp = client.post("/api/threads/upload-test/uploads", files={"files": ("a.txt", b"hello")})
     assert resp.status_code == 200, resp.text
     sandbox_provider.acquire_async.assert_not_called()
-    assert resp.json()["sandbox_sync_skipped"] == "sandbox_execution_denied"
-    assert resp.json()["message"].endswith("; sandbox sync skipped: sandbox execution is not permitted for your role")
 
 
 def test_upload_sandbox_sync_proceeds_when_allowed(monkeypatch, tmp_path):
@@ -581,7 +561,7 @@ def test_artifact_sandbox_sync_skipped_when_denied(monkeypatch, tmp_path):
     sandbox_provider.uses_thread_data_mounts = False
     sandbox_provider.acquire_async = AsyncMock(side_effect=AssertionError("must not acquire"))
     monkeypatch.setattr(artifacts_router, "get_sandbox_provider", lambda: sandbox_provider)
-    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _t, _p, user_id=None: tmp_path / "note.txt")
+    monkeypatch.setattr(artifacts_router, "resolve_outputs_confined_path", lambda _t, _p, user_id=None: tmp_path / "note.txt")
 
     from contextlib import asynccontextmanager
 

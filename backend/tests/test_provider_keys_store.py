@@ -19,8 +19,8 @@ from sqlalchemy.ext.asyncio import create_async_engine
 
 from deerflow.persistence.bootstrap import _get_alembic_config
 
-_REVISION = "0042_provider_keys"
-_PREVIOUS = "0041_email_released_from"
+_REVISION = "0028_provider_keys"
+_PREVIOUS = "0027_account_access"
 
 
 @pytest_asyncio.fixture

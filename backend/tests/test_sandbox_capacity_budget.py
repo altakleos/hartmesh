@@ -41,7 +41,7 @@ import threading
 import time
 
 import pytest
-from test_sandbox_warm_reuse_latency import ACCEPTED_USER, _aio_mod, _binding, _FakeBackend, _make_provider
+from _sandbox_provider_fakes import _aio_mod, _FakeBackend, _make_provider
 
 from deerflow.runtime.turn_phases import TurnPhase, turn_phases
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
@@ -137,29 +137,6 @@ async def test_the_async_path_refuses_the_same_third_thread(tmp_path, monkeypatc
 
     with pytest.raises(SandboxCapacityExceededError):
         await provider.acquire_async("thread-c", user_id=USER)
-
-    assert _live(backend) == sorted([first, second])
-
-
-def test_the_accepted_path_is_refused_by_the_same_decision(tmp_path, monkeypatch):
-    """Accepted projections create through the same door and pay the same budget.
-
-    Driven through ``provision_accepted_skills``, the projection API the
-    worker calls, rather than the internal acquisition underneath it: the
-    binding step runs too, so this is the path the released profile takes on
-    every turn.
-    """
-    provider, backend = _make_provider(tmp_path, monkeypatch, replicas=2)
-    _no_wait(provider)
-
-    def _provision(thread_id: str) -> str:
-        return provider.provision_accepted_skills(thread_id, user_id=ACCEPTED_USER, binding=_binding())
-
-    first = _provision("thread-a")
-    second = _provision("thread-b")
-
-    with pytest.raises(SandboxCapacityExceededError):
-        _provision("thread-c")
 
     assert _live(backend) == sorted([first, second])
 
@@ -720,25 +697,6 @@ async def test_repeated_cancellation_of_a_waiting_acquisition_leaves_nothing_beh
     assert len(_live(backend)) == 2
 
 
-def test_a_prewarm_never_waits_and_never_evicts_for_its_slot(tmp_path, monkeypatch):
-    """A prewarm is speculation; it may not spend a turn's container or a turn's time.
-
-    It gets the fast refusal its caller already handles, and the parked
-    container a real follow-up would reclaim is left alone.
-    """
-    provider, backend = _make_provider(tmp_path, monkeypatch, replicas=2)
-    provider._config["capacity_wait_timeout"] = 30
-    parked = provider.acquire("thread-a", user_id=USER)
-    provider.release(parked)
-    provider.acquire("thread-b", user_id=USER)
-
-    started = time.monotonic()
-    assert provider._prewarm_accepted_skills("thread-c", user_id=ACCEPTED_USER) is None
-    assert time.monotonic() - started < 1.0, "a prewarm does not wait for a slot"
-    assert backend.destroyed == [], "and does not evict a container a turn would reclaim"
-    assert parked in provider._warm_pool
-
-
 # ── Boundaries this change does not claim to cross ───────────────────────
 
 
@@ -955,59 +913,3 @@ def test_the_config_schema_refuses_a_budget_that_is_not_a_number():
 
 
 # ── What a person sees when there is no room ─────────────────────────────
-
-
-@pytest.mark.anyio
-async def test_a_refusal_before_the_model_ends_the_turn_legibly(tmp_path, monkeypatch):
-    """A refusal raised before the model gets the capacity terminal.
-
-    Durable profiles materialize before the run starts, so a refusal there
-    never passes a tool boundary and the typed tool-result contract cannot
-    help: without its own branch the worker's generic handler gives the person
-    ``Runtime operation failed (reference: <hex>)``, which is indistinguishable
-    from a crash. This drives the worker's capacity handler with a refusal
-    raised from the run itself; the materialization boundary's own pass-through
-    is pinned in ``test_accepted_skill_snapshots.py``, and the released tenant
-    profile's route, where the sandbox is acquired at the first tool call, is
-    driven end to end in ``test_accepted_capacity_outcomes.py``.
-    """
-    from types import SimpleNamespace
-    from unittest.mock import AsyncMock
-
-    from deerflow.runtime.runs.manager import RunManager
-    from deerflow.runtime.runs.worker import SANDBOX_CAPACITY_MESSAGE, SANDBOX_CAPACITY_STOP_REASON, RunContext, run_agent
-
-    run_manager = RunManager()
-    record = await run_manager.create("thread-no-room")
-    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
-
-    class _RefusingAgent:
-        async def astream(self, graph_input, config=None, stream_mode=None, subgraphs=False):
-            del graph_input, config, stream_mode, subgraphs
-            raise SandboxCapacityExceededError(
-                "This deployment is already running as many sandboxes as it has room for",
-                active=2,
-                replicas=2,
-            )
-            yield  # pragma: no cover - makes this an async generator
-
-    await run_agent(
-        bridge,
-        run_manager,
-        record,
-        ctx=RunContext(checkpointer=None),
-        agent_factory=lambda **_kwargs: _RefusingAgent(),
-        graph_input={},
-        config={},
-        stream_modes=["messages-tuple"],
-    )
-
-    errors = [call.args[2] for call in bridge.publish.await_args_list if call.args[1] == "error"]
-    assert len(errors) == 1
-    assert errors[0]["message"] == SANDBOX_CAPACITY_MESSAGE
-    assert "room for" in errors[0]["message"], "the person is told what is true"
-    assert "Runtime operation failed" not in errors[0]["message"], "the generic terminal is the defect"
-    assert errors[0]["stop_reason"] == SANDBOX_CAPACITY_STOP_REASON
-    assert errors[0]["name"] == "SandboxCapacityExceededError"
-    fetched = await run_manager.get(record.run_id)
-    assert fetched.error == SANDBOX_CAPACITY_MESSAGE

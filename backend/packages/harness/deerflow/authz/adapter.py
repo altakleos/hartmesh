@@ -21,12 +21,7 @@ from collections.abc import Iterable
 
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest
-from deerflow.authz.runtime import AuthorizedToolCallReceipt
 from deerflow.guardrails.provider import GuardrailDecision, GuardrailReason, GuardrailRequest
-from deerflow.runtime.accepted_invocation import (
-    INVOCATION_IDENTITY_CONTEXT_KEY,
-    TRUSTED_RUN_CONTEXT_KEY,
-)
 
 
 class GuardrailAuthorizationAdapter:
@@ -87,8 +82,6 @@ class GuardrailAuthorizationAdapter:
                 "channel_user_id": gr.channel_user_id,
                 "is_internal": gr.is_internal,
                 "authz_attributes": gr.authz_attributes,
-                INVOCATION_IDENTITY_CONTEXT_KEY: gr.identity,
-                TRUSTED_RUN_CONTEXT_KEY: gr.trusted_context,
             },
             default_role=self._default_role,
         )
@@ -105,28 +98,17 @@ class GuardrailAuthorizationAdapter:
                 "is_subagent": gr.is_subagent,
                 "agent_id": gr.agent_id,
                 "timestamp": gr.timestamp,
-                "origin": gr.origin,
             },
-            trusted_context=gr.trusted_context,
         )
 
     @staticmethod
-    def _to_guardrail(
-        d: AuthzDecision,
-        *,
-        provider: AuthorizationProvider,
-        request: AuthzRequest,
-    ) -> GuardrailDecision:
+    def _to_guardrail(d: AuthzDecision) -> GuardrailDecision:
         """Convert an authorization decision to a guardrail decision."""
         return GuardrailDecision(
             allow=d.allow,
             reasons=[GuardrailReason(code=r.code, message=r.message) for r in d.reasons],
             policy_id=d.policy_id,
-            metadata=d.to_dict()["metadata"],
-            provider_receipt=AuthorizedToolCallReceipt(
-                provider=provider,
-                request=request,
-            ),
+            metadata=d.metadata,
         )
 
     def evaluate(self, request: GuardrailRequest) -> GuardrailDecision:
@@ -142,13 +124,8 @@ class GuardrailAuthorizationAdapter:
         """
         if infrastructure_decision := self._infrastructure_decision(request):
             return infrastructure_decision
-        authz_request = self._to_authz(request)
-        decision = self._provider.authorize(authz_request)
-        return self._to_guardrail(
-            decision,
-            provider=self._provider,
-            request=authz_request,
-        )
+        decision = self._provider.authorize(self._to_authz(request))
+        return self._to_guardrail(decision)
 
     async def aevaluate(self, request: GuardrailRequest) -> GuardrailDecision:
         """Async evaluation: delegate to ``provider.aauthorize``.
@@ -157,10 +134,5 @@ class GuardrailAuthorizationAdapter:
         """
         if infrastructure_decision := self._infrastructure_decision(request):
             return infrastructure_decision
-        authz_request = self._to_authz(request)
-        decision = await self._provider.aauthorize(authz_request)
-        return self._to_guardrail(
-            decision,
-            provider=self._provider,
-            request=authz_request,
-        )
+        decision = await self._provider.aauthorize(self._to_authz(request))
+        return self._to_guardrail(decision)

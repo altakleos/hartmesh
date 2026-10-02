@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig
-from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
+from deerflow.mcp.config_normalization import normalize_mcp_interceptor_paths
 from deerflow.mcp.context_headers import build_context_headers_interceptor
 from deerflow.mcp.oauth import build_oauth_tool_interceptor
 from deerflow.mcp.user_scoped_auth import build_user_scoped_auth_interceptor
@@ -45,16 +45,13 @@ def build_mcp_tool_interceptors(
     if context_headers_interceptor is not None:
         interceptors.append(context_headers_interceptor)
 
-    raw_paths = (extensions_config.model_extra or {}).get("mcpInterceptors")
-    if isinstance(raw_paths, str):
-        raw_paths = [raw_paths]
-    elif not isinstance(raw_paths, list):
-        if raw_paths is not None:
-            target_logger.warning(
-                "mcpInterceptors must be a list of strings, got %s; skipping",
-                type(raw_paths).__name__,
-            )
-        raw_paths = []
+    raw_value = (extensions_config.model_extra or {}).get("mcpInterceptors")
+    if raw_value is not None and not isinstance(raw_value, (str, list)):
+        target_logger.warning(
+            "mcpInterceptors must be a list of strings, got %s; skipping",
+            type(raw_value).__name__,
+        )
+    raw_paths = normalize_mcp_interceptor_paths(raw_value)
 
     for interceptor_path in raw_paths:
         try:
@@ -69,14 +66,11 @@ def build_mcp_tool_interceptors(
                     interceptor_path,
                     type(interceptor).__name__,
                 )
-        except Exception as exc:
-            diagnostic = bounded_diagnostic(
-                code="legacy_mcp_interceptor_load_failed",
-                operation="load_mcp_interceptor",
-                error=exc,
-                contribution_id=(interceptor_path if isinstance(interceptor_path, str) else None),
+        except Exception:
+            target_logger.warning(
+                f"Failed to load MCP interceptor {interceptor_path}",
+                exc_info=True,
             )
-            log_bounded_failure(target_logger, diagnostic)
     return interceptors
 
 

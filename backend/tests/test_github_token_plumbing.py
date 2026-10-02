@@ -18,7 +18,7 @@ concurrent runs on different repos from clobbering each other's token.
 from __future__ import annotations
 
 import os
-import re
+import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -33,6 +33,17 @@ from app.channels.store import ChannelStore
 from deerflow.sandbox.local.local_sandbox import LocalSandbox
 from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV
 from deerflow.sandbox.tools import _github_env_from_runtime, bash_tool
+
+
+def _new_aio_sandbox_with_session_state():
+    """Build a manually wired AioSandbox including creation-ownership state."""
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox, _SessionCreationState
+
+    sbx = AioSandbox.__new__(AioSandbox)
+    sbx._session_creation_state_lock = threading.Lock()
+    sbx._shell_session_creation_state = _SessionCreationState()
+    sbx._bash_session_creation_state = _SessionCreationState()
+    return sbx
 
 
 def _make_conflict_error(detail: str = "thread_id already exists") -> ConflictError:
@@ -107,41 +118,45 @@ def test_aio_sandbox_env_routes_through_bash_exec() -> None:
     persistent-shell ``export … unset`` overlay, which could not keep secrets
     out of the command string.
     """
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
     captured: dict = {}
 
     class _FakeBash:
+        def create_session(self, *, session_id, **kwargs):
+            captured["created_session"] = session_id
+            captured["create_options"] = kwargs.get("request_options")
+
         def exec(self, *, command, env=None, **kwargs):
             captured["command"] = command
             captured["env"] = env
+            captured["exec_session"] = kwargs["session_id"]
             return SimpleNamespace(data=SimpleNamespace(stdout="ok", stderr=None))
 
-    sbx = AioSandbox.__new__(AioSandbox)
+        def close_session(self, session_id, **kwargs):
+            captured["closed_session"] = session_id
+
+    sbx = _new_aio_sandbox_with_session_state()
     sbx._lock = __import__("threading").Lock()
     sbx._client = SimpleNamespace(bash=_FakeBash())
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
     sbx._DEFAULT_HARD_TIMEOUT = 30
     sbx._bash_exec_unsupported = False
-    sbx._abort_lock = __import__("threading").Lock()
-    sbx._inflight_commands = {}
-    sbx._next_command_seq = 0
-    sbx._aborted_calls = {}
 
     out = sbx.execute_command("gh pr create", env={"GH_TOKEN": "tok-123"})
 
     assert out == "ok"
-    assert captured["command"] == "gh pr create"
-    # The abort marker rides the structured env beside the secret, so a
-    # cancelled call can find and kill this command's processes. Its value is
-    # fresh per command, so assert the shape and the rest exactly.
-    marker = captured["env"].pop(ABORT_TOKEN_ENV, None)
-    assert marker and marker.startswith("df-")
-    assert captured["env"] == {"GH_TOKEN": "tok-123"}
+    assert captured["command"] == "exec < /dev/null\ngh pr create"
+    assert "tok-123" not in captured["command"]
+    # Beside the injected token, the command carries the one that lets a cancelled call stop it.
+    assert {name: value for name, value in captured["env"].items() if name != ABORT_TOKEN_ENV} == {"GH_TOKEN": "tok-123"}
+    assert captured["created_session"] == captured["exec_session"] == captured["closed_session"]
+    assert captured["create_options"] == {
+        "timeout_in_seconds": 5,
+        "max_retries": 0,
+    }
 
 
 def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
     captured: dict = {}
 
@@ -152,25 +167,38 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
         data = _FakeData()
 
     class _FakeShell:
+        def create_session(self, *, id, **_kwargs):
+            captured.setdefault("sessions", []).append(id)
+
         def exec_command(self, *, command, no_change_timeout=None, **kwargs):
+            if command.startswith("printf 'DF_ABORT_SNAPSHOT '"):
+                return SimpleNamespace(data=SimpleNamespace(output="DF_ABORT_SNAPSHOT\n", status="completed", exit_code=0))
+            captured.setdefault("first_command", command)
+            captured.setdefault("command_sessions", []).append(kwargs["id"])
             captured["command"] = command
             return _FakeResult()
 
-    sbx = AioSandbox.__new__(AioSandbox)
+        def kill_process(self, **_kwargs):
+            pass
+
+        def delete_session(self, *_args, **_kwargs):
+            pass
+
+    sbx = _new_aio_sandbox_with_session_state()
     sbx._lock = __import__("threading").Lock()
     sbx._client = SimpleNamespace(shell=_FakeShell())
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
     sbx._recovery_session_id = None
     sbx._default_shell_corrupted = False
-    sbx._abort_lock = __import__("threading").Lock()
-    sbx._inflight_commands = {}
-    sbx._next_command_seq = 0
-    sbx._aborted_calls = {}
 
-    sbx.execute_command("echo hello")
+    assert sbx.execute_command("echo hello") == "ok"
+    assert sbx.execute_command("echo hello") == "ok"
 
-    # Prefixed with this command's abort marker and otherwise untouched.
-    assert re.fullmatch(rf"export {ABORT_TOKEN_ENV}=df-[0-9a-f]{{32}}; echo hello", captured["command"]), captured["command"]
+    # The first command a shell session is sent also exports that session's
+    # abort token; from then on a command reaches the shell exactly as written.
+    assert captured["first_command"].endswith("; echo hello") and captured["first_command"].startswith(f"export {ABORT_TOKEN_ENV}=df-")
+    assert captured["command"] == "echo hello"
+    assert captured["command_sessions"] == [captured["sessions"][0]] * 2
 
 
 # ---------------------------------------------------------------------------
@@ -281,7 +309,6 @@ def test_aio_sandbox_rejects_invalid_env_key() -> None:
     """End-to-end on the AIO sandbox path — the injection vector flagged in
     the review never reaches the shell's ``exec_command``.
     """
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
     exec_called = False
 
@@ -291,7 +318,7 @@ def test_aio_sandbox_rejects_invalid_env_key() -> None:
             exec_called = True
             return SimpleNamespace(data=SimpleNamespace(output="ok"))
 
-    sbx = AioSandbox.__new__(AioSandbox)
+    sbx = _new_aio_sandbox_with_session_state()
     sbx._lock = __import__("threading").Lock()
     sbx._client = SimpleNamespace(shell=_FakeShell())
     sbx._DEFAULT_NO_CHANGE_TIMEOUT = 30
@@ -419,6 +446,7 @@ def test_bash_tool_routes_subagent_command_to_its_shell_scope(
         state={"sandbox": {"sandbox_id": "aio:xyz"}},
         context={
             "thread_id": "t1",
+            "user_id": "u-test",
             "sandbox_command_scope_id": "subagent:task-1",
         },
         config={},
@@ -458,7 +486,7 @@ def test_bash_tool_routes_subagent_command_to_its_shell_scope(
 
     assert result == "done"
     assert captured["scope_id"] == "subagent:task-1"
-    assert captured["command"] == "cd /mnt/user-data/workspace; ls"
+    assert captured["command"] == "export DEERFLOW_USER_ID=u-test; cd /mnt/user-data/workspace; ls"
 
 
 # ---------------------------------------------------------------------------

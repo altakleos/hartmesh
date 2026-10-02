@@ -29,7 +29,6 @@ from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.schemas import RunStatus
 from deerflow.runtime.runs.worker import RunContext, run_agent
 from deerflow.runtime.stream_bridge import MemoryStreamBridge
-from deerflow.runtime.tenant_identity import TenantIdentityV1
 from deerflow.runtime.turn_phases import (
     TurnPhase,
     current_turn_phases,
@@ -37,8 +36,6 @@ from deerflow.runtime.turn_phases import (
     turn_phases,
     turn_phases_for_run,
 )
-
-TENANT = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
 
 # Long enough to dominate scheduling noise, short enough to keep the suite fast.
 FIRST_TEXT_DELAY_S = 0.15
@@ -139,7 +136,7 @@ async def test_a_run_with_no_assistant_text_reports_no_first_text_rather_than_gu
 
 @pytest.mark.asyncio
 async def test_run_agent_opens_a_journal_and_records_admission_through_terminal():
-    manager = RunManager(tenant=TENANT)
+    manager = RunManager()
     record = await manager.create_or_reject("thread-phase-run")
     captured: dict[str, object] = {}
 
@@ -159,7 +156,7 @@ async def test_run_agent_opens_a_journal_and_records_admission_through_terminal(
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None, tenant=TENANT),
+        ctx=RunContext(checkpointer=None),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -184,7 +181,7 @@ async def test_the_model_phase_handler_is_attached_to_the_graph_the_agent_receiv
     callback seam rather than a new telemetry path."""
     from deerflow.runtime.turn_phases import TurnPhaseCallbackHandler
 
-    manager = RunManager(tenant=TENANT)
+    manager = RunManager()
     record = await manager.create_or_reject("thread-phase-model")
     captured: dict[str, object] = {}
 
@@ -214,7 +211,7 @@ async def test_the_model_phase_handler_is_attached_to_the_graph_the_agent_receiv
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None, tenant=TENANT),
+        ctx=RunContext(checkpointer=None),
         agent_factory=factory,
         graph_input={},
         config={},
@@ -230,46 +227,11 @@ async def test_the_model_phase_handler_is_attached_to_the_graph_the_agent_receiv
 
 
 @pytest.mark.asyncio
-async def test_run_agent_records_the_session_kind_and_snapshot_facts():
-    """An ordinary run with no pinned material: kind ordinary, no snapshot.
-
-    Presence and count are separate fields; the worker's guard is
-    ``skill_snapshot is not None`` and the journal must say exactly that.
-    """
-    manager = RunManager(tenant=TENANT)
-    record = await manager.create_or_reject("thread-phase-kind")
-    captured: dict[str, object] = {}
-
-    class _Agent:
-        async def astream(self, *_args, **_kwargs):
-            captured["journal"] = current_turn_phases()
-            yield {"messages": []}
-
-    bridge = SimpleNamespace(publish=AsyncMock(), publish_end=AsyncMock(), cleanup=AsyncMock())
-
-    await run_agent(
-        bridge,
-        manager,
-        record,
-        ctx=RunContext(checkpointer=None, tenant=TENANT),
-        agent_factory=lambda *, config: _Agent(),
-        graph_input={},
-        config={},
-    )
-
-    snapshot = captured["journal"].snapshot()
-    assert snapshot.session_kind == "ordinary"
-    assert snapshot.snapshot_present is False
-    assert snapshot.snapshot_package_count is None
-    assert snapshot.mandatory_materialization is False
-
-
-@pytest.mark.asyncio
 async def test_first_stream_text_is_declared_unobservable_when_no_consumer_marked_it():
     """Provider text with no SSE consumer in this process: a limitation, not silence."""
     from deerflow.runtime.turn_phases import TurnPhaseCallbackHandler
 
-    manager = RunManager(tenant=TENANT)
+    manager = RunManager()
     record = await manager.create_or_reject("thread-phase-unmarked")
     captured: dict[str, object] = {}
 
@@ -293,7 +255,7 @@ async def test_first_stream_text_is_declared_unobservable_when_no_consumer_marke
         bridge,
         manager,
         record,
-        ctx=RunContext(checkpointer=None, tenant=TENANT),
+        ctx=RunContext(checkpointer=None),
         agent_factory=factory,
         graph_input={},
         config={},

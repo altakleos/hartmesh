@@ -10,8 +10,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from deerflow.constants import (
-    RETRIEVAL_OBSERVATION_EVENT_CATEGORY,
-    RETRIEVAL_OBSERVATION_EVENT_TYPE,
     RUN_EVENT_CATEGORY_MAX_LENGTH,
     RUN_EVENT_TYPE_MAX_LENGTH,
     WORKSPACE_CHANGES_EVENT_CATEGORY,
@@ -58,36 +56,17 @@ class RunEventPattern:
 
 
 RUN_START_EVENT = RunEventDefinition("run.start", "trace")
-RUN_EXECUTION_STARTED_EVENT = RunEventDefinition(
-    "run.execution.started.v1",
-    "trace",
-)
-SANDBOX_LIFECYCLE_EVENT = RunEventDefinition("sandbox.lifecycle.v1", "trace")
-SANDBOX_DIAGNOSTIC_EVENT = RunEventDefinition("sandbox.diagnostic.v1", "trace")
 RUN_END_EVENT = RunEventDefinition("run.end", "outputs")
-RUN_TERMINAL_EVENT = RunEventDefinition("run.terminal.v1", "trace")
-EXECUTION_POLICY_DECISION_EVENT = RunEventDefinition(
-    "policy.decision.v1",
-    "policy",
-)
 RUN_ERROR_EVENT = RunEventDefinition("run.error", "error")
 LLM_HUMAN_INPUT_EVENT = RunEventDefinition("llm.human.input", "message")
 LLM_AI_RESPONSE_EVENT = RunEventDefinition("llm.ai.response", "message")
 LLM_TOOL_RESULT_EVENT = RunEventDefinition("llm.tool.result", "message")
 LLM_ERROR_EVENT = RunEventDefinition("llm.error", "trace")
 MEMORY_CONTEXT_EVENT = RunEventDefinition("context:memory", "context")
-MEMORY_OBSERVATION_EVENT = RunEventDefinition("memory.observation.v1", "context")
 
 SUBAGENT_START_EVENT = RunEventDefinition("subagent.start", "subagent")
 SUBAGENT_STEP_EVENT = RunEventDefinition("subagent.step", "subagent")
 SUBAGENT_END_EVENT = RunEventDefinition("subagent.end", "subagent")
-
-TOOL_RECEIPT_STARTED_EVENT = RunEventDefinition("tool_receipt.started.v1", "tool")
-TOOL_RECEIPT_OUTCOME_EVENT = RunEventDefinition("tool_receipt.outcome.v1", "tool")
-RETRIEVAL_OBSERVATION_EVENT = RunEventDefinition(
-    RETRIEVAL_OBSERVATION_EVENT_TYPE,
-    RETRIEVAL_OBSERVATION_EVENT_CATEGORY,
-)
 
 WORKSPACE_CHANGES_EVENT = RunEventDefinition(WORKSPACE_CHANGES_EVENT_TYPE, WORKSPACE_CHANGES_EVENT_CATEGORY)
 
@@ -98,39 +77,32 @@ MIDDLEWARE_EVENT_PATTERN = RunEventPattern(
 )
 MIDDLEWARE_EVENT_TAG_MAX_LENGTH = RUN_EVENT_TYPE_MAX_LENGTH - len(MIDDLEWARE_EVENT_PATTERN.prefix)
 MIDDLEWARE_GUARDRAIL_TAG = "guardrail"
-MIDDLEWARE_MCP_PREPARATION_TAG = "mcp_preparation"
 MIDDLEWARE_LOOP_DETECTION_TAG = "loop_detection"
 MIDDLEWARE_SAFETY_TERMINATION_TAG = "safety_termination"
 MIDDLEWARE_SKILL_ACTIVATION_TAG = "skill_activation"
 MIDDLEWARE_SKILL_SECRETS_TAG = "skill_secrets"
+MIDDLEWARE_TOOL_PROMOTION_TAG = "tool_promotion"
+MIDDLEWARE_TOOL_PROGRESS_TAG = "tool_progress"
 MIDDLEWARE_EVENT_TAGS = (
     MIDDLEWARE_GUARDRAIL_TAG,
-    MIDDLEWARE_MCP_PREPARATION_TAG,
     MIDDLEWARE_LOOP_DETECTION_TAG,
     MIDDLEWARE_SAFETY_TERMINATION_TAG,
     MIDDLEWARE_SKILL_ACTIVATION_TAG,
     MIDDLEWARE_SKILL_SECRETS_TAG,
+    MIDDLEWARE_TOOL_PROMOTION_TAG,
+    MIDDLEWARE_TOOL_PROGRESS_TAG,
 )
 
 JOURNAL_RUN_EVENT_DEFINITIONS = (
     RUN_START_EVENT,
     RUN_END_EVENT,
-    RUN_TERMINAL_EVENT,
     RUN_ERROR_EVENT,
     LLM_HUMAN_INPUT_EVENT,
     LLM_AI_RESPONSE_EVENT,
     LLM_TOOL_RESULT_EVENT,
     LLM_ERROR_EVENT,
     MEMORY_CONTEXT_EVENT,
-    MEMORY_OBSERVATION_EVENT,
 )
-
-# Dispatch markers are emitted directly by the fenced worker immediately
-# before graph execution. They are fixed public events, but are not RunJournal
-# records and therefore must not expand the journal producer contract.
-WORKER_DISPATCH_RUN_EVENT_DEFINITIONS = (RUN_EXECUTION_STARTED_EVENT,)
-
-SANDBOX_RUN_EVENT_DEFINITIONS = (SANDBOX_LIFECYCLE_EVENT,)
 
 SUBAGENT_RUN_EVENT_DEFINITIONS = (
     SUBAGENT_START_EVENT,
@@ -138,22 +110,10 @@ SUBAGENT_RUN_EVENT_DEFINITIONS = (
     SUBAGENT_END_EVENT,
 )
 
-TOOL_RECEIPT_RUN_EVENT_DEFINITIONS = (
-    TOOL_RECEIPT_STARTED_EVENT,
-    TOOL_RECEIPT_OUTCOME_EVENT,
-)
-
-RETRIEVAL_RUN_EVENT_DEFINITIONS = (RETRIEVAL_OBSERVATION_EVENT,)
-
 WORKSPACE_RUN_EVENT_DEFINITIONS = (WORKSPACE_CHANGES_EVENT,)
 
 FIXED_RUN_EVENT_DEFINITIONS = (
     *JOURNAL_RUN_EVENT_DEFINITIONS,
-    *WORKER_DISPATCH_RUN_EVENT_DEFINITIONS,
-    *SANDBOX_RUN_EVENT_DEFINITIONS,
     *SUBAGENT_RUN_EVENT_DEFINITIONS,
-    *TOOL_RECEIPT_RUN_EVENT_DEFINITIONS,
-    *RETRIEVAL_RUN_EVENT_DEFINITIONS,
     *WORKSPACE_RUN_EVENT_DEFINITIONS,
-    EXECUTION_POLICY_DECISION_EVENT,
 )

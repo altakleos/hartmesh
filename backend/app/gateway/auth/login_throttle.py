@@ -645,10 +645,11 @@ def resolve_redis_url(local: Any) -> str:
     return local.lockout_store_redis_url or os.getenv("DEER_FLOW_LOGIN_THROTTLE_REDIS_URL") or os.getenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL") or os.getenv("REDIS_URL") or "redis://localhost:6379/0"
 
 
-#: Used when no Gateway tenant namespace is available (unit tests and bare-app
-#: contexts). A constructed Gateway always projects the prefix from its frozen
-#: tenant identity, like every other Redis key family here, so two tenants on
-#: one Redis cannot collide.
+#: Used when the application carries no namespace for its Redis keys
+#: (``app.state.redis_tenant_namespace``), which is the case on the single-VM
+#: profile: each tenant there has a Redis of its own. A deployment that puts
+#: several tenants on one Redis has to set a namespace, or their counters
+#: would be shared.
 UNSCOPED_KEY_PREFIX = "deerflow:auth:login-throttle:v1"
 
 

@@ -1,18 +1,17 @@
 # GitHub Event-Driven Agents
 
-GitHub is a **webhook-push** channel: there is no long-polling worker. Every GitHub App / repository delivery lands at `POST /api/webhooks/github`, where it is HMAC-verified, resolved against trusted agent bindings, and fan-out'd into bounded leased receipt rows. The handler acknowledges only after every matching row commits. Receipt IDs then wake the same `ChannelManager` that handles Feishu/Slack/Telegram. For the high-level orientation, see [AGENTS.md](../AGENTS.md) → "GitHub event-driven agents".
+GitHub is a **webhook-push** channel: there is no long-polling worker. Every GitHub App / repository delivery lands at `POST /api/webhooks/github`, where it is HMAC-verified, fan-out'd to one `InboundMessage` per matching custom-agent binding, and shipped to the rest of DeerFlow through the same `ChannelManager` that handles Feishu/Slack/Telegram. For the high-level orientation, see [AGENTS.md](../AGENTS.md) → "GitHub event-driven agents".
 
 This document covers the **architecture** of that pipeline:
 
 - Per-agent bindings (`config.yaml` → `github:` block)
-- Webhook → atomic receipt fan-out → leased dispatch
-- HMAC/registry-derived verified route bindings for durable replay
+- Webhook → fan-out → `InboundMessage` dispatch
 - Mention-handle precedence for `require_mention` triggers
-- Owner-scoped v2 conversation identity from the verified route binding
+- `preferred_thread_id = UUID5(repo, number, agent_name)` thread determinism
 - GH token lifecycle (`GITHUB_APP_ID` + `PRIVATE_KEY` → `run_context["github_token"]` → sandbox `GH_TOKEN`/`GITHUB_TOKEN`)
 - `ConflictError` (HTTP 409) thread-create race recovery
 - Why **outbound is log-only** (agents post via `gh` from their sandbox)
-- Durable FIFO deferral while busy, with process-local buffering retained only for best-effort mode
+- Follow-up buffering while busy (issue #4121): buffer → watch → drain, and the single-process scope limit
 
 ## Overview
 
@@ -41,49 +40,9 @@ still invalidates the registry when two writes share the same timestamp.
 
 Each agent binding lists the **events it cares about** under `triggers:`. Events absent from `triggers:` are not delivered to that agent — the dispatcher never loads the agent for them. `DEFAULT_TRIGGERS` only supplies **field-level defaults** (e.g. `require_mention: true`) for events a binding did declare; it is no longer an enablement list.
 
-For the signed production path, `github.installation_id` is also part of the
-source trust boundary. The HMAC-authenticated payload's installation must equal
-the configured strict positive integer installation before a matching agent can
-fire. Quoted, boolean, zero, and negative installation values are invalid; update
-legacy YAML to a positive unquoted integer before startup. The dispatcher
-then derives one opaque `webhook_route` binding from the provider, installation,
-registry owner, canonical agent, and repository. It never uses sender login,
-prompt text, or payload metadata as authority, and it leaves
-`InboundMessage.connection_id` unset. The binding kind/reference—not a webhook
-secret or token—is sealed into Origin and used with workspace/conversation to
-scope the stable delivery key. Explicit unverified development mode can still
-exercise the channel locally, but it has no verified binding and remains
-unkeyed. A fired signed route without `X-GitHub-Delivery` cannot construct its
-durable receipt identity and is rejected before acknowledgment; it never degrades
-to best-effort delivery.
-Historical accepted Origins without these optional references remain readable;
-connection-backed rows also replay through their original Origin digest because
-the new binding reference repeats their already-authenticated `connection_id`.
-
-With PostgreSQL and `dedupe_storage.backend: auto|postgres`, the signed route is
-durable at acknowledgment: one receipt is keyed by provider, verified binding
-kind/reference, and provider delivery ID. Each row contains only the bounded
-normalized launch facts needed for replay. It excludes the HMAC secret, GitHub
-token, raw payload, transient attachment bytes, and credentials. SQLite/memory or
-explicit `backend: memory` is reported as `best_effort`, not durable ingress.
-The route separately records a SHA-256 digest of the exact HMAC-authenticated body
-and host-accepted `X-GitHub-Event` value. For each currently resolved binding that
-produces a durable receipt candidate, an equal redelivery reuses that binding's
-first accepted receipt envelope even if live agent policy changed in the meantime;
-it does not re-resolve or rewrite that envelope. A different body/header projection
-for the same binding-and-delivery receipt key is a permanent bounded `409` integrity
-conflict. Events or bindings that produce no receipt candidate have no delivery-wide
-retained identity; freezing fan-out membership globally is deliberately outside this
-per-binding contract. Rows created before this evidence field remain processable,
-but Hartmesh does not guess replay equality for them.
-
 ## Webhook → Fan-out → Dispatch
 
-The webhook handler performs no LangGraph work. It verifies, resolves all trusted
-fan-out targets, and atomically stores their receipt rows before returning `200`.
-A receipt-store failure returns `503`; because GitHub does not automatically retry
-every failed delivery, operators may still need delivery redelivery, but Hartmesh
-never acknowledges a delivery whose only copy is the in-memory bus.
+The webhook handler stays cheap — no LangGraph calls — so GitHub's 10-second delivery timeout is never at risk. Verification, fan-out, and the bus publish are all in-process and bounded.
 
 ```mermaid
 sequenceDiagram
@@ -93,17 +52,16 @@ sequenceDiagram
     participant Disp as fanout_event()<br/>(github/dispatcher.py)
     participant Reg as build_github_agent_registry
     participant Trg as event_should_fire
-    participant Store as InboundReceiptStore
-    participant Bus as MessageBus wake-up
+    participant Bus as MessageBus
     participant Mgr as ChannelManager
-    participant Gateway as Gateway thread API
-    participant Runtime as InvocationRuntime
+    participant Client as langgraph_sdk client
+    participant Gateway as Gateway<br/>/api/webhooks/github
 
     GH->>Router: delivery (event, delivery_id, payload,<br/>X-Hub-Signature-256, X-GitHub-Event)
     Router->>Router: _verify_signature()<br/>hmac.compare_digest(sha256, secret)
-    Router->>Disp: fanout_event(bus, event, delivery_id, payload,<br/>verified_request attestation)
+    Router->>Disp: fanout_event(bus, event, delivery_id, payload,<br/>operator_default_mention_login)
     Disp->>Reg: build_github_agent_registry() (to_thread)
-    Reg-->>Disp: agents bound to (repo, event)<br/>with owner + installation
+    Reg-->>Disp: agents bound to (repo, event)
     loop each matched agent
         Disp->>Disp: _is_self_event(sender.login)?
         alt self event
@@ -112,39 +70,28 @@ sequenceDiagram
             Disp->>Trg: event_should_fire(event, payload, trigger, default_mention_login)
             Trg-->>Disp: (fire, reason)
             opt fire
-                Disp->>Disp: build_prompt() + resolve_conversation_identity()<br/>verified binding + repo + number + agent
-                Disp->>Disp: verify payload installation;<br/>derive webhook_route binding
-                Disp->>Disp: build bounded immutable receipt envelope
+                Disp->>Disp: build_prompt() + resolve_thread_id()<br/>UUID5(repo, number, agent)
+                Disp->>Bus: publish_inbound(InboundMessage(<br/>channel=github, chat_id=repo,<br/>topic_id="{number}:{agent}",<br/>owner_user_id=match.user_id,<br/>metadata.agent_name=agent,<br/>metadata.preferred_thread_id=...,<br/>metadata.github={...}))
             end
         end
     end
-    Disp->>Store: receive_batch(all fired envelopes)
-    Store-->>Disp: committed receipt identities
-    Disp->>Bus: publish receipt-id wake-ups
     Disp-->>Router: summary {matched, fired, skipped}
     Router-->>GH: 200 OK
 
-    Note over Bus,Gateway: Recovery/consumer side
-    Bus->>Mgr: receipt wake-up
-    Mgr->>Store: atomically claim with lease + fencing token
-    Store-->>Mgr: immutable replay envelope
+    Note over Bus,Gateway: Bus consumer side
+    Bus->>Mgr: msg = get_inbound()
     Mgr->>Client: client.threads.create(thread_id=preferred_thread_id)
     Client->>Gateway: threads.create (with owner headers)
     Gateway-->>Client: thread_id (or 409)
-    Mgr->>Runtime: launch(InternalLaunchIntent)<br/>verified route binding + stable delivery key
-    Runtime-->>Mgr: created or known retained run
-    Mgr->>Store: bind run_id, then complete (fenced)
+    Mgr->>Client: runs.create() [fire_and_forget=True]
+    Client->>Gateway: start run
+    Gateway-->>Client: pending
     Note over Mgr: Manager returns immediately.<br/>Agent posts to GitHub via gh CLI.
 ```
 
-## Owner-scoped v2 conversation identity
+## `preferred_thread_id = UUID5(...)` Thread Determinism
 
-For a signed route, `resolve_conversation_identity(...)` hashes the sealed
-`webhook_route` reference with repository, issue/PR number, and canonical agent.
-It derives both the deterministic LangGraph thread ID and the `ChannelStore`
-topic from that same v2 digest. Restarts and store rebuilds therefore converge
-without allowing two owners who use the same agent name on the same repository
-item to share thread state.
+`resolve_thread_id(repo, issue_or_pr_number, agent_name)` builds a deterministic LangGraph thread id so a `(repo, PR/issue number)` always lands on the same thread — even after a store wipe, even across gateway replicas (same UUID5 namespace).
 
 ```mermaid
 graph LR
@@ -152,31 +99,22 @@ graph LR
     classDef hash fill:#D7D3E8,stroke:#6B6680,color:#29263A
     classDef thread fill:#C9D7D2,stroke:#5D706A,color:#21302C
 
-    Binding["verified route binding<br/>provider/installation/owner/agent/repo"]:::input
     Repo["repo<br/>owner/name"]:::input
     Number["issue/PR number<br/>int"]:::input
-    Agent["agent_name<br/>[A-Za-z0-9][A-Za-z0-9-]{0,127}"]:::input
-    Seed["canonical v2 projection<br/>binding + repo + number + agent"]:::hash
-    Digest["SHA-256 projection digest"]:::hash
-    UUID5["uuid.uuid5(<br/>  GITHUB_THREAD_NAMESPACE,<br/>  'github-conversation-v2:' + digest)"]:::hash
-    Thread["thread_id + topic_id<br/>(stable across restarts)"]:::thread
+    Agent["agent_name<br/>[A-Za-z0-9-]+"]:::input
+    Seed["seed = '{repo}#{number}:{agent}'"]:::hash
+    UUID5["uuid.uuid5(<br/>  GITHUB_THREAD_NAMESPACE,<br/>  seed)"]:::hash
+    Thread["thread_id<br/>(same across replicas + restarts)"]:::thread
 
-    Binding --> Seed
     Repo --> Seed
     Number --> Seed
     Agent --> Seed
-    Seed --> Digest --> UUID5 --> Thread
+    Seed --> UUID5 --> Thread
 ```
 
 Different agents on the same PR (coder + reviewer) **deliberately** get different thread ids — `agent_name` is part of the seed. Sharing a thread would couple their message histories and checkpoints, and `multitask_strategy="reject"` would silently drop one run on every dual-mention. Each agent owns its own thread; cross-agent coordination flows through GitHub (PR comments, review threads), the source of truth humans see.
 
-`ChannelStore` uses `topic_id = "github-conversation:v2:sha256:<digest>"`,
-so both agent and owner/binding isolation apply to the cached mapping and receipt
-FIFO. Unverified local development keeps the legacy v1 repo/number/agent mapping.
-Existing v1 signed threads are not silently aliased because their checkpoint
-history lacks the owner-bound identity. A deliberate migration may reuse one only
-after an owner-scoped durable read proves the same effective owner; otherwise the
-next signed delivery starts a fresh v2 thread and leaves legacy history untouched.
+`ChannelStore` uses `topic_id = f"{number}:{agent_name}"` as its cache key, so each agent's cached mapping is independent — a coder's mapping is invisible to a reviewer on the same PR.
 
 ## Mention-handle Precedence
 
@@ -246,9 +184,7 @@ Why a string and not a closure: `run_context` is JSON-encoded by the `langgraph_
 
 ## Thread-create Race Recovery
 
-Two webhook deliveries for the same verified owner/binding conversation can land
-within milliseconds of each other and race on
-`threads.create(thread_id=preferred_thread_id)`. The recovery is narrow by design.
+Two webhook deliveries for the same `(repo, number)` can land within milliseconds of each other and race on `threads.create(thread_id=preferred_thread_id)`. The recovery is narrow by design.
 
 ```mermaid
 sequenceDiagram
@@ -288,14 +224,9 @@ The recovery is **narrow**: only `langgraph_sdk.errors.ConflictError` (HTTP 409)
 
 The follow-up `threads.get(preferred_thread_id)` is itself verified before caching — if it also rejects, the store underneath is in an inconsistent state and the failure surfaces.
 
-## Busy Follow-ups and Receipt Recovery
+## Follow-up Buffering While Busy (#4121)
 
-A **different** conflict from the one above is a new comment arriving while a run
-is active on the same thread. In durable signed-GitHub mode the claimed receipt is
-returned to `deferred` with a bounded next-attempt time. It stays in PostgreSQL,
-and only the oldest unfinished receipt for that thread is eligible for a claim.
-Watcher completion is an early wake-up only; bounded recovery polling is the
-process-loss-safe source of progress.
+A **different** conflict from the one above: not two deliveries racing to *create* a thread, but a new comment arriving while a *run* is already active on an existing thread. `runs.create()` raises `ConflictError` for that too, and until this fix the manager only logged it and replied with `THREAD_BUSY_MESSAGE` — invisible to the commenter, since `GitHubChannel.send()` is log-only (see below). The comment looked silently ignored.
 
 ```mermaid
 sequenceDiagram
@@ -304,36 +235,37 @@ sequenceDiagram
     participant C2 as Comment 2 (while busy)
     participant Mgr as ChannelManager
     participant Client as langgraph_sdk client
-    participant Store as InboundReceiptStore
+    participant SB as StreamBridge
 
-    C1->>Store: receipt K1 committed and claimed
-    Store->>Mgr: immutable delivery K1
-    Mgr->>Runtime: launch(K1) [fire_and_forget]
-    Runtime-->>Mgr: {run_id: run-1, status: pending}
+    C1->>Mgr: InboundMessage
+    Mgr->>Client: runs.create() [fire_and_forget]
+    Client-->>Mgr: {run_id: run-1, status: pending}
     Mgr->>SB: subscribe(run-1) (background watcher)
 
-    C2->>Store: receipt K2 committed (same thread_id)
-    Store->>Mgr: immutable delivery K2
-    Mgr->>Runtime: launch(K2)
-    Runtime-->>Mgr: thread-busy ConflictError
-    Mgr->>Store: defer K2 with same immutable evidence<br/>and bounded next-attempt time
+    C2->>Mgr: InboundMessage (same thread_id)
+    Mgr->>Client: runs.create()
+    Client-->>Mgr: 409 ConflictError
+    Mgr->>Mgr: _buffer_followup(thread_id, msg)<br/>(deduped by delivery_id, capped at 20)
+    Mgr-->>C2: THREAD_BUSY_MESSAGE (log-only on GitHub)
 
-    Note over Store: run-1 completes; watcher or recovery wakes K2
-    Store->>Mgr: claim K2 with a new fencing token
-    Mgr->>Runtime: launch(K2)<br/>(C2's binding, Origin, sender, and external key)
-    Runtime-->>Mgr: {run_id: run-2, status: pending}
-    Mgr->>SB: subscribe(run-2) (watch again — one delivery per chained run)
+    Note over SB: run-1 completes
+    SB-->>Mgr: END_SENTINEL
+    Mgr->>Mgr: _drain_followups_for_thread()<br/>(pop up to 10, oldest first)
+    Mgr->>Client: runs.create() with <followups-while-busy> input
+    Client-->>Mgr: {run_id: run-2, status: pending}
+    Mgr->>SB: subscribe(run-2) (watch again — chains if >10 queued)
 ```
 
 Key properties:
 
-- **Identity snapshot**: each receipt freezes the stable provider ID, verified route binding, sender, owner, chat/topic/workspace route, agent selection, text, and finite policy metadata. Raw provider payloads, attachment bytes, secrets, and credentials are rejected. A previous run never supplies a later delivery's authority, Origin, sender, or key.
-- **Dedupe and replay**: receipt acquisition is unique on verified source identity plus provider delivery ID. If a claimant crashes after invocation acceptance but before binding, replay uses the same external key and receives the known equal run; no second graph starts. Different normalized payload under the same receipt identity is an integrity failure.
-- **Lease fencing**: every claim increments a fencing token. An expired claim may be reclaimed, and the stale claimant cannot bind, defer, or complete it.
-- **FIFO and bounds**: claims select bounded pages and only the earliest unfinished receipt for each thread. Busy work retries on a fixed, non-tight cadence without spending the poison failure budget; malformed or failing processing uses bounded exponential retry and a finite failure cap. Automatic retention removes completed receipts only. Unresolved dead letters remain available through administrator-only capped state/due-age summary and exact-ID safe inspection. Exact-fence requeue returns a recoverable row to `deferred`; exact-fence discard moves a permanently invalid, runless row to `completed` with `operator_discarded` so ordinary retention can remove it after the forensic window. Both require the provider-event digest (or explicit legacy null), increment fencing, and emit only pseudonymous administrator/correlation audit evidence; discard never wakes processing. No list or bulk mutation surface exists.
-- **One source per run**: one receipt launches one invocation on the existing DeerFlow thread. Independent deliveries are never coalesced.
-- **Reactions are out of scope.** GitHub's reaction API (`eyes`/`confused` acknowledgment) has no existing integration in this codebase; buffered comments receive no per-comment acknowledgment.
-- **Best-effort compatibility**: local/non-PostgreSQL dispatch may still use `ChannelManager._followup_buffers`, capped at 20 and process-local. It is reported as `best_effort`; no deployment claim treats that buffer or `MessageBus` as durable.
+- **Dedupe**: buffering keys on the GitHub webhook delivery id (falling back to the generic provider-message-id metadata keys, mirroring `_inbound_dedupe_key`), so a redelivered webhook for a comment already buffered is a no-op rather than a duplicate entry.
+- **Cap**: 20 entries per thread. Overflow drops the *oldest* buffered entry (not the newest) with a WARNING log — recent activity is a more useful signal than the stalest queued comment once a thread is deep enough in the backlog to hit the cap. No reaction/acknowledgment is sent on drop; see the reactions note below.
+- **Batching**: a drain coalesces at most 10 entries into one `<followups-while-busy>` input block. A backlog deeper than 10 is not force-fit into a single turn — the drained run is itself watched, so its own completion triggers another drain cycle for the remainder.
+- **Drain-conflict edge case**: if the drain's own `runs.create()` also hits `ConflictError` — e.g. a manual Web UI turn or a scheduled run raced onto the same thread — the popped batch is requeued (not lost, not retried in a tight loop). It is picked up again the next time this manager successfully creates *and watches* a run on that thread, which is guaranteed to eventually happen once whatever is occupying the thread finishes and any subsequent trigger succeeds.
+- **Reactions are out of scope for this slice.** GitHub's reaction API (`eyes`/`confused` acknowledgment) has no existing integration in this codebase and needs its own design pass; buffered comments are coalesced silently, with no per-comment acknowledgment.
+- **Config**: gated behind `ChannelRunPolicy.buffer_followups_on_busy` (default `False`); GitHub's own registration in `app/gateway/github/run_policy.py` opts in, since it is exactly the fire_and_forget + log-only-send channel this was designed for. Any other channel that adopts `fire_and_forget=True` in the future keeps the old silent-drop-with-log behavior unless it opts in too.
+- **Plumbing**: the watcher subscribes to the Gateway's `StreamBridge` singleton (`app.state.stream_bridge`), which `ChannelManager` previously had no way to reach — every other consumer gets it via `get_stream_bridge(request)`, which needs an HTTP `Request` the bus-consumer loop doesn't have. It is threaded as a zero-arg closure from `app.py`'s lifespan (`get_stream_bridge=lambda: getattr(app.state, "stream_bridge", None)`) through `start_channel_service()` → `ChannelService.__init__` → `ChannelManager.__init__`, mirroring the existing `launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs)` closure already used for `ScheduledTaskService` in the same lifespan function.
+- **Single-process scope (known limitation)**: the buffer and watcher tasks live in one `ChannelManager` instance's process memory. Under `GATEWAY_WORKERS>1` or a multi-pod deployment, a follow-up comment that a load balancer or webhook fan-out routes to a *different* worker than the one that created the busy run will not see that worker's buffer. This mirrors the cross-pod gap already documented for issue #4120 (IM leader election or a shared buffer store would close it) and is deliberately deferred — single-process/single-pod deployments, the safe default, are unaffected.
 
 ## Outbound is Log-only
 
@@ -369,7 +301,7 @@ This is also why the GitHub channel registers `ChannelRunPolicy.fire_and_forget=
 - [IM_CHANNEL_CONNECTIONS.md](IM_CHANNEL_CONNECTIONS.md) — interactive IM channels (Telegram/Slack/etc.) for the full `_handle_chat` and owner-scoped file storage flow
 - `app/gateway/github/dispatcher.py` — `fanout_event`, `_is_self_event`, mention precedence chain
 - `app/channels/manager.py` — `_buffer_followup`, `_drain_followups_for_thread`, `_watch_run_and_drain_followups` (follow-up buffering while busy, issue #4121)
-- `app/gateway/github/identity.py` — owner-scoped `resolve_conversation_identity`, legacy `resolve_thread_id`, and `extract_target`
+- `app/gateway/github/identity.py` — `resolve_thread_id` (UUID5), `extract_target`
 - `app/gateway/github/triggers.py` — `event_should_fire`, `DEFAULT_TRIGGERS`
 - `app/gateway/github/run_policy.py` — `inject_github_credentials`, `register_policy`
 - `app/gateway/routers/github_webhooks.py` — HMAC verify, route mount predicate

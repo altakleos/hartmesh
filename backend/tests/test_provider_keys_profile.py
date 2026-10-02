@@ -61,13 +61,14 @@ def test_every_catalog_fragment_is_one_provider_with_a_name_of_its_own() -> None
 def test_stored_keys_are_applied_before_anything_is_built_from_the_config() -> None:
     runtime = (BACKEND / "app" / "gateway" / "deps.py").read_text(encoding="utf-8")
     applied = runtime.index("ProviderKeyService.from_environ(")
-    assert runtime.index("ensure_schema_tenant_binding(") < applied
+    # The keys are read from the database, so the engine exists first.
+    assert runtime.index("await init_engine_from_config(config.database)") < applied
     # What is built after it builds on the reloaded config, not the one read before.
     rebind = runtime.index("config = get_app_config()", applied)
-    for built in ("make_stream_bridge(", "make_checkpointer(", "tool_plane_config = getattr(config"):
+    for built in ("make_checkpointer(", "make_store(", "run_events_config = getattr(config"):
         assert rebind < runtime.index(built), built
     lifespan = (BACKEND / "app" / "gateway" / "app.py").read_text(encoding="utf-8")
-    entered = lifespan.index("async with langgraph_runtime(app, startup_config):")
+    entered = lifespan.index("_runtime_with_mcp_pool_shutdown(app, startup_config):")
     rebound = lifespan.index('if getattr(app.state, "provider_keys_applied", False):')
     assert lifespan.index("startup_config = get_app_config()", rebound) < lifespan.index("await _ensure_admin_user(app)")
     assert entered < rebound < lifespan.index("await _ensure_admin_user(app)")

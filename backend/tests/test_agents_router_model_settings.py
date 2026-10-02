@@ -20,7 +20,7 @@ from app.gateway.routers.agents import (
     get_agent,
     update_agent,
 )
-from deerflow.config.agents_api_config import AgentsApiConfig
+from deerflow.config.agents_api_config import load_agents_api_config_from_dict
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.sandbox_config import SandboxConfig
@@ -32,13 +32,9 @@ pytestmark = pytest.mark.asyncio
 def _agent_env(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     monkeypatch.setattr("deerflow.config.paths._paths", None)
-    # The routes read ``agents_api`` through its singleton, which the config
-    # installed here owns: declaring it on the config is the one source of
-    # truth, rather than setting the singleton beside a config that says
-    # otherwise.
+    load_agents_api_config_from_dict({"enabled": True})
     set_app_config(
         AppConfig(
-            agents_api=AgentsApiConfig(enabled=True),
             models=[ModelConfig(name="agent-model", display_name="Agent Model", description=None, use="langchain_openai:ChatOpenAI", model="agent-model")],
             sandbox=SandboxConfig(use="deerflow.sandbox.local:LocalSandboxProvider"),
         )
@@ -46,6 +42,7 @@ def _agent_env(tmp_path: Path, monkeypatch):
     try:
         yield
     finally:
+        load_agents_api_config_from_dict({})
         reset_app_config()
 
 
@@ -158,3 +155,16 @@ async def test_allowed_subagents_round_trip_and_explicit_null_clears(_agent_env)
 
     unrestricted = await update_agent("delegator", AgentUpdateRequest(allowed_subagents=None))
     assert unrestricted.allowed_subagents is None
+
+
+async def test_plugin_selection_persists_empty_omitted_and_null(_agent_env):
+    created = await create_agent_endpoint(AgentCreateRequest(name="selected", mcp_plugins=["stable-installation"], skills=["research"]))
+    assert created.mcp_plugins == ["stable-installation"]
+    fetched = await get_agent("selected")
+    assert fetched.mcp_plugins == ["stable-installation"]
+    assert (await update_agent("selected", AgentUpdateRequest(description="changed"))).mcp_plugins == ["stable-installation"]
+    assert (await update_agent("selected", AgentUpdateRequest(mcp_plugins=[]))).mcp_plugins == []
+    assert (await get_agent("selected")).mcp_plugins == []
+    cleared = await update_agent("selected", AgentUpdateRequest(mcp_plugins=None))
+    assert cleared.mcp_plugins is None
+    assert cleared.skills == ["research"]

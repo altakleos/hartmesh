@@ -115,6 +115,21 @@ class TestDatabaseConfig:
         assert "deerflow" not in url.replace("/db", "")
         assert url.startswith("postgresql+asyncpg://")
 
+    def test_sync_postgres_url_uses_configured_schema(self):
+        c = DatabaseConfig(backend="postgres", postgres_url="postgresql://u:p@h:5432/db", postgres_schema="deerflow")
+        url = c.app_sync_sqlalchemy_url
+        assert url.startswith("postgresql+psycopg://")
+        assert "options=-c%20search_path%3Ddeerflow" in url
+
+    def test_sync_postgres_url_preserves_existing_libpq_options(self):
+        c = DatabaseConfig(
+            backend="postgres",
+            postgres_url="postgresql://u:p@h:5432/db?options=-c%20statement_timeout%3D5000",
+            postgres_schema="deerflow",
+        )
+        url = c.app_sync_sqlalchemy_url
+        assert "options=-c%20statement_timeout%3D5000%20-c%20search_path%3Ddeerflow" in url
+
 
 # -- MemoryRunStore --
 
@@ -205,6 +220,20 @@ class TestMemoryRunStore:
         assert [r["run_id"] for r in rows] == ["r4", "r3"]
 
     @pytest.mark.anyio
+    async def test_list_by_thread_keyset_cursor(self, store):
+        for i in range(5):
+            await store.put(f"r{i}", thread_id="t1", created_at=f"2024-01-0{i + 1}T00:00:00+00:00")
+        first = await store.list_by_thread("t1", limit=2)
+        assert [r["run_id"] for r in first] == ["r4", "r3"]
+        second = await store.list_by_thread(
+            "t1",
+            limit=2,
+            before_created_at=first[-1]["created_at"],
+            before_run_id=first[-1]["run_id"],
+        )
+        assert [r["run_id"] for r in second] == ["r2", "r1"]
+
+    @pytest.mark.anyio
     async def test_delete_keeps_thread_index_consistent(self, store):
         await store.put("r1", thread_id="t1")
         await store.put("r2", thread_id="t1")
@@ -219,13 +248,10 @@ class TestMemoryRunStore:
     @pytest.mark.anyio
     async def test_aggregate_tokens_by_thread_scopes_to_thread(self, store):
         await store.put("r1", thread_id="t1")
-        await store.update_status("r1", "success")
         await store.update_run_completion("r1", status="success", model_name="m-a", total_tokens=100)
         await store.put("r2", thread_id="t1")
-        await store.update_status("r2", "error")
         await store.update_run_completion("r2", status="error", model_name="m-a", total_tokens=20)
         await store.put("r3", thread_id="t2")
-        await store.update_status("r3", "success")
         await store.update_run_completion("r3", status="success", model_name="m-b", total_tokens=999)
 
         agg = await store.aggregate_tokens_by_thread("t1")
@@ -237,11 +263,9 @@ class TestMemoryRunStore:
     @pytest.mark.anyio
     async def test_aggregate_tokens_by_thread_excludes_active_unless_requested(self, store):
         await store.put("r1", thread_id="t1")
-        await store.update_status("r1", "success")
         await store.update_run_completion("r1", status="success", total_tokens=10)
         await store.put("r2", thread_id="t1")
-        await store.update_status("r2", "running")
-        await store.update_run_progress("r2", total_tokens=5)
+        await store.update_run_completion("r2", status="running", total_tokens=5)
 
         assert (await store.aggregate_tokens_by_thread("t1"))["total_tokens"] == 10
         assert (await store.aggregate_tokens_by_thread("t1", include_active=True))["total_tokens"] == 15
@@ -249,7 +273,6 @@ class TestMemoryRunStore:
     @pytest.mark.anyio
     async def test_aggregate_tokens_by_thread_unknown_thread_is_zero(self, store):
         await store.put("r1", thread_id="t1")
-        await store.update_status("r1", "success")
         await store.update_run_completion("r1", status="success", total_tokens=10)
         agg = await store.aggregate_tokens_by_thread("missing")
         assert agg["total_tokens"] == 0
@@ -267,21 +290,7 @@ class TestMemoryRunStore:
         ]
         for run_id, thread_id, status, model, tokens in plan:
             await store.put(run_id, thread_id=thread_id)
-            if status in {"success", "error"}:
-                await store.update_status(run_id, status)
-                await store.update_run_completion(
-                    run_id,
-                    status=status,
-                    model_name=model,
-                    total_tokens=tokens,
-                )
-            elif status == "running":
-                await store.update_status(run_id, status)
-                await store.update_run_progress(
-                    run_id,
-                    model_name=model,
-                    total_tokens=tokens,
-                )
+            await store.update_run_completion(run_id, status=status, model_name=model, total_tokens=tokens)
 
         def _reference(thread_id, include_active):
             statuses = ("success", "error", "running") if include_active else ("success", "error")

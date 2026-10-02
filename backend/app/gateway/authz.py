@@ -25,6 +25,10 @@ Inspired by LangGraph Auth system: https://github.com/langchain-ai/langgraph/blo
 - runs:create   - Run agent
 - runs:read     - View run
 - runs:cancel   - Cancel run
+- memory:read   - View memory data/config
+- memory:write  - Modify memory data (create/update/delete facts, import, clear)
+- agents:read   - View custom agents and the user profile
+- agents:write  - Create/update/delete custom agents and the user profile
 """
 
 from __future__ import annotations
@@ -39,21 +43,15 @@ from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, ParamSpec, TypeVar
 
-from deerflow_extension_api import (
-    EffectiveSubjectV1,
-    InvocationIdentityV1,
-    VerifiedActorContextV1,
-)
 from fastapi import HTTPException, Request
 
 from deerflow.authz.principal import build_principal_from_context
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzRequest, Principal
+from deerflow.authz.runtime import construct_authorization_provider, resolve_authorization_provider, resolve_authorization_provider_spec
 from deerflow.config.authorization_config import AuthorizationConfig
-from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 
 if TYPE_CHECKING:
     from app.gateway.auth.models import User
-    from app.gateway.authorization import AuthorizationProviderResolver
     from deerflow.config.app_config import AppConfig
 
 P = ParamSpec("P")
@@ -74,12 +72,18 @@ class Permissions:
     RUNS_CREATE = "runs:create"
     RUNS_READ = "runs:read"
     RUNS_CANCEL = "runs:cancel"
+    # Projects
+    PROJECTS_READ = "projects:read"
+    PROJECTS_WRITE = "projects:write"
+    PROJECTS_DELETE = "projects:delete"
 
-    # Governed skill and MCP revisions. These deliberately remain outside
-    # the PAT v1 scope allowlist.
-    TOOL_PLANE_READ = "tool_plane:read"
-    TOOL_PLANE_MUTATE = "tool_plane:mutate"
-    TOOL_PLANE_ADMIN = "tool_plane:admin"
+    # Memory (per-user memory data surfaced by /api/memory*)
+    MEMORY_READ = "memory:read"
+    MEMORY_WRITE = "memory:write"
+
+    # Custom agents and the per-user USER.md profile (/api/agents*, /api/user-profile)
+    AGENTS_READ = "agents:read"
+    AGENTS_WRITE = "agents:write"
 
 
 class AuthContext:
@@ -149,73 +153,9 @@ def require_cancel_permission_if(request: Request, can_cancel: bool) -> None:
     """
     if not can_cancel:
         return
-    auth = getattr(getattr(request, "state", None), "auth", None)
+    auth = getattr(request.state, "auth", None)
     if auth is not None and not auth.has_permission("runs", "cancel"):
         raise HTTPException(status_code=403, detail="Permission denied: runs:cancel")
-
-
-async def require_audited_cancel_permission_if(
-    request: Request,
-    can_cancel: bool,
-) -> None:
-    """Require current cancel authority and its durable control audit."""
-
-    if not can_cancel:
-        return
-    require_cancel_permission_if(request, can_cancel)
-    await require_audited_permission(
-        request,
-        "runs",
-        "cancel",
-        route_category="runs",
-    )
-
-
-async def require_audited_permission(
-    request: Request,
-    resource: str,
-    action: str,
-    *,
-    route_category: str,
-) -> VerifiedActorContextV1 | None:
-    """Recheck current authority, persist audit, and return the exact actor.
-
-    Router unit tests sometimes call an unwrapped handler with a request-like
-    ``SimpleNamespace``. Those calls have no ASGI scope and already bypass the
-    authentication decorators; preserve that explicit harness convention.
-    Shipped HTTP requests always carry a scope and must provide both current
-    authorization and auditable actor evidence.
-    """
-
-    if not isinstance(getattr(request, "scope", None), dict):
-        return None
-    auth = get_auth_context(request)
-    if auth is not None and not auth.has_permission(resource, action):
-        raise HTTPException(
-            status_code=403,
-            detail=f"Permission denied: {resource}:{action}",
-        )
-    if auth is None or not auth.is_authenticated:
-        raise HTTPException(status_code=401, detail="Authentication required")
-    from app.gateway.credential_evidence import (
-        CredentialEvidenceError,
-        record_required_credential_action,
-    )
-    from deerflow.persistence.credential_audit import (
-        CredentialAuditUnavailable,
-    )
-
-    try:
-        return await record_required_credential_action(
-            request,
-            action="control",
-            route_category=route_category,
-        )
-    except (CredentialAuditUnavailable, CredentialEvidenceError) as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Required audit record unavailable",
-        ) from exc
 
 
 _ALL_PERMISSIONS: list[str] = [
@@ -225,9 +165,13 @@ _ALL_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
-    Permissions.TOOL_PLANE_READ,
-    Permissions.TOOL_PLANE_MUTATE,
-    Permissions.TOOL_PLANE_ADMIN,
+    Permissions.MEMORY_READ,
+    Permissions.MEMORY_WRITE,
+    Permissions.AGENTS_READ,
+    Permissions.AGENTS_WRITE,
+    Permissions.PROJECTS_READ,
+    Permissions.PROJECTS_WRITE,
+    Permissions.PROJECTS_DELETE,
 ]
 
 
@@ -254,74 +198,69 @@ def _get_route_authorization_config() -> AuthorizationConfig:
         return AuthorizationConfig()
 
 
-async def resolve_route_permissions(
-    user: User,
-    *,
-    is_internal: bool,
-    resolver: AuthorizationProviderResolver | None = None,
-    identity: InvocationIdentityV1 | None = None,
-    request: Request | None = None,
-) -> list[str]:
+# --- Provider cache (W1/F1) ---
+# Keyed by config object identity (id) so the expensive model_dump() signature
+# is only recomputed when get_app_config() returns a new object (hot-reload).
+_route_provider_cache: dict[str, AuthorizationProvider] = {}
+_route_provider_config_id: int | None = None
+_route_provider_config_sig: str | None = None
+
+
+def _get_cached_route_provider(config: AuthorizationConfig) -> AuthorizationProvider | None:
+    """Resolve (or reuse) the authorization provider for route permissions.
+
+    The provider is cached per config object identity. When ``get_app_config()``
+    returns a new object (hot-reload), the signature is recomputed and compared;
+    only an actual content change triggers re-resolution. This avoids calling
+    ``model_dump()`` on every request — the fast path is a single ``id()`` check.
+    """
+    global _route_provider_config_id, _route_provider_config_sig, _route_provider_cache
+
+    config_id = id(config)
+
+    # Fast path: same config object as last time → return cached provider.
+    if config_id == _route_provider_config_id and _route_provider_cache:
+        return _route_provider_cache.get("provider")
+
+    # Config object changed (hot-reload): compute signature to check if
+    # content actually changed or just the wrapper object identity.
+    sig = repr(sorted(config.model_dump().items()))
+    if sig == _route_provider_config_sig and _route_provider_cache:
+        # Same content, different object — update id, reuse provider.
+        _route_provider_config_id = config_id
+        return _route_provider_cache.get("provider")
+
+    # Content changed (or first call): re-resolve into a local first,
+    # then publish id + sig + provider together to avoid a race window.
+    _route_provider_cache.clear()
+
+    provider = resolve_authorization_provider(config)
+    if provider is not None:
+        _route_provider_cache["provider"] = provider
+    _route_provider_config_id = config_id
+    _route_provider_config_sig = sig
+    return provider
+
+
+async def resolve_route_permissions(user: User, *, is_internal: bool) -> list[str]:
     """Return the route permissions granted to an authenticated user.
 
     Disabled authorization preserves the legacy all-permissions behavior.
     When enabled, every registered ``resource:action`` permission is evaluated
     independently so a provider failure affects only the route being checked.
-    Provider instances come from the Gateway lifecycle-owned resolver.
+    Provider instances are cached per config signature (hot-reload safe).
     """
     config = _get_route_authorization_config()
     if config.enabled is not True:
         return list(_ALL_PERMISSIONS)
 
     try:
-        if resolver is None:
-            raise ValueError("Gateway authorization provider resolver is unavailable")
-        provider = resolver.resolve(config).provider
+        provider = _get_cached_route_provider(config)
         if provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
-    except Exception as exc:
-        diagnostic = bounded_diagnostic(
-            code="authorization_provider_resolution_failed",
-            operation="resolve_route_authorization_provider",
-            error=exc,
-            capability_id="authorization_provider",
-        )
-        log_bounded_failure(logger, diagnostic)
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for Gateway routes", exc_info=True)
         return [] if config.fail_closed else list(_ALL_PERMISSIONS)
-
-    if identity is None and not is_internal:
-        user_role = getattr(user, "system_role", None)
-        subject_kind = "service" if user_role == "service" else "human"
-        identity = InvocationIdentityV1(
-            effective_subject=EffectiveSubjectV1(
-                kind=subject_kind,
-                subject_id=str(user.id),
-                role=("service" if subject_kind == "service" else user_role),
-                oauth_provider=getattr(user, "oauth_provider", None),
-                oauth_id=getattr(user, "oauth_id", None),
-            )
-        )
-    if identity is None and request is not None:
-        try:
-            from app.gateway.services import invocation_principal_from_request
-
-            identity = (
-                await invocation_principal_from_request(
-                    request,
-                    user_id=str(user.id),
-                )
-            ).identity
-        except Exception as exc:
-            # An enabled provider must never make a decision using transport
-            # trust when the effective subject cannot be established.
-            diagnostic = bounded_diagnostic(
-                code="authorization_identity_resolution_failed",
-                operation="resolve_route_identity",
-                error=exc,
-                capability_id="authorization_provider",
-            )
-            log_bounded_failure(logger, diagnostic)
-            return []
 
     # Align with Phase 1B's tool path: internal callers (IM channel workers,
     # scheduler) have system_role="internal", which is not a real RBAC role.
@@ -333,19 +272,16 @@ async def resolve_route_permissions(
     if user_role == INTERNAL_SYSTEM_ROLE:
         user_role = None
 
-    if identity is not None:
-        principal = Principal.from_identity(identity)
-    else:
-        principal = build_principal_from_context(
-            {
-                "user_id": str(user.id),
-                "user_role": user_role,
-                "oauth_provider": getattr(user, "oauth_provider", None),
-                "oauth_id": getattr(user, "oauth_id", None),
-                "is_internal": is_internal,
-            },
-            default_role=config.default_role,
-        )
+    principal = build_principal_from_context(
+        {
+            "user_id": str(user.id),
+            "user_role": user_role,
+            "oauth_provider": getattr(user, "oauth_provider", None),
+            "oauth_id": getattr(user, "oauth_id", None),
+            "is_internal": is_internal,
+        },
+        default_role=config.default_role,
+    )
 
     # Evaluate all permissions in parallel (W2).
     async def _evaluate(permission: str) -> str | None:
@@ -362,20 +298,28 @@ async def resolve_route_permissions(
                 raise TypeError("AuthorizationProvider.aauthorize must return AuthzDecision")
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
-            diagnostic = bounded_diagnostic(
-                code="authorization_decision_failed",
-                operation="authorize_route_permission",
-                error=exc,
-                capability_id="authorization_provider",
-                contribution_id=permission,
+        except Exception:
+            logger.warning(
+                "Authorization provider failed while evaluating route permission %s",
+                permission,
+                exc_info=True,
             )
-            log_bounded_failure(logger, diagnostic)
             return permission if not config.fail_closed else None
         return permission if decision.allow else None
 
     results = await asyncio.gather(*[_evaluate(p) for p in _ALL_PERMISSIONS])
     return [p for p in results if p is not None]
+
+
+async def resolve_route_permissions_for_request(request: Request, user: Any) -> list[str]:
+    """Resolve the effective route permissions for a request's authenticated user.
+
+    Public wrapper pairing ``resolve_route_permissions`` with the internal-caller
+    heuristics of ``_is_internal_caller`` (auth source, synthetic internal role,
+    internal auth header), so middleware-less consumers resolve exactly what
+    ``_authenticate`` resolves and the two cannot drift apart.
+    """
+    return await resolve_route_permissions(user, is_internal=_is_internal_caller(request, user))
 
 
 class _AuthorizationUnavailable(Exception):
@@ -389,17 +333,11 @@ class _AuthorizationUnavailable(Exception):
         self.fail_closed = fail_closed
 
 
-def resolve_model_authorization(
-    user: User,
-    *,
-    is_internal: bool,
-    resolver: AuthorizationProviderResolver | None = None,
-    config: AuthorizationConfig | None = None,
-) -> tuple[AuthorizationProvider | None, Principal | None]:
-    """Return ``(provider, principal)`` for model-route authorization.
+def _resolve_route_scoped_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for route-level resource authorization.
 
     When authorization is disabled, returns ``(None, None)`` so callers can
-    short-circuit to legacy behavior (all models visible). When enabled,
+    short-circuit to legacy behavior (resource visible). When enabled,
     resolves the cached provider and builds a Principal identical to
     ``resolve_route_permissions`` (including the ``INTERNAL_SYSTEM_ROLE``
     → ``None`` pop so internal callers fall under ``default_role``).
@@ -408,25 +346,17 @@ def resolve_model_authorization(
     when the provider cannot be resolved; callers translate that into the
     appropriate deny response (empty list / 403).
     """
-    config = config or _get_route_authorization_config()
+    config = _get_route_authorization_config()
     if config.enabled is not True:
         return None, None
 
     try:
-        if resolver is None:
-            raise ValueError("Gateway authorization provider resolver is unavailable")
-        provider = resolver.resolve(config).provider
+        provider = _get_cached_route_provider(config)
         if provider is None:
             raise ValueError("authorization is enabled but provider resolution returned None")
-    except Exception as exc:
-        diagnostic = bounded_diagnostic(
-            code="authorization_provider_resolution_failed",
-            operation="resolve_model_authorization_provider",
-            error=exc,
-            capability_id="authorization_provider",
-        )
-        log_bounded_failure(logger, diagnostic)
-        raise _AuthorizationUnavailable(fail_closed=config.fail_closed) from None
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for route-level resources", exc_info=True)
+        raise _AuthorizationUnavailable(fail_closed=config.fail_closed)
 
     principal = build_principal_from_context(
         _route_authz_context(user, is_internal=is_internal),
@@ -435,13 +365,66 @@ def resolve_model_authorization(
     return provider, principal
 
 
+def resolve_model_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for model-route authorization.
+
+    Delegates to ``_resolve_route_scoped_authorization``: disabled →
+    ``(None, None)``; provider-resolution failure raises
+    ``_AuthorizationUnavailable`` (carrying ``fail_closed``).
+    """
+    return _resolve_route_scoped_authorization(user, is_internal=is_internal)
+
+
+def authorize_model_use(user: User, model_name: str | None, *, is_internal: bool, app_config: AppConfig) -> None:
+    """Enforce model:use for an explicit model or the factory's default model.
+
+    Shared by model details and caller-selected one-shot requests. Explicit
+    denies always reject; provider failures honor the configured failure policy.
+    """
+    if model_name is None:
+        if not app_config.models:
+            return  # The caller's existing no-model handling remains authoritative.
+        model_name = app_config.models[0].name
+    detail = f"Model '{model_name}' is not available for your role"
+    try:
+        provider, principal = resolve_model_authorization(user, is_internal=is_internal)
+    except _AuthorizationUnavailable:
+        if app_config.authorization.fail_closed:
+            raise HTTPException(status_code=403, detail=detail) from None
+        return
+    if provider is None or principal is None:
+        return
+    try:
+        decision = provider.authorize(AuthzRequest(principal=principal, resource="model", action="use", target=model_name))
+        if not isinstance(decision, AuthzDecision):
+            raise TypeError("AuthorizationProvider.authorize must return AuthzDecision")
+        allowed = decision.allow
+    except Exception:
+        logger.warning("Authorization provider failed while checking model:use for %s", model_name, exc_info=True)
+        allowed = not app_config.authorization.fail_closed
+    if not allowed:
+        raise HTTPException(status_code=403, detail=detail)
+
+
+def resolve_skill_authorization(user: User, *, is_internal: bool) -> tuple[AuthorizationProvider | None, Principal | None]:
+    """Return ``(provider, principal)`` for skill-route authorization.
+
+    Same resolution and Principal construction as ``resolve_model_authorization``
+    (disabled → ``(None, None)``; provider-resolution failure raises
+    ``_AuthorizationUnavailable`` carrying ``fail_closed``). Consumers translate
+    that into the appropriate deny response (empty skill listing).
+    """
+    return _resolve_route_scoped_authorization(user, is_internal=is_internal)
+
+
 def _route_authz_context(user: User, *, is_internal: bool) -> dict:
     """Build the shared Principal context dict for a request-scoped user.
 
     Applies the ``INTERNAL_SYSTEM_ROLE → None`` pop so internal callers fall
     under ``default_role`` (mirrors ``inject_authenticated_user_context``).
-    Used by ``resolve_model_authorization`` and ``authorize_sandbox_for_request``
-    so every route-level authorization path builds the identity the same way.
+    Used by ``_resolve_route_scoped_authorization`` (model/skill routes) and
+    ``authorize_sandbox_for_request`` so every route-level authorization path
+    builds the identity the same way.
     """
     from app.gateway.internal_auth import INTERNAL_SYSTEM_ROLE
 
@@ -462,7 +445,6 @@ def authorize_sandbox_for_request(
     *,
     is_internal: bool,
     app_config: AppConfig | None,
-    resolver: AuthorizationProviderResolver | None = None,
 ) -> None:
     """Check ``sandbox:execute`` for a Gateway request before sandbox acquisition.
 
@@ -485,19 +467,6 @@ def authorize_sandbox_for_request(
         return
 
     context = _route_authz_context(user, is_internal=is_internal)
-    if resolver is not None:
-        from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
-
-        try:
-            provider = resolver.resolve(config).provider
-            if provider is None:
-                raise ValueError("authorization is enabled but provider resolution returned None")
-            context[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = provider
-        except Exception:
-            logger.warning("Failed to resolve authorization provider for sandbox:execute", exc_info=True)
-            if config.fail_closed:
-                raise SandboxAuthorizationError(role=context.get("user_role")) from None
-            return
 
     try:
         authorize_sandbox_execution(
@@ -518,19 +487,246 @@ def authorize_sandbox_for_request(
             raise SandboxAuthorizationError(role=context.get("user_role")) from None
 
 
-SANDBOX_SYNC_SKIPPED_DENIED = "sandbox_execution_denied"
-SANDBOX_SYNC_SKIPPED_SESSION_CONFLICT = "sandbox_session_conflict"
-_SANDBOX_SYNC_SKIP_MESSAGES = {
-    SANDBOX_SYNC_SKIPPED_DENIED: "sandbox execution is not permitted for your role",
-    SANDBOX_SYNC_SKIPPED_SESSION_CONFLICT: "an accepted run holds this thread's sandbox until it ends",
-}
+# --- Plugin resource authorization -------------------------------------------
+#
+# The plugin request paths deliberately do NOT reuse the route provider cache
+# above: that cache is synchronous, constructs inline on the calling thread and
+# keys on config identity alone, so a hit cannot prove the instance belongs to
+# the caller's event loop. A plugin provider may be loop-affine (its
+# ``__init__`` may create an asyncio client), so this cache keys on
+# ``(config signature, loop key)`` and never hands a loop-built instance to a
+# sync caller or to a different loop.
+
+_PLUGIN_PROVIDER_SYNC_SLOT = object()
+#: loop_key → (config signature, provider, owning loop or None for the sync slot).
+_plugin_provider_cache: dict[object, tuple[str, AuthorizationProvider, asyncio.AbstractEventLoop | None]] = {}
 
 
-def sandbox_sync_skip_message(reason: str | None) -> str | None:
-    """A plain sentence for a skipped sandbox sync, or ``None`` when nothing was skipped."""
-    if reason is None:
+class _PluginAuthorizationUnavailable(Exception):
+    """Raised when the plugin provider cannot be resolved for a request.
+
+    Carries ``fail_closed`` so callers choose between deny and legacy allow
+    without re-reading config (mirrors ``_AuthorizationUnavailable``).
+    """
+
+    def __init__(self, *, fail_closed: bool) -> None:
+        self.fail_closed = fail_closed
+
+
+def _plugin_loaded_config() -> AppConfig | None:
+    """The configuration this host is running on, or ``None`` if it has none.
+
+    ``get_app_config()`` re-reads the file on every request (hot reload), so a
+    failed read needs the last successfully loaded value to tell a host that has
+    no configuration at all from one whose running policy just became
+    unreadable.
+    """
+    from deerflow.config.app_config import peek_loaded_app_config
+
+    return peek_loaded_app_config()
+
+
+def _plugin_config_failure_fail_closed() -> bool:
+    """Failure flag for a plugin decision whose configuration cannot be read.
+
+    * No loaded config: the host never ran on a configuration, and the
+      ``config.yaml``-less case returned no gate before reaching this call, so
+      this is a file that exists but cannot be read or validated right now. The
+      flag that would permit an allow is unreadable, so it fails closed
+      (review P1, round 1).
+    * A loaded config with authorization disabled: there is no gate to apply.
+    * A loaded config with authorization enabled: follow that policy's own
+      ``fail_closed`` (``True`` by default), so a host that lost the config it
+      is running on answers like any other authorization failure instead of
+      reading the loss as "disabled" (review P1, round 2).
+    """
+    loaded = _plugin_loaded_config()
+    if loaded is None:
+        return True
+    authz_config = getattr(loaded, "authorization", None)
+    if getattr(authz_config, "enabled", None) is not True:
+        return False
+    return getattr(authz_config, "fail_closed", False) is True
+
+
+def _plugin_app_config() -> AppConfig | None:
+    """Read the config snapshot for a plugin decision.
+
+    ``None`` means this host has no configuration file *and* has never loaded
+    one, so there is no policy to apply — the same rule the route-scoped gates
+    use for environments without a ``config.yaml`` (CI runners, direct-call
+    tests, a host that mounts only the plugins router): authorization can only
+    be enabled through config.
+
+    A host running on a configuration never reads a failed load as "disabled".
+    Both the lost file (a hot reload, an atomic replace, a ConfigMap remount)
+    and a file that exists but cannot be read or validated right now propagate,
+    so the caller applies the failure policy of the policy it is running on
+    (:func:`_plugin_config_failure_fail_closed`).
+    """
+    from deerflow.config.app_config import get_app_config
+
+    try:
+        return get_app_config()
+    except FileNotFoundError:
+        if _plugin_loaded_config() is None:
+            logger.debug("No `config.yaml` and no loaded config; the plugin authorization gate is a no-op", exc_info=True)
+            return None
+        raise
+
+
+async def _plugin_app_config_async() -> AppConfig | None:
+    """Off-loop :func:`_plugin_app_config` for async request paths."""
+    return await asyncio.to_thread(_plugin_app_config)
+
+
+def _plugin_config_signature(config: AuthorizationConfig) -> str:
+    return repr(sorted(config.model_dump().items()))
+
+
+def _store_plugin_provider(loop_key: object, loop: asyncio.AbstractEventLoop | None, signature: str, provider: AuthorizationProvider) -> None:
+    """Publish one entry, dropping entries whose loop has closed (bounded growth)."""
+    for key, entry in list(_plugin_provider_cache.items()):
+        owner = entry[2]
+        if owner is not None and owner.is_closed():
+            _plugin_provider_cache.pop(key, None)
+    _plugin_provider_cache[loop_key] = (signature, provider, loop)
+
+
+def _get_cached_plugin_provider_sync(config: AuthorizationConfig) -> AuthorizationProvider:
+    """Resolve the provider for sync callers (and FastAPI ``def`` thread-pool workers)."""
+    signature = _plugin_config_signature(config)
+    cached = _plugin_provider_cache.get(_PLUGIN_PROVIDER_SYNC_SLOT)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+    provider = resolve_authorization_provider(config)
+    if provider is None:
+        raise ValueError("authorization is enabled but provider resolution returned None")
+    _store_plugin_provider(_PLUGIN_PROVIDER_SYNC_SLOT, None, signature, provider)
+    return provider
+
+
+async def _aget_cached_plugin_provider(config: AuthorizationConfig) -> AuthorizationProvider:
+    """Resolve the provider belonging to *this* loop; a miss discovers off-loop."""
+    loop = asyncio.get_running_loop()
+    loop_key = id(loop)
+    signature = _plugin_config_signature(config)
+    cached = _plugin_provider_cache.get(loop_key)
+    if cached is not None and cached[0] == signature:
+        return cached[1]
+
+    if getattr(config, "provider", None) is None:
+        # Nothing to import; preserve the resolver's own "enabled but unconfigured" error.
+        provider = resolve_authorization_provider(config)
+    else:
+        spec = await asyncio.to_thread(resolve_authorization_provider_spec, config)
+        # Construction stays on the calling loop: async providers may create
+        # loop-affine clients in ``__init__``.
+        provider = construct_authorization_provider(spec, config)
+    if provider is None:
+        raise ValueError("authorization is enabled but provider resolution returned None")
+    _store_plugin_provider(loop_key, loop, signature, provider)
+    return provider
+
+
+def _plugin_request_principal(request: Request, authz_config: AuthorizationConfig) -> Principal | None:
+    """Build the request-scoped Principal, or ``None`` when the caller is anonymous."""
+    user = getattr(getattr(request, "state", None), "user", None)
+    if user is None:
         return None
-    return _SANDBOX_SYNC_SKIP_MESSAGES.get(reason, reason)
+    return build_principal_from_context(
+        _route_authz_context(user, is_internal=_is_internal_caller(request, user)),
+        default_role=authz_config.default_role,
+    )
+
+
+def resolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None, AppConfig | None]:
+    """Return ``(provider, principal, app_config)`` for plugin resources, for sync callers.
+
+    ``provider is None`` means authorization is disabled for this host — the
+    caller keeps today's behavior; ``app_config is None`` means there is no
+    configuration at all. The same ``app_config`` snapshot that produced the
+    provider is returned so the enforcement layer never re-reads the
+    configuration. Raises ``_PluginAuthorizationUnavailable`` (carrying
+    ``fail_closed``) when the configuration this host is running on became
+    unreadable, or when the provider cannot be resolved.
+    """
+    try:
+        app_config = _plugin_app_config()
+    except Exception:
+        logger.warning("App config unavailable for plugin authorization", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=_plugin_config_failure_fail_closed()) from None
+    if app_config is None:
+        return None, None, None
+    authz_config = getattr(app_config, "authorization", None)
+    if getattr(authz_config, "enabled", None) is not True:
+        return None, None, app_config
+    try:
+        provider = _get_cached_plugin_provider_sync(authz_config)
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for plugin resources", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=getattr(authz_config, "fail_closed", False) is True) from None
+    return provider, _plugin_request_principal(request, authz_config), app_config
+
+
+async def aresolve_plugin_authorization(request: Request) -> tuple[AuthorizationProvider | None, Principal | None, AppConfig | None]:
+    """Async ``(provider, principal, app_config)`` for plugin resources.
+
+    Never returns the sync slot, and never performs synchronous config loading,
+    provider discovery or provider calls on the event loop. The returned
+    ``app_config`` is the snapshot the provider was resolved from, so the
+    enforcement layer never re-reads the configuration.
+    """
+    try:
+        app_config = await _plugin_app_config_async()
+    except Exception:
+        logger.warning("App config unavailable for plugin authorization", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=_plugin_config_failure_fail_closed()) from None
+    if app_config is None:
+        return None, None, None
+    authz_config = getattr(app_config, "authorization", None)
+    if getattr(authz_config, "enabled", None) is not True:
+        return None, None, app_config
+    try:
+        provider = await _aget_cached_plugin_provider(authz_config)
+    except Exception:
+        logger.warning("Failed to resolve authorization provider for plugin resources", exc_info=True)
+        raise _PluginAuthorizationUnavailable(fail_closed=getattr(authz_config, "fail_closed", False) is True) from None
+    return provider, _plugin_request_principal(request, authz_config), app_config
+
+
+async def authorize_plugin_action_for_request(request: Request, *, namespace: str, action_name: str) -> None:
+    """Authorize a registered plugin action before its handler runs (O2).
+
+    Returns normally when the action is permitted (or authorization is
+    disabled); raises ``HTTPException(403)`` on deny, and on a provider
+    resolution failure under ``fail_closed``.
+    """
+    from deerflow.authz.plugin_authz import PluginAuthorizationError, aenforce_plugin_action
+
+    try:
+        provider, principal, app_config = await aresolve_plugin_authorization(request)
+    except _PluginAuthorizationUnavailable as unavailable:
+        if unavailable.fail_closed:
+            raise _plugin_action_denied() from None
+        return
+    if provider is None:
+        # Authorization is disabled: today's behavior.
+        return
+    try:
+        await aenforce_plugin_action(
+            principal=principal,
+            app_config=app_config,
+            namespace=namespace,
+            action_name=action_name,
+            provider=provider,
+        )
+    except PluginAuthorizationError as error:
+        raise _plugin_action_denied() from error
+
+
+def _plugin_action_denied() -> HTTPException:
+    return HTTPException(status_code=403, detail="Plugin action not permitted for your role.")
 
 
 @dataclass(slots=True)
@@ -542,9 +738,6 @@ class SandboxRequestLease:
     denied: bool
     owner_id: str | None
     provider: object | None
-    # Why acquisition was skipped when ``denied``: a stable code callers put
-    # in their response, never a provider message.
-    reason: str | None = None
 
     async def release(self) -> None:
         """Drop the request holder without bypassing concurrent executions."""
@@ -577,11 +770,7 @@ async def try_acquire_sandbox_for_request(
 
     - denied role → no sandbox/owner and ``denied=True``: acquisition was skipped by policy;
       the primary operation (upload / artifact edit) proceeds without the
-      sandbox copy. ``reason`` says which policy: the authorization gate
-      (``sandbox_execution_denied``) or the session provider refusing an
-      ordinary acquire of a thread an accepted run holds
-      (``sandbox_session_conflict``); the latter is recorded on that run as a
-      ``session.refused`` diagnostic through the session's Observer.
+      sandbox copy.
     - allowed → ``sandbox`` is the acquired instance, or ``sandbox is None`` when
       the provider lost it right after acquiring (infrastructure error —
       callers surface it as 500 / RuntimeError respectively, since that is
@@ -596,13 +785,7 @@ async def try_acquire_sandbox_for_request(
 
         user = await get_optional_user_from_request(request) if request is not None else None
         if user is not None:
-            app_state = getattr(getattr(request, "app", None), "state", None)
-            authorize_sandbox_for_request(
-                user,
-                is_internal=_is_internal_caller(request, user),
-                app_config=app_config,
-                resolver=getattr(app_state, "authorization_provider_resolver", None),
-            )
+            authorize_sandbox_for_request(user, is_internal=_is_internal_caller(request, user), app_config=app_config)
     except SandboxAuthorizationError:
         logger.info("Sandbox sync skipped: sandbox execution not permitted for this caller (thread_id=%s)", thread_id)
         return SandboxRequestLease(
@@ -611,57 +794,23 @@ async def try_acquire_sandbox_for_request(
             denied=True,
             owner_id=None,
             provider=None,
-            reason=SANDBOX_SYNC_SKIPPED_DENIED,
         )
 
     from deerflow.sandbox.lease import get_sandbox_lease_manager
-    from deerflow.sandbox.session import SandboxSessionConflict
 
     owner_id = f"{owner_prefix}:{uuid.uuid4()}"
-    try:
-        sandbox_id = await get_sandbox_lease_manager(sandbox_provider).acquire_async(
-            owner_id,
-            thread_id,
-            user_id=user_id,
-            release_on_last=release_on_last,
-        )
-    except SandboxSessionConflict as exc:
-        logger.info("Sandbox sync skipped: %s (requester=%s)", exc, owner_prefix)
-        record_refused_sandbox_acquire(exc, requester=owner_prefix)
-        return SandboxRequestLease(
-            sandbox=None,
-            sandbox_id=None,
-            denied=True,
-            owner_id=None,
-            provider=None,
-            reason=exc.code,
-        )
+    sandbox_id = await get_sandbox_lease_manager(sandbox_provider).acquire_async(
+        owner_id,
+        thread_id,
+        user_id=user_id,
+        release_on_last=release_on_last,
+    )
     return SandboxRequestLease(
         sandbox=sandbox_provider.get(sandbox_id),
         sandbox_id=sandbox_id,
         denied=False,
         owner_id=owner_id,
         provider=sandbox_provider,
-    )
-
-
-def record_refused_sandbox_acquire(conflict: Exception, *, requester: str) -> bool:
-    """Record a refused ordinary acquire on the accepted run that holds the thread.
-
-    The refusal is a fact about that run (an upload or attachment could not be
-    copied into its container), so it goes through the holding session's
-    Observer onto the run's diagnostic stream as ``session.refused``. Returns
-    ``False`` when the conflict names no live session.
-    """
-    from deerflow.sandbox.session import get_sandbox_session_registry
-
-    public_ref = getattr(conflict, "public_ref", None)
-    if not isinstance(public_ref, str) or not public_ref:
-        return False
-    return get_sandbox_session_registry().observe(
-        public_ref,
-        "session.refused",
-        facts={"requester": requester, "reason": SANDBOX_SYNC_SKIPPED_SESSION_CONFLICT},
     )
 
 
@@ -677,13 +826,7 @@ async def _authenticate(request: Request) -> AuthContext:
     if user is None:
         return AuthContext(user=None, permissions=[])
 
-    is_internal = _is_internal_caller(request, user)
-    permissions = await resolve_route_permissions(
-        user,
-        is_internal=is_internal,
-        resolver=getattr(request.app.state, "authorization_provider_resolver", None),
-        request=request,
-    )
+    permissions = await resolve_route_permissions_for_request(request, user)
     return AuthContext(user=user, permissions=permissions)
 
 
@@ -803,20 +946,25 @@ def require_permission(
     def decorator(func: Callable[P, T]) -> Callable[P, T]:
         @functools.wraps(func)
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            # Bind the wrapped signature so a request passed positionally
+            # (direct calls in unit tests, non-FastAPI callers) is honored
+            # instead of colliding with an injected keyword stub.
+            signature = inspect.signature(func)
+            try:
+                bound = signature.bind(*args, **kwargs)
+            except TypeError:
+                bound = None
             request = kwargs.get("request")
+            if request is None and bound is not None:
+                request = bound.arguments.get("request")
             if request is None:
                 # Unit tests may call decorated route handlers directly — with
                 # or without constructing a FastAPI Request object — and may
-                # pass ``request`` positionally. Bind to the real signature
-                # first so a positional request is found rather than
-                # duplicated by the stub injection below.
-                try:
-                    bound = inspect.signature(func).bind_partial(*args, **kwargs)
-                except TypeError:
-                    bound = None
-                if bound is not None and "request" in bound.arguments:
-                    request = bound.arguments["request"]
-                elif "request" in inspect.signature(func).parameters:
+                # pass ``request`` positionally. The full-signature bind at
+                # the top of this wrapper already recovered a positional
+                # request, so only the stub injection for handlers that
+                # declare ``request`` but received none remains here.
+                if "request" in signature.parameters:
                     kwargs["request"] = _make_test_request_stub()
                     request = kwargs["request"]
                 else:
@@ -830,28 +978,11 @@ def require_permission(
                 auth = await _authenticate(request)
                 request.state.auth = auth
 
-            from app.gateway.run_evidence_telemetry import (
-                ensure_run_evidence_requested,
-                record_run_evidence_outcome,
-            )
-
-            evidence_actor_digest = ensure_run_evidence_requested(request)
-
             if not auth.is_authenticated:
-                record_run_evidence_outcome(
-                    request,
-                    "refused",
-                    actor_digest=evidence_actor_digest,
-                )
                 raise HTTPException(status_code=401, detail="Authentication required")
 
             # Check permission
             if not auth.has_permission(resource, action):
-                record_run_evidence_outcome(
-                    request,
-                    "refused",
-                    actor_digest=evidence_actor_digest,
-                )
                 raise HTTPException(
                     status_code=403,
                     detail=f"Permission denied: {resource}:{action}",
@@ -870,6 +1001,8 @@ def require_permission(
                 from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME, INTERNAL_SYSTEM_ROLE
 
                 thread_id = kwargs.get("thread_id")
+                if thread_id is None and bound is not None:
+                    thread_id = bound.arguments.get("thread_id")
                 if thread_id is None:
                     raise ValueError("require_permission with owner_check=True requires 'thread_id' parameter")
 
@@ -898,11 +1031,6 @@ def require_permission(
                             require_existing=require_existing,
                         )
                 if not allowed:
-                    record_run_evidence_outcome(
-                        request,
-                        "refused",
-                        actor_digest=evidence_actor_digest,
-                    )
                     raise HTTPException(
                         status_code=404,
                         detail=f"Thread {thread_id} not found",

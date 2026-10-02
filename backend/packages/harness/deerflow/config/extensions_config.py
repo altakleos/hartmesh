@@ -3,19 +3,17 @@
 import errno
 import json
 import logging
+import math
 import os
 import stat
 import tempfile
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any, Literal
 
-from deerflow_extension_api import (
-    validate_mcp_server_identifier,
-    validate_mcp_tool_identifier,
-)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from deerflow.config.runtime_paths import existing_project_file
@@ -27,6 +25,7 @@ from deerflow.constants import (
 
 logger = logging.getLogger(__name__)
 
+_JSON_KWARGS_ERROR = "middleware kwargs values must be JSON types (object, array, string, number, boolean, or null)"
 _non_atomic_fallback_targets: set[Path] = set()
 _non_atomic_fallback_targets_lock = threading.Lock()
 
@@ -199,7 +198,19 @@ class McpOAuthConfig(BaseModel):
     token_type_field: str = Field(default="token_type", description="Field name containing token type in token response")
     expires_in_field: str = Field(default="expires_in", description="Field name containing expiry (seconds) in token response")
     default_token_type: str = Field(default="Bearer", description="Default token type when missing in token response")
-    refresh_skew_seconds: int = Field(default=60, description="Refresh token this many seconds before expiry")
+    refresh_skew_seconds: int = Field(
+        default=60,
+        ge=0,
+        description="Refresh token this many seconds before expiry",
+    )
+
+    @field_validator("refresh_skew_seconds", mode="before")
+    @classmethod
+    def _reject_boolean_refresh_skew(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be an integer, not a boolean")
+        return value
+
     extra_token_params: dict[str, str] = Field(default_factory=dict, description="Additional form params sent to token endpoint")
     model_config = ConfigDict(extra="allow")
 
@@ -211,6 +222,7 @@ class McpServerConfig(BaseModel):
     type: str = Field(default="stdio", description="Transport type: 'stdio', 'sse', or 'http'")
     command: str | None = Field(default=None, description="Command to execute to start the MCP server (for stdio type)")
     args: list[str] = Field(default_factory=list, description="Arguments to pass to the command (for stdio type)")
+    cwd: str | None = Field(default=None, description="Working directory for the MCP server process (for stdio type)")
     env: dict[str, str] = Field(default_factory=dict, description="Environment variables for the MCP server")
     url: str | None = Field(default=None, description="URL of the MCP server (for sse or http type)")
     headers: dict[str, str] = Field(default_factory=dict, description="HTTP headers to send (for sse or http type)")
@@ -218,17 +230,6 @@ class McpServerConfig(BaseModel):
     user_auth: McpUserScopedAuthConfig | None = Field(
         default=None,
         description="Per-user credential injection (for sse or http type): map DeerFlow user ids to per-user credential header values",
-    )
-    credential_binding_id: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=256,
-        description=("Non-secret stable identity for the credential binding used by durable MCP tasks; credential material is never persisted in task lineage"),
-    )
-    credential_version: int = Field(
-        default=1,
-        ge=1,
-        description=("Operator-managed version for the durable MCP credential binding; increment when recovery must reject tasks created under an unavailable binding"),
     )
     headers_from_context: McpContextHeadersConfig | None = Field(
         default=None,
@@ -243,10 +244,14 @@ class McpServerConfig(BaseModel):
     )
     tool_call_timeout: float | None = Field(
         default=None,
+        gt=0,
+        allow_inf_nan=False,
         description=("Timeout in seconds for individual stdio MCP tool calls and durable-task calls on every transport. Other HTTP/SSE tools use transport-level timeouts. None means no call-level timeout."),
     )
     session_init_timeout: float | None = Field(
         default=DEFAULT_MCP_SESSION_INIT_TIMEOUT,
+        gt=0,
+        allow_inf_nan=False,
         description=(
             "Timeout in seconds for MCP server bring-up: tool discovery (subprocess spawn + initialize + tools/list) "
             "and persistent stdio session initialization, plus ephemeral HTTP/SSE durable-task session "
@@ -254,6 +259,14 @@ class McpServerConfig(BaseModel):
             "construction or the task poller indefinitely. None means no timeout."
         ),
     )
+
+    @field_validator("tool_call_timeout", "session_init_timeout", mode="before")
+    @classmethod
+    def _reject_boolean_mcp_timeouts(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
+
     task_toolsets: list[McpTaskToolsetConfig] = Field(
         default_factory=list,
         description="Ordinary submit/status/cancel tool groups managed by the durable MCP task runtime",
@@ -291,16 +304,6 @@ class McpServerConfig(BaseModel):
         """
         return normalize_mcp_transport_alias(data)
 
-    @field_validator("tools")
-    @classmethod
-    def _validate_tool_override_names(
-        cls,
-        value: dict[str, McpToolOverride],
-    ) -> dict[str, McpToolOverride]:
-        for tool_name in value:
-            validate_mcp_tool_identifier(tool_name, field_name="MCP tool override identifier")
-        return value
-
     @model_validator(mode="after")
     def _validate_task_tool_bindings(self) -> "McpServerConfig":
         claimed: dict[str, str] = {}
@@ -332,12 +335,76 @@ class SkillStateConfig(BaseModel):
     enabled: bool = Field(default=True, description="Whether this skill is enabled")
 
 
+def _coerce_json_kwargs_value(value: Any) -> Any:
+    """Keep JSON types; stringify YAML timestamps so they match JSON strings."""
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError(_JSON_KWARGS_ERROR)
+        return value
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        return value.isoformat()
+    if isinstance(value, dict):
+        if not all(isinstance(key, str) and key.strip() for key in value):
+            raise ValueError("middleware kwargs keys must be non-empty strings")
+        return {key: _coerce_json_kwargs_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_coerce_json_kwargs_value(item) for item in value]
+    raise ValueError(_JSON_KWARGS_ERROR)
+
+
+class ConfiguredMiddlewareSpec(BaseModel):
+    """One config-declared AgentMiddleware with optional constructor arguments."""
+
+    class_path: str = Field(
+        ...,
+        alias="class",
+        min_length=1,
+        description="AgentMiddleware class path in 'module.path:ClassName' form.",
+    )
+    kwargs: dict[str, Any] = Field(
+        default_factory=dict,
+        description=("Keyword arguments passed to the middleware constructor. Values must be JSON types (object, array, string, number, boolean, or null); YAML dates and timestamps are coerced to ISO strings so they match JSON."),
+    )
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    @field_validator("class_path")
+    @classmethod
+    def _strip_class_path(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("middleware class path must be a non-empty string")
+        return stripped
+
+    @field_validator("kwargs", mode="before")
+    @classmethod
+    def _kwargs_none_is_empty(cls, value: Any) -> Any:
+        return {} if value is None else value
+
+    @field_validator("kwargs")
+    @classmethod
+    def _kwargs_are_json_object(cls, value: dict[str, Any]) -> dict[str, Any]:
+        coerced = _coerce_json_kwargs_value(value)
+        json.dumps(coerced)
+        return coerced
+
+
 class ExtensionsConfig(BaseModel):
     """Unified configuration for MCP servers and skills."""
 
-    middlewares: list[str] = Field(
+    middlewares: list[str | ConfiguredMiddlewareSpec] = Field(
         default_factory=list,
-        description="AgentMiddleware class paths loaded into the lead-agent middleware chain. Each entry uses 'module.path:ClassName'.",
+        description=(
+            "AgentMiddleware entries loaded into the lead-agent and subagent middleware chains. "
+            "Each entry is a 'module.path:ClassName' string or an object with 'class' and optional "
+            "'kwargs'. kwargs values must be JSON types; YAML dates and timestamps are coerced to "
+            "ISO strings."
+        ),
     )
     mcp_servers: dict[str, McpServerConfig] = Field(
         default_factory=dict,
@@ -350,23 +417,19 @@ class ExtensionsConfig(BaseModel):
     )
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    @field_validator("mcp_servers")
+    @field_validator("middlewares")
     @classmethod
-    def _validate_mcp_server_names(
-        cls,
-        value: dict[str, McpServerConfig],
-    ) -> dict[str, McpServerConfig]:
-        for server_name, server in value.items():
-            validate_mcp_server_identifier(server_name)
-            if server.tool_name_prefix:
-                try:
-                    validate_mcp_tool_identifier(
-                        f"{server_name}_x",
-                        field_name="prefixed MCP callable name",
-                    )
-                except ValueError as exc:
-                    raise ValueError(f"MCP server {server_name!r} cannot prefix callable tool names. Rename the server to an ASCII tool identifier or set tool_name_prefix=false") from exc
-        return value
+    def _normalize_middleware_entries(cls, value: list[str | ConfiguredMiddlewareSpec]) -> list[str | ConfiguredMiddlewareSpec]:
+        normalized: list[str | ConfiguredMiddlewareSpec] = []
+        for entry in value:
+            if isinstance(entry, str):
+                stripped = entry.strip()
+                if not stripped:
+                    raise ValueError("middleware class path must be a non-empty string")
+                normalized.append(stripped)
+                continue
+            normalized.append(entry)
+        return normalized
 
     @model_validator(mode="after")
     def _validate_task_server_names_fit_storage(self) -> "ExtensionsConfig":
@@ -376,10 +439,6 @@ class ExtensionsConfig(BaseModel):
             if not server_name.strip() or len(server_name) > MCP_TASK_SERVER_NAME_MAX_LENGTH:
                 raise ValueError(f"MCP task server name must contain 1 to {MCP_TASK_SERVER_NAME_MAX_LENGTH} characters")
         return self
-
-    def to_file_dict(self) -> dict[str, Any]:
-        """Serialize in the public extensions_config.json shape."""
-        return self.model_dump(by_alias=True)
 
     @classmethod
     def resolve_config_path(cls, config_path: str | None = None) -> Path | None:
@@ -469,6 +528,9 @@ class ExtensionsConfig(BaseModel):
 
         Returns:
             ExtensionsConfig: The loaded config, or empty config if file not found.
+            Its ``$VAR`` strings are already resolved, so it must never be
+            serialized back to disk; writers use
+            :func:`read_raw_extensions_config` instead.
         """
         resolved_path = cls.resolve_config_path(config_path)
         if resolved_path is None:
@@ -476,7 +538,7 @@ class ExtensionsConfig(BaseModel):
             return cls(mcp_servers={}, skills={})
 
         try:
-            with open(resolved_path, encoding="utf-8") as f:
+            with open(resolved_path, encoding="utf-8-sig") as f:
                 config_data = json.load(f)
             config_data = cls.resolve_env_variables(config_data)
             return cls.model_validate(config_data)
@@ -659,6 +721,47 @@ def atomic_write_extensions_config(path: Path, data: dict[str, Any]) -> None:
                     temporary_path,
                     exc_info=True,
                 )
+
+
+def read_raw_extensions_config(path: Path) -> dict[str, Any]:
+    """Read the on-disk config object with ``$VAR`` placeholders left intact.
+
+    This is the only safe merge source for a read-modify-write.
+    ``ExtensionsConfig.from_file()`` resolves placeholders into live values and
+    unset variables into ``""``, so writing its model back would persist
+    secrets in plaintext and erase the references. Raises ``FileNotFoundError``
+    when *path* does not exist, and ``ValueError`` for a malformed document;
+    that message omits the path so API callers can surface it as-is.
+    """
+    try:
+        with open(path, encoding="utf-8-sig") as f:
+            raw_data = json.load(f)
+    except json.JSONDecodeError as e:
+        raise ValueError(f"Extensions configuration is not valid JSON: {e.msg} at line {e.lineno} column {e.colno}") from e
+    if not isinstance(raw_data, dict):
+        raise ValueError("Extensions configuration must be a JSON object")
+    return raw_data
+
+
+def validate_raw_extensions_config(raw_data: dict[str, Any]) -> ExtensionsConfig:
+    """Validate a raw write candidate exactly as the runtime will load it.
+
+    Resolution works on a copy, so *raw_data* keeps its placeholders and can be
+    written as-is once this returns.
+    """
+    return ExtensionsConfig.model_validate(ExtensionsConfig.resolve_env_variables(raw_data))
+
+
+def set_raw_skill_enabled(raw_data: dict[str, Any], skill_name: str, enabled: bool) -> None:
+    """Set one skill's enabled state in a raw config, leaving everything else as written."""
+    skills = raw_data.setdefault("skills", {})
+    if not isinstance(skills, dict):
+        raise ValueError("Extensions config `skills` must be a JSON object")
+    entry = skills.get(skill_name)
+    if isinstance(entry, dict):
+        entry["enabled"] = enabled
+    else:
+        skills[skill_name] = {"enabled": enabled}
 
 
 def get_extensions_config() -> ExtensionsConfig:

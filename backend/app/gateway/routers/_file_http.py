@@ -19,10 +19,10 @@ from pathlib import Path
 from fastapi import HTTPException, Request
 
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
-from app.gateway.routers.artifacts import ACTIVE_CONTENT_MIME_TYPES, is_text_file_by_content
 from deerflow.config.paths import make_safe_user_id
 from deerflow.files.store import StoreError
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.utils.text_detection import ACTIVE_CONTENT_MIME_TYPES, is_text_file_by_content
 
 __all__ = ["acting_user_id", "existing_regular_file", "response_plan"]
 

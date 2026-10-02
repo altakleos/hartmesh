@@ -5,7 +5,7 @@ This document is the **top-level architecture overview** for DeerFlow. It explai
 points to the module-level guides that own the depth:
 
 - Backend depth → [`backend/AGENTS.md`](../backend/AGENTS.md) and [`backend/docs/ARCHITECTURE.md`](../backend/docs/ARCHITECTURE.md)
-- Frontend depth → [`frontend-hm/AGENTS.md`](../frontend-hm/AGENTS.md)
+- Frontend depth → [`frontend/AGENTS.md`](../frontend/AGENTS.md)
 
 DeerFlow 2.0 is a ground-up rewrite of the original Deep Research framework (see
 [`README.md`](../README.md)); it shares no code with v1.
@@ -87,14 +87,6 @@ SSE streaming carries both per-chunk messages and bounded `values` snapshots; wi
 LangGraph Platform style) rather than impersonating root frames, so SDK clients don't lose
 the parent thread view.
 
-Durable admission also seals a canonical `ExecutionBudgetV1`. The worker restores
-and advances a compact policy projection through the run ownership fence, while
-the pure evaluator decides bounded warnings/stops from normalized observations.
-Private repeated-tool equality uses startup-frozen HMAC keys and never enters
-events or browser contracts. The authorized run-evidence endpoint separately
-aggregates bounded public facts for the frontend; trace IDs and UI state remain
-correlation/display aids, never policy or authorization inputs.
-
 ### State, tools, sandbox
 
 - **`ThreadState`** extends LangGraph's `AgentState` with `sandbox`, `artifacts`,
@@ -120,18 +112,17 @@ The frontend is a **stateful chat app**: users create **threads** (conversations
 messages, set thread-scoped `/goal` completion conditions, and receive streamed responses.
 The backend may produce **artifacts** (files/code), **todos**, and goal-state updates.
 
-**Source layout** (`frontend-hm/src/`):
+**Source layout** (`frontend/src/`):
 - `app/` — App Router routes: `/workspace/chats/[thread_id]` (authenticated chat),
-  `/workspace/agents/[agent_name]` (custom agents), `/` (a redirect to the workspace),
-  `/api/*` route handlers, `(auth)/{login,setup,auth/callback}`.
+  `/workspace/agents/[agent_name]` (custom agents), `/showcase/[thread_id]` (allowlisted
+  public read-only demos), `/api/*` route handlers, `(auth)/{login,setup,auth/callback}`.
 - `core/` — the business-logic heart. Domains: `threads/` (creation, streaming, state),
-  `api/` (LangGraph client singleton), `evidence/` (versioned bounded run evidence),
-  `agents/`, `auth/`, `artifacts/`, `channels/`,
+  `api/` (LangGraph client singleton), `agents/`, `auth/`, `artifacts/`, `channels/`,
   `integrations/`, `memory/`, `skills/`, `mcp/`, `models/`, `tasks/`, `todos/`, `tools/`,
   `workspace-changes/`, `config/`, `i18n/` (en-US, zh-CN), and more.
-- `components/` — `workspace/` (chat); `ui/` and `ai-elements/` are
+- `components/` — `workspace/` (chat), `landing/`, `docs/`; `ui/` and `ai-elements/` are
   registry-generated (Shadcn / Vercel AI SDK) and must not be hand-edited.
-- `hooks/`, `lib/` (`cn()`), `styles/`.
+- `hooks/`, `lib/` (`cn()`), `content/` (MDX), `styles/`.
 
 **Streaming data flow**: `core/threads/` subscribes to the LangGraph run stream via the
 `core/api/` client singleton, normalizes SSE events (messages, `values`, `task_*`,
@@ -158,29 +149,16 @@ These span both layers and require reading multiple files to understand:
   integration packs are global at `.deer-flow/integrations/skills/{provider}/`. Skills are
   discovered/loaded lazily by the harness; `skills/public/skill-reviewer/` is a read-only
   quality reviewer using the harness `review_skill_package` tool.
-- **Artifact delivery** — a turn that created or changed files under a conversation's
-  outputs directory hands them over: the model curates with `present_files` or a
-  producing call's `present` argument, and whatever it leaves out the runtime presents
-  at the end of the turn (`RuntimeDeliveryMiddleware`), tagging the final assistant
-  message so the files appear with the answer. The delivery fence remains as the
-  invariant behind that, failing a run only when the runtime could not hand over — a
-  failed outputs scan, or a turn that interrupts before the hook runs.
 - **Sub-agents** — background delegation via `SubagentExecutor` (server-side `execution_id`)
   correlated to provider `tool_call_id` for `ToolMessage`/SSE/lifecycle/persistence. Scheduled
   tasks reuse the *same* Gateway run lifecycle (scheduler decides *when*, not *how*).
 - **Scheduled tasks** — workspace page `/workspace/scheduled-tasks` + a background scheduler
   gated by `config.yaml → scheduler.enabled`; non-interactive runs drop `ask_clarification`
-  and client-supplied `non_interactive`. A task row carries its own status and next run time
-  and cannot say whether anything is polling for it, so `GET /api/scheduler` answers that
-  separately: `running` from the live service, `configured` from the (hot-reloadable) file,
-  and a `reason` when they differ. The page shows it as a banner and marks a next run that
-  has already passed. It is a read — opening the page never starts anything. There is no
-  misfire grace: when a scheduler starts, each enabled schedule that is already overdue runs
-  once, oldest first, one at a time under `scheduler.max_concurrent_runs`.
+  and client-supplied `non_interactive` (see the run-context trust boundary in §6).
 - **Long-running MCP** — a durable `McpTaskService` (leased rows, DB as source of truth)
   keeps remote task IDs/polling out of the agent loop.
 - **Version sources** — a release version must match in `backend/pyproject.toml`,
-  `frontend-hm/package.json`, and `deploy/helm/deer-flow/Chart.yaml` (`version` + `appVersion`);
+  `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml` (`version` + `appVersion`);
   pushing a `v*` tag triggers CI that runs `scripts/verify_versions.sh` and blocks all
   publishing on drift. See [`RELEASING.md`](../RELEASING.md).
 
@@ -194,6 +172,12 @@ These span both layers and require reading multiple files to understand:
   sandbox is dev-only direct execution.
 - **MCP isolation**: each MCP server runs in its own process with runtime env-var
   resolution; servers toggle independently.
+- **Run-context trust boundary**: run context reaches the agent from two client-writable
+  surfaces — `body.context` and the free-form `body.config` — so every server-produced key
+  is gated on both. `non_interactive`, `disable_clarification`, and `github_token` are
+  honored only for internally-authenticated callers (the scheduler and IM/webhook channel
+  policies) and scrubbed from a non-internal caller's config; identity and sandbox
+  lifecycle fields are cleared unconditionally and restamped from auth state.
 - **Loopback-by-default ingress**: nginx is the only published surface; the Gateway's `8001`
   is container-internal and never published. A bare `"${PORT}:2026"` bind (0.0.0.0) is
   rejected by convention and CI. See the Security Notice in [`README.md`](../README.md) before
@@ -205,7 +189,7 @@ These span both layers and require reading multiple files to understand:
 
 - System topology & component depth → [`backend/docs/ARCHITECTURE.md`](../backend/docs/ARCHITECTURE.md)
 - Backend commands, TDD, harness/app boundary, config reload → [`backend/AGENTS.md`](../backend/AGENTS.md)
-- Frontend commands, source layout, streaming data flow → [`frontend-hm/AGENTS.md`](../frontend-hm/AGENTS.md)
+- Frontend commands, source layout, streaming data flow → [`frontend/AGENTS.md`](../frontend/AGENTS.md)
 - Setup & install → [`Install.md`](../Install.md), [`CONTRIBUTING.md`](../CONTRIBUTING.md)
 - Release process → [`RELEASING.md`](../RELEASING.md)
 - User-facing features & deployment sizing → [`README.md`](../README.md)

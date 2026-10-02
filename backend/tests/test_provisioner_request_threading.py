@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import threading
 import time
 from contextlib import contextmanager
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import httpx
 import pytest
+import requests
 from blockbuster import BlockBuster
 from kubernetes.client.rest import ApiException
 
@@ -48,6 +51,194 @@ def test_provisioner_request_defaults_skills_container_path(provisioner_module) 
     )
 
     assert request.skills_container_path == "/mnt/skills"
+    assert request.max_shell_sessions is None
+
+
+def test_provisioner_threads_shell_capacity_into_sandbox_pod(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(
+        event_loop_thread_id=-1,
+        ready_after_service_reads={"sandbox-capacity": 1},
+    )
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    response = provisioner_module.create_sandbox(
+        provisioner_module.CreateSandboxRequest(
+            sandbox_id="sandbox-capacity",
+            thread_id="thread-1",
+            max_shell_sessions=13,
+        )
+    )
+
+    assert response.status == "Running"
+    pod = fake_core_v1.created_pod_specs["sandbox-capacity"]
+    env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+    assert env["MAX_SHELL_SESSIONS"] == "13"
+
+
+def test_provisioner_rejects_insufficient_capacity_without_replacing_existing_pod(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(
+            provisioner_module.CreateSandboxRequest(
+                sandbox_id="sandbox-existing",
+                thread_id="thread-1",
+                max_shell_sessions=13,
+            )
+        )
+
+    assert error.value.status_code == 409
+    assert "capacity" in error.value.detail
+    assert fake_core_v1.created_pods == []
+    assert fake_core_v1.pod_shell_capacities["sandbox-existing"] == 10
+    assert "sandbox-existing" in fake_core_v1.service_sandboxes
+
+
+def test_capacity_replacement_recovers_when_service_outlives_old_pod(monkeypatch, provisioner_module):
+    """A create racing asynchronous deletion can leave a Service without a Pod."""
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    core.pod_shell_capacities.pop("sandbox-existing")
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+
+    def existing_service(*_args):
+        raise ApiException(status=409)
+
+    monkeypatch.setattr(core, "create_namespaced_service", existing_service)
+    result = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing", thread_id="thread-a", max_shell_sessions=13))
+    assert result.max_shell_sessions == 13
+    assert core.created_pods == ["sandbox-existing"]
+    assert "sandbox-existing" in core.service_sandboxes
+
+
+@pytest.mark.parametrize("failure", [ApiException(status=403), ApiException(status=503), RuntimeError("invalid persisted capacity")])
+def test_capacity_read_failure_does_not_authorize_creation(monkeypatch, provisioner_module, failure):
+    core = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    monkeypatch.setattr(provisioner_module, "_get_pod_shell_capacity", MagicMock(side_effect=failure))
+
+    with pytest.raises(provisioner_module.HTTPException) as error:
+        provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(sandbox_id="sandbox-existing", max_shell_sessions=13))
+
+    assert error.value.status_code == 500
+    assert core.created_pods == []
+    assert core.pod_shell_capacities["sandbox-existing"] == 10
+    assert "sandbox-existing" in core.service_sandboxes
+
+
+def test_list_sandboxes_skips_invalid_capacity_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+    provisioner_module,
+) -> None:
+    fake_core_v1 = _RecordingCoreV1(event_loop_thread_id=-1)
+    monkeypatch.setattr(provisioner_module, "core_v1", fake_core_v1)
+
+    def invalid_capacity(_sandbox_id: str) -> int:
+        raise RuntimeError("invalid capacity")
+
+    monkeypatch.setattr(
+        provisioner_module,
+        "_get_pod_shell_capacity",
+        invalid_capacity,
+    )
+
+    response = provisioner_module.list_sandboxes()
+
+    assert response == {"sandboxes": [], "count": 0}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("async_acquire", [False, True], ids=["sync", "async"])
+async def test_capacity_upgrade_preserves_peer_pod_after_discovery_error(monkeypatch, tmp_path, provisioner_module, async_acquire):
+    """Discovery failure must not bypass ownership; a later safe retry replaces."""
+    from test_sandbox_orphan_reconciliation import _make_provider_for_reconciliation, _make_shared_ownership_store
+
+    from deerflow.community.aio_sandbox import aio_sandbox_provider as provider_mod
+    from deerflow.community.aio_sandbox import remote_backend as remote_mod
+    from deerflow.community.aio_sandbox.ownership import compute_lease_ttl
+    from deerflow.config.paths import Paths
+
+    shared = _make_shared_ownership_store()
+    old = _make_provider_for_reconciliation(worker_id="old-gateway", store=shared)
+    new = _make_provider_for_reconciliation(worker_id="new-gateway", store=shared)
+    sid = "sandbox-existing"
+    old._publish_ownership(sid)
+    new._backend = remote_mod.RemoteSandboxBackend("http://provisioner:8002", max_shell_sessions=13)
+    core = _RecordingCoreV1(event_loop_thread_id=threading.get_ident())
+    monkeypatch.setattr(provisioner_module, "core_v1", core)
+    deleted_under_lease = []
+    discovery_failed = False
+
+    def response(status, payload):
+        result = requests.Response()
+        result.status_code = status
+        result._content = json.dumps(payload).encode()
+        return result
+
+    def get(_url, **_kwargs):
+        nonlocal discovery_failed
+        if not discovery_failed:
+            discovery_failed = True
+            return response(503, {"detail": "temporarily unavailable"})
+        return response(200, provisioner_module.get_sandbox(sid).model_dump())
+
+    def post(_url, *, json, **_kwargs):
+        try:
+            result = provisioner_module.create_sandbox(provisioner_module.CreateSandboxRequest(**json))
+        except provisioner_module.HTTPException as exc:
+            return response(exc.status_code, {"detail": exc.detail})
+        return response(200, result.model_dump())
+
+    def delete(_url, **_kwargs):
+        deleted_under_lease.append((shared.owner(sid), old._ownership.claim(sid)))
+        return response(200, provisioner_module.destroy_sandbox(sid))
+
+    monkeypatch.setattr(requests, "get", get)
+    monkeypatch.setattr(requests, "post", post)
+    monkeypatch.setattr(requests, "delete", delete)
+    monkeypatch.setattr(remote_mod, "user_should_see_legacy_skills", lambda _uid: False)
+    monkeypatch.setattr(provider_mod, "get_paths", lambda: Paths(base_dir=tmp_path))
+    monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready", lambda *_a, **_kw: True)
+    monkeypatch.setattr(provider_mod, "wait_for_sandbox_ready_async", AsyncMock(return_value=True))
+    monkeypatch.setattr(provider_mod, "AioSandbox", MagicMock())
+    monkeypatch.setattr(new, "_get_extra_mounts", lambda *_a, **_kw: [])
+    monkeypatch.setattr(new, "_lark_integration_active", lambda *_a: False)
+    monkeypatch.setattr(new, "_lark_broker_active", lambda *_a: False)
+
+    async def acquire():
+        if async_acquire:
+            return await new._discover_or_create_with_lock_async("thread-a", sid, user_id="user-a")
+        return await asyncio.to_thread(new._discover_or_create_with_lock, "thread-a", sid, user_id="user-a")
+
+    try:
+        with pytest.raises(RuntimeError, match="409"):
+            await acquire()
+        assert core.pod_shell_capacities[sid] == 10
+        assert core.created_pods == []
+        assert sid in core.service_sandboxes
+        assert shared.owner(sid) == "old-gateway"
+
+        with pytest.raises(provider_mod.SandboxPolicyReplacementDeferredError):
+            await acquire()
+        old._ownership.release(sid)
+        with pytest.raises(provider_mod.SandboxPolicyReplacementDeferredError):
+            await acquire()
+        assert deleted_under_lease == []
+
+        new._unowned_since[sid] = time.time() - compute_lease_ttl(new._ownership_config) - 1
+        assert await acquire() == sid
+        assert deleted_under_lease == [("new-gateway", False)]
+        assert core.created_pods == [sid]
+        assert core.pod_shell_capacities[sid] == 13
+        assert shared.owner(sid) == "new-gateway"
+    finally:
+        old._acquire_serializer.close()
+        new._acquire_serializer.close()
 
 
 class _RecordingCoreV1:
@@ -61,6 +252,10 @@ class _RecordingCoreV1:
         self.event_loop_thread_id = event_loop_thread_id
         self.thread_ids: list[int] = []
         self.service_sandboxes: set[str] = {"sandbox-existing"}
+        self.pod_shell_capacities: dict[str, int] = {
+            "sandbox-existing": 10,
+            "sandbox-listed": 10,
+        }
         self.ready_after_service_reads = ready_after_service_reads or {}
         self.service_read_failures = service_read_failures or {}
         self.service_read_counts: dict[str, int] = {}
@@ -94,13 +289,29 @@ class _RecordingCoreV1:
 
     def read_namespaced_pod(self, _name: str, _namespace: str):
         self._record_k8s_call()
-        return SimpleNamespace(status=SimpleNamespace(phase="Running"))
+        sandbox_id = _name[len("sandbox-") :]
+        capacity = self.pod_shell_capacities.get(sandbox_id)
+        if capacity is None:
+            raise ApiException(status=404)
+        return SimpleNamespace(
+            status=SimpleNamespace(phase="Running"),
+            spec=SimpleNamespace(
+                containers=[
+                    SimpleNamespace(
+                        name="sandbox",
+                        env=[SimpleNamespace(name="MAX_SHELL_SESSIONS", value=str(capacity))],
+                    )
+                ]
+            ),
+        )
 
     def create_namespaced_pod(self, _namespace: str, pod) -> None:
         self._record_k8s_call()
         sandbox_id = pod.metadata.labels["sandbox-id"]
         self.created_pods.append(sandbox_id)
         self.created_pod_specs[sandbox_id] = pod
+        env = {item.name: item.value for item in (pod.spec.containers[0].env or [])}
+        self.pod_shell_capacities[sandbox_id] = int(env.get("MAX_SHELL_SESSIONS", "10"))
 
     def create_namespaced_service(self, _namespace: str, service) -> None:
         self._record_k8s_call()
@@ -110,9 +321,11 @@ class _RecordingCoreV1:
 
     def delete_namespaced_service(self, _name: str, _namespace: str) -> None:
         self._record_k8s_call()
+        self.service_sandboxes.discard(_sandbox_id_from_service_name(_name))
 
     def delete_namespaced_pod(self, _name: str, _namespace: str) -> None:
         self._record_k8s_call()
+        self.pod_shell_capacities.pop(_name[len("sandbox-") :], None)
 
     def list_namespaced_service(self, _namespace: str, *, label_selector: str):
         self._record_k8s_call()
@@ -345,6 +558,10 @@ async def test_auth_middleware(monkeypatch: pytest.MonkeyPatch, provisioner_modu
         r = await client.get("/api/sandboxes", headers={"X-API-Key": "wrong-key"})
         assert r.status_code == 401
 
+        # /api/* with a non-ASCII key → 401, not a TypeError from compare_digest
+        r = await client.get("/api/sandboxes", headers={"X-API-Key": "test-secr\xe9t".encode("latin-1")})
+        assert r.status_code == 401
+
         # /api/* with correct key → not 401 (auth passed; handler runs with the K8s mock)
         r = await client.get("/api/sandboxes", headers={"X-API-Key": "test-secret"})
         assert r.status_code != 401
@@ -369,181 +586,3 @@ async def test_auth_middleware_unset_key(monkeypatch: pytest.MonkeyPatch, provis
 
         r = await client.get("/api/sandboxes", headers={"X-API-Key": "anything"})
         assert r.status_code == 401
-
-
-@pytest.mark.asyncio
-async def test_auth_middleware_accepts_only_bound_gateway_service_account_token(
-    monkeypatch: pytest.MonkeyPatch,
-    provisioner_module,
-) -> None:
-    monkeypatch.setattr(provisioner_module, "PROVISIONER_API_KEY", "")
-    monkeypatch.setattr(
-        provisioner_module,
-        "PROVISIONER_AUTH_AUDIENCE",
-        "hartmesh-provisioner",
-    )
-    monkeypatch.setattr(
-        provisioner_module,
-        "PROVISIONER_GATEWAY_NAMESPACE",
-        "runtime",
-    )
-    monkeypatch.setattr(
-        provisioner_module,
-        "PROVISIONER_GATEWAY_SERVICE_ACCOUNT",
-        "gateway",
-    )
-    monkeypatch.setattr(
-        provisioner_module,
-        "ACCEPTED_SKILL_PROJECTION_PROFILE",
-        "rwx_verified_copy_v2",
-    )
-    monkeypatch.setattr(
-        provisioner_module,
-        "SANDBOX_VOLUME_CONFIG",
-        SimpleNamespace(mode="pvc"),
-    )
-    monkeypatch.setattr(provisioner_module, "SKILLS_PVC_NAME", "skills")
-    monkeypatch.setattr(provisioner_module, "USERDATA_PVC_NAME", "userdata")
-    monkeypatch.setattr(
-        provisioner_module,
-        "SANDBOX_IMAGE",
-        "registry.example/sandbox@sha256:" + "a" * 64,
-    )
-    monkeypatch.setattr(
-        provisioner_module,
-        "ACCEPTED_SKILL_RUNTIME_IMAGE",
-        "registry.example/verifier@sha256:" + "b" * 64,
-    )
-    monkeypatch.setattr(provisioner_module, "SANDBOX_RUNTIME_CLASS", "")
-
-    class Core:
-        def read_namespace(self, name: str):
-            assert name == provisioner_module.K8S_NAMESPACE
-            return SimpleNamespace(
-                metadata=SimpleNamespace(uid="namespace-uid", labels={}),
-            )
-
-        def read_namespaced_persistent_volume_claim(
-            self,
-            name: str,
-            namespace: str,
-        ):
-            assert namespace == provisioner_module.K8S_NAMESPACE
-            return SimpleNamespace(
-                metadata=SimpleNamespace(uid=f"{name}-uid"),
-                spec=SimpleNamespace(
-                    volume_name=f"{name}-volume",
-                    storage_class_name="rwx-storage",
-                    access_modes=["ReadWriteMany"],
-                ),
-                status=SimpleNamespace(phase="Bound"),
-            )
-
-    monkeypatch.setattr(provisioner_module, "core_v1", Core())
-    reviewed: list[object] = []
-
-    class Authentication:
-        def create_token_review(self, body, *, _request_timeout: int):
-            reviewed.append(body)
-            assert _request_timeout == 2
-            assert body.spec.audiences == ["hartmesh-provisioner"]
-            return SimpleNamespace(
-                status=SimpleNamespace(
-                    authenticated=True,
-                    audiences=["hartmesh-provisioner"],
-                    user=SimpleNamespace(
-                        username="system:serviceaccount:runtime:gateway",
-                    ),
-                ),
-            )
-
-    monkeypatch.setattr(
-        provisioner_module,
-        "authentication_v1",
-        Authentication(),
-    )
-    transport = httpx.ASGITransport(app=provisioner_module.app)
-    async with httpx.AsyncClient(
-        transport=transport,
-        base_url="http://testserver",
-    ) as client:
-        response = await client.get(
-            "/api/capabilities",
-            headers={"Authorization": "Bearer projected-token"},
-        )
-        assert response.status_code == 200
-        assert response.json()["accepted_skill_projection"] == {
-            "profile": "rwx_verified_copy_v2",
-            "sandbox_image_digest": "a" * 64,
-            "accepted_skill_runtime_image_digest": "b" * 64,
-            "runtime_topology": {
-                "version": 1,
-                "provider_kind": "aio_kubernetes",
-                "profile": "rwx_verified_copy_v2",
-                "sandbox_image_digest": "a" * 64,
-                "verifier_image_digest": "b" * 64,
-                "namespace_uid": "namespace-uid",
-                "pod_security_enforce": None,
-                "pod_security_warn": None,
-                "pod_security_audit": None,
-                "runtime_class": None,
-                "gateway_namespace": "runtime",
-                "gateway_service_account": "gateway",
-                "token_review_audience": "hartmesh-provisioner",
-                "accepted_attempt_lease_seconds": 120,
-                "accepted_attempt_reconcile_interval_seconds": 30,
-                "accepted_attempt_reconcile_limit": 100,
-                "volumes": [
-                    {
-                        "role": "skills",
-                        "uid": "skills-uid",
-                        "volume_name": "skills-volume",
-                        "storage_class": "rwx-storage",
-                        "access_modes": ["ReadWriteMany"],
-                    },
-                    {
-                        "role": "userdata",
-                        "uid": "userdata-uid",
-                        "volume_name": "userdata-volume",
-                        "storage_class": "rwx-storage",
-                        "access_modes": ["ReadWriteMany"],
-                    },
-                ],
-            },
-        }
-        response = await client.get(
-            "/api/capabilities",
-            headers={"Authorization": "Bearer "},
-        )
-        assert response.status_code == 401
-
-    assert len(reviewed) == 1
-
-
-def test_accepted_sandbox_topology_rejects_an_unbound_claim(
-    monkeypatch: pytest.MonkeyPatch,
-    provisioner_module,
-) -> None:
-    class Core:
-        def read_namespaced_persistent_volume_claim(
-            self,
-            _name: str,
-            _namespace: str,
-        ):
-            return SimpleNamespace(
-                metadata=SimpleNamespace(uid="claim-uid"),
-                spec=SimpleNamespace(
-                    volume_name="bound-volume-name",
-                    storage_class_name="rwx-storage",
-                    access_modes=["ReadWriteMany"],
-                ),
-                status=SimpleNamespace(phase="Pending"),
-            )
-
-    monkeypatch.setattr(provisioner_module, "core_v1", Core())
-
-    with pytest.raises(RuntimeError, match="accepted_sandbox_topology_invalid"):
-        provisioner_module._accepted_sandbox_pvc_topology(
-            "skills",
-            "skills-claim",
-        )

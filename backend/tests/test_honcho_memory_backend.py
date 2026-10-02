@@ -7,11 +7,13 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+import yaml
 
 from deerflow.agents.memory.backends.honcho.client import HonchoClient, HonchoRequestError
 from deerflow.agents.memory.backends.honcho.config import HonchoConfig, sanitize_id
 from deerflow.agents.memory.backends.honcho.honcho_manager import HonchoMemoryManager, _stable_id
-from deerflow.agents.memory.manager import MemoryManagerError
+from deerflow.agents.memory.manager import MemoryManagerError, MemoryReadError
+from deerflow.config.app_config import AppConfig
 
 
 class TestHonchoConfig:
@@ -55,19 +57,109 @@ class TestHonchoConfig:
         cfg = HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "api_key": "sk-x", "allow_insecure_http": True})
         assert cfg.api_key == "sk-x"
 
-    def test_http_opt_in_requires_a_literal_boolean(self):
+    def test_allow_insecure_http_false_keeps_the_guard(self):
+        """An explicit ``False`` must not read as an opt-in."""
         with pytest.raises(ValueError, match="allow_insecure_http"):
-            HonchoConfig.from_backend_config(
+            HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "api_key": "sk-x", "allow_insecure_http": False})
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("false", False),
+            ("f", False),
+            ("F", False),
+            ("n", False),
+            ("no", False),
+            ("off", False),
+            ("0", False),
+            ("FALSE", False),
+            ("true", True),
+            ("t", True),
+            ("T", True),
+            ("y", True),
+            ("Y", True),
+            ("yes", True),
+            ("on", True),
+            ("1", True),
+        ],
+    )
+    def test_allow_insecure_http_from_environment(self, monkeypatch, tmp_path, value, expected):
+        """``$VAR`` substitution yields the raw environment string, so the knob
+        must be validated as a boolean: string truthiness turns ``"false"`` into
+        ``True`` and silently sends the API key over plaintext HTTP. The
+        accepted literals are Pydantic's boolean vocabulary, so the documented
+        list is pinned here rather than in prose only."""
+        monkeypatch.setenv("TEST_HONCHO_ALLOW_INSECURE", value)
+        config_path = tmp_path / "config.yaml"
+        config_path.write_text(
+            yaml.safe_dump(
                 {
-                    "base_url": "http://internal:8000",
-                    "api_key": "sk-x",
-                    "allow_insecure_http": "true",
+                    "models": [],
+                    "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+                    "memory": {
+                        "backend_config": {
+                            "base_url": "http://internal:8000",
+                            "api_key": "sk-x",
+                            "allow_insecure_http": "$TEST_HONCHO_ALLOW_INSECURE",
+                        }
+                    },
                 }
-            )
+            ),
+            encoding="utf-8",
+        )
+
+        config = AppConfig.from_file(config_path)
+        backend_config = config.memory.backend_config
+        assert backend_config["allow_insecure_http"] == value
+
+        if expected:
+            assert HonchoConfig.from_backend_config(backend_config).allow_insecure_http is True
+        else:
+            # The opt-in stays off, so the plaintext-http key guard still fires.
+            with pytest.raises(ValueError, match="allow_insecure_http"):
+                HonchoConfig.from_backend_config(backend_config)
+
+    @pytest.mark.parametrize("value", ["not-a-boolean", "2", "", [], "tru"])
+    def test_allow_insecure_http_rejects_a_non_boolean(self, value):
+        with pytest.raises(ValueError, match="allow_insecure_http must be a boolean"):
+            HonchoConfig.from_backend_config({"base_url": "http://internal:8000", "allow_insecure_http": value})
 
     def test_http_without_api_key_is_fine(self):
         cfg = HonchoConfig.from_backend_config({"base_url": "http://host.docker.internal:8000"})
         assert cfg.api_key is None
+
+    @pytest.mark.parametrize("value", ["localhost:8000", "honcho.internal", "not a url", "", "ftp://localhost:8000", "http://", "http://:8000", "https://:8000", 12345])
+    def test_malformed_base_url_rejected_as_config_error(self, value):
+        with pytest.raises(ValueError, match="base_url must be an absolute"):
+            HonchoConfig.from_backend_config({"base_url": value})
+
+    @pytest.mark.parametrize("value", ["localhost:8000", "http://", "http://:8000", "ftp://localhost:8000"])
+    def test_direct_construction_hits_the_same_guard(self, value):
+        """The guard sits in ``__post_init__`` exactly so this path is covered: a
+        caller that builds ``HonchoConfig`` without ``from_backend_config`` must
+        not end up with a base_url httpx can never resolve."""
+        with pytest.raises(ValueError, match="base_url must be an absolute"):
+            HonchoConfig(base_url=value)
+
+    @pytest.mark.parametrize("value", ["HTTP://internal:8000", "HtTp://internal:8000", "http://internal:8000"])
+    def test_http_scheme_case_does_not_bypass_the_insecure_key_guard(self, value):
+        """``urlsplit`` lowercases the scheme and httpx sends such a URL over plain
+        HTTP, so the api_key guard has to read the parsed scheme rather than a
+        case-sensitive ``http://`` prefix."""
+        with pytest.raises(ValueError, match="allow_insecure_http"):
+            HonchoConfig.from_backend_config({"base_url": value, "api_key": "sk-x"})
+        cfg = HonchoConfig.from_backend_config(
+            {"base_url": value, "api_key": "sk-x", "allow_insecure_http": True},
+        )
+        assert cfg.api_key == "sk-x"
+
+    @pytest.mark.parametrize("value", ["http://localhost:8000", "https://api.honcho.dev", "http://host.docker.internal:8000", "https://honcho.internal:8443"])
+    def test_absolute_base_urls_still_accepted(self, value):
+        assert HonchoConfig.from_backend_config({"base_url": f"{value}/"}).base_url == value
+
+    def test_manager_from_config_fails_fast_on_malformed_base_url(self):
+        with pytest.raises(ValueError, match="base_url must be an absolute"):
+            HonchoMemoryManager.from_config({"base_url": "localhost:8000"})
 
     def test_empty_override_values_rejected(self):
         """An override entry with an empty/null value is a config mistake: silently
@@ -81,10 +173,70 @@ class TestHonchoConfig:
         with pytest.raises(ValueError, match="user_peer_overrides"):
             HonchoConfig.from_backend_config({"user_peer_overrides": {"bob": "  "}})
 
-    @pytest.mark.parametrize("value", [[], "", False])
-    def test_override_containers_must_be_mappings_even_when_empty(self, value):
-        with pytest.raises(ValueError, match="workspace_overrides"):
-            HonchoConfig.from_backend_config({"workspace_overrides": value})
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            pytest.param("failure_policy", "fail_closed", id="policy-string"),
+            pytest.param("failure_policy", ["fail_closed"], id="policy-list"),
+            pytest.param("workspace_overrides", "shared", id="overrides-string"),
+            pytest.param("workspace_overrides", ["alice"], id="overrides-list"),
+            pytest.param("user_peer_overrides", 5, id="peer-overrides-int"),
+        ],
+    )
+    def test_non_mapping_nested_values_rejected_as_config_error(self, key, value):
+        """A truthy non-mapping is the operator's mistake, not an internal error:
+        mem0 and OpenViking raise ValueError for these same keys, so Honcho must
+        name the offending key instead of surfacing ``AttributeError`` from a
+        ``.get``/``.items`` call inside backend construction."""
+        with pytest.raises(ValueError, match=f"{key} must be a mapping"):
+            HonchoConfig.from_backend_config({key: value})
+
+    @pytest.mark.parametrize("key", ["failure_policy", "workspace_overrides", "user_peer_overrides"])
+    @pytest.mark.parametrize("value", [None, "", [], {}])
+    def test_empty_nested_values_still_mean_unset(self, key, value):
+        cfg = HonchoConfig.from_backend_config({key: value})
+        assert cfg.read_fail_closed is False
+        assert cfg.workspace_overrides == {}
+        assert cfg.user_peer_overrides == {}
+
+    @pytest.mark.parametrize(
+        ("key", "value"),
+        [
+            pytest.param("timeout_seconds", ["slow"], id="timeout-list"),
+            pytest.param("timeout_seconds", "slow", id="timeout-text"),
+            pytest.param("connect_timeout_seconds", {"seconds": 5}, id="connect-timeout-mapping"),
+            pytest.param("message_char_limit", "wide", id="message-limit-text"),
+            pytest.param("max_injection_chars", ["1000"], id="injection-limit-list"),
+        ],
+    )
+    def test_unusable_numeric_values_rejected_as_config_error(self, key, value):
+        """``float([...])`` and ``int("wide")`` raise a TypeError that names neither
+        the knob nor the config file, so a mistyped scalar reaches the operator as
+        an internal traceback — the same symptom as the nested values above, one
+        block below them."""
+        with pytest.raises(ValueError, match=f"{key} must be a number"):
+            HonchoConfig.from_backend_config({key: value})
+
+    @pytest.mark.parametrize(
+        ("key", "default"),
+        [
+            ("timeout_seconds", 10.0),
+            ("connect_timeout_seconds", 3.0),
+            ("message_char_limit", 8000),
+            ("max_injection_chars", 6000),
+        ],
+    )
+    @pytest.mark.parametrize("value", [None, "", "  "])
+    def test_empty_numeric_values_still_mean_unset(self, key, default, value):
+        cfg = HonchoConfig.from_backend_config({key: value})
+        assert getattr(cfg, key) == default
+
+    @pytest.mark.parametrize(("key", "value", "expected"), [("timeout_seconds", "2.5", 2.5), ("message_char_limit", "120", 120)])
+    def test_numeric_strings_still_accepted(self, key, value, expected):
+        """float()/int() already accept numeric strings, so a quoted YAML scalar
+        must keep working; the guard is only for values that cannot be cast."""
+        cfg = HonchoConfig.from_backend_config({key: value})
+        assert getattr(cfg, key) == expected
 
     @pytest.mark.parametrize(
         ("key", "value"),
@@ -106,7 +258,7 @@ class TestHonchoConfig:
             HonchoConfig.from_backend_config({key: value})
 
     @pytest.mark.parametrize("key", ["message_char_limit", "max_injection_chars"])
-    @pytest.mark.parametrize("value", [0, -1, 100_001])
+    @pytest.mark.parametrize("value", [0, -1])
     def test_rejects_non_positive_character_limits(self, key, value):
         with pytest.raises(ValueError, match=key):
             HonchoConfig.from_backend_config({key: value})
@@ -340,19 +492,6 @@ class TestHonchoManagerWrite:
         sent = [c for c in fake.calls if c[0] == "messages"][0][1][2][0][1]
         assert len(sent) == 10
 
-    def test_add_bounds_the_message_batch(self):
-        mgr, fake = _manager()
-        mgr.add(
-            "t-bounded",
-            [_msg("human", f"message-{index}") for index in range(150)],
-            user_id="u1",
-        )
-
-        sent = [call for call in fake.calls if call[0] == "messages"][0][1][2]
-        assert len(sent) == 100
-        assert sent[0][1] == "message-50"
-        assert sent[-1][1] == "message-149"
-
     def test_from_config_rejects_negative_message_char_limit(self):
         """add() uses ``text[:message_char_limit]``. A negative limit is a
         Python negative slice (``text[:-1]``), which deletes a suffix instead
@@ -413,7 +552,8 @@ class TestHonchoManagerRead:
     def test_get_context_fail_closed_raises_contract_error(self):
         mgr, fake = _manager(failure_policy={"read": "fail_closed"})
         fake.raise_on = "representation"
-        with pytest.raises(MemoryManagerError):
+        assert mgr.read_failures_are_fatal is True
+        with pytest.raises(MemoryReadError):
             mgr.get_context("u1")
 
     def test_get_context_fail_open_swallows_non_honcho_exceptions(self):

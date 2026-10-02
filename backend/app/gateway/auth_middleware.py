@@ -11,14 +11,12 @@ Fine-grained permission checks remain in authz.py decorators.
 
 from collections.abc import Callable
 
-from deerflow_runtime_api import FailureCode
 from fastapi import HTTPException, Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp
 
 from app.gateway.auth.errors import AuthErrorCode, AuthErrorResponse
-from app.gateway.auth.mode import owner_is_refused, refusal_response
 from app.gateway.auth_disabled import (
     AUTH_SOURCE_AUTH_DISABLED,
     AUTH_SOURCE_INTERNAL,
@@ -30,17 +28,11 @@ from app.gateway.auth_disabled import (
 from app.gateway.authz import AuthContext, resolve_route_permissions
 from app.gateway.internal_auth import INTERNAL_AUTH_HEADER_NAME, get_internal_user, is_valid_internal_auth_token
 from app.gateway.request_path import get_request_route_path
-from app.gateway.run_evidence_telemetry import (
-    ensure_run_evidence_requested,
-    record_run_evidence_outcome,
-)
-from app.gateway.runtime_http import is_runtime_api_path, runtime_error_response
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # Paths that never require authentication.
 _PUBLIC_PATH_PREFIXES: tuple[str, ...] = (
     "/health",
-    "/ready",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -62,7 +54,7 @@ _PUBLIC_EXACT_PATHS: frozenset[str] = frozenset(
         "/api/v1/auth/initialize",
         "/api/v1/auth/providers",
         # The product's name heads the sign-in page; see routers/product.py.
-        "/api/product",
+        "/api/v1/auth/product",
     }
 )
 
@@ -101,8 +93,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if _is_public(get_request_route_path(request)):
             return await call_next(request)
 
-        evidence_actor_digest = ensure_run_evidence_requested(request)
-
         internal_user = None
         if is_valid_internal_auth_token(request.headers.get(INTERNAL_AUTH_HEADER_NAME)):
             # Extract the channel owner user ID from the trusted header.
@@ -115,24 +105,22 @@ class AuthMiddleware(BaseHTTPMiddleware):
             owner_user_id = request.headers.get(INTERNAL_OWNER_USER_ID_HEADER_NAME)
             if owner_user_id:
                 owner_user_id = owner_user_id.strip()
-            refusal = await owner_is_refused(owner_user_id) if owner_user_id else None
-            if refusal is not None:
-                # An internal service may not act as an account nothing may
-                # act for: one the deployer turned off, or (sign-on only) an
-                # IM connection bound while its owner still held a local
-                # session.
-                record_run_evidence_outcome(request, "refused", actor_digest=evidence_actor_digest)
-                if is_runtime_api_path(request.url.path):
-                    return runtime_error_response(401, FailureCode.denied)
-                return JSONResponse(status_code=401, content={"detail": refusal_response(refusal).detail})
+            if owner_user_id:
+                from app.gateway.auth.mode import owner_is_refused, refusal_response
+
+                refusal = await owner_is_refused(owner_user_id)
+                if refusal is not None:
+                    # An internal service may not act as an account nothing may
+                    # act for: one the deployer turned off, or (sign-on only) an
+                    # IM connection bound while its owner still held a local
+                    # session.
+                    return JSONResponse(status_code=401, content={"detail": refusal_response(refusal).detail})
             internal_user = get_internal_user(owner_user_id=owner_user_id or None)
 
         auth_source = AUTH_SOURCE_SESSION
         access_token = request.cookies.get("access_token")
         authorization = request.headers.get("authorization")
         pat_scopes: frozenset[str] = frozenset()
-        pat_record = None
-        session_payload = None
 
         # Non-public path: require session cookie
         if internal_user is not None:
@@ -148,41 +136,20 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # Auth-disabled mode is an operator override of all authentication,
             # so it stays ahead of the Bearer check (a stray Authorization
             # header from a proxy must not 401 an E2E sandbox).
-            from app.gateway.auth.pat import authenticate_pat
-            from app.gateway.credential_evidence import credential_route_category
+            from app.gateway.auth.pat import authenticate_pat, is_pat_allowed_route
 
             try:
-                user, pat_scopes, pat_record = await authenticate_pat(
-                    request.app,
-                    authorization,
-                    route_category=credential_route_category(request.url.path),
-                )
+                user, pat_scopes = await authenticate_pat(request.app, authorization)
             except HTTPException as exc:
-                record_run_evidence_outcome(
-                    request,
-                    "refused",
-                    actor_digest=evidence_actor_digest,
-                )
                 return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
-            except Exception:
-                # Driver and persistence exceptions can embed SQL parameters
-                # in their text. Fail closed without logging or reflecting the
-                # exception, preserving the non-oracular credential surface.
-                record_run_evidence_outcome(
-                    request,
-                    "failed",
-                    actor_digest=evidence_actor_digest,
-                )
-                if is_runtime_api_path(request.url.path):
-                    return runtime_error_response(
-                        503,
-                        FailureCode.indeterminate,
-                    )
+            # Default-deny route boundary (#5041 review P1-1): scopes only
+            # constrain @require_permission routes, so any route outside the
+            # explicit PAT policy is closed to PAT callers outright — an
+            # all-scopes token must not reach undecorated mutation routes.
+            if not is_pat_allowed_route(request.method, get_request_route_path(request)):
                 return JSONResponse(
-                    status_code=503,
-                    content={
-                        "detail": "Credential authentication unavailable",
-                    },
+                    status_code=403,
+                    content={"detail": "PAT credentials are not permitted on this route"},
                 )
             auth_source = AUTH_SOURCE_PAT
         elif access_token:
@@ -203,33 +170,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 user = await get_current_user_from_request(request)
             except HTTPException as exc:
                 if not is_auth_disabled():
-                    record_run_evidence_outcome(
-                        request,
-                        "refused",
-                        actor_digest=evidence_actor_digest,
-                    )
-                    if is_runtime_api_path(request.url.path):
-                        return runtime_error_response(exc.status_code, FailureCode.denied)
                     return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
                 user = get_auth_disabled_user()
                 auth_source = AUTH_SOURCE_AUTH_DISABLED
-            if auth_source == AUTH_SOURCE_SESSION:
-                from app.gateway.auth.jwt import TokenPayload, decode_token
-
-                decoded = decode_token(access_token)
-                if isinstance(decoded, TokenPayload):
-                    session_payload = decoded
         elif is_auth_disabled():
             user = get_auth_disabled_user()
             auth_source = AUTH_SOURCE_AUTH_DISABLED
         else:
-            record_run_evidence_outcome(
-                request,
-                "refused",
-                actor_digest=evidence_actor_digest,
-            )
-            if is_runtime_api_path(request.url.path):
-                return runtime_error_response(401, FailureCode.denied)
             return JSONResponse(
                 status_code=401,
                 content={
@@ -246,24 +193,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # JWT-decode + DB-lookup pipeline a second time per request).
         request.state.user = user
         request.state.auth_source = auth_source
-        try:
-            permissions = await resolve_route_permissions(
-                user,
-                is_internal=auth_source == AUTH_SOURCE_INTERNAL,
-                resolver=getattr(
-                    request.app.state,
-                    "authorization_provider_resolver",
-                    None,
-                ),
-                request=request,
-            )
-        except Exception:
-            record_run_evidence_outcome(
-                request,
-                "failed",
-                actor_digest=evidence_actor_digest,
-            )
-            raise
+        permissions = await resolve_route_permissions(
+            user,
+            is_internal=auth_source == AUTH_SOURCE_INTERNAL,
+        )
         if auth_source == AUTH_SOURCE_PAT:
             # A PAT can only narrow its owning user's permissions: the stored
             # scopes intersect the resolved route permissions, never widen
@@ -271,62 +204,6 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # because they were resolved fresh from the owning user above.
             permissions = [permission for permission in permissions if permission in pat_scopes]
         request.state.auth = AuthContext(user=user, permissions=permissions)
-        from app.gateway.credential_evidence import (
-            CredentialEvidenceError,
-            build_boundary_credential_evidence,
-            credential_route_category,
-            record_credential_action_best_effort,
-        )
-
-        try:
-            request.state.credential_evidence = build_boundary_credential_evidence(
-                auth_source=auth_source,
-                permissions=permissions,
-                pat_record=pat_record,
-                session_payload=session_payload,
-            )
-        except CredentialEvidenceError:
-            record_run_evidence_outcome(
-                request,
-                "failed",
-                actor_digest=evidence_actor_digest,
-            )
-            return JSONResponse(
-                status_code=503,
-                content={"detail": "Credential evidence unavailable"},
-            )
-
-        from app.gateway.auth.pat import required_pat_scope
-
-        required_scope = required_pat_scope(
-            request.method,
-            get_request_route_path(request),
-        )
-        route_category = credential_route_category(request.url.path)
-        if auth_source == AUTH_SOURCE_PAT and (required_scope is None or required_scope not in permissions):
-            await record_credential_action_best_effort(
-                request,
-                action="authentication_failed",
-                route_category=route_category,
-                reason_code="scope_required",
-            )
-            detail = "PAT credentials are not permitted on this route" if required_scope is None else "Required PAT scope is unavailable"
-            record_run_evidence_outcome(
-                request,
-                "refused",
-                actor_digest=evidence_actor_digest,
-            )
-            return JSONResponse(
-                status_code=403,
-                content={"detail": detail},
-            )
-
-        await record_credential_action_best_effort(
-            request,
-            action="authenticated",
-            route_category=route_category,
-        )
-
         token = set_current_user(user)
         try:
             return await call_next(request)

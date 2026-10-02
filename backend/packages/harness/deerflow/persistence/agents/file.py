@@ -14,7 +14,6 @@ tests target.
 
 from __future__ import annotations
 
-import hashlib
 import logging
 import shutil
 import tempfile
@@ -34,10 +33,8 @@ from deerflow.config.agents_config import (
 from deerflow.persistence.agents.base import (
     AgentDeleteOutcome,
     AgentExistsError,
-    AgentSnapshot,
     AgentStore,
     parse_agent_config,
-    validate_agent_config_identity,
 )
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 
@@ -45,37 +42,6 @@ logger = logging.getLogger(__name__)
 
 
 class FileAgentStore(AgentStore):
-    def snapshot(self, name: str, *, user_id: str | None = None) -> AgentSnapshot:
-        name = validate_agent_name(name)
-        for _attempt in range(3):
-            agent_dir = resolve_agent_dir(name, user_id=user_id)
-            config_path = agent_dir / "config.yaml"
-            soul_path = agent_dir / SOUL_FILENAME
-
-            def _version() -> tuple[tuple[int, int] | None, tuple[int, int] | None]:
-                values = []
-                for path in (config_path, soul_path):
-                    try:
-                        stat = path.stat()
-                        values.append((stat.st_mtime_ns, stat.st_size))
-                    except OSError:
-                        values.append(None)
-                return values[0], values[1]
-
-            before = _version()
-            config = self.get(name, user_id=user_id)
-            soul = self.get_soul(name, user_id=user_id)
-            after = _version()
-            if before == after:
-                content_version = hashlib.sha256(repr((config.model_dump(mode="json"), soul or "")).encode("utf-8")).hexdigest()
-                return AgentSnapshot(
-                    config=config,
-                    soul=soul,
-                    source="file",
-                    version=content_version,
-                )
-        raise RuntimeError(f"Agent {name!r} changed repeatedly while resolving its revision")
-
     def get(self, name: str, *, user_id: str | None = None) -> AgentConfig:
         name = validate_agent_name(name)
         agent_dir = resolve_agent_dir(name, user_id=user_id)
@@ -142,26 +108,6 @@ class FileAgentStore(AgentStore):
         agents.sort(key=lambda a: a.name)
         return agents
 
-    def list_owned(self, *, user_id: str) -> list[AgentConfig]:
-        # Only the person's own directory: the legacy shared layout is offered
-        # to everyone and owned by no one.
-        root = _ac.get_paths().user_agents_dir(user_id)
-        if not root.is_dir():
-            return []
-        agents: list[AgentConfig] = []
-        unreadable = 0
-        for entry in sorted(root.iterdir()):
-            if entry.is_symlink() or not entry.is_dir() or not (entry / "config.yaml").is_file():
-                continue
-            try:
-                agents.append(self.get(entry.name, user_id=user_id))
-            except Exception:  # noqa: BLE001 - one bad agent must not hide the rest; its message can quote the person's file
-                unreadable += 1
-        if unreadable:
-            logger.warning("Skipped %d unreadable agents of one owner", unreadable)
-        agents.sort(key=lambda a: a.name)
-        return agents
-
     def list_all(self) -> list[tuple[str, AgentConfig]]:
         result: list[tuple[str, AgentConfig]] = []
         for user_id, name in self._discover():
@@ -173,7 +119,6 @@ class FileAgentStore(AgentStore):
 
     def create(self, name: str, config: dict, soul: str, *, user_id: str | None = None) -> None:
         name = validate_agent_name(name)
-        validate_agent_config_identity(config, name)
         paths = _ac.get_paths()
         effective_user = user_id or _ac.get_effective_user_id()
         agent_dir = paths.user_agent_dir(effective_user, name)
@@ -199,8 +144,6 @@ class FileAgentStore(AgentStore):
 
     def update(self, name: str, config: dict | None, soul: str | None, *, user_id: str | None = None) -> None:
         name = validate_agent_name(name)
-        if config is not None:
-            validate_agent_config_identity(config, name)
         effective_user = user_id or _ac.get_effective_user_id()
         agent_dir = _ac.get_paths().user_agent_dir(effective_user, name)
         pre_existing = agent_dir.exists()

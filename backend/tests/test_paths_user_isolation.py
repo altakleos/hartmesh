@@ -29,6 +29,10 @@ class TestValidateUserId:
         with pytest.raises(ValueError, match="Invalid user_id"):
             paths.user_dir("")
 
+    def test_rejects_trailing_newline(self, paths: Paths):
+        with pytest.raises(ValueError, match="Invalid user_id"):
+            paths.user_dir("alice\n")
+
 
 class TestMakeSafeUserId:
     def test_already_safe_id_is_unchanged(self):
@@ -80,6 +84,12 @@ class TestValidateIntegrationId:
         with pytest.raises(ValueError, match="Invalid integration_id"):
             _validate_integration_id(integration_id)
 
+    def test_rejects_trailing_newline(self):
+        from deerflow.config.paths import _validate_integration_id
+
+        with pytest.raises(ValueError, match="Invalid integration_id"):
+            _validate_integration_id("lark-cli\n")
+
     @pytest.mark.parametrize("integration_id", [".", ".."])
     def test_host_integration_config_dir_rejects_dot_traversal(self, paths: Paths, integration_id):
         with pytest.raises(ValueError, match="Invalid integration_id"):
@@ -89,6 +99,12 @@ class TestValidateIntegrationId:
     def test_host_integration_data_dir_rejects_dot_traversal(self, paths: Paths, integration_id):
         with pytest.raises(ValueError, match="Invalid integration_id"):
             paths.host_user_integration_data_dir("alice", integration_id)
+
+
+class TestValidateProjectId:
+    def test_rejects_trailing_newline(self, paths: Paths):
+        with pytest.raises(ValueError, match="Invalid project_id"):
+            paths.user_project_dir("alice", "project\n")
 
 
 class TestUserDir:
@@ -277,59 +293,3 @@ class TestResolveVirtualPathWithUserId:
         result = paths.resolve_virtual_path("t1", "/mnt/user-data/workspace/file.txt")
         expected_base = paths.sandbox_user_data_dir("t1").resolve()
         assert str(result).startswith(str(expected_base))
-
-
-class TestUserFilesDir:
-    """The person's own files live beside their threads and are reached from any of them."""
-
-    def test_user_files_dir(self, paths: Paths):
-        assert paths.user_files_dir("u1") == paths.base_dir / "users" / "u1" / "files"
-
-    def test_user_files_dir_validates_user_id(self, paths: Paths):
-        with pytest.raises(ValueError, match="Invalid user_id"):
-            paths.user_files_dir("../escape")
-
-    def test_host_user_files_dir_with_user_id(self, paths: Paths):
-        assert paths.host_user_files_dir("u1") == str(paths.base_dir / "users" / "u1" / "files")
-
-    def test_ensure_user_files_dir_creates_sandbox_writable_dir(self, paths: Paths):
-        created = paths.ensure_user_files_dir("u1")
-        assert created.is_dir()
-        assert created == paths.user_files_dir("u1")
-        # The sandbox writes here as its own uid, like the thread directories.
-        assert (created.stat().st_mode & 0o777) == 0o777
-        # A mode somebody tightened on the long-lived directory is left alone.
-        created.chmod(0o750)
-        paths.ensure_user_files_dir("u1")
-        assert (created.stat().st_mode & 0o777) == 0o750
-
-    def test_resolve_virtual_files_path_reaches_the_owner_from_any_thread(self, paths: Paths):
-        files_dir = paths.ensure_user_files_dir("u1")
-        resolved = paths.resolve_virtual_path("t1", "/mnt/user-data/files/Reports/august.pdf", user_id="u1")
-        assert resolved == (files_dir / "Reports" / "august.pdf").resolve()
-        # A second thread of the same person resolves to the same file.
-        assert paths.resolve_virtual_path("t2", "/mnt/user-data/files/Reports/august.pdf", user_id="u1") == resolved
-
-    def test_resolve_virtual_files_root(self, paths: Paths):
-        files_dir = paths.ensure_user_files_dir("u1")
-        assert paths.resolve_virtual_path("t1", "/mnt/user-data/files", user_id="u1") == files_dir.resolve()
-
-    def test_resolve_virtual_files_path_never_crosses_owners(self, paths: Paths):
-        alice = paths.resolve_virtual_path("t1", "/mnt/user-data/files/a.txt", user_id="alice")
-        bob = paths.resolve_virtual_path("t1", "/mnt/user-data/files/a.txt", user_id="bob")
-        assert alice != bob
-        assert str(alice).startswith(str(paths.user_files_dir("alice").resolve()))
-
-    def test_resolve_virtual_files_path_blocks_traversal(self, paths: Paths):
-        with pytest.raises(ValueError, match="traversal"):
-            paths.resolve_virtual_path("t1", "/mnt/user-data/files/../../other/secret", user_id="u1")
-
-    def test_resolve_virtual_files_path_requires_an_owner(self, paths: Paths):
-        # The legacy thread layout has no user bucket, so it has no files either.
-        with pytest.raises(ValueError, match="user"):
-            paths.resolve_virtual_path("t1", "/mnt/user-data/files/a.txt")
-
-    def test_resolve_virtual_files_sibling_prefix_stays_in_the_thread(self, paths: Paths):
-        # ``files-old`` is an ordinary name inside the thread's user-data, not the person's files.
-        resolved = paths.resolve_virtual_path("t1", "/mnt/user-data/files-old/a.txt", user_id="u1")
-        assert str(resolved).startswith(str(paths.sandbox_user_data_dir("t1", user_id="u1").resolve()))

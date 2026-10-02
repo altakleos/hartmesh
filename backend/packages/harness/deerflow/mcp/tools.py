@@ -9,40 +9,28 @@ from collections.abc import Iterable, Mapping
 from datetime import timedelta
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlparse
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
-from deerflow_extension_api import MCP_TOOL_IDENTIFIER_PATTERN, validate_mcp_tool_identifier
 from langchain_core.tools import BaseTool, StructuredTool
 from langgraph.config import get_config
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig, resolve_effective_mcp_routing
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT, MCP_TMP_SUBDIR
-from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
-from deerflow.extensions.mcp import get_required_mcp_tool_interceptor
 from deerflow.mcp.client import build_servers_config
 from deerflow.mcp.headers import apply_header_overrides
 from deerflow.mcp.interceptors import build_mcp_tool_interceptors, compose_tool_interceptors
 from deerflow.mcp.oauth import build_oauth_tool_interceptor, get_initial_oauth_headers
-from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool, session_scope_key
-from deerflow.mcp.tasks import (
-    ORDINARY_MCP_TASK_DRIVER,
-    McpTaskLineageBinder,
-    McpTaskLineageError,
-    TaskSubmitRequest,
-    TrustedMcpSubmissionContext,
-    configured_credential_selector,
-)
+from deerflow.mcp.session_pool import call_pooled_session_tool, get_session_pool
+from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER, TaskSubmitRequest
 from deerflow.mcp.tasks.runtime import (
     McpTaskConfigurationError,
     get_mcp_task_submitter,
     validate_mcp_task_config_snapshot,
 )
+from deerflow.mcp_scope import mcp_session_scope_key, runtime_thread_incarnation
 from deerflow.reflection import resolve_variable
-from deerflow.runtime.tool_evidence import (
-    build_request_projection,
-    evidence_safe_fields_from_tool,
-)
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.mcp_metadata import tag_mcp_routing, tag_mcp_tool
 from deerflow.tools.sync import make_sync_tool_wrapper
@@ -59,18 +47,7 @@ logger = logging.getLogger(__name__)
 # framework prompt structure. Canonicalizing at the load boundary constrains
 # both bound and deferred names to the same safe identifier charset, mirroring
 # the load-time validation skill names get (skills/storage/skill_storage.py).
-_VALID_MCP_TOOL_NAME = re.compile(rf"^{MCP_TOOL_IDENTIFIER_PATTERN}$", re.ASCII)
-
-
-def is_valid_mcp_tool_name(value: object) -> bool:
-    """Return whether *value* is safe and host-bindable as an MCP tool name."""
-
-    try:
-        validate_mcp_tool_identifier(value)
-    except ValueError:
-        return False
-    return True
-
+_VALID_MCP_TOOL_NAME = re.compile(r"^[A-Za-z0-9_-]+$")
 
 # Matches local-file references embedded in free text returned by an MCP server.
 # Some servers (notably Playwright's ``browser_take_screenshot``) report saved
@@ -79,7 +56,15 @@ def is_valid_mcp_tool_name(value: object) -> bool:
 # server process cwd (e.g. ``temp/page.yml``, ``./shot.png``). Each match is
 # only rewritten when it resolves to an existing file inside the thread's
 # user-data tree, so an over-eager match is harmless (left untouched).
-_LOCAL_PATH_IN_TEXT_RE = re.compile(r"(?:file://)?/[^\s'\"<>|*?]+|(?:\.{0,2}/|[\w.-]+/)[^\s'\"<>|*?]+")
+_LOCAL_PATH_IN_TEXT_RE = re.compile(
+    r"(?:file://)?/[^\s'\"<>|*?]+"  # POSIX absolute path or file:// URI
+    r"|file://[A-Za-z]:[^\s'\"<>|*?]+"  # file://C:/… — some Windows tools skip the third slash
+    # Windows drive-qualified absolute path; the lookbehind keeps a word
+    # character before the colon (file:/…, id:/…) on the earlier alternatives
+    r"|(?<![\w.-])[A-Za-z]:[\\/][^\s'\"<>|*?]+"
+    # path relative to the server cwd (Windows servers print "\" separators)
+    r"|(?:\.{0,2}[\\/]|[\w.-]+[\\/])[^\s'\"<>|*?]+"
+)
 
 # Trailing characters that are punctuation/markup rather than part of a path.
 _TEXT_PATH_TRAILING_CHARS = ".,;:!?)]}>\"'`"
@@ -102,7 +87,27 @@ def _local_path_from_uri(uri: str, *, base_dir: Path | None = None) -> Path | No
     except ValueError:
         return None
     if parsed.scheme == "file":
-        raw = unquote(parsed.path)
+        # url2pathname converts the "/C:/..." form a file URI's path takes on
+        # Windows into a drive-qualified "C:\..." path; on POSIX it is identity.
+        # It already percent-decodes, so no extra unquote here, and it can
+        # reject odd Windows spellings with OSError — leave those untouched.
+        netloc = parsed.netloc
+        if netloc and netloc.lower() != "localhost":
+            # Some Windows tools emit file://C:/… (two slashes): the drive
+            # lands in the URI authority. Any other host is not a local file.
+            if len(netloc) != 2 or not netloc[0].isalpha() or netloc[1] != ":":
+                return None
+            url_path = f"/{netloc}{parsed.path}"
+        else:
+            url_path = parsed.path
+        try:
+            raw = url2pathname(url_path)
+        except OSError:
+            return None
+    elif len(parsed.scheme) == 1 and parsed.scheme.isalpha():
+        # urlparse reads a Windows drive prefix ("C:\...") as the URI scheme;
+        # the original string is a bare local path, not a remote URI.
+        raw = uri
     elif parsed.scheme == "":
         raw = uri
     else:
@@ -270,13 +275,60 @@ def _rewrite_unique_bare_filenames(
 
     rewritten = text
     for name in sorted(unique, key=len, reverse=True):
-        # Do not rewrite inside longer paths/words. A final sentence period is
-        # allowed, but ".bak" or another path segment is not.
-        pattern = re.compile(rf"(?<![\w./-]){re.escape(name)}(?!(?:[\w/-]|\.[\w]))")
-        rewritten_text, count = pattern.subn(unique[name], rewritten)
+        # Do not rewrite inside longer paths/words, with either path separator.
+        # A final sentence period is allowed, but ".bak" or another segment is not.
+        pattern = re.compile(rf"(?<![\w./\\-]){re.escape(name)}(?!(?:[\w/\\-]|\.[\w]))")
+        # A callable replacement, not a template: the virtual path is built from
+        # the real file's relative path, where a backslash is an ordinary
+        # character, so it must never be read as a regex escape.
+        rewritten_text, count = pattern.subn(lambda _match: unique[name], rewritten)
         if count:
             logger.debug("MCP bare filename rewrite: %s -> %s", name, unique[name])
         rewritten = rewritten_text
+    return rewritten
+
+
+def _rewrite_changed_paths_with_spaces(
+    text: str,
+    *,
+    changed_files: Iterable[Path],
+    thread_id: str,
+    user_id: str,
+    source_base_dir: Path | None,
+) -> str:
+    """Rewrite changed paths with spaces only at unambiguous text boundaries."""
+    candidates: dict[str, set[str]] = {}
+    for path in changed_files:
+        spellings = [str(path)]
+        if path.anchor == "/":
+            # Some servers print file URIs without percent-encoding spaces.
+            spellings.extend((f"file:{path}", f"file://{path}"))
+        if source_base_dir is not None:
+            try:
+                relative = path.relative_to(source_base_dir).as_posix()
+            except ValueError:
+                pass
+            else:
+                spellings.extend((relative, f"./{relative}"))
+        matching_spellings = [spelling for spelling in spellings if any(char.isspace() for char in spelling) and spelling in text]
+        if not matching_spellings:
+            continue
+        virtual_path = _local_uri_to_virtual_path(str(path), thread_id=thread_id, user_id=user_id)
+        if virtual_path is None:
+            continue
+        for spelling in matching_spellings:
+            candidates.setdefault(spelling, set()).add(virtual_path)
+
+    rewritten = text
+    for spelling in sorted(candidates, key=len, reverse=True):
+        destinations = candidates[spelling]
+        if len(destinations) != 1 or spelling not in rewritten:
+            continue
+        # Whitespace after an unquoted spelling may continue a longer filename.
+        # Require punctuation or the end of the text instead of rewriting a prefix.
+        pattern = re.compile(rf"(?<![\w./\\-]){re.escape(spelling)}(?!(?:[\w\s/\\-]|\.[\w]))")
+        replacement = next(iter(destinations))
+        rewritten = pattern.sub(lambda _match: replacement, rewritten)
     return rewritten
 
 
@@ -318,6 +370,16 @@ def _rewrite_local_paths_in_text(
         if rewritten is None:
             return token
         return f"{rewritten}{trailing}"
+
+    if changed_files is not None:
+        changed_files = list(changed_files)
+        text = _rewrite_changed_paths_with_spaces(
+            text,
+            changed_files=changed_files,
+            thread_id=thread_id,
+            user_id=user_id,
+            source_base_dir=source_base_dir,
+        )
 
     rewritten = _LOCAL_PATH_IN_TEXT_RE.sub(_replace, text)
     if changed_files is None:
@@ -481,7 +543,7 @@ def _make_session_pool_tool(
     """Wrap an MCP tool so it reuses a persistent session from the pool.
 
     Replaces the per-call session creation with pool-managed sessions scoped
-    by ``(server_name, user_id:thread_id)``.  This ensures stateful MCP servers
+    by ``(server_name, user/thread/incarnation)``. This ensures stateful MCP servers
     (e.g. Playwright) keep their state across tool calls within the same thread
     while staying isolated per user.
 
@@ -506,7 +568,12 @@ def _make_session_pool_tool(
         # Scope the pooled session by user *and* thread. Filesystem isolation is
         # per-(user_id, thread_id), so a thread_id alone could otherwise let two
         # users with a colliding thread_id share one stateful MCP session.
-        scope_key = session_scope_key(user_id, thread_id)
+        thread_incarnation = runtime_thread_incarnation(runtime)
+        scope_key = mcp_session_scope_key(
+            user_id=user_id,
+            thread_id=thread_id,
+            thread_incarnation=thread_incarnation,
+        )
         session_connection = dict(connection)
         # cwd/temp pinning and the workspace snapshot only matter for stdio
         # servers, which run as local subprocesses writing to a real filesystem.
@@ -659,7 +726,7 @@ def _make_background_submit_tool(
     submit_tool: str,
     status_tool: str,
     cancel_tool: str,
-    server_config: McpServerConfig,
+    connection_scope: str,
 ) -> BaseTool:
     background_contract = f"Submitted as durable background task {task_name!r}; returns a DeerFlow task ID immediately and status polling is handled automatically."
 
@@ -668,47 +735,28 @@ def _make_background_submit_tool(
         **arguments: Any,
     ) -> dict[str, Any]:
         submitter = get_mcp_task_submitter()
+        thread_id = _extract_thread_id(runtime)
+        user_id = resolve_runtime_user_id(runtime)
+        thread_incarnation = runtime_thread_incarnation(runtime)
         context = runtime.context if runtime is not None and runtime.context else {}
-        trusted_runtime = TrustedMcpSubmissionContext.from_runtime_context(
-            context,
-            expected_tool_name=tool.name,
-        )
-        from deerflow.extensions.mcp import mcp_invocation_facts_from_context
-
-        invocation_facts = mcp_invocation_facts_from_context(context)
-        if invocation_facts is None or not isinstance(invocation_facts.principal.user_id, str) or not invocation_facts.principal.user_id:
-            raise McpTaskLineageError("mcp_task_lineage_unavailable")
-        projection = build_request_projection(
-            submit_tool,
-            arguments,
-            evidence_safe_fields=evidence_safe_fields_from_tool(tool),
-        )
-        projection["task_mode"] = {
-            "notification_requested": True,
-            "task_name": task_name,
-        }
-        lineage = McpTaskLineageBinder().for_agent_tool(
-            trusted_runtime=trusted_runtime,
-            server_name=server_name,
-            tool_name=submit_tool,
-            safe_request_projection=projection,
-            credential_selector=configured_credential_selector(
-                server_name,
-                server_config,
-            ),
-        )
+        run_id = context.get("run_id")
+        tool_call_id = getattr(runtime, "tool_call_id", None) if runtime is not None else None
         created = await submitter.submit(
             driver_name=ORDINARY_MCP_TASK_DRIVER,
             request=TaskSubmitRequest(
-                user_id=invocation_facts.principal.user_id,
-                thread_id=invocation_facts.thread_id,
-                lineage=lineage,
+                user_id=user_id,
+                thread_id=thread_id,
+                thread_incarnation=thread_incarnation,
+                run_id=str(run_id) if run_id is not None else None,
+                tool_call_id=str(tool_call_id) if tool_call_id is not None else None,
+                server_name=server_name,
                 task_name=task_name,
                 arguments=arguments,
                 driver_data={
                     "submit_tool": submit_tool,
                     "status_tool": status_tool,
                     "cancel_tool": cancel_tool,
+                    "connection_scope": connection_scope,
                 },
             ),
         )
@@ -734,6 +782,7 @@ def _configure_task_tools_for_server(
     server_name: str,
     server_config: McpServerConfig,
     tool_name_prefix: bool,
+    connection_scope: str = "deployment",
 ) -> list[BaseTool]:
     """Hide driver-only tools and replace submit with a durable wrapper."""
     if not server_config.task_toolsets:
@@ -783,21 +832,24 @@ def _configure_task_tools_for_server(
                 submit_tool=toolset.submit_tool,
                 status_tool=toolset.status_tool,
                 cancel_tool=toolset.cancel_tool,
-                server_config=server_config,
+                connection_scope=connection_scope,
             )
         )
     return configured
 
 
-async def get_mcp_tools(
-    extensions_config: ExtensionsConfig | None = None,
-) -> list[BaseTool]:
+async def get_mcp_tools(extensions_config: ExtensionsConfig | None = None, *, personal_user_id: str | None = None) -> list[BaseTool]:
     """Get all tools from enabled MCP servers.
 
     Tools using stdio transport are wrapped with persistent-session logic so
     consecutive calls within the same thread reuse the same MCP session.
     HTTP/SSE tools are returned unwrapped to avoid cross-task TaskGroup
     cleanup errors.
+
+    Args:
+        extensions_config: Optional pre-loaded extensions config. Callers that
+            must prove which config revision produced these tools pass the exact
+            instance they snapshotted; ``None`` loads the latest config from disk.
 
     Returns:
         List of LangChain tools from all enabled MCP servers.
@@ -809,12 +861,26 @@ async def get_mcp_tools(
         logger.warning("langchain-mcp-adapters not installed. Install it to enable MCP tools: pip install langchain-mcp-adapters")
         return []
 
-    # Ungoverned callers read the latest mutable file. Governed accepted-run
-    # resolution supplies an immutable, secret-safe structural snapshot and
-    # resolves its selectors only into this process-local object.
     if extensions_config is None:
+        # NOTE: We use ExtensionsConfig.from_file() instead of get_extensions_config()
+        # to always read the latest configuration from disk. This ensures that changes
+        # made through the Gateway API (which runs in a separate process) are immediately
+        # reflected when initializing MCP tools. Callers that need to prove which
+        # revision produced these tools pass the instance they snapshotted instead.
         extensions_config = ExtensionsConfig.from_file()
-    validate_mcp_task_config_snapshot(extensions_config)
+    if personal_user_id is None:
+        validate_mcp_task_config_snapshot(extensions_config)
+    else:
+        from deerflow.mcp.personal_access import authorized_personal_config
+        from deerflow.mcp.tasks.runtime import is_mcp_task_runtime_available
+        from deerflow.mcp.user_config import load_user_mcp_config
+
+        current = await asyncio.to_thread(load_user_mcp_config, personal_user_id)
+        if current != extensions_config:
+            raise McpTaskConfigurationError("Personal MCP configuration changed during discovery; retry the run")
+        extensions_config = current = await authorized_personal_config(personal_user_id, current)
+        if any(server.task_toolsets for server in current.mcp_servers.values()) and not is_mcp_task_runtime_available():
+            raise McpTaskConfigurationError("Personal MCP task toolsets require the platform's durable task runtime")
     servers_config = build_servers_config(extensions_config)
 
     if not servers_config:
@@ -838,19 +904,12 @@ async def get_mcp_tools(
                     {"Authorization": auth_header},
                 )
 
-        compatibility_interceptors = build_mcp_tool_interceptors(
+        tool_interceptors = build_mcp_tool_interceptors(
             extensions_config,
             oauth_builder=build_oauth_tool_interceptor,
             resolver=resolve_variable,
             target_logger=logger,
         )
-        # Required preparation owns the complete authorization-to-network
-        # boundary. Compatibility hooks run inside it, while trusted
-        # preparation is the final fence after their transient header changes.
-        required_interceptor = get_required_mcp_tool_interceptor(
-            compatibility_interceptors=tuple(compatibility_interceptors),
-        )
-        tool_interceptors = [required_interceptor] if required_interceptor is not None else compatibility_interceptors
 
         client = MultiServerMCPClient(
             servers_config,
@@ -906,14 +965,11 @@ async def get_mcp_tools(
                         )
                         return []
                 return await discovery
-            except Exception as exc:
-                diagnostic = bounded_diagnostic(
-                    code="mcp_tool_discovery_failed",
-                    operation="discover_mcp_tools",
-                    error=exc,
-                    contribution_id=server_name,
+            except Exception as e:
+                logger.warning(
+                    f"Skipping MCP server '{server_name}' after tool discovery failed: {e}",
+                    exc_info=True,
                 )
-                log_bounded_failure(logger, diagnostic)
                 return []
 
         # Get tools from each server independently so one broken MCP server does
@@ -939,7 +995,7 @@ async def get_mcp_tools(
             tool_name_prefix = server_cfg.tool_name_prefix if server_cfg is not None else True
             current_server_tools: list[BaseTool] = []
             for tool in server_tools:
-                if not is_valid_mcp_tool_name(tool.name or ""):
+                if not _VALID_MCP_TOOL_NAME.fullmatch(tool.name or ""):
                     logger.warning(
                         "Dropping MCP tool from server '%s' with invalid name %r: tool names must match %s. A name outside this charset cannot be bound as a function tool and could forge prompt structure when listed as a deferred tool.",
                         source_name,
@@ -947,14 +1003,9 @@ async def get_mcp_tools(
                         _VALID_MCP_TOOL_NAME.pattern,
                     )
                     continue
+                tag_mcp_tool(tool, server_name=source_name, transport=transport)
                 prefix = f"{source_name}_"
                 original_name = tool.name[len(prefix) :] if tool_name_prefix and tool.name.startswith(prefix) else tool.name
-                tag_mcp_tool(
-                    tool,
-                    server_name=source_name,
-                    transport=transport,
-                    tool_name=original_name,
-                )
                 routing = resolve_effective_mcp_routing(server_cfg, original_name)
                 if routing.get("mode") != "off":
                     tag_mcp_routing(tool, routing)
@@ -987,6 +1038,7 @@ async def get_mcp_tools(
                     server_name=source_name,
                     server_config=server_cfg,
                     tool_name_prefix=tool_name_prefix,
+                    connection_scope="personal" if personal_user_id is not None else "deployment",
                 )
             wrapped_tools.extend(current_server_tools)
 
@@ -999,11 +1051,6 @@ async def get_mcp_tools(
 
     except McpTaskConfigurationError:
         raise
-    except Exception as exc:
-        diagnostic = bounded_diagnostic(
-            code="mcp_tool_loading_failed",
-            operation="load_mcp_tools",
-            error=exc,
-        )
-        log_bounded_failure(logger, diagnostic, level=logging.ERROR)
+    except Exception as e:
+        logger.error(f"Failed to load MCP tools: {e}", exc_info=True)
         return []

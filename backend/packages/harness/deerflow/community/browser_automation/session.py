@@ -21,11 +21,10 @@ import os
 import threading
 import time
 from collections.abc import Callable, Coroutine
+from concurrent.futures import Future
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal, TypeVar
 from urllib.parse import urlparse
-
-from deerflow.runtime.owner_holdings import ANY_OWNER, Ended
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page, Playwright
@@ -174,6 +173,14 @@ def _is_playwright_timeout_error(exc: Exception) -> bool:
     return exc.__class__.__name__ == "TimeoutError" and exc.__class__.__module__.startswith("playwright.")
 
 
+def _consume_future_exception(future: asyncio.Future[Any]) -> None:
+    """Retrieve detached close errors; the concurrent-future callback logs them."""
+    if future.cancelled():
+        return
+    with contextlib.suppress(Exception):
+        future.exception()
+
+
 def redact_browser_url(url: str) -> str:
     """Drop query/fragment so a blocked-URL log line can't leak tokens/PII."""
     try:
@@ -200,7 +207,7 @@ class _PlaywrightLoopThread:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
         return await asyncio.wrap_future(future)
 
-    def submit(self, coro: Coroutine[Any, Any, Any]) -> None:
+    def submit(self, coro: Coroutine[Any, Any, Any]) -> Future[Any]:
         """Schedule *coro* on the private loop without blocking the caller."""
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
 
@@ -211,6 +218,7 @@ class _PlaywrightLoopThread:
                 logger.debug("browser background task failed: %s", exc)
 
         future.add_done_callback(_log_failure)
+        return future
 
     def run_sync(self, coro: Coroutine[Any, Any, T], timeout: float | None = None) -> T:
         future = asyncio.run_coroutine_threadsafe(coro, self._loop)
@@ -851,8 +859,18 @@ class BrowserSession:
         with self._activity():
             await self._loop.run(self._dispatch_input(event))
 
+    def _submit_close(self) -> Future[Any]:
+        close_coro = self._close()
+        try:
+            return self._loop.submit(close_coro)
+        except Exception:
+            close_coro.close()
+            raise
+
     async def close(self) -> None:
-        await self._loop.run(self._close())
+        close_future = asyncio.wrap_future(self._submit_close())
+        close_future.add_done_callback(_consume_future_exception)
+        await asyncio.shield(close_future)
 
 
 class BrowserSessionManager:
@@ -1016,46 +1034,24 @@ class BrowserSessionManager:
         await session.close()
         return True
 
-    async def close_for_owners(self, owners: frozenset[str], *, owner_of: Callable[[str], Coroutine[Any, Any, str | None]]) -> dict[str, Ended]:
-        """Close each browser kept for a thread one of ``owners`` owns; how many, by owner.
-
-        A session is keyed by thread alone, so ``owner_of`` answers whose
-        thread it is. A browser outlives the run that opened it until another
-        thread needs the slot, holding the pages and cookies it was left with.
-        """
-        with self._lock:
-            keys = [key for key in self._sessions if key != "default"]
-        outcome: dict[str, Ended] = {}
-
-        def _add(owner: str, ended: Ended) -> None:
-            before = outcome.get(owner, Ended())
-            outcome[owner] = Ended(before.count + ended.count, before.failed + ended.failed)
-
-        for key in keys:
-            try:
-                owner = await owner_of(key)
-            except Exception:  # noqa: BLE001 - whose it is is unknown, so it is not confirmed ended for anyone; the others still close
-                logger.warning("Could not read whose thread %s is while closing a refused owner's browsers", key, exc_info=True)
-                _add(ANY_OWNER, Ended(0, failed=1))
-                continue
-            if owner not in owners:
-                continue
-            try:
-                await self.close_session(key)
-            except Exception:  # noqa: BLE001 - popped from the pool either way; its browser may still be running
-                logger.warning("Closing the browser of thread %s for a refused owner failed", key, exc_info=True)
-                _add(owner, Ended(0, failed=1))
-                continue
-            _add(owner, Ended(1))
-        return outcome
-
     async def close_all_sessions(self) -> int:
         with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
             self._last_used.clear()
+        close_futures: list[asyncio.Future[Any]] = []
         for session in sessions:
-            await session.close()
+            try:
+                close_future = asyncio.wrap_future(session._submit_close())
+            except Exception as exc:
+                logger.debug("browser session close submission failed: %s", exc)
+                continue
+            close_future.add_done_callback(_consume_future_exception)
+            close_futures.append(close_future)
+        if close_futures:
+            close_group = asyncio.gather(*close_futures)
+            close_group.add_done_callback(_consume_future_exception)
+            await asyncio.shield(close_group)
         return len(sessions)
 
 
@@ -1069,11 +1065,6 @@ def get_browser_session_manager() -> BrowserSessionManager:
         with _manager_lock:
             if _manager is None:
                 _manager = BrowserSessionManager()
-    return _manager
-
-
-def get_initialized_browser_session_manager() -> BrowserSessionManager | None:
-    """The manager, only when something has already started it."""
     return _manager
 
 

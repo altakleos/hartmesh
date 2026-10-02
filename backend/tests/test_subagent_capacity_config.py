@@ -5,12 +5,9 @@ from pydantic import ValidationError
 
 from deerflow.config.app_config import AppConfig
 from deerflow.config.reload_boundary import STARTUP_ONLY_FIELDS, STARTUP_ONLY_PREFIX
-from deerflow.config.subagent_batches_config import (
-    SubagentBatchesConfig,
-    validate_subagent_batch_profile,
-)
+from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
-from deerflow.config.subagents_config import effective_subagent_concurrency
+from deerflow.config.subagents_config import SubagentsAppConfig, effective_subagent_concurrency, effective_total_subagents_per_run
 
 
 def test_subagent_runtime_defaults_are_safe_and_bounded() -> None:
@@ -34,44 +31,11 @@ def test_subagent_batch_defaults_separate_total_live_and_running() -> None:
     assert config.max_items_per_batch == 5_000
     assert config.default_max_live_items == 100
     assert config.default_max_running_items == 3
-    assert config.max_attempt_records_per_item == 64
-    assert config.max_total_runtime_seconds == 86_400
-    assert config.max_evidence_bytes == 16_384
 
     with pytest.raises(ValidationError):
         SubagentBatchesConfig(default_max_live_items=5, default_max_running_items=6)
     with pytest.raises(ValidationError):
         SubagentBatchesConfig(max_live_items_per_batch=4, default_max_live_items=5)
-    with pytest.raises(ValidationError):
-        SubagentBatchesConfig(
-            max_attempts=3,
-            max_attempt_records_per_item=2,
-        )
-
-
-def test_exact_two_profile_rejects_unqualified_batch_workers() -> None:
-    with pytest.raises(
-        ValueError,
-        match="subagent_batches_exact_two_unqualified",
-    ):
-        validate_subagent_batch_profile(
-            SubagentBatchesConfig(enabled=True),
-            "durable_two_gateway_v1",
-        )
-
-    with pytest.raises(
-        ValueError,
-        match="subagent_batches_durable_one_unqualified",
-    ):
-        validate_subagent_batch_profile(
-            SubagentBatchesConfig(enabled=True),
-            "durable_production",
-        )
-
-    validate_subagent_batch_profile(
-        SubagentBatchesConfig(enabled=True),
-        "local_development",
-    )
 
 
 def test_subagent_capacity_sections_are_startup_only() -> None:
@@ -92,3 +56,12 @@ def test_ordinary_task_limit_uses_frozen_execution_capacity_after_reload() -> No
     reloaded_config = SimpleNamespace(subagent_runtime=SubagentRuntimeConfig(max_running=12))
     assert effective_subagent_concurrency(None, reloaded_config, execution_capacity=3) == 3
     assert effective_subagent_concurrency(10, reloaded_config, execution_capacity=3) == 3
+
+
+def test_per_run_delegation_cap_treats_explicit_null_as_unset() -> None:
+    config = SimpleNamespace(subagents=SubagentsAppConfig(max_total_per_run=7))
+    assert effective_total_subagents_per_run(None, config) == 7
+    assert effective_total_subagents_per_run(5, config) == 5
+    assert effective_total_subagents_per_run(99, config) == 50
+    assert effective_total_subagents_per_run(0, config) == 1
+    assert effective_total_subagents_per_run(None, SimpleNamespace()) == 6

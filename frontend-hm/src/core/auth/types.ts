@@ -8,6 +8,10 @@ export const userSchema = z.object({
   system_role: z.enum(["admin", "user"]),
   needs_setup: z.boolean().optional().default(false),
   oauth_provider: z.string().nullable().optional().default(null),
+  // Effective route permissions, as GET /api/v1/auth/me reports them.
+  // Optional and nullable: absent or null means "not resolved", which this
+  // application treats as it did before the backend reported them.
+  permissions: z.array(z.string()).nullable().optional(),
 });
 
 export type User = Omit<z.infer<typeof userSchema>, "oauth_provider"> & {

@@ -731,22 +731,35 @@ async def test_mcp_config_requires_admin_user():
 async def test_reset_mcp_tools_cache_endpoint_requires_admin_user(monkeypatch):
     called = False
 
-    def fake_reset_mcp_tools_cache():
+    def fake_publish_mcp_tools_cache_reset():
         nonlocal called
         called = True
+        return "shared-generation"
 
-    monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
+    monkeypatch.setattr(mcp_router, "publish_mcp_tools_cache_reset", fake_publish_mcp_tools_cache_reset)
 
     response = await reset_mcp_tools_cache_endpoint(_request_with_role("admin"))
 
     assert called is True
     assert response.success is True
+    assert response.scope == "shared_config"
     assert "next use" in response.message
 
     with pytest.raises(HTTPException) as exc_info:
         await reset_mcp_tools_cache_endpoint(_request_with_role("user"))
 
     assert exc_info.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_reset_mcp_tools_cache_endpoint_reports_process_scope_without_shared_config(monkeypatch):
+    monkeypatch.setattr(mcp_router, "publish_mcp_tools_cache_reset", lambda: None)
+
+    response = await reset_mcp_tools_cache_endpoint(_request_with_role("admin"))
+
+    assert response.success is True
+    assert response.scope == "process"
+    assert "current Gateway process" in response.message
 
 
 @pytest.mark.asyncio
@@ -966,7 +979,7 @@ async def test_create_mcp_servers_preserves_concurrent_siblings_and_rejects_dupl
     with pytest.raises(HTTPException) as exc_info:
         await create_mcp_servers(
             _request_with_role("admin"),
-            McpConfigUpdateRequest.model_construct(
+            McpConfigUpdateRequest(
                 mcp_servers={
                     "added": McpServerConfigResponse(command="npx"),
                     "never-written": McpServerConfigResponse(command="uvx"),
@@ -1502,7 +1515,7 @@ async def test_new_server_writes_validate_extensions_constraints_before_writing(
     with pytest.raises(HTTPException) as exc_info:
         await handler(
             _request_with_role("admin"),
-            McpConfigUpdateRequest.model_construct(
+            McpConfigUpdateRequest(
                 mcp_servers={
                     "": McpServerConfigResponse(
                         type="http",
@@ -1521,7 +1534,7 @@ async def test_new_server_writes_validate_extensions_constraints_before_writing(
         )
 
     assert exc_info.value.status_code == 400
-    assert "MCP server identifier" in exc_info.value.detail
+    assert "server name" in exc_info.value.detail
     assert json.loads(config_path.read_text(encoding="utf-8")) == original
 
 

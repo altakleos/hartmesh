@@ -23,7 +23,6 @@ RUN pip install --no-cache-dir \
 
 WORKDIR /app
 COPY app.py .
-COPY accepted_skills.py .
 
 EXPOSE 8002
 

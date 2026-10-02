@@ -3,33 +3,13 @@
 # Copy to my-values.yaml, edit, and install with:
 #   helm install deer-flow deploy/helm/deer-flow -n deer-flow --create-namespace -f my-values.yaml
 
-# -- Optional release namespace override. Empty uses Helm's `--namespace` value.
-namespace: ""
+# -- Target namespace (also used as the K8s sandbox namespace for provisioner-spawned Pods).
+namespace: deer-flow
 
-# -- Namespace for provisioner-created sandbox resources. Empty uses the
-#    resolved release namespace. A non-empty namespace must already exist.
-sandboxNamespace: ""
-
-# -- Server-owned tenant identity. Durable profiles require an explicit
-#    non-local lowercase DNS label. Empty local renders omit the identity env
-#    override; the application and Redis projections use the documented local
-#    identity. Never derive this value from a Helm release or namespace.
-tenant:
-  id: ""
-  # -- Exact legacy prefixes recorded by `deerflow deployment bind-tenant`.
-  #    These declarations never select a prefix by themselves: the matching
-  #    redis.keyPrefixes field must also request it, and Gateway startup checks
-  #    the database binding record before opening Redis.
-  legacyRedisPrefixes:
-    streamBridge: ""
-    checkpointCache: ""
-    sandboxOwnership: ""
-
-# -- Legacy shared image settings. Existing values files using registry/tag and
-#    the three image-name keys remain supported. New deployments should use the
-#    per-workload repository/tag/digest values below.
+# -- Image registry & tag for the three DeerFlow images you build+push.
+#    Required: set `registry` to your registry (e.g. ghcr.io/yourorg).
 image:
-  registry: ""
+  registry: ""              # REQUIRED, e.g. ghcr.io/yourorg
   tag: "latest"
   pullPolicy: IfNotPresent
   # -- Existing image pull secrets, e.g. [{ name: regcred }]
@@ -43,106 +23,25 @@ image:
   frontendImage: deer-flow-frontend
   provisionerImage: deer-flow-provisioner
 
-# -- Helm-side deployment declaration. local_evaluation keeps tag-based images
-#    and explicit unqualified state convenient. Durable modes enable
-#    fail-closed render validation for their exact topology contracts.
-deployment:
-  mode: local_evaluation       # local_evaluation | durable_one_replica | durable_two_gateway_v1
-  persistenceTier: shared_durable  # process_local | node_durable | shared_durable
-  topology:
-    # -- Credential-free reference to the exact PostgreSQL database/schema.
-    #    Required only for durable_two_gateway_v1. Generate this outside Helm
-    #    as schema:sha256:<64 lowercase hex>; never put a DSN or schema name here.
-    databaseSchemaRef: ""
-  provenance:
-    # -- Optional lowercase source commit/revision (7-64 hex characters).
-    sourceRevision: ""
-  # -- Operator-declared references to completed external evidence. An empty list
-  #    reports unqualified/none_declared; a value reports operator_asserted until
-  #    the artifact is independently checked by the offline verifier.
-  qualificationEvidence: []
-  # - qualificationId: durable-contract-2026-08
-  #   artifactDigest: sha256:<64 lowercase hex characters>
-  #   completedAt: "2026-08-08T12:00:00Z"
-  #   scope: durable_one_replica_pod_recovery
-  #   status: passed
-  # - qualificationId: two-gateway-2026-09
-  #   artifactDigest: sha256:<64 lowercase hex characters>
-  #   completedAt: "2026-09-01T12:00:00Z"
-  #   scope: durable_two_gateway_v1_postgres_redis_aio_rwx
-  #   status: passed
-  # -- Qualification harness escape hatch. This does not assert qualification,
-  #    accepts no production namespace, and must never receive user traffic.
-  qualificationCandidate:
-    enabled: false
-    id: ""
-
-# -- Expected non-secret extension provenance for the pinned Gateway image and
-#    ordered plugins configuration. Calculate configurationDigest with
-#    `deerflow extensions config-digest --config <path>`. Both values are
-#    required in durable_one_replica when any plugin is enabled and always
-#    required as an exact tuple in durable_two_gateway_v1.
-extensions:
-  artifactManifestDigest: ""
-  configurationDigest: ""
-
-# -- Gateway ServiceAccount. The default account has no chart-created RBAC and
-#    does not mount an API token. Set create=false/name to select an existing
-#    least-privilege account.
-serviceAccount:
-  create: true
-  name: ""
-  annotations: {}
-  automountServiceAccountToken: false
-
 # -- Gateway (backend) deployment.
 gateway:
-  image:
-    # -- Full repository without a tag. Empty preserves legacy
-    #    image.registry + image.gatewayImage composition.
-    repository: ""
-    tag: ""
-    # -- Optional immutable OCI digest. When set, tag is not rendered.
-    digest: ""
-  # The chart probes /ready for traffic readiness and keeps /health for
-  # process liveness. Required authoritative capability health participates
-  # only in readiness; manifest/plugin changes require a pod restart.
-  replicas: 1               # Two replicas are opt-in only through the exact
-                            # evidence-gated durable_two_gateway_v1 mode.
-  autoscaling:
-    # -- HPA is outside both qualified durable topology contracts.
-    enabled: false
-  # Optional explicit override. null derives the grace period from all
-  # deployment.shutdown phase budgets + memory flush + preStop + headroom.
-  terminationGracePeriodSeconds: null
+  replicas: 1               # Safe default. Postgres + the Redis stream bridge are
+                            # wired, but multi-replica needs issue #3948's run-control
+                            # work (cancel/dedup/reconcile). Scheduler multi_instance
+                             # recovery is safe only when its config prerequisites are met;
+                             # max_concurrent_runs is shared across Pods in that mode.
+  # Pod termination grace period (seconds). MUST exceed the Gateway's graceful
+  # shutdown work: channel stop (~5s) + memory queue drain
+  # (memory.shutdown_flush_timeout_seconds, default 30s) + buffer. K8s defaults
+  # to 30s, which SIGKILLs the memory drain mid-flight and silently re-introduces
+  # the memory loss that shutdown_flush is fixing. Raise this when you raise the
+  # memory timeout. See gateway-deployment.yaml + README "Graceful shutdown".
+  terminationGracePeriodSeconds: 45
   # preStop hook sleep (seconds) before SIGTERM, so the Service/ingress
   # deregisters the pod and in-flight HTTP requests drain before graceful
   # shutdown begins (which runs the memory queue drain). 0 disables the hook.
   # Counts against terminationGracePeriodSeconds.
   preStopSleepSeconds: 5
-  shutdownSchedulingHeadroomSeconds: 3
-  readinessProbe:
-    initialDelaySeconds: 5
-    periodSeconds: 10
-    timeoutSeconds: 6
-    failureThreshold: 1
-  livenessProbe:
-    initialDelaySeconds: 30
-    periodSeconds: 20
-    timeoutSeconds: 2
-    failureThreshold: 3
-  # -- Bounded pod metadata (maximum 32 entries each; label values <=63 bytes,
-  #    annotation values <=2048 bytes). Chart-owned selector/checksum keys are
-  #    reserved and cannot be overridden.
-  podLabels: {}
-  podAnnotations: {}
-  # -- Structured references only. Use secretRef/configMapRef; do not copy raw
-  #    secret values into this file.
-  extraEnvFrom: []
-  # -- Additional Secret or ConfigMap Volume records and matching read-only
-  #    VolumeMount records. Mounts apply only to the Gateway container.
-  extraVolumes: []
-  extraVolumeMounts: []
   resources:
     requests:
       cpu: 200m
@@ -154,10 +53,6 @@ gateway:
 # -- Frontend (Next.js) deployment.
 frontend:
   replicas: 1
-  image:
-    repository: ""
-    tag: ""
-    digest: ""
   resources:
     requests:
       cpu: 100m
@@ -172,7 +67,6 @@ nginx:
   image:
     repository: nginx
     tag: alpine
-    digest: ""
   resources:
     requests:
       cpu: 50m
@@ -189,48 +83,10 @@ nginx:
     loadBalancerIP: ""
     nodePort: ""
 
-# -- Runtime settings for provisioner-created sandbox Pods.
-sandbox:
-  # -- Set to `gvisor` (or another RuntimeClass) to sandbox under it; leave
-  #    empty to use the cluster default runtime.
-  runtimeClassName: ""
-  # -- Sandbox volume mode (`pvc` or `hostpath`). Empty infers `pvc` only when
-  #    both claim names are configured, or `hostpath` when neither is. Kubernetes
-  #    deployments should set `pvc` explicitly so missing claims fail startup.
-  volumeMode: ""
-  # -- Startup probe for provisioner-created sandbox Pods. The 200-second
-  #    default budget gives a measured 134-second concurrent gVisor startup 66
-  #    seconds of margin; image pulling precedes the container/probe lifecycle.
-  startupProbe:
-    initialDelaySeconds: 0
-    periodSeconds: 10
-    timeoutSeconds: 3
-    failureThreshold: 20
-  # -- Liveness begins only after startup first succeeds. A 10-second timeout
-  #    tolerates the healthy startup tail without changing immediate refusal
-  #    detection; three timed-out responses can take up to 61 seconds to kill.
-  livenessProbe:
-    initialDelaySeconds: 10
-    periodSeconds: 10
-    timeoutSeconds: 10
-    failureThreshold: 3
-
 # -- Sandbox provisioner (K8s-native code execution). Creates sandbox Pods in
 #    this namespace via a ServiceAccount + RBAC.
 provisioner:
   enabled: true
-  image:
-    repository: ""
-    tag: ""
-    digest: ""
-  serviceAccount:
-    create: true
-    name: ""
-    annotations: {}
-  # -- Audience for the short-lived projected Gateway ServiceAccount token.
-  #    The provisioner validates it with Kubernetes TokenReview and binds the
-  #    exact Gateway namespace and ServiceAccount name.
-  gatewayTokenAudience: hartmesh-provisioner
   resources:
     requests:
       cpu: 50m
@@ -239,7 +95,7 @@ provisioner:
       cpu: 500m
       memory: 512Mi
   # -- AIO-compatible sandbox container image used for sandbox Pods.
-  sandboxImage: "ghcr.io/bytedance/deer-flow-sandbox:latest"
+  sandboxImage: "enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest"
   # -- Service type for per-sandbox Services. `ClusterIP` (default) exposes
   #    sandboxes only inside the cluster via Service DNS - correct for the
   #    in-cluster gateway and avoids binding the code-execution surface on
@@ -255,23 +111,20 @@ provisioner:
   nodeHost: ""
   # -- Sandbox container port (must match the sandboxImage's listening port).
   sandboxPort: 8080
-  # -- Durable accepted-skill projection. `disabled` keeps remote AIO
-  # empty-only. `rwx_verified_copy_v2` copies an exact content-addressed
-  # snapshot from an actual RWX shared home PVC into a private per-Pod emptyDir,
-  # verifies it, and exposes it read-only through a capability gate. It adds no
-  # same-node affinity; sandbox and provisioner images must be digest-pinned.
-  acceptedSkillProjectionProfile: "disabled" # disabled | rwx_verified_copy_v2
-  acceptedAttempt:
-    # -- Native Lease TTL for one accepted-skill sandbox attempt.
-    leaseSeconds: 120
-    # -- Bounded stale-attempt reconciliation cadence and page size.
-    reconcileIntervalSeconds: 30
-    reconcileLimit: 100
-
-# -- Application database engine settings.
-database:
-  # -- Cap temporary ORM overflow connections on a shared PostgreSQL server; unset keeps SQLAlchemy's default.
-  poolMaxOverflow: null
+  # -- Optional lark-cli init image (Pattern A). Empty (default) leaves the
+  #    sandbox without a lark-cli runtime, so an in-sandbox `lark-cli` call
+  #    fails with "command not found". When set (e.g.
+  #    `deer-flow/lark-cli-init:v1.0.65`), sandbox Pods requesting the runtime
+  #    get an init container + shared emptyDir instead of a hostPath/PVC mount.
+  #    Mirrors compose's `LARK_CLI_INIT_IMAGE`. See `docker/lark-cli-init/`.
+  larkCliInitImage: ""
+  # -- Optional lark-cli broker image (Pattern B, issue #4338). When set, the
+  #    sandbox gets a shim + a `lark-cli-broker` sidecar that holds the
+  #    credentials, so the plaintext config/data dirs are never mounted into
+  #    the sandbox. Supersedes `larkCliInitImage` when both are set. Empty
+  #    (default) ⇒ broker off. Mirrors compose's `LARK_CLI_BROKER_IMAGE`.
+  #    See `docker/lark-cli-broker/`.
+  larkCliBrokerImage: ""
 
 # -- PostgreSQL database. Bundled mode (default) deploys a single-instance
 #    postgres StatefulSet; set `enabled: false` to use an external managed DB.
@@ -283,13 +136,11 @@ postgresql:
   image:
     repository: postgres
     tag: "16"
-    digest: ""
   auth:
     database: deerflow
     username: deerflow
     # -- Password auto-generated (32 chars, persisted across upgrades) when
-    #    empty. Ignored if existingSecret is set. Local evaluation only;
-    #    durable_one_replica rejects inline passwords.
+    #    empty. Ignored if existingSecret is set.
     password: ""
   # -- Use an existing Secret (key `database-url`, plus `postgres-password`
   #    in bundled mode) instead of generating one. Skips Secret creation.
@@ -311,40 +162,29 @@ postgresql:
   #    `databaseUrl` (chart wraps it into a Secret for you) or an
   #    `existingSecret` you manage (key `database-url`).
   external:
-    # -- Local-evaluation convenience DSN. durable_one_replica rejects inline
-    #    URLs and requires external.existingSecret instead.
+    # -- Full DSN, e.g. postgresql://user:pass@host:5432/deerflow. Chart
+    #    writes it into the Secret so it never touches the gateway env directly.
     databaseUrl: ""
     # -- Secret you manage (key `database-url`). Use this with External Secrets
     #    / Vault / Sealed Secrets so the DSN never appears in values files.
     existingSecret: ""
 
 # -- Redis stream bridge. The gateway stores per-run SSE events in Redis Streams
-#    for bounded reconnect replay. Bundled mode (default) deploys
+#    so live run events reach a client connected to any gateway pod (cross-pod
+#    SSE delivery + reconnect replay, PR #3191). Bundled mode (default) deploys
 #    a single-instance redis StatefulSet; set `enabled: false` to use an external
 #    managed Redis. The gateway reads DEER_FLOW_STREAM_BRIDGE_REDIS_URL from the
 #    resolved Secret; config.yaml's stream_bridge.type is `redis` by default.
 redis:
   # -- Deploy a bundled redis StatefulSet. Disable to use an external Redis.
   enabled: true
-  # -- Compatibility-only outer prefix for the first tenant-identity release.
-  #    It must equal the canonical projection or the exact recorded legacy
-  #    stream-bridge projection declared under tenant.legacyRedisPrefixes.
-  tenantPrefix: ""
-  # -- Compatibility-only subsystem prefixes. Each nonempty value must equal
-  #    its canonical projection or exact operator-recorded legacy projection.
-  keyPrefixes:
-    streamBridge: ""
-    checkpointCache: ""
-    sandboxOwnership: ""
   image:
     repository: redis
     tag: "7-alpine"
-    digest: ""
   auth:
     # -- Empty (default) = no auth, matching the compose deployment (ClusterIP
     #    isolation only). Set a password to enable AUTH; the DSN becomes
     #    redis://:<password>@host:6379/0. Ignored if existingSecret is set.
-    #    Local evaluation only; durable_one_replica rejects inline passwords.
     password: ""
   # -- Use an existing Secret (key `redis-url`, plus `redis-password` if auth)
   #    instead of generating one. Skips Secret creation.
@@ -366,8 +206,8 @@ redis:
   #    `redisUrl` (chart wraps it into a Secret for you) or an `existingSecret`
   #    you manage (key `redis-url`).
   external:
-    # -- Local-evaluation convenience URL. durable_one_replica rejects inline
-    #    URLs and requires external.existingSecret instead.
+    # -- Full URL, e.g. redis://:pass@myredis.example:6379/0. Chart writes it
+    #    into the Secret so it never touches the gateway env directly.
     redisUrl: ""
     # -- Secret you manage (key `redis-url`). Use with External Secrets / Vault
     #    / Sealed Secrets so the URL never appears in values files.
@@ -379,31 +219,26 @@ redis:
 #    disabled, Gateway runtime state uses a pod-local emptyDir instead.
 persistence:
   home:
-    # -- Keep enabled=true when using an existing claim: enabled=false also
-    #    suppresses the provisioner's USERDATA_PVC_NAME environment variable.
     enabled: true
-    # -- Existing home PVC name. When set, the chart does not create a PVC;
-    #    the Gateway mount and provisioner sandbox user-data both use this claim.
-    existingClaim: ""
     storageClass: ""         # "" = cluster default
     accessMode: ReadWriteOnce  # Use ReadWriteMany (NFS/etc.) for multi-node
     size: 10Gi
 
-# -- Skills library mounted at /app/skills. Default: emptyDir (skills disabled;
-#    it shadows the public skill library the backend image carries).
+# -- Skills library mounted at /app/skills. Default: emptyDir (skills disabled).
 #    Populate via an existing PVC or ConfigMap, or bake skills into a custom
 #    gateway image. Provisioner PVC mode references this same claim when set.
 skills:
   enabled: false
   existingClaim: ""
   configMap: ""
-  # -- Operator declaration for an existing claim. The chart cannot inspect
-  #    its StorageClass; durable_two_gateway_v1 verifies the claim live too.
-  accessMode: ""
 
-# -- Local-evaluation convenience for provider/channel/search secrets injected
-#    as environment variables. Production values should leave this empty and
-#    use existingSecret or gateway.extraEnvFrom references instead.
+# -- Provider/channel/search secrets injected as env vars into the gateway.
+#    Reference them from config.yaml as $VAR. Example:
+#      secrets:
+#        OPENAI_API_KEY: "sk-..."
+#        FEISHU_APP_ID: "cli_xxx"
+#        FEISHU_APP_SECRET: "xxx"
+#        GITHUB_TOKEN: "ghp_xxx"
 secrets: {}
 # -- Use an existing Secret instead of creating one from `secrets` above.
 existingSecret: ""
@@ -428,8 +263,16 @@ ingress:
 # -- DeerFlow config.yaml content. Secrets MUST stay as $VAR references — never
 #    inline literal secret values here. The default enables provisioner sandbox.
 config: |
-  config_version: 58
+  config_version: 50
   log_level: info
+  recursion_limit: 100
+  max_recursion_limit: 1000
+
+  # Optional provider-agnostic knowledge capability and custom-agent scope selector.
+  # RAGFlow connection/retrieval settings belong on the knowledge_search tool.
+  knowledge_base:
+    enabled: false
+    scope_selection_enabled: false
 
   models: []
   # Example (uncomment & set the matching secret in `secrets`):
@@ -443,8 +286,7 @@ config: |
   sandbox:
     use: deerflow.community.aio_sandbox:AioSandboxProvider
     provisioner_url: http://provisioner:8002
-    accepted_skill_projection_profile: disabled
-    image: ghcr.io/bytedance/deer-flow-sandbox:latest
+    image: enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest
     port: 8080
     replicas: 3
 
@@ -457,41 +299,17 @@ config: |
     pool_recycle: 300
     command_timeout: 30
 
-  # Keyed native ingress uses the application PostgreSQL database for leased
-  # receipt rows. In local non-PostgreSQL configurations, auto degrades
-  # explicitly to best_effort delivery and the deployment report says so.
-  dedupe_storage:
-    backend: auto
-
-  # The default chart is an explicitly unqualified local evaluation. Switch
-  # both this profile and deployment.mode when adopting the validated durable
-  # one-replica profile.
-  deployment:
-    profile: local_development
-    readiness:
-      capability_cache_seconds: 10.0
-      admission_health_max_age_seconds: 10.0
-      required_health_stale_seconds: 30.0
-      capability_probe_timeout_seconds: 2.0
-      overall_timeout_seconds: 5.0
-      required_failure_threshold: 1
-    shutdown:
-      admission_seconds: 2.0
-      channel_seconds: 5.0
-      scheduler_seconds: 3.0
-      run_seconds: 8.0
-      dependencies_seconds: 5.0
-
   # The LangGraph Store (cross-thread memory + thread list) reads this legacy
   # `checkpointer:` section — it does NOT fall back to `database:` the way the
-  # checkpointer does. Point it at the same postgres so durable checkpoints and
-  # the Store survive a Gateway restart.
+  # checkpointer does. Point it at the same postgres so the Store is shared
+  # across gateway pods (required for multi-replica operation).
   checkpointer:
     type: postgres
     connection_string: $DATABASE_URL
 
   # Stream bridge: `redis` (default) stores per-run SSE events in Redis Streams
-  # for reconnect replay. The URL is read from the
+  # so live run events reach a client on any gateway pod (cross-pod SSE delivery
+  # + reconnect replay, PR #3191). The URL is read from the
   # DEER_FLOW_STREAM_BRIDGE_REDIS_URL env var injected from the redis Secret.
   # Set `type: memory` (and disable the redis chart) for single-pod-only mode.
   stream_bridge:
@@ -505,23 +323,6 @@ config: |
     receipts_render_mode: "delegation_only"
     judge_enabled: false
     judge_model_name: null
-
-  # Skill and MCP writes use stage -> validate -> promote. In
-  # durable_two_gateway_v1 this service is immutable: live mutation and
-  # bootstrap endpoints reject requests until a separately qualified shared
-  # deployment revision exists.
-  tool_plane:
-    enabled: true
-    policy_version: deerflow-default-v1
-    allowed_mcp_transports: [stdio, sse, http, streamable_http]
-    allowed_mcp_stdio_commands: [npx, uvx]
-    allowed_mcp_endpoint_hosts: []
-    allow_private_mcp_endpoints: false
-    allowed_managed_integration_providers: []
-    forbidden_skill_capabilities: []
-    maximum_mcp_servers: 128
-    maximum_skills: 512
-    validation_requires_skill_review: true
 
   # -- Tools configuration. The agent gets NO tools unless they're listed here
   # (BUILTIN_TOOLS only adds present_file + ask_clarification). The file/bash
@@ -556,6 +357,28 @@ config: |
     #   similarity_threshold: 0.2
     #   vector_similarity_weight: 0.3
     #   top_k: 256
+    #   max_chars_per_chunk: 800
+    #   max_total_chars: 8000
+    # - name: list_knowledge_bases
+    #   group: knowledge
+    #   use: deerflow.community.ragflow.tools:list_knowledge_bases_tool
+    # Optional tenant-shared, read-only LightRAG retrieval; alternative
+    # provider for the same knowledge_search tool (duplicate names keep the
+    # first entry, so configure exactly one). Requires LightRAG v1.4.9+. Put
+    # LIGHTRAG_API_KEY in `secrets` when the server enables API-key auth;
+    # omit `api_key` only for unauthenticated trusted-network deployments.
+    # Searches the single indexed workspace through the data-retrieval
+    # endpoint with no LLM generation inside LightRAG. Internal chunk and
+    # reference identifiers stay hidden from the Agent.
+    # - name: knowledge_search
+    #   group: knowledge
+    #   use: deerflow.community.lightrag.tools:knowledge_search_tool
+    #   base_url: http://lightrag:9621
+    #   api_key: $LIGHTRAG_API_KEY
+    #   mode: mix
+    #   timeout: 30
+    #   top_k: 60
+    #   chunk_top_k: 8  # Optional; omit to use the server default
     #   max_chars_per_chunk: 800
     #   max_total_chars: 8000
     - name: web_search

@@ -1,5 +1,5 @@
 import ipaddress
-import re
+import math
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -8,6 +8,11 @@ SandboxOwnershipType = Literal["memory", "redis"]
 SandboxOverflowPolicy = Literal["wait", "reject", "burst"]
 SandboxNetworkMode = Literal["open", "isolated", "allowlist"]
 SandboxNetworkApproval = Literal["deny", "prompt"]
+
+# Redis converts relative PX values to absolute Unix-millisecond timestamps.
+# Reserving half the signed range for that timestamp keeps accepted TTLs usable
+# without making config validation depend on the current clock.
+_REDIS_MAX_SAFE_TTL_MILLISECONDS = (2**63 - 1) // 2
 
 
 class SandboxNetworkConfig(BaseModel):
@@ -31,6 +36,14 @@ class SandboxNetworkConfig(BaseModel):
         le=3600,
         description="Lifetime in seconds for the temporary approval choice.",
     )
+
+    @field_validator("temporary_grant_ttl", mode="before")
+    @classmethod
+    def _reject_boolean_temporary_grant_ttl(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be an integer, not a boolean")
+        return value
+
     proxy_image: str = Field(
         default="ghcr.io/bytedance/deer-flow-sandbox-network-proxy:latest",
         min_length=1,
@@ -107,15 +120,31 @@ class SandboxOwnershipConfig(BaseModel):
         allow_inf_nan=False,
         description="Lease TTL as a multiple of renewal_interval_seconds. At least 2, so a single missed renewal (slow host, brief Redis blip) cannot expire a live owner's lease. Default 4 tolerates three consecutive misses.",
     )
+
+    @field_validator("renewal_interval_seconds", "ttl_multiplier", mode="before")
+    @classmethod
+    def _reject_boolean_ownership_settings(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
+
     key_prefix: str = Field(
         default="deerflow:sandbox:owner",
-        description=(
-            "Startup-only compatibility value for Redis ownership leases. In "
-            "Gateway tenant mode, an explicitly configured value (or "
-            "DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX override) must exactly match "
-            "the server-derived sandbox-ownership projection."
-        ),
+        description="Redis key prefix for ownership leases. Only applies to the redis ownership type.",
     )
+
+    @model_validator(mode="after")
+    def validate_lease_ttl(self) -> "SandboxOwnershipConfig":
+        lease_ttl_seconds = self.renewal_interval_seconds * self.ttl_multiplier
+        if not math.isfinite(lease_ttl_seconds):
+            raise ValueError("sandbox.ownership lease TTL must be finite")
+        if self.type == "redis":
+            lease_ttl_milliseconds = lease_ttl_seconds * 1000
+            if lease_ttl_milliseconds < 1:
+                raise ValueError("sandbox.ownership Redis lease TTL must be at least 1 millisecond")
+            if lease_ttl_milliseconds > _REDIS_MAX_SAFE_TTL_MILLISECONDS:
+                raise ValueError("sandbox.ownership Redis lease TTL must fit the signed 64-bit millisecond range with absolute-expiry headroom")
+        return self
 
 
 class VolumeMountConfig(BaseModel):
@@ -199,6 +228,8 @@ class SandboxConfig(BaseModel):
     )
     port: int | None = Field(
         default=None,
+        ge=1,
+        le=65535,
         description="Base port for sandbox containers",
     )
     replicas: int | None = Field(
@@ -226,8 +257,29 @@ class SandboxConfig(BaseModel):
     )
     idle_timeout: int | None = Field(
         default=None,
+        ge=0,
         description="Idle timeout in seconds before released warm sandboxes/VMs are stopped (default: 600 = 10 minutes). Set to 0 to disable.",
     )
+
+    @field_validator(
+        "port",
+        "replicas",
+        "acquire_timeout",
+        "burst_limit",
+        "idle_timeout",
+        "health_check_skip_seconds",
+        "bash_output_max_chars",
+        "read_file_output_max_chars",
+        "ls_output_max_chars",
+        "bash_command_timeout",
+        mode="before",
+    )
+    @classmethod
+    def _reject_boolean_numeric_settings(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be a number, not a boolean")
+        return value
+
     prewarm_claim_timeout: int | None = Field(
         default=None,
         ge=0,
@@ -262,6 +314,7 @@ class SandboxConfig(BaseModel):
     health_check_skip_seconds: float | None = Field(
         default=None,
         ge=0,
+        allow_inf_nan=False,
         description="BoxLite-only reclaim skip window in seconds for boxes recently released by this provider instance. Set to 0 to always validate before warm reuse.",
     )
     ownership: SandboxOwnershipConfig | None = Field(
@@ -303,20 +356,22 @@ class SandboxConfig(BaseModel):
         ge=0,
         description="Maximum characters to keep from ls tool output. Output exceeding this limit is head-truncated. Set to 0 to disable truncation.",
     )
-    bash_command_timeout: int = Field(
+    bash_command_timeout: float = Field(
         default=600,
         gt=0,
+        allow_inf_nan=False,
         description=(
-            "Maximum wall-clock seconds a bash command may run before it is terminated. LocalSandboxProvider applies it to the host process group; "
-            "OpenSandboxProvider forwards it to the remote exec service when a call has no explicit timeout. Keeps a blocking foreground command "
-            "(e.g. an un-backgrounded server) from hanging the turn; background `&` processes return immediately."
+            "Provider command deadline. AIO images on the supported semver line "
+            "(1.9.3+, recommended 1.11.0) enforce it server-side through "
+            "`hard_timeout`; the frozen legacy `all-in-one-sandbox:latest` image "
+            "only gets the bounded host-side request. `bash_command_timeout` is "
+            "used by providers that explicitly wire this setting (currently "
+            "LocalSandbox, AioSandbox, and OpenSandbox). Other providers retain "
+            "their provider-specific command defaults unless a caller supplies an "
+            "explicit timeout."
         ),
     )
 
-    provisioner_url: str | None = Field(
-        default=None,
-        description="Remote sandbox provisioner base URL.",
-    )
     provisioner_api_key: str | None = Field(
         default=None,
         description=(
@@ -325,92 +380,6 @@ class SandboxConfig(BaseModel):
             "Both sides must be set to the same value; "
             "the provisioner rejects all /api/* requests when the key is unset or mismatched."
         ),
-    )
-    provisioner_service_account_token_file: str | None = Field(
-        default=None,
-        description=(
-            "Path to an audience-bound projected Kubernetes ServiceAccount token "
-            "used for provisioner management calls. Mutually exclusive with "
-            "provisioner_api_key; the token is reread for every request so rotation "
-            "does not require a Gateway restart."
-        ),
-    )
-    accepted_skill_projection_profile: Literal[
-        "disabled",
-        "rwx_verified_copy_v1",
-        "rwx_verified_copy_v2",
-    ] = Field(
-        default="disabled",
-        description=("Remote AIO accepted-skill profile required by Gateway readiness. rwx_verified_copy_v2 requires an authenticated provisioner preflight; v1 is compatibility-only and cannot advertise nonempty immutable material."),
-    )
-    accepted_materialization_profile: Literal[
-        "disabled",
-        "durable_one_replica_opensandbox_immutable_skills_v1",
-    ] = Field(
-        default="disabled",
-        description=("Provider-neutral immutable accepted-material profile. OpenSandbox selection is unavailable until its control plane passes the live ownership and trusted-setup feasibility gate."),
-    )
-    opensandbox_control_plane_contract_version: str | None = Field(
-        default=None,
-        max_length=64,
-        description="Pinned OpenSandbox server/SDK contract version for a qualified profile.",
-    )
-    accepted_material_verifier_digest: str | None = Field(
-        default=None,
-        pattern=r"^[0-9a-f]{64}$",
-        description="SHA-256 digest of the verifier embedded in the pinned runtime image.",
-    )
-    accepted_material_lease_duration_seconds: int = Field(
-        default=300,
-        ge=60,
-        le=3600,
-        description="Bounded accepted-material ownership lease duration.",
-    )
-    accepted_material_renew_interval_seconds: int = Field(
-        default=60,
-        ge=10,
-        le=1200,
-        description="Accepted-material ownership renewal interval.",
-    )
-    accepted_material_reconcile_grace_seconds: int = Field(
-        default=600,
-        ge=60,
-        le=86400,
-        description="Conservative expiry grace before an accepted remote may be reconciled.",
-    )
-    accepted_material_max_files: int = Field(
-        default=2048,
-        ge=1,
-        le=10000,
-        description="Maximum entries of all types in one accepted material manifest.",
-    )
-    accepted_material_max_bytes: int = Field(
-        default=32 * 1024 * 1024,
-        ge=1,
-        le=1024 * 1024 * 1024,
-        description="Maximum total accepted material bytes.",
-    )
-    accepted_material_max_path_depth: int = Field(
-        default=32,
-        ge=1,
-        le=128,
-        description="Maximum accepted material relative path depth.",
-    )
-    accepted_material_qualification_evidence: str | None = Field(
-        default=None,
-        max_length=2048,
-        description="Reference to the exact scoped live qualification artifact.",
-    )
-    accepted_material_qualification_digest: str | None = Field(
-        default=None,
-        pattern=r"^(?:sha256:)?[0-9a-f]{64}$",
-        description=("Operator-pinned SHA-256 digest of the accepted-material qualification artifact."),
-    )
-    accepted_material_qualification_max_age_seconds: int = Field(
-        default=30 * 24 * 60 * 60,
-        ge=60,
-        le=365 * 24 * 60 * 60,
-        description="Maximum accepted age of a pinned live qualification artifact.",
     )
 
     @field_validator("ready_timeout", "capacity_wait_timeout", mode="before")
@@ -421,62 +390,5 @@ class SandboxConfig(BaseModel):
         if isinstance(value, bool):
             raise ValueError(f"{info.field_name} must be a number of seconds, not a boolean")
         return value
-
-    @model_validator(mode="after")
-    def _validate_provisioner_auth(self) -> "SandboxConfig":
-        if self.accepted_material_renew_interval_seconds * 2 >= self.accepted_material_lease_duration_seconds:
-            raise ValueError(
-                "accepted material renew interval must be less than half the lease duration",
-            )
-        if self.accepted_material_reconcile_grace_seconds < self.accepted_material_lease_duration_seconds:
-            raise ValueError(
-                "accepted material reconcile grace must be at least the lease duration",
-            )
-        is_opensandbox = self.use in {
-            "deerflow.community.opensandbox:OpenSandboxProvider",
-            "deerflow.community.opensandbox.provider:OpenSandboxProvider",
-        }
-        if self.accepted_materialization_profile != "disabled" and not is_opensandbox:
-            raise ValueError(
-                "opensandbox_qualification_unavailable: the reserved OpenSandbox accepted-material profile cannot be selected for another provider",
-            )
-        if is_opensandbox and self.accepted_materialization_profile != "disabled":
-            if (
-                not isinstance(self.image, str)
-                or re.fullmatch(
-                    r"[^\s@]+@sha256:[0-9a-f]{64}",
-                    self.image,
-                )
-                is None
-            ):
-                raise ValueError(
-                    "opensandbox_image_unpinned: accepted material requires a full OCI digest",
-                )
-            raise ValueError(
-                "opensandbox_qualification_unavailable: OpenSandbox 0.1.15 has no compare-and-set ownership primitive; immutable accepted material remains disabled",
-            )
-        if is_opensandbox and self.accepted_skill_projection_profile != "disabled":
-            raise ValueError(
-                "opensandbox_qualification_unavailable: the AIO accepted-skill projection profile cannot be selected for OpenSandbox",
-            )
-        if self.provisioner_api_key and self.provisioner_service_account_token_file:
-            raise ValueError(
-                "provisioner_api_key and provisioner_service_account_token_file are mutually exclusive",
-            )
-        if self.accepted_skill_projection_profile == "rwx_verified_copy_v1":
-            raise ValueError(
-                "rwx_verified_copy_v1 is compatibility-only and cannot prove nonempty immutable skills; migrate to rwx_verified_copy_v2",
-            )
-        if self.accepted_skill_projection_profile in {"rwx_verified_copy_v1", "rwx_verified_copy_v2"} and not self.provisioner_url:
-            raise ValueError(
-                f"{self.accepted_skill_projection_profile} requires sandbox.provisioner_url",
-            )
-        if bool(self.accepted_material_qualification_evidence) != bool(
-            self.accepted_material_qualification_digest,
-        ):
-            raise ValueError(
-                "accepted material qualification evidence and digest must be configured together",
-            )
-        return self
 
     model_config = ConfigDict(extra="allow")

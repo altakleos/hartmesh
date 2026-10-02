@@ -2,6 +2,13 @@
 
 DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
 
+# Host-only per-run capability. Keep this dependency-free: the runtime worker
+# must not initialize the tool/subagent packages while importing this key.
+CONVERSATION_READER_CONTEXT_KEY = "__conversation_reader"
+CONVERSATION_TOOL_USE = "deerflow.tools.conversation:read_conversation"
+# The Gateway sizes reader pages by this tool's tool-output budget entry.
+CONVERSATION_TOOL_NAME = "read_conversation"
+
 # Hidden subdirectory (under a thread's outputs dir) that holds the browser
 # tools' per-step screenshots. These are transient live-progress frames, not
 # deliverables, so the workspace-changes scanner excludes this directory. Both
@@ -50,12 +57,6 @@ DEFAULT_MCP_SESSION_INIT_TIMEOUT = 60.0
 MCP_TASK_SERVER_NAME_MAX_LENGTH = 128
 MCP_TASK_REMOTE_ID_MAX_LENGTH = 255
 MCP_TASK_NAME_MAX_LENGTH = 255
-MCP_TASK_CANCEL_ACTOR_REF_LENGTH = 64
-MCP_TASK_CANCEL_REASON_MAX_LENGTH = 32
-# ``account_disabled``: the deployer turned the owner off (``accounts disable``);
-# never one a person's own cancel may give (``MCP_TASK_OWNER_CANCEL_REASON_CODES``).
-MCP_TASK_OWNER_CANCEL_REASON_CODES = frozenset({"user_api", "agent_tool"})
-MCP_TASK_CANCEL_REASON_CODES = MCP_TASK_OWNER_CANCEL_REASON_CODES | {"account_disabled"}
 MCP_TASK_RESULT_ARTIFACT_MAX_BYTES = 65_536
 MCP_TASK_POLL_AFTER_MAX_SECONDS = 86_400
 
@@ -64,13 +65,6 @@ MCP_TASK_POLL_AFTER_MAX_SECONDS = 86_400
 # initialize deerflow.runtime just to validate storage constraints.
 RUN_EVENT_TYPE_MAX_LENGTH = 32
 RUN_EVENT_CATEGORY_MAX_LENGTH = 16
-
-# Evidence-bearing retrieval is finalized beside the authoritative terminal
-# tool receipt. Keeping the name below the runtime layer lets every event-store
-# implementation share one persistence identity without importing provider
-# code.
-RETRIEVAL_OBSERVATION_EVENT_TYPE = "retrieval.observation.v1"
-RETRIEVAL_OBSERVATION_EVENT_CATEGORY = "tool"
 
 # Workspace changes are produced below the runtime layer, so their persisted
 # event identity also lives here rather than in the runtime event catalog.

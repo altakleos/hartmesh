@@ -1,29 +1,23 @@
-"""Observe durable tool attempts and render compact receipts to the model.
+"""Stamp deterministic tool receipts and render the receipt ledger to the model.
 
 Ordering contract (enforced by the build-time constraints in
 ``deerflow.extensions.ordering.core_ordering_constraints``): this is the
 outermost ``wrap_tool_call`` layer — Guardrail, SandboxAudit, ReadBeforeWrite,
 and ToolProgress can short-circuit or rebuild results, and an inner receipt
-layer would silently gap the ledger on those. It also sits outside result
-sanitization and output budgeting, so its return path digests/stamps the exact
-final model-visible projection. Normal results still carry a normalized
-``deerflow_tool_meta`` status when observed (ToolErrorHandling runs on the
-inner return path); short-circuit messages either self-stamp the meta or fall
-back to ``message.status`` in ``make_tool_receipt``.
+layer would silently gap the ledger on those. Normal results still carry a
+normalized ``deerflow_tool_meta`` status when stamped (ToolErrorHandling runs
+on the inner return path); short-circuit messages either self-stamp the meta
+or fall back to ``message.status`` in ``make_tool_receipt``.
 
-Durable evidence activates only through typed server-owned runtime context and
-is independent from display configuration. The display-ledger injection mirrors
-DurableContextMiddleware: derived from the
+The ledger injection mirrors DurableContextMiddleware: derived from the
 in-flight messages on every model call, appended as a hidden HumanMessage,
 never written back to state.
 """
 
 from __future__ import annotations
 
-import asyncio
 import logging
-import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable
 from typing import override
 
 from langchain.agents import AgentState
@@ -31,7 +25,6 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ModelCallResult, ModelRequest, ModelResponse
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
-from langgraph.runtime import ExecutionInfo
 from langgraph.types import Command
 
 from deerflow.agents.middlewares.message_utils import insert_after_leading_system_messages, is_genuine_user_message
@@ -43,85 +36,10 @@ from deerflow.agents.middlewares.tool_receipt import (
     make_tool_receipt,
     render_tool_receipts_with_snapshot,
 )
-from deerflow.agents.middlewares.tool_result_meta import TOOL_META_KEY
-from deerflow.authz.outcome import peek_policy_outcomes, pop_policy_outcomes
-from deerflow.retrieval import (
-    RetrievalEvidenceError,
-    RetrievalObservationFinalizer,
-    RetrievalObservationV1,
-    RetrievalPolicyDenied,
-    RetrievalProviderError,
-    active_retrieval_draft_context,
-    protect_retrieval_request_projection,
-    resolve_tool_plane_provenance,
-    retrieval_tool_declaration,
-)
-from deerflow.runtime.execution_policy import (
-    EXECUTION_POLICY_OBSERVER_CONTEXT_KEY,
-    ExecutionBudgetV1,
-    ExecutionPolicyError,
-    ExecutionPolicyObservationV1,
-    PolicyDecision,
-    ToolEquivalenceKeyring,
-    build_tool_equivalence_commitment,
-)
-from deerflow.runtime.tool_evidence import (
-    ToolAttemptReservation,
-    ToolDispatchObservationV1,
-    ToolEvidenceError,
-    active_tool_receipt_context,
-    build_request_projection,
-    digest_request_projection,
-    digest_result_projection,
-    evidence_safe_fields_from_tool,
-    observe_tool_dispatch,
-    resolve_tool_evidence_context,
-)
 
 logger = logging.getLogger(__name__)
 
-_SAFE_REASON = re.compile(r"^[a-z0-9_.:-]{1,64}$")
-
-
-def _bounded_reason(value: object) -> str:
-    """Return a value safe to log: a known-shaped label, or nothing at all.
-
-    Diagnostics here sit next to queries, tool arguments and provider
-    responses, so anything that is not already a bounded machine label is
-    reported as ``unspecified`` rather than truncated into the log.
-    """
-
-    text = getattr(value, "code", value)
-    if isinstance(text, str) and _SAFE_REASON.fullmatch(text):
-        return text
-    return "unspecified"
-
-
 _RECEIPT_CONTEXT_KEY = "deerflow_tool_receipt_context"
-
-
-class _ExecutionPolicyStopped(RuntimeError):
-    """Internal control flow after a fenced policy stop."""
-
-
-def _policy_tool_category(
-    tool_name: str,
-    *,
-    retrieval: bool,
-) -> str:
-    """Classify only explicit built-in names and typed retrieval tools."""
-
-    if retrieval:
-        return "retrieval"
-    if tool_name in {"batch_task", "batch_status", "cancel_batch", "task"}:
-        return "subagent"
-    if tool_name in {"read_file", "list_files", "glob", "find"}:
-        return "filesystem_read"
-    if tool_name in {"write_file", "str_replace", "apply_patch"}:
-        return "filesystem_write"
-    if tool_name in {"bash", "shell", "exec_command"}:
-        return "sandbox"
-    return "tool"
 
 
 class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
@@ -137,18 +55,11 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
 
     state_schema = AgentState
 
-    def __init__(self, *, render_mode: str = "always", display_enabled: bool = True) -> None:
+    def __init__(self, *, render_mode: str = "always") -> None:
         super().__init__()
         if render_mode not in {"always", "delegation_only"}:
             raise ValueError(f"Unknown render_mode: {render_mode}")
         self._render_mode = render_mode
-        self._display_enabled = display_enabled
-
-    def release_policy_parameters(self) -> dict[str, object]:
-        return {
-            "render_mode": self._render_mode,
-            "display_enabled": self._display_enabled,
-        }
 
     def _stamp_message(self, message: ToolMessage, request: ToolCallRequest) -> None:
         try:
@@ -189,15 +100,7 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
-        context = self._runtime_context(request)
-        binding, _sink = resolve_tool_evidence_context(context)
-        if binding is not None:
-            # The durable boundary requires an acknowledged async store write
-            # before dispatch. There is no safe synchronous bridge inside the
-            # running Gateway, so fail before invoking the tool.
-            raise ToolEvidenceError("durable_sync_tool_unsupported")
-        result = handler(request)
-        return self._stamp(result, request) if self._display_enabled else result
+        return self._stamp(handler(request), request)
 
     @override
     async def awrap_tool_call(
@@ -205,505 +108,7 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
         request: ToolCallRequest,
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
-        context = self._runtime_context(request)
-        binding, sink = resolve_tool_evidence_context(context)
-        if binding is None:
-            result = await handler(request)
-            return self._stamp(result, request) if self._display_enabled else result
-
-        tool_call_id = str(request.tool_call.get("id") or "")
-        retrieval_declaration = retrieval_tool_declaration(getattr(request, "tool", None))
-        if retrieval_declaration is not None:
-            # One refusal reason reaches the operator's log, bounded and free
-            # of queries, arguments, provider payloads and tenant identity:
-            # "retrieval refused" alone cannot tell a deployment missing its
-            # atomic finalizer from one whose admission described no
-            # tool-plane state at all, and those have different repairs.
-            try:
-                if not isinstance(sink, RetrievalObservationFinalizer):
-                    raise RetrievalEvidenceError("retrieval_finalizer_unavailable")
-                if binding.tenant is None:
-                    raise RetrievalEvidenceError("retrieval_tenant_context_unavailable")
-                # Governed or explicitly unmanaged: both are decisions this
-                # run's admission sealed, and the observation records which
-                # one it was. Anything else -- an admission that made no
-                # statement, or one that somehow made both -- still fails
-                # before the tool is called.
-                resolve_tool_plane_provenance(context)
-            except RetrievalEvidenceError as exc:
-                logger.warning(
-                    "Refusing a retrieval tool call before dispatch: reason=%s tool=%s run=%s",
-                    _bounded_reason(exc),
-                    _bounded_reason(request.tool_call.get("name")),
-                    binding.run_id,
-                )
-                raise
-        dispatch = self._dispatch_observation(request)
-        async with binding.serialize_dispatch(tool_call_id):
-            tool_name = str(request.tool_call.get("name") or "")
-            arguments = request.tool_call.get("args")
-            if not isinstance(arguments, Mapping):
-                raise ToolEvidenceError("arguments_not_object")
-            projection = build_request_projection(
-                tool_name,
-                arguments,
-                evidence_safe_fields=evidence_safe_fields_from_tool(getattr(request, "tool", None)),
-            )
-            if retrieval_declaration is not None:
-                projection = protect_retrieval_request_projection(
-                    projection,
-                    retrieval_declaration,
-                )
-            # Reservation and append are one fenced store operation. This await
-            # is the side-effect boundary: no inner authorization, provider,
-            # guardrail, or tool code runs before the start is durable.
-            reservation = await sink.reserve_started(
-                binding=binding,
-                tool_call_id=tool_call_id,
-                tool_name=tool_name,
-                request_projection_digest=digest_request_projection(projection),
-                dispatch=dispatch,
-                capability_kind=("retrieval" if retrieval_declaration is not None else None),
-            )
-            if not isinstance(reservation, ToolAttemptReservation):
-                raise ToolEvidenceError("tool_attempt_reservation_invalid")
-            started = reservation.started
-            replayed_outcome = reservation.replayed_outcome
-            if replayed_outcome is not None:
-                if retrieval_declaration is not None:
-                    replayed_observation = reservation.replayed_retrieval_observation
-                    if not isinstance(
-                        replayed_observation,
-                        RetrievalObservationV1,
-                    ):
-                        raise RetrievalEvidenceError("retrieval_replay_observation_missing")
-                    replayed_draft = replayed_observation.draft
-                    if (
-                        replayed_draft.provider_id != retrieval_declaration.provider_id
-                        or replayed_draft.tool_kind != retrieval_declaration.tool_kind
-                        or replayed_draft.adapter_capability_version != retrieval_declaration.adapter_capability_version
-                        or replayed_draft.mcp_evidence_ref != retrieval_declaration.mcp_evidence_ref
-                    ):
-                        raise RetrievalEvidenceError("retrieval_replay_observation_mismatch")
-                    await self._observe_retrieval_policy(
-                        context,
-                        replayed_observation,
-                    )
-                result = ToolMessage(
-                    content=(f"This tool call already reached durable status '{replayed_outcome.phase}' before recovery, but its prior result is unavailable. The tool was not executed again."),
-                    tool_call_id=tool_call_id,
-                    name=tool_name,
-                    status="error",
-                    additional_kwargs={
-                        TOOL_META_KEY: {
-                            "status": "error",
-                            "error_type": "internal_error",
-                        }
-                    },
-                )
-                return self._stamp(result, request) if self._display_enabled else result
-            retrieval_handoff = None
-            try:
-                with active_tool_receipt_context(started):
-                    if retrieval_declaration is None:
-                        evaluation = await self._observe_tool_policy(
-                            context,
-                            started=started,
-                            arguments=arguments,
-                            retrieval=False,
-                        )
-                        if evaluation is not None and evaluation.decision is PolicyDecision.stop:
-                            raise _ExecutionPolicyStopped(evaluation.reason_code)
-                        result = await handler(request)
-                    else:
-                        with active_retrieval_draft_context(
-                            started,
-                            retrieval_declaration,
-                            context,
-                        ) as retrieval_handoff:
-                            evaluation = await self._observe_tool_policy(
-                                context,
-                                started=started,
-                                arguments=arguments,
-                                retrieval=True,
-                            )
-                            if evaluation is not None and evaluation.decision is PolicyDecision.stop:
-                                raise _ExecutionPolicyStopped(evaluation.reason_code)
-                            result = await handler(request)
-            except asyncio.CancelledError:
-                policy = self._policy_references(context, tool_call_id)
-                try:
-                    outcome = started.outcome(
-                        phase="cancelled",
-                        result_projection_digest=None,
-                        result_kind=None,
-                        safe_error_code="cancelled",
-                        **policy,
-                    )
-                    if retrieval_handoff is not None and retrieval_handoff.draft is not None:
-                        await sink.record_with_receipt_outcome(
-                            outcome,
-                            retrieval_handoff.draft,
-                        )
-                    elif retrieval_handoff is not None:
-                        await sink.record_with_receipt_outcome(
-                            outcome,
-                            retrieval_handoff.make_terminal_draft(
-                                provider_status="cancelled",
-                                safe_reason="cancelled",
-                                provider_finished_at=outcome.occurred_at,
-                            ),
-                        )
-                    else:
-                        await sink.record_outcome(outcome)
-                except asyncio.CancelledError:
-                    pass
-                except Exception:
-                    # Cancellation is the caller's primary control signal. A
-                    # failed best-effort terminal write must never replace it.
-                    # It is still worth knowing which write failed and why: a
-                    # cancelled tool attempt with no terminal receipt is the
-                    # indeterminate state recovery fails closed on, and this
-                    # line was the only trace of it. (A durable cancellation
-                    # advances the run's epoch; the sink follows that one
-                    # same-owner step once, so what still lands here is a
-                    # takeover, an expired lease, a further epoch move, a
-                    # store that could not be reached or an integrity error.)
-                    logger.warning("Failed to record durable tool cancellation outcome", exc_info=True)
-                raise
-            except Exception as exc:
-                policy = self._policy_references(context, tool_call_id)
-                if isinstance(exc, (RetrievalPolicyDenied, _ExecutionPolicyStopped)):
-                    phase = "denied"
-                    safe_error_code = "guardrail_denied"
-                    provider_status = "policy_denied"
-                elif isinstance(exc, RetrievalProviderError):
-                    phase = "failed"
-                    safe_error_code = self._safe_error_for_provider_status(exc.status)
-                    provider_status = exc.status
-                elif isinstance(exc, RetrievalEvidenceError):
-                    phase = "failed"
-                    safe_error_code = "configuration_error"
-                    provider_status = "configuration_error"
-                else:
-                    phase = "failed"
-                    safe_error_code = "internal_error"
-                    provider_status = "internal_error"
-                outcome = started.outcome(
-                    phase=phase,
-                    result_projection_digest=None,
-                    result_kind=None,
-                    safe_error_code=safe_error_code,
-                    **policy,
-                )
-                if retrieval_handoff is not None and retrieval_handoff.draft is not None:
-                    await sink.record_with_receipt_outcome(
-                        outcome,
-                        retrieval_handoff.draft,
-                    )
-                elif retrieval_handoff is not None:
-                    await sink.record_with_receipt_outcome(
-                        outcome,
-                        retrieval_handoff.make_terminal_draft(
-                            provider_status=provider_status,
-                            safe_reason=provider_status,
-                            provider_finished_at=outcome.occurred_at,
-                        ),
-                    )
-                else:
-                    await sink.record_outcome(outcome)
-                if isinstance(exc, _ExecutionPolicyStopped):
-                    result = ToolMessage(
-                        content="Tool execution stopped by the accepted execution policy.",
-                        tool_call_id=tool_call_id,
-                        name=tool_name,
-                        status="error",
-                        additional_kwargs={
-                            TOOL_META_KEY: {
-                                "status": "error",
-                                "error_type": "policy_denied",
-                            }
-                        },
-                    )
-                    return self._stamp(result, request) if self._display_enabled else result
-                raise
-
-            phase, safe_error_code, result_kind, result_status, model_visible = self._classify_result(
-                result,
-                request,
-                context,
-            )
-            if retrieval_handoff is not None and retrieval_handoff.draft is not None:
-                provider_status = retrieval_handoff.draft.provider_status
-                if provider_status == "policy_denied":
-                    phase = "denied"
-                    safe_error_code = "guardrail_denied"
-                elif phase == "failed" and provider_status not in {
-                    "success",
-                    "empty",
-                    "partial",
-                }:
-                    safe_error_code = self._safe_error_for_provider_status(provider_status)
-            result_digest = digest_result_projection(
-                model_visible,
-                result_kind=result_kind,
-                status=result_status,
-            )
-            policy = self._policy_references(context, tool_call_id)
-            outcome = started.outcome(
-                phase=phase,
-                result_projection_digest=result_digest,
-                result_kind=result_kind,
-                safe_error_code=safe_error_code,
-                **policy,
-            )
-            if retrieval_declaration is not None:
-                if retrieval_handoff is None or retrieval_handoff.draft is None:
-                    if retrieval_handoff is None:
-                        raise RetrievalEvidenceError("retrieval_draft_context_unavailable")
-                    if phase == "succeeded":
-                        outcome = started.outcome(
-                            phase="failed",
-                            result_projection_digest=None,
-                            result_kind=None,
-                            safe_error_code="internal_error",
-                            **policy,
-                        )
-                        provider_status = "internal_error"
-                    else:
-                        provider_status = self._provider_status_for_terminal(
-                            phase,
-                            safe_error_code,
-                        )
-                    await sink.record_with_receipt_outcome(
-                        outcome,
-                        retrieval_handoff.make_terminal_draft(
-                            provider_status=provider_status,
-                            safe_reason=provider_status,
-                            provider_finished_at=outcome.occurred_at,
-                        ),
-                    )
-                    if phase == "succeeded":
-                        raise RetrievalEvidenceError("retrieval_draft_missing")
-                    return self._stamp(result, request) if self._display_enabled else result
-                observation = await sink.record_with_receipt_outcome(
-                    outcome,
-                    retrieval_handoff.draft,
-                )
-                if not isinstance(observation, RetrievalObservationV1):
-                    raise RetrievalEvidenceError("retrieval_observation_invalid")
-                await self._observe_retrieval_policy(context, observation)
-            else:
-                await sink.record_outcome(outcome)
-            return self._stamp(result, request) if self._display_enabled else result
-
-    @staticmethod
-    async def _observe_retrieval_policy(
-        context: dict,
-        observation: RetrievalObservationV1,
-    ) -> None:
-        """Advance aggregate retrieval facts after the durable receipt pair."""
-
-        observer = context.get(EXECUTION_POLICY_OBSERVER_CONTEXT_KEY)
-        if not callable(observer):
-            return
-        await observer(
-            ExecutionPolicyObservationV1(
-                kind="retrieval",
-                count=0,
-                result_count=observation.draft.result_count,
-                source_count=observation.draft.source_count,
-                observation_id=observation.observation_id,
-            )
-        )
-
-    @staticmethod
-    async def _observe_tool_policy(
-        context: dict,
-        *,
-        started,
-        arguments: Mapping[str, object],
-        retrieval: bool,
-    ):
-        """Advance attempts at the durable receipt reservation boundary."""
-
-        observer = context.get(EXECUTION_POLICY_OBSERVER_CONTEXT_KEY)
-        budget = context.get("accepted_execution_budget")
-        keyring = context.get("execution_policy_keyring")
-        if not callable(observer) or not isinstance(budget, ExecutionBudgetV1):
-            return None
-        if not isinstance(keyring, ToolEquivalenceKeyring):
-            raise ExecutionPolicyError("policy_equivalence_key_unavailable")
-        tenant = started.context.tenant
-        if tenant is None or not isinstance(getattr(tenant, "digest", None), str):
-            raise ExecutionPolicyError("policy_state_inconsistent")
-        candidate = build_tool_equivalence_commitment(
-            tenant_digest=tenant.digest,
-            run_ref=started.context.run_id,
-            tool_name=started.tool_name,
-            arguments=arguments,
-            keyring=keyring,
-            key_id=budget.equivalence_key_id,
-        )
-        evaluation = await observer(
-            ExecutionPolicyObservationV1.tool_attempt(
-                tool_name=started.tool_name,
-                tool_category=_policy_tool_category(
-                    started.tool_name,
-                    retrieval=retrieval,
-                ),
-                equivalence_commitment=(None if candidate is None else candidate.digest),
-                observation_id=f"tool_{started.receipt_id}",
-            )
-        )
-        if retrieval and evaluation.decision is not PolicyDecision.stop:
-            retrieval_evaluation = await observer(
-                ExecutionPolicyObservationV1(
-                    kind="retrieval",
-                    count=1,
-                    observation_id=f"retrieval_{started.receipt_id}",
-                )
-            )
-            if retrieval_evaluation.decision in {
-                PolicyDecision.warn,
-                PolicyDecision.stop,
-            }:
-                return retrieval_evaluation
-        return evaluation
-
-    @staticmethod
-    def _safe_error_for_provider_status(provider_status: str) -> str:
-        return {
-            "timeout": "timeout",
-            "rate_limited": "rate_limited",
-            "authentication_failed": "permission_denied",
-            "configuration_error": "configuration_error",
-            "provider_unavailable": "transient_error",
-            "unsafe_response": "invalid_input",
-            "oversized_response": "invalid_input",
-        }.get(provider_status, "internal_error")
-
-    @classmethod
-    def _provider_status_for_terminal(
-        cls,
-        phase: str,
-        safe_error_code: str | None,
-    ) -> str:
-        if phase == "denied":
-            return "policy_denied"
-        if phase == "cancelled":
-            return "cancelled"
-        return {
-            "timeout": "timeout",
-            "rate_limited": "rate_limited",
-            "permission_denied": "authentication_failed",
-            "configuration_error": "configuration_error",
-            "transient_error": "provider_unavailable",
-            "invalid_input": "unsafe_response",
-        }.get(safe_error_code or "", "internal_error")
-
-    @staticmethod
-    def _runtime_context(request: ToolCallRequest) -> dict:
-        runtime = getattr(request, "runtime", None)
-        context = getattr(runtime, "context", None) if runtime is not None else None
-        return context if isinstance(context, dict) else {}
-
-    @staticmethod
-    def _dispatch_observation(
-        request: ToolCallRequest,
-    ) -> ToolDispatchObservationV1:
-        runtime = getattr(request, "runtime", None)
-        execution_info = getattr(runtime, "execution_info", None)
-        if not isinstance(execution_info, ExecutionInfo):
-            raise ToolEvidenceError("tool_dispatch_generation_unavailable")
-        return observe_tool_dispatch(
-            checkpoint_id=execution_info.checkpoint_id,
-            checkpoint_ns=execution_info.checkpoint_ns,
-            task_id=execution_info.task_id,
-            node_attempt=execution_info.node_attempt,
-        )
-
-    @staticmethod
-    def _matching_messages(result: ToolMessage | Command, request: ToolCallRequest) -> list[ToolMessage]:
-        if isinstance(result, ToolMessage):
-            return [result]
-        update = result.update
-        if not isinstance(update, dict):
-            return []
-        messages = update.get("messages", [])
-        if isinstance(messages, ToolMessage):
-            messages = [messages]
-        if not isinstance(messages, (list, tuple)):
-            return []
-        call_id = str(request.tool_call.get("id") or "")
-        return [message for message in messages if isinstance(message, ToolMessage) and str(message.tool_call_id) == call_id]
-
-    @classmethod
-    def _classify_result(
-        cls,
-        result: ToolMessage | Command,
-        request: ToolCallRequest,
-        context: dict,
-    ) -> tuple[str, str | None, str, str, object]:
-        messages = cls._matching_messages(result, request)
-        statuses: list[str] = []
-        error_types: list[str] = []
-        for message in messages:
-            meta = (message.additional_kwargs or {}).get(TOOL_META_KEY)
-            meta = meta if isinstance(meta, dict) else {}
-            statuses.append(str(meta.get("status") or message.status or "success"))
-            if isinstance(meta.get("error_type"), str):
-                error_types.append(meta["error_type"])
-        outcomes = peek_policy_outcomes(
-            context,
-            str(request.tool_call.get("id") or ""),
-        )
-        denied = [item for item in outcomes if item.decision == "denied"]
-        result_kind = "tool_message" if isinstance(result, ToolMessage) else "command"
-        model_visible: object
-        if len(messages) == 1:
-            model_visible = messages[0].content
-        else:
-            model_visible = [message.content for message in messages]
-        status = "error" if "error" in statuses else (statuses[0] if statuses else "success")
-        if denied:
-            code = "authorization_denied" if any(getattr(item, "kind", None) == "authorization" for item in denied) else "guardrail_denied"
-            return "denied", code, result_kind, status, model_visible
-        if status == "error":
-            aliases = {
-                "auth": "permission_denied",
-                "transient": "transient_error",
-                "config": "configuration_error",
-                "permission": "permission_denied",
-                "internal": "internal_error",
-                "unknown": "unknown_error",
-            }
-            error_types = [aliases.get(item, item) for item in error_types]
-            allowed = {
-                "timeout",
-                "invalid_input",
-                "rate_limited",
-                "permission_denied",
-                "transient_error",
-                "configuration_error",
-                "not_found",
-                "no_results",
-                "internal_error",
-                "unknown_error",
-            }
-            code = next((item for item in error_types if item in allowed), "tool_error")
-            return "failed", code, result_kind, status, model_visible
-        return "succeeded", None, result_kind, status, model_visible
-
-    @staticmethod
-    def _policy_references(context: dict, tool_call_id: str) -> dict[str, object]:
-        outcomes = pop_policy_outcomes(context, tool_call_id)
-        authz = next((item.decision_ref for item in reversed(outcomes) if item.kind == "authorization"), None)
-        guardrails = tuple(dict.fromkeys(item.decision_ref for item in outcomes if item.kind == "guardrail"))
-        return {
-            "authz_decision_ref": authz,
-            "guardrail_decision_refs": guardrails,
-        }
+        return self._stamp(await handler(request), request)
 
     def _should_render(self, request: ModelRequest) -> bool:
         if self._render_mode == "always":
@@ -738,7 +143,7 @@ class ToolReceiptMiddleware(AgentMiddleware[AgentState]):
         return request.override(messages=messages)
 
     def _prepare_model_call(self, request: ModelRequest) -> tuple[ModelRequest, list[ToolReceipt] | None]:
-        if not self._display_enabled or not self._should_render(request):
+        if not self._should_render(request):
             return request, None
         receipts = extract_tool_receipts(list(request.messages))
         ledger, rendered_receipts = render_tool_receipts_with_snapshot(receipts)
