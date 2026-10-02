@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Rebuilds HartMesh on upstream DeerFlow main at
   `67db3d883c38264e2a188d9aaad44f7a7b55015d`. Upstream changes include projects,
-  preferences, scheduling, artifact references and subagent acceptance criteria;
-  the detailed upstream changelog follows below.
+  preferences, scheduling, artifact references and subagent acceptance criteria.
+  Full upstream changes are recorded in the
+  [pinned upstream changelog](https://github.com/bytedance/deer-flow/blob/67db3d883c38264e2a188d9aaad44f7a7b55015d/CHANGELOG.md).
 - Retains HartMesh sign-on-only access, accounts and role limits, provider keys
   with connection testing, branding, turn progress, scheduled runs, page reading
   and image search, business reports with PDF/Word/Excel output, personal and
