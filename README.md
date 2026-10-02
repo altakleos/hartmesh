@@ -581,6 +581,8 @@ DeerFlow's built-in custom events are available through both LangGraph streaming
 
 #### Docker Production Deployment
 
+Clicking Stop cancels the active sandbox command, including statements after a long-running command. Docker/AIO keeps shell state between successful calls, replaces the shell after cancellation, and preserves background jobs started by earlier calls. The composer accepts the next message once the stopped worker has finished draining.
+
 HartMesh release notes describe database schema changes relative to the previous
 release, including upgrade behavior, or explicitly state that there are none.
 See [CHANGELOG.md](CHANGELOG.md) and the

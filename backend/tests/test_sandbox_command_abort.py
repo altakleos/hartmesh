@@ -15,7 +15,9 @@ container this suite has no way to start.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import os
+import selectors
 import shutil
 import subprocess
 import threading
@@ -201,6 +203,7 @@ class _FakeShell:
         self.cleaned: list[str] = []
         self.commands: list[tuple[str | None, str]] = []
         self.killed: list[str] = []
+        self.events: list[tuple[str, str]] = []
         #: The ``request_options`` of every call, in order. An abort request
         #: with no timeout can hang the cancelled call's drain for the client's
         #: whole 600 s command budget, so every one of them is recorded.
@@ -216,17 +219,23 @@ class _FakeShell:
     def cleanup_session(self, session_id: str, request_options=None, **kwargs) -> None:
         self.cleaned.append(session_id)
         self.request_options.append(request_options)
+        self.block.set()
+
+    def update_session(self, *, id, request_options=None, **kwargs):  # noqa: A002
+        self.request_options.append(request_options)
 
     def kill_process(self, *, id: str, request_options=None, **kwargs):  # noqa: A002 - the SDK's parameter name
         self.killed.append(id)
+        self.events.append(("kill", id))
         self.request_options.append(request_options)
         self.block.set()
         return SimpleNamespace(data=None)
 
     def exec_command(self, *, command: str, id: str | None = None, request_options=None, **kwargs):  # noqa: A002
         self.commands.append((id, command))
+        self.events.append(("exec", command))
         self.request_options.append(request_options)
-        if id in self.sessions and not _is_sweep(command):
+        if id in self.sessions and not _is_sweep(command) and "read -r p expected" not in command:
             self.block.wait(timeout=30)
         return SimpleNamespace(data=SimpleNamespace(output="", exit_code=0, session_id=id or self.implicit_session_id))
 
@@ -259,6 +268,7 @@ def _aio_sandbox():
     bash = _FakeBash(shell)
     sandbox = AioSandbox("aio-test", base_url="http://sandbox.invalid", home_dir="/home/gem")
     sandbox._client = SimpleNamespace(shell=shell, bash=bash)
+    sandbox._snapshot_existing_abort_processes = lambda *_a: frozenset()
     return sandbox, shell, bash
 
 
@@ -282,6 +292,137 @@ def _wait_for(predicate, *, timeout: float = 5.0) -> None:
             return
         time.sleep(0.01)
     raise AssertionError("the container was never asked to run anything")
+
+
+class _ProcessShell:
+    """A small shell transport using real Bash, including its kill semantics.
+
+    An omitted id creates a new session, as the AIO API does. Killing only a
+    foreground child lets Bash execute the rest of the submitted command.
+    """
+
+    def __init__(self, child_file: Path):
+        self.processes = {}
+        self.commands = []
+        self.child_file = child_file
+
+    def create_session(self, *, id=None, **kwargs):  # noqa: A002
+        session_id = id or str(uuid.uuid4())
+        self.processes[session_id] = subprocess.Popen(
+            ["bash", "--noprofile", "--norc"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+        return SimpleNamespace(data=SimpleNamespace(session_id=session_id))
+
+    def exec_command(self, *, command, id=None, **kwargs):  # noqa: A002
+        from agent_sandbox.core.api_error import ApiError
+
+        if id is None:
+            id = self.create_session().data.session_id  # noqa: A001
+        self.commands.append((id, command))
+        process = self.processes[id]
+        delimiter = uuid.uuid4().hex
+        try:
+            process.stdin.write(f"{command}\nprintf '\\n{delimiter}\\n'\n".encode())
+            process.stdin.flush()
+            output = b""
+            with selectors.DefaultSelector() as selector:
+                selector.register(process.stdout, selectors.EVENT_READ)
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline:
+                    if not selector.select(timeout=0.1):
+                        continue
+                    chunk = os.read(process.stdout.fileno(), 65536)
+                    if not chunk:
+                        break
+                    output += chunk
+                    if delimiter.encode() in output:
+                        return SimpleNamespace(
+                            data=SimpleNamespace(
+                                output=output.decode().split(delimiter)[0],
+                                exit_code=0,
+                                session_id=id,
+                                status="completed",
+                            )
+                        )
+        except BrokenPipeError:
+            pass
+        raise ApiError(status_code=404, body={"message": "Shell session not found"})
+
+    def update_session(self, **kwargs):
+        pass
+
+    def kill_process(self, *, id, **kwargs):  # noqa: A002
+        # AIO kills the foreground process rather than the interactive shell.
+        if self.processes[id].poll() is None and self.child_file.exists():
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(int(self.child_file.read_text()), 9)
+
+    def cleanup_session(self, session_id, **kwargs):
+        process = self.processes[session_id]
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
+
+
+@linux_proc_only
+@posix_only
+def test_aio_stop_prevents_trailing_statements_preserves_old_jobs_and_recovers(
+    tmp_path,
+):
+    """Exercise the production abort with actual shell processes, not kill mocks."""
+    if shutil.which("bash") is None:
+        pytest.skip("requires Bash")
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+
+    child_file = tmp_path / "current.pid"
+    old_file = tmp_path / "older.pid"
+    trailing = tmp_path / "should-not-exist"
+    shell = _ProcessShell(child_file)
+    sandbox = AioSandbox("process-test", base_url="http://sandbox.invalid", home_dir="/home/gem")
+    sandbox._client = SimpleNamespace(shell=shell)
+    older_pid = None
+    try:
+        sandbox.execute_command(f"sleep 300 >/dev/null 2>&1 & echo $! > {old_file}; export REMEMBERED=ok; cd {tmp_path}")
+        older_pid = int(_wait_for_file(old_file))
+        assert "ok" in sandbox.execute_command('printf "%s %s" "$REMEMBERED" "$PWD"')
+        assert sum(p.poll() is None for p in shell.processes.values()) == 1, "default calls must reuse one explicitly named shell"
+        # Warm-pool release closes host sockets, while the next turn reconnects
+        # to the same server-side shell rather than killing its older jobs.
+        state = sandbox.detach_default_shell()
+        sandbox.close()
+        sandbox = AioSandbox("process-test", base_url="http://sandbox.invalid", home_dir="/home/gem")
+        sandbox._client = SimpleNamespace(shell=shell)
+        sandbox.restore_default_shell(state)
+        assert "ok" in sandbox.execute_command('printf "%s %s" "$REMEMBERED" "$PWD"')
+        assert sum(p.poll() is None for p in shell.processes.values()) == 1
+        worker = _run_in_call(
+            sandbox,
+            f"sleep 300 & echo $! > {child_file}; wait $!; echo bad > {trailing}",
+            "stop-call",
+        )
+        current_pid = int(_wait_for_file(child_file))
+        before = time.monotonic()
+        assert sandbox.abort_running_commands("stop-call") == 1
+        worker.join(timeout=8)
+        assert not worker.is_alive(), "the cancelled command did not drain"
+        assert time.monotonic() - before < 8
+        assert not trailing.exists(), "Bash continued executing after Stop"
+        assert _alive(older_pid), "Stop killed a job from an earlier command"
+        assert not _alive(current_pid) or Path(f"/proc/{current_pid}/stat").read_text().split(") ")[-1].startswith("Z")
+        assert "after" in sandbox.execute_command("echo after")
+        assert len([command for _, command in shell.commands if str(trailing) in command]) == 1, "404 recovery replayed the cancelled command"
+    finally:
+        for process in shell.processes.values():
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=5)
+        if older_pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(older_pid, 9)
 
 
 def test_aio_marks_a_shell_session_once_and_sends_later_commands_as_written():
@@ -315,10 +456,8 @@ def test_aio_gives_each_shell_session_its_own_token():
     assert lead.split(";")[0] != sub.split(";")[0]
 
 
-def test_aio_marks_the_implicit_session_again_when_the_image_replaced_it():
-    """`exit` in the implicit session ends that shell and the image starts
-    another, which exports nothing. The answer names the session that ran the
-    command, so the change is visible and the next command marks the new one."""
+def test_aio_reuses_the_explicit_default_session():
+    """A response from a different session cannot silently redirect later calls."""
     sandbox, shell, _ = _aio_sandbox()
     shell.block.set()
 
@@ -330,25 +469,24 @@ def test_aio_marks_the_implicit_session_again_when_the_image_replaced_it():
 
     commands = [command for _, command in shell.commands]
     assert commands[1] == "echo two", "the change is only known once the new session has answered"
-    assert commands[2].startswith(f"export {ABORT_TOKEN_ENV}=df-") and commands[2].endswith("; echo three")
-    assert commands[2].split(";")[0] != commands[0].split(";")[0]
+    assert commands[2] == "echo three"
     assert commands[3] == "echo four"
+    assert len(shell.sessions) == 1
+    assert all(session_id == shell.sessions[0] for session_id, _ in shell.commands)
 
 
-def test_aio_abort_on_the_implicit_session_kills_by_the_id_it_answered_with():
-    """The implicit session is the lead agent's own. Its id is not known when
-    its first command is sent, and is from then on."""
+def test_aio_abort_targets_the_explicit_default_session():
+    """Cancellation knows the session id before even its first command returns."""
     sandbox, shell, _ = _aio_sandbox()
     shell.block.set()
     sandbox.execute_command("echo warm-up")
     shell.block.clear()
-    shell.sessions.append(None)  # make the fake hold commands sent to the implicit session
     worker = _run_in_call(sandbox, "sleep 300", "call-1")
     _wait_for(lambda: len(shell.commands) == 2)
 
     assert sandbox.abort_running_commands("call-1") == 1
 
-    assert shell.killed == ["implicit-1"]
+    assert shell.sessions[0] in shell.cleaned
     sweep = next(command for _, command in shell.commands if _is_sweep(command))
     token = shell.commands[0][1].split(";")[0].removeprefix(f"export {ABORT_TOKEN_ENV}=")
     assert token in sweep, "the sweep must look for the token that session exports"
@@ -366,7 +504,7 @@ def test_aio_sweep_of_a_session_token_spares_what_older_commands_started():
     sandbox.abort_running_commands("call-1")
     worker.join(timeout=15)
     session_sweep = next(command for _, command in shell.commands if _is_sweep(command))
-    assert "/proc/self/stat" in session_sweep and "-le 3 ]" in session_sweep
+    assert "/proc/self/stat" not in session_sweep, "the shell sweep uses exact prior-job identities, not a rounded age"
 
     shell.commands.clear()
     shell.block.clear()
@@ -388,7 +526,11 @@ def test_aio_abort_kills_the_session_process_and_sweeps_its_descendants():
     stopped = sandbox.abort_running_commands("call-1")
 
     assert stopped == 1
-    assert shell.killed, "the session's foreground process must be killed"
+    assert shell.sessions[0] in shell.cleaned, "the cancelled session must be discarded"
+    parent_index = next(i for i, event in enumerate(shell.events) if event[0] == "exec" and "read -r p expected" in event[1])
+    wake_index = next(i for i, event in enumerate(shell.events) if event[0] == "kill")
+    sweep_index = next(i for i, event in enumerate(shell.events) if event[0] == "exec" and _is_sweep(event[1]))
+    assert parent_index < wake_index < sweep_index, "the PTY must wake after stopping the parent and before sweeping its children"
     sweep = next((command for _, command in shell.commands if _is_sweep(command)), None)
     assert sweep is not None, "descendants are found by the environment they inherited"
     assert "kill -9" in sweep
@@ -484,7 +626,7 @@ def test_aio_abort_bounds_every_request_it_makes():
 
     sandbox.abort_running_commands("call-1")
 
-    assert len(shell.request_options) == 4, shell.request_options
+    assert len(shell.request_options) == 7, shell.request_options
     assert all(options and options.get("timeout_in_seconds") for options in shell.request_options), shell.request_options
 
     worker.join(timeout=15)
@@ -508,10 +650,33 @@ def test_aio_does_not_re_run_a_command_its_own_abort_killed():
 
     sandbox.execute_command("rm -rf /mnt/user-data/outputs/report")
 
-    assert len([command for _, command in shell.commands if "report" in command]) == 1, "the killed command was run again"
+    assert len([command for _, command in shell.commands if "report" in command]) == 0, "an already cancelled call started a command"
 
 
 # ── The tool wrapper: a cancelled tool call aborts the command ──────────
+
+
+@linux_proc_only
+@posix_only
+def test_aio_shell_identity_guard_spares_a_reused_pid():
+    if shutil.which("bash") is None:
+        pytest.skip("requires Bash")
+    from deerflow.community.aio_sandbox.aio_sandbox import _abort_shell_command, _shell_identity_path
+
+    token = f"df-{uuid.uuid4().hex}"
+    process = subprocess.Popen(["sleep", "60"])
+    marker = Path(_shell_identity_path(token))
+    try:
+        ticks = int(Path(f"/proc/{process.pid}/stat").read_text().rsplit(") ", 1)[1].split()[19])
+        marker.write_text(f"{process.pid} {ticks + 1}\n")
+        subprocess.run(["bash", "-c", _abort_shell_command(token)], check=True, timeout=5)
+        assert process.poll() is None, "a stale shell identity killed a different process"
+        assert not marker.exists()
+    finally:
+        marker.unlink(missing_ok=True)
+        if process.poll() is None:
+            process.kill()
+        process.wait(timeout=5)
 
 
 class _AbortRecordingSandbox:
@@ -579,7 +744,10 @@ async def test_a_sandbox_without_an_abort_hook_still_cancels_the_old_way():
         await asyncio.wait_for(task, timeout=15)
 
 
-sweep_runs_here = pytest.mark.skipif(shutil.which("bash") is None or not Path("/proc/self/environ").exists(), reason="the sweep is a shell loop over /proc")
+sweep_runs_here = pytest.mark.skipif(
+    shutil.which("bash") is None or not Path("/proc/self/environ").exists(),
+    reason="the sweep is a shell loop over /proc",
+)
 
 
 @sweep_runs_here

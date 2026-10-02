@@ -14,7 +14,7 @@ import pytest
 
 from deerflow.sandbox.sandbox import ABORT_TOKEN_ENV
 
-_ABORT_MARKER_RE = re.compile(rf"^export {ABORT_TOKEN_ENV}=df-[0-9a-f]{{32}}; ")
+_ABORT_MARKER_RE = re.compile(rf"^export {ABORT_TOKEN_ENV}=df-[0-9a-f]{{32}}; \(umask 077; .*? > /tmp/\.deerflow-shell-df-[0-9a-f]{{32}}\.pid\); ")
 
 
 def _without_abort_marker(command: str) -> str:
@@ -124,7 +124,70 @@ def sandbox():
         from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
 
         sb = AioSandbox(id="test-sandbox", base_url="http://localhost:8080")
+        sb._snapshot_existing_abort_processes = MagicMock(return_value=frozenset())
         return sb
+
+
+def test_async_shell_polling_returns_only_the_current_command_output(sandbox):
+    sandbox._client.shell.exec_command.return_value = SimpleNamespace(data=SimpleNamespace(status="running"))
+    sandbox._client.shell.view.return_value = SimpleNamespace(data=SimpleNamespace(status="completed", output="oldercurrent", exit_code=0, console=[SimpleNamespace(output="older"), SimpleNamespace(output="current")]))
+    assert sandbox.execute_command("echo current") == "current"
+    assert sandbox._client.shell.exec_command.call_args.kwargs["async_mode"] is True
+    sandbox._client.shell.wait_for_process.assert_called_once()
+
+
+def test_async_cancel_does_not_clean_the_shell_before_its_parent_abort(sandbox):
+    polling = threading.Event()
+    release_poll = threading.Event()
+    abort_started = threading.Event()
+    finish_abort = threading.Event()
+    command_done = threading.Event()
+    result = []
+
+    def wait(**_kwargs):
+        polling.set()
+        assert release_poll.wait(timeout=3)
+
+    def sweep(*_args):
+        abort_started.set()
+        assert finish_abort.wait(timeout=3)
+
+    def execute():
+        result.append(sandbox.execute_command("sleep 90; touch unsafe-tail"))
+        command_done.set()
+
+    sandbox._client.shell.exec_command.return_value = SimpleNamespace(data=SimpleNamespace(status="running"))
+    sandbox._client.shell.wait_for_process.side_effect = wait
+    sandbox._sweep_processes_carrying_the_abort_tokens = sweep
+    worker = threading.Thread(target=execute)
+    aborter = threading.Thread(target=sandbox.abort_running_commands)
+    worker.start()
+    try:
+        assert polling.wait(timeout=3)
+        aborter.start()
+        assert abort_started.wait(timeout=3)
+        release_poll.set()
+        assert not command_done.wait(timeout=0.2), "shell cleanup overtook its parent abort"
+        sandbox._client.shell.kill_process.assert_not_called()
+    finally:
+        finish_abort.set()
+        release_poll.set()
+        worker.join(timeout=3)
+        if aborter.ident is not None:
+            aborter.join(timeout=3)
+    assert not worker.is_alive() and not aborter.is_alive()
+    assert len(result) == 1 and result[0].startswith("Error: command cancelled")
+
+
+@pytest.mark.parametrize("scoped", [False, True])
+def test_async_accepted_command_is_not_replayed_when_polling_loses_its_session(sandbox, scoped):
+    from agent_sandbox.core.api_error import ApiError
+
+    sandbox._client.shell.exec_command.return_value = SimpleNamespace(data=SimpleNamespace(status="running"))
+    sandbox._client.shell.wait_for_process.side_effect = ApiError(status_code=404, body={"message": "Shell session not found"})
+    result = sandbox.execute_command_in_scope("unsafe-to-repeat", scope_id="task") if scoped else sandbox.execute_command("unsafe-to-repeat")
+    assert result.startswith("Error:")
+    assert sandbox._client.shell.exec_command.call_count == 1, "a missing polling response replayed an already accepted command"
 
 
 def test_exec_command_appends_exit_marker_when_failure_has_output(sandbox):
@@ -440,24 +503,24 @@ class TestErrorObservationRetry:
 
         assert result == "ok"
         assert len(exec_calls) == 2
-        # First attempt runs on the default session (no id).
-        assert "id" not in exec_calls[0]
+        # Both attempts target sessions created before execution.
+        assert exec_calls[0]["id"] == created_ids[0]
         # A fresh session was explicitly created...
-        assert len(created_ids) == 1
+        assert len(created_ids) == 2
         assert len(created_ids[0]) == 36  # UUID format
         # ...and the retry targets exactly that created session, never an
         # uncreated/fabricated id (which would 404).
-        assert exec_calls[1].get("id") == created_ids[0]
+        assert exec_calls[1].get("id") == created_ids[1]
         # The recovered session is promoted: future commands must not return
         # to the corrupted implicit default session.
-        assert cleaned_ids == []
+        assert cleaned_ids == [created_ids[0]]
         assert sandbox.execute_command("again") == "ok"
-        assert exec_calls[-1].get("id") == created_ids[0]
+        assert exec_calls[-1].get("id") == created_ids[1]
 
         sandbox.close()
-        assert cleaned_ids == [created_ids[0]]
+        assert cleaned_ids == created_ids
 
-    @pytest.mark.parametrize("status", ["running", "pending"])
+    @pytest.mark.parametrize("status", ["unrecognized", "pending"])
     def test_unknown_legacy_status_is_ambiguous_and_invalidates_default_session(self, sandbox, status):
         executions = 0
 
@@ -580,13 +643,13 @@ class TestErrorObservationRetry:
         out = sandbox.execute_command("unsafe-to-repeat")
 
         assert executions == 2
-        assert len(created_ids) == 1
+        assert len(created_ids) == 2
         assert "unexpected status 'pending'" in out
         assert "retry partial" in out
         assert "Exit Code:" not in out
         assert sandbox._recovery_session_id is None
         assert sandbox._default_shell_corrupted is True
-        assert [session_id for session_id, _ in cleaned] == [created_ids[0]]
+        assert [session_id for session_id, _ in cleaned] == created_ids
 
     def test_error_observation_replacement_no_change_timeout_is_not_retained(self, sandbox):
         executions = 0
@@ -628,7 +691,7 @@ class TestErrorObservationRetry:
         assert sandbox._recovery_session_id is None
         assert cleaned == [
             (
-                created_ids[0],
+                session_id,
                 {
                     "request_options": {
                         "timeout_in_seconds": sandbox._CLEANUP_REQUEST_TIMEOUT_SECONDS,
@@ -636,6 +699,7 @@ class TestErrorObservationRetry:
                     }
                 },
             )
+            for session_id in created_ids
         ]
 
     def test_cleanup_failure_does_not_mask_successful_retry(self, sandbox):
@@ -677,12 +741,12 @@ class TestErrorObservationRetry:
 
         assert "ErrorObservation" in sandbox.execute_command("first")
         assert sandbox.execute_command("second") == "healthy"
-        assert exec_ids[0] is None
-        assert exec_ids[1] == created_ids[0]
+        assert exec_ids[0] == created_ids[0]
+        assert exec_ids[1] == created_ids[1]
         # The next call creates another explicit session instead of touching
         # the already-proven-corrupt implicit default again.
-        assert exec_ids[2] == created_ids[1]
-        assert all(session_id is not None for session_id in exec_ids[1:])
+        assert exec_ids[2] == created_ids[2]
+        assert all(session_id is not None for session_id in exec_ids)
 
     def test_no_retry_on_clean_output(self, sandbox):
         """Normal output should not trigger a retry."""
@@ -891,8 +955,8 @@ class TestErrorObservationRetry:
 
         assert "terminated" in first.lower()
         assert second == "next-ok"
-        assert exec_ids == [None, created_ids[0], created_ids[1]]
-        assert len(created_ids) == 2
+        assert exec_ids == created_ids
+        assert len(created_ids) == 3
 
 
 class TestShellSessionCreationOwnership:
@@ -1819,7 +1883,7 @@ class TestScopedShellSessions:
                 data=SimpleNamespace(
                     output="partial",
                     exit_code=0,
-                    status="running",
+                    status="unrecognized",
                 )
             )
 
@@ -1831,7 +1895,7 @@ class TestScopedShellSessions:
 
         assert executions == 1
         assert len(created_ids) == 1
-        assert "unexpected status 'running'" in out
+        assert "unexpected status 'unrecognized'" in out
         assert "Exit Code:" not in out
         assert sandbox._scoped_shell_sessions["subagent-a"].session_id is None
         assert [session_id for session_id, _ in cleaned] == [created_ids[0]]
@@ -2135,10 +2199,10 @@ class TestListDirSerialization:
         assert "may still be running" in command_result
         assert sandbox._default_shell_corrupted is True
         assert listing == ["/a"]
-        assert len(created_ids) == 1
-        assert exec_calls[0].get("id") is None
-        assert exec_calls[1]["id"] == created_ids[0]
-        assert sandbox._recovery_session_id == created_ids[0]
+        assert len(created_ids) == 2
+        assert exec_calls[0]["id"] == created_ids[0]
+        assert exec_calls[1]["id"] == created_ids[1]
+        assert sandbox._recovery_session_id == created_ids[1]
 
     def test_list_dir_reuses_existing_recovery_session(self, sandbox):
         sandbox._default_shell_corrupted = True
@@ -2160,7 +2224,7 @@ class TestListDirSerialization:
         assert kwargs["id"] == "recovery-session"
         sandbox._client.shell.create_session.assert_not_called()
 
-    def test_list_dir_keeps_healthy_implicit_shell(self, sandbox):
+    def test_list_dir_uses_explicit_default_shell(self, sandbox):
         sandbox._client.shell.create_session = MagicMock()
         sandbox._client.shell.exec_command = MagicMock(
             return_value=SimpleNamespace(
@@ -2175,10 +2239,9 @@ class TestListDirSerialization:
         assert sandbox.list_dir("/test") == ["/a"]
 
         kwargs = sandbox._client.shell.exec_command.call_args.kwargs
-        assert "id" not in kwargs
-        sandbox._client.shell.create_session.assert_not_called()
+        assert kwargs["id"] == sandbox._client.shell.create_session.call_args.kwargs["id"]
 
-    def test_list_dir_keeps_implicit_shell_after_hard_timeout(self, sandbox):
+    def test_list_dir_keeps_explicit_shell_after_hard_timeout(self, sandbox):
         calls = []
 
         def exec_command(command, **kwargs):
@@ -2208,8 +2271,8 @@ class TestListDirSerialization:
         assert "Exit Code: 124" in command_result
         assert listing == ["/a"]
         assert sandbox._default_shell_corrupted is False
-        assert "id" not in calls[1]
-        sandbox._client.shell.create_session.assert_not_called()
+        assert calls[0]["id"] == calls[1]["id"]
+        sandbox._client.shell.create_session.assert_called_once()
 
     def test_list_dir_does_not_fall_back_to_implicit_shell_when_recovery_creation_fails(
         self,
@@ -2423,6 +2486,8 @@ class TestNoChangeTimeout:
 
         assert calls == [
             {
+                "id": sandbox._recovery_session_id,
+                "async_mode": True,
                 "no_change_timeout": 600,
                 "hard_timeout": 3,
                 "request_options": {

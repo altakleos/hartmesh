@@ -224,6 +224,21 @@ export function clearReconnectRun(
   }
 }
 
+export async function cancelActiveThreadRun(threadId: string): Promise<void> {
+  if (typeof window === "undefined") return;
+  let runId: string | null;
+  try {
+    runId = window.sessionStorage.getItem(`lg:stream:${threadId}`);
+  } catch {
+    return;
+  }
+  if (!runId) return;
+  // SDK stop sends cancellation without awaiting it. Wait for the worker to
+  // drain before the composer accepts a follow-up; otherwise admission is 409.
+  await getAPIClient().runs.cancel(threadId, runId, true);
+  clearReconnectRun(threadId, runId);
+}
+
 function rememberReconnectRun(
   threadId: string | null | undefined,
   runId: string,

@@ -13,7 +13,9 @@ from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox, _ScopedShellS
 @pytest.fixture
 def sandbox():
     with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
-        yield AioSandbox(id="recovery-test", base_url="http://localhost:8080")
+        instance = AioSandbox(id="recovery-test", base_url="http://localhost:8080")
+        instance._snapshot_existing_abort_processes = lambda *_a: frozenset()
+        yield instance
 
 
 def completed(output="/test\n/test/file\n\n__DF_FIND_STATUS__:0\n"):
@@ -46,7 +48,8 @@ def test_list_dir_transport_failure_fences_before_cleanup_and_recovers(sandbox, 
         assert cleanup_states == [(None, True)]
         client.shell.cleanup_session.assert_called_once_with(session_id, request_options={"timeout_in_seconds": 5, "max_retries": 0})
     else:
-        client.shell.cleanup_session.assert_not_called()
+        assert cleanup_states == [(None, True)]
+        client.shell.cleanup_session.assert_called_once()
     assert sandbox.list_dir("/test") == ["/test", "/test/file"]
     replacement = client.shell.create_session.call_args.kwargs["id"]
     assert replacement != session_id

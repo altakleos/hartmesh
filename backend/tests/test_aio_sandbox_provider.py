@@ -141,14 +141,15 @@ def test_load_config_sizes_aio_shell_capacity_for_subagent_runtime(monkeypatch):
 
     loaded = provider._load_config()
 
-    assert loaded["max_shell_sessions"] == 13
+    assert loaded["max_shell_sessions"] == 27
+    assert loaded["required_shell_sessions"] == 27
     assert loaded["environment"]["MAX_SHELL_SESSIONS"] == str(loaded["max_shell_sessions"])
 
 
 @pytest.mark.parametrize("remote", [False, True], ids=["docker", "provisioner"])
 @pytest.mark.parametrize("persisted_capacity", [4, 9, 13])
 def test_backend_checks_runtime_minimum_without_overriding_image_default(monkeypatch, remote, persisted_capacity):
-    """Removing a four-session override must not reuse it for eight subagents."""
+    """Removing a four-session override must reserve snapshot and abort controls."""
     from deerflow.community.aio_sandbox import aio_sandbox_provider as aio_mod
     from deerflow.community.aio_sandbox import local_backend as local_mod
     from deerflow.community.aio_sandbox import remote_backend as remote_mod
@@ -161,12 +162,12 @@ def test_backend_checks_runtime_minimum_without_overriding_image_default(monkeyp
             environment={"MAX_SHELL_SESSIONS": "4"},
         ),
         stream_bridge=None,
-        subagent_runtime=SimpleNamespace(max_running=3),
+        subagent_runtime=SimpleNamespace(max_running=0),
     )
     monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
     assert provider._load_config()["max_shell_sessions"] == 4
-    app_config.subagent_runtime.max_running = 8
+    app_config.subagent_runtime.max_running = 3
     app_config.sandbox.environment = {}
     provider._config = provider._load_config()
     assert provider._config["max_shell_sessions"] is None
@@ -217,7 +218,7 @@ def test_load_config_rejects_shell_capacity_below_subagent_runtime(monkeypatch):
     monkeypatch.setattr(aio_mod, "get_app_config", lambda: app_config)
     provider = aio_mod.AioSandboxProvider.__new__(aio_mod.AioSandboxProvider)
 
-    with pytest.raises(ValueError, match=r"at least subagent_runtime\.max_running \+ 1"):
+    with pytest.raises(ValueError, match=r"at least 2 \* subagent_runtime\.max_running \+ 3"):
         provider._load_config()
 
 
@@ -1833,6 +1834,30 @@ def test_release_closes_cached_sandbox_client(tmp_path):
     # And the sandbox is parked in the warm pool (container still running).
     assert "sandbox-rel" in provider._warm_pool
     assert "sandbox-rel" not in provider._sandboxes
+
+
+def test_warm_pool_transfers_shell_state_before_reclaim_can_observe_it(tmp_path, monkeypatch):
+    provider, sandbox, aio_mod = _make_provider_with_active_sandbox(tmp_path, "shell-warm")
+    info = provider._sandbox_infos["shell-warm"]
+    provider._thread_sandboxes[("alice", "thread")] = "shell-warm"
+    state = ("default-shell-generation", "df-session-token")
+
+    def detach():
+        assert "shell-warm" not in provider._warm_pool
+        return state
+
+    sandbox.detach_default_shell.side_effect = detach
+    provider.release("shell-warm")
+    assert info.default_shell_state == state
+    assert "default_shell_state" not in info.to_dict()
+    sandbox.close.assert_called_once_with()
+    monkeypatch.setattr(provider, "_check_tracked_sandbox_alive", lambda *_a: True)
+    monkeypatch.setattr(provider, "_publish_ownership", lambda *_a: None)
+    reclaimed = MagicMock()
+    with patch.object(aio_mod, "AioSandbox", return_value=reclaimed):
+        assert provider._reclaim_warm_pool_sandbox("thread", "shell-warm", user_id="alice") == "shell-warm"
+    reclaimed.restore_default_shell.assert_called_once_with(state)
+    assert info.default_shell_state is None
 
 
 def test_destroy_closes_cached_sandbox_client(tmp_path):

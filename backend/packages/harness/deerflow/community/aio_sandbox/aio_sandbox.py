@@ -78,7 +78,7 @@ _ABORT_SWEEP_NOW = "t=$(getconf CLK_TCK 2>/dev/null); n=$(cat /proc/self/stat 2>
 _ABORT_SWEEP_AGE_TEST = 's=$(cat "$d/stat" 2>/dev/null); s=${s##*) }; set -- $s; if [ -z "${20:-}" ] || [ -z "$n" ] || [ $(( (n - ${20}) / ${t:-100} )) -le %d ]; then '
 
 
-def _abort_sweep_command(token: str, *, started_within_seconds: int | None = None) -> str:
+def _abort_sweep_command(token: str, *, started_within_seconds: int | None = None, protected_processes: frozenset[tuple[int, int]] | None = None) -> str:
     """The shell text that kills every process carrying ``token``.
 
     ``started_within_seconds`` limits the kill to processes no older than
@@ -86,9 +86,48 @@ def _abort_sweep_command(token: str, *, started_within_seconds: int | None = Non
     to one command alone.
     """
     marker = shlex.quote(f"{ABORT_TOKEN_ENV}={token}")
+    if protected_processes is not None:
+        guard = ""
+        test = ""
+        if protected_processes:
+            identities = "|".join(f"{pid}:{ticks}" for pid, ticks in sorted(protected_processes))
+            guard = (
+                'df_keep() { q=$1; depth=0; while [ "$q" -gt 1 ] && [ "$depth" -lt 256 ]; do '
+                'read -r s < "/proc/$q/stat" 2>/dev/null || return 1; s=${s##*) }; set -- $s; '
+                f'case "$q:${{20:-}}" in {identities}) return 0;; esac; '
+                "q=${2:-0}; depth=$((depth + 1)); done; return 1; }; "
+            )
+            test = 'if df_keep "$p"; then continue; fi; '
+        return f"{guard}{_ABORT_SWEEP_HEAD}{marker}; then {test}{_ABORT_SWEEP_KILL}; fi; done; true"
     if started_within_seconds is None:
         return f"{_ABORT_SWEEP_HEAD}{marker}; then {_ABORT_SWEEP_KILL}; fi; done; true"
     return f"{_ABORT_SWEEP_NOW}{_ABORT_SWEEP_HEAD}{marker}; then {_ABORT_SWEEP_AGE_TEST % started_within_seconds}{_ABORT_SWEEP_KILL}; fi; fi; done; true"
+
+
+def _shell_identity_path(token: str) -> str:
+    return f"/tmp/.deerflow-shell-{token}.pid"
+
+
+def _shell_marking_prefix(token: str) -> str:
+    """Record the parent shell before running the first user command.
+
+    The subshell keeps positional parameters and umask out of the persistent
+    shell's state. PID plus Linux start ticks prevent killing a reused PID.
+    """
+    path = shlex.quote(_shell_identity_path(token))
+    return f'export {ABORT_TOKEN_ENV}={shlex.quote(token)}; (umask 077; read -r s < /proc/$$/stat; s=${{s##*) }}; set -- $s; printf "%s %s\\n" "$$" "${{20}}" > {path}); '
+
+
+def _abort_shell_command(token: str) -> str:
+    """Kill the shell before any child, so it cannot run trailing statements."""
+    path = shlex.quote(_shell_identity_path(token))
+    return (
+        f"if read -r p expected < {path} 2>/dev/null; then "
+        'case "$p:$expected" in *[!0-9:]*|:*|*:) ;; *) '
+        'if read -r s < "/proc/$p/stat" 2>/dev/null; then '
+        's=${s##*) }; set -- $s; if [ "${20:-}" = "$expected" ]; then kill -9 "$p" 2>/dev/null; fi; fi;; esac; fi; '
+        f"rm -f {path}; true"
+    )
 
 
 # Env-bearing commands require the bash.exec API (POST /v1/bash/exec), which the
@@ -105,21 +144,23 @@ _BASH_EXEC_UNSUPPORTED_ERROR = (
 )
 
 
-@dataclass(frozen=True)
+@dataclass
 class _InflightCommand:
     """One command executing in the container right now."""
 
     #: The tool call it belongs to, or None outside one.
     call_id: str | None
-    #: The shell session running it, or None when it is not known: the image's
-    #: implicit session before its first answer, and the ``bash.exec`` path,
-    #: which auto-creates one. The token sweep is the reach for those.
+    #: The explicit shell session, or None for the env-bearing bash.exec path.
     session_id: str | None
     #: Carried in the environment of every process the command starts.
     token: str
     #: When the command was sent (monotonic clock), for a token its whole shell
     #: session shares; None when the token is this command's alone.
     started: float | None
+    protected_processes: frozenset[tuple[int, int]] | None = None
+    aborted: bool = False
+    abort_complete: threading.Event = field(default_factory=threading.Event)
+    abort_wait_timeout: float = 0
 
 
 @dataclass
@@ -215,15 +256,11 @@ class AioSandbox(Sandbox):
         self._inflight_commands: dict[int, _InflightCommand] = {}
         self._next_command_seq = 0
         # The token each persistent shell session exports, keyed by session id
-        # (None is the image's implicit session). A session is marked once, on
+        # A session is marked once, on
         # the first command this object sends it, so that every later command
         # reaches the shell exactly as written and the shell's own state --
         # ``$?``, ``PIPESTATUS``, traps -- carries from one call to the next.
-        self._session_abort_tokens: dict[str | None, str] = {}
-        # The id the implicit session last answered with. It is what
-        # ``shell.kill_process`` needs, and a change means the image replaced
-        # that shell, which then has to be marked again.
-        self._implicit_session_id: str | None = None
+        self._session_abort_tokens: dict[str, str] = {}
         # Calls already aborted, newest last. A command belonging to one of
         # them refuses to rotate-and-retry, so a killed command is never
         # quietly re-run, and one that has not spawned yet knows not to.
@@ -234,6 +271,32 @@ class AioSandbox(Sandbox):
     @property
     def base_url(self) -> str:
         return self._base_url
+
+    def detach_default_shell(self) -> tuple[str, str | None] | None:
+        """Transfer a drained default shell to the provider's warm-pool entry.
+
+        Detaching prevents close() from destroying its shell and older jobs;
+        the host HTTP client is still closed normally. Scoped shells are never
+        transferred. Call only after execution leases have drained.
+        """
+        with self._lock:
+            session_id = self._recovery_session_id
+            if session_id is None:
+                return None
+            self._recovery_session_id = None
+            with self._abort_state_lock():
+                return session_id, self._session_abort_tokens.get(session_id)
+
+    def restore_default_shell(self, state: tuple[str, str | None] | None) -> None:
+        """Reconnect a new warm-pool client to the previous default shell."""
+        if state is None:
+            return
+        session_id, token = state
+        with self._lock:
+            self._recovery_session_id = session_id
+            if token is not None:
+                with self._abort_state_lock():
+                    self._remember_session_token(session_id, token)
 
     def close(self) -> None:
         """Best-effort close of the host-side HTTP client owned by this sandbox.
@@ -484,16 +547,15 @@ class AioSandbox(Sandbox):
         self._resolve_session_creation("bash", session_id)
         return session_id
 
-    def _ensure_default_shell_session_id(self, client) -> str | None:
+    def _ensure_default_shell_session_id(self, client) -> str:
         """Return the session id that may safely receive default-shell work.
 
-        A healthy implicit shell is represented by ``None``. Once that generation
-        is fenced, all later shell-backed operations must target an explicit
-        recovery session instead of re-entering the implicit shell.
+        Omitting an id creates a new session on the AIO API. Use an explicit id
+        from the first command, both for persistence and cancellation targeting.
 
         Caller must hold ``self._lock``.
         """
-        if self._default_shell_corrupted and self._recovery_session_id is None:
+        if self._recovery_session_id is None:
             self._recovery_session_id = self._create_shell_session(client)
         return self._recovery_session_id
 
@@ -502,12 +564,11 @@ class AioSandbox(Sandbox):
         client,
         command: str,
         *,
-        session_id: str | None,
+        session_id: str,
         timeout: float,
     ) -> tuple[str, int | None, str | None]:
         with self._abort_state_lock():
             token = self._session_abort_tokens.get(session_id)
-            known_session_id = session_id if session_id is not None else self._implicit_session_id
         marking = token is None
         if marking:
             # The first command this object sends a session also exports the
@@ -516,23 +577,79 @@ class AioSandbox(Sandbox):
             # session has no state for the prefix to disturb; no later command
             # is touched.
             token = f"df-{uuid.uuid4().hex}"
-            sent = f"export {ABORT_TOKEN_ENV}={shlex.quote(token)}; {command}"
+            sent = _shell_marking_prefix(token) + command
         else:
             sent = command
+        protected = frozenset() if marking else self._snapshot_existing_abort_processes(client, token)
         kwargs = {
             # /v1/shell is a persistent PTY. Keep its command and terminal stdin
             # intact; the broker shim already treats a TTY as non-payload input.
             "command": sent,
             "no_change_timeout": self._effective_no_change_timeout(timeout),
             "hard_timeout": timeout,
+            "async_mode": True,
             "request_options": self._command_request_options(timeout),
         }
         if session_id is not None:
             kwargs["id"] = session_id
-        with self._command_in_flight(known_session_id, token, started=time.monotonic()):
-            result = client.shell.exec_command(**kwargs)
-        self._record_session_marking(session_id, token, result)
+        with self._command_in_flight(session_id, token, started=time.monotonic(), protected_processes=protected) as inflight:
+            try:
+                deadline = time.monotonic() + timeout + 5
+                viewed = False
+                accepted = False
+                result = client.shell.exec_command(**kwargs)
+                while getattr(getattr(result, "data", None), "status", None) == "running":
+                    accepted = True
+                    if inflight.aborted:
+                        return "Error: command cancelled", None, "terminated"
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise httpx.ReadTimeout("AIO shell command response deadline exceeded")
+                    options = {"timeout_in_seconds": min(2, remaining), "max_retries": 0}
+                    client.shell.wait_for_process(id=session_id, max_wait_seconds=1, request_options=options)
+                    if inflight.aborted:
+                        return "Error: command cancelled", None, "terminated"
+                    result = client.shell.view(id=session_id, request_options=options)
+                    viewed = True
+            except ApiError as error:
+                if inflight.aborted:
+                    return "Error: command cancelled", None, "terminated"
+                if accepted:
+                    # An accepted command may have already changed files. Route
+                    # lost polling responses through the no-replay transport
+                    # fence rather than the missing-session dispatch recovery.
+                    raise httpx.ReadError("AIO accepted command outcome is unknown after polling failed") from error
+                raise
+            if inflight.aborted:
+                return "Error: command cancelled", None, "terminated"
+        with self._abort_state_lock():
+            self._remember_session_token(session_id, token)
+        if viewed:
+            console = getattr(getattr(result, "data", None), "console", None)
+            if console:
+                _, exit_code, status = self._format_shell_result(result)
+                return console[-1].output, exit_code, status
         return self._format_shell_result(result)
+
+    def _snapshot_existing_abort_processes(self, client, token: str) -> frozenset[tuple[int, int]]:
+        """Identify older jobs exactly, including ones started moments earlier.
+
+        Host/container clock rounding cannot distinguish adjacent calls. Read
+        identities on a separate shell so the user's command stays unchanged.
+        """
+        session_id = self._create_shell_session(client)
+        options = self._bounded_cleanup_request_options()
+        marker = shlex.quote(f"{ABORT_TOKEN_ENV}={token}")
+        command = f'printf \'DF_ABORT_SNAPSHOT \'; {_ABORT_SWEEP_HEAD}{marker}; then if read -r s < "$d/stat" 2>/dev/null; then s=${{s##*) }}; set -- $s; printf "%s:%s " "$p" "${{20}}"; fi; fi; done; printf "\\n"'
+        try:
+            result = client.shell.exec_command(command=command, id=session_id, no_change_timeout=1, request_options=options)
+            output, exit_code, status = self._format_shell_result(result)
+            parts = output.split()
+            if status not in (None, "completed") or exit_code not in (None, 0) or not parts or parts[0] != "DF_ABORT_SNAPSHOT":
+                raise RuntimeError("Could not identify existing sandbox background jobs")
+            return frozenset((int(pid), int(ticks)) for pid, ticks in (identity.split(":") for identity in parts[1:]))
+        finally:
+            self._cleanup_session_best_effort(client, session_id, context="background job snapshot", request_options=options)
 
     def _abort_state_lock(self) -> threading.Lock:
         """The lock guarding the abort state, creating that state where ``__init__`` did not run.
@@ -547,33 +664,9 @@ class AioSandbox(Sandbox):
             state.setdefault("_inflight_commands", {})
             state.setdefault("_next_command_seq", 0)
             state.setdefault("_session_abort_tokens", {})
-            state.setdefault("_implicit_session_id", None)
             state.setdefault("_aborted_calls", {})
             lock = state.setdefault("_abort_lock", threading.Lock())
         return lock
-
-    def _record_session_marking(self, session_id: str | None, token: str, result) -> None:
-        """Remember that a session now exports ``token``, once it has answered.
-
-        Recorded only after the command returned, so a request the container
-        never ran does not leave an unmarked session looking marked. For the
-        implicit session the answer also names the session that ran it: a
-        different name than last time means the image started a new shell,
-        which does not export the token yet.
-        """
-        reported = getattr(getattr(result, "data", None), "session_id", None)
-        with self._abort_state_lock():
-            if session_id is not None:
-                self._remember_session_token(session_id, token)
-                return
-            if isinstance(reported, str) and reported:
-                if self._implicit_session_id not in (None, reported):
-                    self._session_abort_tokens.pop(None, None)
-                    self._implicit_session_id = reported
-                    return
-                self._implicit_session_id = reported
-            self._session_abort_tokens[None] = token
-            return
 
     def _remember_session_token(self, session_id: str, token: str) -> None:
         """Record an explicit session's token. Caller holds ``_abort_lock``.
@@ -584,31 +677,32 @@ class AioSandbox(Sandbox):
         """
         self._session_abort_tokens[session_id] = token
         while len(self._session_abort_tokens) > _SESSION_TOKEN_MEMORY:
-            oldest = next((key for key in self._session_abort_tokens if key is not None), None)
-            if oldest is None:
-                break
-            self._session_abort_tokens.pop(oldest)
+            self._session_abort_tokens.pop(next(iter(self._session_abort_tokens)))
 
     @contextlib.contextmanager
-    def _command_in_flight(self, session_id: str | None, token: str, *, started: float | None = None):
+    def _command_in_flight(self, session_id: str | None, token: str, *, started: float | None = None, protected_processes: frozenset[tuple[int, int]] | None = None):
         """Hold one command open for as long as it is executing in the container.
 
-        The session id is what ``shell.kill_process`` needs. The first command
-        on the image's implicit session, and the ``bash.exec`` path that
-        auto-creates one, have none to record; the token sweep is the reach
-        for those. The token marks the processes the command starts: every
-        child inherits it, including one that detaches itself. ``started`` is
-        given when the token is the session's rather than the command's, so the
-        sweep can tell this command's processes from older ones.
+        Shell commands have explicit session ids before dispatch. Env-bearing
+        bash.exec commands use a per-command token rather than a shell identity.
+        The token marks the processes the command starts: every
+        child inherits it, including one that detaches itself. Persistent
+        shells protect exact identities captured before dispatch. ``started``
+        remains the fallback for commands without a shell snapshot.
         """
         call_id = current_sandbox_command_call()
         with self._abort_state_lock():
+            if call_id is not None and call_id in self._aborted_calls:
+                raise RuntimeError("sandbox command call was cancelled before execution")
             self._next_command_seq += 1
             sequence = self._next_command_seq
-            self._inflight_commands[sequence] = _InflightCommand(call_id, session_id, token, started)
+            inflight = _InflightCommand(call_id, session_id, token, started, protected_processes)
+            self._inflight_commands[sequence] = inflight
         try:
-            yield
+            yield inflight
         finally:
+            if inflight.aborted and not inflight.abort_complete.wait(timeout=inflight.abort_wait_timeout):
+                logger.warning("Abort control exceeded its cleanup budget for sandbox %s", self.id)
             with self._abort_state_lock():
                 self._inflight_commands.pop(sequence, None)
 
@@ -684,15 +778,11 @@ class AioSandbox(Sandbox):
         ``_lock`` inside its own HTTP request, so this path takes no lock that
         command holds and never queues behind it.
 
-        Two reaches, because neither alone is the whole command. The SDK's
-        ``shell.kill_process`` ends the session's foreground process -- the
-        direct way to unblock the ``exec_command`` a worker is waiting on, and
-        the only one when the image has no usable ``/proc``. The sweep then
-        kills what the command started and left behind, found by the token in
-        its environment: its children, including one that called ``setsid``
-        and is no longer in any shell's process group. Every request is
-        bounded, because the thread waiting on the cancelled tool call is what
-        the bound is about.
+        Kill the parent shell first: killing only its foreground child lets
+        Bash continue with the rest of the submitted command. Then sweep the
+        command's descendants, including detached ones, while sparing older
+        jobs. Shorten the PTY's idle wait so its pending HTTP request drains.
+        Every request is bounded and the cancelled generation is discarded.
 
         ``call_id`` selects one tool call's commands, because one sandbox is
         shared by the lead agent and its subagents; ``None`` means every
@@ -707,20 +797,41 @@ class AioSandbox(Sandbox):
                 while len(self._aborted_calls) > _ABORTED_CALL_MEMORY:
                     self._aborted_calls.pop(next(iter(self._aborted_calls)))
             selected = [command for command in self._inflight_commands.values() if call_id is None or command.call_id == call_id]
+            for command in selected:
+                # Returning early would let ordinary session cleanup kill the
+                # foreground child before the abort control kills its parent.
+                command.abort_wait_timeout = self._ABORT_REQUEST_TIMEOUT_SECONDS * (6 + 8 * len(selected))
+                command.aborted = True
         if not selected:
             return 0
-        client = self._client
-        if client is None:
-            return 0
-        options = {"timeout_in_seconds": self._ABORT_REQUEST_TIMEOUT_SECONDS}
-        for session_id in sorted({command.session_id for command in selected if command.session_id is not None}):
-            try:
-                client.shell.kill_process(id=session_id, request_options=options)
-            except Exception:
-                logger.warning("Failed to kill the process in shell session %s of sandbox %s", session_id, self.id, exc_info=True)
-        self._sweep_processes_carrying_the_abort_tokens(client, selected, options)
-        logger.info("Sandbox %s aborted %d running command(s)", self.id, len(selected))
-        return len(selected)
+        try:
+            client = self._client
+            if client is None:
+                return 0
+            options = {
+                "timeout_in_seconds": self._ABORT_REQUEST_TIMEOUT_SECONDS,
+                "max_retries": 0,
+            }
+            for session_id in sorted({command.session_id for command in selected if command.session_id is not None}):
+                try:
+                    client.shell.update_session(id=session_id, no_change_timeout=1, request_options=options)
+                except Exception:
+                    logger.warning(
+                        "Failed to shorten the drain of shell session %s of sandbox %s",
+                        session_id,
+                        self.id,
+                        exc_info=True,
+                    )
+            self._sweep_processes_carrying_the_abort_tokens(client, selected, options)
+            for session_id in sorted({command.session_id for command in selected if command.session_id is not None}):
+                # Cleanup also removes a generation whose exec request had not
+                # arrived when the abort began. A later 404 must never replay it.
+                self._cleanup_session_best_effort(client, session_id, context="cancelled command", request_options=options)
+            logger.info("Sandbox %s aborted %d running command(s)", self.id, len(selected))
+            return len(selected)
+        finally:
+            for command in selected:
+                command.abort_complete.set()
 
     def _sweep_processes_carrying_the_abort_tokens(self, client, commands: list[_InflightCommand], options: dict[str, int]) -> None:
         """Kill the processes in the container that these commands started.
@@ -731,8 +842,7 @@ class AioSandbox(Sandbox):
         command budget: an abort that cannot be delivered has to give up and
         leave the command's own timeout as the fallback, not become a second
         hang in front of the drain. A failure here is logged and not raised --
-        the foreground kill above has already run, and the caller's answer must
-        not depend on a best-effort sweep.
+        cleanup still discards the cancelled session if this sweep fails.
         """
         session_id: str | None = None
         try:
@@ -751,17 +861,36 @@ class AioSandbox(Sandbox):
                     sweeps[command.token] = None
             for token in sorted(sweeps):
                 started = sweeps[token]
+                if started is not None:
+                    client.shell.exec_command(
+                        command=_abort_shell_command(token),
+                        no_change_timeout=self._ABORT_NO_CHANGE_TIMEOUT,
+                        id=session_id,
+                        request_options=options,
+                    )
+                    # Wake AIO's waiter before the descendant sweep removes its
+                    # foreground process. Afterwards AIO can select an older
+                    # background job, and the pending exec keeps its idle wait.
+                    for target in sorted({command.session_id for command in commands if command.token == token and command.session_id is not None}):
+                        try:
+                            client.shell.kill_process(id=target, request_options=options)
+                        except Exception:
+                            logger.warning("Failed to wake the cancelled shell session %s of sandbox %s", target, self.id, exc_info=True)
                 # Measured immediately before the request, so the allowance
                 # only has to cover the request itself.
                 within = None if started is None else int(time.monotonic() - started) + _ABORT_SWEEP_AGE_ALLOWANCE_SECONDS
                 client.shell.exec_command(
-                    command=_abort_sweep_command(token, started_within_seconds=within),
+                    command=_abort_sweep_command(token, started_within_seconds=within, protected_processes=next(command.protected_processes for command in commands if command.token == token)),
                     no_change_timeout=self._ABORT_NO_CHANGE_TIMEOUT,
                     id=session_id,
                     request_options=options,
                 )
         except Exception:
-            logger.warning("Abort sweep failed in sandbox %s; detached processes may survive", self.id, exc_info=True)
+            logger.warning(
+                "Abort sweep failed in sandbox %s; detached processes may survive",
+                self.id,
+                exc_info=True,
+            )
         finally:
             if session_id is not None:
                 self._cleanup_session_best_effort(client, session_id, context="abort sweep", request_options=options)

@@ -51,6 +51,9 @@ class SandboxInfo:
     # ``None`` for a resource created before the record existed, or by a
     # backend that keeps none. Discovery-only: never persisted, never compared.
     owner: tuple[str, str] | None = field(default=None, repr=False, compare=False)
+    # Process-local warm-pool continuation. Never serialize it: another
+    # Gateway cannot inherit this client's execution/session ownership.
+    default_shell_state: tuple[str, str | None] | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {

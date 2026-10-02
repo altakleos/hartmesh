@@ -101,6 +101,10 @@ jobs:
           bash_user="$(printf '%s' "$bash_response" | jq --raw-output '.data.stdout' | tr -d '\r\n')"
           test "$bash_user" = "gem"
 
+          # A closed shell must release its hard-timeout worker promptly;
+          # otherwise repeated Stop requests exhaust the image's executor.
+          python3 backend/tests/fixtures/check_sandbox_shell_close.py http://127.0.0.1:18080
+
           # The document libraries must import as the runtime user, not only as
           # the build-time root that installed them. The endpoint answers 200
           # whatever the command's exit code, so check that explicitly and print

@@ -110,7 +110,7 @@ IDLE_CHECK_INTERVAL = _SHARED_IDLE_CHECK_INTERVAL
 # Leave lower-concurrency deployments on the image default; only override it
 # when DeerFlow's configured execution capacity cannot fit.
 _AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
-_SHELL_SESSION_HEADROOM = 1
+_SHELL_SESSION_HEADROOM = 3
 
 # How long an acquisition waits for a replica slot before the budget refuses
 # it. Short on purpose: the saturation this catches is the overlap at the edges
@@ -548,7 +548,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             AioSandbox._DEFAULT_HARD_TIMEOUT,
         )
         max_running_subagents = int(getattr(getattr(config, "subagent_runtime", None), "max_running", 3))
-        required_shell_sessions = max_running_subagents + _SHELL_SESSION_HEADROOM
+        # Reserve one persistent shell and one snapshot control per execution,
+        # plus a separate abort control. AIO may otherwise evict a live shell.
+        required_shell_sessions = 2 * max_running_subagents + _SHELL_SESSION_HEADROOM
         configured_shell_sessions = environment.get("MAX_SHELL_SESSIONS")
         if configured_shell_sessions is None:
             max_shell_sessions = required_shell_sessions if required_shell_sessions > _AIO_DEFAULT_MAX_SHELL_SESSIONS else None
@@ -560,7 +562,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             except (TypeError, ValueError) as exc:
                 raise ValueError("sandbox.environment.MAX_SHELL_SESSIONS must be a positive integer") from exc
             if max_shell_sessions < required_shell_sessions:
-                raise ValueError(f"sandbox.environment.MAX_SHELL_SESSIONS must be at least subagent_runtime.max_running + {_SHELL_SESSION_HEADROOM} ({required_shell_sessions} for the current configuration)")
+                raise ValueError(f"sandbox.environment.MAX_SHELL_SESSIONS must be at least 2 * subagent_runtime.max_running + {_SHELL_SESSION_HEADROOM} ({required_shell_sessions} for the current configuration)")
 
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
@@ -2407,6 +2409,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 request_headers=info.request_headers,
                 default_command_timeout=self._config.get("command_timeout", AioSandbox._DEFAULT_HARD_TIMEOUT),
             )
+            if info.default_shell_state is not None:
+                sandbox.restore_default_shell(info.default_shell_state)
+                info.default_shell_state = None
             self._sandboxes[sandbox_id] = sandbox
             self._sandbox_infos[sandbox_id] = info
             self._active_sandbox_identity[sandbox_id] = key
@@ -3674,6 +3679,13 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             self._last_activity.pop(sandbox_id, None)
             # Park in warm pool — container keeps running
             if info and sandbox_id not in self._warm_pool:
+                detach = getattr(sandbox, "detach_default_shell", None)
+                if callable(detach):
+                    state = detach()
+                    # Optional for legacy/custom test clients; only the real
+                    # shell continuation belongs on this metadata entry.
+                    if isinstance(state, tuple) and len(state) == 2 and isinstance(state[0], str):
+                        info.default_shell_state = state
                 self._warm_pool[sandbox_id] = (info, time.time())
                 self._warm_pool_identity[sandbox_id] = thread_keys_to_remove[0] if thread_keys_to_remove else active_identity
             # Either way a waiter should look again: a parked container frees
