@@ -7,6 +7,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.38] - 2026-10-02
+
+### Changes since v2.1.0+hartmesh.37
+
+- Rebuilds HartMesh on upstream DeerFlow main at
+  `67db3d883c38264e2a188d9aaad44f7a7b55015d`. Upstream changes include projects,
+  preferences, scheduling, artifact references and subagent acceptance criteria;
+  the detailed upstream changelog follows below.
+- Retains HartMesh sign-on-only access, accounts and role limits, provider keys
+  with connection testing, branding, turn progress, scheduled runs, page reading
+  and image search, business reports with PDF/Word/Excel output, personal and
+  Shared files, account exports and conversation transcripts.
+- Keeps the Docker Compose distribution with PostgreSQL, Redis, nginx,
+  SearXNG and gVisor sandboxes, including sandbox capacity and readiness bounds.
+  The HartMesh interface lives in `frontend-hm/`; the upstream `frontend/`
+  snapshot is isolated from product changes.
+- Excludes the previous fork-specific durable invocation/evidence,
+  governed-tool, tenant-binding, credential-audit and refusal-watch layer.
+  The Helm chart is not qualified or published as part of this distribution.
+
+### Fixes
+
+- Reopening a conversation restores report previews and downloads, artifacts,
+  todos and goal state from checkpoint history.
+- Stop terminates the current persistent shell before foreground cleanup, so
+  trailing statements cannot run. Earlier background jobs remain alive,
+  successful shell state survives warm-pool reuse, and an accepted command is
+  not replayed after a polling failure.
+- The composer waits for cancellation to finish before allowing the next
+  message. Closed sandbox sessions release the command executor promptly.
+  Concurrent subagent work reserves shell capacity for cancellation controls.
+
+### Distribution and qualification
+
+- The release manifest uses schema 4 and includes image digests and Compose
+  pins. Consumers expecting schema 3 must update their manifest reader.
+- Every release's notes now require database schema changes or an explicit
+  statement that the database schema is unchanged.
+- Local Docker and browser checks covered sign-in and roles, streaming,
+  mobile layouts, a 5,000-row report with PDF/Word/Excel renders, reopening and
+  downloads, file ownership, exports, scheduling, restart persistence and Stop
+  with an immediate follow-up. Real gVisor sandboxes were used. Model responses
+  came from a controlled local fixture; live-provider quality and a performance
+  comparison with release 37 were not measured.
+
 ### Schema changes
 
 Compared with `v2.1.0+hartmesh.37`, the database schema and migration history
@@ -31,6 +76,8 @@ have changed:
   no migration bridge in this build. Operators retaining an existing database
   need a separately implemented and tested migration before deploying it.
   Newly initialized databases use `0029_shared_publications`.
+
+## [2.2.0-dev] - Upstream changelog at 67db3d883
 
 This section accumulates work toward the **2.2.0** milestone
 ([2.2.0](https://github.com/bytedance/deer-flow/milestone/3)).
@@ -6254,7 +6301,9 @@ with **180 merged pull requests** since the first 2.0 milestone tag.
 - **ci:** Consolidate PR/issue labeling and fix the reviewing-job crash and
   label thrash. ([#3455])
 
-[Unreleased]: https://github.com/bytedance/deer-flow/compare/v2.1.0...HEAD
+[Unreleased]: https://github.com/altakleos/hartmesh/compare/v2.2.0+hartmesh.38...HEAD
+[2.2.0+hartmesh.38]: https://github.com/altakleos/hartmesh/releases/tag/v2.2.0+hartmesh.38
+[2.2.0-dev]: https://github.com/bytedance/deer-flow/blob/67db3d883c38264e2a188d9aaad44f7a7b55015d/CHANGELOG.md
 [2.1.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.1.0
 [2.0.0]: https://github.com/bytedance/deer-flow/releases/tag/v2.0.0
 
