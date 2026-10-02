@@ -9,9 +9,9 @@ the checked-in image pins continue to identify their existing release.
 One KVM guest per customer. Inside it the whole stack runs under Docker
 Compose: gateway, frontend, nginx, PostgreSQL 16, Redis 7, with sandboxes
 created by the Gateway's local Docker backend as containers under gVisor
-(`runsc`). This directory is the profile that guest boots from; it is a
-released deployment path beside the Helm chart, and the two consume the same
-images. The Kubernetes provisioner and the chart are not present in the guest.
+(`runsc`). This directory is the profile that guest boots from, and it is
+the deployment path this distribution releases. Nothing of Kubernetes is
+present in the guest.
 
 The reason for a VM at all is blast radius: the Gateway needs the host Docker
 socket to create sandboxes, and a socket that grants root-equivalent control
@@ -229,7 +229,7 @@ local accounts and needs none.
 
 **An account never crosses issuers.** Each provider-created account records
 the issuer that created it (`users.oauth_issuer`, migration
-`0039_users_oauth_issuer`), and a sign-in whose subject matches but whose
+`0027_account_access`), and a sign-in whose subject matches but whose
 issuer does not is refused with `sso_not_allowed` -- so pointing
 `HARTMESH_SIGN_ON_ISSUER` at another provider cannot hand an account to
 whoever holds the same subject there. Accounts created before this column
@@ -299,20 +299,13 @@ administrator to correct it." The journal carries the issuer and the
 subject, and the line beside it names the address, which is what you
 correct: it is a provider-side fix (correct the address on the identity, or
 have the provider assert a real one), never a row to clear from the
-database. Releases up to and including `v2.1.0+hartmesh.30` answered
-`sso_account_exists` here, which sent operators looking for an account that
-was never there.
+database.
 
-**Upgrade note.** These keys are honoured from `v2.1.0+hartmesh.30`, the
-first release carrying them. A release older than that ignores them and
-serves local passwords with registration open, exactly as before. From
-`.30` on, a tenant whose `.env` carries neither side **stops at start**: put
-`HARTMESH_LOCAL_PASSWORDS=allowed` (with, from the release after `.30`,
+**A sign-in mode must be chosen.** A tenant whose `.env` carries neither
+side **stops at start**: put `HARTMESH_LOCAL_PASSWORDS=allowed` (with
 `HARTMESH_LOCAL_REGISTRATION`; § "Local passwords") or the three sign-on
-keys into `.env` before the pin moves. To check the render before the
-restart, run the **new** bundle's renderer (the `.29` renderer knows no
-sign-in keys and renders clean whatever `.env` says) against the edited keys
-passed explicitly -- `docker compose exec` sees the running container's
+keys into `.env` first. To check the render before a restart, run the
+bundle's renderer against the edited keys passed explicitly -- `docker compose exec` sees the running container's
 environment from its creation, not the edited file, so without `-e` it
 reports exactly the refusal the check is meant to rule out (the same caveat
 as § "Operator-managed models"):
@@ -326,7 +319,7 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
 (or `-e HARTMESH_SIGN_ON_ISSUER=… -e HARTMESH_SIGN_ON_CLIENT_ID=… -e
 HARTMESH_SIGN_ON_CLIENT_SECRET=…` for sign-on) reports
 `sign-in=sign_on_only (provider sso, callback …)` or `sign-in=local
-(registration closed)`, or the refusal. A tenant that was upgraded without the key shows the refusal in the
+(registration closed)`, or the refusal. A tenant started without the key shows the refusal in the
 Gateway's journal (`render_config: refusing to render: no sign-in mode is
 selected …`), the container exits and restarts until the key is added and
 `up -d` is run again. A sign-on option (`HARTMESH_SIGN_ON_ADMINS`, `_SCOPES`,
@@ -417,22 +410,11 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   scheduler records as a failed occurrence naming the refusal, so no run
   starts. A sign-in is refused even when the claim admits, with "Your
   access to this workspace has been turned off. Ask your administrator."
-  (`sso_access_off`) and a journal line naming issuer and subject. A run
-  that a request authenticated just before the refusal admitted is refused
-  as it starts, before the model. **A connection that authenticated once is
-  closed by the deployment**, not left for the client to drop: an open SSE
-  stream, a streaming download (an archive, an evidence bundle, batch
-  results) and the browser WebSocket. Every Gateway process holds each open
-  connection under its account, looks for turned-off accounts about once a
-  second after the command asks it to (and every 30 s on its own), and
-  closes what they hold: a stream is cut -- a download cut short never reads
-  as a finished one -- and a socket closes with `4401`. The application sees
-  exactly what it sees when a client goes away and unwinds from that; one
-  that does not is cancelled 5 s later. The server logs "ASGI callable
-  returned without completing response" at ERROR for each connection it
-  cuts: that line is the cut, not a fault, so an alert on ERROR lines will
-  fire once per cut stream. The command waits for every live process to
-  record that it looked, and what it closed, while the runs unwind. It also
+  (`sso_access_off`) and a journal line naming issuer and subject. **A
+  connection that was already open is not closed by this command**: a run's
+  stream ends because the run is cancelled (next), a download already in
+  progress completes, and a browser WebSocket stays open until its client
+  closes it or the Gateway restarts. It also
   **ends the running work of every account the refusal covers** (a subject
   with an account under each configured provider is refused on both, and both
   have their runs ended): each run is cancelled the way the person's own
@@ -458,17 +440,8 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   as a database fault, may leave the command part-done, and re-running it is
   safe); **2** it did what was asked but a run named
   in `runs_unconfirmed` had not reached a terminal status when the wait ran
-  out, or a surface named in `surfaces_unconfirmed` was not confirmed (a
-  Gateway process named under it had not recorded its look, something it
-  tried to end is still there -- counted under `not_ended` -- or it has no way
-  to end it at all, `not_reached`). A surface under
-  `surfaces_not_reached` stays unconfirmed on every re-run: this deployment
-  has no way to end it (the local sandbox provider's `sandboxes`, or
-  `mcp_tasks` where no Gateway runs the MCP task loop), so a
-  script that re-runs until **0** should stop once that list names every
-  surface still unconfirmed. The durable work is unconfirmed too while an
-  MCP task has not been cancelled at its remote server or a batch item has
-  not stopped (`mcp_tasks` or `subagent_batches`, counted under
+  out, or a surface named in `surfaces_unconfirmed` was not confirmed
+  (something it tried to hold or end is still there, counted under
   `not_ended`). For `enable --restore-held`, 2 means something it held
   could not be turned back on (named under `stayed_off` as
   `restore_failed`, its surface under `surfaces_unconfirmed`). **2 is not
@@ -478,10 +451,7 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   the Gateway is not answering, and the command cannot tell those apart from
   the database, so it does not guess: re-run it to see whether the run has
   since stopped, and only investigate the Gateway if it stays unconfirmed.
-  `--wait-seconds` moves the bound (default 120). `disable`'s run wait stops
-  up to 5 s short of it (a quarter of a wait under 20 s), so the Gateway
-  processes' second look, which confirms what the runs left behind, has
-  time even when a run does not stop. Ids under
+  `--wait-seconds` moves the bound (default 120). Ids under
   `runs_finished_first` are runs that completed on their own before the
   cancellation reached them -- they stopped, but their results were
   delivered.
@@ -499,16 +469,12 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   ids). It forgets the connect codes the person had not used yet
   (`channel_bindings.connect_codes_ended`), so none can bind a chat account
   or turn a held binding back on. It records what it held for the identity
-  -- migration `0047_identity_holds` -- before it acts on it, so an
+  -- migration `0027_account_access` -- before it acts on it, so an
   interrupted command leaves a record a re-run completes; `list` shows every
   record still held, under `holds`.
   It also **ends the work waiting to run** for the person, so none of it
   runs once they are back: every queued scheduled occurrence, manual
-  triggers included; every task notification waiting to launch or to be
-  retried (dead-lettered with `mcp_task_notification_owner_refused`); and
-  every channel message still waiting to be processed, dead letters
-  included, which completes as `owner_refused` and can no longer be
-  requeued. A launch that reads the refusal ends the same way instead of
+  triggers included. A launch that reads the refusal ends the same way instead of
   being retried, and one that got in before it is a run `disable` cancels;
   either way a schedule's pause survives the launch, the cancellation of its
   run and the scheduler's own bookkeeping. After a plain `enable` the held schedules and
@@ -540,7 +506,7 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   default and today the only limit) until the deployer lifts it, **whatever
   the provider's claim says** -- including a provider restored from a backup
   taken before the demotion, whose claim says `admin` again. The limit is
-  one row in `role_limits` (migration `0043_role_limits`), keyed by issuer
+  one row in `role_limits` (migration `0027_account_access`), keyed by issuer
   and subject, so it holds for a subject with no account yet and for every
   account the identity has here. Every read of an account takes its role
   from it, so at once: the stored role reads `user`; a session's next
@@ -584,80 +550,36 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   add `changed` (whether this run changed anything). For `disable` the
   surfaces are `sign_in` and `internal_launches` (`refused_at_next_use`:
   covered accounts, active schedules), `sessions` (`ended`: covered
-  accounts), `personal_access_tokens` (`revoked`), `running_work` (`ended`),
-  the connections a Gateway process closes, `websockets`, `sse_streams` and
-  `downloads`, and what it keeps for the person between requests,
-  `sandboxes` (in a turn or parked for the next one, with whatever a run
-  left running inside), `mcp_sessions` (pooled MCP server sessions),
-  `browser_sessions` (the browser tools' headless browsers, per thread; a
-  browser opened outside any thread is nobody's and is left to its idle
-  timeout), `memory_updates` (conversations queued to be written to
-  their memory, which `ended` drops unwritten) and `account_exports` (a
-  download of all their data, being prepared or waiting to be downloaded,
-  which `ended` deletes), plus what it holds and the
-  work it ends that was waiting to run (the bullet above): `schedules` and
-  `channel_bindings` (`held`, counting the identity's whole hold record)
-  and `scheduled_occurrences`, `mcp_task_notifications` and
-  `channel_receipts` (`ended`, counting what this command ended), each
-  reported when the command's writes were done and looked at again once the
-  runs are over. Each carries `not_ended`: for a held surface, what could
-  not be held; for the waiting work, what a Gateway still had in hand at the
-  last look (a launch in flight, a notification a task loop holds, a message
-  being processed), which its own path ends once it reads the refusal. Any
-  `not_ended`, or a queue that could not be read, leaves the surface
-  unconfirmed, and a re-run looks again.
-  Each of the seven a Gateway keeps is `ended`, with `processes`, the live Gateway
-  processes that confirmed, `processes_unconfirmed`, the live ones that had
-  not when the wait ran out, `not_ended`, how many the processes tried to
-  end and could not confirm ended (a sandbox that would not stop; a
-  sandbox a Gateway took over after a restart that carries no owner label,
-  which counts against every `disable` because it may be anyone's, until
-  its idle timeout ends it; or a subsystem that failed or took longer than
-  15 s),
-  `processes_unreached`, and `confirmed_by: gateway_record`; it reports when
-  the last live process had confirmed, and its count is what the confirming
-  processes ended for this identity. A process's look stops the person's
-  sandboxes too, so the connections' time includes that stop. The kept
-  state is confirmed by a second request to look, made once the runs are
-  over, because a run that is ending releases its sandbox as it goes; a
-  sandbox released for a person already turned off is stopped instead of
-  parked. With no live Gateway process at all, `sandboxes` is unconfirmed:
-  a container outlives its Gateway. A surface a live process has no way to end is
-  `not_reached`, naming the processes under `processes_unreached`: the
-  local sandbox provider, which runs commands on the Gateway's host, cannot
-  stop an owner's sandboxes, so there `sandboxes` is always `not_reached`
-  and `disable` exits **2**. `running_work` reports when the runs'
-  sandboxes were confirmed stopped, and with them the command in flight, its
-  children and anything the runs left running (`confirmed_by:
-  sandbox_gone`), or, where they were not, when the run rows went terminal
-  (`confirmed_by: run_status`). A memory update already being written when
-  the process looks is one model call under way, and is not stopped. Durable
-  work a run started outside itself is stopped the way the person's own
-  cancel would, attributed to the deployer: `mcp_tasks` (their durable MCP
-  tasks, cancelled at the remote server by a Gateway's task loop;
-  `confirmed_by: task_status`, with `not_ended` counting the tasks not yet
-  terminal when the wait ran out; a re-run asks the loop to retry a failed
-  remote cancel at once rather than after its backoff; `not_reached`, naming
-  the processes under `processes_unreached`, when no live Gateway runs the
-  task loop, `mcp_tasks.enabled`) and `subagent_batches` (their durable
-  batches, whose rows are cancelled at once, and whose items a Gateway is
-  executing are stopped at its look, `items_stopped`; `confirmed_by:
-  batch_status`, reported once the rows are cancelled and every live process
-  has confirmed, with `processes` and `processes_unconfirmed` as above), both
-  looked for again once the runs are over. `channel_ingress` (the person's
-  live channel bindings when the refusal committed) is
-  `refused_at_next_use`: a channel message from them is answered with the words the web app gives the same
-  refusal, before any thread is created, any run credential is minted or any
-  attachment is fetched. A process beats every second even when it cannot look, so
-  a live one that cannot confirm -- a database error, say -- leaves the
-  connections unconfirmed rather than reported closed; only one that has
-  not beaten for 90 s is gone, holding nothing, which is why a Gateway that
-  crashed rather than stopped keeps a `disable` at exit 2 for up to 90 s.
+  accounts), `personal_access_tokens` (`revoked`), `running_work` (`ended`;
+  `confirmed_by: run_status`, reported when the run rows went terminal),
+  what it holds and the work it ends that was waiting to run (the bullet
+  above): `schedules` and `channel_bindings` (`held`, counting the
+  identity's whole hold record) and `scheduled_occurrences` (`ended`,
+  counting what this command ended), each reported when the command's writes
+  were done and looked at again once the runs are over, and
+  `channel_ingress` (the person's live channel bindings when the refusal
+  committed; `refused_at_next_use`: a channel message from them is answered
+  with the words the web app gives the same refusal, before any thread is
+  created). Each held or ended surface carries `not_ended`: for a held
+  surface, what could not be held; for the waiting work, what a Gateway
+  still had in hand at the last look (a launch in flight), which its own
+  path ends once it reads the refusal. Any `not_ended`, or a queue that
+  could not be read, leaves the surface unconfirmed, and a re-run looks
+  again.
+  **What the document does not name was not examined.** This command does
+  not look at what a Gateway process keeps for a person between requests (a
+  parked sandbox, a pooled MCP server session, a headless browser, a queued
+  memory update, an account export being prepared), at a background MCP
+  task, at a subagent batch, or at a channel message waiting to be
+  processed, and none of them appears under `surfaces`. A parked sandbox is
+  stopped by its idle timeout (`sandbox.idle_timeout`); a background MCP
+  task the person started keeps running at its remote server until it
+  finishes or is cancelled there.
   For an identity with no account every surface is named with a count of 0. A surface refused or limited at its next use, and
   a role limit's `sessions`, which end in the limit's own transaction,
   report the commit. A surface the
   command could not confirm (`running_work`, when a cancelled run did not
-  stop within `--wait-seconds`, or a Gateway surface as above) is named
+  stop within `--wait-seconds`, or a held or ended surface as above) is named
   under `surfaces_unconfirmed` and the exit status is **2**. For `limit-role` the surfaces and their counts
   are: `stored_role` (stored roles lowered; 0 when every covered account
   already sat at or below the limit), `sign_in` (covered accounts),
@@ -725,35 +647,15 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   longer wait, since the work before the wait comes out of it.
 - A malformed command line -- an unknown flag, a missing value -- is refused
   like any other refusal: one document with `error`, exit **1**.
-- **What `disable` reaches, and what it does not yet.** A release whose
-  `disable` document carries `surfaces` closes open connections and reports
-  them; its migration `0044_refusal_sweeps` adds three tables of Gateway
-  process records, which the downgrade drops. A release whose document
-  names `sandboxes` also ends what a Gateway keeps for the person between
-  requests; its migration `0045_refusal_sweep_reach` adds two columns to
-  those records, which the downgrade drops. A release whose document names
-  `mcp_tasks` also stops durable MCP tasks and subagent batches and refuses
-  channel messages before any work; its migration
-  `0046_mcp_task_disable_reason` admits the `account_disabled` cancellation
-  reason, and its downgrade refuses while a task carries it: to roll back
-  after a `disable` has cancelled a task, restore the backup taken before
-  the upgrade. A release that labels each sandbox container with its owner
-  (`deerflow.owner_user_id`, `deerflow.thread_id`: the account and thread
-  ids, which already appear in the container's mount paths) lets a Gateway
-  that takes a container over after a restart attribute it, and stop it
-  when that person is turned off. Without the label, an adopted sandbox may
-  be anyone's, so every `disable` exits **2** until the idle timeout
-  (`sandbox.idle_timeout`, 1800 s on this profile) ends it; after upgrading
-  onto that release this applies only to the containers the previous
-  release started. To see which running sandboxes carry an owner:
-  `docker ps --filter label=deerflow.role=sandbox --format '{{.Names}} {{.Label "deerflow.owner_user_id"}}'`.
-  A release whose document carries `held` also
-  holds the person's schedules and bindings and ends the work waiting to run
-  for them; its migration `0047_identity_holds` adds the table of what each
-  `disable` held, which the downgrade drops -- losing only the ability to
-  restore, since what it held stays off. The document names only the
-  surfaces it covers; a surface it does not name is not covered, not
-  confirmed.
+- **What `disable` reaches, and what it does not.** It reaches what the
+  document names under `surfaces`, and nothing else: sign-in, sessions,
+  personal access tokens, launches the process makes for the person, their
+  running runs, their schedules and channel bindings, and their queued
+  scheduled occurrences. It does not close a connection that is already
+  open, and it does not look at a parked sandbox, a pooled MCP session, a
+  headless browser, a queued memory update, a background MCP task, a
+  subagent batch or a channel message waiting to be processed. A surface the
+  document does not name is not covered, not confirmed.
 - `release-email` gives up the address of an account that is **turned off**,
   so a person may hold it again. `users.email` is unique, so one address
   belongs to one account for good -- right while the account is someone's,
@@ -769,7 +671,7 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
   one at `released.example`, a domain reserved by RFC 2606 that can never be
   registered and to which nothing can ever be delivered. What it held is
   recorded (`users.email_released_from`, migration
-  `0041_email_released_from`), so `list` still says which address it was.
+  `0027_account_access`), so `list` still says which address it was.
   **The returning person gets a new, empty account.** They sign in under a
   new subject at the provider, so the product gives them a new account;
   every thread, file and share stays on the old one, which is still there
@@ -801,14 +703,11 @@ docker compose --project-directory /opt/hartmesh --env-file /srv/hartmesh/.env \
 - The account's content stays where it is, owned by the account; nothing is
   exported, reassigned or deleted.
 
-Sample output of `disable` on an account with two tokens, a schedule, a run
-in flight and its stream open in a browser, two MCP sessions, a queued
-memory update, a durable MCP task and a Slack binding, on the AIO sandbox
-provider (the compose profile turns MCP tasks off and binds no channel by
-default; this deployment turned both on):
+Sample output of `disable` on an account with two tokens and one schedule,
+with no run in flight:
 
 ```json
-{"account": {"disabled": true, "disabled_at": "2026-09-21T10:00:00.018000+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com", "last_sign_in_at": "2026-09-21T09:12:00+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "role_limit": null, "subject": "3141592"}, "command": "disable", "elapsed_ms": 4471, "held": {"channel_bindings": ["…"], "schedules": ["…"]}, "identity": {"issuer": "https://login.example.com", "subject": "3141592"}, "note": "…", "returncode": 0, "runs_cancelled": 1, "runs_finished_first": [], "runs_found": 1, "runs_unconfirmed": [], "schedules_held": 1, "sessions_ended": true, "started_at": "2026-09-21T10:00:00+00:00", "surfaces": {"account_exports": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "browser_sessions": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "channel_bindings": {"action": "held", "count": 1, "not_ended": 0, "stopped_after_ms": 31, "stopped_at": "2026-09-21T10:00:00.031000+00:00"}, "channel_ingress": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "channel_receipts": {"action": "ended", "count": 0, "stopped_after_ms": 31, "stopped_at": "2026-09-21T10:00:00.031000+00:00"}, "downloads": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 2380, "stopped_at": "2026-09-21T10:00:02.380000+00:00"}, "internal_launches": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "mcp_sessions": {"action": "ended", "confirmed_by": "gateway_record", "count": 2, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "mcp_task_notifications": {"action": "ended", "count": 0, "stopped_after_ms": 31, "stopped_at": "2026-09-21T10:00:00.031000+00:00"}, "mcp_tasks": {"action": "ended", "confirmed_by": "task_status", "count": 1, "not_ended": 0, "processes_unreached": [], "stopped_after_ms": 2890, "stopped_at": "2026-09-21T10:00:02.890000+00:00"}, "memory_updates": {"action": "ended", "confirmed_by": "gateway_record", "count": 1, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "personal_access_tokens": {"action": "revoked", "count": 2, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "running_work": {"action": "ended", "confirmed_by": "sandbox_gone", "count": 1, "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "sandboxes": {"action": "ended", "confirmed_by": "gateway_record", "count": 1, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "scheduled_occurrences": {"action": "ended", "count": 0, "stopped_after_ms": 31, "stopped_at": "2026-09-21T10:00:00.031000+00:00"}, "schedules": {"action": "held", "count": 1, "not_ended": 0, "stopped_after_ms": 31, "stopped_at": "2026-09-21T10:00:00.031000+00:00"}, "sessions": {"action": "ended", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "sign_in": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 18, "stopped_at": "2026-09-21T10:00:00.018000+00:00"}, "sse_streams": {"action": "ended", "confirmed_by": "gateway_record", "count": 1, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 2380, "stopped_at": "2026-09-21T10:00:02.380000+00:00"}, "subagent_batches": {"action": "ended", "confirmed_by": "batch_status", "count": 0, "items_stopped": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "stopped_after_ms": 4460, "stopped_at": "2026-09-21T10:00:04.460000+00:00"}, "websockets": {"action": "ended", "confirmed_by": "gateway_record", "count": 0, "not_ended": 0, "processes": 1, "processes_unconfirmed": [], "processes_unreached": [], "stopped_after_ms": 2380, "stopped_at": "2026-09-21T10:00:02.380000+00:00"}}, "surfaces_not_reached": [], "surfaces_unconfirmed": [], "tokens_revoked": 2, "verdict": "disabled"}
+{"account": {"disabled": true, "disabled_at": "2026-10-01T23:58:06.920848+00:00", "email": "pat@example.com", "id": "…", "issuer": "https://login.example.com/realms/tenant", "last_sign_in_at": "2026-10-01T23:58:06.848332+00:00", "provider": "sso", "released": false, "released_from": null, "role": "user", "role_limit": null, "subject": "sub-pat"}, "command": "disable", "elapsed_ms": 74, "held": {"channel_bindings": [], "schedules": ["…"]}, "identity": {"issuer": "https://login.example.com/realms/tenant", "subject": "sub-pat"}, "note": "sessions are refused at their next request; every run this identity had executing was cancelled and its stream ended with it; no new run starts", "returncode": 0, "runs_cancelled": 0, "runs_finished_first": [], "runs_found": 0, "runs_unconfirmed": [], "schedules_held": 1, "sessions_ended": true, "started_at": "2026-10-01T23:58:06.913819+00:00", "surfaces": {"channel_bindings": {"action": "held", "connect_codes_ended": 0, "count": 0, "not_ended": 0, "stopped_after_ms": 59, "stopped_at": "2026-10-01T23:58:06.972819+00:00"}, "channel_ingress": {"action": "refused_at_next_use", "count": 0, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "internal_launches": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "personal_access_tokens": {"action": "revoked", "count": 2, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "running_work": {"action": "ended", "confirmed_by": "run_status", "count": 0, "stopped_after_ms": 63, "stopped_at": "2026-10-01T23:58:06.976819+00:00"}, "scheduled_occurrences": {"action": "ended", "count": 0, "not_ended": 0, "stopped_after_ms": 59, "stopped_at": "2026-10-01T23:58:06.972819+00:00"}, "schedules": {"action": "held", "count": 1, "not_ended": 0, "stopped_after_ms": 59, "stopped_at": "2026-10-01T23:58:06.972819+00:00"}, "sessions": {"action": "ended", "count": 1, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}, "sign_in": {"action": "refused_at_next_use", "count": 1, "stopped_after_ms": 8, "stopped_at": "2026-10-01T23:58:06.921819+00:00"}}, "surfaces_not_reached": [], "surfaces_unconfirmed": [], "tokens_revoked": 2, "verdict": "disabled"}
 ```
 
 and of `release-email` on that account, then of running it a second time:
@@ -849,36 +748,9 @@ an `error` and a non-zero exit instead:
 {"command": "release-email", "error": "no account exists for subject 'nobody' at issuer 'https://login.example.com'; there is no address to release"}
 ```
 
-**Upgrade note.** The three access keys and the command are honoured from
-the first release carrying this change, `v2.1.0+hartmesh.30` (the same cut
-that first carries the sign-on keys above) or whichever release is cut
-next. An older release ignores the keys at render time and has no command;
-a `.env` carrying them under an older pin renders sign-on-only mode without
-the claim check. Migration `0027_account_access` runs at the first start on
-this release.
-
-The role limit (`limit-role`, `lift-role-limit`, `role_limits` and
-migration `0043_role_limits`) is honoured from the first release cut after
-`v2.1.0+hartmesh.34`. An older release has neither verb: it prints a usage
-error on stderr and exits 2 with no document, so a caller must not read
-that 2 as "unconfirmed". A caller can tell the releases apart first: `list`
-carries `role_limits_without_account` from the release that has the verbs.
-
-`enable --restore-held`, and the `held` key of `disable`, are honoured from
-the first release cut after `v2.1.0+hartmesh.34` that carries migration
-`0047_identity_holds`. On `v2.1.0+hartmesh.34` and earlier the flag is a
-usage error on stderr with exit 2 and no document, and nothing changes; a
-caller can tell the releases apart first: `list` carries `holds` from the
-release that has the flag. There `disable` holds nothing,
-and after `enable` a recurring schedule fires at its next due time.
-
-`--subjects` is honoured from the first release cut after
-`v2.1.0+hartmesh.34` that carries it. On `v2.1.0+hartmesh.34` and earlier
-it is a usage error on stderr, exit 2 and no document; a release cut
-between that one and this change answers it as a malformed command line,
-exit 1 with an `error` document. Either way nothing changes, and the answer
-has no `identities`, so a caller that gets none back falls back to one call
-per subject.
+The account tables this section names (`disabled_identities`,
+`role_limits`, `identity_holds`, and the `users` columns) are created by
+migration `0027_account_access`, which runs at the first start.
 
 ### Local passwords (`HARTMESH_LOCAL_PASSWORDS=allowed`)
 
@@ -975,17 +847,15 @@ The same confinement applies to an account `reset_admin` resets, and to
 sessions only: the reset account's personal access tokens, channels and
 scheduled tasks keep working, since the reset exposed none of them.
 
-**Upgrade note.** `HARTMESH_LOCAL_REGISTRATION` is honoured from
-`v2.1.0+hartmesh.31`, and from that release on a
-local-password tenant whose `.env` lacks it **stops at start**, with
+**The key is required.** A
+local-password tenant whose `.env` lacks `HARTMESH_LOCAL_REGISTRATION` **stops at start**, with
 `render_config: refusing to render: HARTMESH_LOCAL_PASSWORDS=allowed selects
 local passwords, and HARTMESH_LOCAL_REGISTRATION must then say …` in the
 Gateway's journal. Add `HARTMESH_LOCAL_REGISTRATION=open` to keep the
-sign-up form exactly as it was, or `=closed` to close it, before the pin
-moves; check the render with the new bundle's renderer as in the sign-in
-upgrade note above. `.30` and earlier ignore the key. A bundle whose
-template was edited to name `allow_registration` must drop that edit: from
-that release on the renderer refuses it in both modes. Sign-on-only tenants
+sign-up form open, or `=closed` to close it; check the render with the
+bundle's renderer as in § "Sign-in" above. A bundle whose
+template was edited to name `allow_registration` must drop that edit: the
+renderer refuses it in both modes. Sign-on-only tenants
 change nothing.
 
 ## Mount points
@@ -1020,10 +890,7 @@ Two directories cross the container boundary:
   `/mnt/user-data/shared`; written only by the Gateway's publish route, with
   the publication records in the database), so the pre-created
   `uploads/` and `artifacts/` directories are unused by this profile and stay
-  empty. `home/runtime/` is the other persistent consumer of this disk: the
-  accepted skill snapshots and thread views a warm turn reuses instead of
-  staging again, sized and bounded in § "Public skills", **Per-turn
-  material**.
+  empty.
 - `/srv/hartmesh/operator`, mounted **read-only** into the Gateway at the same
   path: operator-owned deployment material that is not release content: the
   optional model file `HARTMESH_MODELS_FILE` names (§ "Operator-managed
@@ -1154,18 +1021,11 @@ beside `public/` and swapped in by two renames, so a copy that fails leaves
 the previous set in place and stops the start before uvicorn runs. `public/`
 is therefore release material. A skill an earlier image shipped, a file
 dropped in by hand or an edit made in place is gone after the next start;
-until that start an edited public skill is live, and the next turn admitted
-after the edit snapshots it, so the seed is a restore, not a tamper guard. A
-skill the operator adds goes in `home/skills/custom/`, which the seed never
-touches. A chat's sandbox never mounts `public/` itself: every turn is
-admitted with an immutable snapshot of the skills enabled for that user,
-projected read-only at `/mnt/skills/.accepted/<snapshot digest>/public/<name>`
-and re-verified by digest before that turn uses it (**Per-turn material**
-below has what the material costs and how long it is kept), and the sandbox
-tools refuse skill paths outside it (`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which
-population a deployment profile runs"). The Gateway's own projection,
-`home/skills_view/`, is rebuilt from `public/` at startup; the measurement
-script below mounts `home/skills` directly, so its paths carry `public/`.
+until that start an edited public skill is live, so the seed is a restore,
+not a tamper guard. A skill the operator adds goes in `home/skills/custom/`,
+which the seed never touches. A chat's sandbox mounts the library read-only
+at `/mnt/skills/public`. The Gateway's own projection, `home/skills_view/`,
+is rebuilt from `public/` at startup.
 Because the library travels in the image, a change to a public skill reaches
 a tenant only through a release (RELEASING.md). A Gateway image older than this
 feature carries no library; the seed says so in the log and leaves `public/`
@@ -1195,88 +1055,17 @@ developer-facing skills. `run.sh` names the exclusions in
   `video-generation` assign a credential read from the environment to a
   variable the review's `secret-env-assignment` rule treats as blocking;
   `skill-creator` uses `subprocess`; and `vercel-deploy` declares a
-  sensitive capability. The profile's own skill review refuses each, and
-  `tool_plane.validation_requires_skill_review: true` makes that review a
-  condition of promotion: a governed base holding any one of them could
-  never be promoted, so the profile does not ship them.
-  `backend/tests/test_compose_public_skills.py` pins that each is still
-  refused and that the policy exclusions are not review refusals; an
+  sensitive capability. The skill review refuses each, so the profile does
+  not ship them. `backend/tests/test_compose_public_skills.py` pins that each
+  is still refused and that the policy exclusions are not review refusals; an
   exclusion the review no longer requires fails the suite, and the skill goes
   to tenants at the next release.
 
 The list can only subtract: it names skills the image carries, and there is
 no entry that adds one. It lives in `run.sh`, so changing it is a profile
 change, not a tenant setting. A skill the operator wants goes in
-`home/skills/custom/`, with the same caveat: a package the review refuses
-blocks promotion of a governed base from `custom/` exactly as it would from
-`public/`. 13 skills are seeded at this release; the seed's line in the
-Gateway log says how many and which names were excluded.
-
-**Per-turn material.** A chat never mounts this library directly: each
-admission snapshots the effective skills into a content-addressed, read-only
-tree under `home/runtime/skill-snapshots/<subject>/<digest>/`, and the turn's
-first sandbox-backed tool call binds it into the thread's view at
-`home/runtime/skill-snapshot-active-views/<subject>/<thread>/`, which is what
-the sandbox sees at `/mnt/skills/.accepted/<digest>`. Until 2026-09-17 both
-were deleted when the run ended and staged again, with a `fsync` per file, on
-the next turn. Measured on a development host, not the tenant class, with the
-13 seeded packages (43 files, 0.40 MB): staging the snapshot 2.0 to 2.4 s and
-45 `fsync`s against 23 ms to verify a retained one, and staging the view 3.2 s
-and 43 `fsync`s against 13 ms to verify a retained one. Both are now retained
-and re-verified by digest before any use — the bytes authorize the reuse, the
-identity never does — so a warm turn pays the verification, not the staging.
-The snapshot is the user's *effective* skills, so a user's custom and
-integration skills ride in it and their trees are larger than the seeded
-library.
-
-Retention is bounded by what removes it, and nothing here expires on a timer:
-
-- **Per user, two snapshot digests.** The third publication evicts the
-  oldest, so toggling one skill keeps both sets warm. A digest a run still
-  holds is never evicted, and the bound is re-applied when that user next
-  publishes — a scope transiently holds two plus its concurrent runs.
-- **Per parked thread, one view.** It goes when a different digest replaces
-  it, or with the container: `destroy`, an idle reap at `idle_timeout`
-  (1800 s here), or a replica eviction, which on two slots is routine.
-- **Per tenant, `2 × snapshot × users admitted since the last Gateway
-  start`.** That is the number to size for: nothing reclaims a user's trees
-  while the process lives, not even deleting the thread. A Gateway restart is
-  the reclaim — startup removes every snapshot and view no live lease holds,
-  and the first turn of each user after it pays one staging.
-
-At this release that is about 1.3 MB per user of seeded library (0.61 MB
-allocated per tree on a 4 KiB-block filesystem) on the tenant data disk, plus
-whatever their own skills add, against the 32 MiB per-snapshot ceiling
-(`max_total_bytes`). See `backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`,
-"Material is retained across turns".
-
-**Governance.** The profile runs the governed tool plane
-(`tool_plane.enabled: true`) under the `local_development` deployment
-profile, so governance state never fails readiness: the seeded library is
-usable at once, and adoption is optional. Until an administrator adopts it
-the tool-plane status reads `unmanaged`: the settings notice says no active
-revision is available and that direct skill and MCP changes are disabled,
-which is the governed tool plane, not the seed; in every state the direct
-skill and MCP controls stay read-only. To adopt it, `POST
-/api/tool-plane/bootstrap/stage-current`, then validate and promote the
-returned base through `/api/tool-plane/admin/revisions/{revision_id}/validate`
-and `.../promote` (docs/GOVERNED_TOOL_PLANE.md, "Upgrade bootstrap");
-stage-current also returns an overlay revision for every user with custom
-skills, and those must be promoted too before bootstrap clears, while a
-tenant whose users have added no custom skill gets a base and nothing else.
-The capture is exactly the seeded bytes, so a restart, which seeds the same
-bytes again, is not drift. A release whose library differs is: after the
-upgrade the base stays `governed` and reports `drift: true`, the skills keep
-working, and the same stage-current, validate, promote sequence adopts the
-new library. Once adopted, `public/` has two writers and the seed is the last
-one: promoting a base that adds or drops a *public* skill changes `public/`
-immediately, and the next start puts the image's library back. `public/` is
-image-owned on this profile; operator material belongs in `custom/`, which
-neither the seed nor a base projection replaces. The upstream library
-carries review warnings (referenced files that do not exist, unreferenced
-resources, plain-HTTP links); none blocks promotion. All of this is pinned
-offline by `backend/tests/test_compose_public_skills.py` against the real
-tree and the profile's own policy values.
+`home/skills/custom/`. 13 skills are seeded at this release; the seed's line
+in the Gateway log says how many and which names were excluded.
 
 **A tenant that predates this release** needs nothing: its first start on
 this release seeds the library into the empty `home/skills/` earlier releases
@@ -1681,7 +1470,7 @@ close it.
 
 The four 512 MiB slots of 2026-09-15 were sized from direct-execution
 measurements (the table above: a report render peaks at 334 to 355 MiB in a
-fresh container). The tenant-class `.18` run measured the same report on the
+fresh container). A run on the tenant VM class (release `2.1.0+hartmesh.18`) measured the same report on the
 real chat path and it did not fit: **288.8 s** at 512 MiB against **86.3 s**
 at 1 GiB, with 32,856,411 file-page refaults and 125.4 GiB of block reads
 in the 512 MiB run (182.7 sandbox CPU-seconds, 93 of them throttled, no OOM
@@ -1728,7 +1517,7 @@ readiness probe -- as the whole of the first turn's pre-model wait, paid while
 the person watched "workspace starting". The prewarm takes a free slot or
 nothing: it never evicts a parked sandbox some thread will reclaim, and one no
 sandbox-backed tool call claims within about 300 s is stopped rather than
-holding the slot for the 1800 s idle timeout. After `.33` only a sandbox-backed
+holding the slot for the 1800 s idle timeout. Only a sandbox-backed
 tool call claims it, so a chat that only talks for five minutes loses its
 prewarm and pays the cold start at its first tool call. So with one thread active and one chat freshly
 opened, both slots are in use, and a third thread pays the same eviction it
@@ -1770,15 +1559,12 @@ at readiness completed a public hello (streamed output, one model call, a
 stored answer) in 46.963 s. Nothing about the model, keys, egress, runtime or
 Gateway configuration was involved. These figures compared CPU quotas on one
 installed runtime; they say nothing about any particular `runsc` release.
-The seeded library makes every turn's skill snapshot nonempty, and the
-sandbox that snapshot is bound into is acquired by the turn's first
+A sandbox is acquired by a turn's first
 sandbox-backed tool call. A turn that calls none answers without one; a new
 chat's first tool call waits out the whole cold start (80 to 91 s measured on
 one CPU, 9.0 to 11.7 s on the slim profile), unless the thread's prewarm has
 already started it, and a chat whose sandbox was evicted pays it again; a
-reused sandbox does not (§ "Public skills"). Through `.33` the sandbox was
-bound before the model was called on every turn, so the first text of every
-new chat waited for the cold start.
+reused sandbox does not.
 
 **The setting.** `SANDBOX_READY_TIMEOUT` in the tenant `.env` overrides the
 template: whole seconds, 60 to 600 inclusive, absent means 120. The floor is
@@ -1830,8 +1616,7 @@ bounds behind it are the backend's per-stop timeout (120 s, for a wedged
 daemon) and 15 s per removal.
 
 **Related deadlines, checked.** nginx proxies `/api/*` with 600 s connect,
-send and read timeouts; the chart's provisioner startup probe (200 s) is a
-different backend and unchanged; the adoption probe `discover()` runs on a
+send and read timeouts; the adoption probe `discover()` runs on a
 warm container and keeps its 5 s; `idle_timeout`, the tool command timeouts
 and the shutdown phases are unaffected.
 
@@ -2341,23 +2126,9 @@ storage tier's write budget is the density ceiling, so do not "fix" it upward.
 
 ## Deployment profile
 
-The rendered `config.yaml` selects `deployment.profile: local_development`,
-one of the two profiles that migrate the database themselves on start (no
-migration job is needed; do not copy the chart's). `durable_production`, the
-fail-closed one, also self-migrates but hard-requires the
-`EXECUTION_POLICY_HMAC_KEYS` and `EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID`
-credentials at start, which are not in the `.env` contract; adopting it is a
-two-key contract change the operator must make, after which it is a one-line
-change here. Everything the durable profile would otherwise check is already
-in place: PostgreSQL for every store, `run_events.backend: db`,
-`dedupe_storage: auto`, and an explicit `DEER_FLOW_TENANT_ID`. One thing is
-not: under `durable_production` a turn whose skill snapshot is nonempty, which
-every tenant's is since `public/` is seeded, admits only a qualified durable
-materializer, and the local container backend offers none, so every chat turn
-would fail with `AcceptedSkillSandboxBindingError` before a sandbox existed
-(`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which population a deployment
-profile runs"). Adopting the durable profile is blocked on a qualified
-materializer, not only on the two keys.
+The Gateway migrates the database itself at start; no migration job is
+needed. Every store is PostgreSQL, and run events are kept in the database
+(`run_events.backend: db`) so they survive a Gateway restart.
 
 The Gateway runs exactly one worker. `DEER_FLOW_INTERNAL_AUTH_TOKEN` is
 generated per process when unset, so a single worker is what keeps it coherent
@@ -2508,11 +2279,7 @@ questions in a minute is what gets an address gated. Results are bounded
 before the model sees them: web addresses only, and a title, address and
 snippet each capped, because a result page is text somebody else wrote.
 
-Neither tool is evidence-bearing: they have no durable evidence adapter, so
-their turns carry tool receipts but no `retrieval.observation.v1` row
-(`backend/docs/EVIDENCE_BEARING_RETRIEVAL.md`). The keyed durable providers
-keep theirs, and with them the domain allowlists and byte ceilings their
-policy carries. `image_search` returns only results carrying a direct image
+`image_search` returns only results carrying a direct image
 address, bounded the same way, and says so plainly when the service is down
 rather than when a query simply found nothing.
 
@@ -3063,32 +2830,6 @@ cost of one password verification, so the lockout cannot be used to discover
 which addresses have accounts. Only the source guard answers 429, and it says
 nothing about any account.
 
-### Differences from the chart's rendered `config.yaml`
-
-The same render with three keys present (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
-`TAVILY_API_KEY`), compared key by key with `helm template` of the chart's
-config ConfigMap under the chart README's recommended values, at
-`2.1.0+hartmesh.6`. Identical: `checkpointer`, `config_version`, `database`,
-`dedupe_storage`, `deployment` (profile, readiness and shutdown budgets),
-`log_level`, `memory`, `stream_bridge`, `tool_groups`, `tool_plane`,
-`verification`. Every difference and its reason:
-
-| Key | Chart | Profile | Why |
-| --- | --- | --- | --- |
-| `models` | `[]` | the catalog entries for the keys present, or the operator's own list when `HARTMESH_MODELS_FILE` is set | the chart leaves models to the operator's values; the profile renders them from the tenant's keys, or from the file § "Operator-managed models" describes |
-| `tools[web_search]` | DuckDuckGo | the profile's own SearXNG without a search key (§ "Web search"), the keyed provider when one is present (Tavily here) | same ten tools; only the search backend follows the tenant |
-| `sandbox.image` | upstream `latest` | the fork's digest pin | release pinning |
-| `sandbox.replicas` | 3 | 2 | the memory budget |
-| `sandbox.idle_timeout` | absent | 1800 | recorded above |
-| `sandbox.environment` | absent | the six `DISABLE_*` switches, each `"true"` | § "Slim services profile": the slim sandbox is what the two 1 GiB slots are measured for |
-| `sandbox.network` | absent | `allowlist` block | the chart's sandboxes are fenced by CiliumNetworkPolicy; the VM has no such fence, so the backend's own mode is the fence |
-| `sandbox.provisioner_url`, `provisioner_service_account_token_file`, `accepted_skill_projection_profile` | set | absent | the Kubernetes provisioner path; the local Docker backend has no provisioner and mounts skills directly |
-| `skills` | absent (PVC mounts) | `path` under `home/`, `container_path: /mnt/skills` | the local backend's skills mount; `public/` is seeded from the Gateway image at every start (§ "Public skills") |
-| `run_events.backend` | upstream default (`memory`) | `db` | run events survive a Gateway restart on a single-Gateway VM |
-| `auth.local.lockout_store` | absent (`memory`) | `redis` | § "Login lockout": one replica with a recreate rollout, so clearing a lockout must not need a restart |
-| `auth.local.source_max_failures` | absent (`300`) | `600` | § "Login lockout": twenty staff reaching their own account lock and retrying past it is 300 failures exactly, so the generic limit leaves the office no margin |
-| `auth.local.enabled`, `auth.local.allow_registration`, `auth.oidc` | absent (local passwords, registration open) | in sign-on-only mode `false`, `false`, and one provider `sso`; in local mode `true`, from `HARTMESH_LOCAL_REGISTRATION`, and absent | § "Sign-in": the `.env` selects the mode and whether visitors may sign up, and the template carries no open default |
-
 ## Moving the `app` subnet on a running tenant
 
 A tenant already running carries a `hartmesh_app` network the daemon created
@@ -3198,202 +2939,58 @@ with `json-file` on the root disk.
 Every turn ends with one `turn phase timings` line from
 `deerflow.runtime.turn_phases`, which carries the reading an operator needs
 (the structured record behind it is the complete one). One turn, one line —
-wrapped here only to fit the page:
+wrapped here only to fit the page. This one is from the repository's own
+end-to-end test, with a model stub and no sandbox, not from a tenant VM:
 
 ```text
-turn phase timings run=<run id> correlation=<id> total=9261ms outcome=success kind=accepted \
-acquisition=accepted_warm_reclaim reused=accepted_active acquire_reason=accepted_binding \
-snapshot=present/13pkg/mandatory queue=0ms phases=admission@0ms assembly@6ms sandbox_lookup@22ms+143ms \
-skill_materialization@21ms+5825ms agent_build@5857ms+232ms checkpoint_preflight@6109ms graph_start@6115ms \
-sandbox_binding@6131ms+2677ms sandbox_acquire@6131ms+2677ms model_request@8821ms first_provider_text@9022ms \
-first_stream_text@9025ms model_completion@9156ms terminal@9261ms \
+turn phase timings run=<run id> correlation=<id> total=3959ms outcome=success model=1/936ms busy=936ms \
+phases=admission@0ms assembly@13ms agent_build@13ms+35ms checkpoint_preflight@48ms graph_start@49ms \
+model_request@71ms first_provider_text@672ms first_stream_text@673ms model_completion@1006ms terminal@3959ms \
 unobservable=browser_first_text(requires_a_browser_measurement_through_public_ingress)
 ```
 
 `@` is an offset from the turn's start and `+` the phase's own measured
 duration, both in milliseconds, so a phase carrying both **ends** at
 `@ + duration` and the questions are arithmetic on one line. A span is printed
-when it *ends*, so an enclosing span appears after the spans it contains and
-its `@` can be earlier than the entry printed before it: `sandbox_lookup@22ms`
-prints ahead of the `skill_materialization@21ms` that encloses it, and
-`sandbox_binding` ahead of the `sandbox_acquire` that encloses it. Sum only
-spans that enclose nothing. The sandbox is in
-hand at the end of `sandbox_acquire` (`6131 + 2677 = 8808ms`), so
-`first_stream_text@9025ms` leaves 217 ms between the sandbox being in hand and
-the first assistant text leaving the Gateway. `first_stream_text -
-first_provider_text` is what the Gateway added to the provider's own first
-token (both are instants, so that one is a plain subtraction). The line above
-is a *warm* turn that still took 9.3 s, and it says where: 5.8 s projecting the
-accepted skill snapshot and 2.7 s binding it, against 143 ms to find the
-container. That line was measured before 2026-09-17, when both were staged
-again every turn; a warm turn on this release verifies the retained material
-instead (§ "Public skills", **Per-turn material**), so the same shape today
-reads in milliseconds. It stays here because reading the line is the point.
+when it *ends*, so an enclosing span appears after the spans it contains.
 
-A *first* turn on a new chat should read the same way. The web client asks
-the Gateway to build the thread's sandbox the moment the chat opens (`POST
-/api/threads/{id}/workspace/prewarm`), seconds before the first message, so
-the first sandbox-backed tool call's `sandbox_lookup` finds it parked (after
-`.33` the lookup is inside that call, after `model_request`; through `.33` it
-ran before the model): `acquisition=accepted_warm_reclaim`
-with no `sandbox_create` or `sandbox_readiness` span at all, and the Gateway
-log carries `Accepted sandbox <id> was built <n>s ahead of this turn and
-reclaimed warm`. A first turn that still shows `acquisition=created` with
-`sandbox_create@…+4000ms sandbox_readiness@…+6000ms` says the prewarm did not
-happen or was not claimed in time: both slots were taken (a prewarm never evicts;
-`Not prewarming a sandbox … every slot is taken`), or the chat sat idle past
-`sandbox.prewarm_claim_timeout` and the container was stopped
-(`Prewarmed sandbox <id> was not claimed within 300s`; the reaper looks every 30 s, so an abandoned slot comes back at up to 330 s),
-or the chat's first sandbox-backed tool call came more than
-`prewarm_claim_timeout` after it opened. A person who sends
-within a few seconds of opening the chat, while the build is still running,
-waits for it on that same turn -- the acquisition serialises on the thread --
-and then reclaims it. That wait is the line's top-level
-`queue=<n>ms` field, which is printed only when it is not zero, and it falls
-inside the `skill_projection` phase, not a `sandbox_create` span, and the
-phase reads long even though its own work took milliseconds. Through `.33`
-the progress label stayed at "preparing" meanwhile; after `.33` the wait falls
-inside the first sandbox tool call, and the person sees that call's card
-running. So read `queue=`
-before concluding that projection is slow. Until `v2.1.0+hartmesh.27` the
-prewarm also published the thread's skill view under that same lock, which
-added its staging to the wait: the released `.26` tenant-class run measured
-`queue=3687ms` on a warm host and `queue=16263ms` on the first chat after a
-boot, against 129 ms of projection work and a 15 ms reclaim. The publication
-now runs after the lock is released, so what `queue=` still shows on a first
-turn is the container build itself. Total wait is what the cold start would have
-been, less the seconds the build had already run.
+- `total` and `outcome` are the turn's wall time and how it ended.
+- `model=<calls>/<time>` and `tools=<calls>/<time>` say how much of the turn
+  was the provider and how much was tools; `busy` is their sum, and the rest
+  of `total` is the turn's own bookkeeping and persistence.
+- `queue` appears when the run waited to start.
+- `acquisition` appears when the turn took a sandbox, and says where it came
+  from: `in_process` (the thread already held it), `warm_reclaim` (a parked
+  container, which is also what a prewarmed first turn reads), `discovered`
+  or `rediscovered` (a container another process or an earlier Gateway
+  started), `created` (a cold start). A cold start carries the phases
+  `sandbox_create` and `sandbox_readiness`; their durations are the wait
+  § "Sandbox readiness budget" is about.
+- `first_stream_text` is when the first text left the Gateway. What the
+  person saw is later by the path through nginx and the browser, which this
+  line cannot observe and says so (`unobservable=browser_first_text`).
 
-**A tenant at its slot limit reads here too**, which is what tells "sized at
-its limit" apart from "something is broken". Both slots in active use and
-nothing parked to evict gives the turn a `sandbox_capacity_wait@…+<n>ms`
-phase and `capacity_waits=1`; a wait that ran out adds `capacity_refusals=1`,
-and the Gateway log carries `Refusing to create sandbox <id>: all 2 replica
-slots are in use (active=2 parked=0 starting=0) and none came free in 5.0s`.
-On this profile the refusal is a tool result: the line still reads
-`outcome=success`, the run record carries `stop_reason=sandbox_capacity_exceeded`,
-and the person reads the agent saying the workspace is busy. The fixed message
-"This workspace is already running as many sandboxes as it has room for" is
-what a refusal before the run starts shows, on a durable profile. Waits without
-refusals are a tenant that keeps finding its slot in time; refusals arriving
-routinely are the signal to move to the 8 GiB VM class (§ "Memory budget"),
-not a defect to chase. Neither counter is printed when it is zero, so an
-ordinary turn's line is unchanged. A turn that *waited and then evicted*
-shows the wait beside `evictions=1` and no refusal: the wait ended when the
-other turn parked its container.
-
-`acquisition=` says where this turn's sandbox came from. `created`,
-`rediscovered`, `discovered`, `warm_reclaim`, `accepted_warm_reclaim` and
-`unknown_provenance` are **origins** — they name how the container came to be;
-`accepted_active` and `in_process` are **observations** that it was already in
-hand, which any turn can make. A turn acquires in stages (through `.33` the
-worker projected the accepted skills before the graph ran and the sandbox
-middleware bound later against whatever was then active; after `.33` the
-first sandbox-backed tool call does both, and later calls find it active), so `acquisition=` is the turn's origin
-whenever a stage reported one, and a later stage that merely found the
-container active is reported beside it as `reused=`. `acquisition=created
-reused=accepted_active` is one turn that created its sandbox and bound to it
-again — one container, not two — so a turn carrying `creates=1` no longer
-reports `acquisition=accepted_active`. A bare `acquisition=accepted_active` or
-`acquisition=in_process` with no `reused=` is a turn that found its container
-already there and no stage said how it got there. (A counter prints only when
-non-zero, so the warm turn above carries no `creates=`.)
-The example line's `acquire_reason=accepted_binding` is the `.33` shape; after
-`.33` an accepted turn reads `acquire_reason=lazy_deferred`, meaning the
-middleware left the acquisition to the first sandbox-backed tool call. That is
-the expected value, not a regression.
-
-Four phases name the work that used to sit unattributed between the sandbox
-lookup and the binding, which on a warm turn is most of the wait.
-`skill_materialization` is the accepted skill snapshot being projected into
-the sandbox — authorization, the snapshot's manifest and verification, the
-container acquisition and the projection itself — and the sandbox phases *it
-records* nest inside it (`sandbox_lookup@22ms+143ms` sits within
-`skill_materialization@21ms+5825ms`, so the projection cost beyond finding the
-container is the difference; on a cold turn `sandbox_create` and
-`sandbox_readiness` nest there too). The middleware's later `sandbox_binding`
-and `sandbox_acquire` do not: they run after the graph starts and are counted
-separately. Then `agent_build` (building the graph; with
-`skill_materialization` one of the two here carrying a measured duration),
-`checkpoint_preflight` (the thread's stored state being loaded) and
-`graph_start` (the worker entering the stream attempt, ahead of the per-thread
-checkpoint lock — so a wait behind a concurrent turn on the same thread falls
-between it and `sandbox_binding`). `graph_start` is marked per attempt, so a
-resumed or retried stream shows two. `skill_materialization` is recorded only
-on `kind=accepted` turns; an ordinary turn has the other three. After `.33`
-it holds only `accepted_authorization` on this profile: the sandbox is
-acquired by the turn's first sandbox-backed tool call, after `graph_start`,
-and `skill_projection` and `skill_snapshot_bind` are recorded there. A turn
-that calls no sandbox tool records neither.
-
-`launch=` is what happened *before* the journal opened, and it is **outside**
-`total=` and every `@` offset: the journal's zero is the worker's admission,
-so `total=` and the phases start there, and `launch=` is the interval from the
-request reaching the application to that zero. It is the server's half of the
-person's wait for a first word — read acknowledgement as `launch=` plus
-`first_stream_text@`, never as the offset alone — and until this field
-existed it was invisible except as the gap between the access log and "Run
-created". Every entry point stamps the intent when it builds it: the HTTP
-routes at `start_run`, the scheduler when it dispatches an occurrence, an IM
-channel when it turns a message into a run, the embedded runtime API at its
-call. The steps in brackets are consecutive from that stamp, so they account
-for the whole interval up to the persisted row: `identify` (the idempotency
-lookup, when the entry point supplied a key), `permit` (the admission fence),
-`seal` (the accepted invocation: config, agent revision and skill snapshot),
-`authorize`, `constrain`, `prepare` (the projection reservation and the
-checkpoint seed check) and `persist` (the run row). `handoff` is the rest:
-the worker being attached, its task being scheduled, and the thread-metadata
-setup it runs before opening the journal. The example line above predates
-the field and is left as it was measured. Measured on the development host on
-2026-09-17 (the Gateway stream suite's ordinary turn against the probe model:
-no skill snapshot, the in-process stores, so `seal` is the cheap case):
-
-```text
-launch=405ms(identify=0ms,permit=16ms,seal=96ms,authorize=0ms,constrain=0ms,prepare=268ms,persist=20ms,handoff=4ms)
-```
-
-Tenant-class `.19`, before this field existed, showed the same interval as
-1.4 to 2.2 s on warm turns and 3.4 s on the session's first, with `seal`
-staging the skill snapshot each time; that is the figure the next
-qualification reads from `launch=` directly. A launch that replays an
-already-admitted run (an idempotent resubmission) starts no worker and prints
-no new line; a run recovered by execution takeover prints a line with no
-`launch=`, because no request in that process launched it.
-
-What the server cannot see it declares instead of inferring:
-`browser_first_text` is always `unobservable` here, because only a browser
-measuring through the front door can time what the person actually waited
-for.
-
-```sh
-docker compose --project-directory /opt/hartmesh --env-file "$ENV" \
-  logs gateway | grep 'turn phase timings'
-```
-
-is therefore a complete per-turn latency record. The same fields also ride the
-log record as a structured `turn_phases` field for deployments that enable
-`logging.enhance.format: json`; this profile logs text. That record stamps
-`version: 7` (`launch` was added in 5, the tool/model working-turn split in 6,
-the capacity counters below in 7), and fields are added rather than repurposed,
-so a reader that tolerates unknown keys needs no change. The line reports
-confirmed resource counts (`creates=`, `teardowns=`), not attempts: the
-structured record keeps `create_attempts` and `unknown_create_results`
-separately, and one confirmed create can stand for several attempts.
+A first turn whose sandbox was built when the chat opened logs `Sandbox <id>
+was built <n>s ahead of this turn and reclaimed warm` beside its timing line.
+A turn that is slow before `model_request` with `acquisition=created` paid a
+cold start; one that is slow between `model_request` and
+`first_provider_text` waited for the provider.
 
 ## Release pinning
 
 At release the `image:` references in `compose.yaml`, `sandbox.image` and
 `network.proxy_image` in `config.yaml`, and the lines of `images.txt` are the
 same digest-pinned strings, written by `scripts/pin_compose_images.py` before
-the tag (see `RELEASING.md`, "Compose profile pins"). Between cuts the tree
+the tag (see `RELEASING.md`, "HartMesh distribution releases"). Between cuts the tree
 carries the **previous release's digest pins**: the pin commit is the last
 thing a release changes and nothing restores placeholders, so a bundle built
 from `main` is grammatical and boots the previous release's images. A cut
-re-points every fork line with `--release`; a third-party image is bumped by
+re-points this repository's four image lines with `--release`; a third-party image is bumped by
 putting its new tag form in place of the old digest string in all three files
-and running the pin script. Seven images are pinned: gateway, frontend,
-sandbox, the network proxy (built under the fork's own name,
-`<repo>-sandbox-network-proxy`), `postgres`, `redis` and `nginx`.
+and running the pin script. Eight images are pinned: gateway, frontend,
+sandbox, the network proxy (built under this repository's own name,
+`<repo>-sandbox-network-proxy`), `postgres`, `redis`, `nginx` and
+`searxng/searxng`.
 
 ## Not here
 
@@ -3401,813 +2998,18 @@ TLS, the front door (Traefik on the platform cluster, forwarding plain HTTP
 with `X-Forwarded-For` / `X-Forwarded-Proto`), backups, and the host firewall
 are all outside the VM and outside this profile.
 
-## Proof record
+## What has been verified
 
-Evidence gathered on a development host with Docker Engine 28.4.0, Compose
-v2.39.4, and no `runsc` registered, so every live line below ran under `runc`;
-the two gVisor-specific claims are recorded as unproved with the command that
-proves them. The data directory, ownership and `.env` were built exactly as the
-golden image lays them out (subdirectories `1000:1000 0750`), and the bundle
-files carried no exec bit.
+This profile's files are checked offline by the repository's test suite
+(`backend/tests/test_compose_*.py`, `test_sandbox_image_contract.py`): the
+render, the pins, the limits, the sign-in modes, the seed and the nginx
+configuration. The sandbox image is built and exercised under the restricted
+runtime and these limits by the sandbox smoke workflow.
 
-- `docker compose --project-directory deploy/compose --env-file .env.example
-  config` renders with the contract keys alone: nginx `host_ip: 0.0.0.0`,
-  `published: "2026"`, five services with `mem_limit == memswap_limit`.
-- `docker compose ps` after `up -d`: one `PORTS` entry, nginx's; postgres and
-  redis healthy as uid 1000 on the pre-created directories; the gateway
-  healthy on `/health/ready`.
-- `docker network ls` after `up`: `hartmesh_app` and `hartmesh_sandbox`
-  present before the first sandbox (Compose created only `app`; `run.sh`
-  created `sandbox`).
-- Gateway process (`/proc/1/status` in the container): `Uid 1000`, `Gid
-  1000`, `Groups <docker socket gid>`, `NoNewPrivs 1`; the docker CLI works
-  from that identity and `pid 1` is uvicorn with `--workers 1`.
-- `nginx -T -c /tmp/nginx.conf` in the running container: syntax ok,
-  `server_name <HARTMESH_PUBLIC_HOST>;`, one `set_real_ip_from` per contract
-  address, `real_ip_header X-Forwarded-For;`, `real_ip_recursive on;`; the
-  bare-`$name` variable count is identical before and after the render (99
-  across the eleven names). `GET /` through nginx returns the frontend
-  (`<title>DeerFlow</title>`), `GET /health` the Gateway's health document.
-- `allowlist`, from inside a live sandbox created through the real provider
-  (two sandboxes acquired, the ceiling at the time): `id` is `uid=1000(gem)`; the only
-  route is the internal network; `postgres`/`redis` do not resolve and their
-  `app` addresses are unreachable; the peer sandbox is unreachable both on its
-  internal address and on its published host-gateway port; `https://pypi.org/
-  simple/` answers `200` through the proxy; `https://example.com/` is refused
-  (`403 from proxy after CONNECT`); `http://neverssl.com/` `403`;
-  `http://169.254.169.254/` answers `IP-literal destinations are not allowed
-  by sandbox network policy`; direct DNS is unavailable by design. `docker
-  inspect` of the sandbox: `User=1000:1000`, `SecurityOpt=[no-new-privileges,
-  seccomp=builtin]`, `CapDrop=[ALL]`, no `CapAdd`, `Memory=MemorySwap=640 MiB`,
-  `NanoCpus=1`, no published port, one network `deer-flow-sandbox-net-*`
-  (`internal=true`, both gateway modes `isolated`); every bind mount source
-  under `home/`. The proxy: `User=65532`, read-only, `Memory=MemorySwap`,
-  published on `172.17.0.1` (the host-gateway address), on the egress and the
-  internal network only. `ss -ltn` showed the two sandbox ports on
-  `172.17.0.1` and nothing of ours on `0.0.0.0`.
-- Workspace both ways: the sandbox wrote `/mnt/user-data/outputs/proof.txt`
-  (`1000:1000`) into a directory the Gateway had created, and the Gateway read
-  it back through `read_file`.
-- Browser under `seccomp=builtin`, no capabilities, uid 1000: `GET
-  /v1/browser/info` reports Chromium 146 with its CDP endpoint and `GET
-  /v1/browser/screenshot` returns a PNG; no OOM kill (`memory.events`).
-- Measured turn (`pip download requests` through the proxy plus Chromium page
-  loads and screenshots): sandbox `pids.peak` 232 (idle 198), proxy
-  `memory.peak` 48 MiB (idle 19 MiB, process HWM 33 MiB), `pids.peak` 9.
-- `open`, after re-rendering `.env` with `SANDBOX_EGRESS=open` and `up -d`
-  (only the Gateway was recreated): the sandbox sits on `hartmesh_sandbox`
-  with a default route, publishes its own port on `172.17.0.1`, no proxy
-  exists; `postgres`/`redis` still do not resolve and are unreachable from the
-  sandbox network; `https://example.com/` and `http://neverssl.com/` answer
-  `200` directly, direct DNS works; the **peer sandbox is reachable** on its
-  bridge address and on its published port (the accepted residual); the
-  metadata address merely timed out here because this host has no route to it,
-  nothing in the profile denied it.
-- After release and process exit, no sandbox containers or per-sandbox
-  networks remained.
-
-Then with `runsc` release-20260817.0 registered on the systrap platform
-(`SANDBOX_RUNTIME=runsc`, the same Docker Engine 28.4.0):
-
-- Full provider-driven proof under `allowlist`, memory raised to 1 GiB by a
-  scratch override for the reason recorded under "Memory budget": `docker
-  inspect` shows `Runtime=runsc`, `ExtraHosts=[<proxy name>:<internal
-  address>]`, `SecurityOpt=[no-new-privileges, seccomp=builtin]`,
-  `CapDrop=[ALL]`, `User=1000:1000`, no published port; inside the sandbox
-  `uname -r` is `4.19.0-gvisor`; `GET /v1/browser/info` and
-  `/v1/browser/screenshot` answer `200` (the browser starts under Docker's
-  built-in seccomp profile with gVisor); the isolation transcript is identical
-  to the `runc` one (datastores and peer unreachable, pypi `200` through the
-  proxy, example.com refused after CONNECT, `neverssl.com` `403`, the metadata
-  address refused as an IP literal, direct DNS unavailable); the workspace
-  round-trips; the proxy sidecar runs under `runc` at its 96 MiB limit
-  (`memory.peak` 45 MiB); nothing remained after release.
-- The first gVisor attempt, before the hosts entry existed, failed every
-  proxied request with `Could not resolve proxy`, which is what the backend
-  change fixes; the standalone reproduction is a plain `docker run --runtime
-  runsc` on a user-defined network, where `getent hosts <peer>` fails and
-  `--add-host` succeeds.
-- At the design's 640 MiB, the profile's value at the time, the gVisor sandbox
-  was OOM-killed under load (see "Memory budget"); the figures there are from
-  three standalone runs at 640 MiB, 768 MiB and 1 GiB with the profile's other
-  flags unchanged.
-
-Then on 2026-09-06, through the provider path with the `2.1.0+hartmesh.6`
-sandbox and proxy images and the backend that refuses a proxy without an
-address (`runsc` release-20260817.0, systrap, Docker Engine 28.4.0):
-
-- `create` → readiness in 53 to 59 s at every size; `docker inspect`:
-  `Runtime=runsc`, `Memory=MemorySwap` at the requested size, `NanoCpus=1`,
-  `PidsLimit=384`, `User=1000:1000`, `SecurityOpt=[no-new-privileges,
-  seccomp=builtin]`, `CapDrop=[ALL]`, no `CapAdd`, `ExtraHosts=[<proxy
-  name>:<internal address>]`, no published port; inside, `uname -r` is
-  `4.19.0-gvisor` and `id` is `uid=1000(gem)`.
-- Each load round: `pip download requests` through the proxy (five files),
-  `https://pypi.org/simple/` `200`, `https://example.com/` refused with `403
-  from proxy after CONNECT`, `http://169.254.169.254/` refused as an IP
-  literal, `GET /v1/browser/info` `200` and `/v1/browser/screenshot` a 41 KiB
-  PNG. The proxy: `runc`, 96 MiB, uid 65532, read-only, published on
-  `172.17.0.1`. The workspace round-trips. After `destroy`, no container and
-  no per-sandbox network remained, at every size, including the OOM-killed
-  runs.
-- The memory outcome per size is the table under "Memory budget": 768 MiB
-  OOM-killed in both runs, 896 MiB in one of two, 1 GiB in neither.
-
-Then on 2026-09-06 for the trim (P-s), the profile itself under Compose on the
-same host (`runsc` release-20260817.0, Docker Engine 28.4.0, Compose v2.39.4,
-the `2.1.0+hartmesh.6` images), a scratch copy of this directory with only
-`skills.path` pointed at the scratch data disk (the template fixes it at
-`/srv/hartmesh`, which this host does not have), the data disk laid out as the
-golden image does and the tenant `.env` on it:
-
-- `up -d --wait`: all five services healthy; `docker inspect` of the Gateway
-  `Memory=MemorySwap=1344 MiB`, of the frontend `384 MiB`, and of every
-  sandbox the Gateway created `Runtime=runsc`, `Memory=MemorySwap=1 GiB`,
-  `NanoCpus=1`, `PidsLimit=384`, `User=1000:1000`, `CapDrop=[ALL]`,
-  `SecurityOpt=[no-new-privileges, seccomp=builtin]`.
-- Three load runs through nginx (`/api/v1/auth/initialize`, then per turn
-  `POST /api/threads` and `POST /api/threads/<id>/runs/stream` read to
-  `event: end`, exactly the frontend's calls): 20 turns in all, 14 of 14 at
-  the shipped limits with `status=success`, each having made two `bash` calls
-  in its sandbox (`pip download requests` through the proxy: five wheels
-  saved) and one `present_files` call; 20 uploads of 16 MiB (one `504` from
-  nginx during the last eviction, the next upload succeeded); 19.6 thousand
-  frontend page loads and 39 thousand Gateway reads across the runs. The per-service `memory.peak` and `memory.events` figures
-  are the table under "Settling the sandbox figure"; no service and no sandbox
-  recorded an OOM kill.
-- After each Gateway recreate, no sandbox or per-sandbox network remained.
-
-Then on 2026-09-09 for the network move (P-v), on the same host (Docker Engine
-28.4.0, Compose v2.39.4) with a disposable stack: a scratch copy of this
-directory, a scratch data disk laid out as the golden image does, fixture
-`.env` values, no provider key, `SANDBOX_RUNTIME=runc`, and nginx published on
-`127.0.0.1:20260`. Two deliberate deviations, both noted where they matter: the
-stand-in "old" subnet was `10.203.10.0/24`, not `172.30.10.0/24`, because this
-development host is itself inside the operator's `10.17.0.0/16` and pinning a
-bridge on a live pod range to prove a point is the defect, not a test of it;
-and `HARTMESH_TRUSTED_PROXIES` was widened to `10.0.0.0/8` so the host could
-act as the front-door proxy and forge distinct client addresses.
-
-- The mechanism, on this host: `ip -4 route get 203.0.113.5` answers `via
-  10.17.100.1 dev eth0`; with a bridge pinned on `203.0.113.0/24` it answers
-  `dev br-e4b410c39c00 src 203.0.113.1`; with the bridge removed it answers
-  `via 10.17.100.1` again. A pinned bridge replaces the route to its whole
-  range, which is what `172.30.10.0/24` was doing to kosmos pod addresses.
-- Trust follows the network, observed through the running stack. The images
-  pinned here are `2.1.0+hartmesh.6`, which predate the account-keyed lockout,
-  so the probe below exercises that release's per-address counter rather than
-  the account lockout the § "Moving the `app` subnet" check describes. It
-  answers the same question -- which address the Gateway resolves for a request
-  arriving through nginx -- and answers it more sharply, because the older
-  counter locks per address. Six failed
-  logins through nginx forwarding `198.51.100.10` answer `401 401 401 401 401
-  429`, and `198.51.100.11` and `.12` are still served `401` -- each forwarded
-  client address is counted on its own. The negative control, the same stack
-  with `AUTH_TRUSTED_PROXIES` pointed at `192.0.2.0/24` instead of the app
-  network: `.20` locks at the sixth attempt exactly as before, and then `.21`
-  and `.22` are refused `429` without a single attempt of their own. That is
-  the whole guard collapsed onto nginx's own address, and it is what changing
-  IPAM alone would have shipped.
-- An in-place `up -d` onto the new bundle is not the procedure. It did recreate
-  the network on the new subnet, and it left the stack broken: `getent hosts
-  postgres` and `redis` failed from inside `hartmesh_app` while `gateway`
-  resolved, the Gateway crash-looped on `socket.gaierror` out of `asyncpg`,
-  nginx exited `0`, and the command returned `dependency failed to start:
-  container hartmesh-gateway-1 is unhealthy`. It did not recover on its own.
-- `down` then `up -d --wait` is. After it: `hartmesh_app` is `10.201.26.0/24`,
-  nginx holds `10.201.26.6`, the Gateway's `AUTH_TRUSTED_PROXIES` is
-  `10.201.26.0/24`, the guest routes `10.201.26.0/24 dev br-60c3849500a6`, all
-  five services are healthy and `ps` shows one published port. The seeded
-  PostgreSQL row, the `users` row, the Redis key and the `home/` file all read
-  back unchanged; a real login through nginx answers `200`; and the probe
-  behaves as it did before the move (`.30` locks, `.31` served).
-- `down` removed `hartmesh_app` and nothing else: `hartmesh_sandbox` and a
-  stand-in container attached to it both survived it, and `down` did not
-  complain about either. No live sandbox existed during this run, so the
-  Gateway's release of real sandboxes during its 60 s grace period is the
-  earlier proof above, not this one.
-- Rollback: appending `HARTMESH_APP_SUBNET=10.203.10.0/24` to the tenant `.env`
-  and repeating `down` / `up -d --wait` put the network, the route and the
-  Gateway's trust all back on the old subnet together, with the data markers
-  still intact. The bundle was not edited.
-- The pool arithmetic, on the same host: with `172.22.5.0/24` pinned on a
-  scratch network, two unpinned `docker network create` calls were allocated
-  `172.21.0.0/16` and then `172.23.0.0/16` -- the daemon skips a whole `/16` it
-  cannot use, which is the cost of pinning `app` inside the pool and the reason
-  the default sits outside it. `docker info --format '{{json
-  .DefaultAddressPools}}'` answered `null` here, which is what an unnarrowed
-  daemon looks like.
-- Not covered here: `runsc`, a real provider-driven sandbox across the move,
-  and the daemon-level `default-address-pool` setting, which is the golden
-  image's and cannot be checked from inside this profile.
-
-Operator-managed models (2026-09-09, P-y), on the same host and engine, with a
-disposable `/srv/hartmesh` laid out as the golden image lays it out, the bundle
-copied to a scratch directory with every exec bit stripped, `SANDBOX_RUNTIME`
-set to `runc`, and fixture provider keys (`fixture-openai-key-not-real`,
-`fixture-acme-key-not-real`). No provider was ever contacted with an intent to
-succeed. The two model identities used, `acme-lightning-1` /
-`acme/lightning-1-2099` and `acme-anvil-9` / `acme-anvil-9-20991231`, are
-fictitious, so nothing here can pass by having been added to the bundle.
-
-- Baseline, no `HARTMESH_MODELS_FILE`, `OPENAI_API_KEY` present: five services
-  healthy, `render_config: wrote /srv/hartmesh/home/config.yaml (models from
-  bundled catalog; egress=allowlist; provider keys found: OPENAI_API_KEY)`, and
-  `GET /api/models` answers `gpt-4`, `gpt-5-responses`. Inside the Gateway,
-  `/srv/hartmesh/operator` is mounted and `touch` there answers `Read-only file
-  system`.
-- With the key set and a two-model file, the same `OPENAI_API_KEY` still
-  present: the log line becomes `models from operator file
-  /srv/hartmesh/operator/models.yaml` and `/api/models` answers exactly
-  `acme-lightning-1`, `acme-anvil-9`. `gpt-4` is gone -- a provider key buys
-  tools, not models. The rendered `config.yaml` carries `api_key:
-  $ACME_API_KEY` verbatim and no fixture value appears anywhere in it.
-- One edit doing all three things -- `max_tokens` 4096 to 16384, output price
-  5.00 to 4.00, a new `acme-vision-3`, `acme-anvil-9` removed -- then
-  `restart gateway`: `/api/models` answers `acme-lightning-1`,
-  `acme-vision-3`, and the rendered file carries `max_tokens: 16384`,
-  `output_per_million: 4.0` and `supports_vision: true`. `up -d gateway` alone
-  did **not** apply it: Compose saw no configuration change and left the
-  container running, which is why the procedure above names `restart`.
-- `--check` refused each of these with one line naming the cause and no value:
-  a duplicate `name`; a top-level `auth:` key; `$NOVITA_API_KEY` when the
-  tenant carries no such variable; an empty file; `models:` with nothing after
-  it; `langchain_nonesuch:ChatNonesuch`; and a `chmod 0000` file
-  (`Permission denied`). It wrote nothing -- the rendered `config.yaml` kept
-  its checksum through all seven.
-- Applying an invalid file anyway: the Gateway exits and `restart:
-  unless-stopped` retries it, `logs gateway` repeats `render_config: refusing
-  to render: rendered models carry a duplicate name: ['acme-lightning-1']`, and
-  `/srv/hartmesh/home/config.yaml` is byte-identical to before the attempt with
-  no `.config.yaml.*` temporary left beside it. Restoring the previous file and
-  restarting brought the list back.
-- Persistence, twice. `down` then `up -d --wait` on the same bundle: the list is
-  still `acme-lightning-1`, `acme-vision-3`. Then a *replaced* bundle -- a copy
-  whose `providers/models/10-openai.yaml` carries an extra `gpt-6-imaginary`,
-  standing in for a later release -- `down`, `up -d --wait` from the new
-  directory: the tenant's list is unchanged and the new bundled model does not
-  appear. The `.env` and the model file were never inside the bundle. The
-  bundle-A tree hashed the same before the first edit and after the last
-  (`cc6f7099e3a8be5000f6a630997ded4b0636720475c3bd984d700746c6aa0758`).
-- Both client families, built from the effective config inside the running
-  Gateway: `ChatOpenAI acme/lightning-1-2099 https://api.acme.invalid/openai`
-  and `ChatAnthropic acme-anvil-9-20991231 https://api.acme.invalid/anthropic`
-  with `{'type': 'enabled', 'budget_tokens': 2048}`; neither client's dump
-  carries `pricing` or `context_window`. The console's map reads the operator's
-  prices back (`USD 1.25 4.0`, 1M in + 1M out = `5.25`). One bounded call to
-  `acme-lightning-1` answers `APIConnectionError: Connection error.` -- the
-  configured endpoint, reached and failed at, with no substitution. Asking for
-  the removed `acme-anvil-9` answers `ValueError: Model acme-anvil-9 not found
-  in config`.
-- Rollback by unsetting: commenting `HARTMESH_MODELS_FILE` out of `.env` and
-  `up -d gateway` returns the log line to `models from bundled catalog` and the
-  list to `gpt-4`, `gpt-5-responses`, `gpt-6-imaginary` -- the replaced
-  bundle's catalog, which had been there and unused throughout.
-- Not covered here: any real provider. Every id above is fictitious and every
-  key a fixture, so nothing in this run says a real provider will accept a
-  configured id, a parameter or an endpoint -- that answer arrives on the first
-  message, as the `APIConnectionError` line stands in for. A streamed
-  completion and a tool-call round trip against a live model, and any advertised
-  thinking or vision behaviour, need an authorized key on a real endpoint and
-  remain unqualified. `runsc` and sandbox behaviour were not exercised: no
-  sandbox is created by a model-configuration change.
-
-Validation and diagnostics (2026-09-10, P-y follow-up), same host, the profile
-at `v2.1.0+hartmesh.9`. Two defects the consuming deployment reproduced: the
-render accepted models the backend rejects, and a credential could reach the
-generated file or a refusal. The fake credential below is the string
-`FAKE-CREDENTIAL-SENTINEL-NOT-A-KEY`, which exists only to be searched for.
-
-- Offline, through both CLI modes. A valid fixture rendered and its bytes
-  recorded; then `context_window: 0`, an empty `name`, and
-  `supports_vision: banana` each in turn. Every one exits 1 from `--check`
-  *and* from the ordinary `--output` invocation, naming the entry by position
-  and the rule that was broken -- `models[0] is not a model the Gateway will
-  load: context_window: greater_than (Input should be greater than 0)`. The
-  previously rendered file kept its checksum through all six invocations, and
-  `home/` held nothing but `config.yaml`. A corrected file then rendered.
-- Credentials. A literal `api_key` is refused (`credential fields must be
-  environment references of the whole-string form $NAME ...
-  ['models[0].api_key']` -- the wording at that commit; it now counts fields
-  per entry instead), as is `${NAME}`, `$NAME-suffix` and a bare `$`. An
-  unset reference is refused by variable name. None of the refusals contains
-  the sentinel. `Authorization` nested in `default_headers` is covered by the
-  same rule; `max_tokens` and `budget_tokens` are not.
-- Malformed YAML holding the sentinel -- `api_key: [FAKE-CREDENTIAL-...` --
-  answers `is not valid YAML at line 3, column 14 (the parser gave up at line
-  4); the parser's message is withheld because it quotes the source`. The
-  sentinel appears in neither stdout nor stderr.
-- Live, on a disposable stack at the pinned images. Baseline: healthy, one
-  operator model, rendered checksum `0b70eb...`. A valid-to-invalid update
-  (`context_window: 0` *and* a literal credential) through the documented
-  preflight: `exec --user 1000 ... --check` exits 1 with the schema refusal.
-  Applied anyway, the Gateway restart-loops, repeating that line once per
-  attempt; the rendered `config.yaml` still hashes `0b70eb...`, no
-  `.config.yaml.*` sits beside it, and `logs gateway` contains no sentinel.
-  Fixing only the schema error surfaces the credential refusal next -- the
-  first fix cannot reintroduce the second defect -- with the checksum still
-  unchanged. Correcting both restores a healthy Gateway, `GET /api/models`
-  answers `acme-lightning-1`, `acme-anvil-9`, and the generated file contains
-  no credential value.
-- Re-checked live afterwards: both installed client families build from the
-  effective config (`ChatOpenAI acme/lightning-1-2099
-  https://api.acme.invalid/openai max_tokens=4096`, `ChatAnthropic
-  acme-anvil-9-20991231 ... {'type': 'enabled', 'budget_tokens': 2048}`),
-  neither client's dump carries `pricing` or `context_window`, the console's
-  map reads `USD 1.25 5.0`, and the client's key is the value the Gateway
-  expanded from the environment -- the reference contract working end to end
-  while the literal never touches disk.
-- Not covered here: the same real-provider gaps as above. This follow-up needed
-  no provider call, and makes no new claim about one.
-
-Diagnostics, part two (2026-09-10, P-y second follow-up). The consuming
-deployment reran the three suites in one process -- 117 passed -- and found two
-refusal branches still repeating what the operator typed: the duplicate-name
-message printed the shared `name`, and the client-class message printed the
-resolver's exception, which quotes the supplied `use`. Reproduced with the same
-`FAKE-CREDENTIAL-SENTINEL-NOT-A-KEY` string, offline, no provider call.
-
-- Both branches, both CLI modes, over a rendered baseline: two entries sharing
-  a sentinel `name` now answer `rendered models must carry distinct names, and
-  these entries share one: operator model file … models[0], models[1]`, and
-  `use: langchain_openai:FAKE-...` answers `models[0] field `use` names a
-  module that defines no such attribute`. Neither repeats the sentinel; both
-  exit 1 from `--check` and from `--output`; the baseline bytes are unchanged
-  and `home/` holds only `config.yaml`. A corrected file then renders.
-- Every other way to get `use` wrong routes around the resolver's message too:
-  a value with no colon and one that is only a colon answer `must name a class
-  as `module.path:ClassName``; `langchain_FAKE-...:ChatOpenAI` answers `names a
-  module this release does not install`; a real class that is not a chat model
-  answers `does not name a chat model client`. None quotes the value.
-- A third branch found in the same review: unknown top-level keys were listed
-  by name, so a paste at the top level was echoed. They are counted now.
-  Credential-form refusals count offending fields per entry (`models[0]: 1`)
-  instead of naming the field, for the same reason.
-- The contract is now a test rather than a claim: seventeen placements of the
-  sentinel -- `name`, a duplicate `name`, `use`, `model`, `base_url`, a literal
-  and a referenced `api_key`, a nested `Authorization`, a credential-shaped and
-  a plain unknown field, an unknown top-level key, a capability flag, a context
-  window, a pricing field, malformed YAML, a non-mapping document, an entry
-  with no name, and a non-list `models:` -- are each run through both CLI
-  modes. Thirteen must refuse and none of those refusals contains the sentinel;
-  the four that are legitimate content (an identity, a provider id, an
-  endpoint, a note) render, which is where that content belongs.
-- Evidence here is CLI-only. This was a message-only repair with no change to
-  what is accepted, so no Gateway drill was repeated; the live evidence in the
-  block above still stands for the paths it covers.
-
-Diagnostics, part three (2026-09-10, P-y third follow-up). The suites passed
-again -- 142 in one process -- and the review found the remaining hole: a
-*location* could still repeat an operator-typed mapping key. Two ways in. The
-credential path was assembled as text and then sliced at its last `]`, so a
-nested list under an invented key kept that key
-(`models[0].FAKE-..._options[0]`), and a `]` typed into a key was
-indistinguishable from a generated index (`models[0].FAKE-...]`). And a
-pydantic `loc` was treated as trusted text, although an `invalid_key` error
-carries the rejected key itself -- reachable with a `!!binary` key, which
-printed `b'FAKE-...': invalid_key`.
-
-- Locations are now built from path components, not from text: a top-level key
-  of the template, then indices this renderer generated, stopping at the first
-  operator-typed key. An index below such a key goes with it, because it means
-  nothing without the key above it. Schema locations print only field names
-  `ModelConfig` declares; anything else, including an `invalid_key`'s rejected
-  key, prints as `(key)`.
-- All three counterexamples, both CLI modes, over a rendered baseline: each
-  exits 1 from `--check` and `--output`, the baseline keeps its checksum
-  (`934aa4...`), `home/` holds only `config.yaml`, and no stdout or stderr
-  contains the sentinel. Cases 1 and 2 answer `Offending fields by entry:
-  models[0]: 1`; case 3 answers `models[0] is not a model the Gateway will
-  load: (key): invalid_key (Keys should be strings)`. Restoring the baseline
-  renders and returns the file to `934aa4...`.
-- Nothing about what is accepted changed, which the tests pin: an entry
-  carrying `vendor.options[0]`, a Unicode key and a nested
-  `extra_body.routing` list still renders with all of it intact. Rejecting odd
-  keys or nested lists to make a message easy would have been an interface
-  change, not a diagnostic repair.
-- Coverage for the shapes: a list under an operator key, a bracket inside a
-  key, a mapping inside a list inside a mapping, a credential-shaped key, a key
-  full of dots that tries to forge a path, and a non-string key -- each through
-  both CLI modes.
-- CLI-only again, for the same reason: no change to acceptance, so the Gateway
-  drill was not repeated.
-
-Readiness budget (2026-09-12 and 2026-09-13, P-z). The repair above (a
-configured budget, ownership before the wait, a deadline that is a deadline)
-was proved on this development host, which is **not** a tenant VM: a Proxmox
-host on an Intel Xeon Gold 6138 at 2.0 GHz with 8 vCPUs and 24 GiB visible to
-the daemon, kernel 7.0.12-1-pve, Docker Engine 28.4.0, `runsc`
-release-20260817.0 (systrap). The estate's observation was a four-vCPU KVM
-guest on `runsc` release-20260831.0 and Docker 29.8.0, so the figures below are
-one Intel data point on a faster and differently virtualised machine, not the
-fleet-wide bound the acceptance gate asks for; no AMD host and no VM-class host
-was available here.
-
-- The offline suites: 455 in the provider, reconciliation, readiness, budget and
-  compose files (including 30 new ones), 231 in the neighbouring sandbox
-  suites, 107 in the blocking-I/O gate; ruff clean; agent guidance 0 errors.
-- The live regression (`pytest -m live tests/test_restricted_runsc_readiness_live.py`,
-  one sample): 5 passed in 8 m 45 s. Every sandbox inspected as `Runtime=runsc`,
-  `NanoCpus=1e9`, `Memory=MemorySwap=1 GiB`, `PidsLimit=384`, `User=1000:1000`,
-  `CapDrop=[ALL]`, no `CapAdd`, `no-new-privileges` and `seccomp=builtin`, no
-  published port, on its internal network only; the sidecar on the internal
-  and egress networks, published on `127.0.0.1` only, on the daemon's default
-  runtime. A missing relay token answered 401 or 403, a wrong one likewise,
-  the right one 200. Sync path: `create` 6.4 s, ready after 57.4 s (53
-  probes), margin 62.6 s. Async path: 5.6 s, 49.6 s (46 probes), margin
-  70.4 s. Two concurrent starts: 23.0 s and 25.4 s. Never-ready control
-  (service port 1), sync and async: the acquisition raised `failed to become
-  ready within 120s` after 144.0 s and 142.9 s in total (`create` 4.2 s and
-  4.3 s, the 120 s budget, cleanup 19.9 s and 18.6 s against the 60 s
-  allowance); the diagnostics taken while it ran carried the inner listener
-  table and the python-server and nginx logs and not the relay token; the
-  sandbox, sidecar and both networks were gone afterwards, the fences never
-  refused, no lease or mark remained.
-- Repeated cold starts (`HARTMESH_READINESS_SAMPLES=5`, 3 passed in 19 m 40 s),
-  readiness measured after `create` returned, each at one CPU. Serial, sync:
-  45.3 / 48.0 / 48.3 / 50.2 / 53.4 s (40 to 49 probes, `create` 4.3 to 4.8 s),
-  worst margin 66.6 s. Serial, async: 49.0 / 51.5 / 51.8 / 53.5 / 53.7 s (40
-  to 48 probes), worst margin 66.3 s. Concurrent pairs: 35.3 + 38.3, 29.9 +
-  29.1, 30.7 + 29.6, 32.7 + 30.4, 36.3 + 33.8 s, worst margin 81.7 s. On this
-  host the image was in the page cache from the first sample on; a rebooted
-  guest is colder. The concurrent starts being faster than the serial ones was
-  observed, not explained, and is the opposite of what a shared four-vCPU
-  guest should be expected to show.
-- Not proved here, and the estate's gate: readiness on the tenant VM classes
-  (Intel and AMD, four vCPUs, nested `runsc`) serially and in concurrent
-  pairs, with the margin against 120 s recorded per start; a cold chat and a
-  tool execution through the Gateway; post-reboot acceptance on the drill
-  tenant. The two 80 to 91 s observations that motivated this change give
-  120 s roughly a third of margin on that class; whether that holds across
-  the fleet is what those runs decide.
-
-Slim services profile and four slots (2026-09-15). Same development host as
-the readiness-budget entry above (`runsc` systrap, eight vCPUs), so a
-development-host stand-in, not the tenant-class gate.
-
-- The offline suites: `pytest tests/test_compose_profile.py` 85 passed (six
-  tests new or rewritten: the six switches as exact strings, slot count,
-  512 MiB and 256 pids, the 5120 equality and the open-mode bound, the render
-  carrying the switches into a valid `AppConfig`, the measurement script's
-  flags against a stub `docker`); with `test_aio_sandbox_local_backend.py`
-  and `test_sandbox_image_contract.py` 213 passed (three live tests
-  deselected); ruff clean.
-- Boot and idle with `scripts/measure-sandbox-boot.sh`: the tables under
-  "Slim services profile". Four slim sandboxes at 512 MiB each building a
-  5,000-row report and rendering PDF, Word and Excel at once, two runs:
-  `memory.peak` 334 to 355 MiB, `pids.peak` 58 to 62, no OOM kill, renders
-  12.2 to 13.4 s each; the fan-out, bind-mount and root-filesystem probes
-  there, which moved the pid limit from a 128 candidate to 256.
-- The live regression against the new profile (`pytest -m live
-  tests/test_restricted_runsc_readiness_live.py`, 5 passed in 8 m 16 s), the
-  template's switches applied and asserted in each container's environment,
-  limits asserted from `compose.yaml`: sync path `create` 6.1 s, ready after
-  22.9 s (23 probes), margin 97.1 s; async path 3.6 s, 10.7 s (11 probes),
-  margin 109.3 s; four concurrent starts, one CPU each: ready after 10.8,
-  11.6, 11.7 and 11.9 s (`create` 5.6 to 6.4 s), worst margin 108.1 s.
-  Never-ready control, sync and async: `failed to become ready within 120s`
-  after 146.4 s and 147.0 s in total (`create` 3.5 and 3.9 s, cleanup 22.9
-  and 23.1 s against the 60 s allowance); sandbox, sidecar and both networks
-  gone afterwards. The full-profile figures on the same host were 57.4 s
-  sync, 49.6 s async and 23.0 to 38.3 s in concurrent pairs. Re-run after
-  the pid limit moved from the 128 candidate to 256 and the switches were
-  routed through the provider's resolver (5 passed in 8 m 03 s): sync
-  10.9 s, async 10.8 s, four concurrent 11.8 to 12.8 s (worst margin
-  107.2 s), never-ready controls 146.7 and 146.4 s.
-- Not proved here, and the estate's gate: the slim boot on the tenant VM
-  class (serial and four at once, ten runs, both CPU quotas) and the
-  four-way render there with the skill at its data-disk path; both
-  invocations are under "Slim services profile". Also open: package
-  installation through the proxy at 512 MiB (the load that decided the full
-  profile's figure), the Gateway's peak at four concurrent turns (its
-  1088 MiB is set against a two-turn peak), and the shipped pinned image
-  under the render load (the render here used the image built from the
-  current tree). The readiness budget stays at 120 until the first of the
-  tenant-class runs has run.
-
-Public skill library (2026-09-15). Same development host, the Gateway image
-built from this tree (`docker build -f backend/Dockerfile --build-arg
-UV_EXTRAS=postgres .`), so a stand-in for the image the next cut pins.
-
-- The Docker context: a scratch Dockerfile that only copies `skills/public`
-  under the repository's `.dockerignore` produced exactly the tracked tree
-  (30 `SKILL.md` files, no `__pycache__` or `.ruff_cache`), and a probe
-  context with `.env`, `.env.local`, `node_modules/` and `.venv/` planted
-  under `skills/public` kept all four out while keeping `SKILL.md`; the
-  built image holds the 24 packages at `/app/skills/public`, root-owned,
-  and `seed_skills.sh` run inside it as uid 1000 seeded the profile's set,
-  files `0644`, directories `0755`, in under a second.
-- A gateway-only stack (postgres, redis, gateway) from a scratch copy of this
-  directory with `skills.path` pointed at the scratch data disk of the P-s
-  entry (its `home/skills/` still empty from that run), the Gateway image
-  replaced by the tree build, `HARTMESH_SANDBOX_RESOLV_CONF=/etc/resolv.conf`
-  because this host runs no systemd-resolved. First start, healthy after
-  26 s: the seed line `13 public skills seeded into .../home/skills/public
-  from /app/skills/public (excluded: chart-visualization claude-to-deerflow
-  find-skills github-deep-research image-generation music-generation
-  podcast-generation skill-creator vercel-deploy video-generation
-  web-design-guidelines)`, then `Ensured the public skill projection`, the
-  persistence bootstrap to head `0037`, `Application startup complete`;
-  `GET /health/ready` 200 `{"status":"ready",...}`. On the data disk
-  `home/skills/public` and `home/skills_view/public` list the same 13
-  packages, owned `1000:1000`, directories `0755`, files `0644`;
-  `business-report/SKILL.md` is byte-identical in the tree, on the disk and
-  in the projection (SHA-256 `4e0a1185…`); the excluded names are absent;
-  `custom/` was not created (the storage creates it on the first install).
-  `docker compose restart gateway`: healthy after 19 s, the seed line and the
-  projection line a second time, 13 and 13 again, no `public.seed` or
-  `public.old` left.
-- The older-image shape, with the tree image's `/app/skills` shadowed by an
-  empty read-only mount so `/app/skills/public` is absent (what the
-  previous release's pinned Gateway image looks like to `run.sh`): healthy
-  after 25 s, the log line `/app/skills/public is absent; this Gateway image
-  predates the public skill library. Leaving .../home/skills/public as it
-  is.`, the 13 packages and the projection untouched.
-- The offline suite: `pytest tests/test_compose_public_skills.py` 23 passed
-  (the image layer and context rules, the seed's contract on a synthetic
-  tree and byte for byte on the real one, the older-image degrade, the
-  empty, linked, relative and non-name refusals, the exclusion list and that
-  every review exclusion is still refused while no policy exclusion is, the
-  README counts, the projection to `/mnt/skills/public`, and the governed
-  tool plane's capture, validation, promotion, `unmanaged` before adoption,
-  restart without drift, upgrade to `governed` with `drift: true` and its
-  repair, all under the template's own `tool_plane` values); with
-  `test_compose_profile.py` 109 passed; ruff and shellcheck clean.
-- Not proved here: a sandbox opened through a chat listing
-  `/mnt/skills/public/business-report` (the mapping is pinned offline; the
-  live stack ran without the frontend and with no signed-in user), the
-  adoption through the HTTP endpoints (the service path is what the offline
-  test drives), and the pinned Gateway image itself, which the next cut
-  builds from this tree.
-
-Normal chat with the seeded library (2026-09-15). The tenant-class
-qualification of v2.1.0+hartmesh.13 found the first browser turn of a fresh
-user failing in under three seconds with `AcceptedSkillSandboxBindingError`
-before any sandbox existed, on a healthy stack that had seeded the 13
-packages. Reproduced and repaired on the same development host and
-gateway-only stack as the entry above, this time with a model: the operator
-model file (`HARTMESH_MODELS_FILE`) selecting the repository's scripted
-probe model (`backend/tests/_turn_phase_probe_model.py`, mounted into the
-Gateway; it streams a fixed answer and calls no tool), the Gateway image the
-previous entry built, and turns driven over the released run-stream route
-by a registered user.
-
-- Cause: every Gateway run is an accepted invocation; with a nonempty
-  effective-skill snapshot the worker must materialize it before the run
-  starts; since 2026-09-03 the worker refused a provider without a qualified
-  durable materializer whenever a run record existed, which is always, and
-  the local container backend never offers one. No earlier tenant release
-  carried a skill, so the snapshot was empty and the guard never fired. The
-  worker now decides by the deployment profile: `local_development` runs the
-  accepted-skills projection, the durable profiles refuse as before
-  (`backend/docs/ACCEPTED_SANDBOX_EXECUTION.md`, "Which population a
-  deployment profile runs").
-- Before the repair, the image as it is: `Run created`, `Using local
-  container sandbox backend` and `Run failed ...
-  error_class=AcceptedSkillSandboxBindingError` in the same second; the
-  stream `metadata`, `error` (`Runtime operation failed (reference: ...)`),
-  `end` after 3.8 s; no sandbox container.
-- After, with the repaired worker mounted over the image's file: the first
-  turn on a new chat streamed `metadata`, six `messages`, `end`. Its
-  container `deer-flow-sandbox-<id>-accepted` was created before the model
-  was called (first text 30.3 s after the request on this host under
-  runsc: the cold start now precedes the model), mounting
-  `/mnt/user-data/{workspace,uploads,outputs}` read-write and
-  `/mnt/skills/.accepted` read-only, no `/mnt/skills/public` (this settles
-  the previous entry's open item the other way: a chat sandbox does not list
-  `/mnt/skills/public/business-report`; that mount belongs to sandboxes of
-  runs with no accepted material, which no chat turn is); then
-  `Released sandbox ... to warm pool (container still running)`. The second
-  turn on the same chat: `Reclaimed warm-pool sandbox <same id>` in the same
-  second, first text after 9.8 s, the same container. A third turn on a
-  second chat created a second container; during it,
-  `/mnt/skills/.accepted/<snapshot digest>/public/` listed the 13 seeded
-  packages with `business-report/SKILL.md` intact, while the idle chat's
-  container showed an empty `.accepted` (cleared at release, re-projected at
-  the next bind; superseded 2026-09-17 — a parked chat now keeps its verified
-  view, so that observation no longer reproduces, and the rest of the entry
-  stands).
-- Offline: `test_worker_materialization_follows_the_deployment_profile`
-  (three profiles) and `test_seeded_skill_gateway_stream_e2e.py` (the real
-  route, admission and worker with one seeded public skill); the accepted
-  material, AIO provider, turn-phase and warm-reuse suites, 274 passed.
-- Observed, not this repair's: the Gateway logs `Refused to recreate missing
-  authoritative lifecycle row ... during completion persistence` at ERROR
-  after every turn, failed or successful; and a reclaimed sandbox still
-  costs about ten seconds before first text on this host, the warm-acquire
-  latency the warm-reuse entry left unmeasured.
-- Not proved here: the tenant class itself (the tenant-class qualification
-  is to be rerun on a release that carries the repair), and a turn that runs
-  a tool in the projected skill through a real model.
-
-A turn's log after the seeded library (2026-09-15). The tenant-class rerun of
-v2.1.0+hartmesh.14 passed the normal chat and the report workflow, and left two
-observations the log itself owed: the `turn phase timings` line carried no
-timings, and the lifecycle ERROR of the previous entry still followed every
-turn, this time after successes. Both reproduced on the same development host,
-now on the released profile shape (this directory's `compose.yaml` and
-`config.yaml`, PostgreSQL and Redis, `run_ownership.heartbeat_enabled` at its
-default `false`, the probe model as above, `SANDBOX_RUNTIME=runsc`), and
-repaired. As in the entry above, the Gateway ran the previous entry's image
-with four working-tree files (`turn_phases.py`, `runs/manager.py`,
-`logging_config.py`, `runs/worker.py`) and the probe model mounted over it, so
-the figures below are this host's, not a pinned image's.
-
-- The timing line was emitted only into the log record's `extra`, which the
-  default text format drops and the JSON formatter rebuilt without; a turn
-  printed the bare words `turn phase timings`. It now renders the reading into
-  the message ("Reading a turn's timing" above) and the JSON formatter carries
-  the structured field. Measured here: a cold chat `sandbox_create@417ms+4777ms
-  sandbox_readiness@5201ms+10654ms model_request@16176ms
-  first_stream_text@16387ms terminal@16624ms`; the next turn on that chat
-  `acquisition=accepted_warm_reclaim sandbox_acquire@336ms+159ms
-  first_stream_text@715ms total=967ms` — the reclaim-to-first-text figure the
-  qualification could not observe is 220 ms, readable off one line (the reclaim
-  finished at `336 + 159 = 495ms` and first text left at `715ms`; a phase with
-  a `+` duration ends at `@ + duration`). About 300 ms of that warm turn is the
-  probe's own scripted delay (`HARTMESH_PROBE_FIRST_TEXT_DELAY_S=0.2`,
-  `HARTMESH_PROBE_TAIL_DELAY_S=0.1`), visible as the 201 ms between
-  `model_request` and `first_provider_text`: the line's shape is what this
-  entry proves, not a model-latency figure.
-- `Refused to recreate missing authoritative lifecycle row ... during
-  completion persistence` was neither a missing row nor only noise. A durable
-  store stamps the terminal projection whether or not lease heartbeats run and
-  refuses a completion write that does not name it; the manager supplied that
-  authority only with heartbeats on, so on this profile **every** turn's token
-  counts, message count and message previews were dropped, and the refusal was
-  then misreported as a missing row. Before: `total_tokens 0, message_count 0,
-  last_ai_message NULL` on both runs of a two-turn chat, with the ERROR after
-  each. After: `message_count 2`, the answer preview present, no ERROR. (The
-  probe model reports no token usage, so `total_tokens` stays 0 here; a real
-  provider's usage rides the same write.)
-- Offline: the run-manager, turn-phase, logging and Gateway stream-e2e suites,
-  including a new e2e assertion that the line a deployment prints carries
-  `first_stream_text@`, and a single-worker completion regression.
-- Not proved here: the tenant class itself; the pinned release image (the
-  Gateway ran the previous entry's image with four working-tree files mounted
-  over it); token counters against a real provider (the probe reports no usage,
-  so only `message_count` and the previews were observed repaired); the
-  heartbeat-enabled path this change restructures, exercised offline only; and
-  a four-turn or concurrent measurement of what the added line costs (it is one
-  formatted string per turn, built from the journal already taken).
-
-Where a warm turn's seconds go, and what acquired its sandbox (2026-09-16). The
-tenant-class rerun of v2.1.0+hartmesh.15 passed its report workflow and its
-package-installation tests, and returned two things the line still got wrong.
-Every one of its seven turns read `acquisition=accepted_active` — including the
-cold turn that also carried `creates=1` and a measured `sandbox_create` — and
-between the sandbox lookup ending and the binding starting each turn spent 2.6
-to 3.4 s that no phase accounted for. Both reproduced on the same development
-host — the unaccounted gap measuring about 6.0 s here rather than the tenant's
-2.6 to 3.4 s — on the released profile shape (this directory's `compose.yaml` and
-`config.yaml`, PostgreSQL, Redis, `SANDBOX_RUNTIME=runsc`, the 13-package
-seeded library, the probe model, the previous entry's image with the
-working-tree `turn_phases.py` and `runs/worker.py` mounted over it), and
-repaired.
-
-- A turn acquires in stages: the worker projects the accepted skills before
-  the graph runs, and the sandbox middleware binds later against what is by
-  then active. The journal took the last word, so the middleware's "already
-  active" observation overwrote the create or the reclaim. `acquisition=` is
-  now the turn's origin and the later observation rides beside it as
-  `reused=`. Measured here: a cold chat `acquisition=created
-  reused=accepted_active ... creates=1 sandbox_create@119ms+4302ms`, and the
-  next turn on it `acquisition=accepted_warm_reclaim reused=accepted_active`.
-  Before the repair both lines said `acquisition=accepted_active`.
-- The unaccounted window is now four phases, and the answer is not the
-  container. That warm turn: `sandbox_lookup@22ms+143ms` inside
-  `skill_materialization@21ms+5825ms`, then `agent_build@5857ms+232ms`,
-  `checkpoint_preflight@6109ms`, `graph_start@6115ms`,
-  `sandbox_binding@6131ms+2677ms`, `model_request@8821ms`. Finding the warm
-  container cost 143 ms; projecting the accepted snapshot into it and binding
-  it cost 8.5 s of a 9.3 s turn. The cold turn's projection encloses its create
-  and readiness: `skill_materialization@39ms+20969ms` around
-  `sandbox_create@119ms+4302ms sandbox_readiness@4423ms+10722ms`.
-- Offline: the turn-phase, warm-reuse, rediscovery-provenance, cleanup-outcome
-  and Gateway stream-e2e suites, including a new e2e assertion that admission,
-  assembly, `agent_build`, `checkpoint_preflight`, `graph_start` and
-  `model_request` are present and in order on a real streamed turn.
-- Not proved here: the tenant class itself, whose next Part A reads these
-  fields; the pinned release image; and *why* the projection costs what it
-  does — this entry measures the phase, it does not reduce it. The figures are
-  this host's, with a 13-package library and ~200 ms of the probe's scripted
-  first-text delay between `model_request` and `first_provider_text` (201 ms
-  here), with ~100 ms more in its tail.
-
-What the projection costs, and what removes it (2026-09-17). The previous
-entry measured the phase without explaining it, and the tenant-class turn
-lines of `.19` showed the same shape: the accepted material was staged twice
-per turn — once at launch, once at the bind — with a `fsync` per file, and
-both copies were deleted when the run ended. Measured on this development
-host, on the released profile's `config.yaml` with the 13-package seeded
-library the image carries (43 files, 415,749 bytes; `HARTMESH_MODELS_FILE`
-unset, a probe key in the environment), driving the same functions a turn
-drives:
-
-- Staging the snapshot at launch: 2,048 ms with the digest pass alone and
-  2,396 ms with the `fsync` counter installed, 45 `fsync`s. Verifying the
-  retained tree instead: 23 ms, no `fsync`, with `resolve_agent_revision`
-  end to end at 34 to 39 ms.
-- Staging the view at the bind: 3,211 ms, 43 `fsync`s. Verifying the
-  retained view instead: 12 to 13 ms, no `fsync` — including the first bind
-  of the *next* run, which is the bind that used to re-stage.
-- The material is retained and re-verified rather than trusted: a tree whose
-  bytes no longer match its digest is replaced (and logged), one that drifts
-  under a live lease is still `skill_snapshot_drift`, and startup removes
-  every tree no live lease holds.
-- Offline: the accepted-snapshot, projection, provider, middleware and
-  lifecycle suites, including new cases for the release path a retained view
-  must not wedge, a drifted tree found with and without a live lease, a
-  symlinked snapshot root, a warm-pool teardown clearing the thread's view,
-  and startup reclaiming every retained digest.
-- Not proved here: the tenant class, where neither the cost nor the repair
-  has been measured — the `.19` figures quoted in the acknowledgement work
-  come from that class's own turn lines, and the next Part A is what reads
-  these fields after the repair; the pinned release image; and the disk
-  behaviour over a long-lived process with many users, which the bound in
-  § "Public skills" states rather than measures.
-
-Keyless web fetch that answers, and a refusal that stops (2026-09-18). The
-profile advertised keyless `web_fetch` through a hosted reader that answers a
-tenant's server address with HTTP 401 for every page, so a research turn made
-three futile calls and a report turn thirteen, each to a different address, and
-both answered from search snippets alone. § "Web fetch" records what replaced
-it. Proved here:
-
-- Probed from this host on 2026-09-17, the seventeen exact addresses those two
-  turns asked for: fourteen answer a plain `GET` with `200 text/html`, two
-  refuse with 403 (a reference site and a blog platform that gate automated
-  readers, which this profile does not solve, evade or shop around), one timed
-  out; the hosted reader answered none of them without a key.
-- `backend/tests/test_direct_fetch.py`, `test_provider_refusal_middleware.py`
-  and `test_web_fetch_default_gateway_stream_e2e.py`: the address checks,
-  per-hop redirect checks, size and content-type caps and the typed
-  origin/provider split as unit tests; the Gateway-stream cases run the real
-  route, admission, worker, receipt middleware and tool dispatch with the wire
-  under the fetch client scripted. Mutation-proved: connecting to the name
-  instead of the pinned address, following redirects with the client, taking
-  provider as the default scope, dropping the caps, or keeping the tool bound
-  after a provider refusal each fail them.
-- `scripts/measure-searxng.sh` against the pinned image with the profile's
-  limits, mounts, read-only root, `pids_limit` and CPU count, replaying the
-  two turns' own 22 queries at the Gateway's concurrency of four: 90 queries
-  across three shapes, `memory.peak` 144 to 149 MiB, anonymous working set
-  near 110 MiB, every query answered, `memory.events max` 0.
-- Not proved here: the tenant's own 170 ceiling events, which this host does
-  not reproduce; the fetch from a tenant's address, where the two 403s and any
-  address-level gating may differ; and the real-model composed turns, which
-  are the tenant class's to run.
-
-Keyless web search that answers (2026-09-17). The DuckDuckGo HTML endpoint
-behind the profile's keyless `web_search` answers a server address with an
-anomaly challenge on every query, so a tenant whose model reached for search
-got an error where an answer should have been. § "Web search" records the
-engines measured and the SearXNG service that replaced it. Proved on this
-host, on the profile's own `compose.yaml`, `config.yaml`, `images.txt` and
-`searxng/` bundle, with the Gateway's harness and app source mounted over the
-image and the turn-phase probe as the model:
-
-- `up -d --wait searxng gateway`: both healthy; `docker inspect` of searxng
-  `Memory=MemorySwap=192 MiB`, `PidsLimit=128`, `ReadonlyRootfs=true`,
-  `User=1000:1000`, no port bindings; of the Gateway `1152 MiB`. The
-  instance's `/config` lists exactly the engines `settings.yml` names and
-  `safe_search` 1; `/etc/searxng/settings.yml` is byte-identical to the
-  bundle's; loading that file without the environment yields the template's
-  placeholder secret, so no secret is on disk; 91.95 MiB resident after a
-  turn at 8 processes, with the fallback pair alone answering 12/12 at
-  10/12 authoritative and 0.73 s while Google was gated. On a container created fresh the declared volume path is the
-  profile's tmpfs; Compose carries an existing container's anonymous volume
-  across a recreate, so a service that ever ran without the mount needs
-  `--renew-anon-volumes` once.
-- A `probe:search` turn through the real route: the tool result in the thread
-  history is the SearXNG JSON, Wikipedia's Paris article first; the run's
-  events carry `tool_receipt.started.v1` and `tool_receipt.outcome.v1` and no
-  `retrieval.observation.v1`; the stream ends with `end` and no `error`.
-- The same turn with `docker compose stop searxng`: the tool result is the
-  one unavailable sentence, the model answered after it, the stream ended
-  with `end`, and the Gateway logged `web_search (SearXNG) failed:
-  ConnectError` with no query text. `up -d --wait searxng` returned it to
-  healthy.
-- Offline: the Gateway stream suite's new SearXNG cases (results reach the
-  conversation, a down service ends the turn in words, no retrieval evidence
-  claim), the profile suite (six services on the 2880 MiB line, the search
-  service private and read-only, the settings naming exactly the three
-  engines, the render selecting SearXNG for a keyless tenant), and the
-  SearXNG tool suite.
-- Offline, after the review: the question travels in the POST body and not
-  the URL, the query stays out of the log on the status-error path as well
-  as the connection one, a malformed tool configuration raises instead of
-  claiming the service did not answer, only web addresses with bounded
-  fields reach the model, and four searches per process run at once.
-- Live, after the review: the same two turns on the reviewed bundle. With
-  the service up the tool returned Wikipedia's Paris article first and the
-  Gateway logged only `POST http://searxng:8080/search`, no question; with
-  it stopped, the unavailable sentence and a `ConnectError` line naming no
-  query.
-- Live, `image_search`: the profile's own tool against a live instance of
-  the shipped bundle returned five usable image addresses for a product
-  query, from Unsplash, Openverse and Wikimedia Commons. A general query in
-  the same instance reached only Bing and Yahoo, so the two engine groups do
-  not mix.
-- Not proved here: the pinned Gateway image (the source was mounted over
-  it), and gating thresholds on any address but this host's.
+The measurements quoted in this document (sandbox memory and start times, the
+memory budget, search behaviour) were taken on the earlier HartMesh release
+line, `2.1.0+hartmesh.N`, and are named by release where the release matters.
+The sandbox image, the limits and the profile's services are the same here;
+the Gateway is a different build. Figures for what passes through the Gateway
+-- a turn's timing above all -- are to be measured again on a tenant VM
+before they are relied on, and this build has not yet been run on one.

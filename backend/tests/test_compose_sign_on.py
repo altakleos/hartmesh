@@ -365,7 +365,7 @@ def test_check_mode_reports_the_mode_and_the_callback(render_config: ModuleType,
 # ── 6. The README ────────────────────────────────────────────────────────────
 
 
-def test_the_readme_states_the_keys_the_callback_the_method_and_the_upgrade_note() -> None:
+def test_the_readme_states_the_keys_the_callback_the_method_and_that_a_mode_must_be_chosen() -> None:
     text = README.read_text(encoding="utf-8")
     section = text.split("## Sign-in", 1)[1].split("\n## ", 1)[0]
     for needle in (
@@ -384,8 +384,7 @@ def test_the_readme_states_the_keys_the_callback_the_method_and_the_upgrade_note
         "openid email profile",
         "AUTH_TOKEN_EXPIRY_DAYS",
         "auth_mode",
-        "Upgrade note",
-        "v2.1.0+hartmesh.30",
+        "A sign-in mode must be chosen",
         "oauth_issuer",
         "no administrator",
     ):

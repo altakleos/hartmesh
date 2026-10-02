@@ -156,9 +156,8 @@ sandbox:
 skills:
   # Skill library on the tenant data disk: public/ is mirrored from the
   # Gateway image at every start by gateway/run.sh (README: "Public skills"),
-  # custom/ is the operator's. A chat's sandbox sees an immutable per-turn
-  # snapshot under container_path/.accepted instead of this path (README:
-  # "Public skills").
+  # custom/ is the operator's. A chat's sandbox mounts it read-only at
+  # container_path.
   path: /srv/hartmesh/home/skills
   container_path: /mnt/skills
 
