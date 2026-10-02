@@ -295,13 +295,14 @@ def serve_gateway(home: Path, *, config_yaml: str = _MINIMAL_CONFIG_YAML) -> Ite
 
     def _tear_down() -> None:
         server.should_exit = True
-        thread.join(timeout=30)
-        if thread.is_alive():
-            # Its shutdown closes the process-wide database engine. Left
-            # running, it would do that underneath whichever test came next,
-            # which then fails for no reason of its own.
-            server.force_exit = True
-            thread.join(timeout=120)
+        # The Gateway's shutdown waits for the runs it still holds, and one
+        # test leaves a model call that hangs for ``HANG_DELAY_S``. The join
+        # has to outlast that: a server still shutting down closes the
+        # process-wide database engine underneath whichever test runs next,
+        # which then fails for no reason of its own. A forced exit is no
+        # remedy -- it skips the Gateway's shutdown and leaves that engine
+        # bound to a closed event loop.
+        thread.join(timeout=HANG_DELAY_S + 90)
         gateway_stopped = not thread.is_alive()
         with contextlib.suppress(OSError):
             loopback.close()
