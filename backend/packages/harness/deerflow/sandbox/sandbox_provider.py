@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING
 
 from deerflow.config import get_app_config
 from deerflow.reflection import resolve_class
+from deerflow.sandbox.lease import run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox import Sandbox
 
 if TYPE_CHECKING:
@@ -62,8 +63,8 @@ class SandboxProvider(ABC):
         user_id: str,
         projection: "SkillProjectionPaths",
     ) -> None:
-        """Async wrapper for upload-based skill synchronization."""
-        await asyncio.to_thread(
+        """Async wrapper that keeps lifecycle ownership until sync finishes."""
+        await run_sync_lifecycle_operation(
             self.sync_agent_skills,
             sandbox_id,
             thread_id=thread_id,
@@ -79,6 +80,22 @@ class SandboxProvider(ABC):
             sandbox_id: The ID of the sandbox environment to retain.
         """
         pass
+
+    def get_scoped(
+        self,
+        sandbox_id: str,
+        *,
+        thread_id: str,
+        user_id: str,
+    ) -> Sandbox | None:
+        """Return an active sandbox only when it belongs to this identity.
+
+        This hook must remain a non-blocking in-memory lookup. Providers that
+        do not implement identity-aware lookup fail closed; the caller then
+        resolves the canonical sandbox through ``acquire``.
+        """
+        del sandbox_id, thread_id, user_id
+        return None
 
     @abstractmethod
     def release(self, sandbox_id: str) -> None:
@@ -96,19 +113,6 @@ class SandboxProvider(ABC):
         """
         pass
 
-    def capability[CapabilityT](self, protocol: type[CapabilityT]) -> CapabilityT | None:
-        """Negotiate an optional capability; ``None`` when this provider lacks it.
-
-        The required provider surface is ``acquire``, its async twin, ``get``
-        and ``release``. Everything else HartMesh needs from a provider is a
-        contract in :mod:`deerflow.sandbox.capabilities`, offered here. A
-        provider offers a contract by inheriting it, in which case this
-        default answers the provider itself, or by overriding this method to
-        answer a companion object that inherits it. Callers negotiate through
-        ``sandbox_capability`` and fail closed on ``None``.
-        """
-        return self if isinstance(self, protocol) else None
-
     def sandbox_network_mode(self) -> str:
         """Return the provider's effective outbound network mode."""
         return "open"
@@ -125,7 +129,10 @@ class SandboxProvider(ABC):
         return []
 
     async def consume_network_policy_events_async(self, sandbox_id: str) -> list[dict[str, object]]:
-        return await asyncio.to_thread(self.consume_network_policy_events, sandbox_id)
+        return await run_sync_lifecycle_operation(
+            self.consume_network_policy_events,
+            sandbox_id,
+        )
 
     def deny_pending_network_policy_events(self, sandbox_id: str) -> bool:
         """Atomically deny all unsurfaced trusted-proxy events for a sandbox."""
@@ -133,7 +140,10 @@ class SandboxProvider(ABC):
         return False
 
     async def deny_pending_network_policy_events_async(self, sandbox_id: str) -> bool:
-        return await asyncio.to_thread(self.deny_pending_network_policy_events, sandbox_id)
+        return await run_sync_lifecycle_operation(
+            self.deny_pending_network_policy_events,
+            sandbox_id,
+        )
 
     def decide_network_policy_request(self, sandbox_id: str, request_id: str, decision: str) -> bool:
         """Apply a user decision to one trusted-proxy event."""
@@ -141,7 +151,12 @@ class SandboxProvider(ABC):
         return False
 
     async def decide_network_policy_request_async(self, sandbox_id: str, request_id: str, decision: str) -> bool:
-        return await asyncio.to_thread(self.decide_network_policy_request, sandbox_id, request_id, decision)
+        return await run_sync_lifecycle_operation(
+            self.decide_network_policy_request,
+            sandbox_id,
+            request_id,
+            decision,
+        )
 
 
 _default_sandbox_provider: SandboxProvider | None = None
@@ -152,59 +167,14 @@ _default_sandbox_provider: SandboxProvider | None = None
 # hand a caller `None` or a torn instance. Every access to the global below takes
 # this lock, including the read+return in `get_sandbox_provider()`.
 #
-# Provider callbacks (`__init__`, `reset()`, `shutdown()`) and the dynamic import
-# in `resolve_class()` run *outside* the lock: they are plugin-supplied and may be
-# slow or re-enter lifecycle functions. During reset/shutdown, a condition-backed
-# transition prevents another thread from installing a replacement until the
-# callback succeeds or refuses teardown. Waiters release the non-reentrant lock;
-# callback-thread re-entry observes the transitioning provider without deadlock.
+# The lock guards only the reference swap. Provider callbacks (`__init__`,
+# `reset()`, `shutdown()`) and the dynamic import in `resolve_class()` run
+# *outside* the lock: they are plugin-supplied (`config.sandbox.use` resolves to
+# an arbitrary class) and may be slow or, worse, re-enter these lifecycle
+# functions. Holding a non-reentrant `threading.Lock` across them would
+# self-deadlock such a provider and would block every concurrent `get()` during a
+# slow teardown. Keeping callbacks off the lock avoids both.
 _provider_lock = threading.Lock()
-_provider_condition = threading.Condition(_provider_lock)
-_provider_teardown: SandboxProvider | None = None
-_provider_teardown_owner: int | None = None
-
-
-def _wait_for_provider_teardown_locked() -> SandboxProvider | None:
-    """Wait for another thread's teardown; return self-owned transition."""
-    current_thread = threading.get_ident()
-    while _provider_teardown is not None:
-        if _provider_teardown_owner == current_thread:
-            return _provider_teardown
-        _provider_condition.wait()
-    return None
-
-
-def _as_session_provider(provider: SandboxProvider) -> SandboxProvider:
-    """Install every provider behind the session provider, exactly once.
-
-    The session provider is the single resolution point for sandbox handles:
-    it dispatches acquire, get and release by the executing session's
-    declaration and forwards everything else to the configured provider. One
-    wrapper per backing provider keeps ``id(provider)``-keyed registries stable.
-    """
-    from deerflow.sandbox.session import sandbox_session_provider
-
-    return sandbox_session_provider(provider)
-
-
-def lifecycle_sandbox_provider(provider: SandboxProvider) -> SandboxProvider:
-    """The provider object that owns process-local lifecycle state for ``provider``.
-
-    Lifecycle registries such as the sandbox lease manager are keyed by provider
-    identity. Runtime code holds the installed session provider, while tests and
-    embedders often hold the backing provider they passed to
-    ``set_sandbox_provider``; both must land on the same registry entry, and
-    that entry must call through the session provider so declared sessions and
-    mount-scope refusals apply to lease-managed acquires as well.
-
-    A partial duck-typed double that cannot stand behind the session provider
-    (it lacks acquire, get, or release) keeps its own identity: it can never be
-    installed, so nothing else can hold a different registry entry for it.
-    """
-    try:
-        return _as_session_provider(provider)
-    except TypeError:
-        return provider
 
 
 def get_initialized_sandbox_provider() -> SandboxProvider | None:
@@ -225,10 +195,7 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
     global _default_sandbox_provider
     # Fast path: a single locked read so a concurrent reset/shutdown can't null
     # the global between the check and the return.
-    with _provider_condition:
-        reentrant_provider = _wait_for_provider_teardown_locked()
-        if reentrant_provider is not None:
-            return reentrant_provider
+    with _provider_lock:
         if _default_sandbox_provider is not None:
             return _default_sandbox_provider
 
@@ -237,19 +204,15 @@ def get_sandbox_provider(**kwargs) -> SandboxProvider:
     # lock. The construction may race another caller; we reconcile under the lock.
     config = get_app_config()
     cls = resolve_class(config.sandbox.use, SandboxProvider)
-    provider = _as_session_provider(cls(**kwargs))
+    provider = cls(**kwargs)
 
-    with _provider_condition:
-        reentrant_provider = _wait_for_provider_teardown_locked()
-        if reentrant_provider is not None:
-            winner = reentrant_provider
-        elif _default_sandbox_provider is None:
+    with _provider_lock:
+        if _default_sandbox_provider is None:
             _default_sandbox_provider = provider
             return provider
-        else:
-            # We lost the install race: another thread got there first.
-            # ``winner`` is read under the same lock, so it is live.
-            winner = _default_sandbox_provider
+        # We lost the install race: another thread got there first. `winner` is
+        # read under the same lock, so it is always a live instance, never None.
+        winner = _default_sandbox_provider
 
     # Discard the instance we just built (outside the lock). For providers with
     # side-effectful constructors (e.g. AioSandboxProvider starts an idle-checker
@@ -273,51 +236,20 @@ def reset_sandbox_provider() -> None:
 
     A provider override can release active sandboxes during reset.
     Otherwise, active sandboxes become orphaned.
-    Concurrent callers wait until reset either completes or restores a provider
-    that refused teardown.
+    Do not reuse the detached provider after reset.
     Use `shutdown_sandbox_provider()` for proper cleanup.
     """
-    global _default_sandbox_provider, _provider_teardown, _provider_teardown_owner
+    global _default_sandbox_provider
     # Detach the reference under the lock, then run the provider's `reset()`
     # callback outside it (see the `_provider_lock` note).
-    with _provider_condition:
-        if _wait_for_provider_teardown_locked() is not None:
-            return
+    with _provider_lock:
         provider = _default_sandbox_provider
         _default_sandbox_provider = None
-        if provider is not None:
-            _provider_teardown = provider
-            _provider_teardown_owner = threading.get_ident()
     if provider is not None:
-        from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
         from deerflow.sandbox.lease import discard_sandbox_lease_manager
 
-        try:
-            provider.reset()
-        except AcceptedSkillSandboxBindingError as exc:
-            with _provider_condition:
-                if exc.code == "accepted_skill_snapshot_projection_in_use":
-                    # The provider stays installed, and so does its lease
-                    # manager: the refused teardown keeps every binding live.
-                    if _default_sandbox_provider is None:
-                        _default_sandbox_provider = provider
-                _provider_teardown = None
-                _provider_teardown_owner = None
-                _provider_condition.notify_all()
-            raise
-        except BaseException:
-            with _provider_condition:
-                _provider_teardown = None
-                _provider_teardown_owner = None
-                _provider_condition.notify_all()
-            discard_sandbox_lease_manager(provider)
-            raise
-        else:
-            with _provider_condition:
-                _provider_teardown = None
-                _provider_teardown_owner = None
-                _provider_condition.notify_all()
-            discard_sandbox_lease_manager(provider)
+        discard_sandbox_lease_manager(provider)
+        provider.reset()
 
 
 def shutdown_sandbox_provider() -> None:
@@ -327,53 +259,17 @@ def shutdown_sandbox_provider() -> None:
     before clearing the singleton. Call this when the application
     is shutting down or when you need to completely reset the sandbox system.
     """
-    global _default_sandbox_provider, _provider_teardown, _provider_teardown_owner
+    global _default_sandbox_provider
     # Detach the reference under the lock, then run the (potentially slow)
     # `shutdown()` callback outside it (see the `_provider_lock` note).
-    with _provider_condition:
-        if _wait_for_provider_teardown_locked() is not None:
-            return
+    with _provider_lock:
         provider = _default_sandbox_provider
         _default_sandbox_provider = None
-        if provider is not None:
-            _provider_teardown = provider
-            _provider_teardown_owner = threading.get_ident()
     if provider is not None and hasattr(provider, "shutdown"):
-        from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
         from deerflow.sandbox.lease import discard_sandbox_lease_manager
 
-        try:
-            provider.shutdown()
-        except AcceptedSkillSandboxBindingError as exc:
-            with _provider_condition:
-                if exc.code == "accepted_skill_snapshot_projection_in_use":
-                    if _default_sandbox_provider is None:
-                        _default_sandbox_provider = provider
-                _provider_teardown = None
-                _provider_teardown_owner = None
-                _provider_condition.notify_all()
-            raise
-        except BaseException:
-            with _provider_condition:
-                _provider_teardown = None
-                _provider_teardown_owner = None
-                _provider_condition.notify_all()
-            discard_sandbox_lease_manager(provider)
-            raise
-        else:
-            with _provider_condition:
-                _provider_teardown = None
-                _provider_teardown_owner = None
-                _provider_condition.notify_all()
-            discard_sandbox_lease_manager(provider)
-    elif provider is not None:
-        from deerflow.sandbox.lease import discard_sandbox_lease_manager
-
-        with _provider_condition:
-            _provider_teardown = None
-            _provider_teardown_owner = None
-            _provider_condition.notify_all()
         discard_sandbox_lease_manager(provider)
+        provider.shutdown()
 
 
 def set_sandbox_provider(provider: SandboxProvider) -> None:
@@ -388,13 +284,10 @@ def set_sandbox_provider(provider: SandboxProvider) -> None:
         provider: The SandboxProvider instance to use.
     """
     global _default_sandbox_provider
-    with _provider_condition:
-        if _wait_for_provider_teardown_locked() is not None:
-            raise RuntimeError("sandbox provider cannot be replaced during its teardown callback")
+    with _provider_lock:
         previous = _default_sandbox_provider
-        installed = _as_session_provider(provider)
-        _default_sandbox_provider = installed
-    if previous is not None and previous is not installed:
+        _default_sandbox_provider = provider
+    if previous is not None and previous is not provider:
         from deerflow.sandbox.lease import discard_sandbox_lease_manager
 
         discard_sandbox_lease_manager(previous)

@@ -106,17 +106,11 @@ def test_get_without_action_still_joins():
     assert events[-1].strip() == "event: end"
 
 
-@pytest.mark.parametrize(
-    ("action", "expected_status"),
-    (("interrupt", RunStatus.interrupted), ("rollback", RunStatus.error)),
-)
-def test_post_with_cancel_action_still_cancels(
-    action: str,
-    expected_status: RunStatus,
-):
+@pytest.mark.parametrize("action", ("interrupt", "rollback"))
+def test_post_with_cancel_action_still_cancels(action: str):
     """The documented POST cancel-then-stream flow is unchanged."""
     client, mgr, run_id = _make_seeded_run_client()
     with client.stream("POST", f"/api/threads/{THREAD_ID}/runs/{run_id}/stream?action={action}") as response:
         assert response.status_code == 200
 
-    assert _get_run_status(mgr, run_id) == expected_status
+    assert _get_run_status(mgr, run_id) == RunStatus.interrupted

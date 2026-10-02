@@ -1,6 +1,7 @@
 import { afterEach, expect, test, rs } from "@rstest/core";
 
 import {
+  cancelActiveThreadRun,
   clearReconnectRun,
   getAPIClient,
   isInactiveRunStreamError,
@@ -210,6 +211,37 @@ test("rethrows not-active-on-worker cancel 409", async () => {
   ).rejects.toThrow("HTTP 409");
 
   expect(sessionStorage.removeItem).not.toHaveBeenCalled();
+});
+
+test("waits for the current run cancellation before forgetting its reconnect key", async () => {
+  const sessionStorage = makeSessionStorage();
+  sessionStorage.setItem("lg:stream:thread-stop", "run-stop");
+  rs.stubGlobal("window", {
+    location: { origin: "http://localhost:2026" },
+    sessionStorage,
+  });
+  let finishCancellation!: (response: Response) => void;
+  const pending = new Promise<Response>((resolve) => {
+    finishCancellation = resolve;
+  });
+  const fetchFn = rs.fn(
+    (_url: string | URL, _options?: RequestInit) => pending,
+  );
+  rs.stubGlobal("fetch", fetchFn);
+  let stopped = false;
+  const cancellation = cancelActiveThreadRun("thread-stop").then(() => {
+    stopped = true;
+  });
+  await rs.waitFor(() => expect(fetchFn).toHaveBeenCalledTimes(1));
+  const url = new URL(String(fetchFn.mock.calls[0]?.[0]));
+  expect(url.pathname).toContain("/threads/thread-stop/runs/run-stop/cancel");
+  expect(url.searchParams.get("wait")).toBe("1");
+  expect(stopped).toBe(false);
+  expect(sessionStorage.getItem("lg:stream:thread-stop")).toBe("run-stop");
+  finishCancellation(new Response(null, { status: 204 }));
+  await cancellation;
+  expect(stopped).toBe(true);
+  expect(sessionStorage.getItem("lg:stream:thread-stop")).toBeNull();
 });
 
 test("short-circuits reconnect to a terminal run", async () => {

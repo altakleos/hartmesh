@@ -34,6 +34,32 @@ PATs require a configured database backend (SQLite/PostgreSQL) — on the
 memory-only backend, Bearer credentials are rejected and PAT management routes
 return `503`.
 
+### Account Preferences
+
+`GET /api/v1/auth/preferences` returns the signed-in browser user's four
+preferences. `PATCH` updates only explicitly supplied fields and returns `204`.
+Both require `X-Expected-User-Id` matching the session user; PATCH also requires
+the normal `X-CSRF-Token` header. The expected ID is a stale-tab guard, not an
+authorization credential. PAT, internal, and auth-disabled callers receive
+`403`; a different session user receives `409`.
+
+```json
+{
+  "notification_enabled": false,
+  "model_name": "my-model",
+  "mode": "pro",
+  "reasoning_effort": "high"
+}
+```
+
+All four fields accept `null` to restore the default. `mode` accepts `flash`,
+`thinking`, `pro`, or `ultra`; `reasoning_effort` accepts `minimal`, `low`,
+`medium`, or `high`; model names are at most 200 characters. Unknown fields and
+invalid values return `422`. Missing preferences read as `null`. Separate-field
+patches preserve each other's changes, and same-field writes are last-commit-wins.
+Storage requires SQLite or PostgreSQL (`503` when unavailable). Browser
+notification permission remains device-local and is not changed by this API.
+
 ### Personal Access Tokens
 
 Base URL: `/api/v1/auth`
@@ -93,22 +119,7 @@ never returns digests or raw tokens.
 DELETE /api/v1/auth/pats/{pat_id}
 ```
 
-Revocation commits a tenant-scoped tombstone. A request whose authentication
-lookup completed before that commit may finish; every later lookup is denied.
-Historical accepted-run evidence is retained but grants no new access.
-
-#### Read Token Audit
-
-```http
-GET /api/v1/auth/pats/{pat_id}/audit?limit=50
-```
-
-Requires an interactive session and ownership of the tenant-bound PAT. `limit`
-is `1`–`100`. The response contains bounded daily aggregates with the public
-credential reference, pseudonymous actor digest, authentication method,
-authority digest, coarse action/route/reason, timestamps, and count. It never
-returns the PAT name, raw token, stored token digest, headers, request body, or
-IP address. SQL audit retention defaults to 90 days.
+Revocation is immediate.
 
 ### PAT Constraints
 
@@ -128,15 +139,12 @@ IP address. SQL audit retention defaults to 90 days.
   (`GET|POST /api/threads/{thread_id}/runs`, the POST-only `stream`, `wait`,
   `regenerate/prepare`, and `edit-regenerate/prepare` collection endpoints,
   `GET /api/threads/{thread_id}/runs/{run_id}` plus its `cancel` (POST),
-  `join`/`messages`/`events`/`retrieval-observations`/`workspace-changes`/
-  `delivery` (GET), and
-  `GET|POST .../runs/{run_id}/stream`, plus
-  `GET|POST .../runs/{run_id}/artifacts/archive` and
-  `GET|POST .../runs/{run_id}/artifacts/evidence-bundle`), plus `POST /api/runs/stream|wait` and
+  `join`/`messages`/`events`/`workspace-changes` (GET), and
+  `GET|POST .../runs/{run_id}/stream`), plus `POST /api/runs/stream|wait` and
   `GET /api/runs/{run_id}/messages|feedback`. A route added under `/runs` is
   denied until explicitly added to the policy.
   Every other authenticated route — memory, agents, models, MCP/skills
-  config, integrations, channels, uploads, files — answers `403` to PAT callers
+  config, integrations, channels, uploads — answers `403` to PAT callers
   regardless of scopes. Scope enforcement alone only constrains
   permission-decorated routes, so the allowlist is the outer boundary;
   session-cookie callers are unaffected.
@@ -144,57 +152,7 @@ IP address. SQL audit retention defaults to 90 days.
   an admin. This includes extension-contributed admin routes: the extension
   principal projection suppresses every admin signal for PAT callers.
 - Revoking or deleting the owning user invalidates their PATs on the next
-  authentication lookup. Unknown, expired, revoked, cross-tenant, and malformed
-  candidates share the same non-oracular `401` response.
-- Every new durable invocation binds a server-created credential method,
-  optional PAT UUID reference, and canonical effective-authority digest to its
-  existing identity/Origin/tenant evidence. Required audit failure returns 503
-  before durable admission or any cancel-capable control; ordinary use/failure
-  audit refresh is best-effort. See the
-  [full contract](../../docs/AUDITABLE_AUTOMATION_IDENTITIES.md).
-
-### Portable Run Evidence Bundle
-
-An authenticated current owner with `runs:read` can validate or download the
-complete evidence projection for a terminal durable run:
-
-```http
-GET /api/threads/{thread_id}/runs/{run_id}/artifacts/evidence-bundle
-POST /api/threads/{thread_id}/runs/{run_id}/artifacts/evidence-bundle
-```
-
-`GET` returns schema/canonicalization versions, pseudonymous run/thread
-references, terminal status, artifact count, all section completeness states,
-the fixed limitations, and `authenticity: "not_signed"`. It validates raw event
-records but never returns their payloads; lifecycle evidence is reduced to
-bounded digests and counts.
-
-`POST` returns a no-store ZIP whose final entry is the canonical
-`hartmesh-evidence/manifest.v1.json`. The other entries are exactly the files
-from the run's verified delivery receipt (presented by `present_files`, or by
-a tool that presented the files it was asked to make, such as `bash` with a
-`present` argument). The manifest binds
-their copied byte lengths and SHA-256 digests plus safe admission, assembly,
-lifecycle, tool, MCP, batch, sandbox, retrieval, and qualification roots.
-
-Only the `complete_durable` profile exists in V1. Active, legacy, pruned,
-inconsistent, oversized, or concurrently changed inputs fail with bounded
-codes; there is no partial evidence mode. Both operations are no-store, cancel
-on disconnect, and have a 60-second whole-generation deadline. This is separate
-from the ordinary `.../artifacts/archive` API, which has no evidence-manifest
-semantics.
-
-Use the dependency-free offline verifier from the repository root:
-
-```bash
-python -I scripts/verify_run_evidence_bundle.py path/to/bundle.zip
-```
-
-Digest verification proves only internal consistency. It is not a signature,
-creator authentication, external attestation, or recall mechanism for a copy
-already downloaded by the user. See
-[Portable Run Evidence Bundles](../../docs/RUN_EVIDENCE_BUNDLES.md) for the
-complete contract and limits.
+  request.
 
 ## LangGraph-compatible API
 
@@ -248,159 +206,6 @@ GET /api/langgraph/threads/{thread_id}/state
 }
 ```
 
-#### Download a Conversation
-
-```http
-GET /api/threads/{thread_id}/export?format=markdown
-GET /api/threads/{thread_id}/export?format=json
-```
-
-The conversation's transcript as a file (`Content-Disposition: attachment`,
-named for its title): what the page shows, and nothing internal. It reads the
-conversation's message feed, as the page does, so a conversation that
-summarization compacted still exports every turn. It carries the person's and
-the assistant's words, with no reasoning, tool calls, tool results, hidden
-control messages or injected context markers. Markdown gives a heading per
-turn under the title and the export and creation times (UTC). JSON gives
-`title`, `thread_id`, `created_at`, `exported_at` and `messages` (`type`, `id`,
-`content`). A conversation recorded as another person's, and one with no
-messages, answer 404. A personal access token cannot reach it. The rules are
-`app/gateway/transcript.py`, held to the page's own by
-`contracts/visible_transcript_contract.json`.
-
-#### Get Thread History
-
-```http
-POST /api/langgraph/threads/{thread_id}/history
-Content-Type: application/json
-
-{"limit": 1}
-```
-
-Returns one entry per checkpoint, newest first. Unlike `/state`, each entry's
-`values` is a **narrow projection**, not the whole channel. Every key below is
-emitted only when it is set:
-
-| Key | Entries |
-| --- | --- |
-| `title`, `thread_data` | every entry |
-| `messages` | newest returned entry |
-| `artifacts` (cumulative presented files, from `present_files` or from a tool call that presented the files it made), `todos`, `goal` | newest returned entry |
-
-The last three are whole-thread state, so repeating them on every checkpoint
-would only duplicate them. "Newest returned" is not "newest that exists": a
-request carrying `before` starts the page at that checkpoint and gets that
-checkpoint's state, which is the same checkpoint whose `messages` the entry
-already carries.
-
-`goal` and `todos` are omitted rather than sent as `null`/`[]` when unset,
-because a client distinguishes "the server answered" from "the server said
-nothing" and the former clears a local override.
-
-This is the read a client makes when it merely *opens* a conversation — it never
-sees a `values` stream frame — so a key the UI renders from thread state must
-appear here or it is blank on every fresh session. In one qualification run that
-cost an empty artifact panel, a business-report card offering no downloads under
-a report whose files were present and downloadable, no todo list, and an active
-goal that stayed invisible while it drove hidden continuation turns.
-
-### Download All My Data
-
-```http
-POST   /api/account/export               # start, or answer with the export already in progress
-GET    /api/account/export               # its state and progress, and its parts once ready
-GET    /api/account/export/parts/{n}     # download part n (application/zip)
-DELETE /api/account/export               # stop it and delete it
-```
-
-Every route acts for the person whose browser session calls it; none takes a
-user id. A personal access token, an internal caller and an unauthenticated
-deployment get 403, and a person turned off is refused as everywhere else, so
-nobody, an administrator included, can export someone else's. Where more than
-one Gateway process serves the deployment (`durable_two_gateway_v1`, or
-`GATEWAY_WORKERS` above 1) the routes answer 503: an export is kept by the
-process that prepares it. The status:
-
-```json
-{
-  "state": "ready",
-  "started_at": "2026-09-27T10:30:00+00:00",
-  "progress": {"conversations_total": 42, "conversations_done": 42, "files_total": 311, "files_done": 311, "bytes_total": 734003200, "bytes_done": 734003200},
-  "parts": [{"number": 1, "size": 734210048, "downloaded": false}],
-  "skipped": 2,
-  "expires_at": "2026-09-27T11:30:05+00:00"
-}
-```
-
-- `state` is `building`, `ready`, `downloaded` (every part has been
-  downloaded at least once) or `failed`, with `error: {"code", "detail"}`. The code is `no_space` when the
-  data disk would keep less than `account_export.min_free_bytes` after what
-  the other exports being prepared still have to write, and `failed`
-  otherwise. The status answers 404 when there is no export.
-- `progress.files_total` counts the person's files to copy. The manifest's
-  `totals.files` counts every entry it lists, transcripts and documents
-  included. `skipped` counts what was left out.
-- A second `POST` while one is prepared or ready returns it. Past
-  `account_export.max_concurrent` exports being prepared at once, `POST`
-  answers 429 with `Retry-After: 60` and `{"detail": "...", "code": "busy"}`.
-- A part can be downloaded again until the export is deleted: a download that
-  looked complete may not have been saved. The export is deleted ten minutes
-  after every part has been downloaded, once `account_export.expires_after_seconds`
-  passes with no part downloading (`expires_at`, `null` while one is), and
-  when the Gateway stops or starts. After that the status answers 404.
-
-The archive:
-
-```
-README.md                                what is in it, in words: each conversation's title and folder, what was left out and why
-manifest.json                            the machine-readable list below (in the last part)
-conversations/<id>/transcript.md|.json   the transcript GET /api/threads/{id}/export writes
-conversations/<id>/files/uploads|outputs|workspace/...
-my-files/...                             the person's own files
-my-skills/...                            the skills the person made
-memory.json                              what GET /api/memory/export returns, where the memory backend keeps a document
-scheduled-tasks.json                     each schedule's definition
-agents.json                              each custom agent the person made, where agents_api is enabled
-agents/<name>/memory.json                what that agent remembers
-```
-
-The directories the Gateway's own tools keep in a conversation (tool-result
-spill, browser frames, an MCP server's `.mcp/` state) are process state, not
-the person's work, and are never included. A file that cannot be archived
-safely is left out and named in `skipped` with its reason: `link`,
-`hard_link`, `not_a_file`, `unsafe_name` (a name Windows cannot hold),
-`name_collision` (differs from another only by case), `changed`, `vanished`
-or `unreadable` while it was copied, or `too_large` (larger than the data
-disk). A conversation whose transcript cannot be read is listed with
-`"message_count": null` and no transcripts, and its files are still
-exported. `manifest.json`:
-
-```json
-{
-  "format": "account-export",
-  "version": 1,
-  "exported_at": "2026-09-27T10:30:02.114000+00:00",
-  "release": "2.1.0+hartmesh.35",
-  "person": {"id": "1f0c…", "email": "ana@example.com"},
-  "conversations": [
-    {"id": "3f2a…", "title": "Monthly review", "created_at": "2026-09-20T08:15:00+00:00", "updated_at": "2026-09-26T17:02:11+00:00", "message_count": 14, "transcripts": ["conversations/3f2a…/transcript.md", "conversations/3f2a…/transcript.json"]}
-  ],
-  "folders_without_conversation": [],
-  "files": [
-    {"path": "conversations/3f2a…/transcript.md", "size": 5120, "sha256": "9c1e…", "part": 1},
-    {"path": "conversations/3f2a…/files/outputs/august-review.pdf", "size": 184322, "sha256": "4b7d…", "part": 1},
-    {"path": "README.md", "size": 1480, "sha256": "e03a…", "part": 1}
-  ],
-  "skipped": [{"path": "conversations/3f2a…/files/workspace/data.csv", "reason": "changed"}],
-  "parts": 1,
-  "totals": {"conversations": 1, "files": 3, "bytes": 190922, "skipped": 1}
-}
-```
-
-`files` lists every entry but `manifest.json` itself, each with the part it
-is in. `folders_without_conversation` names conversation folders whose
-files were exported but which the conversation list no longer holds.
-
 ### Runs
 
 #### Create Run
@@ -410,7 +215,37 @@ Execute the agent with input.
 ```http
 POST /api/langgraph/threads/{thread_id}/runs
 Content-Type: application/json
+Idempotency-Key: <unique key for this logical request>  # optional
 ```
+
+The thread-scoped create, stream, and wait endpoints accept an optional
+`Idempotency-Key` header. Retrying with the same authenticated user, `thread_id`,
+and key reuses the existing run instead of executing the input again. The key is
+shared across `/runs`, `/runs/stream`, and `/runs/wait` for a given user and
+thread, so the same key string cannot back two different calls even across those
+endpoints. Reuse is bound to the original `input`, `assistant_id` and
+`conversation_references`; a retry that changes them returns 409. Generate a new key for every intentional user
+action; reuse a key only when retrying that same action after an uncertain HTTP
+result. Keys may be at most 255 characters. Stateless `/api/langgraph/runs/*`
+endpoints do not support this header because requests without an explicit thread
+create a new temporary conversation.
+
+Retrying a still-running run that this worker cannot stream returns 409 from
+`/runs/stream` (`Run ... is not active on this worker and cannot be streamed`)
+with no `Retry-After`. The same shape on `/runs/wait` returns 200
+`{"status": "<durable status>", "error": ...}` without blocking for a final
+state. Retrying a finished run through `/runs/wait` also returns that durable
+status payload rather than the latest thread checkpoint: a later run on the
+same thread may have advanced the head, and `/wait` does not claim that head
+as this run's result. That status is the durable row after completion, not
+the hydrated record from admission time. The original creating `/wait` still
+returns this run's checkpoint even if a retry overlaps while it is waiting. Retrying a finished run whose SSE log is gone emits a `gap` frame
+(`stream_replay_gap`, `recovery: reload_durable_state`) on the creating
+`/runs/stream` endpoint and closes without an `end` frame; reload durable
+thread/run state instead of treating the stream as empty. Observer joins of
+that same run still end with `end`. Stateless `/api/langgraph/runs/stream`
+does not accept this header and keeps the existing missing-stream close of
+`end`; the `gap` signal is only on a thread-scoped creating retry.
 
 **Request Body:**
 ```json
@@ -441,70 +276,34 @@ Content-Type: application/json
 
 **Run Option Compatibility:**
 - Supported concurrency strategies: `reject`, `rollback`, and `interrupt`
-- With durable run events configured, `rollback` and `interrupt` return `409` without mutation while a predecessor is active. Cancel that run, wait for its terminal `run.delivery`, then retry. Receiptless compatibility deployments retain legacy atomic supersession; the durable path stays fail-closed until a prepared replacement transaction can bind candidate identity, predecessor epoch, and delivery evidence together.
 - Compatibility default: `if_not_exists="create"`; this matches DeerFlow's current behavior
-- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. A presentation — a `present_files` call, or a tool call that presented the files it was asked to make, such as `bash` with a `present` argument — must cover at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
+- Artifact delivery is enforced automatically when a run creates or modifies regular files under `/mnt/user-data/outputs`. `present_files` must present at least one path produced by the current run (or a directory containing it), and the terminal receipt must be persisted; presenting only an unrelated file does not satisfy delivery. Runs without changed outputs retain ordinary conversational behavior. `artifact_delivery` is not a client-settable run option.
 - Unsupported options return `422`: `webhook`, `stream_resumable=true`, `after_seconds`, `feedback_keys`, any non-null `on_completion` value (including the SDK values `"complete"` and `"continue"`), `if_not_exists="reject"`, and `multitask_strategy="enqueue"`
 - `stream_resumable=false` is accepted: it is the LangGraph SDK's default and requests the non-resumable stream DeerFlow already serves
 - Undeclared SDK options, including `checkpoint_during` and `durability`, also return `422` instead of being silently discarded
 
-**Idempotent creation:**
-
-All thread-scoped create/stream/wait routes and stateless stream/wait routes accept an
-optional `Idempotency-Key` header. The value must be a non-empty UTF-8 string without control
-characters. It is scoped to the authenticated server-side user/service identity (auth-disabled
-mode uses DeerFlow's configured default user), so clients cannot create a shared ownerless
-key space.
-
-An equal retry returns the original run, including after success, error, timeout, or
-interruption. Only the request that creates the row attaches a worker. Equality compares a
-persisted canonical projection of caller intent, never a partial merge into the accepted
-effective execution values. Changing or removing the bound-thread selection, agent selector,
-input/command, checkpoint, multitask/interrupt settings, recursion-limit selection, or a
-non-null execution-context option returns `409`. Repeating an omitted stateless thread remains
-equal and reuses the generated thread, but changing that selection to an explicit thread does
-not. Mapping order is irrelevant; sequence order remains significant.
-
-For nullable model/thinking/reasoning/planning/subagent, checkpoint, and interrupt fields,
-explicit null means omission. For recursion limit, omitted or null means the Gateway default;
-every non-null supplied value remains distinct before server clamping. Explicit
-`multitask_strategy="reject"` equals its default. Changing stream/wait route, stream mode,
-subgraph streaming, disconnect behavior, or other response-delivery preferences reuses the
-run because those fields are transient transport choices. Keyed requests return `422` for
-non-empty arbitrary metadata or config/context fields that the canonical projector cannot
-classify, rather than silently ignoring them.
-
-An equal replay reuses the original accepted effective projection and lifecycle without
-rerunning defaults, alias resolution, contributors, authorization-start, constraints, or graph
-execution. Historical keyed rows that predate canonical caller-intent evidence remain readable,
-but replay returns `409` because equality cannot be proven safely.
-
-Keys through 255 UTF-8 bytes are retained exactly behind a `raw:` form marker; longer values
-are represented by a SHA-256 UTF-8 digest. Replay is guaranteed only while the original run
-row is retained. A different key targeting a thread with an active run keeps the existing
-multitask semantics: `reject` reports the thread as busy; with durable run events,
-`interrupt` and `rollback` do the same without mutating the predecessor. A retry of an
-already-persisted equal key remains a read-only replay and returns its original run.
-
 When outputs changed during the run, `run.delivery` events retain the Slice 1
 facts (`presented`, `paths`, and `by_tool`) and add `produced_paths`,
-`presented_files` (the paths tool results presented), `presented_paths`, `matched_paths`, plus an explicit verdict: `verification`,
+`presented_paths`, `matched_paths`, plus an explicit verdict: `verification`,
 `stage` (`presented`, `mismatched`, or `not_started`), and `satisfied`. Receipts
 for runs without changed outputs keep their existing shape.
 
 **Recursion Limit:**
 
 `config.recursion_limit` caps the number of graph steps LangGraph will execute
-in a single run. The unified Gateway path defaults to `100` in
-`build_run_config` (see `backend/app/gateway/services.py`), which is a safer
-starting point for plan-mode or subagent-heavy runs. Clients can still set
-`recursion_limit` explicitly in the request body; increase it if you run deeply
-nested subagent graphs. Scheduled-task launches do not take a client body: they
+in a single run. The unified Gateway path uses the top-level `recursion_limit`
+from `config.yaml` (default `100`) when a request does not provide one. Clients
+can still set `recursion_limit` explicitly in the request body, and a valid
+request value takes precedence. Scheduled-task launches do not take a client body: they
 use `scheduler.recursion_limit` from `config.yaml` (default `1000`, matching
 the web UI). For safety, the Gateway clamps any supplied
-value to a configurable server ceiling (`max_recursion_limit` in `config.yaml`,
+or configured value to a server ceiling (`max_recursion_limit` in `config.yaml`,
 default `1000`) so a single run cannot execute unbounded graph steps (runaway
-LLM cost / DoS); invalid or non-positive values fall back to the `100` default.
+LLM cost / DoS); invalid or non-positive request values fall back to the
+configured default. Both top-level fields are read per run, so edits apply to
+the next request without restarting the Gateway. This top-level setting applies
+to Gateway API runs only; IM channel and embedded `DeerFlowClient` runs retain
+their own defaults and override paths.
 
 **Configurable Options:**
 - `model_name` (string): Override the default model
@@ -523,6 +322,100 @@ data: {"content": "Hello! I'd be happy to help.", "role": "assistant"}
 event: end
 data: {}
 ```
+
+#### Referencing a previous conversation
+
+With `read_conversation` enabled in `config.yaml` (see [configuration](CONFIGURATION.md#reading-referenced-conversations)),
+Gateway API callers can attach up to three explicit references to create/stream/wait requests:
+
+```json
+{
+  "input": {"messages": [{"role": "user", "content": "Use the requirements agreed in the referenced conversation."}]},
+  "conversation_references": ["https://deerflow.example/workspace/chats/source-thread"]
+}
+```
+
+A reference is a valid thread ID or an absolute `/workspace/chats/{thread_id}` URL
+(also `/workspace/agents/{agent_name}/chats/{thread_id}` for custom agents)
+with the same scheme and authority as the run request, without query or fragment.
+URLs are parsed as local selectors and are never fetched. For split-origin clients
+or internal proxies, pass the thread ID. The field is separate from message text:
+links in pasted documents, tool results, or previous messages grant no access.
+The server supplies source IDs to the model as background user-role data and
+binds the reader to this run's references and authenticated identity.
+
+Clients that cannot add top-level fields to a run request (the LangGraph JS SDK
+builds a fixed body and drops unknown keys) may send the same list as
+`context.conversation_references`:
+
+```json
+{
+  "input": {"messages": [{"role": "user", "content": "Use the requirements agreed in the referenced conversation."}]},
+  "context": {"conversation_references": ["https://deerflow.example/workspace/chats/source-thread"]}
+}
+```
+
+The Gateway lifts the key out of `context` before the run context is assembled,
+so it has the same bounds and error locations as the top-level field, is
+recorded on the run in the same way, and never reaches the merged run context
+or the checkpointed `configurable`. Sending the top-level field and the context
+key together returns 422. `GET /api/features` reports
+`conversation_references.enabled` (the tool is configured) and `max_references`,
+so a client can hide its entry point on deployments without the tool.
+
+The request requires `runs:read` as well as the normal run-creation permission.
+The tool rechecks source ownership on each read; foreign, deleted and unowned
+legacy threads are unavailable. `read_conversation(thread_id, cursor?, limit?)`
+reads newest-first pages (messages within each page are chronological), at most
+50 visible user/assistant messages, 4,000 characters per message and 20,000 text
+characters per page. Each page also stays within the tool-output budget that
+applies to `read_conversation` (`tool_output.tool_overrides.read_conversation`,
+else `externalize_min_chars`, and `fallback_max_chars`; 12,000 serialized
+characters by default), so results reach the model inline instead of being
+externalized to a file. A message that does not fit starts the next page intact.
+Only a message longer than 4,000 characters, or one whose serialized form alone
+exceeds the budget, is truncated. Such a message carries
+`continuation: {"message_seq", "offset"}`; `read_conversation(thread_id,
+message_seq=..., offset=...)` without a cursor returns the next part of that one
+message (at most 20,000 text characters, sized to the same budget) with its
+`offset`, `text_length` and, while text remains, a new continuation. Offsets
+refer to the source's current text: an offset past its end returns
+`invalid_request`, and a message that is no longer visible is unavailable. If the
+`read_conversation` budget is too small to return any text (below roughly 800
+serialized characters), the result is `output_budget_too_small` rather than a
+continuation that makes no progress.
+Results include message IDs, sequence numbers, continuation, truncation and
+unavailability. Hidden messages, reasoning blocks, raw tool
+results and subagent internals are excluded. Source data is not changed.
+
+**Live reads and retained copies.** Each call reads the source's current visible
+history. Editing or regenerating the source can change subsequent reads, including
+later pages; a reference does not pin an immutable transcript. Text already returned
+to the destination is a copy and is not automatically refreshed by source changes.
+
+Read permission lasts only for this run, including its internal continuation steps.
+Every new run, including resume, regenerate or edit replay, must submit references
+again; checkpoints and old hints never restore permission. A resume can reuse
+IDs already visible in the interrupted conversation, but needs the explicit
+request field again. Missing/expired transcripts are not reconstructed from
+checkpoints or memory.
+
+Permission expiry does not erase excerpts already stored in the destination
+conversation or conclusions derived from them. Deleting the source does not
+retroactively erase those copies either; they follow the destination's own
+retention and deletion behavior. Once the source is unavailable, further source
+reads report unavailability rather than reconstructing it from destination copies.
+
+**Incomplete requirements.** When `truncated` is true, the tool's notice tells
+the agent to read the rest through each cut message's continuation before relying
+on it, and to acknowledge the omission and request the missing material if that
+read is unavailable. `has_more: false` means there are no older messages to page
+through, not that every returned message is complete. This is model guidance, not
+a new confirmation mechanism or a guarantee of model compliance.
+
+This first version adds no frontend picker or link-to-reference conversion. The
+tool is unavailable to bootstrap agents, subagents and embedded clients without
+a host-provided reader. Active tool/skill policies continue to apply.
 
 #### Get Run History
 
@@ -543,25 +436,6 @@ GET /api/langgraph/threads/{thread_id}/runs
 }
 ```
 
-#### Get Retrieval Observations
-
-```http
-GET /api/threads/{thread_id}/runs/{run_id}/retrieval-observations?limit=100&after_seq=123
-```
-
-Returns the current owner's bounded safe evidence for supported external
-retrieval attempts. `limit` is 1–100 and `after_seq` is the last observed
-thread-global event sequence. The response is
-`{"items": [...], "next_after_seq": integer|null,
-"invalid_event_count": integer}`. Each item contains provider/status, timing,
-counts, truncation/partial flags, safe constraints and source references,
-accepted evidence links, and receipt/result/observation digests. It never
-contains a query, query-derived identifier, credential, result title/snippet,
-document body, provider response body, or raw error. Existing run visibility,
-`runs:read`, PAT default-deny rules, and current invocation-observation policy
-apply. See
-[EVIDENCE_BEARING_RETRIEVAL.md](EVIDENCE_BEARING_RETRIEVAL.md).
-
 #### Stream Run
 
 Stream responses in real-time.
@@ -569,6 +443,7 @@ Stream responses in real-time.
 ```http
 POST /api/langgraph/threads/{thread_id}/runs/stream
 Content-Type: application/json
+Idempotency-Key: <unique key for this logical request>  # optional
 ```
 
 Same request body as Create Run. Returns SSE stream.
@@ -669,23 +544,40 @@ GET /api/models
       "name": "gpt-4",
       "display_name": "GPT-4",
       "supports_thinking": false,
-      "supports_vision": true
-    },
-    {
-      "name": "claude-3-opus",
-      "display_name": "Claude 3 Opus",
-      "supports_thinking": false,
-      "supports_vision": true
+      "supports_reasoning_effort": false,
+      "reasoning": {"thinking": "unsupported", "effort": null, "history": null, "source": "legacy"}
     },
     {
       "name": "deepseek-v3",
       "display_name": "DeepSeek V3",
       "supports_thinking": true,
-      "supports_vision": false
+      "supports_reasoning_effort": true,
+      "reasoning": {
+        "thinking": "optional",
+        "effort": {"values": ["minimal", "low", "medium", "high"], "default": null, "aliases": {}},
+        "history": null,
+        "source": "legacy"
+      }
+    },
+    {
+      "name": "glm-5.3-flash",
+      "display_name": "GLM-5.3-Flash",
+      "supports_thinking": true,
+      "supports_reasoning_effort": true,
+      "reasoning": {
+        "thinking": "required",
+        "effort": {"values": ["low", "high", "max"], "default": "high", "aliases": {"minimal": "low", "medium": "high"}},
+        "history": "clear",
+        "source": "contract"
+      }
     }
   ]
 }
 ```
+
+`supports_thinking` and `supports_reasoning_effort` are deprecated projections of
+`reasoning`. `reasoning.source` is `legacy` when the profile declares no
+`reasoning:` block (the booleans were normalized) and `contract` when it does.
 
 #### Get Model Details
 
@@ -701,60 +593,12 @@ GET /api/models/{model_name}
   "model": "gpt-4",
   "max_tokens": 4096,
   "supports_thinking": false,
-  "supports_vision": true
+  "supports_reasoning_effort": false,
+  "reasoning": {"thinking": "unsupported", "effort": null, "history": null, "source": "legacy"}
 }
 ```
 
-### Provider keys
-
-Where the deployment's `config.yaml` is rendered from a provider catalog (the
-compose profile, `HARTMESH_PROFILE_DIR`), an administrator manages each
-catalog provider's key in the product. A key set here outranks the
-environment's for that provider, takes effect without a restart, and is
-never returned. Every route requires an administrator's interactive
-session; a personal access token is refused (`403`). Elsewhere the list
-answers `available: false`, and the record and every write
-`409 not_available`. A write checks the `refusal` before the provider name,
-so while one stands even an unknown provider gets the `409`.
-
-- `GET /api/provider-keys` lists every catalog provider:
-  `{"available", "refusal", "wrapping_key", "providers": [...]}`, where each
-  provider carries `provider` (`openai`), `variable` (`OPENAI_API_KEY`),
-  `kind` (`models` or `tools`), `source` (`product`, `environment` or
-  `none`), `product_key` (`absent`, `set` or `unreadable`), `wrapped_with`,
-  `changed_at` and `changed_by`. `refusal` (`{code, message}` or null) says
-  why a write would be refused now: `operator_model_file`,
-  `no_wrapping_key` or `wrapping_key_invalid`. `wrapping_key` is `set`,
-  `absent` or `invalid`; beside an `unreadable` key, `absent` or `invalid`
-  means the secret is missing, `set` that it is not the one the key was
-  stored under.
-- `PUT /api/provider-keys/{provider}` with exactly `{"key": "..."}` adds or
-  replaces the key: `{"action": "added" | "replaced", "provider": {...}}`,
-  `Cache-Control: no-store`. `404 unknown_provider` outside the catalog,
-  `422 body_invalid` for any other body (the body is never quoted back),
-  `422 key_invalid` for a key that is not one printable token,
-  `422 render_refused` when the configuration would not render with it, and
-  `409` with the `refusal` code.
-- `DELETE /api/provider-keys/{provider}` removes it (`action: "removed"`, or
-  `"none"` when nothing was stored); the provider falls back to the
-  environment's key, or to none. Allowed without a wrapping key, so an
-  unreadable key can be removed; `404 unknown_provider` outside the
-  catalog and `409 operator_model_file` as for a write.
-- `GET /api/provider-keys/events?limit=50` (1 to 200) is the record, newest
-  first: `event_id`, `variable`, `action`, `actor_id`, `actor_email`,
-  `occurred_at`; `422 limit_invalid` outside the range.
-
-The same reading for the deployer, inside the deployment:
-`python -m app.gateway.provider_keys.status` (one JSON document, never a key).
-
 ### MCP Configuration
-
-These endpoints are the legacy direct configuration surface. With the default
-`tool_plane.enabled: true`, all MCP write endpoints return `409` with
-`governed_revision_required`; in an immutable exact-two deployment the code is
-`immutable_deployment`. Use the governed revision API below. Read and cache
-reset operations remain available. Direct writes operate only when governance
-is explicitly disabled.
 
 #### Get MCP Config
 
@@ -927,9 +771,11 @@ placeholders.
 
 #### Reset MCP Tools Cache
 
-Clear cached MCP tools and persistent MCP sessions process-wide. This affects
-all threads and users in the current Gateway process. Tools are loaded again
-from configured MCP servers on the next agent run or tool lookup.
+Publish a shared cache generation, then clear cached MCP tools and persistent
+MCP sessions in the handling process. Every Gateway worker sharing the writable
+extensions-config directory observes that generation and reloads tools on its
+next agent run or tool lookup. This also refreshes remote `tools/list` changes
+that did not modify `extensions_config.json`.
 
 ```http
 POST /api/mcp/cache/reset
@@ -941,18 +787,17 @@ Requires an authenticated admin session.
 ```json
 {
   "success": true,
-  "message": "MCP tools cache reset. Tools will reload on next use."
+  "scope": "shared_config",
+  "message": "MCP tools cache reset published through the shared config directory. Tools will reload on next use."
 }
 ```
 
-### Skills
+`shared_config` means every worker mounting that same directory observes the
+generation; it does not claim a deployment-wide broadcast when replicas use
+independent filesystems. When no extensions-config path can be resolved, the
+request still resets the current worker and returns `"scope": "process"`.
 
-Skill listing, detail, and cache reload remain available with governed
-revisions enabled. Direct archive install/upload, custom-skill edit/delete or
-legacy rollback, and enable/disable writes return `409` with
-`governed_revision_required` (or `immutable_deployment` for the immutable
-profile). Use the governed revision API below. The legacy writes operate only
-when `tool_plane.enabled: false`.
+### Skills
 
 #### List Skills
 
@@ -1006,31 +851,31 @@ GET /api/skills/{skill_name}
 }
 ```
 
-#### Enable Skill
+#### Enable or Disable Skill
 
 ```http
-POST /api/skills/{skill_name}/enable
+PUT /api/skills/{skill_name}
+Content-Type: application/json
 ```
 
-**Response:**
+Requires an authenticated admin session.
+
+**Request Body:**
 ```json
 {
-  "success": true,
-  "message": "Skill 'pdf-processing' enabled"
+  "enabled": false
 }
 ```
 
-#### Disable Skill
-
-```http
-POST /api/skills/{skill_name}/disable
-```
-
-**Response:**
+**Response:** the updated skill. An unknown `skill_name` returns `404`.
 ```json
 {
-  "success": true,
-  "message": "Skill 'pdf-processing' disabled"
+  "name": "pdf-processing",
+  "description": "Handle PDF documents efficiently",
+  "license": "MIT",
+  "category": "public",
+  "enabled": false,
+  "editable": false
 }
 ```
 
@@ -1058,6 +903,17 @@ Content-Type: multipart/form-data
   }
 }
 ```
+
+#### Export a Custom Skill
+
+Admin session authentication is required for both requests. PAT credentials cannot export. Only the current user's custom skill is eligible; public, legacy and integration fallback is never used. A disabled custom skill remains eligible.
+
+1. `GET /api/skills/custom/{skill_name}/export-manifest` returns `skill_name`, `revision` (SHA-256 or null), `can_export`, `file_count`, `directory_count`, `total_bytes`, `files` (`path`, `type`, `size`, `executable`), `requirements` (`compatibility`, `allowed_tools`, `required_secrets` names and optional flags), and structured `warnings`/`blockers`. Paths are relative; `.` is the package root, counted in directory/entry totals. Structural blockers return a non-downloadable manifest. Declarations are not credential values or dependency verification.
+2. `GET /api/skills/custom/{skill_name}/export?expected_revision=<64 lowercase hex characters>` recaptures content and rejects stale previews with 409 before sending ZIP headers. Successful responses carry `application/zip`, attachment `<skill_name>.skill`, accurate `Content-Length`, `Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`.
+
+Error `detail` contains a safe `code`, `message`, and optional relative `path`. Codes/statuses: `skill_not_found` 404, `skill_changed` 409, `skill_export_limit_exceeded` 413, `skill_export_unsupported` 422, `skill_export_busy` 429, `skill_export_timeout` 503, `skill_export_failed` 500; existing 401/403 auth behavior applies. Limits are 4096 entries including directories, 64 MiB/file, 100 MiB raw/ZIP, 1 MiB frontmatter, 1024 UTF-8 bytes per ZIP path and depth 32. Frontmatter preflight rejects YAML aliases and bounds structure to 32 nesting levels / 16384 parser events before constructing YAML objects. A 5-second lock wait and 60-second cooperative worker deadline bound work; blocking OS calls cannot be forcibly interrupted. Two export slots are shared across all users in each Gateway process; both previews and downloads use them, and 429 means that process-wide capacity is occupied. Slots remain held through worker drain and temporary-file cleanup. The streaming phase has a separate 120-second inactivity deadline, reset after each successful ASGI send. A continuously progressing transfer may exceed 120 seconds overall; a stalled send does not reset the deadline. Expiry aborts the incomplete download (no replacement JSON after ZIP headers); clients must retry. Client disconnect during preparation cancels and drains the worker, then exits the handler normally rather than leaking a synthetic task cancellation. No export cache, persistent job or sharing URL is created.
+
+Raw skill files, sidecars and empty directories are preserved. No hooks/scripts run during export and no secrets are redacted from package files. Import still uses normal security scanning and conflict checks. Export requires no-follow descriptor-relative host filesystem operations; unsupported platforms receive 422 rather than following links unsafely.
 
 #### Reload Skills
 
@@ -1104,91 +960,6 @@ not guarantee that every instance is reached. External MinIO/NFS/CSI writes
 bypass the validation, SkillScan, and history used by the install/edit APIs, so
 the mounted directory must be writable only by trusted operators.
 
-### Governed Tool Plane
-
-The default skill and MCP mutation surface is an authenticated revision
-workflow. Staging is inert, validation binds a report to exact canonical
-material and policy, and promotion activates only the validated revision.
-
-| Method | Endpoint | Purpose |
-| --- | --- | --- |
-| `GET` | `/api/tool-plane/status?scope_kind=user_overlay` | Current verified user's status |
-| `GET` | `/api/tool-plane/status?scope_kind=deployment_base` | Deployment-base status (admin) |
-| `GET` | `/api/tool-plane/revisions?scope_kind=...&limit=50` | Bounded current-scope history |
-| `POST` | `/api/tool-plane/revisions` | Stage a canonical base or current-user overlay |
-| `POST` | `/api/tool-plane/skill-artifacts` | Safely stage an inert `.skill` archive |
-| `GET` | `/api/tool-plane/revisions/{revision_id}` | Safe manifest and validation report |
-| `GET` | `/api/tool-plane/revisions/{revision_id}/diff?against={revision_id}` | Bounded changed-field diff |
-| `POST` | `/api/tool-plane/revisions/{revision_id}/validate` | Validate exact staged material |
-| `POST` | `/api/tool-plane/revisions/{revision_id}/promote` | Promote a passing revision |
-| `POST` | `/api/tool-plane/revisions/{revision_id}/rollback` | Re-promote previously validated material |
-| `GET` | `/api/tool-plane/admin/status` | Explicit cross-user/base status (admin) |
-| `GET` | `/api/tool-plane/admin/revisions` | Explicit cross-user/base history (admin) |
-| `GET/POST` | `/api/tool-plane/admin/revisions/{revision_id}[/{action}]` | Inspect/validate/promote/rollback any existing revision (admin) |
-| `POST` | `/api/tool-plane/bootstrap/stage-current` | Stage an upgraded mutable installation (admin) |
-
-Ordinary overlay routes always derive the opaque user scope from the verified
-actor; they do not accept a user identifier. Cross-user admin list/status calls
-require `scope_kind=user_overlay&user_ref=<opaque-ref>`. Personal access tokens
-are denied by the route/scope matrix.
-
-Stage a deployment base:
-
-```http
-POST /api/tool-plane/revisions
-Content-Type: application/json
-```
-
-```json
-{
-  "scope_kind": "deployment_base",
-  "candidate": {
-    "version": 1,
-    "validation_policy_digest": "<digest from status>",
-    "parent_revision_digest": null,
-    "change_summary": "Add reviewed search tooling",
-    "mcp_servers": {
-      "search": {
-        "type": "http",
-        "url": "https://mcp.example.com/api",
-        "headers": {"Authorization": "$SEARCH_TOKEN"},
-        "tools": {"lookup": {}}
-      }
-    },
-    "public_skills": {},
-    "managed_integrations": {}
-  }
-}
-```
-
-For MCP servers, keys in a nonempty `tools` map form the exact raw-tool
-allowlist; an empty map means all valid tools advertised by that server.
-Credential-bearing fields accept environment or request-context selectors,
-never literal values. A user overlay references the active base and may only
-narrow enablement, select a non-secret credential binding reference/version,
-and supply that user's custom skills/state.
-
-Validate and promote by posting the scope discriminator:
-
-```json
-{"scope_kind": "deployment_base"}
-```
-
-The explicit `/admin/revisions/{revision_id}/{validate|promote|rollback}`
-variants take no body. Immutable exact-two deployments mount only the governed
-read routes; revision mutation, archive staging, and bootstrap routes are absent
-from routing and OpenAPI. Direct legacy mutation remains blocked, and the
-service returns `immutable_deployment` if an internal caller attempts a write.
-
-Expected safe failure codes include `validation_failed` (`422`),
-`validation_stale` (`409`), `secret_value_present` (`422`),
-`base_revision_changed` (`409`), `overlay_preflight_failed` (`422`),
-`bootstrap_inventory_changed` (`409`), and `unmanaged_drift`,
-`projection_failed`, `projection_digest_mismatch`, or `recovery_required`
-(`503`). Detailed schemas, bootstrap procedure, locking/recovery contract, and
-accepted-run pinning are documented in
-[Governed Skill and MCP Revisions](../../docs/GOVERNED_TOOL_PLANE.md).
-
 ### File Uploads
 
 #### Upload Files
@@ -1220,19 +991,12 @@ Content-Type: multipart/form-data
       "markdown_artifact_url": "/api/threads/abc123/artifacts/mnt/user-data/uploads/document.md"
     }
   ],
-  "message": "Successfully uploaded 1 file(s)",
-  "skipped_files": [],
-  "sandbox_sync_skipped": null
+  "message": "Successfully uploaded 1 file(s)"
 }
+
 ```
 
-`sandbox_sync_skipped` is `null` when the files were also copied into the
-thread sandbox. It is `sandbox_execution_denied` when the caller's role may not
-execute in the sandbox, or `sandbox_session_conflict` when an accepted run
-holds the thread's sandbox until it ends; the upload itself succeeded either
-way, `message` ends with the plain reason, and a refused sync is recorded on
-that run as a `session.refused` sandbox diagnostic. The artifact update
-response carries the same field.
+**Name collisions:** filenames are claimed unique against the thread's existing uploads and reserved atomically — a same-name upload never replaces the existing file; it lands as `document_1.pdf` (the response's `filename`/`original_filename` reflect the claimed name). Use the artifacts `PUT` endpoint for sanctioned in-place updates.
 
 **Supported Document Formats** (auto-converted to Markdown):
 - PDF (`.pdf`)
@@ -1278,201 +1042,6 @@ DELETE /api/threads/{thread_id}/uploads/{filename}
 }
 ```
 
-### My Files
-
-The person's own files, kept across conversations. They live under
-`users/{user_id}/files` and every sandbox of that user mounts the same
-directory read-write at `/mnt/user-data/files`, so a file kept in one
-conversation is on the disk of the next. The routes are per owner: there is no
-way to name another person's files.
-
-#### List My Files
-
-```http
-GET /api/files
-```
-
-**Response:**
-```json
-{
-  "files": [
-    {
-      "path": "Reports/2026-08-business-review.pdf",
-      "name": "2026-08-business-review.pdf",
-      "size": 48213,
-      "modified": 1757980800.0,
-      "virtual_path": "/mnt/user-data/files/Reports/2026-08-business-review.pdf",
-      "url": "/api/files/Reports/2026-08-business-review.pdf"
-    }
-  ],
-  "count": 1,
-  "truncated": false
-}
-```
-
-The listing is recursive and sorted by path; hidden names and symlinks are
-skipped. `truncated` is `true` when it stopped at its ceiling.
-
-#### Get One Of My Files
-
-```http
-GET /api/files/{path}
-```
-
-**Query Parameters:**
-- `download` (boolean): force a download; HTML, XHTML and SVG are always downloads
-
-#### Remove One Of My Files
-
-```http
-DELETE /api/files/{path}
-```
-
-Removes a file; folders stay. `404` for a missing file, `400` for a path that
-cannot name a file (a folder, a hidden name, a link).
-
-#### Keep A Conversation's File
-
-Copy one of a conversation's uploads or outputs into the caller's files. The
-exact bytes are copied and the conversation's own file is untouched; a name
-already taken is kept beside the new one with the next free `_N` suffix.
-
-```http
-POST /api/threads/{thread_id}/files
-Content-Type: application/json
-
-{
-  "path": "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.pdf",
-  "folder": "Reports"
-}
-```
-
-**Response** (`201`): the kept file, in the listing's shape. `400` for a path
-outside uploads/outputs or a bad folder, `404` for a missing source or a thread
-the caller does not own.
-
-
-### Shared
-
-The company's Shared area: what anyone at the tenant published, readable by
-everyone signed in. It lives under `shared/` and every sandbox of every person
-mounts it at `/mnt/user-data/shared`; only the publish route writes it, so
-nothing is shared by accident. The mount is read-only to the sandbox wherever
-the provider enforces it — container-backed providers do; the local provider
-refuses the write in the tool layer but does not confine host `bash`, which
-runs as the Gateway's own uid. Publishing copies the exact bytes and
-records who, when and from where. The same bytes already in that folder are
-not copied again: the route answers with the entry that holds them, so a
-second click, a second tab or a colleague's identical file lands once.
-Different bytes under a name already there keep both, nothing is overwritten;
-removing takes the file and leaves the record with who removed it and when. The routes carry the same `threads:*` authorities as the person's own
-files.
-
-#### List Shared Files
-
-```http
-GET /api/shared
-```
-
-**Response:**
-```json
-{
-  "files": [
-    {
-      "path": "Reports/2026-08-business-review.pdf",
-      "name": "2026-08-business-review.pdf",
-      "size": 48213,
-      "modified": 1757980800.0,
-      "virtual_path": "/mnt/user-data/shared/Reports/2026-08-business-review.pdf",
-      "url": "/api/shared/Reports/2026-08-business-review.pdf",
-      "published_by": "alex@example.com",
-      "published_at": "2026-09-19T10:00:00+00:00",
-      "from_thread_id": "11111111-1111-1111-1111-111111111111",
-      "can_remove": true
-    }
-  ],
-  "count": 1,
-  "truncated": false
-}
-```
-
-`published_by`, `published_at` and `from_thread_id` are the publication record.
-`published_by` is the person as a colleague would recognise them, resolved from
-the record's stored user id; it is null when the record has none (a file placed
-on the disk by hand) or when the account behind it is gone. A file with no
-record at all is listed with all three null.
-`can_remove` is decided per caller: the publisher, or an admin. The listing is
-recursive and sorted by path; hidden, symlinked and unaddressable paths are
-skipped. `truncated` is `true` when the area holds more files than one listing
-returns, in which case `files` is the first page of them by path.
-
-All four routes answer `503` when the deployment has no record store (the
-`memory` persistence backend), because a publication that cannot be recorded
-cannot say who shared it.
-
-#### Get One Shared File
-
-```http
-GET /api/shared/{path}
-```
-
-**Query Parameters:**
-- `download` (boolean): force a download; HTML, XHTML and SVG are always downloads
-
-Answers `200` with the file. `400` for a path that cannot name a file here
-(a link, or a path that escapes the area), `404` for one that is not there.
-
-#### Publish A File To Shared
-
-```http
-POST /api/shared/publish
-```
-
-**Request Body:**
-```json
-{
-  "path": "/mnt/user-data/outputs/report-3/2026-08-business-review.pdf",
-  "thread_id": "11111111-1111-1111-1111-111111111111",
-  "folder": "Reports"
-}
-```
-
-`path` is the file as the sandbox names it: one of the caller's own files
-(`/mnt/user-data/files/...`), or one of a conversation's uploads or outputs, in
-which case `thread_id` names the conversation and it must be the caller's.
-`folder` is where in Shared to put it; the root when omitted. Answers `201`
-with the same shape as one listing entry. When a live publication in that
-folder already holds exactly these bytes and the file is still there, nothing
-is copied and no record is written: the answer is `200` with that entry,
-whoever published it (`can_remove` is still decided for the caller). The same
-bytes in another folder, or a file that has changed since it was shared, are
-a new publication, and the changed one takes the next free `_N` suffix beside
-the old. Publishes are handled one at a time per Gateway from that check to
-the record of the copy, so two requests carrying the same bytes at once land
-once; the `200` describes Shared at the moment of the check. `400` for a path
-outside those places, a folder that is not a plain path, or a source that is
-not a plain file; `404` for a missing source or a conversation that is not the
-caller's; `503` when the publication records cannot be read or written, in
-which case nothing was shared.
-
-#### Remove One Shared File
-
-```http
-DELETE /api/shared/{path}
-```
-
-The publisher may, and an admin may; anyone else gets `403`. Removes the file
-and leaves the folder; the publication record keeps who removed it and when.
-`400` for a path that cannot name a file here, `404` for a missing file.
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Removed Reports/2026-08-business-review.pdf"
-}
-```
-
 ### Thread Cleanup
 
 Remove DeerFlow-managed local thread files under `.deer-flow/threads/{thread_id}` after the LangGraph thread itself has been deleted.
@@ -1493,6 +1062,149 @@ DELETE /api/threads/{thread_id}
 - `422` for invalid thread IDs
 - `500` returns a generic `{"detail": "Failed to delete local thread data."}` response while full exception details stay in server logs
 
+### Projects
+
+#### Get Projects Config
+
+```http
+GET /api/projects/config
+```
+
+The `projects` config-block knobs the UI needs for client-side validation. Requires the `projects:read` scope (PATs included).
+
+**Response:**
+```json
+{
+  "instructions_max_bytes": 8192,
+  "trash_retention_days": 30
+}
+```
+
+Values come from `projects.instructions_max_bytes` and `projects.trash_retention_days` in `config.yaml`; the documented defaults apply when the block is absent.
+
+### Project Documents
+
+Per-project document shelf (Projects Phase 2). All routes fail closed: a missing or foreign project/document is `404` (never `403`); uploads and individual trash require an active project — archived projects answer `404` for those while keeping reads; a memory-backend deployment answers `503` `"Projects not available"`. Trashed rows are invisible to every route.
+
+#### List Documents
+
+```http
+GET /api/projects/{project_id}/documents?limit=100&offset=0
+```
+
+**Query Parameters:** `limit` (default 100, 1..1000), `offset` (default 0) — out-of-bounds values are `422`.
+
+**Response:** `{"documents": [{"id", "name", "size_bytes", "sha256", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at", "content_missing"}], "total", "limit", "offset"}` in `updated_at DESC, id ASC` order. `content_missing` is read-time truth (never persisted): `true` when the document's immutable original is missing or size-mismatched (external interference); the derived `converted.md` companion is not the integrity anchor.
+
+#### Upload Document
+
+```http
+POST /api/projects/{project_id}/documents
+Content-Type: multipart/form-data
+```
+
+Exactly one file per request (`file` part), plus an optional `name` form field (defaults to the multipart filename). The name is rejected with `400` when empty after normalization, separator-bearing, or over 255 UTF-8 bytes; empty files are `400`; files over `uploads.max_file_size` are `413`.
+
+**Response:** `201 Created` with `{"document": {...}, "deduplicated": false}`. Re-uploading identical content returns the existing row with `200 OK` and `"deduplicated": true` — the first writer's name wins. Re-upload after trash creates a fresh row.
+
+#### Save Thread File to Shelf (from-thread)
+
+```http
+POST /api/projects/{project_id}/documents/from-thread
+Content-Type: application/json
+```
+
+```json
+{"thread_id": "abc123", "kind": "upload", "name": "report.pdf", "shelf_name": "q3-report.pdf"}
+```
+
+Copies one file from the thread's own uploads (`"kind": "upload"`) or outputs (`"kind": "output"`) directory into the shelf as a project-owned snapshot; the source file is never moved. `name` locates the source file inside the thread; `shelf_name` is optional and defaults to the source name, following upload-name validation (`400`). A source that does not resolve inside that thread's directory — separator-bearing names, escapes, missing files, or a missing/foreign thread — is `404`, indistinguishable from absence. Files over `uploads.max_file_size` are `413`; empty files are `400`.
+
+**Response:** same as Upload Document — `201 Created` with `{"document": {...}, "deduplicated": false}`, or `200 OK` on a content dedup hit. The created row records `source_thread_id` / `source_kind` / `source_name` provenance.
+
+#### Attach Document to Thread
+
+```http
+POST /api/projects/{project_id}/documents/{document_id}/attach-to-thread/{thread_id}
+```
+
+Materializes an independent copy of a live shelf document into the target thread's uploads directory through the same ingestion pipeline as an ordinary upload (filename claiming, size checks, optional conversion under `uploads.auto_convert_documents`, sandbox-readable permissions, and sandbox sync for non-mounted providers; a caller denied `sandbox:execute` keeps the host upload without allocating a sandbox). Reading an archived source project's shelf is allowed and does not mutate it; a missing/foreign document, or a target thread the caller cannot write, is `404`. A row whose original bytes are missing or size-mismatched answers `409` `"content_missing"`.
+
+**Response:** `200 OK` with `{"filename", "size_bytes", "virtual_path", "artifact_url"}` — returned only after ingestion succeeds.
+
+#### Get Document Content
+
+```http
+GET /api/projects/{project_id}/documents/{document_id}/content?download=false
+```
+Serves the converted-markdown companion when present, else inline text when the original samples as text, else an attachment; `download=true` always attaches. Active content (`text/html`, `text/xml`, `application/xml`, `text/xsl`, any `+xml` type such as XHTML/SVG) is always forced to an attachment regardless of `download`, mirroring the artifacts router, so it never executes script on the application origin. A row whose original bytes are missing or size-mismatched answers `409` `"content_missing"`.
+
+#### Delete Document (move to trash)
+
+```http
+DELETE /api/projects/{project_id}/documents/{document_id}
+```
+
+**Response:** `204`. Recoverable trash: the row keeps its bytes and a `{project_id, project_name}` origin snapshot. Deleting a project moves its whole shelf to trash in the same transaction. Restore/purge endpoints land with the trash-completion slice.
+
+### Project Thread Files
+
+Read-only conversation-files view over a project's member threads (Projects Phase 2) — the discovery route for Save Thread File to Shelf. Archived projects keep read access; a missing or foreign project is `404`.
+
+#### List Thread Files
+
+```http
+GET /api/projects/{project_id}/thread-files?offset=0&thread_limit=20&file_limit=50
+```
+
+**Query Parameters:** `offset` (member-thread cursor, default 0), `thread_limit` (default 20, 1..50), `file_limit` (per-thread file cap, default 50, 1..200) — out-of-bounds values are `422`.
+
+**Response:** `{"groups": [{"thread_id", "display_name", "updated_at", "truncated", "files": [{"kind": "upload"|"output", "name", "size_bytes", "modified_at", "artifact_url"}]}], "next_offset", "truncated"}`. Member threads are paged in the same non-archived order as the project thread list; `next_offset` is `null` when no threads remain. Each thread contributes up to `file_limit` files across its uploads and outputs; a group's `truncated` is `true` when that thread's listing was cut, and the envelope `truncated` is the OR over the page's groups. Entries disappear when their thread is deleted — the view keeps no storage of its own.
+
+
+### Trash
+
+Recoverable deletion tier for project shelf documents (Projects Phase 2). Trashed rows keep their bytes and a `{project_id, project_name}` origin snapshot for `projects.trash_retention_days` (default 30) before the retention sweep may purge them; permanent purge is a separate action. All routes fail closed: a missing or foreign document/project is `404` (never `403`), restoring into an archived or foreign target is the same `404`, and a memory-backend deployment answers `503` `"Projects not available"`. Purge endpoints carry no confirmation parameter — the "this cannot be undone" step is a UI contract, not a server-enforced handshake.
+
+#### List Trashed Documents
+
+```http
+GET /api/trash/documents?limit=100&offset=0
+```
+
+**Query Parameters:** `limit` (default 100, 1..1000), `offset` (default 0) — out-of-bounds values are `422`.
+
+**Response:** `{"documents": [{"id", "name", "size_bytes", "sha256", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at", "trashed_at", "trash_origin": {"project_id", "project_name"} | null}], "total", "limit", "offset"}`, most recently trashed first. The retention sweep runs lazily before the listing (a sweep failure is logged and never blocks it).
+
+#### Restore Document
+
+```http
+POST /api/trash/documents/{document_id}/restore
+Content-Type: application/json
+
+{"project_id": "…"}
+```
+
+**Body:** `project_id` optional. Target = the body value, else `trash_origin.project_id` when that project still exists, is owned, and is active; otherwise `404` (the UI offers the project picker). A foreign or archived target is the same `404` as a missing one.
+
+**Response:** `{"outcome": "restored" | "merged", "document": <ProjectDocumentResponse>}`. `merged` means the target already had an active row with identical bytes: the trash row is deleted and `document` is the surviving active row. Restore re-points the row without moving any file. Missing or size-mismatched content answers `409` `"content_missing"` and leaves the row trashed.
+
+#### Purge Document
+
+```http
+POST /api/trash/documents/{document_id}/purge
+```
+
+**Response:** `204`. Permanently unlinks the original and `derived/converted.md`, then deletes the row, in one row-locked transaction. Already-absent content counts as removed; any other file-cleanup failure rolls back, keeps the trashed row, and answers `500` with a retryable message.
+
+#### Empty Trash
+
+```http
+POST /api/trash/purge
+```
+
+**Response:** `{"purged": <int>}` — permanently deletes every trashed document of the caller, regardless of age: the confirmation covers the whole listing, so the retention cutoff never gates this route. Each row goes through the same guarded row-locked transaction as the single-document purge — bytes first, then the row. A file-cleanup failure other than already-absent content answers `500` with a retryable message, leaving that row and every row not yet visited trashed. Retention expiry is enforced only by the sweep (lazily before `GET /api/trash/documents` and once at gateway startup).
+
 ### Artifacts
 
 #### Get Artifact
@@ -1510,354 +1222,13 @@ GET /api/threads/{thread_id}/artifacts/{path}
 **Query Parameters:**
 - `download` (boolean): If `true`, force download with Content-Disposition header
 
-**Response:** File content with appropriate Content-Type
-
----
-
-### Durable inbound receipt operations
-
-These administrator-only routes expose bounded operations for PostgreSQL-backed
-native ingress. Browser mutations use the normal CSRF protection.
-
-| Route | Contract |
-|---|---|
-| `GET /api/channels/inbound-receipts/summary` | Capped counts by finite receipt state and indexed oldest-due age; never enumerates receipt envelopes. |
-| `GET /api/channels/inbound-receipts/{receipt_id}` | Exact unresolved dead-letter evidence with bounded digests, counters, and timestamps; never returns message text, binding reference, or provider delivery ID. |
-| `POST /api/channels/inbound-receipts/{receipt_id}/requeue` | Exact CAS from runless `dead_letter` to `deferred`, then a best-effort receipt-ID wake-up. |
-| `POST /api/channels/inbound-receipts/{receipt_id}/discard` | Exact CAS from runless `dead_letter` to `completed` with `operator_discarded`; no processing wake-up is emitted. |
-
-Both mutations require the expected fencing token, payload digest, and an
-explicit provider-event digest. A JSON `null` is accepted only to match a legacy
-row whose database event digest is SQL `NULL`; omitting the field is invalid.
-Concurrent, stale, already-bound, or otherwise ineligible mutations return a
-bounded conflict. Discard preserves the retained envelope only through the
-ordinary completed-row forensic window, after which normal bounded retention may
-remove it. There is no list, bulk-requeue, bulk-discard, or raw-payload route.
-
----
-
-### Durable subagent batch operations
-
-Base URL: `/api/threads/{thread_id}/subagent-batches`
-
-These routes are available when `subagent_batches.enabled` starts a SQL-backed
-worker. All lookups require the authenticated owner and server-owned tenant; an
-invisible batch returns `404`. Batch creation is model-initiated through
-`batch_task` inside an accepted durable parent tool attempt, not through an HTTP
-create route.
-
-| Route | Contract |
-|---|---|
-| `GET /api/threads/{thread_id}/subagent-batches` | List up to 100 owner-scoped batch projections. |
-| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}` | Return safe aggregate status, counts, immutable evidence anchors, and terminal code. |
-| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/items` | Page item projections; optional finite `status` filter. Raw results are omitted. |
-| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/attempts` | Return at most 100 payload-free attempt evidence records, optionally for one item. |
-| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/observations` | Return at most 100 `batch.accepted`, item-attempt transition, and `batch.terminal` observations. |
-| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/pause` | Stop new claims without revoking an active lease. |
-| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/resume` | Make paused work claimable again. |
-| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/cancel` | Persist cancellation, increment its fence, and reject stale completions; returns `503` if no worker is running. |
-| `POST /api/threads/{thread_id}/subagent-batches/{batch_id}/items/{item_id}/retry` | Requeue an owner-scoped failed item without resetting its accepted attempt budget; returns `409` when the item is ineligible or the budget is exhausted. |
-| `GET /api/threads/{thread_id}/subagent-batches/{batch_id}/results.jsonl` | Stream results through the protected owner-authorized channel. |
-
-Attempt and lifecycle routes never return prompts, results, tool arguments,
-exception text, credentials, worker names, or provider handles. Result export is
-separate because model output is operational data, not lifecycle evidence.
-Parent-run cancellation does not cascade into a batch in this release.
-
-See [Evidence-bound durable subagent batches](../../docs/DURABLE_SUBAGENT_BATCHES.md)
-for admission, retry, cancellation, limits, and qualification semantics.
-
----
-
-## Durable Invocation Runtime API
-
-Base URL: `/api/runtime/v1`
-
-This transport publishes the strict `deerflow.runtime/v1` contract used by the
-embedded runtime adapter. All routes use current Gateway authentication and
-permissions; invocation and context reads retain owner/admin visibility, and
-unknown and invisible resources both return `not_found_or_invisible`. Browser
-`POST` requests also require the normal CSRF cookie/header pair.
-
-The standard-library-only package exports `DurableInvocationPort`, the shared
-Protocol implemented by the embedded and HTTP adapters. Its records are
-transitively immutable defensive snapshots; parsing freezes every nested JSON
-container, while each `to_dict()` call returns a new mutable JSON wire copy.
-
-| Route | Contract |
-|---|---|
-| `GET /capabilities` | Administrator-only strict `runtime.capabilities`; reports only portable ensure, invocation/context observation, cancel control, and unsupported context export/retirement. |
-| `GET /deployment` | Administrator-only `deerflow.deployment/v1` report with extension manifest/health, latest safe admission-readiness reason codes/correlation, bounded image/source provenance when supplied, persistence facts, and an operator-asserted qualification reference or explicit `unqualified` state. This is not part of `DurableInvocationPort` and is not remote attestation. |
-| `POST /invocations/ensure` | Exact `invocation.ensure` body. `external_key` is required; the server derives its scope from the authenticated principal or service. |
-| `GET /invocations/{run_id}` | Access-filtered authoritative snapshot and lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500. Optional `include_tool_receipts=true`, `include_mcp_tasks=true`, and `include_subagent_batches=true` add independently paged bounded receipt, MCP-child, and payload-free batch-lifecycle projections. Each auxiliary limit is 1–100 and each cursor is scoped to the visible run plus its owner/tenant where applicable. |
-| `GET /contexts/{thread_id}/invocations` | Access-filtered normal-run lifecycle page. Optional `cursor`; `limit` defaults to 100 and must be 1–500; optional `source_kind` is `http|scheduled_task|native_channel|service`. |
-| `POST /invocations/{run_id}/control` | Exact `invocation.cancel` body with required `expected_state_version`; body and path run IDs must match. |
-
-Every request record includes `api_version="deerflow.runtime/v1"` and its exact
-`kind`; unknown versions, kinds, fields, or nested input/options are rejected.
-Ensure accepts only an external key, thread ID, nullable agent hint, strict
-graph/resume input, and finite invocation options. It does not accept an
-external scope, principal, Origin, raw config/context/metadata, callbacks,
-credentials, commands, or delivery/stream properties.
-
-The exact ensure body is:
-
-```json
-{
-  "api_version": "deerflow.runtime/v1",
-  "kind": "invocation.ensure",
-  "external_key": "source-delivery-id",
-  "thread_id": "thread-123",
-  "agent_hint": null,
-  "input": {
-    "api_version": "deerflow.runtime/v1",
-    "kind": "invocation.input.graph",
-    "value": {"messages": []}
-  },
-  "options": {
-    "api_version": "deerflow.runtime/v1",
-    "kind": "invocation.options",
-    "model_name": null,
-    "thinking_enabled": null,
-    "multitask_strategy": "reject",
-    "checkpoint_id": null,
-    "interrupt_before": null,
-    "interrupt_after": null
-  }
-}
-```
-
-`input.kind` is exactly `invocation.input.graph` with an object value or
-`invocation.input.resume` with any finite JSON value. Multitask strategy is
-`reject|rollback|interrupt`; interrupt selectors are a string list, `"*"`, or
-null. Observation is represented by `invocation.query` (`run_id`) or
-`context.invocations.query` (`thread_id`) plus nullable cursor, limit,
-`include_snapshot`, and strict nullable `source_kind`. HTTP supplies the path
-identity and fixes `include_snapshot=true`; invocation paging accepts `cursor`
-and `limit`, plus additive `include_tool_receipts`, `tool_receipt_cursor`, and
-`tool_receipt_limit` fields, additive `include_mcp_tasks`, `mcp_task_cursor`,
-and `mcp_task_limit` fields, and additive `include_subagent_batches`,
-`subagent_batch_cursor`, and `subagent_batch_limit` fields. HTTP accepts exact
-lowercase `true|false`; an auxiliary cursor without its matching inclusion
-flag, duplicate parameters, an empty cursor, or an auxiliary limit outside
-1–100 is `422 invalid_request`.
-Context paging additionally accepts `source_kind` but cannot request receipt,
-MCP-child, or batch-child pages. Control accepts exactly:
-
-```json
-{
-  "api_version": "deerflow.runtime/v1",
-  "kind": "invocation.cancel",
-  "run_id": "run-123",
-  "expected_state_version": 4,
-  "action": "interrupt"
-}
-```
-
-`action` is `interrupt|rollback`, and the path/body run IDs must match.
-Visible ensure/control receipts carry `run_id`, `thread_id`, `status`, and
-`state_version`. Observations carry fixed snapshots/events, typed immutable
-`invocation.summary.v1` records, and all three cursor values; auxiliary rows
-never enter any collection. Each summary is joined from its accepted normal run
-and contains only run/thread/current state, source kind, bounded safe Origin
-correlation references, agent/extension identity, and acceptance evidence
-digests. It excludes model input, secrets, secret handles, private policy
-reasons, and unbounded context. A pre-Origin historical row remains readable
-but has no summary.
-
-When explicitly requested for one visible run, an observation also carries a
-strict `tool_receipts` page. Each item includes its full `tr_<sha256>` identity,
-stable lead/subagent task scope, subagent name when applicable, tool name,
-attempt, `succeeded|failed|denied|cancelled|indeterminate` status, start/finish
-store timestamps, request/result projection digests, safe result/error kind,
-bounded policy decision references, and the accepted revision/assembly/
-extension/catalog/definition anchors. The page contains at most 100 items and
-has independent `next_cursor`, nullable `pruned_before`, `evidence_status`, and
-`invalid_event_count` fields. Old runs return `legacy_unavailable`; malformed
-receipt events are not reflected and make the page `invalid`. A start with no
-terminal event is `indeterminate`, including a process-loss gap.
-
-Receipt evidence never contains raw tool arguments, results, provider messages,
-headers, stack traces, or credential-bearing URLs. Request digests use field
-names/types, classified secret handles, length/type markers, and only bounded
-server-declared evidence-safe scalar values. Result digests cover the exact
-sanitized and output-budgeted model-visible result plus type/status. Digests are
-comparison commitments, not encryption, confidentiality, or truth evidence.
-A durable receipt records HartMesh's observation of a tool attempt. It does not
-guarantee an external side effect occurred exactly once or that the tool result
-was correct.
-
-When explicitly requested for one visible invocation, `mcp_tasks` is a separate
-page containing only task ID, lineage digest, submitting execution-task/receipt
-IDs, safe server/tool names, status and safe terminal code, notification run ID,
-timestamps, `next_cursor`, and `pruning_status`. The join is one bounded indexed
-query after parent visibility and current observation authorization succeed; it
-does not fetch one row per task. Cursors cannot be moved between tenants, owners,
-or parent runs. Parent cancellation does not cancel these remote tasks.
-
-When explicitly requested for one visible invocation, `subagent_batches` is a
-separate parent-linked page. It carries immutable acceptance and tool-receipt
-references, safe current status, timestamps, and bounded typed lifecycle
-observations. It never carries prompts, model output, tool arguments,
-credentials, worker identities, or provider handles. Its cursor is scoped to
-the server tenant, owner, and accepted parent run.
-
-The thread-scoped durable-task API is outside the `/api/runtime/v1` base:
-
-| Route | Contract |
-|---|---|
-| `GET /api/threads/{thread_id}/mcp-tasks` | Owner-authorized bounded current-task list with a safe lineage summary. |
-| `POST /api/threads/{thread_id}/mcp-tasks` | Owner-authorized standalone task creation. Accepts server/task-toolset names, arguments, and idempotency key; provenance-shaped extras are ignored and all lineage fields are server-derived. A private versioned HMAC commitment enforces exact replay equality without persisting raw arguments. |
-| `GET /api/threads/{thread_id}/mcp-tasks/{task_id}` | Owner-authorized detail with bounded lineage and result fields. Parent execution/receipt/evidence fields and parent/notification links are included only after independent run authorization; private replay commitments are never returned. |
-| `POST /api/threads/{thread_id}/mcp-tasks/{task_id}/cancel` | Durably requests remote cancellation; it does not modify immutable lineage, and the first request records separate pseudonymous actor attribution plus a fixed reason code. |
-
-Agent-created lineage is classified `agent_tool` and binds the accepted parent
-run/task/receipt/evidence anchors. HTTP-created lineage is `standalone_api` and
-has no parent fields. Existing pre-lineage rows report `legacy_unavailable`.
-Both submission paths use configured MCP call preparation; required preparation
-that depends on accepted Agent invocation facts fails standalone submission closed
-before network dispatch because standalone lineage deliberately has no parent run.
-Unknown or unauthorized task/thread/tenant combinations use the existing
-not-found behavior, and an unauthorized linked run is omitted rather than
-reported as an error.
-
-Accepted durable summaries include a nullable `assembly_evidence` object with
-only `version`, `fingerprint`, `effective_model`, `prompt_digest`,
-`toolset_digest`, `middleware_digest`, `skillset_digest`, and `policy_digest`.
-`assembly_evidence_status` is `pending`, `verified`, or
-`legacy_unavailable`. The server returns `verified` only after strict V1 parsing
-and canonical digest revalidation; partial or corrupt storage is returned as
-null/unavailable without reflecting stored content. The record identifies the
-graph HartMesh assembled and admitted, not a cryptographic code attestation.
-
-Ensure uses the existing durable idempotency boundary. Its strict v1 record always carries the
-complete option record: null model/thinking/checkpoint/interrupt values mean omission, while
-the serialized `multitask_strategy="reject"` is the defaulted caller intent. Object-key order
-does not affect equality; array order does. A new accepted request returns `201 created`; an
-equal retained caller intent returns `200 known` without a second worker; a changed or removed
-intent field returns `409 conflict`; and an independently busy thread returns
-`409 thread_busy`. Transport details outside the strict DTO do not participate. The accepted
-effective execution projection is retained separately and reused on replay. Equal replay does
-not rerun contributors, authorization, constraints, default resolution, agent/profile routing,
-or model execution. This refers to start/admission authorization; current observe authorization
-still applies before a retained row is revealed. The guarantee lasts while the retained normal
-run row exists. Auxiliary operation rows are never visible.
-
-Observation pages contain `next_cursor`, `minimum_available_cursor`, and
-`read_fence_cursor`. Cursor tokens are opaque. Empty filtered pages advance to
-the captured read fence; a pruned cursor returns `410 cursor_gap` with
-`minimum_available_cursor`, while malformed and ahead cursors return `422`.
-Reads are at least once, so consumers should deduplicate stable event IDs and
-cursors. Cursor metadata, returned events, and their summaries share one SQL
-snapshot. Context pages fetch summaries only for distinct run IDs in the
-bounded event page, not every run in the thread. Limits are 500 events per page,
-4 KiB canonical JSON per lifecycle payload, 16 KiB per summary, and 12 MiB for
-the full portable observation; the independent tool-receipt page is capped at
-100 items and each canonical receipt event body at 8 KiB.
-
-Lifecycle event types are exactly `accepted`, `started`,
-`cancellation_requested`, `cancelled`, `succeeded`, `failed`, `timed_out`, and
-`interrupted`. Each successful mutation increments the normal run's
-`state_version` and commits its matching safe event atomically; the run row,
-not the journal, remains authoritative.
-
-Polling either observation route is the supported durable evidence path; cursor polling of the
-transactional lifecycle rows is authoritative, and a push sink is at most optional
-at-least-once acceleration. A clarification request completes its current invocation
-successfully, and the answer starts a new invocation on the same DeerFlow thread, reusing that
-thread's checkpoints, memory, workspace, and conversation context. The v1 lifecycle does not
-define `input_required` or same-invocation suspension/resumption.
-
-Durability starts at committed invocation acceptance, or at the earlier PostgreSQL native
-receipt commit for a source that explicitly reports durable ingress. It does not promise
-exactly-once model execution, process-resumable execution, provider/bus delivery before a
-durable receipt, outbound provider delivery, rollback of external side effects, or
-multi-replica execution ownership. See `INVOCATION_RUNTIME.md` for the complete boundary table.
-
-Success status mapping is `201` for `created`, `202` for cancellation
-`requested`, and `200` for `known`, observations, capabilities,
-`already_requested`, and `already_terminal`. Failures use `403 denied` only
-after an authenticated visible-resource decision, `404
-not_found_or_invisible`, `409 conflict|thread_busy|stale`, `410 cursor_gap`,
-`422 invalid_request|cursor_ahead`, or `503 indeterminate`.
-
-Unlike legacy Gateway endpoints, every non-2xx runtime response—including auth
-and CSRF middleware rejection—uses only this envelope:
-
-```json
-{
-  "api_version": "deerflow.runtime/v1",
-  "kind": "runtime.error",
-  "code": "invalid_request"
-}
-```
-
-Cursor-gap/ahead responses may add their allowlisted cursor detail. An unexpected
-Adapter failure may add only a bounded correlation identifier; the matching
-internal log contains that identifier and safe operation context, never a public
-exception message. The transport never returns policy objects, exception text,
-private Origin data, secrets, or a free-form property bag.
-
-Portable capabilities are transport-identical: HTTP emits the exact strict record
-that the in-process Adapter returns. Deployment facts never appear in that record.
-The separate `GET /deployment` report exposes the host-owned immutable capability
-manifest/digest, separately labelled mutable health, optional bounded build/image
-identifiers, and persistence/qualification truth. When the Gateway runtime supplies
-it, the optional versioned `post_commit_obligations` object reports process-local
-pending admission and auxiliary-release counts plus compensator-proven
-resolved-since-start counts.
-`quarantined_identities` overlaps those pending types and is not additive. Every
-counter is saturated, resets on process restart, and is operational state rather than
-durable lifecycle or multi-replica evidence. The v1 readiness reason
-`admission_compensation_pending` is retained for compatibility and covers every
-post-commit ownership obligation. `process_local` survives neither
-restart nor pod loss; `node_durable` survives process restart on its node; and
-`shared_durable` uses the configured shared PostgreSQL store. `atomic_lifecycle` is
-reported independently because an in-memory store can be atomic without being
-restart-durable. `deployment.profile: durable_production` refuses process-local
-state and requires `run_events.backend: db` for fenced idempotent tool receipts
-at startup and readiness; `local_development` permits memory/JSONL evidence
-without claiming durability. Qualification remains `unqualified` with
-`trust="none_declared"` unless a
-reference is explicitly supplied. A supplied reference retains v1
-`status="qualified"` but is labelled `trust="operator_asserted"`; it is not independently
-verified by the Gateway. Live health never changes the manifest digest or an
-invocation's accepted generation. There is no context export, context retirement,
-event broker, or additional control in v1.
-
-Trusted deployers may stamp `DEER_FLOW_IMAGE_REFERENCE`,
-`DEER_FLOW_IMAGE_DIGEST`, `DEER_FLOW_SOURCE_REVISION`, and bounded
-`DEER_FLOW_QUALIFICATION_EVIDENCE` JSON. Qualification evidence is a finite list
-of exact ID, SHA-256 artifact digest, and RFC3339 completion-time records. New
-scoped records additionally carry a bounded scope and exact `passed` state;
-legacy three-field records remain readable as `legacy_unspecified`. The opt-in
-real-pod suite uses scope `durable_one_replica_pod_recovery` and supplies it only
-after all required scenarios pass. Collection or default skip cannot manufacture a
-reference. Invalid input is ignored with a safe server diagnostic. The Helm chart validates
-and supplies these fields from its non-secret deployment values; they never enter portable
-capabilities. Exact verification is an offline operation: the operator supplies the artifact
-independently and runs `backend/scripts/verify_qualification_evidence.py` with the report
-digest plus expected qualification ID, image/chart/config/schema, namespace, scope, and
-required scenarios. Its only successful trust state is
-`external_evidence_verified`; it performs no network fetch.
-
-`GET /health` is independent process liveness. Unauthenticated `GET /ready`
-returns the overall `status`, the safe tenant-identity projection, and—when
-selected—the safe optional contextual-memory projection. A degraded optional
-Honcho backend is reported without changing overall readiness and is never
-described as a durable dependency. The overall status uses the same bounded proof that fences
-genuinely new invocation admission: current-generation fresh health for every required
-authority capability, bounded lifecycle singleton/pruning/event-edge integrity, database
-availability, and the configured persistence profile. Accepted keyed replay is resolved
-before that fence and reuses its sealed evidence. Startup-only `deployment.readiness`
-configures the cache/admission/staleness windows and per-probe/overall deadlines.
+**Response:** File content with appropriate Content-Type. HTML and XML documents (`.html`, `.xml`, `.xhtml`, `.svg`, and other `+xml` types) are always returned as attachments, regardless of `download`, so generated markup never renders in the application origin.
 
 ---
 
 ## Error Responses
 
-Legacy APIs return errors in this format (the durable runtime namespace uses
-the versioned `runtime.error` envelope documented above):
+All APIs return errors in a consistent format:
 
 ```json
 {
@@ -1892,18 +1263,14 @@ DeerFlow enforces authentication for all non-public HTTP routes. Public routes a
 
 - `POST /api/v1/auth/initialize` creates the first admin account when no admin exists.
 - `POST /api/v1/auth/login/local` logs in with email/password and sets an HttpOnly `access_token` cookie.
-- `POST /api/v1/auth/register` creates a regular `user` account and sets the session cookie; `403 registration_disabled` when `auth.local.allow_registration` is false.
+- `POST /api/v1/auth/register` creates a regular `user` account and sets the session cookie.
 - `POST /api/v1/auth/logout` clears the session cookie.
 - `GET /api/v1/auth/setup-status` reports whether the first admin still needs to be created.
-- `GET /api/product` returns `{"name": ...}`, the product's name (`ui.product_name`, HartMesh when unset), which the sign-in page shows before anyone signs in.
 
 The authenticated auth endpoints are:
 
 - `GET /api/v1/auth/me` returns the current user.
 - `POST /api/v1/auth/change-password` changes password, optionally changes email during setup, increments `token_version`, and reissues the cookie.
-- `POST /api/v1/auth/users` (administrator, interactive session only; local-password mode) adds a `user` account for `{"email"}` and answers `201` with `id`, `email`, `system_role`, `needs_setup: true` and `one_time_password`, shown only in this response. `400 email_already_exists` as `/register`; `403 sign_on_required` in sign-on-only mode. No cookie is set.
-
-A session of an account with `needs_setup` (added by an administrator, or reset by `reset_admin`) is refused with `403 setup_required` on every route but `/me` and `/change-password` until its person chooses a password; `change-password` with `new_email` completes the setup, after which the first password opens nothing. The rule binds sessions only: a reset account's personal access tokens keep working, and an added account has none.
 
 Protected state-changing requests also require the CSRF double-submit token: send the `csrf_token` cookie value as the `X-CSRF-Token` header. Login/register/initialize/logout are bootstrap auth endpoints: they are exempt from the double-submit token but still reject hostile browser `Origin` headers.
 
@@ -2135,7 +1502,9 @@ curl -X POST http://localhost:2026/api/threads/abc123/uploads \
   -F "files=@document.pdf"
 
 # Enable skill
-curl -X POST http://localhost:2026/api/skills/pdf-processing/enable
+curl -X PUT http://localhost:2026/api/skills/pdf-processing \
+  -H "Content-Type: application/json" \
+  -d '{"enabled": true}'
 
 # Stateless stream — no thread pre-creation
 curl -s -D - -N -X POST http://localhost:2026/api/langgraph/runs/stream \
@@ -2186,3 +1555,18 @@ curl -X POST http://localhost:2026/api/langgraph/threads/abc123/runs/stream \
 > `config.recursion_limit` explicitly — see the [Create Run](#create-run)
 > section for details. Scheduled-task launches use
 > `scheduler.recursion_limit` from `config.yaml` instead of a client body.
+
+## Chat archive and restore
+
+`POST /api/threads/search` accepts `archived: true` for archived chats or
+`archived: false` for recent chats (including legacy rows without an archive flag).
+Omit the field or use null to include both. Filtering applies before `limit` and
+`offset` and is scoped to the authenticated user. Combine it with the existing
+`metadata` and `status` filters when needed.
+
+Archive with `PATCH /api/threads/{thread_id}` and body
+`{"metadata":{"deerflow_archived":true}}`; use false to restore. The flag must be
+a JSON boolean. Writes containing only boolean pin/archive flags preserve
+`updated_at` and all other metadata. The owner-checked endpoint returns the normal
+thread metadata response; original thread and artifact URLs remain available.
+Archiving does not cancel runs, pause schedules, or change retention.

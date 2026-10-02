@@ -19,9 +19,9 @@ so the wrapper supplies a silent pass-through counterpart when the inner
 implements only one side; otherwise the base class raises
 ``NotImplementedError`` before isolation can fail open.
 
-Middleware contributions are observational, hence fail-open. Authoritative
-capabilities such as ``AuthorizationProviderFactory`` are resolved by their
-host-owned call sites and never pass through this wrapper.
+All first-version contributions are observational, hence fail-open. A future
+intercepting (decision-making) contribution would need to fail closed and must
+opt out of this wrapper explicitly.
 """
 
 from __future__ import annotations
@@ -36,7 +36,6 @@ from typing import Any
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.errors import GraphBubbleUp
 
-from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 from deerflow.extensions.loader import Diagnostic
 
 logger = logging.getLogger(__name__)
@@ -205,23 +204,12 @@ class IsolatedMiddleware(AgentMiddleware):
         return self._source
 
     def _report(self, hook: str, exc: Exception) -> None:
-        diagnostic = bounded_diagnostic(
-            code="middleware_hook_failed",
-            operation=hook,
-            error=exc,
-            contribution_id=self._source,
-        )
-        log_bounded_failure(logger, diagnostic, level=logging.WARNING)
+        message = f"{type(self._inner).__name__}.{hook} failed and was skipped: {exc}"
+        logger.exception("Extension %s: %s", self._source, message)
         try:
-            self._on_error(Diagnostic.from_bounded(self._source, diagnostic))
-        except Exception as reporting_error:  # pragma: no cover - reporting must never raise
-            reporting_diagnostic = bounded_diagnostic(
-                code="middleware_diagnostic_reporting_failed",
-                operation="report_middleware_failure",
-                error=reporting_error,
-                contribution_id=self._source,
-            )
-            log_bounded_failure(logger, reporting_diagnostic, level=logging.ERROR)
+            self._on_error(Diagnostic.error(self._source, message))
+        except Exception:  # pragma: no cover - reporting must never raise
+            logger.exception("Extension %s: diagnostic reporting failed", self._source)
 
     def _invoke_sync(
         self,

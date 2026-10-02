@@ -37,11 +37,9 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
    ```bash
    make docker-init
    ```
-   This will:
-   - Build Docker images
-   - Install frontend dependencies (pnpm)
-   - Install backend dependencies (uv)
-   - Share pnpm cache with host for faster builds
+   This pulls the sandbox image that the container sandbox modes run, so the
+   first sandbox container does not wait on the download. It is a no-op in
+   local sandbox mode (the default), which needs no image.
 
 3. **Start development services**:
    ```bash
@@ -86,7 +84,7 @@ Docker provides a consistent, isolated environment with all dependencies pre-con
 #### Docker Commands
 
 ```bash
-# Build the custom k3s image (with pre-cached sandbox image)
+# Pull the sandbox image used by the container sandbox modes
 make docker-init
 # Start Docker services (mode-aware, localhost:2026)
 make docker-start
@@ -100,73 +98,12 @@ make docker-logs-frontend
 make docker-logs-gateway
 ```
 
-If Docker builds are slow in your network, you can override the default package registries before running `make docker-init` or `make docker-start`:
+If Docker builds are slow in your network, you can override the default package registries before running `make docker-start`:
 
 ```bash
 export UV_INDEX_URL=https://pypi.org/simple
 export NPM_REGISTRY=https://registry.npmjs.org
 ```
-
-#### Development network
-
-The five dev services share one pinned bridge, `deer-flow-dev`, on
-`10.201.27.0/24`. It is pinned so the range is predictable rather than whatever
-Docker's default pool hands out — and it has to be pinned somewhere your
-machine does not already route, because **a bridge is a connected route**:
-every address in the range stops being reachable through your real default
-gateway while the stack is up.
-
-That is not hypothetical. The stack shipped on `192.168.200.0/24` until
-2026-09-09, which is a live range on the network these tenants are developed
-for, so `make docker-start` there quietly took over the route to it. The
-current default also stays clear of Docker's own address pools (so it never
-collides with a sandbox network) and of the tenant VM profile's
-`10.201.26.0/24`, so one machine can run both.
-
-**No private range is free everywhere.** If `10.201.27.0/24` collides with
-something your machine must still reach, check first and then override:
-
-```bash
-# What this machine already routes. A default route through your gateway is
-# what you want to see; "dev br-*" means something already owns the range.
-ip -4 route get 10.201.27.1
-
-# What Docker has already allocated here.
-docker network inspect -f '{{.Name}} {{range .IPAM.Config}}{{.Subnet}} {{end}}' $(docker network ls -q)
-
-# Override for this stack, in your shell or in docker/.env.
-export DEER_FLOW_DEV_SUBNET=10.90.7.0/24
-```
-
-The variable is optional and defaulted, so a checkout that has never heard of
-it keeps rendering exactly as before.
-
-**Moving an existing stack onto a new range.** Do not do this with `up -d`
-alone. Compose does recreate the network with the new subnet, but it reattaches
-containers it merely restarted **without their service aliases** — `redis`,
-`gateway`, `frontend` and `nginx` stop resolving on the network even though the
-containers are running, so every service that addresses a peer by name breaks
-(observed on Engine 28.4.0 / Compose v2.39.4: the reattached container came back
-with `Aliases=[]` and only its container name resolving). Stop and start
-instead:
-
-```bash
-make docker-stop     # `compose down`: containers and the network, nothing else
-make docker-start
-```
-
-Your data is not part of what that removes. The dev stack keeps Redis in the
-named volume `deer-flow-dev_redis-data` and everything else — your checkout,
-`backend/.deer-flow`, `logs/` — in bind mounts of the repository, and `down`
-touches neither. Never add `-v` (that is what deletes the volumes) and do not
-reach for `docker volume prune` or `docker network prune`. Verify afterwards:
-
-```bash
-docker network inspect deer-flow-dev_deer-flow-dev --format '{{(index .IPAM.Config 0).Subnet}}'
-docker inspect deer-flow-redis --format '{{range .NetworkSettings.Networks}}{{.Aliases}}{{end}}'
-```
-
-The second must list the service alias `redis`, not just the container name.
 
 #### Recommended host resources
 
@@ -281,7 +218,7 @@ If you need to start services individually:
    make dev
 
    # Terminal 2: Start Frontend (port 3000)
-   cd frontend-hm
+   cd frontend
    pnpm dev
    ```
 
@@ -328,7 +265,7 @@ deer-flow/
 │   │   └── channels/       # IM channel integrations
 │   ├── docs/               # Backend documentation
 │   └── Makefile            # Backend commands
-├── frontend-hm/               # Frontend application
+├── frontend/               # Frontend application
 │   └── Makefile            # Frontend commands
 └── skills/                 # Agent skills
     ├── public/             # Public skills
@@ -361,7 +298,7 @@ Nginx (port 2026) ← Unified entry point
    make format   # ruff check --fix + ruff format
 
    # Frontend
-   cd frontend-hm
+   cd frontend
    pnpm format:write   # Prettier
    ```
 
@@ -408,11 +345,11 @@ make test-blocking-io
 make test-live
 
 # Frontend unit tests
-cd frontend-hm
+cd frontend
 make test
 
 # Frontend E2E tests (requires Chromium; builds and auto-starts the Next.js production server)
-cd frontend-hm
+cd frontend
 make test-e2e
 ```
 
@@ -427,7 +364,7 @@ Every pull request triggers the following CI workflows:
 
 - **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
-- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered by `frontend-hm/`, pnpm runner, or workflow changes)
+- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
 
 ## Code Style
 

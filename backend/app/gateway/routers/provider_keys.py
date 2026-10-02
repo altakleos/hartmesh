@@ -3,7 +3,9 @@
 ``GET /api/provider-keys`` lists every provider in the release's catalog with
 where its key comes from -- ``product``, ``environment`` or ``none`` -- and
 when it last changed; ``PUT /api/provider-keys/{provider}`` with
-``{"key": "..."}`` adds or replaces one, ``DELETE`` removes it, and
+``{"key": "..."}`` adds or replaces one, ``DELETE`` removes it,
+``POST /api/provider-keys/{provider}/test`` with the same body asks the
+provider whether it accepts a key without setting it, and
 ``GET /api/provider-keys/events`` is the record of who did which, and when.
 An administrator's interactive session only, as for adding a person. No
 response, log line or error carries a key: the body is parsed here rather
@@ -94,6 +96,20 @@ async def put_provider_key(provider: str, request: Request, response: Response) 
     key = await _key_from_body(request)
     try:
         result = await service.put(provider, key, actor_id=str(admin.id), actor_email=getattr(admin, "email", None))
+    except ProviderKeysRefused as refusal:
+        raise _refused(refusal) from None
+    response.headers["Cache-Control"] = "no-store"
+    return result
+
+
+@router.post("/{provider}/test")
+async def test_provider_key(provider: str, request: Request, response: Response) -> dict[str, Any]:
+    """Whether the provider accepts this key; the key is neither stored nor applied."""
+    await require_admin_user(request, detail=_ADMIN_DETAIL)
+    service = _require_service(request)
+    key = await _key_from_body(request)
+    try:
+        result = await service.check(provider, key)
     except ProviderKeysRefused as refusal:
         raise _refused(refusal) from None
     response.headers["Cache-Control"] = "no-store"

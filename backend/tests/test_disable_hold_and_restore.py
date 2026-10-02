@@ -25,20 +25,23 @@ import pytest
 
 os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-disable-hold-restore-min-32-chars")
 
-from support.scheduled_task_runtime import CallbackInvocationRuntime, NeverLaunchInvocationRuntime
-
 from app.gateway.auth.accounts import EXIT_UNCONFIRMED_RUNS, AccountsCommand, main
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-from app.runtime.invocation import OwnerRefusedLaunchError
+from app.gateway.services import OwnerRefusedLaunchError
 
 ISSUER = "https://login.example.com/realms/tenant"
-HOLD_SURFACES = ("schedules", "channel_bindings", "scheduled_occurrences", "mcp_task_notifications", "channel_receipts")
+# The surfaces this command is given a store for; one it cannot look at is not reported.
+HOLD_SURFACES = ("schedules", "channel_bindings", "scheduled_occurrences")
 
 
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+async def _never_launch(**kwargs):
+    raise AssertionError(f"a held schedule launched: {kwargs}")
 
 
 class _Tasks:
@@ -65,30 +68,24 @@ class _Tasks:
 
 @pytest.fixture
 def stores(tmp_path) -> Iterator[SimpleNamespace]:
-    from app.channels.inbound_receipts import SqlInboundReceiptStore
     from deerflow.persistence.channel_connections import ChannelConnectionRepository, ChannelCredentialCipher
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
-    from deerflow.persistence.inbound_receipt.model import InboundReceiptRow  # noqa: F401 - registers the table
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
     from deerflow.persistence.run import RunRepository
     from deerflow.persistence.scheduled_task_runs import ScheduledTaskRunRepository
     from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
     asyncio.run(init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/holds.db", sqlite_dir=str(tmp_path)))
     session_factory = get_session_factory()
-    tenant = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
     try:
         yield SimpleNamespace(
             session_factory=session_factory,
             users=SQLiteUserRepository(session_factory),
-            tokens=PersonalAccessTokenRepository(session_factory, tenant=tenant),
+            tokens=PersonalAccessTokenRepository(session_factory),
             schedules=ScheduledTaskRepository(session_factory),
             occurrences=ScheduledTaskRunRepository(session_factory),
-            runs=RunRepository(session_factory, tenant=tenant),
+            runs=RunRepository(session_factory),
             connections=ChannelConnectionRepository(session_factory, cipher=ChannelCredentialCipher.from_key("test-encryption-key")),
-            receipts=SqlInboundReceiptStore(session_factory),
-            tasks=_Tasks(),
         )
     finally:
         asyncio.run(close_engine())
@@ -105,9 +102,7 @@ def _command(stores: SimpleNamespace, **kwargs) -> AccountsCommand:
         tokens=stores.tokens,
         schedules=stores.schedules,
         runs=stores.runs,
-        mcp_tasks=stores.tasks,
         channel_connections=stores.connections,
-        receipts=stores.receipts,
         **kwargs,
     )
 
@@ -197,7 +192,7 @@ async def test_after_disable_and_enable_a_held_schedule_does_not_fire_at_its_nex
     scheduler = ScheduledTaskService(
         task_repo=stores.schedules,
         task_run_repo=stores.occurrences,
-        invocation_runtime=NeverLaunchInvocationRuntime(),
+        launch_run=_never_launch,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -310,98 +305,6 @@ async def test_a_restore_with_no_record_says_so(stores) -> None:
 
 
 @pytest.mark.anyio
-async def test_disable_ends_the_work_waiting_to_run_for_them(stores) -> None:
-    from sqlalchemy import select
-
-    from deerflow.persistence.inbound_receipt.model import InboundReceiptRow
-    from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-
-    account = await stores.users.create_user(_account())
-    user_id = str(account.id)
-    self_paused = await _schedule(stores, user_id, paused=True)
-    # A manual trigger runs even on a paused task.
-    await stores.occurrences.create(run_record_id="manual-occurrence", task_id=self_paused, thread_id="thread-manual", scheduled_for=datetime.now(UTC), trigger="manual", status="queued")
-    stores.tasks.waiting[user_id] = 2
-    async with stores.session_factory() as session:
-        session.add(
-            InboundReceiptRow(
-                receipt_id="00000000-0000-0000-0000-000000000001",
-                provider="slack",
-                binding_kind="connection",
-                binding_reference="binding-1",
-                provider_delivery_id="delivery-1",
-                thread_id="thread-receipt",
-                payload_json={"version": 1, "owner_user_id": user_id},
-                payload_digest="a" * 64,
-                provider_event_digest="b" * 64,
-                state="dead_letter",
-                fencing_token=1,
-                next_attempt_at=datetime.now(UTC),
-                received_at=datetime.now(UTC),
-                updated_at=datetime.now(UTC),
-            )
-        )
-        await session.commit()
-
-    document = await _command(stores).run("disable", email="pat@example.com")
-
-    surfaces = document["surfaces"]
-    assert surfaces["scheduled_occurrences"]["action"] == "ended" and surfaces["scheduled_occurrences"]["count"] == 1
-    assert surfaces["mcp_task_notifications"]["action"] == "ended" and surfaces["mcp_task_notifications"]["count"] == 2
-    assert surfaces["channel_receipts"]["action"] == "ended" and surfaces["channel_receipts"]["count"] == 1
-    assert stores.tasks.ended[0] == ((user_id,), "mcp_task_notification_owner_refused")
-    async with stores.session_factory() as session:
-        occurrence = await session.get(ScheduledTaskRunRow, "manual-occurrence")
-        receipt = (await session.execute(select(InboundReceiptRow))).scalar_one()
-    assert occurrence.status == "interrupted"
-    assert receipt.state == "completed" and receipt.outcome_code == "owner_refused"
-
-
-@pytest.mark.anyio
-async def test_what_appears_while_the_runs_unwind_is_held_and_ended_by_the_second_look(stores) -> None:
-    """A request that authenticated before the refusal can still make a schedule, and a task that went terminal has a notification waiting."""
-    account = await stores.users.create_user(_account())
-    user_id = str(account.id)
-    command = _command(stores)
-    late: list[str] = []
-    end_running_work = command._end_running_work
-
-    async def _meanwhile(*args, **kwargs):
-        result = await end_running_work(*args, **kwargs)
-        late.append(await _schedule(stores, user_id))
-        stores.tasks.waiting[user_id] = 1
-        return result
-
-    command._end_running_work = _meanwhile
-    document = await command.run("disable", email="pat@example.com")
-
-    assert document["held"]["schedules"] == late
-    assert await _status(stores, late[0]) == "paused"
-    assert document["surfaces"]["mcp_task_notifications"]["count"] == 1
-    assert len(stores.tasks.ended) == 2, "both looks"
-
-
-@pytest.mark.anyio
-async def test_work_a_gateway_still_has_in_hand_is_not_reported_ended(stores) -> None:
-    """A notification a task loop is launching, or an occurrence a scheduler is: its own launch reads the refusal, and until it has, a re-run is needed."""
-    account = await stores.users.create_user(_account())
-    user_id = str(account.id)
-    weekly = await _schedule(stores, user_id)
-    await stores.occurrences.create(run_record_id="launching-occurrence", task_id=weekly, thread_id="thread-launching", scheduled_for=datetime.now(UTC), trigger="scheduled", status="queued")
-    await stores.occurrences.claim_queued_run("launching-occurrence", lease_owner="scheduler-a", now=datetime.now(UTC), lease_seconds=60, global_max_concurrent_runs=10)
-    stores.tasks.in_a_loop[user_id] = 1
-
-    document = await _command(stores).run("disable", email="pat@example.com")
-
-    for name in ("scheduled_occurrences", "mcp_task_notifications"):
-        entry = document["surfaces"][name]
-        assert entry["not_ended"] == 1 and entry["stopped_after_ms"] is None, name
-        assert name in document["surfaces_unconfirmed"], name
-    assert document["surfaces"]["channel_receipts"]["not_ended"] == 0
-    assert document["returncode"] == EXIT_UNCONFIRMED_RUNS
-
-
-@pytest.mark.anyio
 async def test_a_schedule_its_owner_paused_while_the_command_looked_is_not_recorded_as_held(stores, monkeypatch) -> None:
     """Active when listed, paused by its owner before the hold reached it: a restore must not resume it."""
     account = await stores.users.create_user(_account())
@@ -436,41 +339,6 @@ async def test_a_look_that_cannot_record_what_to_hold_still_cancels_the_runs_and
     assert document["runs_found"] == 1, "the command went on to the runs"
     assert {"schedules", "channel_bindings"} <= set(document["surfaces_unconfirmed"])
     assert document["returncode"] == EXIT_UNCONFIRMED_RUNS
-
-
-@pytest.mark.anyio
-async def test_a_queue_that_cannot_be_ended_is_unconfirmed_and_does_not_stop_the_others(stores, monkeypatch) -> None:
-    account = await stores.users.create_user(_account())
-    stores.tasks.waiting[str(account.id)] = 1
-
-    async def _unavailable(*args, **kwargs):
-        raise ConnectionError("the database went away")
-
-    monkeypatch.setattr(stores.receipts, "end_for_owners", _unavailable)
-    document = await _command(stores).run("disable", email="pat@example.com")
-
-    assert "channel_receipts" in document["surfaces_unconfirmed"] and document["returncode"] == EXIT_UNCONFIRMED_RUNS
-    assert document["surfaces"]["channel_receipts"]["stopped_after_ms"] is None
-    assert document["surfaces"]["mcp_task_notifications"]["count"] == 1 and "mcp_task_notifications" not in document["surfaces_unconfirmed"]
-
-
-@pytest.mark.anyio
-async def test_a_queue_the_first_look_could_not_end_and_the_second_did_is_confirmed(stores, monkeypatch) -> None:
-    await stores.users.create_user(_account())
-    end_for_owners = stores.receipts.end_for_owners
-    calls: list[int] = []
-
-    async def _fails_once(*args, **kwargs):
-        calls.append(1)
-        if len(calls) == 1:
-            raise ConnectionError("database is locked")
-        return await end_for_owners(*args, **kwargs)
-
-    monkeypatch.setattr(stores.receipts, "end_for_owners", _fails_once)
-    document = await _command(stores).run("disable", email="pat@example.com")
-
-    assert len(calls) == 2
-    assert "channel_receipts" not in document["surfaces_unconfirmed"] and document["returncode"] == 0
 
 
 @pytest.mark.anyio
@@ -530,7 +398,7 @@ async def test_a_rerun_reports_the_whole_hold_and_holds_nothing_twice(stores) ->
     assert again["held"] == {"schedules": [weekly], "channel_bindings": []}
     assert again["surfaces"]["schedules"]["count"] == 1
     assert again["schedules_held"] == 0, "nothing is active any more"
-    assert (await stores.schedules.get_internal(weekly))["schedule_version"] == 2, "held once"
+    assert (await stores.schedules.get_internal(weekly))["status"] == "paused"
 
 
 @pytest.mark.anyio
@@ -576,7 +444,7 @@ async def test_the_hold_stands_through_a_launch_in_flight_during_the_disable(sto
     scheduler = ScheduledTaskService(
         task_repo=stores.schedules,
         task_run_repo=stores.occurrences,
-        invocation_runtime=CallbackInvocationRuntime(_launch_while_the_owner_is_turned_off),
+        launch_run=_launch_while_the_owner_is_turned_off,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,

@@ -241,10 +241,9 @@ async def test_gateway_runtime_rejects_mode_different_from_frozen_process(
 
     from app.gateway.deps import langgraph_runtime
     from deerflow.runtime import checkpoint_mode
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
     @asynccontextmanager
-    async def resource(_config, **_kwargs):
+    async def resource(_config):
         yield object()
 
     async def noop(*_args, **_kwargs):
@@ -286,13 +285,11 @@ async def test_gateway_runtime_rejects_mode_different_from_frozen_process(
         run_events=None,
     )
 
-    app = FastAPI()
-    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
     with pytest.raises(
         checkpoint_mode.CheckpointModeReconfigurationError,
         match="restart",
     ):
-        async with langgraph_runtime(app, startup_config):
+        async with langgraph_runtime(FastAPI(), startup_config):
             pass
 
 

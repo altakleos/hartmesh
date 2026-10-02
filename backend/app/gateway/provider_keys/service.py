@@ -39,7 +39,7 @@ import asyncio
 import logging
 import os
 import tempfile
-from collections.abc import Callable, Mapping, MutableMapping
+from collections.abc import Awaitable, Callable, Mapping, MutableMapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -51,6 +51,7 @@ from app.gateway.provider_keys.cipher import (
     UnreadableProviderKey,
     WrappingKeyInvalid,
 )
+from app.gateway.provider_keys.probe import ProbeOutcome, probe_model, with_key
 from app.gateway.provider_keys.profile import CatalogProvider, ProfileRenderer, RenderRefused
 
 logger = logging.getLogger(__name__)
@@ -103,11 +104,13 @@ class ProviderKeyService:
         repository: Any,
         environ: MutableMapping[str, str],
         reload: Callable[[], None] = _default_reload,
+        probe: Callable[[Mapping[str, Any], str], Awaitable[ProbeOutcome]] = probe_model,
     ) -> None:
         self._renderer = renderer
         self._repository = repository
         self._environ = environ
         self._reload = reload
+        self._probe = probe
         self._providers = {provider.id: provider for provider in renderer.providers}
         # What the process started with, for every catalog variable: what a
         # provider falls back to when no key is stored for it.
@@ -196,6 +199,30 @@ class ProviderKeyService:
 
     async def events(self, *, limit: int = 50) -> list[dict]:
         return await self._repository.events(limit=limit)
+
+    # ── testing a key before it is set ─────────────────────────────────────
+
+    async def check(self, provider_id: str, key: str) -> dict[str, Any]:
+        """Ask the provider whether it accepts *key*. Nothing is stored, applied or changed.
+
+        For a model provider, one short message is sent with the client a run
+        would build from the catalog's first model for it. ``accepted`` means
+        the provider started answering, ``rejected`` that it refused the key,
+        and ``inconclusive`` that the question could not be settled -- no
+        answer in time, or a refusal that is not about the key -- with the
+        cause in ``reason``. A search or page-reading provider has no request
+        every one of them answers the same way, so its result is
+        ``not_testable``: its key is first exercised by the next search.
+        """
+        self._refuse_unless_managed(needs_cipher=False)
+        provider = self._provider(provider_id)
+        key = _check_key(key)
+        entry = self._renderer.first_model(provider.variable) if provider.kind == "models" else None
+        if entry is None:
+            return {"provider": provider.id, "kind": provider.kind, "result": "not_testable", "reason": None, "model": None}
+        outcome = await self._probe(with_key(entry, provider.variable, key), key)
+        logger.info("provider keys: a key for %s (%s) was tested: %s", provider.id, provider.variable, outcome.result)
+        return {"provider": provider.id, "kind": provider.kind, "result": outcome.result, "reason": outcome.reason, "model": entry.get("name")}
 
     # ── applying ───────────────────────────────────────────────────────────
 

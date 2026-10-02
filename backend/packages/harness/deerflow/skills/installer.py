@@ -7,12 +7,14 @@ Both Gateway and Client delegate to these functions.
 import asyncio
 import concurrent.futures
 import logging
+import os
 import posixpath
 import shutil
 import stat
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+from deerflow.skills.package_files import is_code_path, is_executable_binary_prefix
 from deerflow.skills.permissions import make_skill_tree_sandbox_readable
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -28,21 +30,6 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_INPUT_DIRS = {"references", "templates"}
 _PROMPT_INPUT_SUFFIXES = frozenset({".json", ".markdown", ".md", ".rst", ".txt", ".yaml", ".yml"})
-_CODE_SUFFIXES = frozenset({".bash", ".cjs", ".js", ".mjs", ".php", ".pl", ".ps1", ".py", ".rb", ".sh", ".ts", ".zsh"})
-# Full magics per variant — a shorter shared prefix would also match
-# non-executable data files.
-_EXECUTABLE_MAGIC_PREFIXES = (
-    b"\x7fELF",  # ELF
-    b"MZ",  # PE/DOS
-    b"\xfe\xed\xfa\xce",  # Mach-O 32-bit big-endian
-    b"\xfe\xed\xfa\xcf",  # Mach-O 64-bit big-endian
-    b"\xce\xfa\xed\xfe",  # Mach-O 32-bit little-endian
-    b"\xcf\xfa\xed\xfe",  # Mach-O 64-bit little-endian
-    b"\xca\xfe\xba\xbe",  # Mach-O fat binary big-endian
-    b"\xbe\xba\xfe\xca",  # Mach-O fat binary little-endian
-    b"\xca\xfe\xba\xbf",  # Mach-O fat64 binary big-endian
-    b"\xbf\xba\xfe\xca",  # Mach-O fat64 binary little-endian
-)
 
 
 class SkillAlreadyExistsError(ValueError):
@@ -101,11 +88,6 @@ def is_symlink_member(info: zipfile.ZipInfo) -> bool:
     return stat.S_ISLNK(mode)
 
 
-def is_executable_binary_prefix(prefix: bytes) -> bool:
-    """Detect ELF, PE, and Mach-O executables by magic bytes."""
-    return prefix.startswith(_EXECUTABLE_MAGIC_PREFIXES)
-
-
 def should_ignore_archive_entry(path: Path) -> bool:
     """Return True for macOS metadata dirs and dotfiles."""
     return path.name.startswith(".") or path.name == "__MACOSX"
@@ -140,8 +122,7 @@ def safe_extract_skill_archive(
 
     Protections:
     - Reject absolute paths and directory traversal (..).
-    - Reject symlink, device, socket, FIFO, and other special entries.
-    - Reject duplicate normalized paths and file/directory conflicts.
+    - Skip symlink entries instead of materialising them.
     - Enforce a hard limit on total uncompressed size (zip bomb defence).
     - Enforce a hard limit on member count (zip bomb defence by entry count —
       a huge number of tiny/empty members can be cheap to store yet still
@@ -152,6 +133,8 @@ def safe_extract_skill_archive(
         ValueError: If unsafe members, executable binaries, entry count, or size limit exceeded.
     """
     dest_root = dest_path.resolve()
+    total_written = 0
+
     infos = zip_ref.infolist()
     if len(infos) > max_entries:
         # Early-abort before any per-member work below — mirrors the same
@@ -162,50 +145,21 @@ def safe_extract_skill_archive(
         # it lives in the extraction path every install goes through.
         raise ValueError(f"Skill archive contains too many entries ({len(infos)} > {max_entries}).")
 
-    normalized_infos: list[tuple[zipfile.ZipInfo, PurePosixPath, bool]] = []
-    seen: dict[PurePosixPath, bool] = {}
-    advertised_total = 0
     for info in infos:
         if is_unsafe_zip_member(info):
             raise ValueError(f"Archive contains unsafe member path: {info.filename!r}")
-        normalized_name = posixpath.normpath(info.filename.replace("\\", "/"))
-        normalized_path = PurePosixPath(normalized_name)
-        if normalized_name in {"", "."}:
-            raise ValueError("Archive contains an empty member path.")
-        is_directory = info.is_dir()
-        unix_mode = info.external_attr >> 16
-        file_type = stat.S_IFMT(unix_mode)
-        if is_symlink_member(info) or file_type not in {
-            0,
-            stat.S_IFREG,
-            stat.S_IFDIR,
-        }:
-            raise ValueError(f"Archive contains link or special-file member: {info.filename!r}")
-        if file_type == stat.S_IFDIR and not is_directory:
-            raise ValueError(f"Archive contains link or special-file member: {info.filename!r}")
-        if normalized_path in seen:
-            raise ValueError(f"Archive contains duplicate or conflicting member path: {info.filename!r}")
-        for parent in normalized_path.parents:
-            if parent == PurePosixPath("."):
-                break
-            if seen.get(parent) is False:
-                raise ValueError(f"Archive contains duplicate or conflicting member path: {info.filename!r}")
-        if not is_directory and any(normalized_path in prior.parents for prior in seen):
-            raise ValueError(f"Archive contains duplicate or conflicting member path: {info.filename!r}")
-        seen[normalized_path] = is_directory
-        advertised_total += max(info.file_size, 0)
-        if advertised_total > max_total_size:
-            raise ValueError("Skill archive is too large or appears highly compressed.")
-        normalized_infos.append((info, normalized_path, is_directory))
 
-    total_written = 0
-    for info, normalized_path, is_directory in normalized_infos:
-        member_path = dest_root.joinpath(*normalized_path.parts)
+        if is_symlink_member(info):
+            logger.warning("Skipping symlink entry in skill archive: %s", info.filename)
+            continue
+
+        normalized_name = posixpath.normpath(info.filename.replace("\\", "/"))
+        member_path = dest_root.joinpath(*PurePosixPath(normalized_name).parts)
         if not member_path.resolve().is_relative_to(dest_root):
             raise ValueError(f"Zip entry escapes destination: {info.filename!r}")
         member_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if is_directory:
+        if info.is_dir():
             member_path.mkdir(parents=True, exist_ok=True)
             continue
 
@@ -219,6 +173,8 @@ def safe_extract_skill_archive(
                 if total_written > max_total_size:
                     raise ValueError("Skill archive is too large or appears highly compressed.")
                 dst.write(chunk)
+        if os.name == "posix":
+            member_path.chmod(0o755 if (info.external_attr >> 16) & 0o111 else 0o644)
 
 
 def _is_script_support_file(rel_path: Path) -> bool:
@@ -239,20 +195,14 @@ def _has_shebang(path: Path) -> bool:
         return False
 
 
-def _is_code_file_by_name(rel_path: Path) -> bool:
-    """Pure name-based code classification: scripts/ members and code suffixes."""
-    if _is_script_support_file(rel_path):
-        return True
-    return rel_path.suffix.lower() in _CODE_SUFFIXES
-
-
 async def _is_code_file(path: Path, rel_path: Path) -> bool:
     """Classify code files anywhere in the tree for the executable scan policy.
 
-    Name checks are pure and stay on the event loop; only the shebang
-    sniff for extensionless files reads the file and is offloaded.
+    Applies :func:`is_code_file` lazily: name checks are pure and stay on the
+    event loop; only the shebang sniff for extensionless files reads the file
+    and is offloaded.
     """
-    if _is_code_file_by_name(rel_path):
+    if is_code_path(rel_path):
         return True
     return not rel_path.suffix and await asyncio.to_thread(_has_shebang, path)
 
@@ -278,7 +228,7 @@ def _findings_for_file(findings: list[StaticFinding], rel_path: str) -> list[Sta
     return [finding for finding in findings if finding.get("file") in {rel_path, None}]
 
 
-async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None) -> None:
+async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str, *, executable: bool, static_findings: list[StaticFinding] | None = None, app_config=None) -> None:
     rel_path = path.relative_to(skill_dir).as_posix()
     location = f"{skill_name}/{rel_path}"
     try:
@@ -287,7 +237,7 @@ async def _scan_skill_file_or_raise(skill_dir: Path, path: Path, skill_name: str
         raise SkillSecurityScanError(f"Security scan failed for skill '{skill_name}': {location} must be valid UTF-8") from e
 
     try:
-        result = await scan_skill_content(content, executable=executable, location=location, static_findings=static_findings or [])
+        result = await scan_skill_content(content, executable=executable, location=location, app_config=app_config, static_findings=static_findings or [])
     except Exception as e:
         raise SkillSecurityScanError(f"Security scan failed for {location}: {e}") from e
 
@@ -339,7 +289,7 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
     static_findings = await _scan_static_skill_archive_or_raise(skill_dir, skill_name, app_config=app_config)
 
     skill_md = skill_dir / "SKILL.md"
-    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, static_findings=_findings_for_file(static_findings, "SKILL.md"))
+    await _scan_skill_file_or_raise(skill_dir, skill_md, skill_name, executable=False, static_findings=_findings_for_file(static_findings, "SKILL.md"), app_config=app_config)
 
     for path in await asyncio.to_thread(_collect_scannable_files, skill_dir):
         rel_path = path.relative_to(skill_dir)
@@ -355,6 +305,7 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
                 skill_name,
                 executable=True,
                 static_findings=_findings_for_file(static_findings, rel_path_posix),
+                app_config=app_config,
             )
         elif _should_scan_support_file(rel_path):
             await _scan_skill_file_or_raise(
@@ -363,6 +314,7 @@ async def _scan_skill_archive_contents_or_raise(skill_dir: Path, skill_name: str
                 skill_name,
                 executable=False,
                 static_findings=_findings_for_file(static_findings, rel_path_posix),
+                app_config=app_config,
             )
     return static_findings
 

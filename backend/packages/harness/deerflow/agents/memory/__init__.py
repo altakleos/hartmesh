@@ -17,17 +17,19 @@ from deerflow.agents.memory.manager import (
     MemoryCorruptionError,
     MemoryManager,
     MemoryManagerError,
-    MemoryWriterActivityV1,
+    MemoryReadError,
     get_memory_manager,
+    memory_read_failures_are_fatal,
     reset_memory_manager,
 )
 
 __all__ = [
     "MemoryManager",
     "MemoryManagerError",
+    "MemoryReadError",
     "MemoryConflictError",
     "MemoryCorruptionError",
-    "MemoryWriterActivityV1",
     "get_memory_manager",
+    "memory_read_failures_are_fatal",
     "reset_memory_manager",
 ]

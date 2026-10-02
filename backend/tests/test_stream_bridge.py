@@ -5,26 +5,23 @@ import os
 import re
 import uuid
 from collections import defaultdict
-from types import MappingProxyType
 
 import anyio
 import pytest
 from pydantic import ValidationError
 
-from deerflow.config.deployment_config import DeploymentConfig
-from deerflow.config.stream_bridge_config import MAX_HEARTBEAT_INTERVAL_SECONDS, StreamBridgeConfig, set_stream_bridge_config
+from deerflow.config.stream_bridge_config import (
+    MAX_HEARTBEAT_INTERVAL_SECONDS,
+    MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS,
+    StreamBridgeConfig,
+    set_stream_bridge_config,
+)
 from deerflow.runtime import END_SENTINEL, HEARTBEAT_SENTINEL, MemoryStreamBridge, StreamGap, make_stream_bridge
 
 # RedisStreamBridge is no longer re-exported from deerflow.runtime (redis is an
 # optional extra; see the NOTE in runtime/stream_bridge/__init__.py). Import it
 # directly from the submodule.
 from deerflow.runtime.stream_bridge.redis import RedisStreamBridge
-from deerflow.runtime.tenant_identity import (
-    RedisTenantComponent,
-    TenantIdentityV1,
-    TenantSubsystem,
-    redis_component_key_prefix,
-)
 
 
 def _stream_id_gt(left: str, right: str) -> bool:
@@ -92,69 +89,6 @@ class _FakeRedis:
 
     async def aclose(self):
         self.closed = True
-
-
-class _RecordingRedis(_FakeRedis):
-    def __init__(self) -> None:
-        super().__init__()
-        self.redis_calls: list[tuple[str, str]] = []
-
-    async def xadd(
-        self,
-        name: str,
-        fields: dict[str, str],
-        maxlen: int | None = None,
-        approximate: bool = True,
-    ) -> str:
-        self.redis_calls.append(("xadd", name))
-        return await super().xadd(
-            name,
-            fields,
-            maxlen=maxlen,
-            approximate=approximate,
-        )
-
-    async def xread(
-        self,
-        streams: dict[str, str],
-        count: int | None = None,
-        block: int | None = None,
-    ) -> list[tuple[str, list[tuple[str, dict[str, str]]]]]:
-        for name in streams:
-            self.redis_calls.append(("xread", name))
-        return await super().xread(streams, count=count, block=block)
-
-    async def xrevrange(
-        self,
-        name: str,
-        max: str = "+",
-        min: str = "-",
-        count: int | None = None,
-    ) -> list[tuple[str, dict[str, str]]]:
-        self.redis_calls.append(("xrevrange", name))
-        return await super().xrevrange(name, max=max, min=min, count=count)
-
-    async def xrange(
-        self,
-        name: str,
-        min: str = "-",
-        max: str = "+",
-        count: int | None = None,
-    ) -> list[tuple[str, dict[str, str]]]:
-        self.redis_calls.append(("xrange", name))
-        return await super().xrange(name, min=min, max=max, count=count)
-
-    async def delete(self, name: str) -> int:
-        self.redis_calls.append(("delete", name))
-        return await super().delete(name)
-
-    async def exists(self, name: str) -> int:
-        self.redis_calls.append(("exists", name))
-        return await super().exists(name)
-
-    async def expire(self, name: str, seconds: int) -> bool:
-        self.redis_calls.append(("expire", name))
-        return await super().expire(name, seconds)
 
 
 class _DelayedBlockingReadRedis:
@@ -231,79 +165,6 @@ class _FakeRedisPipeline:
                 _, streams, count, block = op
                 results.append(await self.redis.xread(streams, count=count, block=block))
         return results
-
-
-class _FakeReadinessPubSub:
-    def __init__(self, redis: "_FakeReadinessRedis") -> None:
-        self.redis = redis
-        self.channel: str | None = None
-        self.messages: asyncio.Queue[dict[str, object]] = asyncio.Queue()
-        self.closed = False
-
-    async def subscribe(self, channel: str) -> None:
-        self.channel = channel
-        self.redis.subscribers[channel] = self
-        await self.messages.put({"type": "subscribe", "channel": channel, "data": 1})
-
-    async def get_message(self, *, timeout: float = 0) -> dict[str, object] | None:
-        try:
-            return await asyncio.wait_for(self.messages.get(), timeout=timeout)
-        except TimeoutError:
-            return None
-
-    async def unsubscribe(self, channel: str) -> None:
-        self.redis.subscribers.pop(channel, None)
-
-    async def aclose(self) -> None:
-        self.closed = True
-
-
-class _FakeReadinessRedis:
-    def __init__(
-        self,
-        *,
-        deny_publish: bool = False,
-        deny_prefix: str | None = None,
-    ) -> None:
-        self.values: dict[str, str] = {}
-        self.subscribers: dict[str, _FakeReadinessPubSub] = {}
-        self.names: list[str] = []
-        self.deny_publish = deny_publish
-        self.deny_prefix = deny_prefix
-
-    async def ping(self) -> bool:
-        return True
-
-    async def set(self, name: str, value: str, *, ex: int) -> bool:
-        if self.deny_prefix and name.startswith(self.deny_prefix):
-            raise RuntimeError("NOPERM")
-        assert ex == 5
-        self.names.append(name)
-        self.values[name] = value
-        return True
-
-    async def get(self, name: str) -> str | None:
-        self.names.append(name)
-        return self.values.get(name)
-
-    async def delete(self, name: str) -> int:
-        self.names.append(name)
-        return int(self.values.pop(name, None) is not None)
-
-    def pubsub(self) -> _FakeReadinessPubSub:
-        return _FakeReadinessPubSub(self)
-
-    async def publish(self, channel: str, data: str) -> int:
-        if self.deny_prefix and channel.startswith(self.deny_prefix):
-            raise RuntimeError("NOPERM")
-        self.names.append(channel)
-        if self.deny_publish:
-            return 0
-        subscriber = self.subscribers.get(channel)
-        if subscriber is None:
-            return 0
-        await subscriber.messages.put({"type": "message", "channel": channel, "data": data})
-        return 1
 
 
 # ---------------------------------------------------------------------------
@@ -674,131 +535,6 @@ def redis_bridge() -> RedisStreamBridge:
     return RedisStreamBridge(redis_url="redis://fake", queue_maxsize=2, client=_FakeRedis())
 
 
-@pytest.mark.parametrize(
-    ("namespace_prefix", "expected_key"),
-    [
-        ("tA", "tA:deerflow:stream_bridge:inventory-run"),
-        ("", "deerflow:stream_bridge:inventory-run"),
-    ],
-    ids=["tenant-prefix", "legacy-unprefixed"],
-)
-@pytest.mark.anyio
-async def test_redis_bridge_routes_every_emitted_name_through_configurable_prefix(
-    namespace_prefix: str,
-    expected_key: str,
-) -> None:
-    fake = _RecordingRedis()
-    bridge = RedisStreamBridge(
-        redis_url="redis://fake",
-        namespace_prefix=namespace_prefix,
-        client=fake,
-    )
-
-    await bridge.publish("inventory-run", "metadata", {"run_id": "inventory-run"})
-    await bridge.publish_end("inventory-run")
-    assert await bridge.stream_exists("inventory-run") is True
-    received = [entry async for entry in bridge.subscribe("inventory-run")]
-    assert received[0].event == "metadata"
-    assert received[1] is END_SENTINEL
-    await bridge.cleanup("inventory-run")
-
-    assert {command for command, _name in fake.redis_calls} == {
-        "delete",
-        "exists",
-        "expire",
-        "xadd",
-        "xrange",
-        "xread",
-        "xrevrange",
-    }
-    emitted_names = [name for _command, name in fake.redis_calls]
-    assert set(emitted_names) == {expected_key}
-    assert all(re.fullmatch(r"tA:.*", name) for name in emitted_names) is bool(
-        namespace_prefix,
-    )
-
-
-@pytest.mark.anyio
-async def test_redis_topology_readiness_proves_tenant_key_and_channel_acl() -> None:
-    fake = _FakeReadinessRedis()
-    bridge = RedisStreamBridge(
-        redis_url="redis://fake",
-        namespace_prefix="hm:v1:tenant-abcd:redis:stream",
-        client=fake,
-    )
-
-    assert await bridge.topology_readiness_probe(
-        replica_id="gateway-0",
-        timeout_seconds=1,
-        additional_key_prefixes=(
-            "hm:v1:tenant-abcd:redis:ckpt-hist:v1",
-            "hm:v1:tenant-abcd:redis:deerflow:sandbox:owner",
-        ),
-    )
-
-    assert fake.values == {}
-    assert fake.subscribers == {}
-    assert fake.names
-    assert all(name.startswith("hm:v1:tenant-abcd:redis:") for name in fake.names)
-
-
-@pytest.mark.anyio
-async def test_redis_topology_readiness_fails_closed_when_channel_acl_denies_publish() -> None:
-    bridge = RedisStreamBridge(
-        redis_url="redis://fake",
-        namespace_prefix="hm:v1:tenant-abcd:redis:stream",
-        client=_FakeReadinessRedis(deny_publish=True),
-    )
-
-    with pytest.raises(RuntimeError, match="redis_topology_channel_probe_failed"):
-        await bridge.topology_readiness_probe(
-            replica_id="gateway-0",
-            timeout_seconds=1,
-        )
-
-
-@pytest.mark.anyio
-async def test_redis_topology_readiness_requires_cross_tenant_acl_denial() -> None:
-    foreign = "hm:v1:tenant-foreign:redis"
-    bridge = RedisStreamBridge(
-        redis_url="redis://fake",
-        namespace_prefix="hm:v1:tenant-abcd:redis:stream",
-        client=_FakeReadinessRedis(),
-    )
-
-    with pytest.raises(RuntimeError, match="redis_topology_acl_isolation_failed"):
-        await bridge.topology_readiness_probe(
-            replica_id="gateway-0",
-            timeout_seconds=1,
-            forbidden_key_prefix=foreign,
-        )
-
-    isolated = RedisStreamBridge(
-        redis_url="redis://fake",
-        namespace_prefix="hm:v1:tenant-abcd:redis:stream",
-        client=_FakeReadinessRedis(deny_prefix=foreign),
-    )
-    assert await isolated.topology_readiness_probe(
-        replica_id="gateway-0",
-        timeout_seconds=1,
-        forbidden_key_prefix=foreign,
-    )
-
-
-@pytest.mark.anyio
-async def test_explicit_storage_prefix_keeps_constructor_compatibility() -> None:
-    fake = _FakeRedis()
-    bridge = RedisStreamBridge(
-        redis_url="redis://fake",
-        key_prefix="custom",
-        client=fake,
-    )
-
-    await bridge.publish("run", "metadata", {})
-
-    assert set(fake.streams) == {"custom:run"}
-
-
 @pytest.mark.anyio
 async def test_redis_publish_subscribe(redis_bridge: RedisStreamBridge):
     """Redis bridge should deliver events in order and terminate on end."""
@@ -851,7 +587,7 @@ async def test_redis_evicted_last_event_id_yields_gap_before_partial_replay(
     """Redis must distinguish a trimmed cursor from a complete replay."""
     run_id = "redis-run-evicted-cursor"
     await redis_bridge.publish(run_id, "e1", {"step": 1})
-    key = redis_bridge._key(run_id)
+    key = redis_bridge._stream_key(run_id)
     e1_id = redis_bridge._redis.streams[key][0][0]
     await redis_bridge.publish(run_id, "e2", {"step": 2})
     await redis_bridge.publish(run_id, "e3", {"step": 3})
@@ -889,7 +625,7 @@ async def test_redis_slow_subscriber_yields_gap_after_buffer_trim(
     await redis_bridge.publish(run_id, "e2", {"step": 2})
     await redis_bridge.publish(run_id, "e3", {"step": 3})
     await redis_bridge.publish(run_id, "e4", {"step": 4})
-    key = redis_bridge._key(run_id)
+    key = redis_bridge._stream_key(run_id)
     retained_ids = [event_id for event_id, _fields in redis_bridge._redis.streams[key]]
 
     assert await anext(subscriber) == StreamGap(
@@ -925,7 +661,7 @@ async def test_redis_initial_subscriber_yields_gap_when_first_wake_falls_behind(
         delayed.release_wake_response.set()
         gap = await first_item
 
-    key = bridge._key(run_id)
+    key = bridge._stream_key(run_id)
     retained_ids = [event_id for event_id, _fields in fake.streams[key]]
     assert gap == StreamGap(
         requested_event_id=None,
@@ -944,7 +680,7 @@ async def test_redis_recovery_cursor_at_end_yields_end_immediately(
     run_id = "redis-run-end-cursor"
     await redis_bridge.publish(run_id, "event", {})
     await redis_bridge.publish_end(run_id)
-    key = redis_bridge._key(run_id)
+    key = redis_bridge._stream_key(run_id)
     end_id = redis_bridge._redis.streams[key][-1][0]
 
     received = [
@@ -1229,12 +965,6 @@ async def test_redis_blocking_wakeup_error_gives_up_after_max_retries():
 # ---------------------------------------------------------------------------
 
 
-def test_stream_bridge_key_prefix_defaults_to_legacy_names() -> None:
-    config = StreamBridgeConfig()
-
-    assert config.key_prefix == ""
-
-
 @pytest.mark.parametrize(
     "heartbeat_interval",
     [
@@ -1257,6 +987,31 @@ def test_stream_bridge_config_accepts_numeric_heartbeat_string():
     config = StreamBridgeConfig(heartbeat_interval_seconds="2.5")
 
     assert config.heartbeat_interval_seconds == 2.5
+
+
+@pytest.mark.parametrize(
+    "cleanup_delay",
+    [
+        True,
+        False,
+        -1,
+        float("inf"),
+        float("-inf"),
+        float("nan"),
+        MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS + 1,
+    ],
+)
+def test_stream_bridge_config_rejects_invalid_recovered_stream_cleanup_delay(cleanup_delay):
+    with pytest.raises(ValidationError, match="recovered_stream_cleanup_delay_seconds"):
+        StreamBridgeConfig(recovered_stream_cleanup_delay_seconds=cleanup_delay)
+
+
+@pytest.mark.parametrize("cleanup_delay", [0, 60, MAX_RECOVERED_STREAM_CLEANUP_DELAY_SECONDS])
+def test_stream_bridge_config_accepts_valid_recovered_stream_cleanup_delay(cleanup_delay):
+    """A delay of 0 is a valid 'delete as soon as END is published' setting."""
+    config = StreamBridgeConfig(recovered_stream_cleanup_delay_seconds=cleanup_delay)
+
+    assert config.recovered_stream_cleanup_delay_seconds == float(cleanup_delay)
 
 
 @pytest.mark.parametrize("heartbeat_interval", [True, MAX_HEARTBEAT_INTERVAL_SECONDS + 1])
@@ -1504,19 +1259,17 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
     import deerflow.runtime.stream_bridge.redis as redis_module
 
     captured: dict = {}
-    fake = _FakeRedis()
 
     def fake_from_url(url, **kwargs):
         captured["url"] = url
         captured.update(kwargs)
-        return fake
+        return _FakeRedis()
 
     monkeypatch.setattr(redis_module.Redis, "from_url", staticmethod(fake_from_url))
     set_stream_bridge_config(
         StreamBridgeConfig(
             type="redis",
             redis_url="redis://fake:6379/0",
-            key_prefix="configured",
             heartbeat_interval_seconds=2.5,
             max_connections=50,
             stream_ttl_seconds=42,
@@ -1527,73 +1280,10 @@ async def test_make_stream_bridge_passes_redis_options(monkeypatch):
             assert isinstance(bridge, RedisStreamBridge)
             assert bridge.heartbeat_interval == 2.5
             assert bridge._stream_ttl_seconds == 42
-            await bridge.publish("factory-run", "metadata", {})
-        assert set(fake.streams) == {
-            "configured:deerflow:stream_bridge:factory-run",
-        }
         assert captured["max_connections"] == 50
         assert captured["decode_responses"] is True
     finally:
         set_stream_bridge_config(None)
-
-
-@pytest.mark.anyio
-async def test_make_stream_bridge_key_prefix_env_overrides_config(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import deerflow.runtime.stream_bridge.redis as redis_module
-
-    fake = _FakeRedis()
-    monkeypatch.setattr(
-        redis_module.Redis,
-        "from_url",
-        staticmethod(lambda _url, **_kwargs: fake),
-    )
-    monkeypatch.setenv("DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX", "from-env")
-    set_stream_bridge_config(
-        StreamBridgeConfig(
-            type="redis",
-            redis_url="redis://fake:6379/0",
-            key_prefix="from-config",
-        )
-    )
-    try:
-        async with make_stream_bridge() as bridge:
-            await bridge.publish("env-run", "metadata", {})
-    finally:
-        set_stream_bridge_config(None)
-
-    assert set(fake.streams) == {
-        "from-env:deerflow:stream_bridge:env-run",
-    }
-
-
-@pytest.mark.anyio
-async def test_make_stream_bridge_uses_server_tenant_namespace(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import deerflow.runtime.stream_bridge.redis as redis_module
-
-    fake = _FakeRedis()
-    monkeypatch.setattr(
-        redis_module.Redis,
-        "from_url",
-        staticmethod(lambda _url, **_kwargs: fake),
-    )
-    identity = TenantIdentityV1.resolve(
-        deployment_config=DeploymentConfig(tenant_id="tenant-a"),
-        environ=MappingProxyType({}),
-    )
-    set_stream_bridge_config(StreamBridgeConfig(type="redis", redis_url="redis://fake:6379/0"))
-    try:
-        async with make_stream_bridge(
-            tenant_namespace=identity.namespace(TenantSubsystem.REDIS),
-        ) as bridge:
-            await bridge.publish("same-run", "metadata", {})
-    finally:
-        set_stream_bridge_config(None)
-
-    assert set(fake.streams) == {f"{identity.namespace(TenantSubsystem.REDIS).key_prefix.rstrip(':')}:deerflow:stream_bridge:same-run"}
 
 
 # ---------------------------------------------------------------------------
@@ -1670,185 +1360,6 @@ async def test_redis_integration_publish_subscribe_and_id_format(real_redis_brid
 @pytest.mark.integration
 @requires_redis
 @pytest.mark.anyio
-async def test_redis_acl_confines_bridge_and_denies_cross_tenant_commands():
-    from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
-    from redis import Redis as SyncRedis
-    from redis.asyncio import Redis
-    from redis.exceptions import NoPermissionError
-
-    from deerflow.community.aio_sandbox.ownership.base import RenewOutcome
-    from deerflow.community.aio_sandbox.ownership.redis import RedisOwnershipStore
-    from deerflow.community.e2b_sandbox.capacity.redis import (
-        RedisE2BCapacityStore,
-        ReserveStatus,
-    )
-    from deerflow.runtime.checkpoint_cache.base import make_history_key
-    from deerflow.runtime.checkpoint_cache.redis import RedisCheckpointHistoryCache
-
-    tenant_a_namespace = TenantIdentityV1.from_canonical_id("tenant-a").namespace(TenantSubsystem.REDIS)
-    tenant_b_namespace = TenantIdentityV1.from_canonical_id("tenant-b").namespace(TenantSubsystem.REDIS)
-    components = (
-        RedisTenantComponent.STREAM_BRIDGE,
-        RedisTenantComponent.CHECKPOINT_CACHE,
-        RedisTenantComponent.SANDBOX_OWNERSHIP,
-    )
-    tenant_a_prefixes = {component: redis_component_key_prefix(tenant_a_namespace, component) for component in components}
-    tenant_b_prefixes = {component: redis_component_key_prefix(tenant_b_namespace, component) for component in components}
-    tenant_a_prefix = tenant_a_prefixes[RedisTenantComponent.STREAM_BRIDGE]
-    run_id = f"acl-{uuid.uuid4().hex}"
-    username = f"deerflow-test-{uuid.uuid4().hex}"
-    password = uuid.uuid4().hex
-    admin = Redis.from_url(REDIS_TEST_URL, decode_responses=True)
-    tenant = None
-    checkpoint_tenant = None
-    sync_tenant = None
-
-    try:
-        await admin.execute_command(
-            "ACL",
-            "SETUSER",
-            username,
-            "reset",
-            "on",
-            f">{password}",
-            f"~{tenant_a_prefix}*",
-            f"&{tenant_a_prefix}*",
-            "+@read",
-            "+@write",
-            "+@transaction",
-            "+@scripting",
-            "+time",
-            "+publish",
-            "+select",
-        )
-        tenant = Redis.from_url(
-            REDIS_TEST_URL,
-            username=username,
-            password=password,
-            decode_responses=True,
-        )
-        bridge = RedisStreamBridge(
-            redis_url=REDIS_TEST_URL,
-            namespace_prefix=tenant_a_prefix,
-            client=tenant,
-        )
-
-        await bridge.publish(run_id, "metadata", {"run_id": run_id})
-        await bridge.publish_end(run_id)
-        received = [entry async for entry in bridge.subscribe(run_id)]
-
-        assert received[0].event == "metadata"
-        assert received[1] is END_SENTINEL
-        assert await tenant.publish(f"{tenant_a_prefix}:events", "ok") == 0
-
-        checkpoint_tenant = Redis.from_url(
-            REDIS_TEST_URL,
-            username=username,
-            password=password,
-            decode_responses=False,
-        )
-        checkpoint_prefix = tenant_a_prefixes[RedisTenantComponent.CHECKPOINT_CACHE]
-        checkpoint_key = make_history_key(
-            checkpoint_prefix,
-            "thread-acl",
-            "",
-            "checkpoint-acl",
-            "messages",
-        )
-        checkpoint_cache = RedisCheckpointHistoryCache(
-            REDIS_TEST_URL,
-            serde=JsonPlusSerializer(),
-            ttl_seconds=60,
-            client=checkpoint_tenant,
-        )
-        await checkpoint_cache.aset_many({checkpoint_key: {"writes": []}})
-        assert checkpoint_key in await checkpoint_cache.aget_many([checkpoint_key])
-        await checkpoint_cache.adelete_thread(checkpoint_prefix, "thread-acl")
-        assert await checkpoint_tenant.exists(checkpoint_key) == 0
-
-        sync_tenant = SyncRedis.from_url(
-            REDIS_TEST_URL,
-            username=username,
-            password=password,
-            decode_responses=True,
-        )
-        ownership_prefix = tenant_a_prefixes[RedisTenantComponent.SANDBOX_OWNERSHIP]
-        ownership = RedisOwnershipStore(
-            owner_id="acl-owner",
-            redis_url=REDIS_TEST_URL,
-            ttl_seconds=60,
-            key_prefix=ownership_prefix,
-            client=sync_tenant,
-        )
-        assert await asyncio.to_thread(ownership.take, "sandbox-acl") is True
-        assert await asyncio.to_thread(ownership.owner, "sandbox-acl") == "acl-owner"
-        assert await asyncio.to_thread(ownership.renew, "sandbox-acl") is RenewOutcome.RENEWED
-        await asyncio.to_thread(ownership.release, "sandbox-acl")
-
-        capacity = RedisE2BCapacityStore(
-            redis_url=REDIS_TEST_URL,
-            hard_limit=1,
-            key_prefix=ownership_prefix,
-            client=sync_tenant,
-        )
-        assert await asyncio.to_thread(
-            capacity.reconcile,
-            expected_revision=0,
-            remote_sandboxes={},
-            complete=True,
-            reservation_max_age_ms=60_000,
-        )
-        assert await asyncio.to_thread(capacity.reserve, "reservation-acl") is ReserveStatus.GRANTED
-        await asyncio.to_thread(
-            capacity.track,
-            "sandbox-capacity-acl",
-            reservation_token="reservation-acl",
-        )
-        await asyncio.to_thread(capacity.release, "sandbox-capacity-acl")
-
-        with pytest.raises(NoPermissionError):
-            await tenant.xadd(
-                f"{tenant_b_prefixes[RedisTenantComponent.STREAM_BRIDGE]}:stream",
-                {"kind": "event"},
-            )
-        with pytest.raises(NoPermissionError):
-            await tenant.xread({f"{tenant_b_prefixes[RedisTenantComponent.STREAM_BRIDGE]}:stream": "0-0"})
-        with pytest.raises(NoPermissionError):
-            await tenant.set(
-                f"{tenant_b_prefixes[RedisTenantComponent.CHECKPOINT_CACHE]}:value",
-                "denied",
-            )
-        with pytest.raises(NoPermissionError):
-            await tenant.set(
-                f"{tenant_b_prefixes[RedisTenantComponent.SANDBOX_OWNERSHIP]}:value",
-                "denied",
-            )
-        with pytest.raises(NoPermissionError):
-            await tenant.publish(
-                f"{tenant_b_prefixes[RedisTenantComponent.STREAM_BRIDGE]}:events",
-                "denied",
-            )
-    finally:
-        if tenant is not None:
-            await tenant.aclose()
-        if checkpoint_tenant is not None:
-            await checkpoint_tenant.aclose()
-        if sync_tenant is not None:
-            await asyncio.to_thread(sync_tenant.close)
-        try:
-            keys = [key async for key in admin.scan_iter(f"{tenant_a_namespace.key_prefix.rstrip(':')}*")]
-            if keys:
-                await admin.delete(*keys)
-        finally:
-            try:
-                await admin.execute_command("ACL", "DELUSER", username)
-            finally:
-                await admin.aclose()
-
-
-@pytest.mark.integration
-@requires_redis
-@pytest.mark.anyio
 async def test_redis_integration_replays_after_last_event_id(real_redis_bridge):
     run_id = "integ-replay"
     await real_redis_bridge.publish(run_id, "metadata", {"run_id": run_id})
@@ -1909,7 +1420,7 @@ async def test_redis_integration_maxlen_trims_history(real_redis_bridge):
     for i in range(6):
         await real_redis_bridge.publish(run_id, f"event-{i}", {"i": i})
 
-    key = real_redis_bridge._key(run_id)
+    key = real_redis_bridge._stream_key(run_id)
     length = await real_redis_bridge._redis.xlen(key)
     assert length == 2
 
@@ -1921,7 +1432,7 @@ async def test_redis_integration_evicted_cursor_yields_gap(real_redis_bridge):
     """Real Redis MAXLEN trimming must produce the same gap contract."""
     run_id = "integ-gap"
     await real_redis_bridge.publish(run_id, "event-1", {"i": 1})
-    key = real_redis_bridge._key(run_id)
+    key = real_redis_bridge._stream_key(run_id)
     first_id = (await real_redis_bridge._redis.xrange(key, count=1))[0][0]
     await real_redis_bridge.publish(run_id, "event-2", {"i": 2})
     await real_redis_bridge.publish(run_id, "event-3", {"i": 3})
@@ -1969,7 +1480,7 @@ async def test_redis_integration_initial_subscriber_yields_gap_when_first_wake_f
         delayed.release_wake_response.set()
         gap = await first_item
 
-    key = real_redis_bridge._key(run_id)
+    key = real_redis_bridge._stream_key(run_id)
     retained = await raw_redis.xrange(key)
     assert gap == StreamGap(
         requested_event_id=None,
@@ -1997,7 +1508,7 @@ async def test_redis_integration_stream_ttl_reclaims_key():
         client=client,
     )
     run_id = "integ-ttl"
-    key = bridge._key(run_id)
+    key = bridge._stream_key(run_id)
     try:
         await bridge.publish(run_id, "metadata", {"run_id": run_id})
         assert await client.exists(key) == 1

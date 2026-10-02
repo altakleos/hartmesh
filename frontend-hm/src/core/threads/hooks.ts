@@ -15,7 +15,7 @@ import { toast } from "sonner";
 
 import type { PromptInputMessage } from "@/components/ai-elements/prompt-input";
 
-import { getAPIClient } from "../api";
+import { cancelActiveThreadRun, getAPIClient } from "../api";
 import { fetch } from "../api/fetcher";
 import {
   parseArtifactDeliveryFailure,
@@ -1576,6 +1576,7 @@ export async function stopThreadAndInvalidateCaches(
   isMock = false,
 ) {
   try {
+    if (threadId && !isMock) await cancelActiveThreadRun(threadId);
     await stop();
   } finally {
     invalidateStoppedThreadCaches(queryClient, threadId, isMock);
@@ -1676,6 +1677,8 @@ export function useThreadStream({
   const [pendingSupersededMessageIds, setPendingSupersededMessageIds] =
     useState<ReadonlySet<string>>(() => new Set());
   const [isUploading, setIsUploading] = useState(false);
+  const [stoppingThreadId, setStoppingThreadId] = useState<string | null>(null);
+  const stoppingThreadIdRef = useRef<string | null>(null);
   // Track the thread ID that is currently streaming to handle thread changes during streaming
   const [onStreamThreadId, setOnStreamThreadId] = useState(() => threadId);
   // Ref to track current thread ID across async callbacks without causing re-renders,
@@ -2012,18 +2015,28 @@ export function useThreadStream({
   const stopThread = useCallback(async () => {
     const stoppedThreadId =
       threadIdRef.current ?? displayThreadId ?? threadId ?? null;
+    if (stoppingThreadIdRef.current) return;
+    stoppingThreadIdRef.current = stoppedThreadId;
+    setStoppingThreadId(stoppedThreadId);
     if (stoppedThreadId) clearTurnProgress(stoppedThreadId);
     const pendingReplay = pendingPreparedReplayRef.current;
-    await stopThreadAndInvalidateCaches(
-      queryClient,
-      () => thread.stop(),
-      stoppedThreadId,
-      isMock,
-    );
-    if (pendingReplay) {
-      setOptimisticMessages([]);
-      setOptimisticThreadId(null);
-      clearPreparedReplayMasks(pendingReplay);
+    try {
+      await stopThreadAndInvalidateCaches(
+        queryClient,
+        () => thread.stop(),
+        stoppedThreadId,
+        isMock,
+      );
+      if (pendingReplay) {
+        setOptimisticMessages([]);
+        setOptimisticThreadId(null);
+        clearPreparedReplayMasks(pendingReplay);
+      }
+    } catch (error) {
+      toast.error(getStreamErrorMessage(error));
+    } finally {
+      stoppingThreadIdRef.current = null;
+      setStoppingThreadId(null);
     }
   }, [
     clearPreparedReplayMasks,
@@ -2200,7 +2213,7 @@ export function useThreadStream({
       extraContext?: Record<string, unknown>,
       options?: SendMessageOptions,
     ) => {
-      if (sendInFlightRef.current) {
+      if (sendInFlightRef.current || stoppingThreadIdRef.current === threadId) {
         return;
       }
       sendInFlightRef.current = true;
@@ -2698,6 +2711,9 @@ export function useThreadStream({
   const mergedThread = {
     ...thread,
     stop: stopThread,
+    isLoading:
+      thread.isLoading ||
+      (stoppingThreadId !== null && stoppingThreadId === currentViewThreadId),
     values: hasVisibleStreamState ? thread.values : EMPTY_THREAD_VALUES,
     messages: mergedMessages,
   } as typeof thread;

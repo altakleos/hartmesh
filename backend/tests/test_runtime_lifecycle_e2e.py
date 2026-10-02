@@ -17,7 +17,6 @@ import time
 import uuid
 from contextlib import suppress
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 from unittest.mock import patch
 
@@ -158,61 +157,10 @@ class _ScriptedAgent:
 
 def _make_agent_factory(controller: _RunController, **agent_kwargs):
     def factory(*, config):
-        from deerflow.agents.assembly_descriptor import (
-            build_assembly_descriptor,
-            subagent_release_policy,
-        )
-        from deerflow.agents.lead_agent.agent import LeadAgentAssembly
-        from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
-
-        runtime_context = config.get("context") or {}
-        material = runtime_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
+        del config
         agent = _ScriptedAgent(controller, **agent_kwargs)
         controller.instances.append(agent)
-        if material is None:
-            # Read-only state accessors invoke the same factory without accepted
-            # invocation material and remain compatible with a bare graph.
-            return agent
-
-        defaults = material.runtime_defaults
-        is_bootstrap = bool(defaults.get("is_bootstrap", False))
-        enabled_skills = list(material.enabled_skill_objects)
-        if is_bootstrap:
-            enabled_skills = [skill for skill in enabled_skills if getattr(skill, "name", None) == "bootstrap"]
-        requested_subagents = bool(defaults.get("subagent_enabled", False))
-        allowed_subagents = getattr(material.agent_config_object, "allowed_subagents", None)
-        subagents_enabled = requested_subagents and allowed_subagents != []
-        max_concurrent = int(runtime_context.get("max_concurrent_subagents", defaults.get("max_concurrent_subagents", 3)))
-        max_total = int(runtime_context.get("max_total_subagents", defaults.get("max_total_subagents", 6)))
-
-        descriptor = build_assembly_descriptor(
-            namespace="deerflow",
-            agent_name="bootstrap" if is_bootstrap else str(defaults.get("agent_name") or "lead-agent"),
-            requested_model=None,
-            effective_model=str(material.model_profile["name"]),
-            model_config=SimpleNamespace(),
-            thinking_enabled=bool(defaults.get("thinking_enabled", True)),
-            reasoning_effort=defaults.get("reasoning_effort"),
-            rendered_base_prompt="runtime lifecycle test prompt",
-            tools=[],
-            middlewares=[],
-            deferred_names=frozenset(),
-            enabled_skills=enabled_skills,
-            effective_policies={
-                "bootstrap": is_bootstrap,
-                "non_interactive": bool(defaults.get("non_interactive", False)),
-                "plan_mode": bool(defaults.get("is_plan_mode", False)),
-                "recursion_limit": config.get("recursion_limit", "framework-default"),
-                "subagents": subagent_release_policy(
-                    material.app_config,
-                    enabled=subagents_enabled,
-                    max_concurrent=max_concurrent,
-                    max_total=max_total,
-                    resolved_subagent_catalog=material.subagent_catalog,
-                ),
-            },
-        )
-        return LeadAgentAssembly(graph=agent, descriptor=descriptor)
+        return agent
 
     return factory
 
@@ -246,9 +194,6 @@ def isolated_deer_flow_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setenv("DEER_FLOW_HOME", str(home))
     monkeypatch.setenv("OPENAI_API_KEY", "sk-fake-key-not-used")
     monkeypatch.setenv("OPENAI_API_BASE", "https://example.invalid")
-    empty_skills = tmp_path / "skills"
-    empty_skills.mkdir()
-    monkeypatch.setenv("DEER_FLOW_SKILLS_PATH", str(empty_skills))
 
     staged_config = tmp_path / "config.yaml"
     staged_config.write_text(_MINIMAL_CONFIG_YAML, encoding="utf-8")
@@ -598,8 +543,8 @@ def test_stream_run_completes_and_persists_runtime_state(isolated_app):
             transcript = _drain_stream(response)
 
         events = _parse_sse(transcript)
-        # The run's progress frames ride the same stream after metadata; the
-        # lifecycle shape is asserted without them.
+        # The run's progress frames ride the same stream after metadata; they
+        # are advisory and are not part of the sequence this test pins.
         progress = [event for event in events if event["event"] == "custom" and event["data"].get("type") == "turn_progress"]
         assert progress and events[0]["event"] == "metadata"
         events = [event for event in events if event not in progress]
@@ -930,4 +875,6 @@ def test_cancel_rollback_restores_pre_run_checkpoint(isolated_app):
         after = client.get(f"/api/threads/{thread_id}/state")
         assert after.status_code == 200, after.text
         assert after.json()["values"]["title"] == "Before rollback"
-        assert after.json()["values"]["messages"] == [{"type": "human", "content": "before"}]
+        # Admission canonicalizes messages; rollback must restore that exact
+        # checkpoint, including normalized message metadata.
+        assert after.json()["values"]["messages"] == before.json()["values"]["messages"]

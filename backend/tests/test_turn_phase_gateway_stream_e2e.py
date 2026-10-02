@@ -283,21 +283,39 @@ def serve_gateway(home: Path, *, config_yaml: str = _MINIMAL_CONFIG_YAML) -> Ite
     loopback_port = loopback.getsockname()[1]
     loopback_url = f"http://127.0.0.1:{loopback_port}"
 
+    # The Gateway's start-up attaches its log filters to every root handler,
+    # pytest's session-wide ones included; they are put back at tear-down so
+    # no later test reads records this Gateway's filters rewrote.
+    root_handler_filters = [(handler, list(handler.filters)) for handler in logging.root.handlers]
+    httpx_logger_filters = list(logging.getLogger("httpx").filters)
+
     server = uvicorn.Server(uvicorn.Config(create_app(), log_level="warning", lifespan="on"))
     thread = threading.Thread(target=lambda: asyncio.run(server.serve(sockets=[loopback])), name="turn-phase-e2e-gateway", daemon=True)
     thread.start()
 
     def _tear_down() -> None:
         server.should_exit = True
-        thread.join(timeout=30)
+        # The Gateway's shutdown waits for the runs it still holds, and one
+        # test leaves a model call that hangs for ``HANG_DELAY_S``. The join
+        # has to outlast that: a server still shutting down closes the
+        # process-wide database engine underneath whichever test runs next,
+        # which then fails for no reason of its own. A forced exit is no
+        # remedy -- it skips the Gateway's shutdown and leaves that engine
+        # bound to a closed event loop.
+        thread.join(timeout=HANG_DELAY_S + 90)
+        gateway_stopped = not thread.is_alive()
         with contextlib.suppress(OSError):
             loopback.close()
         journal_logger.removeHandler(sink)
         journal_logger.setLevel(previous_level)
+        for handler, filters in root_handler_filters:
+            handler.filters[:] = filters
+        logging.getLogger("httpx").filters[:] = httpx_logger_filters
         from deerflow.sandbox.sandbox_provider import shutdown_sandbox_provider
 
         shutdown_sandbox_provider()
         monkeypatch.undo()
+        assert gateway_stopped, "the test Gateway did not stop; its shutdown would run during a later test"
 
     # A Gateway that refuses to start is a result some suites assert on; the
     # environment and singletons this function set must not outlive it either,
@@ -495,15 +513,6 @@ def test_the_emitted_line_carries_the_turn_timing_a_deployment_can_read(gateway:
     stream_text_ms = _phase_at(wire, "first_stream_text")
     assert f"first_stream_text@{round(stream_text_ms)}ms" in message
     assert "unobservable=browser_first_text(" in message
-    # The route's own interval -- request received to worker admission -- is
-    # the part of the ≤2 s acknowledgement target a server can measure, and it
-    # reads from the same line, before the phases it precedes.
-    assert "launch=" in message and message.index("launch=") < message.index("phases="), message
-    launch = wire["launch"]
-    assert launch is not None and launch["total_ms"] > 0, wire
-    assert [step["step"] for step in launch["steps"]] == ["identify", "permit", "seal", "authorize", "constrain", "prepare", "persist"], launch
-    assert launch["handoff_ms"] >= 0, launch
-    print(f"turn-phase e2e (released log line): {message}")
 
 
 def test_the_time_before_the_model_request_is_accounted_for(gateway: _Gateway) -> None:

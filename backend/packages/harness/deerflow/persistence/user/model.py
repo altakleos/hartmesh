@@ -13,7 +13,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
-from sqlalchemy import Boolean, DateTime, Index, String, text
+from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Index, String, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from deerflow.persistence.base import Base
@@ -28,6 +28,15 @@ from deerflow.persistence.base import Base
 # so 0018_oauth_identity_pg_partial.py keeps its own literal by
 # convention (consistent with every other revision in that package).
 OAUTH_IDENTITY_INDEX_NAME = "idx_users_oauth_identity"
+
+
+class UserPreferenceRow(Base):
+    """Independent keys allow concurrent clients to patch disjoint preferences."""
+
+    __tablename__ = "user_preferences"
+    user_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    key: Mapped[str] = mapped_column(String(40), primary_key=True)
+    value: Mapped[object] = mapped_column(JSON, nullable=True)
 
 
 class UserRow(Base):
@@ -64,12 +73,12 @@ class UserRow(Base):
     # Auth lifecycle flags
     needs_setup: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     token_version: Mapped[int] = mapped_column(nullable=False, default=0)
-    # Stamped at every provider sign-in (0040_account_access); NULL on local
+    # Stamped at every provider sign-in (0027_account_access); NULL on local
     # accounts and on provider accounts that have not signed in since.
     last_sign_in_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     # The address this account held before the deployer released it
-    # (0041_email_released_from). NULL on every account whose email is its
+    # (0027_account_access). NULL on every account whose email is its
     # own; non-NULL is what "released" means, so nothing has to read the
     # shape of the replacement address to know.
     email_released_from: Mapped[str | None] = mapped_column(String(320), nullable=True)

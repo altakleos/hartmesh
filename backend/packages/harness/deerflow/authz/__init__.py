@@ -1,16 +1,29 @@
 """Pluggable fine-grained authorization (resource-level RBAC and beyond)."""
 
 from deerflow.authz.adapter import GuardrailAuthorizationAdapter
-from deerflow.authz.enforcement import filter_tools_by_authorization
+from deerflow.authz.enforcement import filter_resources_by_authorization, filter_tools_by_authorization
+from deerflow.authz.plugin_authz import (
+    PluginAuthorizationError,
+    aenforce_plugin_action,
+    aenforce_plugin_management,
+    afilter_plugin_management,
+    afilter_plugin_pages,
+    enforce_plugin_action,
+    enforce_plugin_management,
+)
+from deerflow.authz.plugin_targets import (
+    MANAGEMENT_READ_PART,
+    MANAGEMENT_WRITE_PART,
+    plugin_action_target,
+    plugin_management_target,
+    plugin_page_target,
+)
 from deerflow.authz.principal import build_principal_from_context, normalize_authz_attributes
 from deerflow.authz.provider import AuthorizationProvider, AuthzDecision, AuthzReason, AuthzRequest, Principal
 from deerflow.authz.rbac import RbacAuthorizationProvider
-from deerflow.authz.runtime import (
-    AUTHORIZATION_PROVIDER_CONTEXT_KEY,
-    authorization_provider_from_context,
-    resolve_authorization_provider,
-)
+from deerflow.authz.runtime import resolve_authorization_provider
 from deerflow.authz.sandbox_authz import authorize_sandbox_execution
+from deerflow.authz.skill_filter import filter_available_skills_by_authorization
 from deerflow.authz.tool_filter import apply_tool_authorization
 
 __all__ = [
@@ -18,15 +31,27 @@ __all__ = [
     "AuthzReason",
     "AuthzRequest",
     "AuthorizationProvider",
-    "AUTHORIZATION_PROVIDER_CONTEXT_KEY",
     "GuardrailAuthorizationAdapter",
+    "MANAGEMENT_READ_PART",
+    "MANAGEMENT_WRITE_PART",
+    "PluginAuthorizationError",
     "Principal",
     "RbacAuthorizationProvider",
+    "aenforce_plugin_action",
+    "aenforce_plugin_management",
+    "afilter_plugin_management",
+    "afilter_plugin_pages",
     "apply_tool_authorization",
-    "authorization_provider_from_context",
     "authorize_sandbox_execution",
     "build_principal_from_context",
+    "enforce_plugin_action",
+    "enforce_plugin_management",
+    "filter_available_skills_by_authorization",
+    "filter_resources_by_authorization",
     "filter_tools_by_authorization",
     "normalize_authz_attributes",
+    "plugin_action_target",
+    "plugin_management_target",
+    "plugin_page_target",
     "resolve_authorization_provider",
 ]

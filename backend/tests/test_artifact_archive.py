@@ -53,7 +53,6 @@ def _archive_app(
     run_thread_id: str = THREAD_ID,
     run_status: str = "success",
     with_receipt: bool = True,
-    owner_check_passes: bool = True,
 ) -> tuple[TestClient, MemoryRunStore, MemoryRunEventStore]:
     run_store = MemoryRunStore()
     event_store = MemoryRunEventStore()
@@ -90,10 +89,7 @@ def _archive_app(
         raising=False,
     )
 
-    app = make_authed_test_app(
-        user_factory=_user,
-        owner_check_passes=owner_check_passes,
-    )
+    app = make_authed_test_app(user_factory=_user)
     app.state.run_store = run_store
     app.state.run_event_store = event_store
     app.state.run_manager = run_manager
@@ -105,7 +101,10 @@ def test_archive_download_contains_only_presented_files(tmp_path, monkeypatch) -
     outputs = tmp_path / "outputs"
     (outputs / "reports").mkdir(parents=True)
     (outputs / "reports" / "summary.txt").write_text("summary", encoding="utf-8")
-    (outputs / "data.csv").write_text("a,b\n1,2\n", encoding="utf-8")
+    # Written as bytes on purpose: text mode translates "\n" to "\r\n" on
+    # Windows, so the archive would legitimately contain CRLF bytes while the
+    # assertion below compares against this literal LF spelling.
+    (outputs / "data.csv").write_bytes(b"a,b\n1,2\n")
     (outputs / "not-presented.txt").write_text("secret", encoding="utf-8")
     paths = [
         "/mnt/user-data/outputs/reports/summary.txt",
@@ -130,30 +129,6 @@ def test_archive_download_contains_only_presented_files(tmp_path, monkeypatch) -
         assert archive.read("reports/summary.txt") == b"summary"
         assert archive.read("data.csv") == b"a,b\n1,2\n"
         assert "not-presented.txt" not in archive.namelist()
-
-
-def test_archive_contains_files_a_bash_run_presented_on_the_runs_behalf(tmp_path, monkeypatch) -> None:
-    """The receipt's ``presented_files`` are what was presented; ``by_tool`` may name any tool, here ``bash``."""
-    outputs = tmp_path / "outputs"
-    outputs.mkdir(parents=True)
-    (outputs / "r.pdf").write_bytes(b"pdf")
-    client, _, event_store = _archive_app(monkeypatch, outputs, with_receipt=False)
-    asyncio.run(
-        event_store.put(
-            thread_id=THREAD_ID,
-            run_id=RUN_ID,
-            event_type="run.delivery",
-            category="outputs",
-            content={"presented": 1, "paths": ["/mnt/user-data/outputs/r.pdf"], "by_tool": {"bash": ["/mnt/user-data/outputs/r.pdf"]}, "presented_files": ["/mnt/user-data/outputs/r.pdf"]},
-        )
-    )
-
-    with client:
-        response = client.post(ARCHIVE_URL, json={"paths": ["/mnt/user-data/outputs/r.pdf"]})
-
-    assert response.status_code == 200
-    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-        assert archive.namelist() == ["r.pdf"]
 
 
 def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypatch) -> None:
@@ -479,6 +454,12 @@ def test_archive_rejects_internal_output_names(
         )
 
 
+# The swap the test performs is os.replace() while the archive still holds the
+# source file open. Windows refuses that rename with WinError 5, so the race is
+# only reproducible on POSIX; the same-size content change covered by
+# test_archive_rejects_same_size_content_change_with_restored_mtime still runs
+# on Windows and exercises the same mid-read revalidation.
+@pytest.mark.skipif(os.name == "nt", reason="os.replace() cannot rename over a file the archive still holds open on Windows (WinError 5)")
 def test_archive_rejects_a_path_replaced_during_read(tmp_path, monkeypatch) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

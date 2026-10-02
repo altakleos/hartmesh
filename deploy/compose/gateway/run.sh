@@ -32,11 +32,10 @@ mkdir -p "$DEER_FLOW_HOME" "$DEER_FLOW_HOME/skills"
 # allowlist does not govern; find-skills and claude-to-deerflow describe
 # flows that cannot work here (an install into a read-only mount the next
 # start replaces, a DeerFlow at localhost:2026 a sandbox cannot reach); the
-# other six the profile's own skill review refuses
-# (tool_plane.validation_requires_skill_review), so a base holding any of
-# them could never be promoted. backend/tests/test_compose_public_skills.py
-# pins both lists and that every review exclusion is still needed.
-EXCLUDED_PUBLIC_SKILLS="chart-visualization claude-to-deerflow find-skills github-deep-research image-generation music-generation podcast-generation skill-creator vercel-deploy-claimable video-generation web-design-guidelines"
+# other six stay out as in the released profile, where a skill review refused
+# them; that review is not part of this build, so shipping them is a decision
+# still to take. backend/tests/test_compose_public_skills.py pins the list.
+EXCLUDED_PUBLIC_SKILLS="chart-visualization claude-to-deerflow find-skills github-deep-research image-generation music-generation podcast-generation skill-creator vercel-deploy video-generation web-design-guidelines"
 # shellcheck disable=SC2086
 sh "$PROFILE/gateway/seed_skills.sh" /app/skills/public "$DEER_FLOW_HOME/skills" $EXCLUDED_PUBLIC_SKILLS
 

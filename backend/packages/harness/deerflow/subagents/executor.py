@@ -6,12 +6,12 @@ import json
 import logging
 import os
 import re
+import sys
 import threading
 import uuid
-from collections.abc import Awaitable, Callable, Coroutine, Mapping
+from collections.abc import Callable, Coroutine, Mapping
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FuturesTimeoutError
-from contextlib import nullcontext
 from contextvars import Context, copy_context
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -19,13 +19,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import TYPE_CHECKING, Any
 
-from deerflow_extension_api import (
-    ConstraintProjectionV1,
-    ConstraintProjectionV2,
-    InvocationIdentityV1,
-    SealedOriginV1,
-    TrustedRunContextV1,
-)
 from langchain.agents import create_agent
 from langchain.tools import BaseTool
 from langchain_core.callbacks.base import BaseCallbackManager
@@ -34,35 +27,19 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.runnables.config import var_child_runnable_config
 from langgraph.errors import GraphRecursionError
 
-from deerflow.agents.middlewares.audit_context import LOOP_DETECTION_RECORDER_CONTEXT_KEY
+from deerflow.agents.middlewares.audit_context import (
+    LOOP_DETECTION_RECORDER_CONTEXT_KEY,
+    TOOL_PROGRESS_RECORDER_CONTEXT_KEY,
+    TOOL_PROMOTION_RECORDER_CONTEXT_KEY,
+)
 from deerflow.agents.thread_state import SandboxState, ThreadDataState, ThreadState
 from deerflow.authz.principal import normalize_authz_attributes
-from deerflow.authz.provider import AuthorizationProvider
 from deerflow.config import get_app_config
 from deerflow.config.app_config import AppConfig
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import THREAD_INCARNATION_CONTEXT_KEY
 from deerflow.models import create_chat_model
-from deerflow.runtime.accepted_invocation import (
-    INVOCATION_IDENTITY_CONTEXT_KEY,
-    INVOCATION_ORIGIN_CONTEXT_KEY,
-    TRUSTED_RUN_CONTEXT_KEY,
-    ResolvedAgentMaterialV1,
-)
-from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
-from deerflow.runtime.constraints import InvocationSubagentReservation
-from deerflow.runtime.skill_projection import (
-    SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
-    SkillProjectionConsumerToken,
-    get_skill_projection_coordinator,
-)
-from deerflow.runtime.subagent_snapshot import (
-    ResolvedSubagentDefinitionV1,
-    SubagentCatalogError,
-)
-from deerflow.runtime.tool_evidence import (
-    DurableToolReceiptSink,
-    ToolEvidenceRuntimeBinding,
-    install_tool_evidence_context,
-)
+from deerflow.runtime.runs.stream_cleanup import close_agent_stream
 from deerflow.runtime.user_context import DEFAULT_USER_ID
 from deerflow.skills.types import Skill
 from deerflow.subagents.capacity import (
@@ -71,6 +48,7 @@ from deerflow.subagents.capacity import (
     get_subagent_execution_capacity,
 )
 from deerflow.subagents.config import SubagentConfig, resolve_subagent_model_name
+from deerflow.subagents.context_snapshot import SNAPSHOT_SYSTEM_NOTE, ParentContextSnapshot
 from deerflow.subagents.report_contract import (
     build_acceptance_criteria_system_note,
     build_report_contract_section,
@@ -78,8 +56,12 @@ from deerflow.subagents.report_contract import (
 )
 from deerflow.subagents.step_events import capture_new_step_messages
 from deerflow.subagents.token_collector import SubagentTokenCollector
+from deerflow.subagents.turn_budget import find_jumping_hooks, resolve_recursion_limit
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, resolve_trace_id
-from deerflow.tracing import build_tracing_callbacks, inject_langfuse_metadata
+from deerflow.tracing import (
+    build_tracing_callbacks,
+    inject_langfuse_metadata,
+)
 from deerflow.utils.messages import message_content_to_text
 
 if TYPE_CHECKING:
@@ -87,12 +69,12 @@ if TYPE_CHECKING:
     # tool_search eagerly would run tools/builtins/__init__ -> task_tool ->
     # `from deerflow.subagents import SubagentExecutor`, which re-enters this
     # still-initializing package. Type-only here keeps the annotation precise.
-    from deerflow.sandbox.session import SandboxSessionDeclaration
     from deerflow.tools.builtins.tool_search import DeferredToolSetup
 
 logger = logging.getLogger(__name__)
 
 _EXTENSION_TASK_NOTIFY_TIMEOUT_SECONDS = 3.0
+_STREAM_CLOSE_SLOW_WARNING_SECONDS = 10.0
 # Kept as wire keys here instead of importing ``deerflow.sandbox`` at module
 # load: executor tests and extension embedders replace that package while
 # breaking agent/tool import cycles.
@@ -286,10 +268,29 @@ class SubagentResult:
             return True
 
 
-def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
+def _terminal_direct_results(final_state: Any, return_direct_tools: set[str]) -> list[ToolMessage] | None:
+    """Match a complete terminal direct-tool batch in call order."""
+    if not final_state or not return_direct_tools:
+        return None
+    messages = final_state.get("messages", [])
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if not isinstance(message, AIMessage):
+            continue
+        calls = message.tool_calls
+        if calls and all(call["name"] in return_direct_tools for call in calls):
+            results = {item.tool_call_id: item for item in messages[index + 1 :] if isinstance(item, ToolMessage)}
+            if all(call["id"] in results for call in calls):
+                return [results[call["id"]] for call in calls]
+        return None
+    return None
+
+
+def _extract_final_result(final_state: Any, *, trace_id: str, name: str, return_direct_tools: set[str] | None = None) -> str:
     """Extract a human-readable result string from the streamed subagent state.
 
-    Finds the last ``AIMessage`` in the conversation and stringifies its
+    Uses the matched tool results when the last assistant turn consists only
+    of direct-return tools. Otherwise finds the last ``AIMessage`` and stringifies its
     content via the shared :func:`message_content_to_text` helper; falls back
     to the last message of any type when no AIMessage is present. Returns a
     sentinel string (``"No response generated"``) when there is nothing to
@@ -308,12 +309,12 @@ def _extract_final_result(final_state: Any, *, trace_id: str, name: str) -> str:
     messages = final_state.get("messages", [])
     logger.info(f"[trace={trace_id}] Subagent {name} final messages count: {len(messages)}")
 
-    last_ai_message = None
-    for msg in reversed(messages):
-        if isinstance(msg, AIMessage):
-            last_ai_message = msg
-            break
+    direct_results = _terminal_direct_results(final_state, return_direct_tools or set())
+    if direct_results is not None:
+        texts = [message_content_to_text(message.content) for message in direct_results]
+        return "\n\n".join(text for text in texts if text) or "No response generated"
 
+    last_ai_message = next((message for message in reversed(messages) if isinstance(message, AIMessage)), None)
     if last_ai_message is not None:
         text = message_content_to_text(last_ai_message.content)
         return text if text else "No response generated"
@@ -468,11 +469,7 @@ def _bash_evidence_status(content: str, meta_status: str) -> tuple[str, str | No
     return ("success" if int(match.group(1)) == 0 else "error"), " ".join(match.group(0).split())
 
 
-def _harvest_shell_persistence(
-    final_state: Any,
-    *,
-    sandbox_session: "SandboxSessionDeclaration | None" = None,
-) -> bool | None:
+def _harvest_shell_persistence(final_state: Any) -> bool | None:
     """Whether the sandbox that produced this state's bash evidence reuses one
     persistent shell session (``Sandbox.persistent_shell_sessions`` — AIO's
     legacy exec path).
@@ -489,11 +486,6 @@ def _harvest_shell_persistence(
     fresh-shell proof. Consumers must fail closed (UNVERIFIED) on ``None``.
     """
     try:
-        if sandbox_session is not None:
-            # A declared session's handle carries the producing sandbox's
-            # capability declaration; state holds only its public ref.
-            declared = getattr(sandbox_session.handle, "persistent_shell_sessions", None)
-            return None if declared is None else bool(declared)
         from deerflow.sandbox.overwrite import unwrap_sandbox
         from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
@@ -515,8 +507,6 @@ def _harvest_shell_persistence(
 
 def _harvest_bash_executions(
     final_state: Any,
-    *,
-    sandbox_session: "SandboxSessionDeclaration | None" = None,
 ) -> list[dict[str, Any]] | None:
     """Harvest bounded bash command/output evidence from one streamed state.
 
@@ -592,10 +582,7 @@ def _harvest_bash_executions(
         # cannot derive it (its runtime has no ``sandbox`` key when the
         # parent delegated before touching one). ``None`` (unknown) fails
         # closed in the acceptance matcher.
-        shell_persistent = _harvest_shell_persistence(
-            final_state,
-            sandbox_session=sandbox_session,
-        )
+        shell_persistent = _harvest_shell_persistence(final_state)
         for execution in executions:
             execution["shell_persistent"] = shell_persistent
         return executions[-_BASH_EVIDENCE_MAX_ENTRIES:]
@@ -778,20 +765,6 @@ def _copy_isolated_subagent_context() -> Context:
     return context
 
 
-def _record_scope_release(context: object, scope_ref: str) -> None:
-    """Record the subagent's shell-scope release as a run diagnostic.
-
-    Diagnostics are best effort and never authority: the sandbox package is
-    imported lazily here like the lease helpers, and an environment without
-    it simply records nothing.
-    """
-    try:
-        from deerflow.sandbox.diagnostics import record_sandbox_diagnostic
-    except Exception:
-        return
-    record_sandbox_diagnostic(context, "scope.released", facts={"scope_ref": scope_ref})
-
-
 def _filter_tools(
     all_tools: list[BaseTool],
     allowed: list[str] | None,
@@ -822,26 +795,7 @@ def _filter_tools(
     return filtered
 
 
-async def _release_own_projection_consumer(context: dict[str, Any], consumer_id: str, *, trace_id: str | None) -> None:
-    """Drop the projection consumer this execution activated for itself.
-
-    A child that reaches the sandbox before its lead activates a consumer under
-    its own lease identity (a retained parent token is released separately).
-    Its middleware drops it on a normal finish; a child that fails, times out
-    or is cancelled does not get there, and the consumer would keep the
-    thread's projection busy after the run.
-    """
-    from deerflow.runtime.skill_projection import SKILL_PROJECTION_TOKEN_CONTEXT_KEY, SkillProjectionConsumerToken
-
-    token = context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
-    if not isinstance(token, SkillProjectionConsumerToken) or token.consumer_id != consumer_id:
-        return
-    from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
-
-    try:
-        await asyncio.to_thread(release_accepted_skill_consumer, token)
-    except Exception:
-        logger.warning("[trace=%s] Failed to release the subagent's skill projection consumer", trace_id, exc_info=True)
+_THREAD_INCARNATION_UNSET = object()
 
 
 class SubagentExecutor:
@@ -866,30 +820,16 @@ class SubagentExecutor:
         channel_user_id: str | None = None,
         is_internal: bool = False,
         authz_attributes: Mapping[str, Any] | None = None,
-        invocation_identity: InvocationIdentityV1 | None = None,
-        invocation_origin: SealedOriginV1 | None = None,
-        trusted_run_context: TrustedRunContextV1 | None = None,
         deerflow_trace_id: str | None = None,
+        knowledge_scope: dict[str, Any] | None = None,
         extensions: Any | None = None,
-        authorization_provider: AuthorizationProvider | None = None,
-        invocation_constraints: ConstraintProjectionV1 | ConstraintProjectionV2 | None = None,
-        subagent_reservation: InvocationSubagentReservation | None = None,
-        accepted_extension_generation: int | None = None,
-        accepted_extension_manifest_digest: str | None = None,
-        accepted_extension_artifact_manifest_digest: str | None = None,
-        accepted_extension_configuration_digest: str | None = None,
-        mcp_invocation_facts: Any | None = None,
-        mcp_preparation_audit_sink: Any | None = None,
-        resolved_agent_material: ResolvedAgentMaterialV1 | None = None,
-        skill_projection_token: SkillProjectionConsumerToken | None = None,
-        tool_evidence_parent_binding: ToolEvidenceRuntimeBinding | None = None,
-        tool_evidence_sink: DurableToolReceiptSink | None = None,
-        tool_evidence_execution_task_id: str | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
-        execution_admitted_callback: Callable[[], Awaitable[None]] | None = None,
-        sandbox_session: "SandboxSessionDeclaration | None" = None,
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
+        tool_promotion_recorder: Any | None = None,
+        tool_progress_recorder: Any | None = None,
+        context_snapshot: ParentContextSnapshot | None = None,
+        thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     ):
         """Initialize the executor.
 
@@ -906,6 +846,8 @@ class SubagentExecutor:
                 run. Seeded into the child graph state so ``list_uploaded_files``
                 can exclude them from historical-upload results.
             thread_id: Thread ID for sandbox operations.
+            thread_incarnation: Server-captured parent lifecycle. Explicit None
+                preserves legacy scope; omission stays absent so MCP fails closed.
             trace_id: Trace ID from parent for distributed tracing.
             user_id: User ID captured from the parent tool's runtime context.
                 When None, the tracing layer falls back to DEFAULT_USER_ID.
@@ -919,43 +861,16 @@ class SubagentExecutor:
                 from the parent run for Langfuse metadata correlation. Falls
                 back to the ambient trace so the attribute is always a real
                 id, never ``None``.
+            knowledge_scope: Canonical execution-only knowledge scope inherited
+                from the parent turn. Display labels are never propagated.
             extensions: The parent run's immutable ``LoadedExtensions`` snapshot,
                 captured at ``task_tool`` dispatch. When None (embedded client,
                 standalone LangGraph Server), ``_aexecute`` falls back to the
                 process-wide singleton.
-            authorization_provider: The parent run's resolved provider instance.
-            invocation_constraints: The accepted immutable constraint projection.
-            subagent_reservation: The invocation-scoped exact dispatch counter.
-            accepted_extension_generation: The immutable extension generation
-                accepted for the parent invocation.
-            accepted_extension_manifest_digest: The matching immutable safe
-                manifest digest accepted for the parent invocation.
-            accepted_extension_artifact_manifest_digest: The verified installed
-                extension artifact manifest accepted for the parent invocation.
-            accepted_extension_configuration_digest: The matching secret-safe
-                deployment configuration digest.
-            mcp_invocation_facts: Host-sealed MCP operation facts inherited
-                from the accepted parent invocation.
-            mcp_preparation_audit_sink: Thread-safe bridge to the parent run's
-                MCP preparation journal.
-            trusted_run_context: Host-sealed invocation facts inherited as one
-                immutable record. When present it is authoritative over the
-                legacy identity, Origin, attributes, and extension arguments.
-            resolved_agent_material: Exact accepted graph-factory material.
-                Its snapshot-backed skills are shared with the lead agent and
-                remain process-local.
             execution_capacity: Optional explicitly shared admission controller.
                 Direct ``create_deerflow_agent`` callers pass one through their
                 ``SubagentRuntime``; application factories fall back to the
                 startup-configured process singleton.
-            execution_admitted_callback: Optional async fence invoked after a
-                process slot is acquired and immediately before model work.
-                Durable batch workers use it to persist ``started`` without
-                treating a queue-capacity rejection as an execution attempt.
-            sandbox_session: The declared sandbox session the child executes
-                under: an in-run subagent borrows its parent's declaration, a
-                durable batch child gets its own. The executor binds it for
-                exactly the child's execution and never retires it.
             acceptance_criteria: Optional lead-supplied completion requirements
                 (RFC #4651 PR3). Criterion values are model-supplied untrusted
                 data, so ``_build_initial_state`` appends them to the task
@@ -966,6 +881,13 @@ class SubagentExecutor:
                 parent task tool. Native subagents execute on a separate event
                 loop, so this must be a proxy rather than the parent
                 ``RunJournal`` itself.
+            tool_promotion_recorder: Optional loop-safe recorder for deferred-tool
+                promotion events. It follows the same isolated-loop boundary.
+            tool_progress_recorder: Optional loop-safe recorder for tool-progress
+                phase transitions. It follows the same isolated-loop boundary.
+            context_snapshot: Optional immutable parent history captured by the
+                ordinary task tool at dispatch. Rendered as background data,
+                never as child execution evidence or inherited system authority.
         """
         self.config = config
         self.app_config = app_config
@@ -981,7 +903,9 @@ class SubagentExecutor:
         self.sandbox_state = sandbox_state
         self.thread_data = thread_data
         self.uploaded_files = deepcopy(uploaded_files) if uploaded_files is not None else None
+        self.context_snapshot = context_snapshot
         self.thread_id = thread_id
+        self.thread_incarnation = thread_incarnation
         # Generate trace_id if not provided (for top-level calls)
         self.trace_id = trace_id or str(uuid.uuid4())[:8]
         self.user_id = user_id
@@ -994,133 +918,29 @@ class SubagentExecutor:
         # chats share one thread across senders, so delegated bash commands
         # must export the dispatching turn's id, not none at all.
         self.channel_user_id = channel_user_id
-        if trusted_run_context is not None and not isinstance(trusted_run_context, TrustedRunContextV1):
-            raise TypeError("trusted_run_context must be TrustedRunContextV1 or None")
-        if trusted_run_context is not None:
-            subject = trusted_run_context.identity.effective_subject
-            if run_id is not None and trusted_run_context.run_id is not None and run_id != trusted_run_context.run_id:
-                raise ValueError("trusted run context does not match parent run")
-            if thread_id is not None and thread_id != trusted_run_context.thread_id:
-                raise ValueError("trusted run context does not match parent thread")
-            self.thread_id = trusted_run_context.thread_id
-            self.run_id = trusted_run_context.run_id or run_id
-            self.user_id = subject.subject_id
-            self.user_role = subject.role
-            self.oauth_provider = subject.oauth_provider
-            self.oauth_id = subject.oauth_id
-            invocation_identity = trusted_run_context.identity
-            invocation_origin = trusted_run_context.origin
-            is_internal = subject.kind == "service"
-            authz_attributes = trusted_run_context.authorization_attributes
-            if accepted_extension_generation is not None and accepted_extension_generation != trusted_run_context.extension_generation:
-                raise ValueError("trusted run context does not match extension generation")
-            if accepted_extension_manifest_digest is not None and accepted_extension_manifest_digest != trusted_run_context.extension_manifest_digest:
-                raise ValueError("trusted run context does not match extension manifest")
-            if accepted_extension_artifact_manifest_digest is not None and accepted_extension_artifact_manifest_digest != trusted_run_context.extension_artifact_manifest_digest:
-                raise ValueError("trusted run context does not match extension artifact manifest")
-            if accepted_extension_configuration_digest is not None and accepted_extension_configuration_digest != trusted_run_context.extension_configuration_digest:
-                raise ValueError("trusted run context does not match extension configuration")
-            accepted_extension_generation = trusted_run_context.extension_generation
-            accepted_extension_manifest_digest = trusted_run_context.extension_manifest_digest
-            accepted_extension_artifact_manifest_digest = trusted_run_context.extension_artifact_manifest_digest
-            accepted_extension_configuration_digest = trusted_run_context.extension_configuration_digest
-        if invocation_identity is not None and not isinstance(invocation_identity, InvocationIdentityV1):
-            raise TypeError("invocation_identity must be InvocationIdentityV1 or None")
-        if invocation_origin is not None and not isinstance(invocation_origin, SealedOriginV1):
-            raise TypeError("invocation_origin must be SealedOriginV1 or None")
-        self.invocation_identity = invocation_identity
-        self.invocation_origin = invocation_origin
-        self.trusted_run_context = trusted_run_context
-        # Retain the compatibility boolean without allowing transport-derived
-        # legacy state to promote a represented human.
-        self.is_internal = invocation_identity.effective_subject.kind == "service" if invocation_identity is not None else is_internal
-        self.authz_attributes = trusted_run_context.authorization_attributes if trusted_run_context is not None else normalize_authz_attributes(authz_attributes)
+        # Authorization identity propagated from the parent runtime context.
+        # is_internal is written unconditionally (including False) so the
+        # subagent's GuardrailMiddleware sees the same provenance as the lead.
+        self.is_internal = is_internal
+        self.authz_attributes = normalize_authz_attributes(authz_attributes)
         # Resolved, not stored raw: the attribute is part of the non-nullable
         # trace contract, and ``_aexecute`` rebinds it because a subagent runs
         # on the isolated loop thread where the parent ContextVar may be gone.
         self.deerflow_trace_id = resolve_trace_id(deerflow_trace_id)
+        self.knowledge_scope = execution_scope(knowledge_scope) if knowledge_scope is not None else None
         # Parent run's extension snapshot. Binding it here (rather than reading
         # the singleton at execution time) is what keeps one run on a single
         # extension generation: a concurrent ``set_loaded_extensions()`` between
         # the lead run's start and this subagent's execution must not swap the
         # generation underneath the delegated work.
         self.extensions = extensions
-        self.authorization_provider = authorization_provider
-        self.invocation_constraints = invocation_constraints
-        self.subagent_reservation = subagent_reservation
-        self.accepted_extension_generation = accepted_extension_generation
-        self.accepted_extension_manifest_digest = accepted_extension_manifest_digest
-        self.accepted_extension_artifact_manifest_digest = accepted_extension_artifact_manifest_digest
-        self.accepted_extension_configuration_digest = accepted_extension_configuration_digest
-        self.mcp_invocation_facts = mcp_invocation_facts
-        self.mcp_preparation_audit_sink = mcp_preparation_audit_sink
-        if resolved_agent_material is not None and not isinstance(
-            resolved_agent_material,
-            ResolvedAgentMaterialV1,
-        ):
-            raise TypeError("resolved_agent_material must be ResolvedAgentMaterialV1 or None")
-        self.resolved_agent_material = resolved_agent_material
-        evidence_parts = (
-            tool_evidence_parent_binding,
-            tool_evidence_sink,
-            tool_evidence_execution_task_id,
-        )
-        if any(item is not None for item in evidence_parts) and not all(item is not None for item in evidence_parts):
-            raise TypeError("tool evidence binding, sink, and stable task ID must be supplied together")
-        if tool_evidence_parent_binding is not None and not isinstance(tool_evidence_parent_binding, ToolEvidenceRuntimeBinding):
-            raise TypeError("tool_evidence_parent_binding must be ToolEvidenceRuntimeBinding or None")
-        if tool_evidence_sink is not None and not isinstance(tool_evidence_sink, DurableToolReceiptSink):
-            raise TypeError("tool_evidence_sink must implement DurableToolReceiptSink")
-        if tool_evidence_execution_task_id is not None and (not isinstance(tool_evidence_execution_task_id, str) or not tool_evidence_execution_task_id.startswith("st_") or len(tool_evidence_execution_task_id) != 67):
-            raise TypeError("tool_evidence_execution_task_id must be a stable subagent task ID")
-        self.tool_evidence_parent_binding = tool_evidence_parent_binding
-        self.tool_evidence_binding: ToolEvidenceRuntimeBinding | None = None
-        self.tool_evidence_sink = tool_evidence_sink
-        self.tool_evidence_execution_task_id = tool_evidence_execution_task_id
-        if resolved_agent_material is not None and self.app_config is None and resolved_agent_material.app_config is not None:
-            self.app_config = resolved_agent_material.app_config
-            if self.model_name is None:
-                self.model_name = resolve_subagent_model_name(
-                    config,
-                    parent_model,
-                    app_config=self.app_config,
-                )
-        self.resolved_subagent_definition: ResolvedSubagentDefinitionV1 | None = None
-        self.parent_subagent_catalog_digest: str | None = None
-        if resolved_agent_material is not None:
-            catalog = resolved_agent_material.subagent_catalog
-            catalog_entry = catalog.get(config.name)
-            if catalog_entry is None or config != catalog_entry.to_subagent_config():
-                raise SubagentCatalogError("subagent_definition_drift")
-            if self.app_config is not None:
-                catalog_entry.verify_execution_settings(
-                    self.app_config,
-                    parent_model_name=self.model_name,
-                )
-            self.resolved_subagent_definition = catalog_entry
-            self.parent_subagent_catalog_digest = catalog.digest
-        self._owns_resolved_agent_material = False
-        if skill_projection_token is not None and not isinstance(
-            skill_projection_token,
-            SkillProjectionConsumerToken,
-        ):
-            raise TypeError("skill_projection_token must be SkillProjectionConsumerToken or None")
-        self.skill_projection_token = skill_projection_token
-        self._owns_skill_projection_token = False
         self.execution_capacity = execution_capacity
-        if execution_admitted_callback is not None and not callable(execution_admitted_callback):
-            raise TypeError("execution_admitted_callback must be callable or None")
-        self.execution_admitted_callback = execution_admitted_callback
-        if sandbox_session is not None:
-            from deerflow.sandbox.session import SandboxSessionDeclaration
-
-            if not isinstance(sandbox_session, SandboxSessionDeclaration):
-                raise TypeError("sandbox_session must be SandboxSessionDeclaration or None")
-        self.sandbox_session = sandbox_session
         # Raw lead-supplied criteria; stripping/capping happens at render time
         # in report_contract.render_acceptance_criteria_block.
         self.acceptance_criteria = acceptance_criteria
         self.loop_detection_recorder = loop_detection_recorder
+        self.tool_promotion_recorder = tool_promotion_recorder
+        self.tool_progress_recorder = tool_progress_recorder
 
         self._base_tools = _filter_tools(
             tools,
@@ -1140,6 +960,18 @@ class SubagentExecutor:
         # not just the first — because the v2 contract advertises more than one
         # cap reason.
         self._stop_reason_middlewares: list[Any] = []
+        self._return_direct_tools: set[str] = set()
+        # The one skill-authorization context for this execution, resolved
+        # lazily by ``_resolve_skill_authorization`` and shared by the Layer 1
+        # filter and every runtime ``skill:activate`` check (activation
+        # middleware, describe gate, skill-read stamping).
+        self._skill_authorization: Any | None = None
+        # LangGraph super-step budget that buys ``config.max_turns`` turns,
+        # resolved in ``_create_agent`` once the middleware chain — and with it
+        # the compiled graph's per-turn node count — is known. Stays ``None``
+        # until then; ``_aexecute`` falls back to the raw turn count so a test
+        # double replacing ``_create_agent`` still produces a runnable config.
+        self._recursion_limit: int | None = None
         # What this subagent was assembled from, published to extension
         # observers at the end of ``_create_agent``. The prompt and skill set
         # are captured while ``_build_initial_state`` renders them because
@@ -1172,16 +1004,9 @@ class SubagentExecutor:
         app_config = self._get_resolved_app_config()
         if self.model_name is None:
             self.model_name = resolve_subagent_model_name(self.config, self.parent_model, app_config=app_config)
-        model = create_chat_model(
-            name=self.model_name,
-            thinking_enabled=False,
-            app_config=app_config,
-            attach_tracing=False,
-        )
+        model = create_chat_model(name=self.model_name, thinking_enabled=False, app_config=app_config, attach_tracing=False)
 
-        from deerflow.agents.middlewares.tool_error_handling_middleware import (
-            build_subagent_runtime_middlewares,
-        )
+        from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 
         # Reuse shared middleware composition with lead agent. ``agent_name``
         # lets the builder resolve the per-agent token_budget override.
@@ -1208,6 +1033,17 @@ class SubagentExecutor:
         authz_provider = getattr(self, "_authz_provider", None)
         if authz_provider is not None:
             middleware_kwargs["authorization_provider"] = authz_provider
+        # Phase 3 (Layer 2): arm the runtime ``skill:activate`` check on the
+        # subagent chain too — a delegated task is a plain HumanMessage, so
+        # task text containing /skill-name reaches the activation middleware.
+        # Resolved through the same memoized helper the Layer 1 filter used
+        # (``_resolve_skill_authorization``): provider factories are
+        # deliberately uncached, so resolving independently here could hand the
+        # runtime checks a different provider instance (and policy snapshot)
+        # than the filter that built ``_available_skill_names``.
+        skill_authorization = self._resolve_skill_authorization()
+        if skill_authorization is not None:
+            middleware_kwargs["skill_authorization"] = skill_authorization
         if mcp_routing_middleware is not None:
             middleware_kwargs["mcp_routing_middleware"] = mcp_routing_middleware
         middlewares = build_subagent_runtime_middlewares(**middleware_kwargs)
@@ -1218,6 +1054,7 @@ class SubagentExecutor:
         # a list (not ``next(...)``) so every guard is checked and a later one
         # is picked up automatically.
         self._stop_reason_middlewares = [m for m in middlewares if hasattr(m, "consume_stop_reason")]
+        self._recursion_limit = self._resolve_recursion_limit(middlewares)
 
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
@@ -1230,6 +1067,13 @@ class SubagentExecutor:
             state_schema=ThreadState,
             checkpointer=False,
         )
+        # Use the compiled registry: it includes middleware tools, normalized
+        # callables, and LangChain's last-definition-wins name precedence.
+        from langgraph.prebuilt import ToolNode
+
+        tool_graph_node = agent.get_graph().nodes.get("tools")
+        tool_node = tool_graph_node.data if tool_graph_node is not None else None
+        self._return_direct_tools = {tool.name for tool in tool_node.tools_by_name.values() if tool.return_direct} if isinstance(tool_node, ToolNode) else set()
         self._describe_assembly(
             app_config=app_config,
             tools=bound_tools,
@@ -1238,6 +1082,44 @@ class SubagentExecutor:
             extensions=extensions if extensions is not None else self.extensions,
         )
         return agent
+
+    def _resolve_recursion_limit(self, middlewares: list[Any]) -> int:
+        """Translate ``max_turns`` into the super-step budget it actually means.
+
+        ``max_turns`` is the operator-facing policy ("how many times may this
+        agent think and act"), while LangGraph's ``recursion_limit`` counts
+        graph nodes. ``create_agent`` compiles one node per middleware
+        lifecycle hook, so the two differ by the depth of the assembled chain —
+        see ``turn_budget.py`` for the arithmetic. Resolving it here, from the
+        chain this subagent was actually built with, keeps the budget stable as
+        middlewares are added and lets a per-agent chain differ.
+        """
+        recursion_limit = resolve_recursion_limit(self.config.max_turns, middlewares)
+        logger.debug(
+            "[trace=%s] Subagent %s turn budget: max_turns=%s -> recursion_limit=%s (%d middlewares)",
+            self.trace_id,
+            self.config.name,
+            self.config.max_turns,
+            recursion_limit,
+            len(middlewares),
+        )
+        # A hook that declares ``can_jump_to`` — agent-level hooks included —
+        # can leave the straight path through the graph, spending super-steps
+        # the flat per-turn cost does not model, so the budget silently becomes
+        # a lower bound. No middleware in the subagent chain declares one today;
+        # say so loudly if that changes, rather than letting runs quietly cap
+        # short again.
+        jumping_hooks = find_jumping_hooks(middlewares)
+        if jumping_hooks:
+            logger.warning(
+                "[trace=%s] Subagent %s has jump-declaring middleware hooks (%s); recursion_limit=%s is a lower bound for max_turns=%s, so the run may cap early",
+                self.trace_id,
+                self.config.name,
+                ", ".join(f"{name}.{hook}" for name, hook in jumping_hooks),
+                recursion_limit,
+                self.config.max_turns,
+            )
+        return recursion_limit
 
     def _describe_assembly(
         self,
@@ -1255,17 +1137,13 @@ class SubagentExecutor:
         schema and probes every middleware, so it is skipped entirely when no
         observer is registered to receive it.
         """
-        has_observers = getattr(
-            extensions,
-            "has_agent_assembly_observers",
-            False,
-        )
-        if not has_observers and self.resolved_subagent_definition is None:
+        if not getattr(extensions, "has_agent_assembly_observers", False):
             return
 
         from types import SimpleNamespace
 
         from deerflow.agents.assembly_descriptor import build_assembly_descriptor
+        from deerflow.extensions.notify import notify_agent_assembled
 
         try:
             get_model_config = getattr(app_config, "get_model_config", None)
@@ -1281,14 +1159,20 @@ class SubagentExecutor:
                     supports_vision=False,
                 )
             deferred_names = deferred_setup.deferred_names if deferred_setup is not None else frozenset()
+            # Subagents request thinking off; the model's reasoning contract
+            # decides what that means (a required-thinking model stays on), and
+            # the descriptor reports the effective policy the factory applied.
+            from deerflow.models.reasoning import resolve_reasoning_contract, resolve_reasoning_request
+
+            effective_reasoning = resolve_reasoning_request(resolve_reasoning_contract(model_config), thinking_enabled=False, reasoning_effort=None)
             descriptor = build_assembly_descriptor(
                 namespace="deerflow",
                 agent_name=self.config.name,
                 requested_model=(self.config.model if self.config.model != "inherit" else self.parent_model),
                 effective_model=self.model_name,
                 model_config=model_config,
-                thinking_enabled=False,
-                reasoning_effort=None,
+                thinking_enabled=effective_reasoning.thinking_enabled,
+                reasoning_effort=effective_reasoning.reasoning_effort,
                 rendered_base_prompt=self._assembled_system_prompt,
                 prompt_template_id="deerflow-subagent-v1",
                 tools=tools,
@@ -1304,13 +1188,9 @@ class SubagentExecutor:
                         "enabled": bool(deferred_names),
                         "catalog_hash": (deferred_setup.catalog_hash if deferred_setup is not None else None),
                     },
-                    "accepted_definition_digest": (self.resolved_subagent_definition.definition_digest if self.resolved_subagent_definition is not None else None),
-                    "parent_catalog_digest": self.parent_subagent_catalog_digest,
                 },
             )
-        except Exception as exc:
-            if self.resolved_subagent_definition is not None:
-                raise SubagentCatalogError("subagent_definition_drift") from exc
+        except Exception:
             logger.warning(
                 "[trace=%s] Could not describe subagent %s assembly",
                 self.trace_id,
@@ -1319,10 +1199,7 @@ class SubagentExecutor:
             )
             return
         self.assembly_descriptor = descriptor
-        if has_observers:
-            from deerflow.extensions.notify import notify_agent_assembled
-
-            notify_agent_assembled(descriptor, extensions)
+        notify_agent_assembled(descriptor, extensions)
 
     def _consume_guard_stop_reason(self) -> str | None:
         """Pop and return the guard-cap stop reason set during the last run.
@@ -1348,30 +1225,21 @@ class SubagentExecutor:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} skills=[] — skipping skill loading")
             return []
 
-        if self.resolved_agent_material is not None:
-            all_skills = list(self.resolved_agent_material.skill_objects_for_scope(f"subagent:{self.config.name}"))
-            logger.info(
-                "[trace=%s] Subagent %s loaded %d accepted snapshot skill(s)",
-                self.trace_id,
-                self.config.name,
-                len(all_skills),
-            )
-        else:
-            try:
-                from deerflow.skills.storage import get_or_new_user_skill_storage
+        try:
+            from deerflow.skills.storage import get_or_new_user_skill_storage
 
-                storage_kwargs = {"app_config": self.app_config} if self.app_config is not None else {}
-                storage = await asyncio.to_thread(
-                    get_or_new_user_skill_storage,
-                    self.user_id or DEFAULT_USER_ID,
-                    **storage_kwargs,
-                )
-                # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
-                all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
-                logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
-            except Exception:
-                logger.exception(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}")
-                raise
+            storage_kwargs = {"app_config": self.app_config} if self.app_config is not None else {}
+            storage = await asyncio.to_thread(
+                get_or_new_user_skill_storage,
+                self.user_id or DEFAULT_USER_ID,
+                **storage_kwargs,
+            )
+            # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
+            all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
+            logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
+        except Exception:
+            logger.exception(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}")
+            raise
 
         if not all_skills:
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} no enabled skills found")
@@ -1380,8 +1248,66 @@ class SubagentExecutor:
         # Filter by config.skills whitelist
         if self.config.skills is not None:
             allowed = set(self.config.skills)
+        else:
+            allowed = None
+
+        # Phase 3: enforce skill authorization (Layer 1). Filter the skill
+        # allowlist by the provider's "skill" policy so denied skills never
+        # reach the returned list (and are never turned into tools). Pass the
+        # already-loaded ``all_skills`` names as candidates so we don't pay a
+        # second ``load_skills`` round-trip inside the filter, and the memoized
+        # authorization context so the filter's provider instance is the same
+        # one the runtime ``skill:activate`` checks on this assembly use.
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+
+        resolved_app_config = self.app_config or get_app_config()
+        allowed = filter_available_skills_by_authorization(
+            allowed,
+            context=self._skill_authz_context(),
+            app_config=resolved_app_config,
+            # Same bucket convention as the middleware chain (self.user_id or
+            # DEFAULT_USER_ID); only consulted if candidates were not supplied.
+            user_id=self.user_id or DEFAULT_USER_ID,
+            candidate_skill_names=[s.name for s in all_skills],
+            authorization=self._resolve_skill_authorization(),
+        )
+
+        if allowed is not None:
             return [s for s in all_skills if s.name in allowed]
         return all_skills
+
+    def _resolve_skill_authorization(self):
+        """The one skill-authorization context for this execution.
+
+        Resolved once per executor assembly (executors are built per task
+        dispatch) and shared by the Layer 1 filter in ``_load_skills``, the
+        runtime ``skill:activate`` check on the activation middleware, the
+        ``describe_skill`` gate, and the skill-read stamping middleware — so
+        every layer of this assembly sees the same provider instance and
+        policy snapshot. Providers are uncached by design; resolving per layer
+        would let a custom provider observe different snapshots for visibility
+        and activation within one run.
+        """
+        resolved = getattr(self, "_skill_authorization", None)
+        if resolved is None:
+            from deerflow.authz.skill_filter import resolve_skill_authorization
+
+            resolved = resolve_skill_authorization(self._skill_authz_context(), self._get_resolved_app_config())
+            self._skill_authorization = resolved
+        return resolved
+
+    def _skill_authz_context(self) -> dict[str, Any]:
+        """Identity mapping shared by the Layer 1 filter and the runtime
+        ``skill:activate`` check wired into the subagent middleware chain."""
+        return {
+            "user_id": self.user_id,
+            "user_role": self.user_role,
+            "oauth_provider": self.oauth_provider,
+            "oauth_id": self.oauth_id,
+            "channel_user_id": self.channel_user_id,
+            "is_internal": self.is_internal,
+            "authz_attributes": self.authz_attributes,
+        }
 
     async def _build_initial_state(self, task: str) -> tuple[dict[str, Any], list[BaseTool], "DeferredToolSetup"]:
         """Build the initial state for agent execution.
@@ -1399,11 +1325,7 @@ class SubagentExecutor:
         # Lazy import: see the TYPE_CHECKING note at the top of this module -
         # importing tool_search runs tools/builtins/__init__, which would
         # re-enter this package during its own initialization.
-        from deerflow.tools.builtins.tool_search import (
-            assemble_deferred_tools,
-            get_deferred_tools_prompt_section,
-            get_mcp_routing_hints_prompt_section,
-        )
+        from deerflow.tools.builtins.tool_search import assemble_deferred_tools, get_deferred_tools_prompt_section, get_mcp_routing_hints_prompt_section
 
         # Skills are discoverable metadata until explicitly slash-activated or
         # loaded through read_file. Their allowed-tools declarations are applied
@@ -1414,15 +1336,13 @@ class SubagentExecutor:
 
         resolved_app_config = self._get_resolved_app_config()
 
-        from deerflow.skills.describe import (
-            build_skill_search_setup,
-            get_skill_index_prompt_section,
-        )
+        from deerflow.skills.describe import build_skill_search_setup, get_skill_index_prompt_section
 
         skill_setup = build_skill_search_setup(
             skills,
             enabled=resolved_app_config.skills.deferred_discovery,
             container_base_path=resolved_app_config.skills.container_path,
+            skill_authorization=self._resolve_skill_authorization(),
         )
 
         # Apply authorization Layer 1: filter tools before deferred assembly
@@ -1436,13 +1356,8 @@ class SubagentExecutor:
             "oauth_id": self.oauth_id,
             "channel_user_id": self.channel_user_id,
             "is_internal": self.is_internal,
-            INVOCATION_IDENTITY_CONTEXT_KEY: self.invocation_identity,
-            INVOCATION_ORIGIN_CONTEXT_KEY: self.invocation_origin,
+            "authz_attributes": self.authz_attributes,
         }
-        if self.trusted_run_context is not None:
-            authz_context[TRUSTED_RUN_CONTEXT_KEY] = self.trusted_run_context
-        else:
-            authz_context["authz_attributes"] = self.authz_attributes
         authorization_candidates = [*self._base_tools]
         if skill_setup.describe_skill_tool is not None:
             authorization_candidates.append(skill_setup.describe_skill_tool)
@@ -1451,7 +1366,6 @@ class SubagentExecutor:
             authorization_candidates,
             context=authz_context,
             app_config=resolved_app_config,
-            authorization_provider=self.authorization_provider,
         )
         configured_tools = [tool for tool in authorized_tools if id(tool) in configured_tool_ids]
         late_tools = [tool for tool in authorized_tools if id(tool) not in configured_tool_ids]
@@ -1477,6 +1391,8 @@ class SubagentExecutor:
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
+        if self.context_snapshot is not None:
+            system_parts.append(SNAPSHOT_SYSTEM_NOTE)
         # RFC #4651 PR3: every subagent — built-in or custom — gets the same
         # report contract, so the citation / verifiable-handle requirements
         # never depend on the config author remembering them. The citation
@@ -1513,7 +1429,6 @@ class SubagentExecutor:
                     self._available_skill_names,
                     app_config=resolved_app_config,
                     user_id=self.user_id or DEFAULT_USER_ID,
-                    resolved_skills=(tuple(skills) if self.resolved_agent_material is not None else None),
                 )
             if skills_section:
                 system_parts.append(skills_section)
@@ -1528,8 +1443,11 @@ class SubagentExecutor:
 
         messages: list[Any] = []
         if system_parts:
-            self._assembled_system_prompt = "\n\n".join(system_parts)
+            self._assembled_system_prompt = self.config.prompt_overlay.apply("\n\n".join(system_parts))
             messages.append(SystemMessage(content=self._assembled_system_prompt))
+
+        if self.context_snapshot is not None:
+            messages.append(self.context_snapshot.to_message())
 
         # Then the actual task, with any lead-supplied acceptance criteria
         # appended as untrusted data (see the channel note above).
@@ -1568,7 +1486,7 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
             )
-        with ensure_trace_context(self.deerflow_trace_id), self._sandbox_session_binding():
+        with ensure_trace_context(self.deerflow_trace_id):
             try:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 async with capacity.slot():
@@ -1584,20 +1502,6 @@ class SubagentExecutor:
                     admission_failure=True,
                 )
                 return result
-
-    def _sandbox_session_binding(self):
-        """Bind the handed declaration for exactly this execution.
-
-        A batch child runs on the isolated loop, whose context carries no
-        declaration; an in-run subagent's copied context carries its parent's.
-        Either way the child's tools and middleware resolve the declaration it
-        was handed and nothing else, and the binding ends with the execution.
-        """
-        if self.sandbox_session is None:
-            return nullcontext()
-        from deerflow.sandbox.session import bind_sandbox_session
-
-        return bind_sandbox_session(self.sandbox_session)
 
     async def _aexecute_admitted(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute a task asynchronously.
@@ -1636,7 +1540,6 @@ class SubagentExecutor:
         loaded_extensions = self.extensions if self.extensions is not None else get_loaded_extensions()
         task_store: ExtensionData | None = None
         task_info: TaskInfo | None = None
-        task_lifecycle_started = False
         if loaded_extensions.needs_task_store:
             task_store = ExtensionData(result.external_task_id or result.task_id)
         if loaded_extensions.has_task_lifecycle and self.run_id:
@@ -1685,16 +1588,10 @@ class SubagentExecutor:
             # execution. Criteria-free runs pay nothing.
             if not self.acceptance_criteria:
                 return None
-            return _harvest_bash_executions(
-                final_state,
-                sandbox_session=self.sandbox_session,
-            )
+            return _harvest_bash_executions(final_state)
 
         try:
-            if self.resolved_agent_material is not None:
-                await asyncio.to_thread(self.resolved_agent_material.verify_process_material)
             if task_info is not None and task_store is not None:
-                task_lifecycle_started = True
                 await notify_task_start(
                     loaded_extensions,
                     task_store,
@@ -1726,7 +1623,10 @@ class SubagentExecutor:
             # namespace. Business consumers receive thread_id via ``context``
             # below instead.
             run_config: RunnableConfig = {
-                "recursion_limit": self.config.max_turns,
+                # Super-steps, not turns: ``_create_agent`` (just above) scaled
+                # ``max_turns`` by the compiled chain's per-turn node count.
+                # Unset only when that method was replaced by a test double.
+                "recursion_limit": self._recursion_limit if self._recursion_limit is not None else self.config.max_turns,
                 "callbacks": [collector],
                 "tags": [collector_caller],
             }
@@ -1764,6 +1664,8 @@ class SubagentExecutor:
             context: dict[str, Any] = {}
             if self.thread_id:
                 context["thread_id"] = self.thread_id
+            if self.thread_incarnation is not _THREAD_INCARNATION_UNSET:
+                context[THREAD_INCARNATION_CONTEXT_KEY] = self.thread_incarnation
             if self.app_config is not None:
                 context["app_config"] = self.app_config
             # Propagate guardrail attribution so delegated tool calls are
@@ -1784,67 +1686,21 @@ class SubagentExecutor:
             # Authorization identity: is_internal written unconditionally
             # (including False); attributes copied again on write-back.
             context["is_internal"] = self.is_internal
-            if self.trusted_run_context is not None:
-                context[TRUSTED_RUN_CONTEXT_KEY] = self.trusted_run_context
-            else:
-                context["authz_attributes"] = dict(self.authz_attributes)
-            if self.invocation_identity is not None:
-                context[INVOCATION_IDENTITY_CONTEXT_KEY] = self.invocation_identity
-            if self.invocation_origin is not None:
-                context[INVOCATION_ORIGIN_CONTEXT_KEY] = self.invocation_origin
-            if self.deerflow_trace_id:
-                context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
+            context["authz_attributes"] = dict(self.authz_attributes)
+            context[DEERFLOW_TRACE_METADATA_KEY] = self.deerflow_trace_id
+            if self.knowledge_scope is not None:
+                context[KNOWLEDGE_SCOPE_RUNTIME_KEY] = dict(self.knowledge_scope)
             context["is_subagent"] = True
-            if self.invocation_constraints is not None:
-                from deerflow.runtime.constraints import (
-                    INVOCATION_CONSTRAINTS_CONTEXT_KEY,
-                )
-
-                context[INVOCATION_CONSTRAINTS_CONTEXT_KEY] = self.invocation_constraints
-            if self.subagent_reservation is not None:
-                from deerflow.runtime.constraints import (
-                    SUBAGENT_RESERVATION_CONTEXT_KEY,
-                )
-
-                context[SUBAGENT_RESERVATION_CONTEXT_KEY] = self.subagent_reservation
-            if self.accepted_extension_generation is not None:
-                context["accepted_extension_generation"] = self.accepted_extension_generation
-            if self.accepted_extension_manifest_digest is not None:
-                context["accepted_extension_manifest_digest"] = self.accepted_extension_manifest_digest
-            if self.accepted_extension_artifact_manifest_digest is not None:
-                context["accepted_extension_artifact_manifest_digest"] = self.accepted_extension_artifact_manifest_digest
-            if self.accepted_extension_configuration_digest is not None:
-                context["accepted_extension_configuration_digest"] = self.accepted_extension_configuration_digest
-            if self.mcp_invocation_facts is not None:
-                from deerflow.extensions.mcp import MCP_INVOCATION_FACTS_CONTEXT_KEY
-
-                context[MCP_INVOCATION_FACTS_CONTEXT_KEY] = self.mcp_invocation_facts
-            if self.authorization_provider is not None:
-                from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
-
-                context[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = self.authorization_provider
-            if self.mcp_preparation_audit_sink is not None:
-                from deerflow.extensions.mcp import (
-                    MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY,
-                )
-
-                context[MCP_PREPARATION_AUDIT_SINK_CONTEXT_KEY] = self.mcp_preparation_audit_sink
-            if self.resolved_agent_material is not None:
-                context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = self.resolved_agent_material
-            if self.skill_projection_token is not None:
-                context[SKILL_PROJECTION_TOKEN_CONTEXT_KEY] = self.skill_projection_token
-            if self.tool_evidence_binding is not None and self.tool_evidence_sink is not None:
-                install_tool_evidence_context(
-                    context,
-                    binding=self.tool_evidence_binding,
-                    sink=self.tool_evidence_sink,
-                )
             context[_SANDBOX_LEASE_OWNER_CONTEXT_KEY] = sandbox_lease_owner_id
             context[_SANDBOX_COMMAND_SCOPE_CONTEXT_KEY] = sandbox_lease_owner_id
             execution_context = context
             context["agent_id"] = self.config.name
             if self.loop_detection_recorder is not None:
                 context[LOOP_DETECTION_RECORDER_CONTEXT_KEY] = self.loop_detection_recorder
+            if self.tool_promotion_recorder is not None:
+                context[TOOL_PROMOTION_RECORDER_CONTEXT_KEY] = self.tool_promotion_recorder
+            if self.tool_progress_recorder is not None:
+                context[TOOL_PROGRESS_RECORDER_CONTEXT_KEY] = self.tool_progress_recorder
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} starting async execution with max_turns={self.config.max_turns}")
 
@@ -1862,47 +1718,87 @@ class SubagentExecutor:
                 )
                 return result
 
-            # All child material, tools, middleware, and policy context are now
-            # assembled, while no model call has begun. Durable batch workers
-            # use this exact boundary to transition claimed -> started.
-            if self.execution_admitted_callback is not None:
-                await self.execution_admitted_callback()
+            cancelled_during_stream = False
+            stream = agent.astream(state, config=run_config, context=context, stream_mode="values")  # type: ignore[arg-type]
+            try:
+                async for chunk in stream:
+                    # A yielded values chunk is already executed state.  Retain it
+                    # before observing cooperative cancellation so terminal receipt
+                    # harvesting includes a tool result that completed while the
+                    # cancellation request was in flight.
+                    final_state = chunk
+                    result.update_tool_receipts(terminal_receipts())
+                    result.update_bash_executions(current_bash_executions())
 
-            async for chunk in agent.astream(state, config=run_config, context=context, stream_mode="values"):  # type: ignore[arg-type]
-                # A yielded values chunk is already executed state.  Retain it
-                # before observing cooperative cancellation so terminal receipt
-                # harvesting includes a tool result that completed while the
-                # cancellation request was in flight.
-                final_state = chunk
-                result.update_tool_receipts(terminal_receipts())
-                result.update_bash_executions(current_bash_executions())
+                    # Cooperative cancellation: check if parent requested stop.
+                    # Note: cancellation is only detected at astream iteration boundaries,
+                    # so long-running tool calls within a single iteration will not be
+                    # interrupted until the next chunk is yielded.
+                    if result.cancel_event.is_set():
+                        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
+                        cancelled_during_stream = True
+                        break
 
-                # Cooperative cancellation: check if parent requested stop.
-                # Note: cancellation is only detected at astream iteration boundaries,
-                # so long-running tool calls within a single iteration will not be
-                # interrupted until the next chunk is yielded.
-                if result.cancel_event.is_set():
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} cancelled by parent")
-                    result.try_set_terminal(
-                        SubagentStatus.CANCELLED,
-                        error="Cancelled by user",
-                        token_usage_records=collector.snapshot_records(),
-                        tool_receipts=terminal_receipts(),
+                    result.update_token_usage_records(collector.snapshot_records())
+
+                    # Capture every step message (assistant turns AND tool outputs)
+                    # appended since the last chunk. A single super-step can append
+                    # several ToolMessages when the model emits multiple tool calls in
+                    # one turn, so capturing only messages[-1] would drop all but the
+                    # last output (#3779). Dedup/serialization live in capture_step_message.
+                    messages = chunk.get("messages", [])
+                    previous_count = len(ai_messages)
+                    processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
+                    if len(ai_messages) > previous_count:
+                        logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
+            finally:
+                active_error = sys.exception()
+                cancel_requested = cancelled_during_stream or result.cancel_event.is_set()
+                slow_close_warning = asyncio.get_running_loop().call_later(
+                    _STREAM_CLOSE_SLOW_WARNING_SECONDS,
+                    logger.warning,
+                    "[trace=%s] Subagent %s stream cleanup for execution %s is still running after %.1fs; cooperative terminalization and sandbox resource release have not occurred",
+                    self.trace_id,
+                    self.config.name,
+                    result.task_id,
+                    _STREAM_CLOSE_SLOW_WARNING_SECONDS,
+                    context=Context(),
+                )
+                try:
+                    await close_agent_stream(stream)
+                except asyncio.CancelledError as exc:
+                    close_failure = exc.__cause__
+                    if isinstance(close_failure, Exception):
+                        logger.warning(
+                            "[trace=%s] Could not close interrupted subagent stream %s",
+                            self.trace_id,
+                            self.config.name,
+                            exc_info=(type(close_failure), close_failure, close_failure.__traceback__),
+                        )
+                    raise
+                except Exception:
+                    cancel_requested = cancel_requested or result.cancel_event.is_set()
+                    if active_error is None and not cancel_requested:
+                        raise
+                    logger.warning(
+                        "[trace=%s] Could not close interrupted subagent stream %s",
+                        self.trace_id,
+                        self.config.name,
+                        exc_info=True,
                     )
-                    return result
+                else:
+                    cancel_requested = cancel_requested or result.cancel_event.is_set()
+                finally:
+                    slow_close_warning.cancel()
 
-                result.update_token_usage_records(collector.snapshot_records())
-
-                # Capture every step message (assistant turns AND tool outputs)
-                # appended since the last chunk. A single super-step can append
-                # several ToolMessages when the model emits multiple tool calls in
-                # one turn, so capturing only messages[-1] would drop all but the
-                # last output (#3779). Dedup/serialization live in capture_step_message.
-                messages = chunk.get("messages", [])
-                previous_count = len(ai_messages)
-                processed_message_count = capture_new_step_messages(messages, ai_messages, seen_message_ids, processed_message_count)
-                if len(ai_messages) > previous_count:
-                    logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} captured {len(ai_messages) - previous_count} step message(s); total #{len(ai_messages)}")
+            if cancel_requested:
+                result.try_set_terminal(
+                    SubagentStatus.CANCELLED,
+                    error="Cancelled by user",
+                    token_usage_records=collector.snapshot_records(),
+                    tool_receipts=terminal_receipts(),
+                )
+                return result
 
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} completed async execution")
             token_usage_records = collector.snapshot_records()
@@ -1915,7 +1811,22 @@ class SubagentExecutor:
                     tool_receipts=terminal_receipts(),
                 )
             else:
-                final_result = _extract_final_result(final_state, trace_id=self.trace_id, name=self.config.name)
+                final_result = _extract_final_result(
+                    final_state,
+                    trace_id=self.trace_id,
+                    name=self.config.name,
+                    return_direct_tools=self._return_direct_tools,
+                )
+                direct_results = _terminal_direct_results(final_state, self._return_direct_tools)
+                if direct_results is not None and any(message.status == "error" for message in direct_results):
+                    result.try_set_terminal(
+                        SubagentStatus.FAILED,
+                        result=final_result,
+                        error=f"Direct-return tool failure:\n{final_result}",
+                        token_usage_records=token_usage_records,
+                        tool_receipts=terminal_receipts(),
+                    )
+                    return result
                 # A guard hard-stop (token budget or loop detection) does not raise
                 # — it strips tool_calls so the run completes with a final answer.
                 # ``consume_stop_reason`` on each guard tells us whether that
@@ -1934,14 +1845,15 @@ class SubagentExecutor:
                 )
 
         except GraphRecursionError:
-            # ``recursion_limit`` on run_config == ``self.config.max_turns``
-            # (set above). Hitting it means the subagent exhausted its turn
-            # budget. Route into the additive ``stop_reason`` channel (#3875
-            # Phase 2) rather than a dedicated status enum (which would break v1
-            # contract consumers). If the run streamed usable partial work,
-            # surface it as ``completed``; otherwise ``failed``. Either way the
-            # lead can tell "out of budget" from "broken subagent" without
-            # parsing result text.
+            # ``recursion_limit`` on run_config is ``self.config.max_turns``
+            # scaled into super-steps (set above), so hitting it means the
+            # subagent exhausted its turn budget — report the turn count, which
+            # is the number the operator configured. Route into the additive
+            # ``stop_reason`` channel (#3875 Phase 2) rather than a dedicated
+            # status enum (which would break v1 contract consumers). If the run
+            # streamed usable partial work, surface it as ``completed``;
+            # otherwise ``failed``. Either way the lead can tell "out of budget"
+            # from "broken subagent" without parsing result text.
             #
             # Prefer a guard's stop reason if one already fired this run: a
             # token-budget / loop hard-stop strips tool_calls to force a final
@@ -2006,8 +1918,13 @@ class SubagentExecutor:
             )
 
         finally:
-            if execution_context is not None:
-                await _release_own_projection_consumer(execution_context, sandbox_lease_owner_id, trace_id=self.trace_id)
+            # Cancellation (including wait_for's execution timeout) bypasses
+            # the terminal branches above. A completed model response can be
+            # in the collector before its graph node publishes a values chunk.
+            # Stream teardown has drained at this point; publish its final
+            # usage before the outer wrapper chooses CANCELLED or TIMED_OUT.
+            if collector is not None:
+                result.update_token_usage_records(collector.snapshot_records())
             if execution_context is not None and execution_context.get("sandbox_id") is not None:
                 try:
                     from deerflow.sandbox import get_sandbox_provider
@@ -2022,9 +1939,7 @@ class SubagentExecutor:
                         self.config.name,
                         exc_info=True,
                     )
-                else:
-                    _record_scope_release(execution_context, sandbox_lease_owner_id)
-            if task_lifecycle_started and task_info is not None and task_store is not None:
+            if task_info is not None and task_store is not None:
                 try:
                     await notify_task_stop(
                         loaded_extensions,
@@ -2045,55 +1960,6 @@ class SubagentExecutor:
                     )
 
         return result
-
-    def retain_resolved_agent_material(self, consumer_id: str) -> None:
-        """Give this background child independent byte and projection leases."""
-        previous_material = self.resolved_agent_material
-        acquired_material = False
-        if self.resolved_agent_material is None:
-            pass
-        elif not self._owns_resolved_agent_material:
-            self.resolved_agent_material = self.resolved_agent_material.retain_process_material()
-            self._owns_resolved_agent_material = True
-            acquired_material = True
-        try:
-            if self.skill_projection_token is not None and not self._owns_skill_projection_token:
-                self.skill_projection_token = get_skill_projection_coordinator().retain(
-                    self.skill_projection_token,
-                    consumer_id=f"subagent:{consumer_id}",
-                )
-                self._owns_skill_projection_token = True
-        except BaseException:
-            if acquired_material:
-                retained_material = self.resolved_agent_material
-                self.resolved_agent_material = previous_material
-                self._owns_resolved_agent_material = False
-                if retained_material is not None:
-                    retained_material.release_process_material()
-            raise
-
-    def _release_owned_resolved_agent_material(self) -> None:
-        try:
-            if self._owns_skill_projection_token:
-                self._owns_skill_projection_token = False
-                from deerflow.sandbox.accepted_projection import release_accepted_skill_consumer
-
-                release_accepted_skill_consumer(self.skill_projection_token)
-        finally:
-            if self._owns_resolved_agent_material:
-                self._owns_resolved_agent_material = False
-                if self.resolved_agent_material is not None:
-                    self.resolved_agent_material.release_process_material()
-
-    async def _aexecute_with_material_lease(
-        self,
-        task: str,
-        result_holder: SubagentResult,
-    ) -> SubagentResult:
-        try:
-            return await self._aexecute(task, result_holder)
-        finally:
-            await asyncio.to_thread(self._release_owned_resolved_agent_material)
 
     def _execute_in_isolated_loop(self, task: str, result_holder: SubagentResult | None = None) -> SubagentResult:
         """Execute the subagent on the persistent isolated event loop.
@@ -2174,16 +2040,6 @@ class SubagentExecutor:
             Unique execution ID that can be used to check status later.
         """
         execution_id = str(uuid.uuid4())
-        if self.tool_evidence_parent_binding is not None:
-            definition = self.resolved_subagent_definition
-            if definition is None:
-                raise SubagentCatalogError("subagent_definition_evidence_unavailable")
-            assert self.tool_evidence_execution_task_id is not None
-            self.tool_evidence_binding = self.tool_evidence_parent_binding.for_subagent(
-                execution_task_id=self.tool_evidence_execution_task_id,
-                subagent_name=self.config.name,
-                subagent_definition_digest=definition.definition_digest,
-            )
 
         # Create initial pending result
         result = SubagentResult(
@@ -2215,7 +2071,7 @@ class SubagentExecutor:
         async def run_with_timeout() -> SubagentResult:
             try:
                 return await asyncio.wait_for(
-                    self._aexecute_with_material_lease(task, result),
+                    self._aexecute(task, result),
                     timeout=self.config.timeout_seconds,
                 )
             except TimeoutError:
@@ -2250,38 +2106,6 @@ class SubagentExecutor:
             # PENDING zombie nothing will ever remove.
             with _background_tasks_lock:
                 _background_tasks.pop(execution_id, None)
-            try:
-                loop = asyncio.get_running_loop()
-            except RuntimeError:
-                try:
-                    self._release_owned_resolved_agent_material()
-                except Exception:
-                    logger.warning(
-                        "[trace=%s] Subagent %s material cleanup failed after submission rejection",
-                        self.trace_id,
-                        self.config.name,
-                        exc_info=True,
-                    )
-            else:
-                cleanup_task = loop.create_task(
-                    asyncio.to_thread(
-                        self._release_owned_resolved_agent_material,
-                    )
-                )
-
-                def log_cleanup_failure(completed: asyncio.Task[None]) -> None:
-                    try:
-                        completed.result()
-                    except asyncio.CancelledError:
-                        logger.warning(
-                            "Subagent material cleanup was cancelled after submission rejection",
-                        )
-                    except Exception:
-                        logger.warning(
-                            "Subagent material cleanup failed after submission rejection",
-                        )
-
-                cleanup_task.add_done_callback(log_cleanup_failure)
             raise
         with _background_tasks_lock:
             _background_futures[execution_id] = execution_future

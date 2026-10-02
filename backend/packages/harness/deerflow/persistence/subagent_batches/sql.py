@@ -1,41 +1,18 @@
 from __future__ import annotations
 
-import base64
-import json
 import uuid
 from collections import Counter
-from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from deerflow_extension_api import TenantReferenceV1
-from sqlalchemy import and_, func, select
+from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.persistence.subagent_batches.model import (
-    SUBAGENT_BATCH_SCHEMA_WRITER_VERSION,
-    SubagentBatchAttemptRow,
-    SubagentBatchItemRow,
-    SubagentBatchRow,
-)
-from deerflow.runtime.accepted_invocation import canonical_digest
-from deerflow.sandbox.accepted_material import (
-    AcceptedExecutionEvidenceV2,
-    AcceptedMaterialRequestV2,
-    AcceptedSandboxLifecycleKind,
-    AcceptedSandboxLifecycleObservationV1,
-    accepted_scope_reference,
-)
-from deerflow.subagents.batch_acceptance import (
-    AcceptedBatchItemV1,
-    AcceptedBatchV1,
-    BatchAdmissionConflict,
-    BatchAdmissionError,
-    BatchAttemptEvidenceV1,
-    BatchItemRequestV1,
-    ParentBoundBatchExecutionV1,
-)
+from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
+from deerflow.subagents.acceptance_checks import AcceptanceVerdict, validate_acceptance_verdict
+from deerflow.subagents.batch_runtime import BatchItemInput
+from deerflow.subagents.report_contract import normalize_acceptance_criteria
 from deerflow.utils.time import coerce_iso
 
 BATCH_ACTIVE_STATUSES = ("queued", "running", "paused")
@@ -52,21 +29,11 @@ _BATCH_PUBLIC_FIELDS = (
     "max_live_items",
     "max_running_items",
     "max_attempts",
-    "parent_cancellable",
-    "cancel_epoch",
-    "acceptance_digest",
-    "terminal_code",
-    "accepted_at",
     "created_at",
     "updated_at",
     "completed_at",
 )
-_BATCH_TIMESTAMP_FIELDS = (
-    "accepted_at",
-    "created_at",
-    "updated_at",
-    "completed_at",
-)
+_BATCH_TIMESTAMP_FIELDS = ("created_at", "updated_at", "completed_at")
 _ITEM_PUBLIC_FIELDS = (
     "id",
     "batch_id",
@@ -74,247 +41,26 @@ _ITEM_PUBLIC_FIELDS = (
     "position",
     "status",
     "attempt",
-    "request_digest",
-    "lease_epoch",
     "model_name",
+    "result_preview",
     "result_truncated",
     "error",
     "stop_reason",
-    "terminal_code",
-    "terminal_evidence_digest",
     "token_usage",
+    "acceptance_criteria",
     "started_at",
     "completed_at",
     "created_at",
     "updated_at",
 )
 _ITEM_TIMESTAMP_FIELDS = ("started_at", "completed_at", "created_at", "updated_at")
-_BATCH_PARENT_CURSOR_VERSION = "deerflow.subagent-batch-parent-cursor/v1"
-_MAX_BATCH_PARENT_PAGE_SIZE = 100
-_MAX_ACCEPTED_MATERIAL_REQUEST_BYTES = 4 * 1024 * 1024
-_MAX_ACCEPTED_EXECUTION_EVIDENCE_BYTES = 64 * 1024
-_MAX_ACCEPTED_SANDBOX_LIFECYCLE_OBSERVATIONS = 8
-
-
-def _canonical_json_size(value: object) -> int:
-    return len(
-        json.dumps(
-            value,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-            allow_nan=False,
-        ).encode("utf-8"),
-    )
-
-
-def _decode_sandbox_lifecycle(
-    value: object,
-    *,
-    evidence_digest: str | None,
-) -> tuple[AcceptedSandboxLifecycleObservationV1, ...]:
-    if value is None:
-        return ()
-    if not isinstance(value, list | tuple) or len(value) > _MAX_ACCEPTED_SANDBOX_LIFECYCLE_OBSERVATIONS:
-        raise BatchAdmissionError("execution_material_unavailable")
-    try:
-        observations = tuple(AcceptedSandboxLifecycleObservationV1.from_persisted(row) for row in value)
-    except (TypeError, ValueError) as exc:
-        raise BatchAdmissionError("execution_material_unavailable") from exc
-    if evidence_digest is None or any(observation.execution_evidence_digest != evidence_digest for observation in observations):
-        raise BatchAdmissionError("execution_material_unavailable")
-    if len({observation.digest for observation in observations}) != len(
-        observations,
-    ):
-        raise BatchAdmissionError("execution_material_unavailable")
-    return observations
-
-
-def _validated_sandbox_attachment_payloads(
-    *,
-    request: AcceptedMaterialRequestV2,
-    evidence: AcceptedExecutionEvidenceV2,
-    observations: Sequence[AcceptedSandboxLifecycleObservationV1],
-    require_initial_acquisition: bool,
-) -> tuple[
-    dict[str, object],
-    dict[str, object],
-    tuple[AcceptedSandboxLifecycleObservationV1, ...],
-]:
-    try:
-        if not isinstance(request, AcceptedMaterialRequestV2):
-            raise TypeError("request must be AcceptedMaterialRequestV2")
-        if not isinstance(evidence, AcceptedExecutionEvidenceV2):
-            raise TypeError("evidence must be AcceptedExecutionEvidenceV2")
-        if isinstance(observations, str | bytes | bytearray):
-            raise TypeError("observations must be a sequence")
-        request_json = request.to_persisted()
-        evidence_json = evidence.to_persisted()
-        AcceptedMaterialRequestV2.from_persisted(request_json)
-        AcceptedExecutionEvidenceV2.from_persisted(evidence_json)
-        if _canonical_json_size(request_json) > _MAX_ACCEPTED_MATERIAL_REQUEST_BYTES or _canonical_json_size(evidence_json) > _MAX_ACCEPTED_EXECUTION_EVIDENCE_BYTES:
-            raise ValueError("accepted sandbox attachment is too large")
-        shared_fields = (
-            "run_id",
-            "attempt_id",
-            "tenant",
-            "runtime_image_digest",
-            "skill_snapshot_digest",
-            "skill_scope_digest",
-            "accepted_invocation_ref",
-            "accepted_invocation_digest",
-            "tool_plane_base_revision_digest",
-            "tool_plane_user_overlay_digest",
-            "tool_plane_projection_digest",
-            "tool_plane_effective_digest",
-            "batch_child_attempt_ref",
-            "capability_profile_digest",
-        )
-        if any(getattr(request, field_name) != getattr(evidence, field_name) for field_name in shared_fields):
-            raise ValueError("accepted sandbox request/evidence mismatch")
-        lifecycle = tuple(observations)
-        persisted_lifecycle = [row.to_persisted() for row in lifecycle]
-        decoded_lifecycle = _decode_sandbox_lifecycle(
-            persisted_lifecycle,
-            evidence_digest=evidence.digest,
-        )
-        if any(
-            observation.run_id != evidence.run_id
-            or observation.attempt_ref != evidence.attempt_id
-            or observation.batch_child_attempt_ref != evidence.batch_child_attempt_ref
-            or observation.provider_kind != evidence.provider_kind
-            or observation.qualification_scope != evidence.qualification_scope
-            for observation in decoded_lifecycle
-        ):
-            raise ValueError("accepted sandbox lifecycle binding mismatch")
-        if require_initial_acquisition and (len(decoded_lifecycle) != 1 or decoded_lifecycle[0].kind is not AcceptedSandboxLifecycleKind.ACQUIRED):
-            raise ValueError("accepted sandbox acquisition observation missing")
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise BatchAdmissionError("execution_material_unavailable") from exc
-    return request_json, evidence_json, decoded_lifecycle
-
-
-def _decode_attempt_sandbox_attachment(
-    row: SubagentBatchAttemptRow,
-) -> tuple[AcceptedSandboxLifecycleObservationV1, ...]:
-    attachment = (
-        row.accepted_material_request_json,
-        row.accepted_material_request_digest,
-        row.accepted_execution_evidence_json,
-        row.accepted_execution_evidence_digest,
-        row.accepted_sandbox_lifecycle_json,
-    )
-    if all(value is None for value in attachment):
-        return ()
-    if any(value is None for value in attachment):
-        raise BatchAdmissionError("execution_material_unavailable")
-    try:
-        request = AcceptedMaterialRequestV2.from_persisted(
-            row.accepted_material_request_json,
-        )
-        evidence = AcceptedExecutionEvidenceV2.from_persisted(
-            row.accepted_execution_evidence_json,
-        )
-    except (TypeError, ValueError) as exc:
-        raise BatchAdmissionError("execution_material_unavailable") from exc
-    _, _, lifecycle = _validated_sandbox_attachment_payloads(
-        request=request,
-        evidence=evidence,
-        observations=_decode_sandbox_lifecycle(
-            row.accepted_sandbox_lifecycle_json,
-            evidence_digest=row.accepted_execution_evidence_digest,
-        ),
-        require_initial_acquisition=False,
-    )
-    if request.digest != row.accepted_material_request_digest or evidence.digest != row.accepted_execution_evidence_digest or not lifecycle or lifecycle[0].kind is not AcceptedSandboxLifecycleKind.ACQUIRED:
-        raise BatchAdmissionError("execution_material_unavailable")
-    return lifecycle
 
 
 class SubagentBatchRepository:
     """Durable batch/item state with lease-based multi-worker claiming."""
 
-    def __init__(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        *,
-        tenant: TenantReferenceV1 | None = None,
-    ) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._sf = session_factory
-        if tenant is not None and not isinstance(tenant, TenantReferenceV1):
-            raise TypeError("tenant must be TenantReferenceV1 or None")
-        self._tenant = tenant
-
-    @property
-    def tenant(self) -> TenantReferenceV1 | None:
-        """Return the immutable tenant scope, if this is not a legacy adapter."""
-
-        return self._tenant
-
-    async def verify_schema_writer_compatibility(self) -> None:
-        """Refuse mutation after a newer binary has written batch rows."""
-
-        async with self._sf() as session:
-            maximum = (await session.execute(select(func.max(SubagentBatchRow.schema_writer_version)))).scalar_one_or_none()
-        if maximum is not None and int(maximum) > SUBAGENT_BATCH_SCHEMA_WRITER_VERSION:
-            raise BatchAdmissionError("batch_schema_writer_unsupported")
-
-    async def _now(
-        self,
-        session: AsyncSession,
-        supplied: datetime | None,
-    ) -> datetime:
-        """Return the lease authority's time.
-
-        Accepted rows always use database time.  The process-clock argument is
-        retained solely for the explicit single-process legacy adapter used by
-        SQLite tests and local compatibility mode.
-        """
-
-        if self._tenant is None and supplied is not None:
-            return supplied
-        bind = session.get_bind()
-        clock = func.clock_timestamp() if bind.dialect.name == "postgresql" else func.current_timestamp()
-        value = (await session.execute(select(clock))).scalar_one()
-        if not isinstance(value, datetime):
-            raise RuntimeError("database_time_unavailable")
-        if value.tzinfo is None:
-            return value.replace(tzinfo=UTC)
-        return value.astimezone(UTC)
-
-    def _can_execute(self, batch: SubagentBatchRow | None) -> bool:
-        if batch is None:
-            return False
-        if self._tenant is None:
-            return batch.schema_writer_version == 1 and batch.tenant_digest is None
-        return batch.schema_writer_version == 2 and batch.tenant_digest == self._tenant.digest
-
-    @staticmethod
-    def _requires_attempt_fence(batch: SubagentBatchRow) -> bool:
-        return batch.schema_writer_version == 2
-
-    @staticmethod
-    def _attempt_dict(row: SubagentBatchAttemptRow) -> dict[str, Any]:
-        lifecycle = _decode_attempt_sandbox_attachment(row)
-        value = {
-            "attempt_id": row.id,
-            "batch_id": row.batch_id,
-            "item_id": row.item_id,
-            "attempt_number": row.attempt_number,
-            "lease_epoch": row.lease_epoch,
-            "worker_ref": row.worker_ref,
-            "status": row.status,
-            "consumed": row.consumed,
-            "terminal_code": row.terminal_code,
-            "evidence_digest": row.evidence_digest,
-            "accepted_material_request_digest": (row.accepted_material_request_digest),
-            "accepted_execution_evidence_digest": (row.accepted_execution_evidence_digest),
-            "accepted_sandbox_lifecycle_count": len(lifecycle),
-            "claimed_at": coerce_iso(row.claimed_at),
-            "started_at": (None if row.started_at is None else coerce_iso(row.started_at)),
-            "terminal_at": (None if row.terminal_at is None else coerce_iso(row.terminal_at)),
-        }
-        return value
 
     @staticmethod
     def _batch_dict(row: SubagentBatchRow) -> dict[str, Any]:
@@ -323,286 +69,25 @@ class SubagentBatchRepository:
         for key in _BATCH_TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
-        data["compatibility_state"] = "accepted_v1" if row.schema_writer_version == 2 and row.acceptance_json is not None and row.acceptance_digest is not None else "legacy_unbound"
-        data["evidence"] = (
-            {
-                "tenant_ref": row.tenant_ref,
-                "tenant_digest": row.tenant_digest,
-                "parent_run_id": row.run_id,
-                "parent_invocation_digest": row.parent_invocation_digest,
-                "parent_assembly_fingerprint": (row.parent_assembly_fingerprint),
-                "parent_tool_receipt_id": row.parent_tool_receipt_id,
-                "parent_tool_attempt": row.parent_tool_attempt,
-                "subagent_catalog_digest": row.subagent_catalog_digest,
-                "subagent_definition_digest": (row.subagent_definition_digest),
-                "item_root_digest": row.item_root_digest,
-            }
-            if data["compatibility_state"] == "accepted_v1"
-            else None
-        )
         return data
 
     @staticmethod
     def _execution_batch_dict(row: SubagentBatchRow) -> dict[str, Any]:
         """Return worker-only fields required to reconstruct an execution."""
-        if row.schema_writer_version == 2:
-            if row.acceptance_json is None or row.execution_json is None:
-                raise BatchAdmissionError("execution_material_unavailable")
-            acceptance = AcceptedBatchV1.from_persisted_json(row.acceptance_json)
-            execution = ParentBoundBatchExecutionV1.from_persisted_json(row.execution_json)
-            if (
-                row.acceptance_digest != acceptance.acceptance_digest
-                or row.execution_digest != execution.execution_digest
-                or execution.acceptance_digest != acceptance.acceptance_digest
-                or acceptance.batch_id != row.id
-                or execution.batch_id != row.id
-                or acceptance.tenant.public_ref != row.tenant_ref
-                or acceptance.tenant.digest != row.tenant_digest
-                or acceptance.parent_run_id != row.run_id
-                or acceptance.parent_thread_id != row.thread_id
-                or acceptance.parent_tool_call_id != row.tool_call_id
-                or acceptance.parent_invocation_digest != row.parent_invocation_digest
-                or acceptance.parent_assembly_fingerprint != row.parent_assembly_fingerprint
-                or acceptance.parent_tool_receipt_id != row.parent_tool_receipt_id
-                or acceptance.parent_tool_attempt != row.parent_tool_attempt
-                or acceptance.subagent_catalog_digest != row.subagent_catalog_digest
-                or acceptance.subagent_definition_digest != row.subagent_definition_digest
-                or acceptance.item_root_digest != row.item_root_digest
-                or acceptance.item_count != row.total_items
-                or acceptance.limits.max_live_items != row.max_live_items
-                or acceptance.limits.max_running_items != row.max_running_items
-                or acceptance.limits.max_attempts != row.max_attempts
-                or acceptance.parent_cancellable != row.parent_cancellable
-                or execution.user_id != row.user_id
-                or execution.selected_subagent_name != row.subagent_type
-            ):
-                raise BatchAdmissionError("execution_material_unavailable")
-            try:
-                execution.verify_against_acceptance(acceptance)
-            except BatchAdmissionError as exc:
-                raise BatchAdmissionError("execution_material_unavailable") from exc
-            return {
-                "id": row.id,
-                "user_id": row.user_id,
-                "thread_id": row.thread_id,
-                "run_id": row.run_id,
-                "acceptance": acceptance,
-                "execution": execution,
-            }
         return {
             "id": row.id,
             "user_id": row.user_id,
             "thread_id": row.thread_id,
             "run_id": row.run_id,
             "execution_spec": row.execution_spec,
-            "compatibility_state": "legacy_unbound",
         }
-
-    @staticmethod
-    def _item_matches_acceptance(
-        item: SubagentBatchItemRow,
-        accepted: AcceptedBatchV1,
-    ) -> bool:
-        if item.position < 0 or item.position >= accepted.item_count:
-            return False
-        try:
-            expected = AcceptedBatchItemV1.from_request(
-                BatchItemRequestV1(
-                    key=item.item_key,
-                    prompt=item.prompt,
-                ),
-                batch_id=accepted.batch_id,
-                ordinal=item.position,
-            )
-        except BatchAdmissionError:
-            return False
-        return expected.item_id == item.id and expected.request_digest == item.request_digest
-
-    def _tenant_visible_clause(self):
-        if self._tenant is None:
-            return SubagentBatchRow.tenant_digest.is_(None)
-        return and_(
-            SubagentBatchRow.schema_writer_version == 2,
-            SubagentBatchRow.tenant_digest == self._tenant.digest,
-        )
-
-    def _tenant_executable_clause(self):
-        if self._tenant is None:
-            return and_(
-                SubagentBatchRow.schema_writer_version == 1,
-                SubagentBatchRow.tenant_digest.is_(None),
-            )
-        return and_(
-            SubagentBatchRow.schema_writer_version == 2,
-            SubagentBatchRow.tenant_digest == self._tenant.digest,
-        )
-
-    async def accept_batch(
-        self,
-        *,
-        accepted: AcceptedBatchV1,
-        execution: ParentBoundBatchExecutionV1,
-        item_requests: tuple[BatchItemRequestV1, ...],
-        user_id: str,
-        submission_key: str,
-        title: str,
-        subagent_type: str,
-    ) -> dict[str, Any]:
-        """Atomically persist immutable acceptance, execution, and item inputs."""
-
-        tenant = self._tenant
-        if tenant is None:
-            raise BatchAdmissionError("batch_tenant_unavailable")
-        if accepted.tenant != tenant:
-            raise BatchAdmissionError("batch_tenant_mismatch")
-        if (
-            execution.batch_id != accepted.batch_id
-            or execution.acceptance_digest != accepted.acceptance_digest
-            or execution.catalog.digest != accepted.subagent_catalog_digest
-            or execution.selected_definition.definition_digest != accepted.subagent_definition_digest
-            or execution.user_id != user_id
-            or execution.selected_subagent_name != subagent_type
-        ):
-            raise BatchAdmissionError("batch_acceptance_mismatch")
-        execution.verify_against_acceptance(accepted)
-        operational_items = tuple(item_requests)
-        immutable_items = AcceptedBatchItemV1.from_requests(
-            operational_items,
-            batch_id=accepted.batch_id,
-        )
-        if len(operational_items) != accepted.item_count or AcceptedBatchItemV1.root_digest(immutable_items) != accepted.item_root_digest:
-            raise BatchAdmissionError("batch_item_count_invalid")
-
-        async with self._sf() as session:
-            existing = await self._find_submission(
-                session,
-                parent_tool_receipt_id=accepted.parent_tool_receipt_id,
-                submission_key=submission_key,
-            )
-            if existing is not None:
-                return await self._resolve_idempotent_submission(
-                    session,
-                    existing,
-                    acceptance_digest=accepted.acceptance_digest,
-                )
-
-            now = await self._now(session, None)
-            batch = SubagentBatchRow(
-                id=accepted.batch_id,
-                schema_writer_version=SUBAGENT_BATCH_SCHEMA_WRITER_VERSION,
-                tenant_ref=tenant.public_ref,
-                tenant_digest=tenant.digest,
-                user_id=user_id,
-                thread_id=accepted.parent_thread_id,
-                run_id=accepted.parent_run_id,
-                tool_call_id=accepted.parent_tool_call_id,
-                submission_key=submission_key,
-                title=title,
-                subagent_type=subagent_type,
-                status="queued",
-                total_items=accepted.item_count,
-                max_live_items=accepted.limits.max_live_items,
-                max_running_items=accepted.limits.max_running_items,
-                max_attempts=accepted.limits.max_attempts,
-                # Retained only for the explicit legacy decoder. New execution
-                # consumes the separately versioned protected payload below.
-                execution_spec={},
-                acceptance_json=accepted.to_persisted_json(),
-                acceptance_digest=accepted.acceptance_digest,
-                execution_json=execution.to_persisted_json(),
-                execution_digest=execution.execution_digest,
-                parent_invocation_digest=accepted.parent_invocation_digest,
-                parent_assembly_fingerprint=accepted.parent_assembly_fingerprint,
-                parent_tool_receipt_id=accepted.parent_tool_receipt_id,
-                parent_tool_attempt=accepted.parent_tool_attempt,
-                subagent_catalog_digest=accepted.subagent_catalog_digest,
-                subagent_definition_digest=accepted.subagent_definition_digest,
-                item_root_digest=accepted.item_root_digest,
-                parent_cancellable=accepted.parent_cancellable,
-                cancel_epoch=0,
-                accepted_at=now,
-                created_at=now,
-                updated_at=now,
-            )
-            rows = [
-                SubagentBatchItemRow(
-                    id=immutable.item_id,
-                    batch_id=accepted.batch_id,
-                    item_key=operational.key,
-                    position=immutable.ordinal,
-                    prompt=operational.prompt,
-                    request_digest=immutable.request_digest,
-                    status="pending",
-                    attempt=0,
-                    lease_epoch=0,
-                    result_truncated=False,
-                    created_at=now,
-                    updated_at=now,
-                )
-                for operational, immutable in zip(
-                    operational_items,
-                    immutable_items,
-                    strict=True,
-                )
-            ]
-            try:
-                session.add(batch)
-                await session.flush()
-                session.add_all(rows)
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                existing = await self._find_submission(
-                    session,
-                    parent_tool_receipt_id=accepted.parent_tool_receipt_id,
-                    submission_key=submission_key,
-                )
-                if existing is not None:
-                    return await self._resolve_idempotent_submission(
-                        session,
-                        existing,
-                        acceptance_digest=accepted.acceptance_digest,
-                    )
-                raise
-            return await self._with_counts(session, batch)
-
-    async def _find_submission(
-        self,
-        session: AsyncSession,
-        *,
-        parent_tool_receipt_id: str,
-        submission_key: str,
-    ) -> SubagentBatchRow | None:
-        if self._tenant is None:
-            return None
-        return (
-            await session.execute(
-                select(SubagentBatchRow).where(
-                    SubagentBatchRow.schema_writer_version == 2,
-                    SubagentBatchRow.tenant_digest == self._tenant.digest,
-                    SubagentBatchRow.parent_tool_receipt_id == parent_tool_receipt_id,
-                    SubagentBatchRow.submission_key == submission_key,
-                )
-            )
-        ).scalar_one_or_none()
-
-    async def _resolve_idempotent_submission(
-        self,
-        session: AsyncSession,
-        existing: SubagentBatchRow,
-        *,
-        acceptance_digest: str,
-    ) -> dict[str, Any]:
-        if existing.acceptance_digest != acceptance_digest:
-            raise BatchAdmissionConflict()
-        return await self._with_counts(session, existing)
 
     @staticmethod
     def _item_dict(row: SubagentBatchItemRow, *, include_result: bool = False) -> dict[str, Any]:
         data = {key: getattr(row, key) for key in _ITEM_PUBLIC_FIELDS}
+        data["acceptance_verdict"] = validate_acceptance_verdict(row.acceptance_verdict)
         if include_result:
             data["result"] = row.result
-            data["result_preview"] = row.result_preview
         for key in _ITEM_TIMESTAMP_FIELDS:
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
@@ -619,21 +104,15 @@ class SubagentBatchRepository:
         submission_key: str,
         title: str,
         subagent_type: str,
-        items: list[dict[str, str]],
+        items: list[BatchItemInput],
         max_live_items: int,
         max_running_items: int,
         max_attempts: int,
         execution_spec: dict[str, Any],
     ) -> dict[str, Any]:
-        if self._tenant is not None:
-            # This compatibility adapter intentionally has no accepted-parent
-            # inputs. A tenant-bound production repository must never create
-            # a new row whose evidence can only be labelled legacy_unbound.
-            raise BatchAdmissionError("legacy_batch_unbound")
         now = datetime.now(UTC)
         batch = SubagentBatchRow(
             id=batch_id,
-            schema_writer_version=1,
             user_id=user_id,
             thread_id=thread_id,
             run_id=run_id,
@@ -657,6 +136,7 @@ class SubagentBatchRepository:
                 item_key=item["key"],
                 position=position,
                 prompt=item["prompt"],
+                acceptance_criteria=normalize_acceptance_criteria(item.get("acceptance_criteria")) or None,
                 status="pending",
                 attempt=0,
                 result_truncated=False,
@@ -703,16 +183,8 @@ class SubagentBatchRepository:
 
     async def get_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
         async with self._sf() as session:
-            batch = (
-                await session.execute(
-                    select(SubagentBatchRow).where(
-                        SubagentBatchRow.id == batch_id,
-                        SubagentBatchRow.user_id == user_id,
-                        self._tenant_visible_clause(),
-                    )
-                )
-            ).scalar_one_or_none()
-            if batch is None:
+            batch = await session.get(SubagentBatchRow, batch_id)
+            if batch is None or batch.user_id != user_id:
                 return None
             return await self._with_counts(session, batch)
 
@@ -725,7 +197,6 @@ class SubagentBatchRepository:
                         .where(
                             SubagentBatchRow.thread_id == thread_id,
                             SubagentBatchRow.user_id == user_id,
-                            self._tenant_visible_clause(),
                         )
                         .order_by(SubagentBatchRow.created_at.desc(), SubagentBatchRow.id.desc())
                         .limit(limit)
@@ -733,24 +204,6 @@ class SubagentBatchRepository:
                 ).scalars()
             )
             return [await self._with_counts(session, row) for row in rows]
-
-    async def load_execution(self, batch_id: str) -> dict[str, Any]:
-        """Load protected execution material for this repository's tenant."""
-
-        async with self._sf() as session:
-            batch = (
-                await session.execute(
-                    select(SubagentBatchRow).where(
-                        SubagentBatchRow.id == batch_id,
-                        self._tenant_executable_clause(),
-                    )
-                )
-            ).scalar_one_or_none()
-            if batch is None:
-                raise BatchAdmissionError("execution_material_unavailable")
-            if batch.schema_writer_version == 1:
-                raise BatchAdmissionError("legacy_batch_unbound")
-            return self._execution_batch_dict(batch)
 
     async def list_items(
         self,
@@ -764,16 +217,8 @@ class SubagentBatchRepository:
         include_result: bool = False,
     ) -> list[dict[str, Any]] | None:
         async with self._sf() as session:
-            batch = (
-                await session.execute(
-                    select(SubagentBatchRow).where(
-                        SubagentBatchRow.id == batch_id,
-                        SubagentBatchRow.user_id == user_id,
-                        self._tenant_visible_clause(),
-                    )
-                )
-            ).scalar_one_or_none()
-            if batch is None:
+            batch = await session.get(SubagentBatchRow, batch_id)
+            if batch is None or batch.user_id != user_id:
                 return None
             stmt = select(SubagentBatchItemRow).where(SubagentBatchItemRow.batch_id == batch_id)
             if status is not None:
@@ -791,7 +236,7 @@ class SubagentBatchRepository:
     async def claim_items(
         self,
         *,
-        now: datetime | None,
+        now: datetime,
         lease_owner: str,
         lease_seconds: int,
         limit: int,
@@ -801,74 +246,10 @@ class SubagentBatchRepository:
             return []
         claimed: list[dict[str, Any]] = []
         async with self._sf() as session:
-            authority_now = await self._now(session, now)
-            batches = list(
-                (
-                    await session.execute(
-                        select(SubagentBatchRow)
-                        .where(
-                            SubagentBatchRow.status.in_(("queued", "running")),
-                            self._tenant_executable_clause(),
-                        )
-                        .order_by(
-                            SubagentBatchRow.created_at,
-                            SubagentBatchRow.id,
-                        )
-                        .with_for_update(skip_locked=True)
-                    )
-                ).scalars()
-            )
+            batches = list((await session.execute(select(SubagentBatchRow).where(SubagentBatchRow.status.in_(("queued", "running"))).order_by(SubagentBatchRow.created_at, SubagentBatchRow.id).with_for_update(skip_locked=True))).scalars())
             for batch in batches:
                 if len(claimed) >= limit:
                     break
-                execution_batch: dict[str, Any] | None = None
-                if batch.schema_writer_version == 2:
-                    try:
-                        execution_batch = self._execution_batch_dict(batch)
-                        acceptance = execution_batch["acceptance"]
-                        item_commitment_rows = list(
-                            (
-                                await session.execute(
-                                    select(
-                                        SubagentBatchItemRow.id,
-                                        SubagentBatchItemRow.position,
-                                        SubagentBatchItemRow.request_digest,
-                                    )
-                                    .where(SubagentBatchItemRow.batch_id == batch.id)
-                                    .order_by(SubagentBatchItemRow.position)
-                                )
-                            ).all()
-                        )
-                        item_commitments = tuple(
-                            AcceptedBatchItemV1(
-                                version=1,
-                                item_id=item_id,
-                                ordinal=position,
-                                request_digest=request_digest,
-                            )
-                            for item_id, position, request_digest in (item_commitment_rows)
-                        )
-                        if len(item_commitments) != acceptance.item_count or AcceptedBatchItemV1.root_digest(item_commitments) != acceptance.item_root_digest:
-                            raise BatchAdmissionError("execution_material_unavailable")
-                    except Exception:
-                        await self._stop_batch_for_reason(
-                            session,
-                            batch=batch,
-                            now=authority_now,
-                            terminal_code="execution_material_unavailable",
-                        )
-                        continue
-                    accepted_at = None if batch.accepted_at is None else _as_utc(batch.accepted_at)
-                    if accepted_at is None or accepted_at + timedelta(seconds=(acceptance.limits.max_total_runtime_seconds)) <= authority_now:
-                        await self._stop_batch_for_reason(
-                            session,
-                            batch=batch,
-                            now=authority_now,
-                            terminal_code="policy_stopped",
-                        )
-                        continue
-                else:
-                    execution_batch = self._execution_batch_dict(batch)
 
                 expired = list(
                     (
@@ -877,46 +258,32 @@ class SubagentBatchRepository:
                             .where(
                                 SubagentBatchItemRow.batch_id == batch.id,
                                 SubagentBatchItemRow.status.in_(("leased", "running")),
-                                SubagentBatchItemRow.lease_expires_at <= authority_now,
+                                SubagentBatchItemRow.lease_expires_at < now,
                             )
                             .with_for_update(skip_locked=True)
                         )
                     ).scalars()
                 )
+                terminalized_expired = False
                 for item in expired:
-                    if self._requires_attempt_fence(batch):
-                        await self._terminalize_attempt_fail_closed(
-                            session,
-                            batch=batch,
-                            item=item,
-                            terminal_code="lease_expired",
-                            consumed=True,
-                            terminal_at=authority_now,
-                        )
                     item.lease_owner = None
                     item.lease_expires_at = None
-                    item.active_attempt_id = None
-                    item.updated_at = authority_now
+                    item.updated_at = now
                     if item.cancel_requested_at is not None:
                         item.status = "cancelled"
-                        item.terminal_code = "cancelled"
-                        item.completed_at = authority_now
+                        item.completed_at = now
+                        terminalized_expired = True
                     elif item.attempt >= batch.max_attempts:
                         item.status = "failed"
                         item.error = item.error or "Execution lease expired after the maximum retry count"
-                        item.terminal_code = "attempt_limit_exhausted"
-                        item.completed_at = authority_now
+                        item.completed_at = now
+                        terminalized_expired = True
                     else:
                         item.status = "queued"
                         item.error = "Previous worker lease expired; retrying"
-                if expired:
-                    await self._refresh_batch_status(
-                        session,
-                        batch,
-                        now=authority_now,
-                    )
-                    if batch.status in BATCH_TERMINAL_STATUSES:
-                        continue
+
+                if terminalized_expired:
+                    await self._refresh_batch_status(session, batch, now=now)
 
                 counts = await self._counts(session, batch.id)
                 live = counts["queued"] + counts["leased"] + counts["running"]
@@ -938,7 +305,7 @@ class SubagentBatchRepository:
                     )
                     for item in pending:
                         item.status = "queued"
-                        item.updated_at = authority_now
+                        item.updated_at = now
 
                 counts = await self._counts(session, batch.id)
                 batch_available = max(0, batch.max_running_items - counts["leased"] - counts["running"])
@@ -960,336 +327,24 @@ class SubagentBatchRepository:
                         )
                     ).scalars()
                 )
-                if batch.schema_writer_version == 2 and any(not self._item_matches_acceptance(item, acceptance) for item in runnable):
-                    await self._stop_batch_for_reason(
-                        session,
-                        batch=batch,
-                        now=authority_now,
-                        terminal_code="execution_material_unavailable",
-                    )
-                    continue
-                expires_at = authority_now + timedelta(seconds=lease_seconds)
-                evidence_limit_exhausted = False
-                claimed_for_batch = False
+                expires_at = now + timedelta(seconds=lease_seconds)
                 for item in runnable:
-                    if self._requires_attempt_fence(batch) and item.lease_epoch >= acceptance.limits.max_attempt_records_per_item:
-                        item.status = "failed"
-                        item.error = "evidence_limit_exhausted"
-                        item.terminal_code = "evidence_limit_exhausted"
-                        item.terminal_evidence_digest = None
-                        item.completed_at = authority_now
-                        item.updated_at = authority_now
-                        evidence_limit_exhausted = True
-                        continue
                     item.status = "leased"
                     item.attempt += 1
-                    item.lease_epoch += 1
                     item.lease_owner = lease_owner
                     item.lease_expires_at = expires_at
-                    item.started_at = authority_now if not self._requires_attempt_fence(batch) else None
-                    item.updated_at = authority_now
+                    item.started_at = now
+                    item.updated_at = now
                     item.error = None
-                    item.terminal_code = None
-                    item.terminal_evidence_digest = None
-                    if self._requires_attempt_fence(batch):
-                        attempt_id = f"ba_{uuid.uuid4().hex}"
-                        item.active_attempt_id = attempt_id
-                        session.add(
-                            SubagentBatchAttemptRow(
-                                id=attempt_id,
-                                batch_id=batch.id,
-                                item_id=item.id,
-                                tenant_digest=batch.tenant_digest or "",
-                                attempt_number=item.attempt,
-                                lease_epoch=item.lease_epoch,
-                                worker_ref=canonical_digest(
-                                    {
-                                        "version": 1,
-                                        "domain": "subagent_batch_worker_ref",
-                                        "tenant_digest": batch.tenant_digest,
-                                        "lease_owner": lease_owner,
-                                    }
-                                ),
-                                status="claimed",
-                                consumed=True,
-                                claimed_at=authority_now,
-                            )
-                        )
-                    else:
-                        attempt_id = None
                     value = self._item_dict(item)
                     value["prompt"] = item.prompt
-                    assert execution_batch is not None
-                    value["batch"] = execution_batch
-                    value["attempt_id"] = attempt_id
+                    value["batch"] = self._execution_batch_dict(batch)
                     claimed.append(value)
-                    claimed_for_batch = True
-                if evidence_limit_exhausted:
-                    await self._refresh_batch_status(
-                        session,
-                        batch,
-                        now=authority_now,
-                    )
-                if claimed_for_batch:
+                if runnable:
                     batch.status = "running"
-                    batch.updated_at = authority_now
+                    batch.updated_at = now
             await session.commit()
         return claimed
-
-    async def _stop_batch_for_reason(
-        self,
-        session: AsyncSession,
-        *,
-        batch: SubagentBatchRow,
-        now: datetime,
-        terminal_code: str,
-    ) -> None:
-        items = list(
-            (
-                await session.execute(
-                    select(SubagentBatchItemRow)
-                    .where(
-                        SubagentBatchItemRow.batch_id == batch.id,
-                        SubagentBatchItemRow.status.not_in(ITEM_TERMINAL_STATUSES),
-                    )
-                    .with_for_update()
-                )
-            ).scalars()
-        )
-        for item in items:
-            if item.active_attempt_id is not None:
-                await self._terminalize_attempt_fail_closed(
-                    session,
-                    batch=batch,
-                    item=item,
-                    terminal_code=terminal_code,
-                    consumed=True,
-                    terminal_at=now,
-                )
-            item.status = "failed"
-            item.terminal_code = terminal_code
-            item.error = terminal_code
-            item.lease_owner = None
-            item.lease_expires_at = None
-            item.active_attempt_id = None
-            item.completed_at = now
-            item.updated_at = now
-        batch.status = "failed"
-        batch.terminal_code = terminal_code
-        batch.completed_at = now
-        batch.updated_at = now
-
-    async def _execution_window_open(
-        self,
-        session: AsyncSession,
-        *,
-        batch: SubagentBatchRow,
-        now: datetime,
-    ) -> bool:
-        """Fence active work when accepted material or its deadline is stale."""
-
-        if not self._requires_attempt_fence(batch):
-            return True
-        terminal_code: str | None = None
-        try:
-            if batch.acceptance_json is None:
-                raise BatchAdmissionError("execution_material_unavailable")
-            acceptance = AcceptedBatchV1.from_persisted_json(batch.acceptance_json)
-            accepted_at = None if batch.accepted_at is None else _as_utc(batch.accepted_at)
-            if accepted_at is None or acceptance.batch_id != batch.id or acceptance.acceptance_digest != batch.acceptance_digest or acceptance.tenant.digest != batch.tenant_digest:
-                raise BatchAdmissionError("execution_material_unavailable")
-        except BatchAdmissionError:
-            terminal_code = "execution_material_unavailable"
-        else:
-            if accepted_at + timedelta(seconds=acceptance.limits.max_total_runtime_seconds) <= now:
-                terminal_code = "policy_stopped"
-        if terminal_code is None:
-            return True
-        await self._stop_batch_for_reason(
-            session,
-            batch=batch,
-            now=now,
-            terminal_code=terminal_code,
-        )
-        return False
-
-    async def _terminalize_attempt(
-        self,
-        session: AsyncSession,
-        *,
-        batch: SubagentBatchRow,
-        item: SubagentBatchItemRow,
-        terminal_code: str,
-        consumed: bool,
-        terminal_at: datetime,
-        result: str | None = None,
-    ) -> bool:
-        attempt_id = item.active_attempt_id
-        if attempt_id is None or item.request_digest is None:
-            return False
-        attempt = await session.get(
-            SubagentBatchAttemptRow,
-            attempt_id,
-            with_for_update=True,
-        )
-        if (
-            not self._attempt_matches_current(
-                batch=batch,
-                item=item,
-                attempt=attempt,
-                statuses=("claimed", "started"),
-            )
-            or batch.acceptance_digest is None
-        ):
-            return False
-        assert attempt is not None
-        evidence = BatchAttemptEvidenceV1.terminal(
-            batch_id=batch.id,
-            item_id=item.id,
-            attempt_id=attempt.id,
-            acceptance_digest=batch.acceptance_digest,
-            request_digest=item.request_digest,
-            attempt_number=attempt.attempt_number,
-            lease_epoch=attempt.lease_epoch,
-            terminal_code=terminal_code,
-            consumed=consumed,
-            result_digest=(
-                None
-                if result is None
-                else canonical_digest(
-                    {
-                        "version": 1,
-                        "domain": "subagent_batch_result",
-                        "result": result,
-                    }
-                )
-            ),
-        )
-        attempt.status = "terminal"
-        attempt.consumed = consumed
-        attempt.terminal_code = terminal_code
-        attempt.evidence_json = evidence.to_persisted_json()
-        attempt.evidence_digest = evidence.evidence_digest
-        attempt.terminal_at = terminal_at
-        item.terminal_evidence_digest = evidence.evidence_digest
-        if (
-            terminal_code == "lease_expired"
-            and attempt.accepted_material_request_json is not None
-            and attempt.accepted_material_request_digest is not None
-            and attempt.accepted_execution_evidence_json is not None
-            and attempt.accepted_execution_evidence_digest is not None
-        ):
-            try:
-                sandbox_request = AcceptedMaterialRequestV2.from_persisted(
-                    attempt.accepted_material_request_json,
-                )
-                sandbox_evidence = AcceptedExecutionEvidenceV2.from_persisted(
-                    attempt.accepted_execution_evidence_json,
-                )
-                existing_lifecycle = _decode_sandbox_lifecycle(
-                    attempt.accepted_sandbox_lifecycle_json,
-                    evidence_digest=(attempt.accepted_execution_evidence_digest),
-                )
-                if sandbox_request.digest != attempt.accepted_material_request_digest or sandbox_evidence.digest != attempt.accepted_execution_evidence_digest:
-                    raise ValueError("accepted sandbox attachment digest mismatch")
-                _validated_sandbox_attachment_payloads(
-                    request=sandbox_request,
-                    evidence=sandbox_evidence,
-                    observations=existing_lifecycle,
-                    require_initial_acquisition=False,
-                )
-                if not existing_lifecycle or existing_lifecycle[0].kind is not AcceptedSandboxLifecycleKind.ACQUIRED:
-                    raise ValueError("accepted sandbox acquisition missing")
-                orphaned = AcceptedSandboxLifecycleObservationV1.build(
-                    evidence=sandbox_evidence,
-                    kind=AcceptedSandboxLifecycleKind.ORPHANED,
-                    observed_at=terminal_at,
-                    reason_code="batch_item_lease_expired",
-                )
-                if orphaned.digest not in {row.digest for row in existing_lifecycle} and len(existing_lifecycle) < _MAX_ACCEPTED_SANDBOX_LIFECYCLE_OBSERVATIONS:
-                    attempt.accepted_sandbox_lifecycle_json = [
-                        *(row.to_persisted() for row in existing_lifecycle),
-                        orphaned.to_persisted(),
-                    ]
-            except (BatchAdmissionError, TypeError, ValueError):
-                # Lifecycle evidence is diagnostic only. Corruption cannot
-                # prevent the authoritative lease-expiry transition.
-                pass
-        return True
-
-    @staticmethod
-    def _attempt_matches_current(
-        *,
-        batch: SubagentBatchRow,
-        item: SubagentBatchItemRow,
-        attempt: SubagentBatchAttemptRow | None,
-        statuses: tuple[str, ...],
-    ) -> bool:
-        if attempt is None or item.lease_owner is None:
-            return False
-        expected_worker_ref = canonical_digest(
-            {
-                "version": 1,
-                "domain": "subagent_batch_worker_ref",
-                "tenant_digest": batch.tenant_digest,
-                "lease_owner": item.lease_owner,
-            }
-        )
-        return bool(
-            attempt.id == item.active_attempt_id
-            and attempt.item_id == item.id
-            and attempt.batch_id == batch.id
-            and attempt.tenant_digest == batch.tenant_digest
-            and attempt.attempt_number == item.attempt
-            and attempt.lease_epoch == item.lease_epoch
-            and attempt.worker_ref == expected_worker_ref
-            and attempt.status in statuses
-            and attempt.terminal_at is None
-        )
-
-    async def _terminalize_attempt_fail_closed(
-        self,
-        session: AsyncSession,
-        *,
-        batch: SubagentBatchRow,
-        item: SubagentBatchItemRow,
-        terminal_code: str,
-        consumed: bool,
-        terminal_at: datetime,
-    ) -> bool:
-        """Fence a corrupt active attempt without fabricating evidence."""
-
-        try:
-            accepted = await self._terminalize_attempt(
-                session,
-                batch=batch,
-                item=item,
-                terminal_code=terminal_code,
-                consumed=consumed,
-                terminal_at=terminal_at,
-            )
-        except BatchAdmissionError:
-            accepted = False
-        if accepted:
-            return True
-        attempt_id = item.active_attempt_id
-        if attempt_id is None:
-            return False
-        attempt = await session.get(
-            SubagentBatchAttemptRow,
-            attempt_id,
-            with_for_update=True,
-        )
-        if attempt is None or attempt.item_id != item.id or attempt.batch_id != batch.id or attempt.lease_epoch != item.lease_epoch or attempt.terminal_at is not None:
-            return False
-        attempt.status = "terminal"
-        attempt.consumed = consumed
-        attempt.terminal_code = terminal_code
-        attempt.evidence_json = None
-        attempt.evidence_digest = None
-        attempt.terminal_at = terminal_at
-        item.terminal_evidence_digest = None
-        return True
 
     async def renew_item_lease(
         self,
@@ -1297,432 +352,48 @@ class SubagentBatchRepository:
         *,
         lease_owner: str,
         lease_seconds: int,
-        now: datetime | None,
-        attempt_id: str | None = None,
-        lease_epoch: int | None = None,
+        now: datetime,
     ) -> dict[str, bool]:
         async with self._sf() as session:
-            loaded = await self._locked_fenced_item(
-                session,
-                item_id=item_id,
-                lease_owner=lease_owner,
-                attempt_id=attempt_id,
-                lease_epoch=lease_epoch,
-                statuses=("leased", "running"),
-            )
-            if loaded is None:
+            item = (
+                await session.execute(
+                    select(SubagentBatchItemRow)
+                    .where(
+                        SubagentBatchItemRow.id == item_id,
+                        SubagentBatchItemRow.status.in_(("leased", "running")),
+                        SubagentBatchItemRow.lease_owner == lease_owner,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if item is None:
                 return {"valid": False, "cancel_requested": True}
-            item, batch = loaded
-            authority_now = await self._now(session, now)
-            if not await self._execution_window_open(
-                session,
-                batch=batch,
-                now=authority_now,
-            ):
-                await session.commit()
-                return {"valid": False, "cancel_requested": True}
-            expired = item.lease_expires_at is None or _as_utc(item.lease_expires_at) <= authority_now
-            cancel_requested = item.cancel_requested_at is not None or batch.status == "cancelled" or expired
+            batch = await session.get(SubagentBatchRow, item.batch_id)
+            cancel_requested = item.cancel_requested_at is not None or batch is None or batch.status == "cancelled"
             if not cancel_requested:
-                item.lease_expires_at = authority_now + timedelta(seconds=lease_seconds)
-                item.updated_at = authority_now
+                item.lease_expires_at = now + timedelta(seconds=lease_seconds)
+                item.updated_at = now
                 await session.commit()
             return {"valid": not cancel_requested, "cancel_requested": cancel_requested}
 
-    async def item_attempt_authorized(
-        self,
-        item_id: str,
-        *,
-        lease_owner: str,
-        attempt_id: str,
-        lease_epoch: int,
-    ) -> bool:
-        """Sample whether one accepted item attempt still owns execution.
-
-        The database locks exist only for this authority sample. Callers must
-        release this method before invoking a sandbox provider; this is the
-        baseline check-then-call fence, not an atomic provider-operation fence.
-        """
-
+    async def mark_item_running(self, item_id: str, *, lease_owner: str, now: datetime) -> bool:
         async with self._sf() as session:
-            loaded = await self._locked_fenced_item(
-                session,
-                item_id=item_id,
-                lease_owner=lease_owner,
-                attempt_id=attempt_id,
-                lease_epoch=lease_epoch,
-                statuses=("leased", "running"),
-            )
-            if loaded is None:
-                return False
-            item, batch = loaded
-            authority_now = await self._now(session, None)
-            if not await self._execution_window_open(
-                session,
-                batch=batch,
-                now=authority_now,
-            ):
-                await session.commit()
-                return False
-            expected_attempt_status = ("claimed",) if item.status == "leased" else ("started",)
-            attempt = await session.get(
-                SubagentBatchAttemptRow,
-                attempt_id,
-                with_for_update=True,
-            )
-            return bool(
-                batch.status in BATCH_ACTIVE_STATUSES
-                and item.cancel_requested_at is None
-                and item.lease_expires_at is not None
-                and _as_utc(item.lease_expires_at) > authority_now
-                and self._attempt_matches_current(
-                    batch=batch,
-                    item=item,
-                    attempt=attempt,
-                    statuses=expected_attempt_status,
+            item = (
+                await session.execute(
+                    select(SubagentBatchItemRow)
+                    .where(
+                        SubagentBatchItemRow.id == item_id,
+                        SubagentBatchItemRow.status == "leased",
+                        SubagentBatchItemRow.lease_owner == lease_owner,
+                    )
+                    .with_for_update()
                 )
-            )
-
-    def _sandbox_attachment_matches_attempt(
-        self,
-        *,
-        batch: SubagentBatchRow,
-        item: SubagentBatchItemRow,
-        attempt: SubagentBatchAttemptRow,
-        request: AcceptedMaterialRequestV2,
-    ) -> bool:
-        tenant = self._tenant
-        if tenant is None or item.request_digest is None:
-            return False
-        try:
-            execution_batch = self._execution_batch_dict(batch)
-            acceptance = execution_batch["acceptance"]
-        except (BatchAdmissionError, KeyError, TypeError):
-            return False
-        if not isinstance(acceptance, AcceptedBatchV1):
-            return False
-        child_identity = f"{batch.id}:{item.id}:{attempt.id}:{attempt.lease_epoch}:{item.request_digest}"
-        expected_attempt_ref = accepted_scope_reference(
-            tenant,
-            kind="attempt",
-            value=child_identity,
-        )
-        expected_child_ref = accepted_scope_reference(
-            tenant,
-            kind="batch-child",
-            value=child_identity,
-        )
-        expected_invocation_ref = accepted_scope_reference(
-            tenant,
-            kind="invocation",
-            value=(f"{acceptance.parent_run_id}:{acceptance.parent_invocation_digest}"),
-        )
-        return bool(
-            request.tenant == tenant
-            and request.run_id == acceptance.parent_run_id == batch.run_id
-            and request.attempt_id == expected_attempt_ref
-            and request.batch_child_attempt_ref == expected_child_ref
-            and request.user_ref
-            == accepted_scope_reference(
-                tenant,
-                kind="user",
-                value=batch.user_id,
-            )
-            and request.thread_ref
-            == accepted_scope_reference(
-                tenant,
-                kind="thread",
-                value=batch.thread_id,
-            )
-            and request.accepted_invocation_ref == expected_invocation_ref
-            and request.accepted_invocation_digest == acceptance.parent_invocation_digest == batch.parent_invocation_digest
-            and request.agent_revision_digest == acceptance.parent_agent_revision_digest
-            and request.skill_scope_digest == acceptance.skill_scope_digest
-        )
-
-    async def attach_item_sandbox_evidence(
-        self,
-        item_id: str,
-        *,
-        lease_owner: str,
-        attempt_id: str,
-        lease_epoch: int,
-        request: AcceptedMaterialRequestV2,
-        evidence: AcceptedExecutionEvidenceV2,
-        observations: Sequence[AcceptedSandboxLifecycleObservationV1],
-    ) -> bool:
-        """Atomically join one accepted sandbox tuple to the active attempt.
-
-        Provider I/O has already completed before this short transaction. The
-        same item/attempt fence is sampled again here, so evidence from a
-        worker that lost authority can never become executable batch state.
-        """
-
-        request_json, evidence_json, lifecycle = _validated_sandbox_attachment_payloads(
-            request=request,
-            evidence=evidence,
-            observations=observations,
-            require_initial_acquisition=True,
-        )
-        lifecycle_json = [row.to_persisted() for row in lifecycle]
-        async with self._sf() as session:
-            loaded = await self._locked_fenced_item(
-                session,
-                item_id=item_id,
-                lease_owner=lease_owner,
-                attempt_id=attempt_id,
-                lease_epoch=lease_epoch,
-                statuses=("leased", "running"),
-            )
-            if loaded is None:
-                return False
-            item, batch = loaded
-            authority_now = await self._now(session, None)
-            if not await self._execution_window_open(
-                session,
-                batch=batch,
-                now=authority_now,
-            ):
-                await session.commit()
-                return False
-            if batch.status not in BATCH_ACTIVE_STATUSES or item.cancel_requested_at is not None or item.lease_expires_at is None or _as_utc(item.lease_expires_at) <= authority_now:
-                return False
-            expected_attempt_status = ("claimed",) if item.status == "leased" else ("started",)
-            attempt = await session.get(
-                SubagentBatchAttemptRow,
-                attempt_id,
-                with_for_update=True,
-            )
-            if (
-                not self._attempt_matches_current(
-                    batch=batch,
-                    item=item,
-                    attempt=attempt,
-                    statuses=expected_attempt_status,
-                )
-                or attempt is None
-                or not self._sandbox_attachment_matches_attempt(
-                    batch=batch,
-                    item=item,
-                    attempt=attempt,
-                    request=request,
-                )
-            ):
-                return False
-            existing = (
-                attempt.accepted_material_request_json,
-                attempt.accepted_material_request_digest,
-                attempt.accepted_execution_evidence_json,
-                attempt.accepted_execution_evidence_digest,
-                attempt.accepted_sandbox_lifecycle_json,
-            )
-            if any(value is not None for value in existing):
-                if any(value is None for value in existing):
-                    return False
-                if existing != (
-                    request_json,
-                    request.digest,
-                    evidence_json,
-                    evidence.digest,
-                    lifecycle_json,
-                ):
-                    return False
-                return True
-            attempt.accepted_material_request_json = request_json
-            attempt.accepted_material_request_digest = request.digest
-            attempt.accepted_execution_evidence_json = evidence_json
-            attempt.accepted_execution_evidence_digest = evidence.digest
-            attempt.accepted_sandbox_lifecycle_json = lifecycle_json
-            await session.commit()
-            return True
-
-    async def append_item_sandbox_lifecycle(
-        self,
-        item_id: str,
-        *,
-        lease_owner: str,
-        attempt_id: str,
-        lease_epoch: int,
-        execution_evidence_digest: str,
-        observations: Sequence[AcceptedSandboxLifecycleObservationV1],
-    ) -> bool:
-        """Append bounded diagnostics to their exact evidence-bound attempt.
-
-        This retained attempt fence deliberately remains usable after terminal
-        publication. It cannot authorize work or mutate item/batch state.
-        """
-
-        if self._tenant is None:
-            return False
-        try:
-            new_lifecycle = tuple(observations)
-            if isinstance(observations, str | bytes | bytearray):
-                raise TypeError("observations must be a sequence")
-            if len(new_lifecycle) > _MAX_ACCEPTED_SANDBOX_LIFECYCLE_OBSERVATIONS:
-                raise ValueError("too many sandbox lifecycle observations")
-            for observation in new_lifecycle:
-                if not isinstance(
-                    observation,
-                    AcceptedSandboxLifecycleObservationV1,
-                ):
-                    raise TypeError("invalid sandbox lifecycle observation")
-                if observation.execution_evidence_digest != execution_evidence_digest:
-                    raise ValueError("sandbox lifecycle evidence mismatch")
-        except (TypeError, ValueError) as exc:
-            raise BatchAdmissionError("execution_material_unavailable") from exc
-        async with self._sf() as session:
-            attempt = await session.get(
-                SubagentBatchAttemptRow,
-                attempt_id,
-                with_for_update=True,
-            )
-            expected_worker_ref = canonical_digest(
-                {
-                    "version": 1,
-                    "domain": "subagent_batch_worker_ref",
-                    "tenant_digest": self._tenant.digest,
-                    "lease_owner": lease_owner,
-                }
-            )
-            if (
-                attempt is None
-                or attempt.item_id != item_id
-                or attempt.tenant_digest != self._tenant.digest
-                or attempt.lease_epoch != lease_epoch
-                or attempt.worker_ref != expected_worker_ref
-                or attempt.accepted_material_request_json is None
-                or attempt.accepted_material_request_digest is None
-                or attempt.accepted_execution_evidence_json is None
-                or attempt.accepted_execution_evidence_digest != execution_evidence_digest
-            ):
-                return False
-            try:
-                sandbox_request = AcceptedMaterialRequestV2.from_persisted(
-                    attempt.accepted_material_request_json,
-                )
-                evidence = AcceptedExecutionEvidenceV2.from_persisted(
-                    attempt.accepted_execution_evidence_json,
-                )
-                _, _, validated_new = _validated_sandbox_attachment_payloads(
-                    request=sandbox_request,
-                    evidence=evidence,
-                    observations=new_lifecycle,
-                    require_initial_acquisition=False,
-                )
-                existing = _decode_sandbox_lifecycle(
-                    attempt.accepted_sandbox_lifecycle_json,
-                    evidence_digest=execution_evidence_digest,
-                )
-            except (BatchAdmissionError, TypeError, ValueError):
-                return False
-            if sandbox_request.digest != attempt.accepted_material_request_digest or evidence.digest != execution_evidence_digest or not existing or existing[0].kind is not AcceptedSandboxLifecycleKind.ACQUIRED:
-                return False
-            merged = list(existing)
-            known = {observation.digest for observation in existing}
-            for observation in validated_new:
-                if observation.digest not in known:
-                    merged.append(observation)
-                    known.add(observation.digest)
-            if len(merged) > _MAX_ACCEPTED_SANDBOX_LIFECYCLE_OBSERVATIONS:
-                return False
-            attempt.accepted_sandbox_lifecycle_json = [observation.to_persisted() for observation in merged]
-            await session.commit()
-            return True
-
-    async def _locked_fenced_item(
-        self,
-        session: AsyncSession,
-        *,
-        item_id: str,
-        lease_owner: str,
-        attempt_id: str | None,
-        lease_epoch: int | None,
-        statuses: tuple[str, ...],
-    ) -> tuple[SubagentBatchItemRow, SubagentBatchRow] | None:
-        # Resolve the immutable parent key without taking a row lock, then
-        # lock parent before child. Control paths (notably cancellation) use
-        # the same order, preventing a PostgreSQL item->batch / batch->item
-        # deadlock while still fencing the mutable item under FOR UPDATE.
-        batch_id = (await session.execute(select(SubagentBatchItemRow.batch_id).where(SubagentBatchItemRow.id == item_id))).scalar_one_or_none()
-        if batch_id is None:
-            return None
-        batch = await session.get(
-            SubagentBatchRow,
-            batch_id,
-            with_for_update=True,
-        )
-        if not self._can_execute(batch):
-            return None
-        assert batch is not None
-        item = (
-            await session.execute(
-                select(SubagentBatchItemRow)
-                .where(
-                    SubagentBatchItemRow.id == item_id,
-                    SubagentBatchItemRow.status.in_(statuses),
-                    SubagentBatchItemRow.lease_owner == lease_owner,
-                )
-                .with_for_update()
-            )
-        ).scalar_one_or_none()
-        if item is None:
-            return None
-        if item.batch_id != batch.id:
-            return None
-        if self._requires_attempt_fence(batch) and (attempt_id is None or lease_epoch is None or item.active_attempt_id != attempt_id or item.lease_epoch != lease_epoch):
-            return None
-        return item, batch
-
-    async def mark_item_running(
-        self,
-        item_id: str,
-        *,
-        lease_owner: str,
-        now: datetime | None,
-        attempt_id: str | None = None,
-        lease_epoch: int | None = None,
-    ) -> bool:
-        async with self._sf() as session:
-            loaded = await self._locked_fenced_item(
-                session,
-                item_id=item_id,
-                lease_owner=lease_owner,
-                attempt_id=attempt_id,
-                lease_epoch=lease_epoch,
-                statuses=("leased",),
-            )
-            if loaded is None:
-                return False
-            item, batch = loaded
-            authority_now = await self._now(session, now)
-            if not await self._execution_window_open(
-                session,
-                batch=batch,
-                now=authority_now,
-            ):
-                await session.commit()
-                return False
-            if item.cancel_requested_at is not None or batch.status == "cancelled" or item.lease_expires_at is None or _as_utc(item.lease_expires_at) <= authority_now:
+            ).scalar_one_or_none()
+            if item is None or item.cancel_requested_at is not None:
                 return False
             item.status = "running"
-            item.started_at = authority_now
-            item.updated_at = authority_now
-            if self._requires_attempt_fence(batch):
-                attempt = await session.get(
-                    SubagentBatchAttemptRow,
-                    item.active_attempt_id,
-                    with_for_update=True,
-                )
-                if not self._attempt_matches_current(
-                    batch=batch,
-                    item=item,
-                    attempt=attempt,
-                    statuses=("claimed",),
-                ):
-                    return False
-                assert attempt is not None
-                attempt.status = "started"
-                attempt.started_at = authority_now
+            item.started_at = now
+            item.updated_at = now
             await session.commit()
             return True
 
@@ -1731,8 +402,6 @@ class SubagentBatchRepository:
         item_id: str,
         *,
         lease_owner: str,
-        attempt_id: str | None = None,
-        lease_epoch: int | None = None,
         succeeded: bool,
         result: str | None,
         result_preview: str | None,
@@ -1741,88 +410,54 @@ class SubagentBatchRepository:
         stop_reason: str | None,
         token_usage: dict[str, Any] | None,
         model_name: str | None,
-        completed_at: datetime | None,
-        terminal_code: str | None = None,
+        completed_at: datetime,
+        acceptance_verdict: AcceptanceVerdict | None = None,
     ) -> bool:
         async with self._sf() as session:
-            loaded = await self._locked_fenced_item(
-                session,
-                item_id=item_id,
-                lease_owner=lease_owner,
-                attempt_id=attempt_id,
-                lease_epoch=lease_epoch,
-                statuses=("leased", "running"),
-            )
-            if loaded is None:
-                return False
-            item, batch = loaded
-            authority_now = await self._now(session, completed_at)
-            if not await self._execution_window_open(
-                session,
-                batch=batch,
-                now=authority_now,
-            ):
-                await session.commit()
-                return False
-            if item.lease_expires_at is None or _as_utc(item.lease_expires_at) <= authority_now:
-                return False
-            cancelled = item.cancel_requested_at is not None or batch.status == "cancelled"
-            code = terminal_code or ("cancelled" if cancelled else "succeeded" if succeeded else "execution_failed")
-            if self._requires_attempt_fence(batch):
-                accepted = await self._terminalize_attempt(
-                    session,
-                    batch=batch,
-                    item=item,
-                    terminal_code=code,
-                    consumed=True,
-                    terminal_at=authority_now,
-                    result=result if succeeded else None,
+            item = (
+                await session.execute(
+                    select(SubagentBatchItemRow)
+                    .where(
+                        SubagentBatchItemRow.id == item_id,
+                        SubagentBatchItemRow.status.in_(("leased", "running")),
+                        SubagentBatchItemRow.lease_owner == lease_owner,
+                    )
+                    .with_for_update()
                 )
-                if not accepted:
-                    return False
+            ).scalar_one_or_none()
+            if item is None:
+                return False
+            batch = await session.get(SubagentBatchRow, item.batch_id, with_for_update=True)
+            cancelled = item.cancel_requested_at is not None or batch is None or batch.status == "cancelled"
             item.lease_owner = None
             item.lease_expires_at = None
-            item.active_attempt_id = None
             item.model_name = model_name
             item.stop_reason = stop_reason
             item.token_usage = token_usage
-            item.updated_at = authority_now
+            item.updated_at = completed_at
+            item.acceptance_verdict = None
             if cancelled:
                 item.status = "cancelled"
                 item.error = "Cancelled by user"
-                item.terminal_code = "cancelled"
-                item.completed_at = authority_now
+                item.completed_at = completed_at
             elif succeeded:
                 item.status = "succeeded"
+                item.acceptance_verdict = validate_acceptance_verdict(acceptance_verdict)
                 item.result = result
                 item.result_preview = result_preview
                 item.result_truncated = result_truncated
                 item.error = None
-                item.terminal_code = code
-                item.completed_at = authority_now
-            elif (
-                code
-                not in {
-                    "policy_stopped",
-                    "provider_not_qualified",
-                    "result_too_large",
-                    "execution_material_unavailable",
-                }
-                and item.attempt < batch.max_attempts
-            ):
+                item.completed_at = completed_at
+            elif item.attempt < batch.max_attempts:
                 item.status = "queued"
                 item.error = error
                 item.started_at = None
             else:
                 item.status = "failed"
                 item.error = error
-                item.terminal_code = code if code != "execution_failed" else "attempt_limit_exhausted"
-                item.completed_at = authority_now
-            await self._refresh_batch_status(
-                session,
-                batch,
-                now=authority_now,
-            )
+                item.completed_at = completed_at
+            if batch is not None:
+                await self._refresh_batch_status(session, batch, now=completed_at)
             await session.commit()
             return True
 
@@ -1832,9 +467,7 @@ class SubagentBatchRepository:
         *,
         lease_owner: str,
         error: str | None,
-        now: datetime | None,
-        attempt_id: str | None = None,
-        lease_epoch: int | None = None,
+        now: datetime,
     ) -> bool:
         """Undo a claim rejected before execution admission.
 
@@ -1844,70 +477,35 @@ class SubagentBatchRepository:
         attempt instead of consuming the batch's retry budget.
         """
         async with self._sf() as session:
-            loaded = await self._locked_fenced_item(
-                session,
-                item_id=item_id,
-                lease_owner=lease_owner,
-                attempt_id=attempt_id,
-                lease_epoch=lease_epoch,
-                statuses=("leased",),
-            )
-            if loaded is None:
-                return False
-            item, batch = loaded
-            authority_now = await self._now(session, now)
-            if not await self._execution_window_open(
-                session,
-                batch=batch,
-                now=authority_now,
-            ):
-                await session.commit()
-                return False
-            if item.lease_expires_at is None or _as_utc(item.lease_expires_at) <= authority_now:
-                return False
-            cancelled = item.cancel_requested_at is not None or batch.status == "cancelled"
-            if self._requires_attempt_fence(batch):
-                attempt = await session.get(
-                    SubagentBatchAttemptRow,
-                    item.active_attempt_id,
-                    with_for_update=True,
+            item = (
+                await session.execute(
+                    select(SubagentBatchItemRow)
+                    .where(
+                        SubagentBatchItemRow.id == item_id,
+                        SubagentBatchItemRow.status.in_(("leased", "running")),
+                        SubagentBatchItemRow.lease_owner == lease_owner,
+                    )
+                    .with_for_update()
                 )
-                if not self._attempt_matches_current(
-                    batch=batch,
-                    item=item,
-                    attempt=attempt,
-                    statuses=("claimed",),
-                ):
-                    return False
-                accepted = await self._terminalize_attempt(
-                    session,
-                    batch=batch,
-                    item=item,
-                    terminal_code=("cancelled" if cancelled else "queue_rejected"),
-                    consumed=False,
-                    terminal_at=authority_now,
-                )
-                if not accepted:
-                    return False
+            ).scalar_one_or_none()
+            if item is None:
+                return False
+            batch = await session.get(SubagentBatchRow, item.batch_id, with_for_update=True)
+            cancelled = item.cancel_requested_at is not None or batch is None or batch.status == "cancelled"
             item.lease_owner = None
             item.lease_expires_at = None
-            item.active_attempt_id = None
-            item.updated_at = authority_now
+            item.updated_at = now
             if cancelled:
                 item.status = "cancelled"
                 item.error = "Cancelled by user"
-                item.terminal_code = "cancelled"
-                item.completed_at = authority_now
+                item.completed_at = now
             else:
                 item.status = "queued"
                 item.attempt = max(0, item.attempt - 1)
                 item.started_at = None
                 item.error = error
-            await self._refresh_batch_status(
-                session,
-                batch,
-                now=authority_now,
-            )
+            if batch is not None:
+                await self._refresh_batch_status(session, batch, now=now)
             await session.commit()
             return True
 
@@ -1917,22 +515,6 @@ class SubagentBatchRepository:
         if terminal >= batch.total_items:
             if batch.status != "cancelled":
                 batch.status = "failed" if counts["failed"] > 0 and counts["succeeded"] == 0 else "completed"
-                if batch.status == "failed":
-                    terminal_codes = {
-                        code
-                        for code in (
-                            await session.execute(
-                                select(SubagentBatchItemRow.terminal_code).where(
-                                    SubagentBatchItemRow.batch_id == batch.id,
-                                    SubagentBatchItemRow.status == "failed",
-                                )
-                            )
-                        ).scalars()
-                        if code is not None
-                    }
-                    batch.terminal_code = next(iter(terminal_codes)) if len(terminal_codes) == 1 else "failed"
-                else:
-                    batch.terminal_code = "completed_with_failures" if counts["failed"] > 0 else "succeeded"
             batch.completed_at = now
         elif batch.status not in ("paused", "cancelled"):
             batch.status = "running"
@@ -1944,40 +526,21 @@ class SubagentBatchRepository:
     async def resume_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
         return await self._set_control(batch_id, user_id=user_id, action="resume")
 
-    async def cancel_batch(self, batch_id: str, *, user_id: str, reason: str = "Cancelled by user") -> dict[str, Any] | None:
-        """Cancel the batch and every item not yet terminal; ``reason`` is what each such item says."""
-        return await self._set_control(batch_id, user_id=user_id, action="cancel", reason=reason)
+    async def cancel_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
+        return await self._set_control(batch_id, user_id=user_id, action="cancel")
 
-    async def list_active_by_user(self, user_id: str) -> list[dict[str, Any]]:
-        """Every batch of ``user_id`` not yet terminal, in any thread: what turning the person off must stop."""
-        async with self._sf() as session:
-            rows = (
-                await session.execute(
-                    select(SubagentBatchRow)
-                    .where(
-                        SubagentBatchRow.user_id == user_id,
-                        SubagentBatchRow.status.not_in(BATCH_TERMINAL_STATUSES),
-                        self._tenant_visible_clause(),
-                    )
-                    .order_by(SubagentBatchRow.created_at.asc(), SubagentBatchRow.id.asc())
-                )
-            ).scalars()
-            return [self._batch_dict(row) for row in rows]
-
-    async def _set_control(self, batch_id: str, *, user_id: str, action: str, reason: str = "Cancelled by user") -> dict[str, Any] | None:
+    async def _set_control(self, batch_id: str, *, user_id: str, action: str) -> dict[str, Any] | None:
+        now = datetime.now(UTC)
         async with self._sf() as session:
             batch = await session.get(SubagentBatchRow, batch_id, with_for_update=True)
-            if batch is None or batch.user_id != user_id or not self._can_execute(batch):
+            if batch is None or batch.user_id != user_id:
                 return None
-            now = await self._now(session, None)
             if action == "pause" and batch.status in ("queued", "running"):
                 batch.status = "paused"
             elif action == "resume" and batch.status == "paused":
                 batch.status = "queued"
             elif action == "cancel" and batch.status not in BATCH_TERMINAL_STATUSES:
                 batch.status = "cancelled"
-                batch.cancel_epoch += 1
-                batch.terminal_code = "cancelled"
                 batch.completed_at = now
                 items = list(
                     (
@@ -1992,418 +555,38 @@ class SubagentBatchRepository:
                     ).scalars()
                 )
                 for item in items:
-                    if self._requires_attempt_fence(batch) and item.active_attempt_id is not None:
-                        await self._terminalize_attempt_fail_closed(
-                            session,
-                            batch=batch,
-                            item=item,
-                            terminal_code="cancelled",
-                            consumed=True,
-                            terminal_at=now,
-                        )
                     item.cancel_requested_at = now
                     item.updated_at = now
                     item.status = "cancelled"
-                    item.error = reason
+                    item.error = "Cancelled by user"
                     item.lease_owner = None
                     item.lease_expires_at = None
-                    item.active_attempt_id = None
-                    item.terminal_code = "cancelled"
                     item.completed_at = now
             batch.updated_at = now
             await session.commit()
             return await self._with_counts(session, batch)
 
     async def retry_item(self, batch_id: str, item_id: str, *, user_id: str) -> dict[str, Any] | None:
+        now = datetime.now(UTC)
         async with self._sf() as session:
             batch = await session.get(SubagentBatchRow, batch_id, with_for_update=True)
-            if batch is None or batch.user_id != user_id or not self._can_execute(batch):
+            if batch is None or batch.user_id != user_id:
                 return None
             item = await session.get(SubagentBatchItemRow, item_id, with_for_update=True)
             if item is None or item.batch_id != batch_id or item.status != "failed":
                 return None
-            if self._requires_attempt_fence(batch) and item.attempt >= batch.max_attempts:
-                return None
-            now = await self._now(session, None)
             item.status = "pending"
-            if not self._requires_attempt_fence(batch):
-                item.attempt = 0
-            item.started_at = None
+            item.attempt = 0
             item.error = None
             item.result = None
             item.result_preview = None
             item.result_truncated = False
-            item.terminal_code = None
-            item.terminal_evidence_digest = None
+            item.acceptance_verdict = None
             item.completed_at = None
             item.cancel_requested_at = None
             item.updated_at = now
             batch.status = "queued"
-            batch.terminal_code = None
             batch.completed_at = None
             batch.updated_at = now
             await session.commit()
             return self._item_dict(item)
-
-    async def list_attempts(
-        self,
-        batch_id: str,
-        *,
-        user_id: str,
-        item_id: str | None = None,
-        limit: int = 100,
-    ) -> list[dict[str, Any]] | None:
-        """Return bounded safe attempt observations for an authorized owner."""
-
-        bounded_limit = max(1, min(limit, 100))
-        async with self._sf() as session:
-            batch = (
-                await session.execute(
-                    select(SubagentBatchRow).where(
-                        SubagentBatchRow.id == batch_id,
-                        SubagentBatchRow.user_id == user_id,
-                        self._tenant_visible_clause(),
-                    )
-                )
-            ).scalar_one_or_none()
-            if batch is None:
-                return None
-            if batch.schema_writer_version == 1:
-                return []
-            stmt = select(SubagentBatchAttemptRow).where(
-                SubagentBatchAttemptRow.batch_id == batch_id,
-                SubagentBatchAttemptRow.tenant_digest == batch.tenant_digest,
-            )
-            if item_id is not None:
-                stmt = stmt.where(SubagentBatchAttemptRow.item_id == item_id)
-            rows = list(
-                (
-                    await session.execute(
-                        stmt.order_by(
-                            SubagentBatchAttemptRow.claimed_at,
-                            SubagentBatchAttemptRow.lease_epoch,
-                        ).limit(bounded_limit)
-                    )
-                ).scalars()
-            )
-            return [self._attempt_dict(row) for row in rows]
-
-    async def list_observations(
-        self,
-        batch_id: str,
-        *,
-        user_id: str,
-        limit: int = 100,
-    ) -> list[dict[str, Any]] | None:
-        """Derive a bounded payload-free lifecycle view from durable rows.
-
-        Acceptance, attempt timestamps, and terminal projection remain owned by
-        their existing tables. This additive view gives portable consumers one
-        stable vocabulary without creating a second lifecycle authority.
-        """
-
-        bounded_limit = max(1, min(limit, 100))
-        async with self._sf() as session:
-            batch = (
-                await session.execute(
-                    select(SubagentBatchRow).where(
-                        SubagentBatchRow.id == batch_id,
-                        SubagentBatchRow.user_id == user_id,
-                        self._tenant_visible_clause(),
-                    )
-                )
-            ).scalar_one_or_none()
-            if batch is None:
-                return None
-            if batch.schema_writer_version != 2 or batch.accepted_at is None or batch.acceptance_digest is None:
-                return []
-
-            attempt_rows = list(
-                (
-                    await session.execute(
-                        select(SubagentBatchAttemptRow)
-                        .where(
-                            SubagentBatchAttemptRow.batch_id == batch_id,
-                            SubagentBatchAttemptRow.tenant_digest == batch.tenant_digest,
-                        )
-                        .order_by(
-                            SubagentBatchAttemptRow.claimed_at.desc(),
-                            SubagentBatchAttemptRow.id.desc(),
-                        )
-                        .limit(bounded_limit)
-                    )
-                ).scalars()
-            )
-            accepted_observation = {
-                "version": 1,
-                "event": "batch.accepted",
-                "batch_id": batch.id,
-                "acceptance_digest": batch.acceptance_digest,
-                "parent_run_id": batch.run_id,
-                "parent_tool_receipt_id": batch.parent_tool_receipt_id,
-                "item_count": batch.total_items,
-                "occurred_at": coerce_iso(batch.accepted_at),
-            }
-            terminal_observation = (
-                {
-                    "version": 1,
-                    "event": "batch.terminal",
-                    "batch_id": batch.id,
-                    "acceptance_digest": batch.acceptance_digest,
-                    "terminal_code": batch.terminal_code,
-                    "occurred_at": coerce_iso(batch.completed_at),
-                }
-                if batch.completed_at is not None
-                else None
-            )
-            attempt_observations: list[dict[str, Any]] = []
-            for attempt in reversed(attempt_rows):
-                common = {
-                    "version": 1,
-                    "event": "batch.item_attempt",
-                    "batch_id": batch.id,
-                    "item_id": attempt.item_id,
-                    "attempt_id": attempt.id,
-                    "attempt_number": attempt.attempt_number,
-                    "lease_epoch": attempt.lease_epoch,
-                }
-                attempt_observations.append(
-                    {
-                        **common,
-                        "transition": "claimed",
-                        "occurred_at": coerce_iso(attempt.claimed_at),
-                    }
-                )
-                if attempt.started_at is not None:
-                    attempt_observations.append(
-                        {
-                            **common,
-                            "transition": "started",
-                            "occurred_at": coerce_iso(attempt.started_at),
-                        }
-                    )
-                if attempt.terminal_at is not None:
-                    attempt_observations.append(
-                        {
-                            **common,
-                            "transition": "terminal",
-                            "terminal_code": attempt.terminal_code,
-                            "consumed": attempt.consumed,
-                            "evidence_digest": attempt.evidence_digest,
-                            "occurred_at": coerce_iso(attempt.terminal_at),
-                        }
-                    )
-                for observation in _decode_attempt_sandbox_attachment(attempt):
-                    attempt_observations.append(
-                        {
-                            "version": 1,
-                            "event": "sandbox.lifecycle",
-                            "batch_id": batch.id,
-                            "item_id": attempt.item_id,
-                            "attempt_id": attempt.id,
-                            "parent_run_id": observation.run_id,
-                            "attempt_ref": observation.attempt_ref,
-                            "batch_child_attempt_ref": (observation.batch_child_attempt_ref),
-                            "tool_receipt_ref": observation.tool_receipt_ref,
-                            "state": observation.kind.value,
-                            "provider_kind": observation.provider_kind,
-                            "qualification_scope": (observation.qualification_scope),
-                            "reason_code": observation.reason_code,
-                            "evidence_digest": (observation.execution_evidence_digest),
-                            "occurred_at": coerce_iso(
-                                observation.observed_at,
-                            ),
-                        }
-                    )
-            attempt_observations.sort(
-                key=lambda row: (
-                    row["occurred_at"],
-                    row["event"],
-                    str(row.get("transition") or row.get("state") or ""),
-                ),
-            )
-            reserved_edges = 1 + int(terminal_observation is not None)
-            transition_budget = max(0, bounded_limit - reserved_edges)
-            observations = [accepted_observation]
-            if transition_budget:
-                observations.extend(attempt_observations[-transition_budget:])
-            if terminal_observation is not None and len(observations) < bounded_limit:
-                observations.append(terminal_observation)
-            return observations
-
-    def _parent_cursor_scope(
-        self,
-        *,
-        parent_run_id: str,
-        user_id: str,
-    ) -> str:
-        if self._tenant is None:
-            raise BatchAdmissionError("legacy_batch_unbound")
-        return canonical_digest(
-            {
-                "version": 1,
-                "domain": "subagent_batch_parent_cursor_scope",
-                "tenant_digest": self._tenant.digest,
-                "parent_run_id": parent_run_id,
-                "user_id": user_id,
-            }
-        )
-
-    def _encode_parent_cursor(
-        self,
-        *,
-        parent_run_id: str,
-        user_id: str,
-        accepted_at: datetime,
-        batch_id: str,
-    ) -> str:
-        core = {
-            "version": _BATCH_PARENT_CURSOR_VERSION,
-            "scope": self._parent_cursor_scope(
-                parent_run_id=parent_run_id,
-                user_id=user_id,
-            ),
-            "accepted_at": _as_utc(accepted_at).isoformat(),
-            "batch_id": batch_id,
-        }
-        payload = {**core, "checksum": canonical_digest(core)}
-        encoded = base64.urlsafe_b64encode(
-            json.dumps(
-                payload,
-                sort_keys=True,
-                separators=(",", ":"),
-            ).encode("utf-8")
-        ).rstrip(b"=")
-        return "sbc1." + encoded.decode("ascii")
-
-    def _decode_parent_cursor(
-        self,
-        cursor: str,
-        *,
-        parent_run_id: str,
-        user_id: str,
-    ) -> tuple[datetime, str]:
-        if not isinstance(cursor, str) or len(cursor.encode("utf-8")) > 4096 or not cursor.startswith("sbc1."):
-            raise BatchAdmissionError("subagent_batch_cursor_invalid")
-        try:
-            raw = cursor[5:]
-            payload = json.loads(
-                base64.b64decode(
-                    raw + "=" * (-len(raw) % 4),
-                    altchars=b"-_",
-                    validate=True,
-                )
-            )
-            expected = {
-                "version",
-                "scope",
-                "accepted_at",
-                "batch_id",
-                "checksum",
-            }
-            if not isinstance(payload, dict) or set(payload) != expected:
-                raise ValueError
-            core = {key: payload[key] for key in ("version", "scope", "accepted_at", "batch_id")}
-            if (
-                payload["version"] != _BATCH_PARENT_CURSOR_VERSION
-                or payload["scope"]
-                != self._parent_cursor_scope(
-                    parent_run_id=parent_run_id,
-                    user_id=user_id,
-                )
-                or payload["checksum"] != canonical_digest(core)
-                or not isinstance(payload["batch_id"], str)
-                or not payload["batch_id"]
-            ):
-                raise ValueError
-            accepted_at = datetime.fromisoformat(payload["accepted_at"])
-            if accepted_at.tzinfo is None:
-                raise ValueError
-            return accepted_at.astimezone(UTC), payload["batch_id"]
-        except (TypeError, ValueError, UnicodeError, json.JSONDecodeError) as exc:
-            raise BatchAdmissionError("subagent_batch_cursor_invalid") from exc
-
-    async def list_lifecycle_by_parent_run(
-        self,
-        parent_run_id: str,
-        *,
-        user_id: str,
-        limit: int = 20,
-        cursor: str | None = None,
-        tenant_digest: str,
-    ) -> dict[str, Any]:
-        """Return owner-scoped child lifecycle through the portable run seam."""
-
-        if self._tenant is None:
-            raise BatchAdmissionError("legacy_batch_unbound")
-        if tenant_digest != self._tenant.digest:
-            raise BatchAdmissionError("batch_tenant_mismatch")
-        if type(limit) is not int or not 1 <= limit <= _MAX_BATCH_PARENT_PAGE_SIZE:
-            raise ValueError("subagent batch lineage limit must be between 1 and 100")
-        stmt = select(SubagentBatchRow).where(
-            SubagentBatchRow.tenant_digest == tenant_digest,
-            SubagentBatchRow.run_id == parent_run_id,
-            SubagentBatchRow.user_id == user_id,
-            SubagentBatchRow.schema_writer_version == 2,
-            SubagentBatchRow.acceptance_digest.is_not(None),
-            SubagentBatchRow.accepted_at.is_not(None),
-        )
-        if cursor is not None:
-            accepted_at, batch_id = self._decode_parent_cursor(
-                cursor,
-                parent_run_id=parent_run_id,
-                user_id=user_id,
-            )
-            stmt = stmt.where((SubagentBatchRow.accepted_at < accepted_at) | ((SubagentBatchRow.accepted_at == accepted_at) & (SubagentBatchRow.id < batch_id)))
-        stmt = stmt.order_by(
-            SubagentBatchRow.accepted_at.desc(),
-            SubagentBatchRow.id.desc(),
-        ).limit(limit + 1)
-        async with self._sf() as session:
-            rows = list((await session.execute(stmt)).scalars())
-        has_more = len(rows) > limit
-        rows = rows[:limit]
-        items: list[dict[str, Any]] = []
-        for row in rows:
-            observations = await self.list_observations(
-                row.id,
-                user_id=user_id,
-                limit=100,
-            )
-            if observations is None:
-                continue
-            items.append(
-                {
-                    "batch_id": row.id,
-                    "acceptance_digest": row.acceptance_digest,
-                    "parent_tool_receipt_id": row.parent_tool_receipt_id,
-                    "status": row.status,
-                    "terminal_code": row.terminal_code,
-                    "total_items": row.total_items,
-                    "accepted_at": coerce_iso(row.accepted_at),
-                    "updated_at": coerce_iso(row.updated_at),
-                    "completed_at": (None if row.completed_at is None else coerce_iso(row.completed_at)),
-                    "observations": observations,
-                }
-            )
-        next_cursor = None
-        if has_more and rows:
-            tail = rows[-1]
-            assert tail.accepted_at is not None
-            next_cursor = self._encode_parent_cursor(
-                parent_run_id=parent_run_id,
-                user_id=user_id,
-                accepted_at=tail.accepted_at,
-                batch_id=tail.id,
-            )
-        return {
-            "items": items,
-            "next_cursor": next_cursor,
-            "pruning_status": "not_pruned",
-        }
-
-
-def _as_utc(value: datetime) -> datetime:
-    if value.tzinfo is None:
-        return value.replace(tzinfo=UTC)
-    return value.astimezone(UTC)

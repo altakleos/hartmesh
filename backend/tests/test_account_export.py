@@ -38,11 +38,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 from langgraph.store.memory import InMemoryStore
 from starlette.requests import ClientDisconnect
 
-from app.gateway import account_export, retained_state, transcript
+from app.gateway import account_export, transcript
 from app.gateway.artifact_archive import ArtifactArchiveError, copy_file
 from app.gateway.auth.models import User
 from app.gateway.routers import account_export as account_export_router
-from app.gateway.routers import agents as agents_router
 from app.gateway.routers import memory as memory_router
 from deerflow.config.account_export_config import AccountExportConfig
 from deerflow.config.paths import Paths
@@ -50,8 +49,11 @@ from deerflow.constants import BROWSER_FRAMES_DIRNAME, MCP_INTERNAL_DIRNAME, TOO
 from deerflow.persistence.agents import file as file_agent_store
 from deerflow.persistence.thread_meta.memory import THREADS_NS, MemoryThreadMetaStore
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
-from deerflow.runtime.owner_holdings import Ended, OwnerHoldings
 from deerflow.runtime.runs.manager import EditReplayVisibility
+
+# The real sources, kept before a deployment double replaces them on the module.
+_REAL_MEMORY_EXPORT_DOCUMENT = account_export.memory_export_document
+_REAL_OWNED_AGENT_DOCUMENTS = account_export.owned_agent_documents
 
 PERSON_A = User(id=UUID("11111111-1111-4111-8111-111111111111"), email="ana@example.com", password_hash="x", system_role="user")
 PERSON_B = User(id=UUID("22222222-2222-4222-8222-222222222222"), email="ben@example.com", password_hash="x", system_role="user")
@@ -372,14 +374,16 @@ async def test_memory_json_is_what_the_memory_export_route_answers(tmp_path, mon
     asked: list[tuple[str, str | None]] = []
 
     class _Manager:
+        supports_agent_scoped_management = True
+
         def get_memory(self, *, user_id, agent_name=None):
             asked.append((user_id, agent_name))
             return documents[agent_name]
 
     monkeypatch.setattr(memory_router, "get_memory_manager", lambda: _Manager())
-    monkeypatch.setattr(account_export, "memory_export_document", memory_router.memory_export_document)
+    monkeypatch.setattr(account_export, "memory_export_document", _REAL_MEMORY_EXPORT_DOCUMENT)
     deployment.agents[A_ID] = [{"name": "analyst"}]
-    app = make_authed_test_app(user_factory=lambda: PERSON_A)
+    app = make_authed_test_app(signed_in=True, user_factory=lambda: PERSON_A)
     app.include_router(memory_router.router)
     with TestClient(app) as client:
         route = client.get("/api/memory/export")
@@ -401,7 +405,7 @@ async def test_a_memory_backend_that_keeps_no_document_gives_none(monkeypatch) -
 
     monkeypatch.setattr(memory_router, "get_memory_manager", lambda: _Minimal())
 
-    assert await memory_router.memory_export_document(A_ID) is None
+    assert await account_export.memory_export_document(A_ID) is None
 
 
 @pytest.mark.anyio
@@ -418,8 +422,8 @@ async def test_agents_are_left_out_where_the_feature_is_off_and_memory_where_the
 
 def _agents_on_files(monkeypatch, paths: Paths) -> None:
     monkeypatch.setattr(file_agent_store._ac, "get_paths", lambda: paths)
-    monkeypatch.setattr(agents_router, "get_agents_api_config", lambda: SimpleNamespace(enabled=True))
-    monkeypatch.setattr(agents_router, "get_agent_store", file_agent_store.FileAgentStore)
+    monkeypatch.setattr(account_export, "get_agents_api_config", lambda: SimpleNamespace(enabled=True))
+    monkeypatch.setattr(account_export, "get_agent_store", file_agent_store.FileAgentStore)
 
 
 def _agent(root: Path, name: str, config: str, soul: str | None = None) -> None:
@@ -438,7 +442,7 @@ def test_the_agents_a_person_made_are_theirs_alone_with_their_soul_and_no_github
     _agent(paths.agents_dir, "legacy", "name: legacy\n")
     _agent(paths.user_agents_dir(B_ID), "bens", "name: bens\n")
 
-    documents = agents_router.owned_agent_documents(A_ID)
+    documents = account_export.owned_agent_documents(A_ID)
 
     assert [document["name"] for document in documents] == ["analyst"]
     assert documents[0]["soul"] == "You read spreadsheets."
@@ -446,20 +450,8 @@ def test_the_agents_a_person_made_are_theirs_alone_with_their_soul_and_no_github
     # The unreadable agent is counted, never named.
     logged = "\n".join(record.getMessage() + (record.exc_text or "") for record in caplog.records)
     assert "broken" not in logged and str(tmp_path) not in logged
-    monkeypatch.setattr(agents_router, "get_agents_api_config", lambda: SimpleNamespace(enabled=False))
-    assert agents_router.owned_agent_documents(A_ID) is None
-
-
-def test_the_file_store_lists_only_the_person_s_own_agents(tmp_path, monkeypatch) -> None:
-    paths = Paths(tmp_path)
-    monkeypatch.setattr(file_agent_store._ac, "get_paths", lambda: paths)
-    _agent(paths.user_agents_dir("u1"), "mine", "name: mine\n")
-    _agent(paths.agents_dir, "legacy", "name: legacy\n")
-    store = file_agent_store.FileAgentStore()
-
-    assert {agent.name for agent in store.list(user_id="u1")} == {"mine", "legacy"}
-    assert {agent.name for agent in store.list_owned(user_id="u1")} == {"mine"}
-    assert store.list_owned(user_id="nobody") == []
+    monkeypatch.setattr(account_export, "get_agents_api_config", lambda: SimpleNamespace(enabled=False))
+    assert account_export.owned_agent_documents(A_ID) is None
 
 
 @pytest.mark.anyio
@@ -525,7 +517,7 @@ async def test_the_archive_holds_no_credential_and_no_process_state(tmp_path, mo
     deployment = _Deployment(tmp_path, monkeypatch)
     await _two_people(deployment)
     _agents_on_files(monkeypatch, deployment.paths)
-    monkeypatch.setattr(account_export, "owned_agent_documents", agents_router.owned_agent_documents)
+    monkeypatch.setattr(account_export, "owned_agent_documents", _REAL_OWNED_AGENT_DOCUMENTS)
     _agent(deployment.paths.user_agents_dir(A_ID), "analyst", f"name: analyst\ngithub:\n  installation_id: 42\n  bot_login: {SENTINEL}\n")
     # An MCP server's own temporary files, the tool-result spill (default and
     # configured) and the browser frames sit in the person's directories.
@@ -1189,46 +1181,6 @@ async def test_a_gateway_that_stops_removes_every_export(tmp_path, monkeypatch) 
     assert deployment.left() == []
 
 
-@pytest.mark.anyio
-async def test_a_person_turned_off_loses_the_export_they_had(tmp_path, monkeypatch) -> None:
-    deployment = _Deployment(tmp_path, monkeypatch)
-    await _two_people(deployment)
-    await deployment.export(PERSON_A)
-    await deployment.export(PERSON_B)
-    holdings = OwnerHoldings()
-
-    async def _no_owner(thread_id: str) -> None:
-        return None
-
-    retained_state.add_retained_state_sources(holdings, thread_owner=_no_owner, account_exports=deployment.service)
-    monkeypatch.setattr(retained_state, "_initialized_sandbox_provider", lambda: None)
-    monkeypatch.setattr(retained_state, "_mcp_session_pool", lambda: None)
-    monkeypatch.setattr(retained_state, "_browser_session_manager", lambda: None)
-    monkeypatch.setattr(retained_state, "_initialized_memory_manager", lambda: None)
-
-    ended = await holdings.end_owners({A_ID})
-    await deployment.service.settled()
-
-    assert ended == {A_ID: {"account_exports": Ended(1)}}
-    assert deployment.service.status(A_ID) is None and deployment.service.status(B_ID) is not None
-    assert len(deployment.left()) == 1
-    assert "account_exports" in retained_state.RETAINED_SURFACES
-
-
-@pytest.mark.anyio
-async def test_a_process_that_prepares_no_exports_still_answers_for_them() -> None:
-    holdings = OwnerHoldings()
-
-    async def _no_owner(thread_id: str) -> None:
-        return None
-
-    retained_state.add_retained_state_sources(holdings, thread_owner=_no_owner)
-
-    # Every surface the account command names has a source here, so none reads as unasked.
-    assert "account_exports" in holdings._sources
-    assert holdings._sources["account_exports"][0](frozenset({A_ID})) == {}
-
-
 # ── What the logs say ───────────────────────────────────────────────────
 
 
@@ -1283,7 +1235,7 @@ async def test_a_failure_logs_no_file_name(tmp_path, monkeypatch, caplog) -> Non
 
 def _routes_app(tmp_path, monkeypatch, user: User, *, auth_source: str | None = None):
     if auth_source is None:
-        app = make_authed_test_app(user_factory=lambda: user)
+        app = make_authed_test_app(signed_in=True, user_factory=lambda: user)
     else:
         # Signed in some other way than an interactive session.
         app = FastAPI()

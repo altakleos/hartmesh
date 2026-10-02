@@ -268,7 +268,7 @@ deployment's. Hiding is presentation, not authorization — the routes are
 unchanged and `authorization` has no permission covering these APIs;
 `system_role` is what limits a person, and the API already checks it.
 The product's name is the deployment's too (`ui.product_name`, HartMesh when
-unset). Each route layout reads it from the public `GET /api/product`
+unset). Each route layout reads it from the public `GET /api/v1/auth/product`
 (`core/product/server.ts`) and hands it to `I18nProvider`, which builds the
 dictionary with it, so every string that names the product says the
 configured name and `useProductName()` reads it back from that dictionary —

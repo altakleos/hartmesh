@@ -24,7 +24,7 @@ import subprocess
 
 import pytest
 
-from deerflow.utils.readability import ReadabilityExtractor
+from deerflow.community.direct_fetch.extraction import InProcessExtractor
 
 REPRESENTATIVE_HTML = """
 <html><head><title>Great Lakes</title></head><body>
@@ -82,12 +82,12 @@ def no_subprocess(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     [(REPRESENTATIVE_HTML, "representative"), (MALFORMED_HTML, "malformed"), (JS_HEAVY_HTML, "js-heavy"), ("", "empty"), ("<html></html>", "no content")],
 )
 def test_extraction_never_leaves_the_process(html: str, shape: str, no_subprocess: list[list[str]]) -> None:
-    ReadabilityExtractor().extract_article(html)
+    InProcessExtractor().extract_article(html)
     assert no_subprocess == [], f"{shape}: nothing should have been executed"
 
 
 def test_a_representative_page_extracts_its_body_and_drops_the_furniture(no_subprocess: list[list[str]]) -> None:
-    article = ReadabilityExtractor().extract_article(REPRESENTATIVE_HTML)
+    article = InProcessExtractor().extract_article(REPRESENTATIVE_HTML)
     markdown = article.to_markdown()
 
     assert "21 per cent" in markdown and "30 million people" in markdown
@@ -98,7 +98,7 @@ def test_a_representative_page_extracts_its_body_and_drops_the_furniture(no_subp
 def test_malformed_html_still_yields_its_text(no_subprocess: list[list[str]]) -> None:
     # Unclosed tags all the way down: the extractor must return the text rather
     # than raise, because a real page like this is a fetch the model is waiting on.
-    article = ReadabilityExtractor().extract_article(MALFORMED_HTML)
+    article = InProcessExtractor().extract_article(MALFORMED_HTML)
     markdown = article.to_markdown()
 
     assert "personal agent" in markdown
@@ -116,7 +116,7 @@ def test_a_js_heavy_page_yields_what_is_actually_in_the_html(no_subprocess: list
     were already taking this path, since the JS extractor never ran there
     either.
     """
-    article = ReadabilityExtractor().extract_article(JS_HEAVY_HTML)
+    article = InProcessExtractor().extract_article(JS_HEAVY_HTML)
     markdown = article.to_markdown()
 
     assert "Muse Agent" in markdown, "the title and any served body are what a reader gets"
@@ -131,7 +131,7 @@ def test_a_js_heavy_page_yields_what_is_actually_in_the_html(no_subprocess: list
 
 
 def test_an_empty_page_says_so_instead_of_returning_nothing(no_subprocess: list[list[str]]) -> None:
-    article = ReadabilityExtractor().extract_article("<html><body></body></html>")
+    article = InProcessExtractor().extract_article("<html><body></body></html>")
     assert "No content" in article.to_markdown()
     assert article.title == "Untitled"
 
@@ -150,8 +150,8 @@ def test_only_the_pure_python_path_is_ever_asked_for(monkeypatch: pytest.MonkeyP
         calls.append(use_readability)
         return {"title": "T", "content": "<p>C</p>"}
 
-    monkeypatch.setattr("deerflow.utils.readability.simple_json_from_html_string", fake)
-    article = ReadabilityExtractor().extract_article("<html><body>x</body></html>")
+    monkeypatch.setattr("deerflow.community.direct_fetch.extraction.simple_json_from_html_string", fake)
+    article = InProcessExtractor().extract_article("<html><body>x</body></html>")
 
     assert calls == [False], "asked once, for the path that does the work"
     assert article.title == "T"
@@ -171,16 +171,6 @@ def test_an_unexpected_failure_still_surfaces(monkeypatch: pytest.MonkeyPatch) -
         def fake(html: str, use_readability: bool = False, _error: BaseException = error) -> dict:
             raise _error
 
-        monkeypatch.setattr("deerflow.utils.readability.simple_json_from_html_string", fake)
+        monkeypatch.setattr("deerflow.community.direct_fetch.extraction.simple_json_from_html_string", fake)
         with pytest.raises(type(error)):
-            ReadabilityExtractor().extract_article("<html><body>x</body></html>")
-
-
-def test_the_js_path_is_off_by_construction() -> None:
-    """The one line that decides it, asserted directly.
-
-    ``use_readability=True`` is what makes ``readabilipy`` probe for Node and
-    attempt ``npm install``; nothing else in this module reaches outside the
-    process. If this flips, every fetch pays two subprocesses again.
-    """
-    assert ReadabilityExtractor.USE_READABILITY_JS is False
+            InProcessExtractor().extract_article("<html><body>x</body></html>")

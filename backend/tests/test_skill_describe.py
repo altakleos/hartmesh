@@ -11,6 +11,7 @@ from deerflow.skills.describe import (
     build_skill_search_setup,
     get_skill_index_prompt_section,
 )
+from deerflow.skills.tool_policy import allowed_tool_names_for_skills
 from deerflow.skills.types import Skill, SkillCategory
 
 # ── Helpers ────────────────────────────────────────────────────────────────────
@@ -60,10 +61,6 @@ def test_render_metadata_format(sample_skills: list[Skill]):
     assert "[built-in]" in rendered
     assert "Allowed tools: execute_code, read_file" in rendered
     assert "Location: /mnt/skills/public/data-analysis/SKILL.md" in rendered
-    # The directory is stated outright rather than left to be derived from the
-    # file path: a skill's own command examples are written against it, and
-    # dropping the `/SKILL.md` is a step a reader can get wrong.
-    assert "Directory: /mnt/skills/public/data-analysis" in rendered
 
 
 def test_render_custom_skill_mutability(sample_skills: list[Skill]):
@@ -206,21 +203,12 @@ def test_skill_index_without_evolution_section():
     assert "Skill Self-Evolution" not in section
 
 
-def test_skill_index_states_no_root_of_its_own():
-    """The index must not name a mount point it cannot know is right.
-
-    A durable accepted invocation executes an immutable snapshot, so
-    ``skills.container_path`` is the one prefix that is refused there. Saying it
-    with framework authority above every skill's real location is how a model
-    ends up running a path that does not exist.
-    """
+def test_skill_index_custom_container_path():
     section = get_skill_index_prompt_section(
         skill_names=frozenset({"a"}),
         container_base_path="/custom/skills",
     )
-    assert "/custom/skills" not in section
-    assert "do not assume a\npath" in section
-    assert "describe_skill reports each skill's exact Location and Directory." in section
+    assert "/custom/skills" in section
 
 
 def test_skill_index_names_are_sorted():
@@ -277,16 +265,17 @@ def test_describe_tool_keyword_search(catalog: SkillCatalog):
     assert "deep-research" in messages[0].content
 
 
-def test_describe_tool_select_uncapped(tmp_path):
+def test_describe_tool_select_uncapped():
     """select: must return ALL requested skills, not capped at MAX_RESULTS."""
-    from deerflow.skills.catalog import MAX_RESULTS
+    from deerflow.skills.catalog import MAX_QUERY_CHARS, MAX_RESULTS
 
     # Build more skills than MAX_RESULTS so the cap would visibly truncate
-    many_skills = [_make_skill(f"skill-{i:02d}") for i in range(MAX_RESULTS + 2)]
+    many_skills = [_make_skill(f"skill-number-{i:02d}-with-a-longish-name") for i in range(MAX_RESULTS + 10)]
     big_catalog = SkillCatalog(tuple(many_skills))
     tool = build_describe_skill_tool(big_catalog)
 
     names_csv = ",".join(s.name for s in many_skills)
+    assert len(names_csv) > MAX_QUERY_CHARS
     result = tool.invoke(
         {"args": {"name": f"select:{names_csv}"}, "name": "describe_skill", "type": "tool_call", "id": "test_select_uncapped"},
     )
@@ -295,8 +284,22 @@ def test_describe_tool_select_uncapped(tmp_path):
         assert s.name in content, f"select: truncated — {s.name} missing from result"
 
 
-def test_skill_index_says_a_skill_file_is_read_on_its_own():
-    """Calls chosen beside a skill's first read are not run (SkillToolPolicyMiddleware); the step says so."""
-    section = get_skill_index_prompt_section(skill_names=frozenset({"business-report"}))
+# ── Explicitly empty allowed-tools ─────────────────────────────────────────────
 
-    assert "on its own: other calls in the same message are not run" in " ".join(section.split())
+
+def test_render_explicit_empty_allowed_tools_does_not_claim_all():
+    restricted = _make_skill("locked-down", allowed_tools=())
+    rendered = _render_skill_metadata([restricted], "/mnt/skills")
+    assert "Allowed tools: (all)" not in rendered
+    assert "Allowed tools: (none)" in rendered
+
+
+def test_rendered_allowed_tools_agree_with_skill_tool_policy():
+    """`(all)` must mean unrestricted, which is the one state that renders it."""
+    omitted = _make_skill("legacy")
+    assert allowed_tool_names_for_skills([omitted]) is None
+    assert "Allowed tools: (all)" in _render_skill_metadata([omitted], "/mnt/skills")
+
+    restricted = _make_skill("locked-down", allowed_tools=())
+    assert allowed_tool_names_for_skills([restricted]) == set()
+    assert "Allowed tools: (all)" not in _render_skill_metadata([restricted], "/mnt/skills")

@@ -10,7 +10,6 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpOAuthConfig
-from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 from deerflow.mcp.headers import apply_header_overrides, header_spellings, illegal_header_value_reason
 
 logger = logging.getLogger(__name__)
@@ -250,14 +249,12 @@ async def get_initial_oauth_headers(extensions_config: ExtensionsConfig) -> dict
     for server_name in token_manager.oauth_server_names():
         try:
             value = await token_manager.get_authorization_header(server_name)
-        except Exception as exc:
-            diagnostic = bounded_diagnostic(
-                code="mcp_oauth_header_preparation_failed",
-                operation="prepare_initial_mcp_oauth_header",
-                error=exc,
-                contribution_id=server_name,
+        except Exception:
+            logger.warning(
+                "Skipping initial OAuth header for MCP server '%s' after token fetch failed",
+                server_name,
+                exc_info=True,
             )
-            log_bounded_failure(logger, diagnostic)
             continue
         if value:
             headers[server_name] = value

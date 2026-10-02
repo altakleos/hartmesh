@@ -11,6 +11,10 @@ there are still incomplete todo items. When the model produces a final response
 for the next model request and jumps back to the model node to force continued
 engagement. The completion reminder is injected via ``wrap_model_call`` instead
 of being persisted into graph state as a normal user-visible message.
+
+The completion guard defers to ``model_length_termination``: when a length-capped
+turn has already been terminalized by ``ModelLengthFinishReasonMiddleware``,
+re-engaging would only re-emit the same oversized tool call into the same cap.
 """
 
 from __future__ import annotations
@@ -27,6 +31,8 @@ from langgraph.runtime import Runtime
 
 from deerflow.agents.thread_state import ThreadState
 
+TODO_REMINDER_MESSAGE_NAME = "todo_reminder"
+
 
 def _todos_in_messages(messages: list[Any]) -> bool:
     """Return True if any AIMessage in *messages* contains a write_todos tool call."""
@@ -41,7 +47,7 @@ def _todos_in_messages(messages: list[Any]) -> bool:
 def _reminder_in_messages(messages: list[Any]) -> bool:
     """Return True if a todo_reminder HumanMessage is already present in *messages*."""
     for msg in messages:
-        if isinstance(msg, HumanMessage) and getattr(msg, "name", None) == "todo_reminder":
+        if isinstance(msg, HumanMessage) and getattr(msg, "name", None) == TODO_REMINDER_MESSAGE_NAME:
             return True
     return False
 
@@ -119,6 +125,7 @@ class TodoMiddleware(TodoListMiddleware):
             "system_prompt_hash": canonical_hash(self.system_prompt),
             "tool_description_hash": canonical_hash(self.tool_description),
             "state_channel": "todos",
+            "skip_completion_reminder_on_length_cap": True,
         }
 
     @override
@@ -145,7 +152,7 @@ class TodoMiddleware(TodoListMiddleware):
         # Inject a reminder as a HumanMessage so the model stays aware.
         formatted = _format_todos(todos)
         reminder = HumanMessage(
-            name="todo_reminder",
+            name=TODO_REMINDER_MESSAGE_NAME,
             additional_kwargs={"hide_from_ui": True},
             content=(
                 "<system_reminder>\n"
@@ -244,6 +251,25 @@ class TodoMiddleware(TodoListMiddleware):
                 self._touch_completion_reminder_key_locked(key)
             return reminders
 
+    def _restore_completion_reminders(self, runtime: Runtime, reminders: list[str]) -> None:
+        """Requeue reminders taken for a model call that raised.
+
+        LLMErrorHandlingMiddleware sits outside this middleware and retries a
+        failed call by running this wrap again, so the retry must still find
+        the reminder. The count is not bumped again: it was spent when the
+        reminder was queued. A run whose reminder state was dropped meanwhile
+        stays dropped.
+        """
+        if not reminders:
+            return
+        key = self._pending_key(runtime)
+        with self._lock:
+            if key not in self._completion_reminder_counts:
+                return
+            queued = self._pending_completion_reminders.setdefault(key, [])
+            queued[:0] = [reminder for reminder in reminders if reminder not in queued]
+            self._touch_completion_reminder_key_locked(key)
+
     def _clear_other_run_completion_reminders(self, runtime: Runtime) -> None:
         thread_id, current_run_id = self._pending_key(runtime)
         with self._lock:
@@ -297,6 +323,16 @@ class TodoMiddleware(TodoListMiddleware):
         if not last_ai or _has_tool_call_intent_or_error(last_ai):
             return None
 
+        if (last_ai.additional_kwargs or {}).get("deerflow_error_fallback"):
+            return None
+
+        # A length-capped turn was already terminalized by
+        # ModelLengthFinishReasonMiddleware (tool calls suppressed, notice
+        # appended); re-engaging would only re-emit the same oversized tool
+        # call into the same cap.
+        if (last_ai.additional_kwargs or {}).get("model_length_termination"):
+            return None
+
         # 3. Allow exit when all todos are completed or there are no todos.
         todos: list[Todo] = state.get("todos") or []  # type: ignore[assignment]
         if not todos or all(t.get("status") == "completed" for t in todos):
@@ -326,8 +362,7 @@ class TodoMiddleware(TodoListMiddleware):
     def _format_pending_completion_reminders(reminders: list[str]) -> str:
         return "\n\n".join(dict.fromkeys(reminders))
 
-    def _augment_request(self, request: ModelRequest) -> ModelRequest:
-        reminders = self._drain_completion_reminders(request.runtime)
+    def _inject_completion_reminders(self, request: ModelRequest, reminders: list[str]) -> ModelRequest:
         if not reminders:
             return request
         new_messages = [
@@ -350,7 +385,12 @@ class TodoMiddleware(TodoListMiddleware):
         # without calling it the model is never told about the todo list feature.
         # Augment with pending completion reminders on the request that already
         # carries the injected system prompt.
-        return super().wrap_model_call(request, lambda req: handler(self._augment_request(req)))
+        reminders = self._drain_completion_reminders(request.runtime)
+        try:
+            return super().wrap_model_call(request, lambda req: handler(self._inject_completion_reminders(req, reminders)))
+        except Exception:
+            self._restore_completion_reminders(request.runtime, reminders)
+            raise
 
     @override
     async def awrap_model_call(
@@ -359,10 +399,16 @@ class TodoMiddleware(TodoListMiddleware):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         # See wrap_model_call: preserve the base class system-prompt injection.
-        async def augmented_handler(req: ModelRequest) -> ModelResponse:
-            return await handler(self._augment_request(req))
+        reminders = self._drain_completion_reminders(request.runtime)
 
-        return await super().awrap_model_call(request, augmented_handler)
+        async def augmented_handler(req: ModelRequest) -> ModelResponse:
+            return await handler(self._inject_completion_reminders(req, reminders))
+
+        try:
+            return await super().awrap_model_call(request, augmented_handler)
+        except Exception:
+            self._restore_completion_reminders(request.runtime, reminders)
+            raise
 
     @override
     def after_agent(self, state: ThreadState, runtime: Runtime) -> dict[str, Any] | None:

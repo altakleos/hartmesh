@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import subprocess
 import tomllib
 import zipfile
@@ -14,14 +15,16 @@ import pytest
 REPO_ROOT = Path(__file__).resolve().parents[2]
 BACKEND_ROOT = REPO_ROOT / "backend"
 
+_MAKE_ON_PATH = shutil.which("make") is not None
+_skip_without_make = pytest.mark.skipif(
+    not _MAKE_ON_PATH,
+    reason="these contract tests dry-run the root Makefile through 'make -n'; GNU make is not installed on this host",
+)
+
 
 def _make_recipe(path: Path, target: str) -> str:
     content = path.read_text(encoding="utf-8")
-    match = re.search(
-        rf"^{re.escape(target)}:[^\n]*\n(?P<recipe>(?:\t[^\n]*\n)+)",
-        content,
-        re.MULTILINE,
-    )
+    match = re.search(rf"^{re.escape(target)}:[^\n]*\n(?P<recipe>(?:\t[^\n]*\n)+)", content, re.MULTILINE)
     assert match is not None, f"missing {target!r} target in {path}"
     return match.group("recipe")
 
@@ -90,6 +93,14 @@ def test_root_makefile_exposes_extension_management_commands() -> None:
     assert "uv run --frozen --no-group extensions" in install
     assert "--yes" not in install
 
+    upgrade = _make_recipe(makefile, "extension-upgrade")
+    assert "deerflow extensions upgrade" in upgrade
+    assert "--source-env __deerflow_extension_source__" in upgrade
+    assert "DEER_FLOW_EXTENSION_SOURCE" not in upgrade
+    assert "$(SOURCE)" not in upgrade
+    assert "uv run --frozen --no-group extensions" in upgrade
+    assert "--yes" not in upgrade
+
     for target, command in (
         ("extension-list", "deerflow extensions list"),
         ("extension-enable", "deerflow extensions enable"),
@@ -106,6 +117,7 @@ def test_extension_management_bootstrap_does_not_resolve_a_broken_extension_sour
 
     for target in (
         "extension-install",
+        "extension-upgrade",
         "extension-list",
         "extension-enable",
         "extension-disable",
@@ -184,6 +196,7 @@ def test_root_extension_shortcuts_are_cross_platform_and_keep_trust_confirmation
 
     for target in (
         "extension-install",
+        "extension-upgrade",
         "extension-enable",
         "extension-disable",
         "extension-remove",
@@ -193,13 +206,16 @@ def test_root_extension_shortcuts_are_cross_platform_and_keep_trust_confirmation
         assert "usage: make" in recipe, target
 
     assert "--yes" not in _make_recipe(makefile, "extension-install")
+    assert "--yes" not in _make_recipe(makefile, "extension-upgrade")
 
 
+@_skip_without_make
 def test_root_extension_shortcuts_reject_ambient_environment_arguments() -> None:
     environment = os.environ.copy()
 
     for target, variable in (
         ("extension-install", "SOURCE"),
+        ("extension-upgrade", "SOURCE"),
         ("extension-enable", "NAME"),
     ):
         environment[variable] = "ambient-value"
@@ -219,11 +235,13 @@ def test_root_extension_shortcuts_reject_ambient_environment_arguments() -> None
     ("target", "variable", "env_option"),
     [
         ("extension-install", "SOURCE", "--source-env __deerflow_extension_source__"),
+        ("extension-upgrade", "SOURCE", "--source-env __deerflow_extension_source__"),
         ("extension-enable", "NAME", "--name-env __deerflow_extension_name__"),
         ("extension-disable", "NAME", "--name-env __deerflow_extension_name__"),
         ("extension-remove", "NAME", "--name-env __deerflow_extension_name__"),
     ],
 )
+@_skip_without_make
 def test_root_extension_shortcuts_keep_command_line_arguments_out_of_the_shell_recipe(
     target: str,
     variable: str,
@@ -251,11 +269,13 @@ def test_root_extension_shortcuts_keep_command_line_arguments_out_of_the_shell_r
     ("target", "variable", "env_option"),
     [
         ("extension-install", "SOURCE", "--source-env __deerflow_extension_source__"),
+        ("extension-upgrade", "SOURCE", "--source-env __deerflow_extension_source__"),
         ("extension-enable", "NAME", "--name-env __deerflow_extension_name__"),
         ("extension-disable", "NAME", "--name-env __deerflow_extension_name__"),
         ("extension-remove", "NAME", "--name-env __deerflow_extension_name__"),
     ],
 )
+@_skip_without_make
 def test_root_extension_shortcuts_keep_values_out_of_the_cmd_recipe_on_windows(
     target: str,
     variable: str,
@@ -300,11 +320,6 @@ def test_docker_image_builds_from_the_lock_and_never_syncs_at_runtime() -> None:
     production_compose = (REPO_ROOT / "docker" / "docker-compose.yaml").read_text(encoding="utf-8")
 
     assert "uv sync --locked --extra redis" in dockerfile
-    assert ".venv/bin/python -m deerflow.extensions.artifact_build" in dockerfile
-    assert "--source-lock /app/backend/extensions.lock.json" in dockerfile
-    assert "--output /app/hartmesh/extension-artifacts.json" in dockerfile
-    assert "chmod 0444 /app/hartmesh/extension-artifacts.json" in dockerfile
-    assert "COPY --from=builder /app/hartmesh ./hartmesh" in dockerfile
     assert "ARG UV_IMAGE=ghcr.io/astral-sh/uv:0.11.1" in dockerfile
     assert dockerfile.count("uv run --no-sync uvicorn app.gateway.app:app") == 2
     assert "uv run --no-sync uvicorn app.gateway.app:app" in production_compose

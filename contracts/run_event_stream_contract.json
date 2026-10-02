@@ -51,8 +51,7 @@
       "content": {"type": ["string", "object", "array", "number", "boolean", "null"]},
       "metadata": {"type": "object"},
       "created_at": {"type": "string", "format": "date-time"},
-      "user_id": {"type": ["string", "null"]},
-      "idempotency_key": {"type": ["string", "null"], "maxLength": 128}
+      "user_id": {"type": ["string", "null"]}
     },
     "additionalProperties": true
   },
@@ -67,10 +66,8 @@
     "outputs": "Root graph completion output; not an authoritative run lifecycle status.",
     "error": "Callback-observed run or chain failure evidence.",
     "middleware": "Middleware state-change audit evidence.",
-    "context": "Bounded identity/digest evidence about effective hidden or mutable context; raw context is excluded.",
+    "context": "Identity-only evidence about effective hidden context.",
     "subagent": "Subagent lifecycle and persisted step evidence.",
-    "tool": "Bounded, redacted, owner-fenced durable tool-attempt evidence.",
-    "policy": "Bounded warn/stop decisions from the accepted execution policy; private equivalence commitments are excluded.",
     "workspace": "Run-scoped workspace and output file-change evidence."
   },
   "events": [
@@ -89,70 +86,6 @@
         "required": ["caller"],
         "properties": {"caller": {"type": "string"}},
         "additionalProperties": true
-      }
-    },
-    {
-      "event_type": "run.execution.started.v1",
-      "category": "trace",
-      "producer": "run_agent immediately before the first agent.astream dispatch",
-      "content_description": "Owner-fenced singleton proving graph execution crossed the durable dispatch boundary. The pre-graph checkpoint anchor lets recovery distinguish an earlier thread head from a checkpoint produced by this execution.",
-      "content_schema": {
-        "type": "object",
-        "required": ["version", "pre_graph_checkpoint_id"],
-        "properties": {
-          "version": {"const": 1},
-          "pre_graph_checkpoint_id": {"type": ["string", "null"]}
-        },
-        "additionalProperties": false
-      },
-      "metadata_schema": {"type": "object", "additionalProperties": false},
-      "storage_semantics": {
-        "singleton": "At most one event of this type is written per run via the live owner-fenced put-if-absent port.",
-        "dispatch_gate": "The event must commit before graph/model/tool work begins; failure prevents dispatch."
-      }
-    },
-    {
-      "event_type": "sandbox.lifecycle.v1",
-      "category": "trace",
-      "producer": "AcceptedSandboxSession through the fenced durable worker, or the administrative reconciler after winning orphan takeover",
-      "content_description": "Bounded, non-authoritative lifecycle observation. It links accepted evidence without exposing provider resource handles, renewal material, commands, or file data.",
-      "content_schema": {
-        "type": "object",
-        "required": [
-          "version",
-          "kind",
-          "run_id",
-          "attempt_ref",
-          "batch_child_attempt_ref",
-          "tool_receipt_ref",
-          "provider_kind",
-          "qualification_scope",
-          "observed_at",
-          "reason_code",
-          "execution_evidence_digest",
-          "digest"
-        ],
-        "properties": {
-          "version": {"const": 1},
-          "kind": {"enum": ["acquired", "authority_lost", "released", "cleanup_pending", "orphaned"]},
-          "run_id": {"type": "string", "minLength": 1, "maxLength": 512},
-          "attempt_ref": {"type": "string", "minLength": 1, "maxLength": 512},
-          "batch_child_attempt_ref": {"type": ["string", "null"], "maxLength": 512},
-          "tool_receipt_ref": {"type": ["string", "null"], "maxLength": 512},
-          "provider_kind": {"type": "string", "minLength": 1, "maxLength": 512},
-          "qualification_scope": {"type": "string", "minLength": 1, "maxLength": 512},
-          "observed_at": {"type": "string", "format": "date-time"},
-          "reason_code": {"type": ["string", "null"], "maxLength": 512},
-          "execution_evidence_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-        },
-        "additionalProperties": false
-      },
-      "metadata_schema": {"type": "object", "additionalProperties": false},
-      "storage_semantics": {
-        "authority": "Observations describe lifecycle state and never grant execution or cleanup authority.",
-        "renewal": "Routine successful renewals are coalesced and do not produce events.",
-        "redaction": "Raw provider handles and opaque renewal data are forbidden."
       }
     },
     {
@@ -177,56 +110,13 @@
       "event_type": "run.error",
       "category": "error",
       "producer": "RunJournal.on_chain_error()",
-      "content_description": "Bounded V1 failure evidence. Exception messages and tracebacks are deliberately excluded.",
-      "content_schema": {
+      "content_schema": {"type": "string"},
+      "metadata_schema": {
         "type": "object",
-        "required": ["version", "code", "error_class", "correlation_id"],
-        "properties": {
-          "version": {"const": 1},
-          "code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
-          "error_class": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
-          "correlation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
-        },
-        "additionalProperties": false
-      },
-      "metadata_schema": {"type": "object", "additionalProperties": true}
-    },
-    {
-      "event_type": "run.terminal.v1",
-      "category": "trace",
-      "producer": "run_agent finalization via RunJournal.record_terminal_summary()",
-      "content_description": "Bounded terminal lifecycle evidence that supplements, and never rewrites, authorized opaque run.end graph output.",
-      "content_schema": {
-        "type": "object",
-        "required": ["version", "status", "stop_reason", "failure"],
-        "properties": {
-          "version": {"const": 1},
-          "status": {"enum": ["success", "error", "timeout", "interrupted"]},
-          "stop_reason": {
-            "type": ["string", "null"],
-            "maxLength": 64,
-            "pattern": "^[A-Za-z0-9_.:/@-]+$"
-          },
-          "failure": {
-            "anyOf": [
-              {"type": "null"},
-              {
-                "type": "object",
-                "required": ["version", "code", "error_class", "correlation_id"],
-                "properties": {
-                  "version": {"const": 1},
-                  "code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
-                  "error_class": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
-                  "correlation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
-                },
-                "additionalProperties": false
-              }
-            ]
-          }
-        },
-        "additionalProperties": false
-      },
-      "metadata_schema": {"type": "object", "additionalProperties": true}
+        "required": ["error_type"],
+        "properties": {"error_type": {"type": "string"}},
+        "additionalProperties": true
+      }
     },
     {
       "event_type": "llm.human.input",
@@ -297,18 +187,7 @@
       "event_type": "llm.error",
       "category": "trace",
       "producer": "RunJournal.on_llm_error()",
-      "content_description": "The same bounded V1 failure shape used by run.error; provider exception messages and tracebacks are excluded.",
-      "content_schema": {
-        "type": "object",
-        "required": ["version", "code", "error_class", "correlation_id"],
-        "properties": {
-          "version": {"const": 1},
-          "code": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
-          "error_class": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:/@-]+$"},
-          "correlation_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"}
-        },
-        "additionalProperties": false
-      },
+      "content_schema": {"type": "string"},
       "metadata_schema": {"type": "object", "additionalProperties": true}
     },
     {
@@ -319,56 +198,11 @@
         "type": "object",
         "required": ["content_sha256"],
         "properties": {
-          "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          "content_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "project_context_revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+          "project_shelf_revision": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
         },
         "additionalProperties": true
-      },
-      "metadata_schema": {"type": "object", "additionalProperties": true}
-    },
-    {
-      "event_type": "memory.observation.v1",
-      "category": "context",
-      "producer": "RunJournal.persist_memory_observations() from a trusted durable Honcho operation binding",
-      "content_description": "Bounded evidence about one mutable Honcho operation. Read projections may carry only a digest; write observations carry no content digest. It contains no memory/query text, raw workspace/user identity, provider response, or exception detail.",
-      "content_schema": {
-        "type": "object",
-        "required": [
-          "version",
-          "backend",
-          "tenant",
-          "workspace_ref",
-          "operation",
-          "status",
-          "safe_projection_digest",
-          "item_count",
-          "truncated",
-          "occurred_at"
-        ],
-        "properties": {
-          "version": {"const": 1},
-          "backend": {"const": "honcho"},
-          "tenant": {
-            "type": "object",
-            "required": ["version", "public_ref", "digest"],
-            "properties": {
-              "version": {"const": 1},
-              "public_ref": {"type": "string", "pattern": "^tenant-[0-9a-f]{16}$"},
-              "digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-            },
-            "additionalProperties": false
-          },
-          "workspace_ref": {"type": "string", "pattern": "^honcho-workspace-[0-9a-f]{24}$"},
-          "operation": {"enum": ["get_context", "search", "get_memory", "add"]},
-          "status": {"enum": ["succeeded", "empty", "failed_open", "failed_closed"]},
-          "safe_projection_digest": {
-            "type": ["string", "null"],
-            "pattern": "^[0-9a-f]{64}$"
-          },
-          "item_count": {"type": ["integer", "null"], "minimum": 0, "maximum": 100},
-          "truncated": {"type": "boolean"},
-          "occurred_at": {"type": "string", "format": "date-time"}
-        },
-        "additionalProperties": false
       },
       "metadata_schema": {"type": "object", "additionalProperties": true}
     },
@@ -469,311 +303,6 @@
       }
     },
     {
-      "event_type": "policy.decision.v1",
-      "category": "policy",
-      "producer": "ExecutionPolicyEvaluator adapter after a fenced compact-state compare-and-set",
-      "content_description": "A bounded warning or stop decision. Raw prompts, tool arguments/results, provider payloads, and private HMAC commitments are forbidden.",
-      "content_schema": {
-        "type": "object",
-        "required": ["version", "decision", "reason_code", "current", "limit", "budget_digest", "state_digest", "summary_key"],
-        "properties": {
-          "version": {"const": 1},
-          "decision": {"enum": ["warn", "stop"]},
-          "reason_code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
-          "current": {"type": "integer", "minimum": 0},
-          "limit": {"type": "integer", "minimum": 0},
-          "budget_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "state_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "summary_key": {"type": "string", "pattern": "^execution_policy\\.[a-z][a-z0-9_]{0,63}$"}
-        },
-        "additionalProperties": false
-      },
-      "metadata_schema": {"type": "object", "additionalProperties": false}
-    },
-    {
-      "event_type": "tool_receipt.started.v1",
-      "category": "tool",
-      "producer": "ToolReceiptMiddleware through RunEventToolReceiptSink before inner authorization/tool dispatch",
-      "content_schema": {
-        "type": "object",
-        "required": ["version", "receipt_id", "idempotency_key", "phase", "tool_name", "request_projection_digest", "result_projection_digest", "result_kind", "safe_error_code", "authz_decision_ref", "guardrail_decision_refs", "context"],
-        "properties": {
-          "version": {"const": 1},
-          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
-          "idempotency_key": {"type": "string", "pattern": "^tr_[0-9a-f]{64}:start$"},
-          "phase": {"const": "started"},
-          "tool_name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:/-]+$"},
-          "request_projection_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "result_projection_digest": {"type": "null"},
-          "result_kind": {"type": "null"},
-          "safe_error_code": {"type": "null"},
-          "authz_decision_ref": {"type": "null"},
-          "guardrail_decision_refs": {"type": "array", "maxItems": 0},
-          "context": {
-            "type": "object",
-            "required": ["run_id", "execution_task_id", "execution_kind", "subagent_name", "tool_call_id", "attempt", "owner_id", "lease_epoch", "agent_revision_digest", "assembly_fingerprint", "extension_generation", "subagent_catalog_digest", "subagent_definition_digest"],
-            "properties": {
-              "run_id": {"type": "string", "minLength": 1, "maxLength": 64},
-              "execution_task_id": {"type": "string", "minLength": 1, "maxLength": 128},
-              "execution_kind": {"enum": ["lead", "subagent"]},
-              "subagent_name": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
-              "tool_call_id": {"type": "string", "minLength": 1, "maxLength": 256},
-              "attempt": {"type": "integer", "minimum": 1},
-              "owner_id": {"type": "string", "minLength": 1, "maxLength": 128},
-              "lease_epoch": {"type": "integer", "minimum": 0},
-              "agent_revision_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "assembly_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "extension_generation": {"type": "integer", "minimum": 0},
-              "subagent_catalog_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "subagent_definition_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
-            },
-            "allOf": [
-              {
-                "if": {"properties": {"execution_kind": {"const": "lead"}}},
-                "then": {"properties": {"subagent_name": {"type": "null"}, "subagent_definition_digest": {"type": "null"}}}
-              },
-              {
-                "if": {"properties": {"execution_kind": {"const": "subagent"}}},
-                "then": {"properties": {"subagent_name": {"type": "string", "minLength": 1, "maxLength": 128}, "subagent_definition_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
-              }
-            ],
-            "additionalProperties": false
-          }
-        },
-        "additionalProperties": false
-      },
-      "metadata_schema": {
-        "type": "object",
-        "required": ["receipt_id", "task_id", "tool_call_id", "attempt", "writer_fence_digest", "dispatch_generation_digest"],
-        "properties": {
-          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
-          "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
-          "tool_call_id": {"type": "string", "minLength": 1, "maxLength": 256},
-          "attempt": {"type": "integer", "minimum": 1},
-          "writer_fence_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "dispatch_generation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-        },
-        "additionalProperties": true
-      }
-    },
-    {
-      "event_type": "tool_receipt.outcome.v1",
-      "category": "tool",
-      "producer": "ToolReceiptMiddleware through RunEventToolReceiptSink when control returns",
-      "content_schema": {
-        "type": "object",
-        "required": ["version", "receipt_id", "idempotency_key", "phase", "tool_name", "request_projection_digest", "result_projection_digest", "result_kind", "safe_error_code", "authz_decision_ref", "guardrail_decision_refs", "context"],
-        "properties": {
-          "version": {"const": 1},
-          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
-          "idempotency_key": {"type": "string", "pattern": "^tr_[0-9a-f]{64}:terminal$"},
-          "phase": {"enum": ["succeeded", "failed", "denied", "cancelled"]},
-          "tool_name": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9_.:/-]+$"},
-          "request_projection_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "result_projection_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
-          "result_kind": {"type": ["string", "null"], "minLength": 1, "maxLength": 64},
-          "safe_error_code": {"enum": [null, "authorization_denied", "guardrail_denied", "cancelled", "timeout", "tool_error", "invalid_input", "permission_denied", "rate_limited", "transient_error", "configuration_error", "not_found", "no_results", "internal_error", "unknown_error"]},
-          "authz_decision_ref": {"type": ["string", "null"], "pattern": "^pd_[0-9a-f]{64}$"},
-          "guardrail_decision_refs": {"type": "array", "maxItems": 16, "uniqueItems": true, "items": {"type": "string", "pattern": "^pd_[0-9a-f]{64}$"}},
-          "context": {
-            "type": "object",
-            "required": ["run_id", "execution_task_id", "execution_kind", "subagent_name", "tool_call_id", "attempt", "owner_id", "lease_epoch", "agent_revision_digest", "assembly_fingerprint", "extension_generation", "subagent_catalog_digest", "subagent_definition_digest"],
-            "properties": {
-              "run_id": {"type": "string", "minLength": 1, "maxLength": 64},
-              "execution_task_id": {"type": "string", "minLength": 1, "maxLength": 128},
-              "execution_kind": {"enum": ["lead", "subagent"]},
-              "subagent_name": {"type": ["string", "null"], "minLength": 1, "maxLength": 128},
-              "tool_call_id": {"type": "string", "minLength": 1, "maxLength": 256},
-              "attempt": {"type": "integer", "minimum": 1},
-              "owner_id": {"type": "string", "minLength": 1, "maxLength": 128},
-              "lease_epoch": {"type": "integer", "minimum": 0},
-              "agent_revision_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "assembly_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "extension_generation": {"type": "integer", "minimum": 0},
-              "subagent_catalog_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "subagent_definition_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
-            },
-            "allOf": [
-              {
-                "if": {"properties": {"execution_kind": {"const": "lead"}}},
-                "then": {"properties": {"subagent_name": {"type": "null"}, "subagent_definition_digest": {"type": "null"}}}
-              },
-              {
-                "if": {"properties": {"execution_kind": {"const": "subagent"}}},
-                "then": {"properties": {"subagent_name": {"type": "string", "minLength": 1, "maxLength": 128}, "subagent_definition_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
-              }
-            ],
-            "additionalProperties": false
-          }
-        },
-        "allOf": [
-          {
-            "if": {"properties": {"phase": {"const": "succeeded"}}},
-            "then": {"properties": {"result_projection_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}, "result_kind": {"type": "string", "minLength": 1, "maxLength": 64}, "safe_error_code": {"type": "null"}}}
-          },
-          {
-            "if": {"properties": {"phase": {"enum": ["failed", "denied", "cancelled"]}}},
-            "then": {"properties": {"safe_error_code": {"enum": ["authorization_denied", "guardrail_denied", "cancelled", "timeout", "tool_error", "invalid_input", "permission_denied", "rate_limited", "transient_error", "configuration_error", "not_found", "no_results", "internal_error", "unknown_error"]}}}
-          }
-        ],
-        "additionalProperties": false
-      },
-      "metadata_schema": {
-        "type": "object",
-        "required": ["receipt_id", "task_id", "tool_call_id", "attempt", "writer_fence_digest", "dispatch_generation_digest"],
-        "properties": {
-          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
-          "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
-          "tool_call_id": {"type": "string", "minLength": 1, "maxLength": 256},
-          "attempt": {"type": "integer", "minimum": 1},
-          "writer_fence_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "dispatch_generation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-        },
-        "additionalProperties": true
-      }
-    },
-    {
-      "event_type": "retrieval.observation.v1",
-      "category": "tool",
-      "producer": "ToolReceiptMiddleware through RunEventToolReceiptSink.append_retrieval_pair() beside the terminal receipt outcome",
-      "content_schema": {
-        "type": "object",
-        "required": ["version", "observation_id", "idempotency_key", "observation_digest", "domain", "draft", "draft_digest", "receipt_phase", "result_projection_digest", "result_kind", "final_result_status", "safe_terminal_reason", "terminal_at"],
-        "properties": {
-          "version": {"const": 1},
-          "observation_id": {"type": "string", "pattern": "^ro_[0-9a-f]{64}$"},
-          "idempotency_key": {"type": "string", "pattern": "^tr_[0-9a-f]{64}:retrieval$"},
-          "observation_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "domain": {"const": "hartmesh/retrieval-observation/v1"},
-          "draft": {
-            "type": "object",
-            "required": ["version", "canonicalization", "tenant_ref", "tenant_digest", "run_id", "receipt_id", "attempt", "provider_id", "tool_kind", "adapter_capability_version", "policy_digest", "safe_constraints", "started_at", "provider_finished_at", "duration_ms", "provider_status", "safe_reason", "result_count", "source_count", "source_references", "truncated", "partial", "safe_provider_request_ref", "tool_plane", "accepted_execution_evidence_ref", "accepted_sandbox_operation_ref", "mcp_evidence_ref"],
-            "properties": {
-              "version": {"const": 1},
-              "canonicalization": {"const": "hartmesh-retrieval-v1"},
-              "tenant_ref": {"type": "string", "pattern": "^tenant-[0-9a-f]{16}$"},
-              "tenant_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "run_id": {"type": "string", "minLength": 1, "maxLength": 64},
-              "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
-              "attempt": {"type": "integer", "minimum": 1},
-              "provider_id": {"type": "string", "minLength": 1, "maxLength": 64},
-              "tool_kind": {"type": "string", "minLength": 1, "maxLength": 64},
-              "adapter_capability_version": {"type": "string", "minLength": 1, "maxLength": 64},
-              "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "safe_constraints": {
-                "oneOf": [
-                  {
-                    "type": "object",
-                    "required": ["version", "provider_id", "policy_status"],
-                    "properties": {
-                      "version": {"const": 1},
-                      "provider_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$"},
-                      "policy_status": {"enum": ["not_evaluated", "denied"]}
-                    },
-                    "additionalProperties": false
-                  },
-                  {
-                    "type": "object",
-                    "required": ["version", "provider_id", "collection_public_refs", "domain_scope", "recency_days", "max_results", "max_item_bytes", "max_aggregate_bytes", "timeout_ms", "allow_redirects", "accept_partial", "source_schemes", "policy_digest"],
-                    "properties": {
-                      "version": {"const": 1},
-                      "provider_id": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]{0,63}$"},
-                      "collection_public_refs": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$"}},
-                      "domain_scope": {"enum": ["provider_default", "restricted"]},
-                      "recency_days": {"type": ["integer", "null"], "minimum": 1, "maximum": 36500},
-                      "max_results": {"type": "integer", "minimum": 1, "maximum": 100},
-                      "max_item_bytes": {"type": "integer", "minimum": 1, "maximum": 1048576},
-                      "max_aggregate_bytes": {"type": "integer", "minimum": 1, "maximum": 8388608},
-                      "timeout_ms": {"type": "integer", "minimum": 1, "maximum": 120000},
-                      "allow_redirects": {"type": "boolean"},
-                      "accept_partial": {"type": "boolean"},
-                      "source_schemes": {"type": "array", "minItems": 1, "maxItems": 3, "uniqueItems": true, "items": {"enum": ["http", "https", "ragflow-doc"]}},
-                      "policy_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-                    },
-                    "additionalProperties": false
-                  }
-                ]
-              },
-              "started_at": {"type": "string", "maxLength": 64},
-              "provider_finished_at": {"type": "string", "maxLength": 64},
-              "duration_ms": {"type": "integer", "minimum": 0, "maximum": 86400000},
-              "provider_status": {"enum": ["success", "empty", "partial", "policy_denied", "provider_unavailable", "timeout", "rate_limited", "authentication_failed", "configuration_error", "unsafe_response", "oversized_response", "internal_error", "cancelled"]},
-              "safe_reason": {"type": ["string", "null"], "maxLength": 64},
-              "result_count": {"type": "integer", "minimum": 0},
-              "source_count": {"type": "integer", "minimum": 0, "maximum": 64},
-              "source_references": {"type": "array", "maxItems": 64, "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 512}},
-              "truncated": {"type": "boolean"},
-              "partial": {"type": "boolean"},
-              "safe_provider_request_ref": {"type": ["string", "null"], "maxLength": 128},
-              "tool_plane": {
-                "type": "object",
-                "required": ["base_revision_digest", "user_overlay_digest", "projection_digest", "effective_digest"],
-                "properties": {
-                  "mode": {"const": "unmanaged"},
-                  "base_revision_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
-                  "user_overlay_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
-                  "projection_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
-                  "effective_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
-                },
-                "additionalProperties": false,
-                "allOf": [
-                  {
-                    "comment": "A governed observation is the four digests alone; it carries no mode, so its bytes are unchanged from every release that predates the ungoverned state.",
-                    "if": {"not": {"required": ["mode"]}},
-                    "then": {
-                      "properties": {
-                        "base_revision_digest": {"type": "string"},
-                        "user_overlay_digest": {"type": "string"},
-                        "projection_digest": {"type": "string"},
-                        "effective_digest": {"type": "string"}
-                      }
-                    }
-                  },
-                  {
-                    "comment": "An ungoverned one anchors to no revision and says so; it never substitutes a digest for one that was never promoted.",
-                    "if": {"required": ["mode"]},
-                    "then": {
-                      "properties": {
-                        "base_revision_digest": {"type": "null"},
-                        "user_overlay_digest": {"type": "null"},
-                        "projection_digest": {"type": "null"},
-                        "effective_digest": {"type": "null"}
-                      }
-                    }
-                  }
-                ]
-              },
-              "accepted_execution_evidence_ref": {"type": ["string", "null"], "maxLength": 256},
-              "accepted_sandbox_operation_ref": {"type": ["string", "null"], "maxLength": 256},
-              "mcp_evidence_ref": {"type": ["string", "null"], "maxLength": 256}
-            },
-            "additionalProperties": false
-          },
-          "draft_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-          "receipt_phase": {"enum": ["succeeded", "failed", "denied", "cancelled"]},
-          "result_projection_digest": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
-          "result_kind": {"type": ["string", "null"], "maxLength": 32},
-          "final_result_status": {"enum": ["success", "error"]},
-          "safe_terminal_reason": {"type": ["string", "null"], "maxLength": 64},
-          "terminal_at": {"type": "string", "maxLength": 64}
-        },
-        "additionalProperties": false
-      },
-      "metadata_schema": {
-        "type": "object",
-        "required": ["receipt_id", "task_id", "attempt", "provider_id", "observation_id", "writer_fence_digest"],
-        "properties": {
-          "receipt_id": {"type": "string", "pattern": "^tr_[0-9a-f]{64}$"},
-          "task_id": {"type": "string", "minLength": 1, "maxLength": 128},
-          "attempt": {"type": "integer", "minimum": 1},
-          "provider_id": {"type": "string", "minLength": 1, "maxLength": 64},
-          "observation_id": {"type": "string", "pattern": "^ro_[0-9a-f]{64}$"},
-          "writer_fence_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
-        },
-        "additionalProperties": true
-      }
-    },
-    {
       "event_type": "workspace_changes",
       "category": "workspace",
       "producer": "workspace_changes.record_workspace_changes()",
@@ -870,7 +399,7 @@
       "pattern": "middleware:{tag}",
       "category": "middleware",
       "producer": "RunJournal.record_middleware(tag, ...)",
-      "known_tags": ["guardrail", "loop_detection", "mcp_preparation", "safety_termination", "skill_activation", "skill_secrets"],
+      "known_tags": ["guardrail", "loop_detection", "safety_termination", "skill_activation", "skill_secrets", "tool_promotion", "tool_progress"],
       "event_type_schema": {
         "type": "string",
         "pattern": "^middleware:",
@@ -917,7 +446,7 @@
     {
       "id": "middleware-coverage",
       "status": "partial",
-      "notes": "Loop-detection events cover lead-agent and ordinary task-tool subagent runs; durable batch subagent loop detection and deferred-tool promotion do not currently emit middleware events."
+      "notes": "Loop-detection, deferred-tool promotion, and tool-progress events cover lead-agent and ordinary task-tool subagent runs. Durable batch subagents have no parent run journal and do not currently emit these events."
     },
     {
       "id": "run-scoped-observation-context",

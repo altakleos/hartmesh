@@ -24,9 +24,15 @@ from deerflow_extension_api import (
     ExtensionRuntimeDeps,
     ExtensionService,
     HostPolicySnapshot,
+    InvalidRunEvidenceCursor,
     MiddlewareContributor,
     MiddlewarePlacement,
     Placement,
+    RunEventPage,
+    RunEventView,
+    RunEvidenceReader,
+    RunPage,
+    RunStatusView,
     SystemModelCallObserver,
     SystemModelRequest,
     SystemModelResult,
@@ -71,6 +77,10 @@ def test_middleware_placement_defaults():
         SystemModelRequest,
         SystemModelResult,
         MiddlewarePlacement,
+        RunEventPage,
+        RunEventView,
+        RunPage,
+        RunStatusView,
     ],
 )
 def test_every_dataclass_is_frozen(cls):
@@ -80,13 +90,7 @@ def test_every_dataclass_is_frozen(cls):
 
 @pytest.mark.parametrize(
     "cls",
-    [
-        HostPolicySnapshot,
-        ExtensionRuntimeDeps,
-        TaskInfo,
-        SystemModelRequest,
-        SystemModelResult,
-    ],
+    [HostPolicySnapshot, ExtensionRuntimeDeps, TaskInfo, SystemModelRequest, SystemModelResult],
 )
 def test_additive_dataclasses_are_constructible_with_required_fields_only(cls):
     """Fields added later must carry defaults, or old extensions break on upgrade.
@@ -125,6 +129,7 @@ def test_agent_build_context_optional_fields_keep_their_defaults():
         ExtensionRegistry,
         ExtensionService,
         MiddlewareContributor,
+        RunEvidenceReader,
         TaskLifecycleContributor,
         SystemModelCallObserver,
     ],
@@ -141,7 +146,10 @@ def test_every_protocol_method_has_a_default_implementation(protocol):
             continue
         checked += 1
         body = inspect.getsource(member).split("\n", 1)[1]
-        assert "return" in body, f"{protocol.__name__}.{name} has no default implementation. Adding a contract method is only additive when it returns a default; otherwise every already-released extension breaks on upgrade."
+        if protocol is RunEvidenceReader:
+            assert "raise NotImplementedError" in body
+        else:
+            assert "return" in body, f"{protocol.__name__}.{name} has no default implementation. Adding a contract method is only additive when it returns a default; otherwise every already-released extension breaks on upgrade."
     assert checked > 0, f"{protocol.__name__} declared no methods to check"
 
 
@@ -182,32 +190,8 @@ def test_system_model_observer_contract_reports_success_and_failure_shapes():
     failure = SystemModelResult(error=RuntimeError("provider failed"), duration_ms=2.0)
 
     assert SystemOperationKind.GOAL.value == "goal"
-    assert (
-        asyncio.run(
-            SystemModelCallObserver.on_system_model_call(
-                _Bare(),
-                app_store,
-                task_store,
-                SystemOperationKind.GOAL,
-                request,
-                success,
-            )
-        )
-        is None
-    )
-    assert (
-        asyncio.run(
-            SystemModelCallObserver.on_system_model_call(
-                _Bare(),
-                app_store,
-                task_store,
-                SystemOperationKind.GOAL,
-                request,
-                failure,
-            )
-        )
-        is None
-    )
+    assert asyncio.run(SystemModelCallObserver.on_system_model_call(_Bare(), app_store, task_store, SystemOperationKind.GOAL, request, success)) is None
+    assert asyncio.run(SystemModelCallObserver.on_system_model_call(_Bare(), app_store, task_store, SystemOperationKind.GOAL, request, failure)) is None
 
 
 def test_system_model_request_normalizes_messages_into_an_immutable_sequence():
@@ -226,11 +210,7 @@ def test_system_model_request_normalizes_messages_into_an_immutable_sequence():
     assert request.messages == ("first",)
 
     assert SystemModelRequest().messages == ()
-    assert SystemModelRequest(messages=("already", "a", "tuple")).messages == (
-        "already",
-        "a",
-        "tuple",
-    )
+    assert SystemModelRequest(messages=("already", "a", "tuple")).messages == ("already", "a", "tuple")
 
 
 def test_gateway_contribution_points_are_part_of_the_public_surface():
@@ -239,12 +219,36 @@ def test_gateway_contribution_points_are_part_of_the_public_surface():
     for name in (
         "ExtensionRuntimeDeps",
         "ExtensionService",
+        "InvalidRunEvidenceCursor",
+        "RunEvidenceReader",
+        "RunEventPage",
+        "RunPage",
     ):
         assert name in deerflow_extension_api.__all__
         assert hasattr(deerflow_extension_api, name)
     assert callable(ExtensionRegistry.service)
     assert callable(ExtensionRegistry.routers)
     assert not hasattr(deerflow_extension_api, "RouterContributor")
+
+
+def test_run_evidence_pages_are_immutable_and_empty_by_default():
+    assert issubclass(InvalidRunEvidenceCursor, ValueError)
+    assert RunPage().items == ()
+    assert RunPage().next_cursor is None
+    assert RunPage().has_more is False
+    assert RunEventPage().items == ()
+    assert RunEventPage().next_after_seq is None
+
+
+def test_bare_run_evidence_reader_fails_explicitly_instead_of_looking_caught_up():
+    class _Bare:
+        pass
+
+    async def invoke():
+        with pytest.raises(NotImplementedError):
+            await RunEvidenceReader.list_changed_runs(_Bare(), cursor=None, limit=10)
+
+    asyncio.run(invoke())
 
 
 def test_task_store_from_runtime_reads_the_host_key():
@@ -277,20 +281,11 @@ def test_extension_decorator_stamps_api_requirement():
 
 
 def test_task_outcome_members():
-    assert {outcome.value for outcome in TaskOutcome} == {
-        "completed",
-        "aborted",
-        "failed",
-    }
+    assert {outcome.value for outcome in TaskOutcome} == {"completed", "aborted", "failed"}
 
 
 def test_system_operation_kind_members():
-    assert {kind.value for kind in SystemOperationKind} == {
-        "goal",
-        "memory",
-        "title",
-        "summarization",
-    }
+    assert {kind.value for kind in SystemOperationKind} == {"goal", "memory", "title", "summarization"}
 
 
 def test_registry_and_install_alias_are_part_of_the_public_surface():
@@ -347,50 +342,8 @@ def test_runtime_api_version_matches_the_installed_contract_package():
     """Every additive contract slice bumps both gates together."""
     from importlib.metadata import version
 
-    assert API_VERSION == "0.13.1"
+    assert API_VERSION == "0.2.4"
     assert API_VERSION == version("deerflow-extension-api")
-
-
-def test_invocation_identity_contract_is_frozen_bounded_and_round_trips() -> None:
-    from deerflow_extension_api import (
-        ActingServiceV1,
-        EffectiveSubjectV1,
-        InvocationIdentityV1,
-    )
-
-    attributes = {"tenant": {"id": "north"}, "groups": ["readers"]}
-    identity = InvocationIdentityV1(
-        effective_subject=EffectiveSubjectV1(
-            kind="human",
-            subject_id="human-1",
-            attributes=attributes,
-        ),
-        acting_service=ActingServiceV1(service_id="channel:telegram"),
-    )
-    attributes["tenant"]["id"] = "forged"
-    attributes["groups"].append("admins")
-
-    assert dataclasses.is_dataclass(identity)
-    assert identity.__dataclass_params__.frozen
-    assert identity.effective_subject.attributes["tenant"]["id"] == "north"
-    assert identity.effective_subject.attributes["groups"] == ("readers",)
-    import json
-
-    assert json.loads(json.dumps(identity.to_json()))["effective_subject"]["subject_id"] == "human-1"
-    assert InvocationIdentityV1.from_json(identity.to_json()) == identity
-
-    with pytest.raises(ValueError, match="version 1"):
-        InvocationIdentityV1.from_json({**identity.to_json(), "version": 2})
-    with pytest.raises(ValueError, match="unknown or missing"):
-        InvocationIdentityV1.from_json({**identity.to_json(), "caller_internal": True})
-    with pytest.raises(ValueError, match="8 KiB"):
-        InvocationIdentityV1(
-            effective_subject=EffectiveSubjectV1(
-                kind="human",
-                subject_id="human-1",
-                attributes={"oversized": "x" * 9000},
-            )
-        )
 
 
 def test_extension_service_contract_is_public_and_defaults_to_noop():
@@ -401,5 +354,6 @@ def test_extension_service_contract_is_public_and_defaults_to_noop():
 
     assert deps.app_store is None
     assert deps.session_factory is None
+    assert deps.run_evidence_reader is None
     assert asyncio.run(ExtensionService.start(_Bare(), deps)) is None
     assert asyncio.run(ExtensionService.stop(_Bare())) is None

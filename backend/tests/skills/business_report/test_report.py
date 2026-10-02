@@ -22,9 +22,17 @@ from pathlib import Path
 
 import openpyxl
 import pytest
-from docx import Document
 from jsonschema import Draft202012Validator, FormatChecker
-from pypdf import PdfReader
+
+# The script, and these tests of it, use the document libraries the sandbox
+# image ships (docker/sandbox/Dockerfile). They are not part of this project's
+# locked dependencies, so the module is skipped where one is missing; the
+# "Skill script tests" workflow installs them and runs it.
+for _library in ("docx", "pypdf", "jinja2", "matplotlib"):
+    pytest.importorskip(_library)
+
+from docx import Document  # noqa: E402
+from pypdf import PdfReader  # noqa: E402
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 SKILL_DIR = REPO_ROOT / "skills" / "public" / "business-report"

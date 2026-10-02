@@ -292,7 +292,6 @@ def _update_tree_digest(
     label: str,
     *,
     follow_package_directory_symlinks: bool = False,
-    skip_root_dot_dirs: bool = False,
 ) -> None:
     """Hash directory metadata (inode/mode/size/mtime), not file contents.
 
@@ -302,11 +301,6 @@ def _update_tree_digest(
     projection stale until the next explicit rebuild. Runtime writes through
     this codebase are covered regardless: the mutation path rebuilds under
     lock, and atomic-rename always changes the inode.
-
-    ``skip_root_dot_dirs`` is for source trees only: the loaders never read a
-    skill from a dot directory, and ``.history`` is appended to after every
-    edit outside the projection lock. A view keeps hashing them, so anything
-    planted at a view's root is still drift.
 
     Custom skill roots may contain an operator-managed package directory
     symlink. Follow only those links directly below the category root so
@@ -325,8 +319,6 @@ def _update_tree_digest(
             ordered = sorted(entries, key=lambda entry: entry.name)
         child_dirs: list[tuple[Path, Path]] = []
         for entry in ordered:
-            if skip_root_dot_dirs and relative_root == Path(".") and entry.name.startswith(".") and entry.is_dir(follow_symlinks=True):
-                continue
             relative = relative_root / entry.name
             metadata = entry.stat(follow_symlinks=False)
             if entry.is_symlink():
@@ -354,7 +346,7 @@ def _source_signature(storage: SkillStorage, scope: str) -> str:
     digest = hashlib.sha256()
     host_root = storage.get_skills_root_path()
     if scope == "public":
-        _update_tree_digest(digest, host_root / SkillCategory.PUBLIC.value, "public", skip_root_dot_dirs=True)
+        _update_tree_digest(digest, host_root / SkillCategory.PUBLIC.value, "public")
         state = {"extensions": _extensions_state()}
     elif scope == "user":
         user_custom_root = storage.get_user_custom_root()
@@ -364,22 +356,20 @@ def _source_signature(storage: SkillStorage, scope: str) -> str:
             user_custom_root,
             "custom",
             follow_package_directory_symlinks=True,
-            skip_root_dot_dirs=True,
         )
         _update_tree_digest(
             digest,
             host_root / SkillCategory.CUSTOM.value,
             "legacy",
             follow_package_directory_symlinks=True,
-            skip_root_dot_dirs=True,
         )
-        _update_tree_digest(digest, integration_root, "integrations", skip_root_dot_dirs=True)
+        _update_tree_digest(digest, integration_root, "integrations")
         # CUSTOM/LEGACY/INTEGRATION visibility is the intersection of the
         # per-user state and the global extensions default, so both belong in
         # this signature.
         state = {
             "extensions": _extensions_state(),
-            "user": storage.capture_skill_state_projection(),
+            "user": storage._read_skill_states(),
         }
     else:  # pragma: no cover - internal invariant
         raise ValueError(f"Unknown skill projection scope: {scope}")
@@ -823,3 +813,53 @@ def ensure_public_skill_projection(*, app_config=None) -> bool:
             logger.error("Failed to clear the public skill projection after a boot-time error", exc_info=True)
         return False
     return True
+
+
+@contextmanager
+def skill_projection_read_lock(storage: SkillStorage, *, timeout: float = 5.0, check=None) -> Iterator[None]:
+    """Bounded, non-mutating acquisition of the existing user projection lock."""
+    import time
+
+    root = (storage.get_skills_root_path() / "custom") if getattr(storage, "user_id", None) is None else get_skill_projection_paths(storage).custom.parent
+    lock_path = root.parent / f".{root.name}.projection.lock"
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    process_lock = _lock_for(lock_path)
+    deadline = time.monotonic() + timeout
+    acquired = False
+    try:
+        while not acquired:
+            if check:
+                check()
+            acquired = process_lock.acquire(timeout=min(0.05, max(0, deadline - time.monotonic())))
+            if not acquired and time.monotonic() >= deadline:
+                raise TimeoutError("Skill projection lock timeout")
+        with lock_path.open("a", encoding="utf-8") as lock_file:
+            locked = False
+            try:
+                while not locked:
+                    if check:
+                        check()
+                    try:
+                        if fcntl is not None:
+                            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        else:  # pragma: no cover - Windows
+                            lock_file.seek(0)
+                            msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
+                        locked = True
+                    except OSError as error:
+                        if error.errno not in (errno.EACCES, errno.EAGAIN, errno.EDEADLK):
+                            raise
+                        if time.monotonic() >= deadline:
+                            raise TimeoutError("Skill projection lock timeout") from None
+                        time.sleep(0.02)
+                yield
+            finally:
+                if locked:
+                    if fcntl is not None:
+                        fcntl.flock(lock_file, fcntl.LOCK_UN)
+                    else:  # pragma: no cover - Windows
+                        lock_file.seek(0)
+                        msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
+    finally:
+        if acquired:
+            process_lock.release()

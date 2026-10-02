@@ -22,16 +22,16 @@ The **Sandbox Provisioner** is a FastAPI service that dynamically manages sandbo
 
 1. **Backend Request**: When the backend needs to execute code, it sends a `POST /api/sandboxes` request with a `sandbox_id`, `thread_id`, optional `user_id`, and the configured `skills_container_path` (default: `/mnt/skills`).
 
-2. **Pod Creation**: The provisioner creates a dedicated Pod in `K8S_NAMESPACE` with:
+2. **Pod Creation**: The provisioner creates a dedicated Pod in the `deer-flow` namespace with:
    - The sandbox container image (all-in-one-sandbox)
-   - PVC or hostPath volumes, selected once at startup, mounted for:
+   - HostPath volumes mounted for:
      - `{skills_container_path}/{public,custom,legacy}` → Default read-only skill projections
      - `{skills_container_path}/integrations` → Optional read-only managed-integration projection supplied by the Gateway
      - `/mnt/user-data` → Read-write access to thread-specific data
    - Resource limits (CPU, memory, ephemeral storage)
    - Readiness/liveness probes
 
-3. **Access resource**: Legacy sandboxes receive a Service. A durable accepted-skill Pod uses its exact Pod IP through a capability gate instead, so a replacement Pod cannot inherit the old data-plane identity.
+3. **Service Creation**: A Service is created to expose the Pod. By default this is a NodePort Service for Docker Compose compatibility. Set `SANDBOX_SERVICE_TYPE=ClusterIP` when the backend runs inside the Kubernetes cluster.
 
 4. **Access URL**: In NodePort mode, the provisioner returns `http://{NODE_HOST}:{NodePort}`. In ClusterIP mode, it returns a Kubernetes service DNS URL like `http://sandbox-{sandbox_id}-svc.{namespace}.svc.cluster.local:8080`.
 
@@ -83,7 +83,7 @@ Create a new sandbox Pod + Service.
 }
 ```
 
-`user_id` is optional for backwards compatibility and defaults to `default`. In `pvc` volume mode, the provisioner uses `USERDATA_PVC_NAME` to isolate PVC-backed user-data directories.
+`user_id` is optional for backwards compatibility and defaults to `default`. When `USERDATA_PVC_NAME` is set, the provisioner uses it to isolate PVC-backed user-data directories.
 
 When the Gateway mounts that same storage at its DeerFlow home and the PVC
 subpaths align, set `sandbox.thread_data_mounts: true` in the Gateway's
@@ -96,26 +96,11 @@ uncertain.
 {
   "sandbox_id": "abc-123",
   "sandbox_url": "http://host.docker.internal:32123",
-  "status": "Pending",
-  "provenance": "created"
+  "status": "Pending"
 }
 ```
 
-**Idempotent**: Calling with the same `sandbox_id` returns the existing sandbox
-info, with `provenance` set to `rediscovered` instead of `created`. The Gateway
-rolls back only a Pod the provisioner says it started and counts only that as a
-new resource set; a response without the field (an older provisioner image) is
-treated as unknown provenance, never as a fresh creation. Until this image is
-deployed, a newer Gateway cannot reuse remote accepted sandboxes warm and parks
-rather than rolls back a cancelled one; roll both images together.
-
-An accepted (durable) request may carry `egress_allowance`, the Gateway's sealed
-`EgressAllowanceV1` (`version`, `profile`, `dns`, canonical public-CIDR `rules`,
-`digest`). The provisioner recomputes the digest, renders the allowance into the
-accepted Pod's NetworkPolicy, binds the digest to the attempt Lease and Pod, and
-echoes it as `egress_allowance_digest` in the response; the Gateway destroys a Pod
-whose echo is missing or differs. Without the field the accepted policy stays
-ingress-only, as it always was for the accepted-skills projection population.
+**Idempotent**: Calling with the same `sandbox_id` returns the existing sandbox info.
 
 ### `GET /api/sandboxes/{sandbox_id}`
 Get status and URL of a specific sandbox.
@@ -161,60 +146,34 @@ List all sandboxes currently managed.
 
 ## Configuration
 
-The provisioner is configured via environment variables. Docker Compose sets local/hybrid defaults in [docker-compose-dev.yaml](../docker-compose-dev.yaml), while Helm injects chart-managed values through the [provisioner Deployment template](../../deploy/helm/deer-flow/templates/provisioner-deployment.yaml):
+The provisioner is configured via environment variables (set in [docker-compose-dev.yaml](../docker-compose-dev.yaml)):
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `K8S_NAMESPACE` | `deer-flow` | Pre-existing Kubernetes namespace for sandbox resources |
-| `PROVISIONER_CREATE_NAMESPACE` | `false` | Set to `true` only for operator-controlled single-namespace local/Compose installs that should create `K8S_NAMESPACE` when absent. Helm leaves this disabled and requires the sandbox namespace to be pre-created. |
+| `K8S_NAMESPACE` | `deer-flow` | Kubernetes namespace for sandbox resources |
 | `SANDBOX_IMAGE` | `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` | AIO-compatible container image for sandbox Pods |
-| `SANDBOX_RUNTIME_CLASS` | empty (cluster default) | Optional Kubernetes RuntimeClass for sandbox Pods, such as `gvisor`; an empty value omits `runtimeClassName` and uses the cluster default runtime |
-| `SANDBOX_VOLUME_MODE` | empty (infer) | `pvc` or `hostpath`. When empty, both PVC names select `pvc`, neither selects `hostpath`, and exactly one configured name is a startup error. |
-| `SANDBOX_STARTUP_PROBE_INITIAL_DELAY_SECONDS` | `0` | Sandbox startup probe initial delay (0–300 seconds). |
-| `SANDBOX_STARTUP_PROBE_PERIOD_SECONDS` | `10` | Sandbox startup probe period (1–300 seconds). Must be at least its timeout. |
-| `SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS` | `3` | Sandbox startup probe timeout (1–300 seconds). |
-| `SANDBOX_STARTUP_PROBE_FAILURE_THRESHOLD` | `20` | Sandbox startup probe failure threshold (1–60); the default gives a 200-second budget. |
-| `SANDBOX_LIVENESS_PROBE_INITIAL_DELAY_SECONDS` | `10` | Sandbox liveness probe initial delay after startup succeeds (0–300 seconds). |
-| `SANDBOX_LIVENESS_PROBE_PERIOD_SECONDS` | `10` | Sandbox liveness probe period (1–300 seconds). Must be at least its timeout. |
-| `SANDBOX_LIVENESS_PROBE_TIMEOUT_SECONDS` | `10` | Sandbox liveness probe timeout (1–300 seconds). |
-| `SANDBOX_LIVENESS_PROBE_FAILURE_THRESHOLD` | `3` | Sandbox liveness probe failure threshold (1–60). |
 | `LARK_CLI_INIT_IMAGE` | empty (feature off) | Optional lark-cli init image (Pattern A). When set, sandbox Pods requesting the lark-cli runtime get an init container + shared `emptyDir` that provisions `lark-cli`, instead of a hostPath/PVC runtime mount. See [`docker/lark-cli-init`](../lark-cli-init/README.md) |
 | `LARK_CLI_BROKER_IMAGE` | empty (feature off) | Optional lark-cli broker image (Pattern B, issue #4338). When set, sandbox Pods requesting the broker get a shim init container + a `lark-cli-broker` sidecar that holds the credentials; the plaintext `config`/`data` are mounted into the **sidecar only**, never the sandbox. Supersedes `LARK_CLI_INIT_IMAGE` when both are set. See [`docker/lark-cli-broker`](../lark-cli-broker/README.md) |
 | `THREADS_HOST_PATH` | - | **Host machine** path to threads data directory (must be absolute) |
 | `DEER_FLOW_HOST_BASE_DIR` | `/.deer-flow` | **Host machine** DeerFlow data root containing global and per-user `skills_view` projections |
-| `SKILLS_PVC_NAME` | empty | Required skills claim name in `pvc` mode; the claim is mounted read-only |
+| `SKILLS_PVC_NAME` | empty (use hostPath) | PVC name for skills volume; when set, sandbox Pods use PVC instead of hostPath |
 | `SKILLS_PVC_SUBPATH_TEMPLATE` | empty | Optional `subPath` template for `SKILLS_PVC_NAME`. Supports `{user_id}` and `{thread_id}`. When empty, the skills PVC root is mounted unchanged |
-| `USERDATA_PVC_NAME` | empty | Required home claim name in `pvc` mode; uses `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
-| `ACCEPTED_SKILL_PROJECTION_PROFILE` | disabled | Set to `rwx_verified_copy_v2` to enable verified nonempty durable skill snapshots. The configured home claim must report `ReadWriteMany`. V1 is parse-only compatibility evidence and remains empty-only. |
-| `ACCEPTED_SKILL_RUNTIME_IMAGE` | empty | Digest-pinned provisioner image containing `accepted_skills.py`; used for the verifier init container and capability gate. Required by `rwx_verified_copy_v2`. |
-| `ACCEPTED_ATTEMPT_LEASE_SECONDS` | `120` | Native Lease duration for one accepted sandbox attempt (30–900 seconds). |
-| `ACCEPTED_ATTEMPT_RECONCILE_INTERVAL_SECONDS` | `30` | Bounded expiry-reconciliation cadence (5–300 seconds); keep the Lease duration at least twice this value. |
-| `ACCEPTED_ATTEMPT_RECONCILE_LIMIT` | `100` | Maximum expired attempt Leases inspected per reconciliation page (1–500). |
-| `PROVISIONER_AUTH_AUDIENCE` | empty | Required audience for projected Gateway ServiceAccount tokens. Helm supplies a release-scoped value; an empty value disables trusted management authentication. |
-| `PROVISIONER_GATEWAY_NAMESPACE` | empty | Exact namespace accepted from TokenReview for the Gateway ServiceAccount identity. Helm sets the release namespace. |
-| `PROVISIONER_GATEWAY_SERVICE_ACCOUNT` | empty | Exact Gateway ServiceAccount name accepted from TokenReview. Helm resolves the created or operator-selected account. |
+| `USERDATA_PVC_NAME` | empty (use hostPath) | PVC name for user-data volume; when set, uses PVC with `subPath: deer-flow/users/{user_id}/threads/{thread_id}/user-data` |
 | `KUBECONFIG_PATH` | `/root/.kube/config` | Path to kubeconfig **inside** the provisioner container |
 | `SANDBOX_SERVICE_TYPE` | `NodePort` | Service type for sandbox access. Use `ClusterIP` when backend and provisioner run inside the same Kubernetes cluster |
 | `NODE_HOST` | `host.docker.internal` | Hostname that backend containers use to reach host NodePorts; ignored when `SANDBOX_SERVICE_TYPE=ClusterIP` |
 | `K8S_API_SERVER` | (from kubeconfig) | Override K8s API server URL (e.g., `https://host.docker.internal:26443`) |
 
-### Sandbox volume mode
-
-The provisioner resolves one volume mode at startup and every sandbox volume and mount builder uses that decision:
-
-| `SANDBOX_VOLUME_MODE` | `USERDATA_PVC_NAME` | `SKILLS_PVC_NAME` | Result |
-|---|---|---|---|
-| empty | unset | unset | Infer `hostpath` for legacy Compose/local deployments |
-| empty | set | set | Infer `pvc` |
-| empty | set | unset | Startup error naming `SKILLS_PVC_NAME` |
-| empty | unset | set | Startup error naming `USERDATA_PVC_NAME` |
-| `pvc` | set | set | Explicit PVC mode |
-| `pvc` | either missing | any | Startup error naming every missing variable |
-| `hostpath` | any | any | Explicit legacy hostPath layout; configured claim names are ignored |
-
-Kubernetes deployments should set `sandbox.volumeMode: pvc` in Helm values. This makes a missing home or skills claim name fail the provisioner process instead of allowing inference to select hostPath. Leave the value empty only when the both-set/both-unset inference contract is intentional; use explicit `hostpath` for Compose or hybrid development that needs node filesystem mounts.
-
-Every provisioner-created sandbox container, init container, and sidecar uses the restricted baseline `allowPrivilegeEscalation: false`, drops all Linux capabilities, and selects the `RuntimeDefault` seccomp profile. The provisioner deliberately leaves `runAsNonRoot` and `runAsUser` unset because those depend on the configured image; set `SANDBOX_RUNTIME_CLASS` to select an isolation runtime such as gVisor, or leave it empty to omit `runtimeClassName` and use the cluster default runtime. A PSA `restricted` namespace must also use allowed volume sources: select `pvc` mode and configure both `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME`.
+For new sandbox requests, the Gateway also sends the effective AIO shell-session
+capacity derived from `subagent_runtime.max_running`. The provisioner writes it
+to the sandbox Pod as `MAX_SHELL_SESSIONS`; requests from older Gateways omit the
+field and retain the image default. Discovery responses report the effective
+capacity. The Gateway replaces a lower-capacity Pod through its ownership-fenced
+replacement path once the previous owner and recovery grace permit it. A create
+request for an existing Pod with insufficient capacity returns HTTP 409; the
+provisioner does not delete an existing Pod to upgrade its capacity, including
+after a transient Gateway discovery failure. If the old Pod has already gone
+but its Service remains, create can safely provision the missing Pod.
 
 ### Custom sandbox image
 
@@ -223,72 +182,6 @@ Provisioner-created sandbox Pods use the provisioner's `SANDBOX_IMAGE` environme
 For persistent dependencies, build an image that extends the default `all-in-one-sandbox` image and set `SANDBOX_IMAGE` to your published tag. A from-scratch image must remain compatible with the AIO sandbox HTTP API consumed by `agent-sandbox`, keep `/mnt/user-data` writable, and listen on the configured sandbox port.
 
 See [Building a Custom AIO Sandbox Image](../../backend/docs/CONFIGURATION.md#building-a-custom-aio-sandbox-image) for the runtime contract and a minimal Dockerfile example.
-
-### Durable accepted skills on Kubernetes
-
-`rwx_verified_copy_v2` supports nonempty immutable skill snapshots without placing the Gateway
-and sandbox on the same node. The Gateway publishes the accepted content-addressed snapshot
-beneath the shared home claim. The provisioner mounts only that exact snapshot subpath read-only
-into a verifier init container. The verifier performs bounded symlink-safe traversal, copies the
-bytes into a private per-Pod `emptyDir`, recomputes Hartmesh's canonical digest from both source
-and destination, and publishes the completed copy atomically. The sandbox receives only the
-private copy at `/mnt/skills/.accepted`, mounted read-only; it receives neither the RWX source nor
-the mutable live skill projections.
-
-The accepted Pod is reached directly through an in-Pod capability gate. The high-entropy
-capability exists only in process memory and an immutable Pod Secret; it is not serialized into
-run rows, lifecycle events, checkpoints, or logs. A v2 receipt must match snapshot digest, run,
-generation, Pod UID and canonical admitted-isolation digest, Lease UID, exact NetworkPolicy UID
-and spec digest, immutable evidence/capability Secret UIDs and payload/spec digests, pinned image
-digests and observed image IDs, the verifier-authored receipt digest, and the final
-materialization digest before remote AIO advertises `immutable_read_only`. V1 receipts remain
-parseable but cannot authorize nonempty execution. The Lease is the owner root for the Pod,
-immutable Secrets, and NetworkPolicy. Response-loss replay, reuse, renewal, and the worker
-pre-stream fence re-read the complete tuple and fail closed on deletion, replacement, or drift.
-Live qualification counts a Lease renewal only when the UID, accepted-attempt holder, and
-qualified duration stay fixed while bounded RFC3339 `spec.renewTime` strictly advances;
-`resourceVersion` alone is not proof. The verifier/gate ships in this provisioner artifact, so
-v2 evidence requires their exact pinned reference and digest to equal the provisioner subject.
-A bounded
-reconciler deletes expired Lease UIDs, letting Kubernetes garbage collection remove children.
-Process restart does not adopt such a Pod because the capability is intentionally unrecoverable;
-the corresponding lost worker follows the existing orphan-terminalization contract.
-
-Run-bound egress: when the request carries `egress_allowance`, the accepted
-NetworkPolicy owns egress as well as ingress. Each rule renders as an `ipBlock`
-with the never-allowed ranges (private, loopback, link-local, carrier-NAT,
-multicast, documentation, cloud metadata; identical to
-`deerflow.sandbox.egress.NEVER_ALLOWED_NETWORKS`) carved out, `dns: true` adds
-`kube-system` `kube-dns` on port 53, and an allowance with no rule denies every
-destination. The allowance digest is part of the attempt Lease identity, so a
-replay with a different allowance is an identity conflict, and the re-read fence
-rebuilds the expected policy from the Lease-recorded allowance.
-
-The provider-neutral `AcceptedMaterializer` refactor does not change this
-provisioner protocol or qualification scope. `AioAcceptedMaterializer` retains
-the exact v2 Pod/Lease/Secret/NetworkPolicy/verifier receipt for live fencing and
-cryptographically commits that tuple into the neutral execution-evidence
-envelope. The neutral in-memory adapter and OpenSandbox control-plane fake are
-test-only and cannot satisfy this Kubernetes qualification.
-
-Gateway management calls use a distinct projected ServiceAccount token. The token is audience
-bound, reread on every request for rotation, and checked with TokenReview against the exact Gateway
-namespace and ServiceAccount. This identity namespace can differ from `K8S_NAMESPACE`; accepted
-NetworkPolicy peers use the Gateway namespace selector so split deployments stay fail closed without
-blocking the capability gate. The Gateway's readiness path authenticates to `/api/capabilities`
-and requires the configured projection profile plus the exact sandbox/verifier image digests
-before it admits new work. The worker binds the advertised sandbox digest into its
-provider-neutral request, then requires the materialization receipt to match it. The per-attempt bearer
-capability remains narrower and is accepted only by that attempt's in-Pod gate.
-
-Both `SANDBOX_IMAGE` and `ACCEPTED_SKILL_RUNTIME_IMAGE` must be SHA-256 digest references. The
-provisioner's `/ready` endpoint also reads the configured PVC and rejects a non-Bound or non-RWX
-claim. Helm rejects RWO rather than adding a same-node requirement. Accepted Pods have only a
-soft preference for a different Gateway node. Cross-node CNI/PVC behavior remains a live
-qualification concern; this profile adds no same-node fallback and does not turn fake-Kubernetes
-or chart-render evidence into live-cluster evidence. The repository's ordinary and process-loss
-suites do not qualify this cross-node path; an artifact-bound live cluster run with a real RWX
-implementation remains an explicit release gate.
 
 ### Lark CLI sandbox runtime (Pattern A)
 
@@ -363,20 +256,10 @@ kubectl config view --minify -o jsonpath='{.clusters[0].cluster.server}'
    - Current context should point to your local cluster
 
 3. **Kubernetes Access**:
-   - Helm grants a Role in the sandbox namespace for Pod/Service lifecycle,
-     immutable Secret lifecycle, NetworkPolicy lifecycle, Lease lifecycle, and
-     read-only access to the configured PVC, plus a ClusterRole containing
-     name-pinned namespace get and TokenReview create. The sandbox namespace must
-     be pre-created; the chart does not grant namespace creation.
-   - Kubernetes RBAC applies those verbs to every resource of each named kind
-     in the sandbox namespace; it cannot restrict them by sandbox label or
-     attempt identity. Treat the provisioner as a trusted namespace
-     control-plane component. Use a dedicated sandbox namespace or admission
-     policy if compromise isolation from unrelated namespace resources is a
-     requirement.
-   - The Docker Compose/hybrid mode instead mounts the configured kubeconfig;
-     that credential's permissions are operator-owned and are not narrowed by
-     the Helm Role.
+   - The provisioner needs permissions to:
+     - Create/read/delete Pods in the `deer-flow` namespace
+     - Create/read/delete Services in the `deer-flow` namespace
+     - Read Namespaces (to create `deer-flow` if missing)
 
 4. **Host Paths**:
    - `DEER_FLOW_HOST_BASE_DIR` and `THREADS_HOST_PATH` must be **absolute paths on the host machine**
@@ -509,7 +392,7 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 ## Security Considerations
 
-1. **HostPath Volumes**: The provisioner infers hostPath only when both claim names are absent, or uses it when explicitly selected. Ensure these paths contain only trusted data. For production, set `SANDBOX_VOLUME_MODE=pvc` and configure both `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME` to avoid node-specific data loss risks.
+1. **HostPath Volumes**: The provisioner mounts host directories into sandbox Pods by default. Ensure these paths contain only trusted data. For production, prefer PVC-based volumes (set `SKILLS_PVC_NAME` and `USERDATA_PVC_NAME`) to avoid node-specific data loss risks.
 
 2. **Resource Limits**: Each sandbox Pod has CPU, memory, and storage limits to prevent resource exhaustion.
 
@@ -523,8 +406,8 @@ docker exec deer-flow-gateway curl -s $SANDBOX_URL/v1/sandbox
 
 - [ ] Support for custom resource requests/limits per sandbox
 - [x] PersistentVolume support for larger data requirements
-- [x] Bounded cleanup of expired accepted-attempt Leases
+- [ ] Automatic cleanup of stale sandboxes (timeout-based)
 - [ ] Metrics and monitoring (Prometheus integration)
 - [ ] Multi-cluster support (route to different K8s clusters)
 - [ ] Pod affinity/anti-affinity rules for better placement
-- [x] Exact per-attempt NetworkPolicy creation and drift verification
+- [ ] NetworkPolicy templates for sandbox isolation

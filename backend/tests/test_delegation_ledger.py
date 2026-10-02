@@ -69,6 +69,26 @@ class TestMergeDelegations:
 
         assert out[0]["run_id"] == "run-1"
 
+    def test_same_tool_call_id_in_different_runs_keeps_both_delegations(self):
+        existing = [{**_entry("call_1", "completed", "old task"), "run_id": "run-old"}]
+        new = [{**_entry("call_1", "in_progress", "new task"), "run_id": "run-new"}]
+
+        merged = merge_delegations(existing, new)
+
+        assert [(entry["run_id"], entry["description"], entry["status"]) for entry in merged] == [
+            ("run-old", "old task", "completed"),
+            ("run-new", "new task", "in_progress"),
+        ]
+
+    def test_same_tool_call_id_in_one_run_still_updates_one_delegation(self):
+        existing = [{**_entry("call_1", "in_progress"), "run_id": "run-1"}]
+        new = [{**_entry("call_1", "completed"), "run_id": "run-1"}]
+
+        merged = merge_delegations(existing, new)
+
+        assert len(merged) == 1
+        assert merged[0]["status"] == "completed"
+
     def test_over_cap_keeps_most_recent_entries(self):
         from deerflow.agents import thread_state as thread_state_module
 
@@ -359,7 +379,7 @@ class TestRenderDelegationLedger:
 
         out = render_delegation_ledger(entries)
 
-        assert "do NOT delegate" in out
+        assert "inspect self-report before reuse" in out
         assert "research auth" in out
         assert "general-purpose" in out
         assert "auth uses JWT" in out

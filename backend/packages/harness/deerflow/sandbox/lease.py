@@ -86,8 +86,7 @@ async def run_sync_sandbox_command[T](sandbox: object, func: Callable[..., T], /
     the stream ran on for another 537 s after the refusal was recorded.
 
     So cancellation is delivered to the command first. The abort runs off the
-    event loop -- it makes network calls, and the accepted session refuses a
-    synchronous call made on its owner loop -- and every request it makes is
+    event loop -- it may make network calls -- and every request it makes is
     bounded by the sandbox implementation, so a container that stops answering
     leaves the command's own timeout as the fallback rather than a second hang.
     The drain then returns as soon as the command dies.
@@ -405,7 +404,7 @@ class SandboxLeaseManager:
                 release_on_last=release_on_last,
             )
         if release_previous and previous is not None:
-            await asyncio.to_thread(
+            await run_sync_lifecycle_operation(
                 self._provider.release,
                 previous.sandbox_id,
             )
@@ -458,7 +457,7 @@ class SandboxLeaseManager:
                     release_on_last=release_on_last,
                 )
             if release_previous and previous is not None:
-                await asyncio.to_thread(
+                await run_sync_lifecycle_operation(
                     self._provider.release,
                     previous.sandbox_id,
                 )
@@ -498,12 +497,15 @@ class SandboxLeaseManager:
         user_id: str,
         release_on_last: bool = True,
         acquire_release_on_last: bool = True,
+        allow_unscoped_borrow: bool = False,
     ) -> str:
-        """Atomically retain a live persisted sandbox or acquire a replacement.
+        """Atomically restore a scoped sandbox or acquire a replacement.
 
-        A fork-restored live client is borrowed with ``release_on_last=False``;
-        if that persisted client is gone, its freshly acquired replacement is
-        owned normally unless ``acquire_release_on_last`` is also disabled.
+        Ordinary checkpoint ids must match ``user_id`` and ``thread_id``.
+        Server-created fork wrappers may set ``allow_unscoped_borrow`` with
+        ``release_on_last=False`` to share a parent's live client. If that
+        client is gone, the replacement is owned normally unless
+        ``acquire_release_on_last`` is also disabled.
         """
         key = self._thread_key(thread_id, user_id)
         with self._serializer.hold(key):
@@ -515,7 +517,16 @@ class SandboxLeaseManager:
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
 
-            if self._provider.get(sandbox_id) is not None:
+            sandbox = (
+                self._provider.get(sandbox_id)
+                if allow_unscoped_borrow
+                else self._provider.get_scoped(
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+            )
+            if sandbox is not None:
                 with self._metadata_lock:
                     previous, release_previous = self._bind_locked(
                         owner_id,
@@ -570,6 +581,7 @@ class SandboxLeaseManager:
         user_id: str,
         release_on_last: bool = True,
         acquire_release_on_last: bool = True,
+        allow_unscoped_borrow: bool = False,
     ) -> str:
         """Async atomic retain-or-replace transition for a persisted sandbox."""
         key = self._thread_key(thread_id, user_id)
@@ -582,7 +594,16 @@ class SandboxLeaseManager:
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
 
-            if self._provider.get(sandbox_id) is not None:
+            sandbox = (
+                self._provider.get(sandbox_id)
+                if allow_unscoped_borrow
+                else self._provider.get_scoped(
+                    sandbox_id,
+                    thread_id=thread_id,
+                    user_id=user_id,
+                )
+            )
+            if sandbox is not None:
                 with self._metadata_lock:
                     previous, release_previous = self._bind_locked(
                         owner_id,
@@ -591,7 +612,7 @@ class SandboxLeaseManager:
                         release_on_last=release_on_last,
                     )
                 if release_previous and previous is not None:
-                    await asyncio.to_thread(
+                    await run_sync_lifecycle_operation(
                         self._provider.release,
                         previous.sandbox_id,
                     )
@@ -661,18 +682,6 @@ _manager_lock = threading.Lock()
 _managers: dict[int, tuple[SandboxProvider, SandboxLeaseManager]] = {}
 
 
-def _lifecycle_provider(provider: SandboxProvider) -> SandboxProvider:
-    """Resolve the provider object that owns lifecycle state for ``provider``.
-
-    HartMesh installs every provider behind its session provider; a caller
-    holding the backing provider and a caller holding the installed wrapper
-    must share one manager, and that manager must call through the wrapper.
-    """
-    from deerflow.sandbox.sandbox_provider import lifecycle_sandbox_provider
-
-    return lifecycle_sandbox_provider(provider)
-
-
 def get_sandbox_lease_manager(provider: SandboxProvider) -> SandboxLeaseManager:
     """Return the process-local lease manager for this provider object.
 
@@ -682,7 +691,6 @@ def get_sandbox_lease_manager(provider: SandboxProvider) -> SandboxLeaseManager:
     already owns the provider strongly, so a weak-key registry would not make
     the lifecycle shorter.
     """
-    provider = _lifecycle_provider(provider)
     provider_id = id(provider)
     with _manager_lock:
         entry = _managers.get(provider_id)
@@ -695,7 +703,6 @@ def get_sandbox_lease_manager(provider: SandboxProvider) -> SandboxLeaseManager:
 
 def discard_sandbox_lease_manager(provider: SandboxProvider) -> None:
     """Forget lease metadata when a provider singleton is detached."""
-    provider = _lifecycle_provider(provider)
     provider_id = id(provider)
     with _manager_lock:
         entry = _managers.get(provider_id)

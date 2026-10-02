@@ -9,7 +9,6 @@ import secrets
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit
 
-from deerflow_runtime_api import FailureCode
 from fastapi import Request, Response
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
@@ -19,11 +18,7 @@ from app.gateway.auth.config import get_auth_config
 from app.gateway.auth.session_cookie_state import SESSION_COOKIE_ISSUED_STATE_ATTR, SESSION_COOKIE_MAX_AGE_STATE_ATTR, SESSION_COOKIE_SECURE_STATE_ATTR, SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth_disabled import is_auth_disabled
 from app.gateway.request_path import get_request_route_path
-from app.gateway.run_evidence_telemetry import (
-    ensure_run_evidence_requested,
-    record_run_evidence_outcome,
-)
-from app.gateway.runtime_http import is_runtime_api_path, runtime_error_response
+from app.gateway.utils import constant_time_equals
 from deerflow.trace_context import TRACE_ID_HEADER
 
 CSRF_COOKIE_NAME = "csrf_token"
@@ -226,7 +221,6 @@ class CSRFMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(self, request: Request, call_next: Callable[[Request], Awaitable[Response]]) -> Response:
         _is_auth = is_auth_endpoint(request)
-        evidence_actor_digest = ensure_run_evidence_requested(request)
 
         if should_check_csrf(request) and _is_auth and not is_allowed_auth_origin(request):
             return JSONResponse(
@@ -247,26 +241,12 @@ class CSRFMiddleware(BaseHTTPMiddleware):
             header_token = request.headers.get(CSRF_HEADER_NAME)
 
             if not cookie_token or not header_token:
-                record_run_evidence_outcome(
-                    request,
-                    "refused",
-                    actor_digest=evidence_actor_digest,
-                )
-                if is_runtime_api_path(request.url.path):
-                    return runtime_error_response(403, FailureCode.denied)
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "CSRF token missing. Include X-CSRF-Token header."},
                 )
 
-            if not secrets.compare_digest(cookie_token, header_token):
-                record_run_evidence_outcome(
-                    request,
-                    "refused",
-                    actor_digest=evidence_actor_digest,
-                )
-                if is_runtime_api_path(request.url.path):
-                    return runtime_error_response(403, FailureCode.denied)
+            if not constant_time_equals(cookie_token, header_token):
                 return JSONResponse(
                     status_code=403,
                     content={"detail": "CSRF token mismatch."},

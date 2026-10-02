@@ -126,7 +126,7 @@ def test_the_readme_and_env_example_name_the_keys_and_the_command() -> None:
     for key in ("HARTMESH_SIGN_ON_ACCESS_CLAIM", "HARTMESH_SIGN_ON_ACCESS_VALUES", "HARTMESH_SIGN_ON_ROLES"):
         assert f"| `{key}` |" in readme, key
     assert "### Membership follows the claim" in readme
-    for phrase in ("python -m app.gateway.auth.accounts list", "end-sessions", "sso_no_access", "sso_access_off", "0040_account_access", "nothing reachable over HTTP", "PYTHONPATH=. uv run --no-sync python -m app.gateway.auth.accounts"):
+    for phrase in ("python -m app.gateway.auth.accounts list", "end-sessions", "sso_no_access", "sso_access_off", "0027_account_access", "nothing reachable over HTTP", "PYTHONPATH=. uv run --no-sync python -m app.gateway.auth.accounts"):
         assert phrase in readme, phrase
     example = (PROFILE / ".env.example").read_text(encoding="utf-8")
     assert "#HARTMESH_SIGN_ON_ACCESS_CLAIM=" in example and "#HARTMESH_SIGN_ON_ROLES=" in example

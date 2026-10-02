@@ -5,10 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 from app.channels.message_bus import InboundMessage
-from app.runtime.native_binding import (
-    InternalVerifiedNativeBinding,
-    InternalVerifiedNativeBindingKind,
-)
 
 
 async def attach_connection_identity(
@@ -43,10 +39,6 @@ async def attach_connection_identity(
         inbound.connection_id = connection["id"]
         inbound.owner_user_id = connection["owner_user_id"]
         inbound.workspace_id = connection.get("workspace_id")
-        inbound.verified_source_binding = InternalVerifiedNativeBinding(
-            kind=InternalVerifiedNativeBindingKind.connection,
-            reference=connection["id"],
-        )
         return inbound
 
     return inbound

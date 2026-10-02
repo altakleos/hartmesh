@@ -3,7 +3,7 @@
 import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
-from typing import Literal, override
+from typing import override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -14,18 +14,7 @@ from langgraph.types import Command
 
 from deerflow.authz.outcome import AuthorizationOutcome, put_authorization_outcome
 from deerflow.authz.principal import normalize_authz_attributes
-from deerflow.guardrails.provider import (
-    GuardrailDecision,
-    GuardrailProvider,
-    GuardrailReason,
-    GuardrailRequest,
-    bind_guardrail_provider_receipt,
-)
-from deerflow.runtime.accepted_invocation import (
-    INVOCATION_IDENTITY_CONTEXT_KEY,
-    INVOCATION_ORIGIN_CONTEXT_KEY,
-    TRUSTED_RUN_CONTEXT_KEY,
-)
+from deerflow.guardrails.provider import GuardrailDecision, GuardrailProvider, GuardrailReason, GuardrailRequest
 from deerflow.runtime.events.catalog import MIDDLEWARE_GUARDRAIL_TAG
 
 logger = logging.getLogger(__name__)
@@ -42,18 +31,10 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
       - False: allow it through with a warning
     """
 
-    def __init__(
-        self,
-        provider: GuardrailProvider,
-        *,
-        fail_closed: bool = True,
-        passport: str | None = None,
-        decision_kind: Literal["authorization", "guardrail"] = "guardrail",
-    ):
+    def __init__(self, provider: GuardrailProvider, *, fail_closed: bool = True, passport: str | None = None):
         self.provider = provider
         self.fail_closed = fail_closed
         self.passport = passport
-        self.decision_kind = decision_kind
 
     def _resolve_policy_identity(self) -> tuple[str, str]:
         """Return ``(policy_id, policy_version)`` without the provider's full declaration.
@@ -82,7 +63,6 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         return {
             "fail_closed": self.fail_closed,
             "passport": self.passport,
-            "decision_kind": self.decision_kind,
             "policy": {"id": policy_id, "version": policy_version},
             "provider_parameters": provider_parameters,
         }
@@ -94,13 +74,6 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
         return context if isinstance(context, dict) else {}
 
     def _build_request(self, request: ToolCallRequest, context: dict) -> GuardrailRequest:
-        trusted_context = context.get(TRUSTED_RUN_CONTEXT_KEY)
-        if trusted_context is not None:
-            from deerflow_extension_api import TrustedRunContextV1
-
-            if not isinstance(trusted_context, TrustedRunContextV1):
-                raise TypeError("accepted trusted run context must be TrustedRunContextV1")
-        authorization_attributes = trusted_context.authorization_attributes if trusted_context is not None else normalize_authz_attributes(context.get("authz_attributes"))
         return GuardrailRequest(
             tool_name=str(request.tool_call.get("name", "")),
             tool_input=request.tool_call.get("args", {}),
@@ -116,10 +89,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             tool_call_id=request.tool_call.get("id"),
             channel_user_id=context.get("channel_user_id"),
             is_internal=context.get("is_internal") is True,
-            authz_attributes=authorization_attributes,
-            identity=context.get(INVOCATION_IDENTITY_CONTEXT_KEY),
-            origin=context.get(INVOCATION_ORIGIN_CONTEXT_KEY),
-            trusted_context=trusted_context,
+            authz_attributes=normalize_authz_attributes(context.get("authz_attributes")),
         )
 
     def _build_denied_message(self, request: ToolCallRequest, decision: GuardrailDecision) -> ToolMessage:
@@ -143,7 +113,6 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             policy_id=policy_id,
             policy_version=policy_version,
             reason_codes=reason_codes,
-            kind=self.decision_kind,
         )
 
     def _record_guardrail_event(
@@ -159,8 +128,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
 
         This follows the optional-Journal pattern used by existing middleware:
         audit persistence is best-effort and must never change tool execution
-        behavior. Runtimes without ``__run_journal`` (including embedded
-        execution) skip persistence.
+        behavior. Runtimes without ``__run_journal`` (including embedded and
+        subagent execution) skip persistence.
         """
         journal = context.get("__run_journal")
         if journal is None:
@@ -173,7 +142,8 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
             "tool_name": guardrail_request.tool_name,
             "tool_call_id": guardrail_request.tool_call_id,
             "agent_id": guardrail_request.agent_id,
-            # Custom runtimes may provide a journal with subagent attribution.
+            # Native subagents do not currently inherit __run_journal; custom
+            # runtimes may still provide one with subagent attribution.
             "is_subagent": guardrail_request.is_subagent,
             "user_role": guardrail_request.user_role,
             "allow": decision.allow,
@@ -231,8 +201,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
                     provider_error=True,
                 )
                 put_authorization_outcome(context, request.tool_call.get("id"), self._build_authorization_outcome(decision))
-                with bind_guardrail_provider_receipt(decision.provider_receipt):
-                    return handler(request)
+                return handler(request)
         put_authorization_outcome(context, request.tool_call.get("id"), self._build_authorization_outcome(decision))
         if not decision.allow:
             logger.warning("Guardrail denied: tool=%s policy=%s code=%s", gr.tool_name, decision.policy_id, decision.reasons[0].code if decision.reasons else "unknown")
@@ -244,8 +213,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
                 provider_error=False,
             )
             return self._build_denied_message(request, decision)
-        with bind_guardrail_provider_receipt(decision.provider_receipt):
-            return handler(request)
+        return handler(request)
 
     @override
     async def awrap_tool_call(
@@ -283,8 +251,7 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
                     provider_error=True,
                 )
                 put_authorization_outcome(context, request.tool_call.get("id"), self._build_authorization_outcome(decision))
-                with bind_guardrail_provider_receipt(decision.provider_receipt):
-                    return await handler(request)
+                return await handler(request)
         put_authorization_outcome(context, request.tool_call.get("id"), self._build_authorization_outcome(decision))
         if not decision.allow:
             logger.warning("Guardrail denied: tool=%s policy=%s code=%s", gr.tool_name, decision.policy_id, decision.reasons[0].code if decision.reasons else "unknown")
@@ -296,5 +263,4 @@ class GuardrailMiddleware(AgentMiddleware[AgentState]):
                 provider_error=False,
             )
             return self._build_denied_message(request, decision)
-        with bind_guardrail_provider_receipt(decision.provider_receipt):
-            return await handler(request)
+        return await handler(request)

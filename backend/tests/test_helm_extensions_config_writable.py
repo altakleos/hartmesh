@@ -40,16 +40,13 @@ def test_helm_template_seeds_a_directory_backed_writable_extensions_config() -> 
     assert "name: init-extensions" in template
     assert "cp /extensions-seed/extensions_config.json /extensions-runtime/extensions_config.json" in template
     assert "mountPath: /extensions-seed" in template
-    assert "{{- if $isMultiGateway }}" in template
+    assert "mountPath: /app/backend/extensions_config.json" not in template
+    assert "subPath: extensions_config.json" not in template
 
 
 @pytest.mark.parametrize("persistence_enabled", [True, False])
 def test_rendered_helm_extensions_config_is_writable_and_seeded(persistence_enabled: bool) -> None:
-    volume_settings = ("sandbox.volumeMode=pvc", "skills.existingClaim=deer-flow-test-skills") if persistence_enabled else ("sandbox.volumeMode=hostpath",)
-    documents = _render_chart(
-        f"persistence.home.enabled={str(persistence_enabled).lower()}",
-        *volume_settings,
-    )
+    documents = _render_chart(f"persistence.home.enabled={str(persistence_enabled).lower()}")
     deployment = _gateway_deployment(documents)
     pod_spec = deployment["spec"]["template"]["spec"]
     gateway = _named(pod_spec["containers"], "gateway")
@@ -69,7 +66,6 @@ def test_rendered_helm_extensions_config_is_writable_and_seeded(persistence_enab
     assert home_mount["mountPath"] == "/app/backend/.deer-flow"
     assert home_mount["subPath"] == "deer-flow"
     assert "readOnly" not in home_mount
-    assert all(mount["mountPath"] != "/app/backend/extensions_config.json" for mount in gateway["volumeMounts"])
 
     volumes = {item["name"]: item for item in pod_spec["volumes"]}
     assert volumes["extensions-seed"]["configMap"]["name"].endswith("-extensions")

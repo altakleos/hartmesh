@@ -4,7 +4,6 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from support.scheduled_task_runtime import CallbackInvocationRuntime
 
 from app.scheduler.service import ScheduledTaskService
 from deerflow.config.database_config import DatabaseConfig
@@ -40,7 +39,7 @@ def _make_service(task_repo, run_repo, launch_run, *, queue_timeout_seconds: int
     return ScheduledTaskService(
         task_repo=task_repo,
         task_run_repo=run_repo,
-        invocation_runtime=CallbackInvocationRuntime(launch_run),
+        launch_run=launch_run,
         poll_interval_seconds=5,
         lease_seconds=120,
         max_concurrent_runs=3,
@@ -155,6 +154,94 @@ async def test_queued_run_survives_single_instance_restart_sweep(tmp_path):
         await close_engine()
 
 
+async def test_queued_once_task_survives_startup_and_is_drained_on_next_poll(tmp_path):
+    """A newer queued occurrence survives recovery of an already-stuck parent.
+
+    The old success models a completion that committed before its parent update.
+    A real manual dispatch then leaves newer work queued after a transient
+    same-thread conflict. Startup must not let the old success finalize the
+    parent through the newer active row; the ordinary queue drain owns launch.
+    """
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        task_repo = ScheduledTaskRepository(sf)
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime.now(UTC)
+        await task_repo.create(
+            task_id="task-queued-once",
+            user_id="user-1",
+            thread_id="thread-queued-once",
+            context_mode="reuse_thread",
+            assistant_id="lead_agent",
+            title="Queued once task",
+            prompt="Resume queued work",
+            schedule_type="once",
+            schedule_spec={"run_at": now.isoformat()},
+            timezone="UTC",
+            next_run_at=None,
+        )
+        await task_repo.update(
+            "task-queued-once",
+            user_id="user-1",
+            updates={"status": "running"},
+        )
+        await run_repo.create(
+            run_record_id="task-run-old-success",
+            task_id="task-queued-once",
+            thread_id="thread-queued-once",
+            scheduled_for=now - timedelta(minutes=1),
+            trigger="scheduled",
+            status="success",
+        )
+        task = await task_repo.get("task-queued-once", user_id="user-1")
+        assert task is not None
+        launched = []
+
+        async def launch_run(**kwargs):
+            launched.append(kwargs)
+            if len(launched) == 1:
+                raise ConflictError("Thread thread-queued-once already has an active run")
+            return {"run_id": "run-after-restart", "thread_id": kwargs["thread_id"]}
+
+        first_service = _make_service(task_repo, run_repo, launch_run)
+        queued = await first_service.dispatch_task(task, now=now, trigger="manual")
+        assert queued["outcome"] == "queued"
+        rows = await run_repo.list_by_task("task-queued-once")
+        assert [row["status"] for row in rows] == ["queued", "success"]
+
+        service = _make_service(task_repo, run_repo, launch_run)
+
+        async def parked_run_loop():
+            await service._stop.wait()
+
+        service._run_loop = parked_run_loop
+        await service.start()
+        try:
+            task = await task_repo.get_internal("task-queued-once")
+            rows = await run_repo.list_by_task("task-queued-once")
+            assert task is not None
+            assert task["status"] == "running"
+            assert rows[0]["status"] == "queued"
+
+            await service.run_once(now=now + timedelta(seconds=1))
+
+            task = await task_repo.get_internal("task-queued-once")
+            rows = await run_repo.list_by_task("task-queued-once")
+            assert task is not None
+            assert task["status"] == "running"
+            assert task["last_run_id"] == "run-after-restart"
+            assert rows[0]["status"] == "running"
+            assert rows[0]["run_id"] == "run-after-restart"
+            assert rows[1]["status"] == "success"
+            assert len(launched) == 2
+        finally:
+            await service.stop()
+    finally:
+        await close_engine()
+
+
 async def test_only_one_worker_can_claim_a_queued_run(tmp_path):
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
     try:
@@ -194,6 +281,75 @@ async def test_only_one_worker_can_claim_a_queued_run(tmp_path):
         assert row["status"] == "launching"
         assert row["attempt_count"] == 1
         assert row["lease_owner"] in {"worker-a", "worker-b"}
+    finally:
+        await close_engine()
+
+
+async def test_global_launch_budget_holds_when_distinct_rows_are_claimed_concurrently(tmp_path):
+    """The global launch budget must survive claims racing on *distinct* rows.
+
+    ``claim_queued_run`` counts executing rows and then promotes one row to
+    ``launching``. Postgres serializes that pair with an advisory lock. SQLite
+    needs ``BEGIN IMMEDIATE`` for the same reason ``ThreadMetaRepository``
+    does: a deferred transaction does not reserve the writer until the UPDATE,
+    so every claimer reads the same stale count and overshoots
+    ``max_concurrent_runs``.
+
+    Distinct rows are the load-bearing part. Two claims of the *same* row are
+    already safe via the ``status == "queued"`` CAS, which is what
+    ``test_only_one_worker_can_claim_a_queued_run`` covers.
+    """
+    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
+    try:
+        sf = get_session_factory()
+        assert sf is not None
+        run_repo = ScheduledTaskRunRepository(sf)
+        now = datetime(2026, 8, 20, 9, 0, tzinfo=UTC)
+        claimants = 8
+        for index in range(claimants):
+            await run_repo.create(
+                run_record_id=f"task-run-budget-{index}",
+                task_id=f"task-budget-{index}",
+                thread_id=f"thread-budget-{index}",
+                scheduled_for=now,
+                trigger="scheduled",
+                status="queued",
+            )
+
+        # Open every connection the claimers need up front. On a cold pool the
+        # per-connection PRAGMA setup staggers them enough to hide the race.
+        await asyncio.gather(*(run_repo.count_active_runs() for _ in range(claimants)))
+
+        # That warm-up is load-bearing, and it only works because the SQLite
+        # engine keeps pooled connections (init_engine_from_config builds it on
+        # SQLAlchemy's default AsyncAdaptedQueuePool, so `pool_size` of them
+        # survive this gather while the overflow is discarded). Under a
+        # non-pooling class such as NullPool every claimer would open its own
+        # connection, the PRAGMA setup would serialize them, and this test
+        # would pass against an unserialized claim instead of failing. Assert
+        # the reuse so that a pool change breaks this test loudly rather than
+        # quietly draining it of guard strength.
+        pool = sf.kw["bind"].sync_engine.pool
+        # A non-pooling class does not implement checkedin() at all, so treat a
+        # missing counter as "nothing was reused" and report it the same way.
+        pooled = pool.checkedin() if hasattr(pool, "checkedin") else 0
+        assert pooled >= 2, f"{type(pool).__name__} left {pooled} connections pooled after the warm-up; the claimers cannot overlap, so this test would pass against an unserialized claim"
+
+        claims = await asyncio.gather(
+            *(
+                run_repo.claim_queued_run(
+                    f"task-run-budget-{index}",
+                    lease_owner=f"worker-{index}",
+                    now=now,
+                    lease_seconds=120,
+                    global_max_concurrent_runs=1,
+                )
+                for index in range(claimants)
+            )
+        )
+
+        assert sum(claim is not None for claim in claims) == 1
+        assert await run_repo.count_active_runs() == 1
     finally:
         await close_engine()
 
@@ -368,7 +524,7 @@ async def test_slow_launch_is_reassociated_after_lease_recovery(tmp_path):
         service = ScheduledTaskService(
             task_repo=task_repo,
             task_run_repo=run_repo,
-            invocation_runtime=CallbackInvocationRuntime(launch_run),
+            launch_run=launch_run,
             poll_interval_seconds=1,
             lease_seconds=5,
             max_concurrent_runs=3,
@@ -894,140 +1050,5 @@ async def test_expired_launch_claim_attaches_existing_run_instead_of_relaunching
             increment_run_count=True,
         )
         assert (await task_repo.get("task-attached", user_id="user-1"))["run_count"] == 1
-    finally:
-        await close_engine()
-
-
-async def _seed_occurrence(run_repo: ScheduledTaskRunRepository, occurrence_id: str, *, status: str, started_at: datetime | None, run_id: str | None = None) -> None:
-    await run_repo.create(run_record_id=occurrence_id, task_id=f"task-of-{occurrence_id}", thread_id=f"thread-of-{occurrence_id}", scheduled_for=datetime.now(UTC), trigger="manual", status=status)
-    if status != "queued":
-        await run_repo.update_status(occurrence_id, status=status, run_id=run_id, started_at=started_at)
-
-
-async def test_the_occurrences_past_their_time_limit_are_the_running_ones_that_started_before_the_cutoff(tmp_path):
-    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
-    try:
-        sf = get_session_factory()
-        assert sf is not None
-        run_repo = ScheduledTaskRunRepository(sf)
-        now = datetime.now(UTC)
-        long_ago, cutoff = now - timedelta(hours=2), now - timedelta(minutes=15)
-        await _seed_occurrence(run_repo, "running-newest-overdue", status="running", started_at=now - timedelta(minutes=30), run_id="run-c")
-        await _seed_occurrence(run_repo, "running-oldest-overdue", status="running", started_at=long_ago, run_id="run-a")
-        await _seed_occurrence(run_repo, "running-overdue", status="running", started_at=now - timedelta(hours=1), run_id="run-b")
-        await _seed_occurrence(run_repo, "running-recent", status="running", started_at=now - timedelta(minutes=5), run_id="run-d")
-        await _seed_occurrence(run_repo, "running-no-start-recorded", status="running", started_at=None, run_id="run-e")
-        await _seed_occurrence(run_repo, "launching-old", status="launching", started_at=long_ago)
-        await _seed_occurrence(run_repo, "queued-old", status="queued", started_at=None)
-        await _seed_occurrence(run_repo, "finished-old", status="success", started_at=long_ago, run_id="run-f")
-
-        overdue = await run_repo.list_overdue_running(started_before=cutoff, limit=10)
-
-        # Oldest first, running only, and never a row whose start was not recorded.
-        assert [row["id"] for row in overdue] == ["running-oldest-overdue", "running-overdue", "running-newest-overdue"]
-        assert [row["id"] for row in await run_repo.list_overdue_running(started_before=cutoff, limit=2)] == ["running-oldest-overdue", "running-overdue"]
-    finally:
-        await close_engine()
-
-
-async def test_an_occurrence_is_ended_once_by_whoever_gets_there_first_and_never_rewritten(tmp_path):
-    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
-    try:
-        sf = get_session_factory()
-        assert sf is not None
-        run_repo = ScheduledTaskRunRepository(sf)
-        now = datetime.now(UTC)
-        await _seed_occurrence(run_repo, "live", status="running", started_at=now, run_id="run-live")
-        await _seed_occurrence(run_repo, "launching", status="launching", started_at=None)
-        await _seed_occurrence(run_repo, "already-done", status="success", started_at=now, run_id="run-done")
-
-        assert await run_repo.end_active_run("live", status="failed", run_id="run-live", error="ran too long", finished_at=now) is True
-        assert await run_repo.end_active_run("live", status="interrupted", run_id="run-live", error="run was interrupted before completion", finished_at=now) is False
-        assert await run_repo.end_active_run("launching", status="success", run_id="run-l", error=None, finished_at=now) is True
-        assert await run_repo.end_active_run("already-done", status="failed", run_id="run-done", error="too late", finished_at=now) is False
-        assert await run_repo.end_active_run("no-such-occurrence", status="failed", run_id=None, error="x", finished_at=now) is False
-
-        rows = {row["id"]: row for occurrence in ("live", "launching", "already-done") for row in await run_repo.list_by_task(f"task-of-{occurrence}")}
-        assert (rows["live"]["status"], rows["live"]["error"], rows["live"]["run_id"]) == ("failed", "ran too long", "run-live")
-        assert rows["live"]["finished_at"] is not None
-        assert (rows["launching"]["status"], rows["launching"]["run_id"]) == ("success", "run-l")
-        assert (rows["already-done"]["status"], rows["already-done"]["error"]) == ("success", None)
-    finally:
-        await close_engine()
-
-
-async def test_a_run_past_its_time_limit_ends_its_occurrence_first_and_the_runs_own_completion_changes_nothing(tmp_path):
-    """The real occurrence and task stores: the limit decides the outcome, whichever order the run reports in."""
-    from deerflow.runtime import RunRecord, RunStatus
-    from deerflow.runtime.runs.schemas import DisconnectMode
-
-    await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path)))
-    try:
-        sf = get_session_factory()
-        assert sf is not None
-        task_repo = ScheduledTaskRepository(sf)
-        run_repo = ScheduledTaskRunRepository(sf)
-        now = datetime.now(UTC)
-        await task_repo.create(
-            task_id="task-once",
-            user_id="user-1",
-            thread_id=None,
-            context_mode="fresh_thread_per_run",
-            assistant_id="lead_agent",
-            title="One-off",
-            prompt="Build it",
-            schedule_type="once",
-            schedule_spec={"run_at": (now + timedelta(days=1)).isoformat()},
-            timezone="UTC",
-            next_run_at=now + timedelta(days=1),
-        )
-        task = await task_repo.get("task-once", user_id="user-1")
-        assert task is not None
-        stopped: list[str] = []
-
-        async def stop_run(run_id: str) -> None:
-            stopped.append(run_id)
-
-        async def launch_run(**kwargs):
-            return {"run_id": "run-long", "thread_id": kwargs["thread_id"]}
-
-        service = ScheduledTaskService(
-            task_repo=task_repo,
-            task_run_repo=run_repo,
-            invocation_runtime=CallbackInvocationRuntime(launch_run),
-            poll_interval_seconds=5,
-            lease_seconds=120,
-            max_concurrent_runs=1,
-            max_run_seconds=900,
-            stop_run=stop_run,
-        )
-        assert (await service.dispatch_task(task, now=now, trigger="manual"))["outcome"] == "launched"
-
-        await service.run_once(now=now + timedelta(seconds=899))
-        assert stopped == [], "not yet past its limit"
-
-        await service.run_once(now=now + timedelta(seconds=901))
-        assert stopped == ["run-long"]
-        [occurrence] = await run_repo.list_by_task("task-once")
-        assert (occurrence["status"], occurrence["error"]) == ("failed", "the task did not finish within 15 minutes, so it was stopped")
-        assert (await task_repo.get("task-once", user_id="user-1"))["status"] == "failed"
-
-        # The Stop lands and the run reports how it ended: nothing about the occurrence or the task changes.
-        record = RunRecord(
-            run_id="run-long",
-            thread_id="thread-1",
-            assistant_id="lead_agent",
-            status=RunStatus.interrupted,
-            on_disconnect=DisconnectMode.continue_,
-            metadata={"scheduled_task_id": "task-once", "scheduled_task_run_id": occurrence["id"]},
-            user_id="user-1",
-        )
-        await service.handle_run_completion(record)
-
-        [after] = await run_repo.list_by_task("task-once")
-        assert (after["status"], after["error"]) == ("failed", "the task did not finish within 15 minutes, so it was stopped")
-        finished = await task_repo.get("task-once", user_id="user-1")
-        assert (finished["status"], finished["last_error"]) == ("failed", "the task did not finish within 15 minutes, so it was stopped")
-        assert await run_repo.list_overdue_running(started_before=now + timedelta(days=1), limit=10) == []
     finally:
         await close_engine()

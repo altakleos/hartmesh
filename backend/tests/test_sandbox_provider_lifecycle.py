@@ -13,13 +13,9 @@ exit, so tests never leak a provider into one another.
 import threading
 import time
 
-import pytest
-
 import deerflow.sandbox.sandbox_provider as sandbox_provider
-from deerflow.sandbox.accepted_material import AcceptedSkillSandboxBindingError
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
-from deerflow.sandbox.session import unwrap_sandbox_provider
 
 
 class SlowSandboxProvider(SandboxProvider):
@@ -69,31 +65,6 @@ class ShutdownSandboxProvider(SlowSandboxProvider):
 
     def reset(self) -> None:
         self.reset_calls += 1
-
-
-class RefusingTeardownProvider(SlowSandboxProvider):
-    """Provider whose ownership fence pauses before refusing teardown."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.teardown_started = threading.Event()
-        self.allow_refusal = threading.Event()
-        self.refuse_teardown = True
-
-    def _teardown(self) -> None:
-        self.teardown_started.set()
-        if not self.allow_refusal.wait(timeout=2):
-            raise AssertionError("test did not release teardown fence")
-        if self.refuse_teardown:
-            raise AcceptedSkillSandboxBindingError(
-                "accepted_skill_snapshot_projection_in_use",
-            )
-
-    def reset(self) -> None:
-        self._teardown()
-
-    def shutdown(self) -> None:
-        self._teardown()
 
 
 class _SandboxConfig:
@@ -275,64 +246,6 @@ def test_set_racing_get_never_returns_none_or_torn(monkeypatch):
         sandbox_provider.reset_sandbox_provider()
 
 
-@pytest.mark.parametrize(
-    "teardown_name",
-    ["reset_sandbox_provider", "shutdown_sandbox_provider"],
-)
-def test_refused_teardown_blocks_replacement_get_and_restores_owner(
-    monkeypatch,
-    teardown_name,
-):
-    sandbox_provider.reset_sandbox_provider()
-    provider = RefusingTeardownProvider()
-    sandbox_provider.set_sandbox_provider(provider)
-    construction_attempted = threading.Event()
-    getter_done = threading.Event()
-    results: list[SandboxProvider] = []
-    teardown_errors: list[BaseException] = []
-
-    def unexpected_resolve(*_args):
-        construction_attempted.set()
-        return SlowSandboxProvider
-
-    monkeypatch.setattr(sandbox_provider, "resolve_class", unexpected_resolve)
-    teardown = getattr(sandbox_provider, teardown_name)
-
-    def tear_down() -> None:
-        try:
-            teardown()
-        except BaseException as exc:
-            teardown_errors.append(exc)
-
-    def get_provider() -> None:
-        results.append(sandbox_provider.get_sandbox_provider())
-        getter_done.set()
-
-    teardown_thread = threading.Thread(target=tear_down)
-    getter_thread = threading.Thread(target=get_provider)
-    teardown_thread.start()
-    assert provider.teardown_started.wait(timeout=1)
-    getter_thread.start()
-    try:
-        assert not getter_done.wait(timeout=0.05)
-        assert not construction_attempted.is_set()
-        provider.allow_refusal.set()
-        teardown_thread.join(timeout=1)
-        getter_thread.join(timeout=1)
-
-        assert not teardown_thread.is_alive()
-        assert not getter_thread.is_alive()
-        assert len(teardown_errors) == 1
-        assert isinstance(teardown_errors[0], AcceptedSkillSandboxBindingError)
-        assert [unwrap_sandbox_provider(result) for result in results] == [provider]
-        assert unwrap_sandbox_provider(sandbox_provider.get_sandbox_provider()) is provider
-        assert not construction_attempted.is_set()
-    finally:
-        provider.refuse_teardown = False
-        provider.allow_refusal.set()
-        teardown()
-
-
 def test_losing_cold_start_racer_shuts_down_its_orphan(monkeypatch):
     """When two cold-start callers race, the loser must shut down the instance it
     built so a side-effectful constructor (idle-checker thread, etc.) does not
@@ -373,7 +286,7 @@ def test_losing_cold_start_racer_shuts_down_its_orphan(monkeypatch):
         assert winner.shutdown_calls == 0
         # ...and every loser that was constructed had shutdown() called on it
         # exactly once.
-        losers = [inst for inst in ShutdownSandboxProvider.registry if inst is not unwrap_sandbox_provider(winner)]
+        losers = [inst for inst in ShutdownSandboxProvider.registry if inst is not winner]
         assert len(losers) == ShutdownSandboxProvider.instances_created - 1
         assert all(inst.shutdown_calls == 1 for inst in losers)
     finally:

@@ -17,10 +17,8 @@ import pytest
 from fastapi import FastAPI
 from starlette.testclient import TestClient
 
-from app.channels.inbound_receipts import InboundReceiptReplayConflict
 from app.channels.message_bus import MessageBus
 from app.gateway.csrf_middleware import CSRFMiddleware
-from app.gateway.github.dispatcher import VerifiedGitHubWebhookRequest
 from app.gateway.routers import github_webhooks
 
 SECRET = "test-secret-do-not-use-in-production"
@@ -37,35 +35,6 @@ def _make_app() -> FastAPI:
     app.add_middleware(CSRFMiddleware)
     app.include_router(github_webhooks.router)
     return app
-
-
-def test_verified_request_digest_binds_exact_authenticated_body_and_event() -> None:
-    body = b'{"action":"opened","number":7}'
-
-    first = VerifiedGitHubWebhookRequest.attest(
-        DELIVERY_ID,
-        event="pull_request",
-        body=body,
-    )
-    equal = VerifiedGitHubWebhookRequest.attest(
-        DELIVERY_ID,
-        event="pull_request",
-        body=body,
-    )
-    changed_body = VerifiedGitHubWebhookRequest.attest(
-        DELIVERY_ID,
-        event="pull_request",
-        body=body + b" ",
-    )
-    changed_event = VerifiedGitHubWebhookRequest.attest(
-        DELIVERY_ID,
-        event="issues",
-        body=body,
-    )
-
-    assert first.provider_event_digest == equal.provider_event_digest
-    assert first.provider_event_digest != changed_body.provider_event_digest
-    assert first.provider_event_digest != changed_event.provider_event_digest
 
 
 @pytest.fixture
@@ -346,6 +315,21 @@ def test_signature_mismatch_returns_401(client: TestClient) -> None:
     assert response.status_code == 401
 
 
+def test_non_ascii_signature_returns_401(client: TestClient) -> None:
+    body = b'{"zen": "x"}'
+    response = client.post(
+        "/api/webhooks/github",
+        content=body,
+        headers={
+            "X-GitHub-Event": "ping",
+            "X-GitHub-Delivery": DELIVERY_ID,
+            "X-Hub-Signature-256": ("sha256=" + "\xe9" * 64).encode("latin-1"),
+        },
+    )
+
+    assert response.status_code == 401
+
+
 def test_signature_verified_against_exact_bytes(client: TestClient) -> None:
     """Signature must be computed over the request body bytes, not
     re-serialised JSON. Whitespace and key ordering matter."""
@@ -412,24 +396,6 @@ def test_unset_secret_with_dev_optin_accepts_unverified(client: TestClient, monk
 
     assert response.status_code == 200
     assert any("UNVERIFIED delivery" in rec.message and "dev/loopback mode ONLY" in rec.message for rec in caplog.records)
-
-
-def test_durable_profile_never_falls_back_to_unverified_after_secret_loss(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    client.app.state.deployment_profile = "durable_production"
-    monkeypatch.delenv("GITHUB_WEBHOOK_SECRET", raising=False)
-    monkeypatch.setenv("DEER_FLOW_ALLOW_UNVERIFIED_GITHUB_WEBHOOKS", "1")
-    body = json.dumps({"zen": "ok"}).encode()
-
-    response = client.post(
-        "/api/webhooks/github",
-        content=body,
-        headers={"X-GitHub-Event": "ping", "X-GitHub-Delivery": DELIVERY_ID},
-    )
-
-    assert response.status_code == 503
 
 
 def test_empty_string_secret_rejects_without_optin(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -617,10 +583,8 @@ def test_dispatch_failure_returns_503_not_200(client: TestClient, monkeypatch: p
     discoverable and recoverable this way.
     """
 
-    private_failure_marker = "transient-registry-secret-marker"
-
     async def fake_fanout(*args, **kwargs) -> dict:
-        raise RuntimeError(private_failure_marker)
+        raise RuntimeError("transient registry hiccup")
 
     monkeypatch.setattr(github_webhooks, "fanout_event", fake_fanout)
 
@@ -638,78 +602,11 @@ def test_dispatch_failure_returns_503_not_200(client: TestClient, monkeypatch: p
     assert response.status_code == 503
     detail = response.json()["detail"]
     assert "fan-out failed" in detail
-    assert DELIVERY_ID not in detail
-    assert private_failure_marker not in detail
-    # Operator-visible diagnostics use a bounded correlation digest rather
-    # than reflecting the caller-controlled delivery header.
+    assert DELIVERY_ID in detail
+    assert "transient registry hiccup" in detail
+    # Operator-visible log: stack trace + delivery id so the redelivery
+    # page entry can be correlated.
     assert any("fanout failed" in rec.message for rec in caplog.records)
-    assert any("delivery_correlation=" in rec.message for rec in caplog.records)
-    assert "exception_class=RuntimeError" in caplog.text
-    assert private_failure_marker not in caplog.text
-
-
-def test_authenticated_delivery_identity_conflict_is_permanent_and_bounded(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    async def conflicting_fanout(*_args, **_kwargs) -> dict:
-        raise InboundReceiptReplayConflict("secret conflicting provider bytes")
-
-    monkeypatch.setattr(github_webhooks, "fanout_event", conflicting_fanout)
-    body = json.dumps({"zen": "ok"}).encode()
-
-    response = client.post(
-        "/api/webhooks/github",
-        content=body,
-        headers={
-            "X-GitHub-Event": "ping",
-            "X-GitHub-Delivery": DELIVERY_ID,
-            "X-Hub-Signature-256": _signature(body),
-        },
-    )
-
-    assert response.status_code == 409
-    assert response.json() == {"detail": "verified delivery identity conflicts with retained event evidence"}
-    assert "secret conflicting provider bytes" not in response.text
-
-
-def test_signed_webhook_does_not_ack_until_atomic_receipt_batch_commits(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-    _stub_channel_service,
-) -> None:
-    persisted_batches: list[tuple[object, ...]] = []
-
-    async def fail_receipts(messages) -> None:
-        persisted_batches.append(tuple(messages))
-        raise RuntimeError("database unavailable")
-
-    _stub_channel_service.accept_verified_inbound_batch = fail_receipts
-
-    async def fake_fanout(*_args, **kwargs) -> dict:
-        await kwargs["inbound_sink"]((object(), object()))
-        return {
-            "matched_agents": ["a", "b"],
-            "fired_agents": ["a", "b"],
-            "skipped": [],
-        }
-
-    monkeypatch.setattr(github_webhooks, "fanout_event", fake_fanout)
-    body = json.dumps({"zen": "ok"}).encode()
-
-    response = client.post(
-        "/api/webhooks/github",
-        content=body,
-        headers={
-            "X-GitHub-Event": "ping",
-            "X-GitHub-Delivery": DELIVERY_ID,
-            "X-Hub-Signature-256": _signature(body),
-        },
-    )
-
-    assert response.status_code == 503
-    assert len(persisted_batches) == 1
-    assert len(persisted_batches[0]) == 2
 
 
 def test_dispatch_failure_503_lets_github_redeliver_successfully(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:

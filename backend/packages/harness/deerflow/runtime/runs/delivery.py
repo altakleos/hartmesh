@@ -15,8 +15,11 @@ it. The receipt outlives the page, so the notice can too.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 #: Stamped on the run record by the delivery fence, and the only thing a client
 #: needs in order to know whether asking for the detail below is worthwhile.
@@ -81,6 +84,43 @@ def undelivered_paths(content: dict[str, Any]) -> list[str]:
     """
     matched = set(_path_list(content.get("matched_paths")))
     return [path for path in _path_list(content.get("produced_paths")) if path not in matched]
+
+
+#: The ``type`` of the advisory ``custom`` frame a live client hears.
+DELIVERY_INCOMPLETE_EVENT_TYPE = "artifact_delivery_incomplete"
+
+
+async def publish_delivery_failure(bridge: Any, run_id: str, *, message: str, content: dict[str, Any]) -> None:
+    """Tell live clients this run failed delivery, and what it is still holding.
+
+    Advisory by contract. The authority is the run record -- ``status``,
+    ``error`` and ``stop_reason`` -- plus the durable ``run.delivery`` receipt,
+    which carries the full path set this bounded frame truncates. A client that
+    reloads, gaps, or never negotiated ``custom`` reads the same verdict over
+    HTTP; this frame only saves a live client the round trip, so losing it
+    degrades latency rather than correctness.
+
+    Deliberately not an ``error`` frame: the graph completed and the answer is
+    checkpointed, so every frame the client already consumed is valid and
+    final. Best-effort, whole body guarded: the run's terminal status is
+    already committed when this runs, and an error escaping here would be
+    taken for a second failure of the run.
+    """
+    try:
+        undelivered = undelivered_paths(content)
+        await bridge.publish(
+            run_id,
+            "custom",
+            {
+                "type": DELIVERY_INCOMPLETE_EVENT_TYPE,
+                "run_id": run_id,
+                "message": message,
+                "undelivered_paths": undelivered[:MAX_DISCLOSED_UNDELIVERED_PATHS],
+                "undelivered_count": len(undelivered),
+            },
+        )
+    except Exception:
+        logger.error("Failed to publish delivery verdict for run %s", run_id, exc_info=True)
 
 
 def unavailable_delivery_response() -> dict[str, Any]:

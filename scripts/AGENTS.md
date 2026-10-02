@@ -1,42 +1,28 @@
-## Release Tooling Contracts
+## Release Notes
 
-The coordinated frontend version source is `frontend-hm/package.json`;
-`frontend/package.json` retains the upstream version. Product pnpm calls pass
-`--project frontend-hm --` to `pnpm.py`; its no-selector form is retained for
-the upstream Makefile. `frontend_env.py` migrates existing local UI settings
-or creates them from the new template, without overwriting either app's file.
-`verify_frontend_isolation.py` checks the pinned upstream tree and direct
-Hartmesh source inputs; default mode checks index and worktree, while
-`--revision HEAD` checks committed material in CI. It needs the pinned ancestor
-in Git history, and never updates the pin or the real index. The sync policy
-lives in `../docs/FRONTEND_ISOLATION.md`.
-
-`bump_version.sh` owns coordinated version updates, including regenerating the
-root `deer-flow` entry in `backend/uv.lock` with `uv lock`;
-`verify_versions.sh` validates all five fields without requiring `uv` in the CI
-gate. `release_tag_spellings.sh <version>` is the sole implementation of the
-registry-safe release spellings and emits `image_tag=...` plus
-`chart_oci_tag=...` lines suitable for `GITHUB_OUTPUT`. Both manual-only release
-workflows consume that helper: `release-manifest.yaml` resolves and records a
-completed four-image tag publish, while `sandbox-image-mirror.yaml` copies and
-verifies an operator-selected upstream digest into the distinct
-`<repo>-sandbox-base` cache. The tag-triggered container workflow is the sole
-publisher of the deployable `<repo>-sandbox` package. Keep publishing out of
-these local scripts and keep the two manual workflows dispatch-only.
-
-`verify_release_manifest.py` owns the strict, stdlib-only offline parser for
-release-manifest schema 2 and the embedded extension artifact-manifest shape.
-The release workflow may extract the manifest from the exact backend image, but
-must call this verifier rather than independently calculating or interpreting
-its digest. Missing/unknown fields, a wrong image/artifact/API/count tuple, or a
-wrong OCI provenance subject are fatal stable-code failures. The verifier is
-read-only and performs no network access.
-
-`verify_run_evidence_bundle.py` validates portable ZIP integrity offline using
-only stdlib under `python -I`. Keep its format, roots, paths, and bounds aligned
-with `run_evidence.py`; reject unknown versions/entries and report `not_signed`.
+Every HartMesh release entry in `CHANGELOG.md` includes a nonempty
+`### Schema changes` section describing the database changes relative to the
+previous release, or explicitly stating that there are none. Include migration
+revisions and upgrade behavior when the schema changes. `release_notes.py`
+extracts the exact version's entry, ignores headings inside fenced examples,
+and refuses missing, duplicate or incomplete entries. The release-manifest
+workflow validates notes before resolving artifacts and uses the entry for both
+new and existing GitHub Releases. Tests: `backend/tests/test_release_notes.py`.
 
 ## Service Startup Contracts
+
+Optional browser dependency detection reads the top-level `tools:` sequence
+without requiring `name` to be its first mapping key. Both indented and
+indentless lists are supported; nested option names and block-scalar text
+must not enable the browser extra. Keep the detector standard-library-only
+because it runs before dependency synchronization. Read UTF-8 config files
+with or without a leading BOM so the first section remains detectable.
+`setup-sandbox.sh` also strips the leading BOM and normalizes CRLF before selecting the image;
+keep its shell filter compatible with GNU and BSD sed.
+An Apple Container pull that succeeds on macOS must not fail the setup step
+just because Docker is absent. Keep the Docker pull when Docker is available,
+including after an Apple Container failure, and retain the final image-config
+note rather than exiting early on Apple Container success.
 
 The root `PORT` value configures Docker's published nginx ingress only; local
 orchestration pins Next.js to `3000`. Runtime commands launch from the already
@@ -44,9 +30,51 @@ synchronized environment with `uv run --no-sync`. Production Compose probes
 Gateway `/health`, and `deploy.sh` waits for all services before reporting
 success; failures print Compose status and recent Gateway logs.
 
-`check_tenant_namespaces.py` is the read-only Redis migration inventory. It
-requires `--dry-run`, bounds SCAN/key/channel counts, and reports only prefix
-counts—never keys, values, or credentials.
+`deploy.sh` never sources the repo-root `.env`; Compose reads it via
+`--env-file`, and shell exports outrank that file during interpolation (an
+exported-but-empty variable still wins). So `BETTER_AUTH_SECRET` and
+`DEER_FLOW_INTERNAL_AUTH_TOKEN` resolve shell → `.env` → persisted file under
+`DEER_FLOW_HOME` → freshly generated, and a `.env`-provided value is left
+unexported so Compose parses it itself. Whether `.env` provides one is
+Compose's answer, not a `KEY=VALUE` grep: Compose also accepts `KEY: VALUE`
+lines and interpolates `${VAR}` inside values, so the script renders a stub
+project whose only environment entry is `${KEY}` through
+`docker compose config` (same `--env-file`, stub on stdin, project directory
+`docker/`) and reads the value back; `""` means empty or unset and falls
+through to the persisted/generated secret. This works on every Compose v2
+(the README floor is 2.24; `config --environment` would need 2.28), and a
+failing probe stops the script rather than guessing. `read_dotenv_value`
+stays for the end-of-run summary only. Do not export a value the script read
+from `.env`: that shadows Compose's own dotenv parsing and re-creates the bug
+where `make up` replaced the operator's secret with a generated one.
+`backend/tests/test_deploy_dotenv_secrets.py` pins the order and the probe;
+its real-Compose cases run against the installed `docker` CLI and against any
+standalone binaries listed in `DEER_FLOW_TEST_COMPOSE_BINARIES`.
+
+`doctor.py` checks the config file the Gateway would load, not a fixed
+`<checkout>/config.yaml`. It mirrors how `serve.sh` hands the two
+config-location variables to the Gateway: `.env` values for
+`DEER_FLOW_CONFIG_PATH` / `DEER_FLOW_PROJECT_ROOT` override the shell (other
+keys stay shell-first), an unquoted leading `~` in them expands as `source`
+does (a quoted one stays literal), and an unset or empty
+`DEER_FLOW_PROJECT_ROOT` becomes the checkout. It then asks the harness
+(`AppConfig.resolve_config_path`) instead of re-implementing its order. An
+override the Gateway would reject (`DEER_FLOW_CONFIG_PATH` missing,
+`DEER_FLOW_PROJECT_ROOT` not a directory) fails `config.yaml found` with the
+Gateway's error, and the config-dependent checks skip. Any failure to import
+the harness is reported, never raised: doctor diagnoses broken environments.
+Pinned by `backend/tests/test_doctor.py::TestMainConfigResolution`.
+
+Root `make install` runs pre-commit through uv, so uv's tool bin directory
+need not be on `PATH`.
+
+`config-upgrade.sh` upgrades the file the Gateway loads by asking the harness
+(`AppConfig.resolve_config_path`) rather than copying its lookup order. It
+defaults `DEER_FLOW_PROJECT_ROOT` to the checkout, as `serve.sh` does, so
+`<checkout>/config.yaml` wins over a legacy `backend/config.yaml`. A missing
+`DEER_FLOW_CONFIG_PATH` or invalid project root is an error, never a fallback.
+Only "no config anywhere" creates `<checkout>/config.yaml` from the example.
+`backend/tests/test_config_version.py::test_config_upgrade_*` pins this.
 
 ## Shell Script Invocation Contract
 
@@ -56,6 +84,14 @@ Git Bash wrapper. Shell scripts that invoke sibling repository scripts must
 likewise prefix the target with `bash`. This keeps documented `make` commands
 working when a source archive, `core.fileMode=false`, or a non-POSIX filesystem
 does not preserve executable bits.
+
+Host-side pnpm calls must go through `scripts/pnpm.py`. With native Windows
+Python (`os.name == "nt"`), it checks `pnpm.cmd` before the generic `pnpm`
+lookup, which uses `PATH`/`PATHEXT` and may select an `.exe` or `.bat` in the
+same or an earlier PATH directory. If neither is found, it falls back to
+Corepack, checking `corepack.cmd` before `corepack`. POSIX Python (including
+MSYS/Cygwin Python) keeps the generic name first for each tool; the gate is
+based on Python's `os.name`, not the invoking shell.
 
 ## Public Skill Review Waivers
 
@@ -292,3 +328,7 @@ bounded, drop-oldest frame queue. WebSocket clients that request
 The legacy no-parameter protocol still base64-encodes frames into JSON at the
 Gateway boundary for backward compatibility. Unknown `frame_format` values
 receive a JSON error and close code 1008.
+
+The support bundle's `extensions_config.json` reader accepts UTF-8 with or
+without a leading BOM, matching the runtime loader. Preserve redaction and
+avoid flagging a valid BOM-prefixed file as a syntax error in triage output.

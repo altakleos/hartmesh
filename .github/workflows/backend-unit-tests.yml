@@ -2,7 +2,7 @@ name: Unit Tests
 
 on:
   push:
-    branches: [ 'main', '2.0.x-dev' ]
+    branches: [ 'main', '*-dev' ]
   pull_request:
     types: [opened, synchronize, reopened, ready_for_review]
 
@@ -103,19 +103,7 @@ jobs:
 
       - name: Install backend dependencies
         working-directory: backend
-        # The Phase 0 feasibility probe byte-verifies the exact optional SDK.
-        # Keep it out of the documented default install job above, but present
-        # before the full-suite step so `make test`'s same locked extra
-        # selection is a no-op and install failures stay separately attributed.
-        run: uv sync --group dev --extra postgres --extra opensandbox
-
-      - name: Qualify PostgreSQL invocation persistence
-        working-directory: backend
-        env:
-          DEERFLOW_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
-        # Keep this visible marker gate even though the full suite below repeats
-        # it: this step records PostgreSQL/Alembic identity and isolates failures.
-        run: PYTHONPATH=. uv run pytest -m postgres_contract -v -s
+        run: uv sync --group dev --extra postgres
 
       - name: Run unit tests of backend (shard ${{ matrix.shard }} of 4)
         working-directory: backend
@@ -125,8 +113,4 @@ jobs:
           # mapping those tests silently skip and the headline capability is never
           # exercised in CI.
           DEDUPE_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
-          # Atomic RunRow admission races use their own explicit gate. Keeping
-          # this mapping beside the dedupe gate makes any skip a CI failure of
-          # the required capability rather than a silently untested branch.
-          DEERFLOW_TEST_POSTGRES_URL: ${{ env.TEST_POSTGRES_URI }}
         run: make test-shard SPLITS=4 GROUP=${{ matrix.shard }}

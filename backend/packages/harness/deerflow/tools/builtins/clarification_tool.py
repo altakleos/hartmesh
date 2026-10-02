@@ -43,9 +43,8 @@ def ask_clarification_tool(
     - **Risky operations**: Destructive actions that need explicit confirmation (e.g., deleting files, modifying production)
     - **Suggestions**: You have a recommendation but want user approval before proceeding
 
-    The question is presented to the user and the tool ends the current invocation successfully.
-    A later response starts a new invocation on the same DeerFlow thread; the
-    invocation that asked is not suspended and resumed.
+    The execution will be interrupted and the question will be presented to the user.
+    Wait for the user's response before continuing.
 
     When to use ask_clarification:
     - You need information that wasn't provided in the user's request
@@ -70,7 +69,7 @@ def ask_clarification_tool(
     - For risky operations, ALWAYS ask for confirmation
     - If a skill provides a predefined field template, pass it through `fields`
       unchanged instead of redesigning it
-    - After calling this tool, the current invocation ends automatically
+    - After calling this tool, execution will be interrupted automatically
     - Do not call any other tool in the same turn as this one; sibling tool
       calls are dropped so they cannot run before the user answers
 

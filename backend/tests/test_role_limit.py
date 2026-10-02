@@ -50,18 +50,16 @@ def stores(tmp_path) -> Iterator[SimpleNamespace]:
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
     from deerflow.persistence.run import RunRepository
     from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
     asyncio.run(init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/role-limit.db", sqlite_dir=str(tmp_path)))
     session_factory = get_session_factory()
     assert session_factory is not None
-    tenant = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
     try:
         yield SimpleNamespace(
             users=SQLiteUserRepository(session_factory),
-            tokens=PersonalAccessTokenRepository(session_factory, tenant=tenant),
+            tokens=PersonalAccessTokenRepository(session_factory),
             schedules=ScheduledTaskRepository(session_factory),
-            runs=RunRepository(session_factory, tenant=tenant),
+            runs=RunRepository(session_factory),
             path=tmp_path / "role-limit.db",
         )
     finally:
@@ -95,8 +93,7 @@ async def _sign_in(stores: SimpleNamespace, user_id: str, *, claim_role: str) ->
 async def _seed_run(stores: SimpleNamespace, user_id: str, *, role: str | None = None) -> str:
     """A running run; ``role`` is the role sealed at its admission, unrecorded when ``None``."""
     run_id = str(uuid4())
-    sealed = None if role is None else {"user_id": user_id, "role": role}
-    await stores.runs.put(run_id, thread_id=str(uuid4()), user_id=user_id, status="running", created_at=datetime.now(UTC).isoformat(), principal_projection_json=sealed)
+    await stores.runs.put(run_id, thread_id=str(uuid4()), user_id=user_id, status="running", created_at=datetime.now(UTC).isoformat())
     return run_id
 
 
@@ -348,49 +345,6 @@ async def test_asked_to_it_cancels_every_covered_account_s_running_work_and_repo
     assert [(await stores.runs.get(run_id, user_id=None))["cancel_action"] for run_id in runs] == ["interrupt", "interrupt"]
     assert document["surfaces_unconfirmed"] == ["running_work"] and document["returncode"] == EXIT_UNCONFIRMED_RUNS
     assert document["surfaces"]["running_work"] == {**document["surfaces"]["running_work"], "action": "ended", "count": 2, "stopped_after_ms": None, "stopped_at": None, "role_read_by": []}
-
-
-@pytest.mark.anyio
-async def test_re_applied_with_the_flag_it_ends_only_work_still_carrying_the_role_it_took_away(stores) -> None:
-    """The deployer re-applies every pass; what the person starts as a user afterwards is theirs to finish."""
-    account = await stores.users.create_user(_account())
-    as_admin = await _seed_run(stores, str(account.id), role="admin")
-    as_user = await _seed_run(stores, str(account.id), role="user")
-    unrecorded = await _seed_run(stores, str(account.id))
-
-    document = await _command(stores, wait_seconds=0).run("limit-role", issuer=ISSUER, subject="sub-pat", role="user", end_running_work=True)
-
-    assert document["runs_found"] == 2 and document["surfaces"]["running_work"]["count"] == 2
-    assert (await stores.runs.get(as_admin, user_id=None))["cancel_action"] == "interrupt"
-    assert (await stores.runs.get(unrecorded, user_id=None))["cancel_action"] == "interrupt", "a run whose role is not recorded is not assumed harmless"
-    assert (await stores.runs.get(as_user, user_id=None)).get("cancel_action") is None
-    left = await _command(stores, wait_seconds=0).run("limit-role", issuer=ISSUER, subject="sub-pat", role="user")
-    assert left["surfaces"]["running_work"]["count"] == 2, "left alone, it counts the same runs"
-
-
-@pytest.mark.anyio
-async def test_asked_to_it_also_ends_a_run_admitted_above_the_limit_after_it_listed_the_runs(stores) -> None:
-    """A request that authenticated just before the limit committed can insert its run after the command looked.
-
-    Past the commit nothing new can be admitted above the limit, so looking
-    once more after the wait finds every such run.
-    """
-    account = await stores.users.create_user(_account())
-    early = await _seed_run(stores, str(account.id), role="admin")
-    late: list[str] = []
-    request_cancel = stores.runs.request_cancel_compat
-
-    async def _admitted_meanwhile(run_id: str, **kwargs):
-        if not late:
-            late.append(await _seed_run(stores, str(account.id), role="admin"))
-        return await request_cancel(run_id, **kwargs)
-
-    stores.runs.request_cancel_compat = _admitted_meanwhile
-    document = await _command(stores, wait_seconds=0).run("limit-role", issuer=ISSUER, subject="sub-pat", role="user", end_running_work=True)
-
-    assert late and (await stores.runs.get(late[0], user_id=None))["cancel_action"] == "interrupt"
-    assert document["runs_found"] == 2 and document["runs_unconfirmed"] == sorted([early, *late])
-    assert document["surfaces"]["running_work"]["count"] == 2
 
 
 @pytest.mark.anyio

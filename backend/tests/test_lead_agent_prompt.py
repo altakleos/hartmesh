@@ -6,6 +6,7 @@ from typing import cast
 import anyio
 import pytest
 
+from deerflow.agents.interaction_policy import RunInteractionMode, RunInteractionPolicy
 from deerflow.agents.lead_agent import prompt as prompt_module
 from deerflow.config.app_config import AppConfig
 from deerflow.config.subagents_config import CustomSubagentConfig, SubagentsAppConfig
@@ -103,43 +104,55 @@ def test_apply_prompt_template_includes_relative_path_guidance(monkeypatch):
 
     assert "Treat `/mnt/user-data/workspace` as your default current working directory" in prompt
     assert "`hello.txt`, `../uploads/data.csv`, and `../outputs/report.md`" in prompt
-    # The person's own files, kept across conversations, and how one is handed over from there.
-    assert "- User files: `/mnt/user-data/files`" in prompt
-    assert "deliverables still go to `/mnt/user-data/outputs`" in prompt
-    assert "copy it to `/mnt/user-data/outputs` and name the copy under `present`" in prompt
-    # The company's Shared area: readable, and not the agent's to publish into.
-    assert "- Shared: `/mnt/user-data/shared`" in prompt
-    assert "read-only" in prompt
-    assert "Share with everyone" in prompt
 
 
-@pytest.mark.parametrize(
-    ("sandbox", "named"),
-    [
-        (SimpleNamespace(mounts=[], use="deerflow.sandbox.local:LocalSandboxProvider"), True),
-        (SimpleNamespace(mounts=[], use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url=None), True),
-        (SimpleNamespace(mounts=[], use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url="http://provisioner:8002"), False),
-        (SimpleNamespace(mounts=[], use="deerflow.community.aio_sandbox:AioSandboxProvider", provisioner_url="http://provisioner:8002", thread_data_mounts=True), True),
-        (SimpleNamespace(mounts=[], use="deerflow.community.e2b_sandbox:E2BSandboxProvider"), False),
-    ],
-)
-def test_apply_prompt_template_names_user_files_only_where_the_sandbox_mounts_them(monkeypatch, sandbox, named):
-    """A remote provider mounts no host directory, so the agent is not sent to ``ls`` one that is not there."""
+def test_apply_prompt_template_uses_non_interactive_clarification_guidance(monkeypatch):
     config = SimpleNamespace(
-        sandbox=sandbox,
+        sandbox=SimpleNamespace(mounts=[]),
         skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, mode="middleware", injection_enabled=False),
+        acp_agents={},
     )
-    monkeypatch.setattr("deerflow.config.get_app_config", lambda: config)
-    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
+    policy = RunInteractionPolicy(RunInteractionMode.SCHEDULED)
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
     monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
     monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
-    monkeypatch.setattr(prompt_module, "_get_memory_context", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_custom_mounts_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_memory_tool_section", lambda **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template(app_config=config, interaction_policy=policy)
+
+    assert "There is no human available to answer a synchronous question" in prompt
+    assert "MUST call ask_clarification" not in prompt
+    assert "Do not wait for a human response" in prompt
+
+
+def test_apply_prompt_template_preserves_interactive_clarification_guidance(monkeypatch):
+    config = SimpleNamespace(
+        sandbox=SimpleNamespace(mounts=[]),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, mode="middleware", injection_enabled=False),
+        acp_agents={},
+    )
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
+    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_custom_mounts_section", lambda **kwargs: "")
+    monkeypatch.setattr(prompt_module, "_build_memory_tool_section", lambda **kwargs: "")
 
-    prompt = prompt_module.apply_prompt_template()
+    prompt = prompt_module.apply_prompt_template(app_config=config)
 
-    assert ("/mnt/user-data/files" in prompt) is named
-    assert ("/mnt/user-data/shared" in prompt) is named, "Shared is the same host directory story as the person's own files"
+    assert "**WORKFLOW PRIORITY: CLARIFY → PLAN → ACT**" in prompt
+    assert "DO NOT call any other tool in the same turn as ask_clarification" in prompt
+    assert "❌ DO NOT make assumptions when information is missing - ALWAYS ask" in prompt
+    assert '**Example:**\nUser: "Deploy the application"' in prompt
+    assert 'User: "staging"\nYou: "Deploying to staging..." [proceed]' in prompt
 
 
 def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(monkeypatch):
@@ -166,6 +179,7 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
 
     tool_prompt = prompt_module.apply_prompt_template(app_config=tool_config)
+    stateless_agent_prompt = prompt_module.apply_prompt_template(app_config=tool_config, memory_enabled=False)
     middleware_prompt = prompt_module.apply_prompt_template(app_config=middleware_config)
 
     assert "<memory_tool_system>" in tool_prompt
@@ -173,6 +187,7 @@ def test_apply_prompt_template_includes_memory_tool_guidance_only_in_tool_mode(m
     assert "memory_add" in tool_prompt
     assert "agent facts are not injected automatically" in tool_prompt
     assert "When present, the injected <memory> block contains only global user and history summaries" in tool_prompt
+    assert "<memory_tool_system>" not in stateless_agent_prompt
     assert "<memory_tool_system>" not in middleware_prompt
 
 
@@ -308,6 +323,34 @@ def test_apply_prompt_template_clamps_subagent_limits_to_enforced_bounds(monkeyp
     assert "MAXIMUM 50 `task` CALLS PER RUN" in prompt
 
 
+def test_apply_prompt_template_uses_configured_subagent_total_when_unset(monkeypatch):
+    explicit_config = SimpleNamespace(
+        sandbox=SimpleNamespace(
+            use="deerflow.sandbox.local:LocalSandboxProvider",
+            allow_host_bash=False,
+            mounts=[],
+        ),
+        subagents=SubagentsAppConfig(max_total_per_run=7),
+        subagent_runtime=SimpleNamespace(max_running=4),
+        skills=SimpleNamespace(container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage", get_skills_path=lambda: Path("/tmp/skills")),
+        skill_evolution=SimpleNamespace(enabled=False),
+        tool_search=SimpleNamespace(enabled=False),
+        memory=SimpleNamespace(enabled=False, injection_enabled=True, max_injection_tokens=2000),
+        acp_agents={},
+    )
+
+    monkeypatch.setattr(prompt_module, "get_or_new_skill_storage", lambda app_config=None: SimpleNamespace(load_skills=lambda enabled_only=True: []))
+    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
+
+    prompt = prompt_module.apply_prompt_template(
+        subagent_enabled=True,
+        max_total_subagents=None,
+        app_config=explicit_config,
+    )
+
+    assert "MAXIMUM 7 `task` CALLS PER RUN" in prompt
+
+
 def test_apply_prompt_template_prefers_startup_execution_capacity_after_reload(monkeypatch):
     explicit_config = SimpleNamespace(
         sandbox=SimpleNamespace(
@@ -411,7 +454,7 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     def fail_get_memory_config():
         raise AssertionError("ambient get_memory_config() must not be used when app_config is explicit")
 
-    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None, query=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
         return "remember this"
@@ -431,25 +474,25 @@ def test_get_memory_context_uses_explicit_app_config_without_global_config(monke
     }
 
 
-def test_get_memory_context_propagates_fail_closed_manager_error(monkeypatch):
-    from deerflow.agents.memory import MemoryManagerError
+def test_get_memory_context_propagates_required_read_error_without_backend_config(monkeypatch):
+    from deerflow.agents.memory import MemoryReadError
 
     explicit_config = SimpleNamespace(
         memory=SimpleNamespace(
             enabled=True,
             injection_enabled=True,
-            backend_config={"failure_policy": {"read": "fail_closed"}},
+            backend_config={},
         ),
     )
-    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryManagerError("down")))
+    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryReadError("down")))
     monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
     monkeypatch.setattr("deerflow.runtime.user_context.get_effective_user_id", lambda: "user-1")
 
-    with pytest.raises(MemoryManagerError, match="down"):
+    with pytest.raises(MemoryReadError, match="down"):
         prompt_module._get_memory_context("agent-a", app_config=explicit_config)
 
 
-def test_get_memory_context_swallows_manager_error_without_fail_closed(monkeypatch):
+def test_get_memory_context_swallows_ordinary_manager_error(monkeypatch):
     from deerflow.agents.memory import MemoryManagerError
 
     explicit_config = SimpleNamespace(
@@ -462,6 +505,27 @@ def test_get_memory_context_swallows_manager_error_without_fail_closed(monkeypat
     assert prompt_module._get_memory_context("agent-a", app_config=explicit_config) == ""
 
 
+def test_get_memory_context_preserves_legacy_fail_closed_contract(monkeypatch):
+    from deerflow.agents.memory import MemoryManagerError
+
+    explicit_config = SimpleNamespace(
+        memory=SimpleNamespace(
+            enabled=True,
+            injection_enabled=True,
+            backend_config={"failure_policy": {"read": "fail_closed"}},
+        ),
+    )
+    manager = SimpleNamespace(get_context=lambda *args, **kwargs: (_ for _ in ()).throw(MemoryManagerError("down")))
+    monkeypatch.setattr("deerflow.agents.memory.get_memory_manager", lambda: manager)
+
+    with pytest.raises(MemoryManagerError, match="down"):
+        prompt_module._get_memory_context(
+            "agent-a",
+            app_config=explicit_config,
+            user_id="user-1",
+        )
+
+
 def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
     explicit_config = SimpleNamespace(
         memory=SimpleNamespace(enabled=True, injection_enabled=True),
@@ -471,7 +535,7 @@ def test_get_memory_context_prefers_explicit_user_id(monkeypatch):
     def fail_resolve_runtime_user_id(runtime):
         raise AssertionError("explicit user_id must bypass ambient identity resolution")
 
-    def fake_get_context(user_id, *, agent_name=None, thread_id=None):
+    def fake_get_context(user_id, *, agent_name=None, thread_id=None, query=None):
         captured["agent_name"] = agent_name
         captured["user_id"] = user_id
         return "remember this"
@@ -671,7 +735,7 @@ def test_system_prompt_template_requires_virtual_paths_for_output_images():
 
     assert "![Chart](/mnt/user-data/outputs/chart.png)" in template
     assert "Never use a bare or workspace-relative filename" in template
-    assert "Present the image before referencing it (under the writing command's `present`, or with `present_files`)" in template
+    assert "Call `present_files` for the image before referencing it" in template
 
 
 def test_system_prompt_template_preserves_placeholders():
@@ -691,6 +755,7 @@ def test_system_prompt_template_preserves_placeholders():
         "{acp_section}",
         "{subagent_reminder}",
         "{skill_first_reminder}",
+        "{workspace_scripts_guidance}",
     ):
         assert ph in template, f"placeholder {ph} accidentally removed"
 
@@ -739,52 +804,3 @@ def test_apply_prompt_template_deferred_path_mentions_describe_skill(monkeypatch
     assert "describe_skill(name)" in prompt
     # Must NOT contain the legacy wording
     assert "Always load the relevant skill" not in prompt
-
-
-def _prompt_for(monkeypatch, app_config, **kwargs) -> str:
-    monkeypatch.setattr(prompt_module, "_get_enabled_skills", lambda: [])
-    monkeypatch.setattr(prompt_module, "get_skills_prompt_section", lambda *args, **kwargs: "")
-    monkeypatch.setattr(prompt_module, "get_deferred_tools_prompt_section", lambda **kwargs: "")
-    monkeypatch.setattr(prompt_module, "_build_acp_section", lambda **kwargs: "")
-    monkeypatch.setattr(prompt_module, "_build_custom_mounts_section", lambda **kwargs: "")
-    monkeypatch.setattr(prompt_module, "_build_user_files_section", lambda **kwargs: "")
-    monkeypatch.setattr(prompt_module, "_build_memory_tool_section", lambda **kwargs: "")
-    monkeypatch.setattr(prompt_module, "get_agent_soul", lambda agent_name=None, **kwargs: "")
-    return prompt_module.apply_prompt_template(app_config=app_config, **kwargs)
-
-
-def test_the_assistant_answers_to_the_product_name(monkeypatch):
-    """Asked what it is, the default agent names the product the person is using, not the framework under it."""
-    from deerflow.config.ui_config import UiConfig
-
-    named = _prompt_for(monkeypatch, SimpleNamespace(ui=UiConfig(product_name="Acme Assist")))
-    assert "You are Acme Assist," in named
-    assert "visible and editable in Acme Assist)" in named
-    assert "DeerFlow 2.0" not in named
-    assert "DeerFlow UI" not in named
-    # The tenant's product is not described as the framework's tagline.
-    assert "You are Acme Assist, an AI assistant." in named
-    assert "open-source super agent" not in named
-
-    assert "You are HartMesh," in _prompt_for(monkeypatch, SimpleNamespace(ui=UiConfig()))
-
-
-def test_a_custom_agent_keeps_its_own_name(monkeypatch):
-    from deerflow.config.ui_config import UiConfig
-
-    prompt = _prompt_for(monkeypatch, SimpleNamespace(ui=UiConfig(product_name="Acme Assist")), agent_name="bookkeeper")
-    assert "You are bookkeeper," in prompt
-    assert "visible and editable in Acme Assist)" in prompt
-
-
-def test_legacy_skill_section_says_a_skill_file_is_read_on_its_own():
-    """Calls chosen beside a skill's first read are not run (SkillToolPolicyMiddleware); the step says so."""
-    section = prompt_module._get_cached_skills_prompt_section(
-        (("business-report", "Monthly business review from an export.", "public", "/mnt/skills/public/business-report/SKILL.md"),),
-        (),
-        None,
-        "/mnt/skills",
-        "",
-    )
-
-    assert "on its own: other calls in the same message are not run" in " ".join(section.split())

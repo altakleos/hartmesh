@@ -15,7 +15,6 @@ from deerflow.extensions import (
     reset_runtime_diagnostics,
 )
 from deerflow.extensions.registry import ExtensionRegistry
-from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 @pytest.fixture(autouse=True)
@@ -45,9 +44,9 @@ def _patch_runtime_resources(monkeypatch, events: list[str]) -> None:
     async def close_engine() -> None:
         events.append("engine_close")
 
-    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", lambda _config, **_kwargs: _resource(object()))
+    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", lambda _config: _resource(object()))
     monkeypatch.setattr("deerflow.runtime.make_store", lambda _config: _resource(object()))
-    monkeypatch.setattr("deerflow.runtime.checkpointer.async_provider.make_checkpointer", lambda _config, **_kwargs: _resource(object()))
+    monkeypatch.setattr("deerflow.runtime.checkpointer.async_provider.make_checkpointer", lambda _config: _resource(object()))
     monkeypatch.setattr("deerflow.persistence.engine.init_engine_from_config", init_engine)
     monkeypatch.setattr("deerflow.persistence.engine.close_engine", close_engine)
     monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", lambda: None)
@@ -66,15 +65,13 @@ async def test_runtime_owns_engine_cleanup_before_initialization(monkeypatch):
     async def close_engine() -> None:
         events.append("engine_close")
 
-    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", lambda _config, **_kwargs: _resource(object()))
+    monkeypatch.setattr("deerflow.runtime.make_stream_bridge", lambda _config: _resource(object()))
     monkeypatch.setattr("deerflow.persistence.engine.init_engine_from_config", fail_engine_init)
     monkeypatch.setattr("deerflow.persistence.engine.close_engine", close_engine)
 
-    app = FastAPI()
-    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
     with pytest.raises(RuntimeError, match="schema bootstrap failed"):
         async with langgraph_runtime(
-            app,
+            FastAPI(),
             SimpleNamespace(database=_database_config()),
         ):
             pytest.fail("runtime must not yield")
@@ -120,12 +117,11 @@ async def test_later_startup_failure_stops_same_snapshot_and_appends_diagnostics
     _patch_runtime_resources(monkeypatch, events)
     monkeypatch.setattr(
         "deerflow.persistence.thread_meta.make_thread_store",
-        lambda _sf, _store, *, run_store: (_ for _ in ()).throw(RuntimeError("thread store failed")),
+        lambda _sf, _store: (_ for _ in ()).throw(RuntimeError("thread store failed")),
     )
 
     app = FastAPI()
     app.state.extensions = snapshot
-    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
     live_diagnostics = initialize_runtime_diagnostics([])
     app.state.extension_diagnostics = live_diagnostics
 
@@ -184,7 +180,6 @@ async def test_cancellation_during_service_start_propagates_after_cleanup(monkey
     _patch_runtime_resources(monkeypatch, events)
     app = FastAPI()
     app.state.extensions = registry.build()
-    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
 
     async def run_runtime() -> None:
         async with langgraph_runtime(
@@ -196,6 +191,74 @@ async def test_cancellation_during_service_start_propagates_after_cleanup(monkey
     task = asyncio.create_task(run_runtime())
     await asyncio.wait_for(blocking_start_entered.wait(), timeout=1.0)
     task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert events == [
+        "start:first",
+        "start:blocking",
+        "stop:blocking",
+        "stop:first",
+        "engine_close",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_host_cancellation_does_not_abandon_extension_service_shutdown(monkeypatch):
+    from app.gateway.deps import langgraph_runtime
+
+    events: list[str] = []
+    blocking_stop_entered = asyncio.Event()
+    allow_blocking_stop = asyncio.Event()
+
+    class _Service:
+        def __init__(self, name: str, *, block_stop: bool = False) -> None:
+            self.name = name
+            self.block_stop = block_stop
+
+        async def start(self, _deps) -> None:
+            events.append(f"start:{self.name}")
+
+        async def stop(self) -> None:
+            events.append(f"stop:{self.name}")
+            if self.block_stop:
+                blocking_stop_entered.set()
+                await allow_blocking_stop.wait()
+
+    registry = ExtensionRegistry()
+    with registry.attributed_to("first:install"):
+        registry.service(_Service("first"))
+    with registry.attributed_to("blocking:install"):
+        registry.service(_Service("blocking", block_stop=True))
+
+    _patch_runtime_resources(monkeypatch, events)
+    monkeypatch.setattr(
+        "deerflow.persistence.thread_meta.make_thread_store",
+        lambda _sf, _store: (_ for _ in ()).throw(RuntimeError("later startup failure")),
+    )
+    app = FastAPI()
+    app.state.extensions = registry.build()
+
+    async def run_runtime() -> None:
+        async with langgraph_runtime(
+            app,
+            SimpleNamespace(database=_database_config()),
+        ):
+            pytest.fail("runtime must not yield")
+
+    task = asyncio.create_task(run_runtime())
+    await asyncio.wait_for(blocking_stop_entered.wait(), timeout=1.0)
+
+    task.cancel()
+    await asyncio.sleep(0)
+    task.cancel()
+    for _ in range(5):
+        await asyncio.sleep(0)
+
+    assert not task.done(), "host cancellation abandoned extension shutdown"
+    assert "stop:first" not in events
+
+    allow_blocking_stop.set()
     with pytest.raises(asyncio.CancelledError):
         await task
 

@@ -29,8 +29,7 @@ with ``--subjects`` it means some identity was refused or failed, below);
 ``2`` means it did what was asked but could not confirm all of it: a run it
 cancelled had not stopped (named under ``runs_unconfirmed``), or a surface
 had not been confirmed stopped (named under ``surfaces_unconfirmed`` -- a
-run's ``running_work``, or the connections a Gateway process had not yet
-recorded closing).
+run's ``running_work``, or something it could not hold or end).
 A malformed command line is a refusal like any other: a document and ``1``,
 never argparse's usage text and the ``2`` that would read as "unconfirmed".
 A caller that runs this through a remote runner may not see its exit status,
@@ -44,24 +43,22 @@ request (``app.gateway.auth.mode.require_live_account``, ``authenticate_pat``),
 the browser WebSocket, the LangGraph auth hook, an internal caller's owner
 header (``owner_is_refused``), and every process-internal launch for the
 owner -- a due scheduled task, a channel message, an MCP task notification
-(``services._principal_projection_for_intent``). Sign-in is refused before
-an account is created or returned (``user_provisioning``), and a run that
-was admitted just before the refusal committed is refused as it starts
-(``services._owner_refusal``). On top of the derived refusal the command ends
+(``services._refuse_launch_for_refused_owner``). Sign-in is refused before
+an account is created or returned (``user_provisioning``). A run that a
+request authenticated just before the refusal committed was able to start is
+one the command's second look cancels (below). On top of the derived refusal
+the command ends
 the sessions (``token_version``) and revokes the personal access tokens of
 every account the identity covers, so ``enable`` cannot revive them.
 
 A connection that authenticated once never reads the refusal again: an SSE
-stream, a streaming download, the browser WebSocket. Every Gateway process
-holds each one under its owner (``app.gateway.owner_connections``) and
-closes what a refused owner holds (``app.gateway.refusal_watch``); the
-command asks every live process to look (``refusal_checks``), waits -- while
-the runs unwind, within the same ``--wait-seconds`` -- for each to record
-that it did and what it ended, and reports ``websockets``, ``sse_streams``
-and ``downloads`` from that record. A process beats even when it cannot
-look, so one that is alive and has not recorded its look when the wait runs
-out leaves those surfaces unconfirmed; only one that has not beaten for 90 s
-is gone, holding nothing.
+stream, a streaming download, the browser WebSocket. This command does not
+close them. A run's stream ends because the run is cancelled (below); a
+download already in progress completes; a WebSocket stays open until its
+client closes it or the Gateway restarts. The command is written to take a
+record of what each Gateway process closed and kept (``sweeps``), and
+reports those surfaces only when it is given one; this build has none, so
+they are not in the document.
 
 It also ends the account's running work. The refusal stops the next request
 and the next launch, but a run already executing was the one path left: a
@@ -92,7 +89,7 @@ invites them again, or gives a departed person's address to someone new,
 sends a *new* subject carrying an address an old account still holds; every
 sign-in of theirs is refused and no deployer command could change it. This
 one gives up a turned-off account's address, recording what it held
-(``users.email_released_from``, migration 0041), and leaves everything else
+(``users.email_released_from``, migration ``0027_account_access``), and leaves everything else
 about the account alone.
 
 What ``limit-role`` is for: demoting an administrator at the provider reaches
@@ -100,7 +97,7 @@ nothing here until they sign in again, and the provider can be restored from
 a backup whose claim says ``admin`` -- so a demotion the next sign-in could
 override would hand the role back between the deployer's passes. The limit
 is one row in ``role_limits`` keyed by ``(issuer, subject)`` (migration
-0043), valid before an account exists and covering every account the
+``0027_account_access``), valid before an account exists and covering every account the
 identity holds. Every read of an account derives its role from it, the way
 the turned-off state is derived, so every path that reads the stored role --
 a session's next request and what it may see of other people's runs, a run a
@@ -133,41 +130,35 @@ The ``disable`` and role-limit documents say when each surface stopped:
 ``surfaces`` one entry per surface with its ``action``, its ``count``,
 ``stopped_after_ms`` on a monotonic clock from the command's start, and
 ``stopped_at``, that offset added to ``started_at``. A surface refused or
-limited at its next use reports the commit. A surface a Gateway process
-ends reports when every live process had confirmed (``confirmed_by:
-gateway_record``), with how many each could not confirm ended
-(``not_ended``). What a process keeps for a person between requests
-(``app.gateway.retained_state``: sandboxes, pooled MCP sessions, browsers,
-queued memory updates) is confirmed by a second check once the runs are
-over, because a run that is ending parks its sandbox as it goes; a surface
-some process has no way to end at all is ``not_reached``. ``running_work``
-reports when the runs' sandboxes were confirmed stopped (``confirmed_by:
-sandbox_gone``), or, where they were not, only when the run rows went
-terminal (``run_status``). A surface the command could not confirm is named
-under ``surfaces_unconfirmed`` and makes the exit status 2;
-``runs_unconfirmed`` keeps naming only runs. Durable work a run started
-outside itself is stopped through the request a person's own cancel makes,
-attributed to the deployer: ``mcp_tasks`` (cancelled remotely by a Gateway's
-task loop, ``confirmed_by: task_status``) and ``subagent_batches`` (applied at
-once, ``batch_status``), looked for again once the runs are over. A channel
+limited at its next use reports the commit. ``running_work`` reports when
+the run rows went terminal (``confirmed_by: run_status``). A surface the
+command could not confirm is named under ``surfaces_unconfirmed`` and makes
+the exit status 2; ``runs_unconfirmed`` keeps naming only runs. A channel
 message is refused at its next use (``channel_ingress``), before any work is
 done for the person.
+
+What the document does not cover is not reported as done. A surface is in
+the document only when the command was given the store that lets it look:
+what a Gateway process keeps for a person between requests (a parked
+sandbox, a pooled MCP session, a browser, a queued memory update), a
+subagent batch, and a channel message waiting to be processed are not
+examined in this build and are absent from ``surfaces``. A parked sandbox
+is stopped by its idle timeout. A background MCP task the person started
+keeps running at its remote server; cancel it there if that matters.
 
 Rejoining revives nothing. ``disable`` holds what could start work for the
 person again -- every covered account's active schedules, paused, and its
 connected channel bindings, which then route nothing -- and names them under
 ``held`` (``schedules``, ``channel_bindings``). What it holds is recorded for
-the identity (``identity_holds``, migration 0047) before it is acted on, so a
+the identity (``identity_holds``, migration ``0027_account_access``) before it is acted on, so a
 command stopped in between leaves a record a re-run completes. It also ends
 the work waiting to run for them, which would otherwise run once they are
 enabled again: queued scheduled occurrences, manual triggers included
-(``scheduled_occurrences``), task notifications waiting to launch or to be
-retried (``mcp_task_notifications``), and channel messages still waiting to
-be processed, dead letters included (``channel_receipts``). A launch already
-in flight is refused for its owner (``OwnerRefusedLaunchError``) and ends the
-same way instead of being retried, and a schedule's pause survives the
-scheduler's bookkeeping after it. Both looks do this, the second once the runs
-and tasks are over. After ``enable`` the held schedules and bindings stay off
+(``scheduled_occurrences``). A launch already in flight is refused for its
+owner (``OwnerRefusedLaunchError``) and ends the same way instead of being
+retried, and a schedule's pause survives the scheduler's bookkeeping after
+it. Both looks do this, the second once the runs are over. After ``enable``
+the held schedules and bindings stay off
 until their owner turns them on; ``enable --restore-held`` turns back on
 exactly what the record names and nothing the owner paused themselves, each
 schedule at its next occurrence from now (a ``once`` schedule whose time
@@ -190,8 +181,7 @@ which is a batch of one -- and ``totals`` across them. An identity the
 command refuses or cannot finish is its own entry (``refused`` or
 ``failed``, with ``error``) and does not stop the others; a fault in a step
 they share, such as the one wait, fails every identity it left unfinished,
-each still with its entry. The run wait stops ``SECOND_LOOK_RESERVE_SECONDS``
-short of the deadline, so one person's slow run leaves that person
+each still with its entry. One person's slow run leaves that person
 unconfirmed, not everyone. The exit status is the worst: 1 if some identity
 was refused or failed, which here means *some*, not that nothing changed;
 else 2 if any was unconfirmed; else 0.
@@ -203,7 +193,6 @@ import argparse
 import asyncio
 import json
 import logging
-import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -212,11 +201,20 @@ from typing import Any
 
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-from app.gateway.retained_state import RETAINED_SURFACES
 from deerflow.persistence.user.access import LIMIT_ROLES, issuer_key, limited_role
-from deerflow.runtime.owner_holdings import ANY_OWNER
 
 logger = logging.getLogger(__name__)
+
+#: What a Gateway process keeps for a person between requests. Reported only
+#: where a process record exists (``sweeps``); this build runs without one, so
+#: these surfaces end with the runs that hold them and are not confirmed here.
+RETAINED_SURFACES: tuple[str, ...] = ("sandboxes", "mcp_sessions", "browsers", "memory_updates")
+
+#: The owner a process records for what it could not attribute to an account.
+ANY_OWNER = "*"
+
+#: How long a Gateway process counts as live after its last beat.
+LIVE_WINDOW_SECONDS = 90.0
 
 COMMANDS = ("list", "disable", "enable", "end-sessions", "release-email", "limit-role", "lift-role-limit")
 
@@ -324,14 +322,10 @@ CONNECTION_SURFACES = ("websockets", "sse_streams", "downloads")
 #: out remotely by a Gateway's task loop. A batch's is applied to its rows at
 #: once, and its stop time is also when every live process confirmed it had
 #: stopped the items it was executing (``app.gateway.durable_work``).
-CONFIRMED_BY_TASK_STATUS = "task_status"
 CONFIRMED_BY_BATCH_STATUS = "batch_status"
 
 #: What the Gateway processes end of the durable work, at their look.
 DURABLE_PROCESS_SURFACES = ("subagent_batches",)
-
-#: The cancellation reason a durable MCP task records when ``disable`` stops it.
-MCP_TASK_CANCEL_REASON = "account_disabled"
 
 #: What a cancelled subagent batch's items say, instead of "Cancelled by user".
 BATCH_CANCEL_REASON = "Cancelled because the account was turned off"
@@ -353,7 +347,7 @@ HELD_SURFACES = {"schedules": "schedule", "channel_bindings": "channel_binding"}
 #: it runs once they are enabled again: queued scheduled occurrences (manual
 #: triggers included), task notifications, and channel messages still waiting
 #: to be processed (dead letters included).
-QUEUED_WORK_SURFACES = ("scheduled_occurrences", "mcp_task_notifications", "channel_receipts")
+QUEUED_WORK_SURFACES = ("scheduled_occurrences", "channel_receipts")
 
 #: What an ended occurrence and channel message say.
 SCHEDULED_OCCURRENCE_ENDED_ERROR = "the owner's account was turned off"
@@ -384,11 +378,8 @@ def _sealed_role_above(row: dict[str, Any], limit: str) -> bool:
 
 @dataclass
 class _DurableWork:
-    """The MCP tasks and subagent batches ``disable`` asked to stop, by id and owner, across both of its looks."""
+    """The subagent batches ``disable`` asked to stop, by id and owner, across both of its looks."""
 
-    tasks: dict[str, str] = field(default_factory=dict)
-    tasks_ended: set[str] = field(default_factory=set)
-    tasks_stopped_ms: int | None = None
     batches: dict[str, str] = field(default_factory=dict)
     batches_ended: set[str] = field(default_factory=set)
     batches_stopped_ms: int | None = None
@@ -647,19 +638,15 @@ class AccountsCommand:
         setup_opens_without_admin: bool = False,
         sweeps: Any | None = None,
         live_window_seconds: float | None = None,
-        mcp_tasks: Any | None = None,
         batches: Any | None = None,
         channel_connections: Any | None = None,
         receipts: Any | None = None,
     ) -> None:
-        from app.gateway.refusal_watch import LIVE_WINDOW_SECONDS
-
         self._users = users
         self._tokens = tokens
         self._schedules = schedules
         self._runs = runs
         self._sweeps = sweeps
-        self._mcp_tasks = mcp_tasks
         self._batches = batches
         self._channel_connections = channel_connections
         self._receipts = receipts
@@ -888,7 +875,7 @@ class AccountsCommand:
         # ended. The same goes for a batch it accepted or a task it submitted.
         await _each(covered, lambda state: self._end_durable_work(state.accounts, state.work, state.clock))
         retained_check = await self._sweeps.request_check() if self._sweeps is not None else None
-        retained, _ = await _together(self._await_processes(retained_check, clock), self._wait_for_tasks([(state.work, state.clock) for state in covered if state.failure is None]))
+        retained = await self._await_processes(retained_check, clock)
         await _each(covered, lambda state: self._report_processes(retained, check, state.accounts, state.clock, RETAINED_SURFACES + DURABLE_PROCESS_SURFACES))
         await _each(covered, self._disable_finish)
 
@@ -1006,7 +993,7 @@ class AccountsCommand:
     @staticmethod
     def _surfaces_note(clock: SurfaceClock) -> str:
         """What the unconfirmed process surfaces mean, saying only what the processes' record showed."""
-        entries = {name: clock.surfaces[name] for name in clock.unconfirmed if name not in ("running_work", "mcp_tasks", "subagent_batches", *HELD_SURFACES, *QUEUED_WORK_SURFACES)}
+        entries = {name: clock.surfaces[name] for name in clock.unconfirmed if name not in ("running_work", "subagent_batches", *HELD_SURFACES, *QUEUED_WORK_SURFACES)}
         note = ""
         if any(entry.get("processes_unconfirmed") for entry in entries.values()):
             note += (
@@ -1039,17 +1026,6 @@ class AccountsCommand:
         not_ended = [name for name in QUEUED_WORK_SURFACES if name in clock.unconfirmed]
         if not_ended:
             note += f"; the work waiting to run under {', '.join(not_ended)} could not be ended and may run once the person is enabled again; re-run this command to try again"
-        tasks = clock.surfaces.get("mcp_tasks", {})
-        if "mcp_tasks" in clock.unconfirmed and tasks.get("action") == ACTION_NOT_REACHED:
-            note += (
-                "; mcp_tasks is `not_reached`: no live Gateway process runs the task loop that carries a cancellation out at the remote server (`mcp_tasks.enabled` is off), "
-                "so the tasks counted under `not_ended` keep running remotely, and re-running this command will not change that"
-            )
-        elif "mcp_tasks" in clock.unconfirmed:
-            note += (
-                "; the MCP tasks counted under `not_ended` were asked to stop, but a Gateway's task loop had not yet had the remote server cancel them when the wait ran out "
-                "(the server may be unreachable, or no Gateway process is running); re-running this command asks the task loop to try again now"
-            )
         if "subagent_batches" in clock.unconfirmed:
             note += (
                 "; a subagent batch counted under `not_ended` could not be cancelled, or a batch item a Gateway was executing did not stop, "
@@ -1127,7 +1103,7 @@ class AccountsCommand:
                 held.failed["channel_bindings"].add(CONNECT_CODES_TARGET)
             else:
                 held.failed["channel_bindings"].discard(CONNECT_CODES_TARGET)
-        for surface in QUEUED_WORK_SURFACES:
+        for surface in self._queued_work_surfaces():
             try:
                 ended, left = await self._end_queued_work(surface, ids, now=now) if ids else (0, 0)
             except Exception as exc:  # noqa: BLE001 - one queue that fails must not leave the others waiting
@@ -1144,6 +1120,16 @@ class AccountsCommand:
             if surface in changed or surface not in held.at_ms:
                 held.at_ms[surface] = looked_at
 
+    def _queued_work_surfaces(self) -> tuple[str, ...]:
+        """The waiting-work surfaces this command was given a store for.
+
+        A surface it has no store for is not looked at, so it is not reported:
+        an ``ended`` with a count of 0 would read as a confirmation that
+        nothing was waiting there.
+        """
+        reachable = {"scheduled_occurrences": self._schedules, "channel_receipts": self._receipts}
+        return tuple(surface for surface in QUEUED_WORK_SURFACES if reachable.get(surface) is not None)
+
     async def _end_queued_work(self, surface: str, user_ids: list[str], *, now: datetime) -> tuple[int, int]:
         """End what waits under ``surface`` to run for these accounts; returns how many ended, and how many a Gateway still has in hand."""
         if surface == "scheduled_occurrences":
@@ -1151,14 +1137,6 @@ class AccountsCommand:
                 return 0, 0
             ended = await self._schedules.end_queued_occurrences(user_ids, error=SCHEDULED_OCCURRENCE_ENDED_ERROR, now=now)
             return ended, await self._schedules.count_launching_occurrences(user_ids)
-        if surface == "mcp_task_notifications":
-            if self._mcp_tasks is None:
-                return 0, 0
-            from app.mcp_tasks.service import NOTIFICATION_OWNER_REFUSED_ERROR
-
-            digest = self._mcp_tasks.tenant.digest
-            ended = await self._mcp_tasks.end_waiting_notifications(user_ids, error=NOTIFICATION_OWNER_REFUSED_ERROR, tenant_digest=digest)
-            return ended, await self._mcp_tasks.count_waiting_notifications(user_ids, tenant_digest=digest)
         if self._receipts is None:
             return 0, 0
         ended = await self._receipts.end_for_owners(user_ids, outcome_code=CHANNEL_RECEIPT_OWNER_REFUSED)
@@ -1174,7 +1152,7 @@ class AccountsCommand:
                 clock.not_stopped(surface, ACTION_HELD, len(document[surface]), unconfirmed=True, not_ended=len(held.failed[surface]), **facts)
             else:
                 clock.stopped(surface, ACTION_HELD, len(document[surface]), at_ms=held.at_ms.get(surface, committed), not_ended=0, **facts)
-        for surface in QUEUED_WORK_SURFACES:
+        for surface in self._queued_work_surfaces():
             # ``not_ended``: what a Gateway still had in hand at the last look,
             # whose own path ends it once it reads the refusal; a re-run sees.
             if surface in held.ended_failed or held.left[surface]:
@@ -1184,14 +1162,13 @@ class AccountsCommand:
         return document
 
     async def _end_durable_work(self, accounts: list[User], work: _DurableWork, clock: SurfaceClock) -> None:
-        """Ask each active MCP task and subagent batch of these accounts to stop; one already asked is asked again only if asking failed.
+        """Ask each active subagent batch of these accounts to stop; one already asked is asked again only if asking failed.
 
         The request is the one a person's own cancel makes, attributed to the
-        deployer: a batch's is applied to its rows at once, and each Gateway
-        stops the items it is executing at its look; an MCP task's is carried
-        out remotely by a Gateway's task loop (``_wait_for_tasks``).
+        deployer: it is applied to the batch's rows at once, and each Gateway
+        stops the items it is executing at its look. Where the command is
+        given no batch store, as in this build, there is nothing to ask.
         """
-        from app.mcp_tasks.service import deployer_cancel_actor_ref
         from deerflow.persistence.subagent_batches.sql import BATCH_TERMINAL_STATUSES
 
         ids = [str(covered.id) for covered in accounts]
@@ -1213,91 +1190,27 @@ class AccountsCommand:
                     if result is not None and result.get("status") in BATCH_TERMINAL_STATUSES:
                         work.batches_ended.add(batch_id)
                         work.batches_stopped_ms = clock.now_ms()
-        if self._mcp_tasks is not None:
-            digest = self._mcp_tasks.tenant.digest
-            actor_ref = deployer_cancel_actor_ref(tenant_digest=digest)
-            for user_id in ids:
-                for row in await self._mcp_tasks.list_active_by_user(user_id, tenant_digest=digest):
-                    task_id = str(row["id"])
-                    if task_id in work.tasks and task_id not in work.failed:
-                        continue
-                    work.tasks[task_id] = user_id
-                    try:
-                        # ``retry_now``: a re-run of the command asks the task
-                        # loop to try a failing remote cancel again now, not
-                        # after its backoff.
-                        await self._mcp_tasks.request_cancel(
-                            task_id,
-                            user_id=user_id,
-                            thread_id=row["thread_id"],
-                            requested_at=datetime.now(UTC),
-                            actor_ref=actor_ref,
-                            reason_code=MCP_TASK_CANCEL_REASON,
-                            tenant_digest=digest,
-                            retry_now=True,
-                        )
-                    except Exception as exc:  # noqa: BLE001 - one task that refuses must not hide the others
-                        logger.warning("Failed to request cancellation of MCP task %s: %s", task_id, exc)
-                        work.failed.add(task_id)
-                        continue
-                    work.failed.discard(task_id)
-
-    async def _wait_for_tasks(self, works: list[tuple[_DurableWork, SurfaceClock]]) -> None:
-        """Poll until every task asked to stop, of every identity, is terminal or the wait runs out."""
-        waiting = [(work, clock) for work, clock in works if work.tasks]
-        if self._mcp_tasks is None or not waiting:
-            return
-        from deerflow.mcp.tasks import TERMINAL_TASK_STATUSES
-
-        terminal = {status.value for status in TERMINAL_TASK_STATUSES}
-        deadline = self._deadline if self._deadline is not None else time.monotonic() + max(0.0, self._wait_seconds)
-
-        def settle() -> None:
-            nonlocal waiting
-            for work, clock in waiting:
-                if work.tasks_ended >= set(work.tasks):
-                    work.tasks_stopped_ms = clock.now_ms()
-            waiting = [(work, clock) for work, clock in waiting if not work.tasks_ended >= set(work.tasks)]
-
-        settle()
-        while waiting:
-            pending = sorted({task_id for work, _ in waiting for task_id in set(work.tasks) - work.tasks_ended})
-            statuses = await self._mcp_tasks.statuses(pending, tenant_digest=self._mcp_tasks.tenant.digest)
-            # A row that went away says nothing about the remote job: not ended.
-            for work, _ in waiting:
-                work.tasks_ended.update(task_id for task_id in set(work.tasks) - work.tasks_ended if statuses.get(task_id) in terminal)
-            settle()
-            if not waiting or time.monotonic() >= deadline:
-                return
-            await asyncio.sleep(SWEEP_WAIT_POLL_SECONDS)
 
     async def _report_durable_work(self, work: _DurableWork, clock: SurfaceClock, *, committed: int, channels: int) -> None:
-        tasks_left = len(set(work.tasks) - work.tasks_ended)
-        if tasks_left:
-            # Only a task loop carries a cancellation out: where every live
-            # process runs none, waiting or re-running will not end the task.
-            live = await self._sweeps.live_processes(window_seconds=self._live_window) if self._sweeps is not None else []
-            unreached = sorted(process.process_id for process in live if "mcp_tasks" in process.unreached)
-            action = ACTION_NOT_REACHED if live and len(unreached) == len(live) else ACTION_ENDED
-            clock.not_stopped("mcp_tasks", action, len(work.tasks), unconfirmed=True, confirmed_by=CONFIRMED_BY_TASK_STATUS, not_ended=tasks_left, processes_unreached=unreached)
-        else:
-            clock.stopped("mcp_tasks", ACTION_ENDED, len(work.tasks), at_ms=work.tasks_stopped_ms if work.tasks else committed, confirmed_by=CONFIRMED_BY_TASK_STATUS, not_ended=0, processes_unreached=[])
-        # The rows' cancel, and what the processes confirmed stopping of the
-        # items they were executing (``_confirm_processes``): an executing item
-        # reads the rows only at its next lease renewal.
-        executions = clock.surfaces.pop("subagent_batches", None)
-        executions_confirmed = executions is None or "subagent_batches" not in clock.unconfirmed
-        if not executions_confirmed:
-            clock.unconfirmed.remove("subagent_batches")
-        process_facts = {key: executions[key] for key in ("processes", "processes_unconfirmed")} if executions is not None else {}
-        items_stopped = executions["count"] if executions is not None else 0
-        not_ended = len(set(work.batches) - work.batches_ended) + (executions["not_ended"] if executions is not None else 0)
-        if not_ended or not executions_confirmed:
-            clock.not_stopped("subagent_batches", ACTION_ENDED, len(work.batches), unconfirmed=True, confirmed_by=CONFIRMED_BY_BATCH_STATUS, items_stopped=items_stopped, not_ended=not_ended, **process_facts)
-        else:
-            rows_ms = work.batches_stopped_ms if work.batches else committed
-            at_ms = max(rows_ms, executions["stopped_after_ms"]) if executions is not None else rows_ms
-            clock.stopped("subagent_batches", ACTION_ENDED, len(work.batches), at_ms=at_ms, confirmed_by=CONFIRMED_BY_BATCH_STATUS, items_stopped=items_stopped, not_ended=0, **process_facts)
+        # Reported only where the command was given a batch store: a surface it
+        # does not look at is left out rather than reported as ended.
+        if self._batches is not None:
+            # The rows' cancel, and what the processes confirmed stopping of the
+            # items they were executing (``_confirm_processes``): an executing item
+            # reads the rows only at its next lease renewal.
+            executions = clock.surfaces.pop("subagent_batches", None)
+            executions_confirmed = executions is None or "subagent_batches" not in clock.unconfirmed
+            if not executions_confirmed:
+                clock.unconfirmed.remove("subagent_batches")
+            process_facts = {key: executions[key] for key in ("processes", "processes_unconfirmed")} if executions is not None else {}
+            items_stopped = executions["count"] if executions is not None else 0
+            not_ended = len(set(work.batches) - work.batches_ended) + (executions["not_ended"] if executions is not None else 0)
+            if not_ended or not executions_confirmed:
+                clock.not_stopped("subagent_batches", ACTION_ENDED, len(work.batches), unconfirmed=True, confirmed_by=CONFIRMED_BY_BATCH_STATUS, items_stopped=items_stopped, not_ended=not_ended, **process_facts)
+            else:
+                rows_ms = work.batches_stopped_ms if work.batches else committed
+                at_ms = max(rows_ms, executions["stopped_after_ms"]) if executions is not None else rows_ms
+                clock.stopped("subagent_batches", ACTION_ENDED, len(work.batches), at_ms=at_ms, confirmed_by=CONFIRMED_BY_BATCH_STATUS, items_stopped=items_stopped, not_ended=0, **process_facts)
         # A channel message would start a run for the person: refused as it arrives.
         clock.stopped("channel_ingress", ACTION_REFUSED_AT_NEXT_USE, channels, at_ms=committed)
 
@@ -1751,7 +1664,9 @@ class AccountsCommand:
         """Ask for each run's cancellation, then wait until ``until`` at the latest; returns the status each run that stopped reached, and when it was seen."""
         for run_id, user_id in owners.items():
             try:
-                await self._runs.request_cancel_compat(run_id, action="interrupt", user_id=user_id)  # type: ignore[union-attr]
+                # The request the run's own cancel route persists; the owning
+                # worker applies it at its next lease renewal.
+                await self._runs.request_cancel(run_id, action="interrupt")  # type: ignore[union-attr]
             except Exception as exc:  # noqa: BLE001 - one run that refuses the request must not hide the others
                 logger.warning("Failed to request cancellation of run %s: %s", run_id, exc)
         return await self._wait_for_terminal(owners, until=until)
@@ -1846,40 +1761,30 @@ async def _run(
     restore_held: bool = False,
     subjects: list[str] | None = None,
 ) -> dict[str, Any]:
-    from app.channels.inbound_receipts import SqlInboundReceiptStore
     from deerflow.config import get_app_config
     from deerflow.persistence.channel_connections import ChannelConnectionRepository
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine_from_config
-    from deerflow.persistence.mcp_tasks import McpTaskRepository
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
-    from deerflow.persistence.refusal_sweeps import RefusalSweepRepository
     from deerflow.persistence.run import RunRepository
     from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
-    from deerflow.persistence.subagent_batches import SubagentBatchRepository
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
     config = get_app_config()
     if config.database.backend == "memory":
         raise CommandError("the memory database backend keeps no accounts between processes; this command needs config.database on sqlite or postgres")
-    # The same tenant the Gateway resolves at construction: the token store
-    # and the run store both filter rows by it, so a run this command cancels
-    # is one this deployment owns.
-    tenant = TenantIdentityV1.resolve(deployment_config=config.deployment, environ=os.environ).to_persisted_reference()
     await init_engine_from_config(config.database)
     try:
         session_factory = get_session_factory()
         if session_factory is None:
             raise CommandError("persistence engine not available (check config.database)")
+        # No process record (``sweeps``), durable MCP tasks, subagent batches
+        # or channel receipts in this build: those surfaces are not reported,
+        # and what a run holds ends with the run this command cancels.
         command_runner = AccountsCommand(
             SQLiteUserRepository(session_factory),
-            tokens=PersonalAccessTokenRepository(session_factory, tenant=tenant),
+            tokens=PersonalAccessTokenRepository(session_factory),
             schedules=ScheduledTaskRepository(session_factory),
-            runs=RunRepository(session_factory, tenant=tenant),
-            sweeps=RefusalSweepRepository(session_factory),
-            mcp_tasks=McpTaskRepository(session_factory, tenant=tenant),
-            batches=SubagentBatchRepository(session_factory, tenant=tenant),
+            runs=RunRepository(session_factory),
             channel_connections=ChannelConnectionRepository(session_factory),
-            receipts=SqlInboundReceiptStore(session_factory),
             wait_seconds=wait_seconds,
             **deployment_options(config),
         )

@@ -21,7 +21,6 @@ from deerflow.extensions import (
 from deerflow.extensions.registry import ExtensionRegistry
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.worker import RunContext, _build_runtime_context, run_agent
-from deerflow.runtime.tenant_identity import TenantIdentityV1
 
 
 def test_build_runtime_context_installs_the_extension_store():
@@ -85,7 +84,6 @@ def test_gateway_run_context_captures_the_app_extension_snapshot(monkeypatch):
                 run_events_config=None,
                 checkpoint_channel_mode="full",
                 checkpoint_snapshot_frequency=None,
-                tenant_identity=TenantIdentityV1.from_canonical_id("local"),
             )
         )
     )
@@ -144,6 +142,12 @@ _MOCKED_SUBAGENT_MODULES = (
 @pytest.fixture
 def _subagent_env():
     """Import the real executor behind tests/conftest.py's cycle-breaking mock."""
+    # Load the real leaf before replacing its parent package with a cycle-breaking
+    # mock; otherwise isolated execution depends on earlier test collection.
+    import importlib
+
+    importlib.import_module("deerflow.agents.middlewares.audit_context")
+    importlib.import_module("deerflow.authz.principal")
     original_modules = {name: sys.modules.get(name) for name in _MOCKED_SUBAGENT_MODULES}
     original_executor = sys.modules.get("deerflow.subagents.executor")
     missing = object()

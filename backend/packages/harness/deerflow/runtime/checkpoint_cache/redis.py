@@ -43,15 +43,6 @@ def _redis_error() -> type[Exception]:
     return RedisError
 
 
-def _is_permission_error(exc: Exception) -> bool:
-    """Recognize Redis ACL errors across redis-py versions."""
-    try:
-        from redis.exceptions import NoPermissionError
-    except ImportError:
-        return "NOPERM" in str(exc).upper()
-    return isinstance(exc, NoPermissionError) or "NOPERM" in str(exc).upper()
-
-
 class RedisCheckpointHistoryCache:
     def __init__(
         self,
@@ -60,20 +51,14 @@ class RedisCheckpointHistoryCache:
         serde: Any,
         ttl_seconds: int,
         max_connections: int | None = None,
-        client: Any | None = None,
     ) -> None:
-        self._client = client or _create_client(
-            redis_url,
-            max_connections=max_connections,
-        )
-        self._owns_client = client is None
+        self._client = _create_client(redis_url, max_connections=max_connections)
         self._serde = serde
         # ttl_seconds=0 is an explicit opt-out of expiry (no SETEX) — not the
         # default, and leaked/orphaned keys then rely on redis maxmemory only.
         self._ttl = ttl_seconds if ttl_seconds > 0 else None
         self._hits = 0
         self._misses = 0
-        self._purge_disabled = False
 
     async def aget_many(self, keys: list[str]) -> dict[str, dict[str, Any]]:
         if not keys:
@@ -112,9 +97,6 @@ class RedisCheckpointHistoryCache:
         """SCAN+UNLINK every entry of one thread. Failure degrades to
         TTL-bounded residual retention; the source-of-truth delete already
         happened, so this never raises."""
-        if self._purge_disabled:
-            logger.debug("checkpoint history cache thread purge skipped because ACL denies checkpoint-cache purge")
-            return
         stem = thread_key_stem(key_prefix, thread_id)
         try:
             cursor = 0
@@ -125,22 +107,10 @@ class RedisCheckpointHistoryCache:
                 if cursor == 0:
                     break
         except _redis_error() as exc:
-            if _is_permission_error(exc):
-                if self._purge_disabled:
-                    logger.debug("checkpoint history cache thread purge skipped because ACL denies checkpoint-cache purge")
-                    return
-                self._purge_disabled = True
-                ttl_consequence = f"entries expire via TTL ({self._ttl}s)" if self._ttl is not None else "TTL is disabled, so residual entries do not expire"
-                logger.warning(
-                    "ACL denies checkpoint-cache purge (SCAN or UNLINK); %s",
-                    ttl_consequence,
-                )
-                return
             logger.warning("checkpoint history cache thread purge failed; residual entries expire via TTL: %s", exc)
 
     def stats(self) -> CheckpointCacheStats:
         return CheckpointCacheStats(hits=self._hits, misses=self._misses)
 
     async def aclose(self) -> None:
-        if self._owns_client:
-            await self._client.aclose()
+        await self._client.aclose()

@@ -25,8 +25,8 @@ to reference environment variables from .env:
       postgres_url: $DATABASE_URL
 
 The $VAR resolution is handled by AppConfig.resolve_env_variables()
-before this config is instantiated. DATABASE_POOL_MAX_OVERFLOW is also
-accepted as a deployment-level override for the app engine pool cap.
+before this config is instantiated -- DatabaseConfig itself does not
+need to do any environment variable processing.
 """
 
 from __future__ import annotations
@@ -135,7 +135,7 @@ class CheckpointCacheConfig(BaseModel):
     )
     key_prefix: str = Field(
         default="",
-        description=("Startup-only compatibility value. In Gateway tenant mode, a nonempty value (or DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX override) must exactly match the server-derived checkpoint-cache tenant projection."),
+        description="Optional override for the redis key prefix; defaults to a hash of the database identity.",
     )
 
 
@@ -184,12 +184,8 @@ class DatabaseConfig(BaseModel):
     )
     pool_size: int = Field(
         default=5,
+        gt=0,
         description="Connection pool size for the app ORM engine (postgres only).",
-    )
-    pool_max_overflow: int = Field(
-        default=10,
-        ge=0,
-        description="Maximum overflow connections for the app ORM engine (postgres only).",
     )
     pool_recycle: int = Field(
         default=300,
@@ -219,13 +215,19 @@ class DatabaseConfig(BaseModel):
     def _validate_postgres_schema(cls, value: str) -> str:
         return validate_postgres_schema(value)
 
-    @model_validator(mode="before")
+    @field_validator("pool_size", "pool_recycle", mode="before")
     @classmethod
-    def _apply_pool_max_overflow_env(cls, data: Any) -> Any:
-        value = os.getenv("DATABASE_POOL_MAX_OVERFLOW")
-        if value is None or not isinstance(data, dict):
-            return data
-        return {**data, "pool_max_overflow": value}
+    def _reject_boolean_pool_settings(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("must be an integer, not a boolean")
+        return value
+
+    @field_validator("command_timeout", mode="before")
+    @classmethod
+    def _reject_boolean_command_timeout(cls, value: object) -> object:
+        if isinstance(value, bool):
+            raise ValueError("command_timeout must be a number of seconds or null, not a boolean")
+        return value
 
     # -- Legacy key migration (not user-configured) --
 
@@ -323,6 +325,14 @@ class DatabaseConfig(BaseModel):
             return f"sqlite:///{self.sqlite_path}"
         if self.backend == "postgres":
             url = self.postgres_url
+            if self.postgres_schema:
+                # The synchronous agent stores use psycopg via SQLAlchemy,
+                # so they need the same search_path as the async ORM engine
+                # and LangGraph stores.  Keep the option merge in the shared
+                # PostgreSQL helper so existing libpq options are preserved.
+                from deerflow.persistence.postgres_schema import dsn_with_search_path
+
+                url = dsn_with_search_path(url, self.postgres_schema)
             if url.startswith("postgresql+asyncpg://"):
                 url = url.replace("postgresql+asyncpg://", "postgresql+psycopg://", 1)
             elif url.startswith("postgresql://"):

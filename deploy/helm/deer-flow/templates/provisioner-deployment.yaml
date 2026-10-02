@@ -1,5 +1,4 @@
 {{- if .Values.provisioner.enabled -}}
-{{- include "deer-flow.validateSandboxVolumeMode" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -21,7 +20,7 @@ spec:
         app.kubernetes.io/component: provisioner
     spec:
       {{- include "deer-flow.imagePullSecrets" . | nindent 6 }}
-      serviceAccountName: {{ include "deer-flow.provisionerServiceAccountName" . }}
+      serviceAccountName: {{ include "deer-flow.fullname" . }}-provisioner
       securityContext:
         # Non-root: provisioner image has no USER directive. uid/gid 1000.
         # No fsGroup — it mounts no PVCs (it references PVC names for the
@@ -46,40 +45,10 @@ spec:
             # Running as non-root uid 1000: suppress .pyc writes under root-owned /app.
             - name: PYTHONDONTWRITEBYTECODE
               value: "1"
-            # Sandbox resources can live in a separate pre-created namespace,
-            # while TokenReview must keep validating the Gateway's release identity.
             - name: K8S_NAMESPACE
-              value: {{ include "deer-flow.sandboxNamespace" . | quote }}
-            - name: PROVISIONER_AUTH_AUDIENCE
-              value: {{ .Values.provisioner.gatewayTokenAudience | quote }}
-            - name: PROVISIONER_GATEWAY_NAMESPACE
               value: {{ include "deer-flow.namespace" . | quote }}
-            - name: PROVISIONER_GATEWAY_SERVICE_ACCOUNT
-              value: {{ include "deer-flow.serviceAccountName" . | quote }}
             - name: SANDBOX_IMAGE
               value: {{ .Values.provisioner.sandboxImage | quote }}
-            - name: SANDBOX_RUNTIME_CLASS
-              value: {{ .Values.sandbox.runtimeClassName | default "" | quote }}
-            {{- if .Values.sandbox.volumeMode }}
-            - name: SANDBOX_VOLUME_MODE
-              value: {{ .Values.sandbox.volumeMode | quote }}
-            {{- end }}
-            - name: SANDBOX_STARTUP_PROBE_INITIAL_DELAY_SECONDS
-              value: {{ .Values.sandbox.startupProbe.initialDelaySeconds | quote }}
-            - name: SANDBOX_STARTUP_PROBE_PERIOD_SECONDS
-              value: {{ .Values.sandbox.startupProbe.periodSeconds | quote }}
-            - name: SANDBOX_STARTUP_PROBE_TIMEOUT_SECONDS
-              value: {{ .Values.sandbox.startupProbe.timeoutSeconds | quote }}
-            - name: SANDBOX_STARTUP_PROBE_FAILURE_THRESHOLD
-              value: {{ .Values.sandbox.startupProbe.failureThreshold | quote }}
-            - name: SANDBOX_LIVENESS_PROBE_INITIAL_DELAY_SECONDS
-              value: {{ .Values.sandbox.livenessProbe.initialDelaySeconds | quote }}
-            - name: SANDBOX_LIVENESS_PROBE_PERIOD_SECONDS
-              value: {{ .Values.sandbox.livenessProbe.periodSeconds | quote }}
-            - name: SANDBOX_LIVENESS_PROBE_TIMEOUT_SECONDS
-              value: {{ .Values.sandbox.livenessProbe.timeoutSeconds | quote }}
-            - name: SANDBOX_LIVENESS_PROBE_FAILURE_THRESHOLD
-              value: {{ .Values.sandbox.livenessProbe.failureThreshold | quote }}
             # In-cluster API access via the mounted ServiceAccount token.
             # K8S_API_SERVER is intentionally unset (do NOT use host.docker.internal).
             # Service type for per-sandbox Services. ClusterIP (default) routes the
@@ -105,6 +74,11 @@ spec:
             {{- end }}
             # PVC mode — sandbox Pods mount the same PVCs the gateway uses.
             {{- if .Values.persistence.home.enabled }}
+            # Extra-mount paths originate in the Gateway's state namespace.
+            # Keep this logical base aligned so the provisioner can translate
+            # those paths into USERDATA PVC subPaths.
+            - name: DEER_FLOW_HOST_BASE_DIR
+              value: /app/backend/.deer-flow
             - name: USERDATA_PVC_NAME
               value: {{ include "deer-flow.homePVC" . | quote }}
             {{- end }}
@@ -114,23 +88,22 @@ spec:
             {{- end }}
             - name: SANDBOX_CONTAINER_PORT
               value: {{ .Values.provisioner.sandboxPort | quote }}
-            - name: ACCEPTED_SKILL_PROJECTION_PROFILE
-              value: {{ .Values.provisioner.acceptedSkillProjectionProfile | default "disabled" | quote }}
-            {{- if eq (default "disabled" .Values.provisioner.acceptedSkillProjectionProfile) "rwx_verified_copy_v2" }}
-            # The digest-pinned provisioner image contains both the verifier and
-            # the per-attempt data-plane gate.
-            - name: ACCEPTED_SKILL_RUNTIME_IMAGE
-              value: {{ include "deer-flow.provisionerImage" . | quote }}
-            - name: ACCEPTED_ATTEMPT_LEASE_SECONDS
-              value: {{ .Values.provisioner.acceptedAttempt.leaseSeconds | quote }}
-            - name: ACCEPTED_ATTEMPT_RECONCILE_INTERVAL_SECONDS
-              value: {{ .Values.provisioner.acceptedAttempt.reconcileIntervalSeconds | quote }}
-            - name: ACCEPTED_ATTEMPT_RECONCILE_LIMIT
-              value: {{ .Values.provisioner.acceptedAttempt.reconcileLimit | quote }}
+            # Optional lark-cli sandbox runtime images. The provisioner keys off
+            # "non-empty", so render the variables only when set; an empty
+            # string would still mean "off" but would churn the Pod spec on
+            # every values edit. Broker (Pattern B) supersedes init (Pattern A)
+            # in the provisioner when both are set.
+            {{- with .Values.provisioner.larkCliInitImage }}
+            - name: LARK_CLI_INIT_IMAGE
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.provisioner.larkCliBrokerImage }}
+            - name: LARK_CLI_BROKER_IMAGE
+              value: {{ . | quote }}
             {{- end }}
           readinessProbe:
             httpGet:
-              path: /ready
+              path: /health
               port: http
             initialDelaySeconds: 5
             periodSeconds: 10

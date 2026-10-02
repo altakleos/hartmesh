@@ -16,12 +16,8 @@ from pathlib import Path
 
 import pytest
 import yaml
+from support.symlinks import symlink_or_skip
 
-from deerflow.extensions.artifacts import (
-    extension_configuration_digest,
-    read_source_lock,
-    verify_source_lock_current,
-)
 from deerflow.extensions.cli import find_project_root
 from deerflow.extensions.loader import ExtensionSpec
 from deerflow.extensions.manager import (
@@ -98,52 +94,15 @@ default-groups = ["extensions"]
     (root / "config.yaml").write_text("config_version: 1\n", encoding="utf-8")
 
 
-def _simulate_uv_local_add(root: Path) -> None:
-    """Model the two files ``uv add --no-sync`` changes for local sources."""
-
-    backend = root / "backend"
-    pyproject_path = backend / "pyproject.toml"
-    pyproject_path.write_text(
-        pyproject_path.read_text(encoding="utf-8").replace(
-            "extensions = []",
-            'extensions = ["deerflow-extension-demo"]',
-        ),
-        encoding="utf-8",
-    )
-    (backend / "uv.lock").write_text(
-        """\
-version = 1
-requires-python = ">=3.12"
-
-[[package]]
-name = "deerflow-extension-demo"
-version = "1.0.0"
-source = { directory = "extensions/sources/deerflow-extension-demo" }
-""",
-        encoding="utf-8",
-    )
-
-
 def _commit_local_extension(source: Path) -> str:
     subprocess.run(["git", "init", "-q"], cwd=source, check=True)
     test_hooks = source / ".git" / "test-hooks"
     test_hooks.mkdir()
     subprocess.run(["git", "config", "user.name", "Extension Test"], cwd=source, check=True)
-    subprocess.run(
-        ["git", "config", "user.email", "extension-test@example.com"],
-        cwd=source,
-        check=True,
-    )
+    subprocess.run(["git", "config", "user.email", "extension-test@example.com"], cwd=source, check=True)
     subprocess.run(["git", "add", "."], cwd=source, check=True)
     subprocess.run(
-        [
-            "git",
-            "-c",
-            f"core.hooksPath={test_hooks}",
-            "commit",
-            "-qm",
-            "initial extension",
-        ],
+        ["git", "-c", f"core.hooksPath={test_hooks}", "commit", "-qm", "initial extension"],
         cwd=source,
         check=True,
     )
@@ -208,13 +167,16 @@ def _assert_demo_entry_point_loads(backend: Path) -> None:
     assert completed.returncode == 0, completed.stderr
 
 
-def _write_demo_wheel(directory: Path) -> Path:
-    directory.mkdir()
-    wheel = directory / "deerflow_extension_demo-1.0.0-py3-none-any.whl"
-    dist_info = "deerflow_extension_demo-1.0.0.dist-info"
+def _write_demo_wheel(directory: Path, *, version: str = "1.0.0", marker: str | None = None) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+    wheel = directory / f"deerflow_extension_demo-{version}-py3-none-any.whl"
+    dist_info = f"deerflow_extension_demo-{version}.dist-info"
+    init = "def install(registry, config):\n    return None\n"
+    if marker is not None:
+        init = f"MARKER = {marker!r}\n{init}"
     records = {
-        "demo_extension/__init__.py": "def install(registry, config):\n    return None\n",
-        f"{dist_info}/METADATA": ("Metadata-Version: 2.1\nName: deerflow-extension-demo\nVersion: 1.0.0\nRequires-Python: >=3.12\n"),
+        "demo_extension/__init__.py": init,
+        f"{dist_info}/METADATA": (f"Metadata-Version: 2.1\nName: deerflow-extension-demo\nVersion: {version}\nRequires-Python: >=3.12\n"),
         f"{dist_info}/WHEEL": ("Wheel-Version: 1.0\nGenerator: deerflow-extension-test\nRoot-Is-Purelib: true\nTag: py3-none-any\n"),
         f"{dist_info}/entry_points.txt": ("[deerflow.extensions]\ndemo = demo_extension:install\n"),
     }
@@ -225,9 +187,7 @@ def _write_demo_wheel(directory: Path) -> Path:
     return wheel
 
 
-def test_install_local_directory_makes_it_deployable_and_enabled(
-    tmp_path: Path,
-) -> None:
+def test_install_local_directory_makes_it_deployable_and_enabled(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -260,29 +220,99 @@ def test_install_local_directory_makes_it_deployable_and_enabled(
         }
     ]
 
-    source_lock_path = root / "backend" / "extensions.lock.json"
-    source_lock = read_source_lock(source_lock_path)
-    assert len(source_lock.entries) == 1
-    assert source_lock.entries[0].source_kind == "local_snapshot"
-    assert source_lock.entries[0].distribution == "deerflow-extension-demo"
-    source_lock_bytes = source_lock_path.read_bytes()
-    enabled_digest = extension_configuration_digest(config["plugins"])
-
-    manager = ExtensionManager(root)
-    manager.set_enabled("demo", enabled=False)
-    disabled_plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
-    assert extension_configuration_digest(disabled_plugins) != enabled_digest
-    assert source_lock_path.read_bytes() == source_lock_bytes
-    manager.set_enabled("demo", enabled=True)
-    reenabled_plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
-    assert extension_configuration_digest(reenabled_plugins) == enabled_digest
-    assert source_lock_path.read_bytes() == source_lock_bytes
-
     _assert_demo_entry_point_loads(root / "backend")
 
 
-def test_local_install_ignores_generated_ruff_cache_for_snapshot_provenance(
+def test_install_rejects_an_already_snapshotted_local_directory(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    manager = ExtensionManager(root)
+    manager.install(str(source), yes=True)
+
+    with pytest.raises(FileExistsError, match="already installed"):
+        manager.install(str(source), yes=True)
+
+
+def test_upgrade_replaces_local_snapshot_and_preserves_private_config(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    manager = ExtensionManager(root)
+    manager.install(str(source), yes=True)
+    config_path = root / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"][0]["required"] = True
+    config["plugins"][0]["config"] = {"label": "keep-this"}
+    config["plugins"][0]["enabled"] = False
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v2'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+
+    result = manager.upgrade(str(source), yes=True)
+
+    assert result.name == "demo"
+    managed = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
+    assert "MARKER = 'v2'" in (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8")
+    plugins = yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"]
+    assert plugins == [
+        {
+            "name": "demo",
+            "package": "deerflow-extension-demo",
+            "use": "demo_extension:install",
+            "enabled": False,
+            "required": True,
+            "config": {"label": "keep-this"},
+        }
+    ]
+    _assert_demo_entry_point_loads(root / "backend")
+
+
+def test_failed_upgrade_restores_the_previous_snapshot_and_config(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    manager = ExtensionManager(root)
+    manager.install(str(source), yes=True)
+    config_path = root / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"][0]["config"] = {"label": "keep-this"}
+    original_config = yaml.safe_dump(config, sort_keys=False)
+    config_path.write_text(original_config, encoding="utf-8")
+    original_init = (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo" / "demo_extension" / "__init__.py").read_text(encoding="utf-8")
+    original_pyproject = (root / "backend" / "pyproject.toml").read_bytes()
+
+    broken = tmp_path / "broken-source"
+    broken.mkdir()
+    _write_local_extension(broken, entry_target="missing_demo_extension:install")
+
+    with pytest.raises(ValueError, match="could not be loaded"):
+        manager.upgrade(str(broken), yes=True)
+
+    managed = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
+    assert (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8") == original_init
+    assert (root / "backend" / "pyproject.toml").read_bytes() == original_pyproject
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"][0]["config"] == {"label": "keep-this"}
+    leftover = list((root / "backend" / "extensions" / "sources").glob(".*.upgrade-*"))
+    assert leftover == []
+
+
+def test_deerflow_extensions_upgrade_exposes_the_local_replace_flow(
     tmp_path: Path,
+    monkeypatch,
+    capsys,
 ) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
@@ -290,21 +320,290 @@ def test_local_install_ignores_generated_ruff_cache_for_snapshot_provenance(
     source.mkdir()
     _write_host_project(root)
     _write_local_extension(source)
-    source_cache = source / ".ruff_cache"
-    source_cache.mkdir()
-    (source_cache / "CACHEDIR.TAG").write_text("generated before install", encoding="utf-8")
+    monkeypatch.setenv("DEER_FLOW_PROJECT_ROOT", str(root))
+    assert deerflow_main(["extensions", "install", str(source), "--yes"]) == 0
+    capsys.readouterr()
 
-    ExtensionManager(root).install(str(source), yes=True)
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v2'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+    exit_code = deerflow_main(["extensions", "upgrade", str(source), "--yes"])
 
-    backend = root / "backend"
-    managed_source = backend / "extensions" / "sources" / "deerflow-extension-demo"
-    assert not (managed_source / ".ruff_cache").exists()
+    assert exit_code == 0
+    assert "Upgraded demo" in capsys.readouterr().out
+    managed = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
+    assert "MARKER = 'v2'" in (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8")
 
-    managed_cache = managed_source / ".ruff_cache"
-    managed_cache.mkdir()
-    (managed_cache / "CACHEDIR.TAG").write_text("generated after install", encoding="utf-8")
-    source_lock = read_source_lock(backend / "extensions.lock.json")
-    assert verify_source_lock_current(source_lock, backend) is source_lock
+
+def test_upgrade_rejects_a_local_source_that_is_not_installed(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+
+    with pytest.raises(ValueError, match="not installed"):
+        ExtensionManager(root).upgrade(str(source), yes=True)
+
+    assert not (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").exists()
+    assert yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")).get("plugins") is None
+
+
+def test_upgrade_rejects_a_requirement_that_is_not_installed(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    root.mkdir()
+    _write_host_project(root)
+
+    with pytest.raises(ValueError, match="not installed"):
+        ExtensionManager(root).upgrade("deerflow-extension-demo==2.0.0", yes=True)
+
+
+def test_upgrade_rejects_a_git_source_that_is_not_installed(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    root.mkdir()
+    _write_host_project(root)
+    pyproject = root / "backend" / "pyproject.toml"
+    before = pyproject.read_text(encoding="utf-8")
+
+    with pytest.raises(ValueError, match="not installed"):
+        ExtensionManager(root).upgrade(
+            "git+https://github.com/acme/deerflow-extension-demo.git@main",
+            yes=True,
+        )
+
+    assert pyproject.read_text(encoding="utf-8") == before
+    assert yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8")).get("plugins") is None
+
+
+def test_upgrade_repins_an_installed_git_source_and_preserves_private_config(tmp_path: Path) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-git-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v1'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+    first_revision = _commit_local_extension(source)
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v2'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+    test_hooks = source / ".git" / "test-hooks"
+    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    subprocess.run(
+        ["git", "-c", f"core.hooksPath={test_hooks}", "commit", "-qm", "upgrade pin"],
+        cwd=source,
+        check=True,
+    )
+    second_revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=source,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    bare_repository = tmp_path / "demo.git"
+    subprocess.run(["git", "clone", "-q", "--bare", str(source), str(bare_repository)], check=True)
+    subprocess.run(["git", "--git-dir", str(bare_repository), "update-server-info"], check=True)
+
+    with _serve_directory(tmp_path) as base_url:
+        manager = ExtensionManager(root)
+        manager.install(f"git+{base_url}/demo.git@{first_revision}", yes=True)
+        config_path = root / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["plugins"][0]["required"] = True
+        config["plugins"][0]["config"] = {"label": "keep-this"}
+        config["plugins"][0]["enabled"] = False
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+        result = manager.upgrade(f"git+{base_url}/demo.git@{second_revision}", yes=True)
+
+        _assert_demo_entry_point_loads(root / "backend")
+        marker = subprocess.run(
+            [
+                str(root / "backend" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
+                "-c",
+                "import demo_extension; print(demo_extension.MARKER)",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    assert result.name == "demo"
+    assert marker == "v2"
+    assert second_revision in (root / "backend" / "uv.lock").read_text(encoding="utf-8")
+    assert not (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").exists()
+    plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
+    assert plugins == [
+        {
+            "name": "demo",
+            "package": "deerflow-extension-demo",
+            "use": "demo_extension:install",
+            "enabled": False,
+            "required": True,
+            "config": {"label": "keep-this"},
+        }
+    ]
+
+
+def test_upgrade_repins_an_installed_requirement_and_preserves_private_config(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Re-pinning ==2.0.0 to ==3.0.0 keeps the same distribution name.
+
+    added_names is empty; identification must take the added_specs fallback so
+    private config/required/enabled survive the lock re-pin.
+    """
+    root = tmp_path / "deer-flow"
+    simple_root = tmp_path / "simple"
+    package_dir = simple_root / "deerflow-extension-demo"
+    root.mkdir()
+    _write_host_project(root)
+    _write_demo_wheel(package_dir, version="2.0.0", marker="v2")
+    _write_demo_wheel(package_dir, version="3.0.0", marker="v3")
+    (package_dir / "index.html").write_text(
+        """\
+<!DOCTYPE html>
+<html><body>
+<a href="deerflow_extension_demo-2.0.0-py3-none-any.whl">deerflow_extension_demo-2.0.0-py3-none-any.whl</a>
+<a href="deerflow_extension_demo-3.0.0-py3-none-any.whl">deerflow_extension_demo-3.0.0-py3-none-any.whl</a>
+</body></html>
+""",
+        encoding="utf-8",
+    )
+
+    with _serve_directory(simple_root) as index_url:
+        monkeypatch.setenv("UV_DEFAULT_INDEX", index_url)
+        manager = ExtensionManager(root)
+        manager.install("deerflow-extension-demo==2.0.0", yes=True)
+        config_path = root / "config.yaml"
+        config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+        config["plugins"][0]["required"] = True
+        config["plugins"][0]["config"] = {"label": "keep-this"}
+        config["plugins"][0]["enabled"] = False
+        config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+        result = manager.upgrade("deerflow-extension-demo==3.0.0", yes=True)
+
+        _assert_demo_entry_point_loads(root / "backend")
+        marker = subprocess.run(
+            [
+                str(root / "backend" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")),
+                "-c",
+                "import demo_extension; print(demo_extension.MARKER)",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+
+    pyproject = (root / "backend" / "pyproject.toml").read_text(encoding="utf-8")
+    lock = (root / "backend" / "uv.lock").read_text(encoding="utf-8")
+    assert result.name == "demo"
+    assert marker == "v3"
+    assert "deerflow-extension-demo==3.0.0" in pyproject
+    assert "deerflow-extension-demo==2.0.0" not in pyproject
+    assert re.search(r'name = "deerflow-extension-demo"\s+version = "3.0.0"', lock) is not None
+    assert not (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").exists()
+    plugins = yaml.safe_load((root / "config.yaml").read_text(encoding="utf-8"))["plugins"]
+    assert plugins == [
+        {
+            "name": "demo",
+            "package": "deerflow-extension-demo",
+            "use": "demo_extension:install",
+            "enabled": False,
+            "required": True,
+            "config": {"label": "keep-this"},
+        }
+    ]
+
+
+def test_failed_upgrade_leaves_snapshot_when_staging_rename_fails(tmp_path: Path, monkeypatch) -> None:
+    """A snapshot that cannot be moved must stay the live tree.
+
+    Path.rename can fail after mkdtemp (file held open, Windows AV). Treating
+    that like a failed install would rmtree the original snapshot that was
+    never replaced.
+    """
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    manager = ExtensionManager(root)
+    manager.install(str(source), yes=True)
+    config_path = root / "config.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    config["plugins"][0]["config"] = {"label": "keep-this"}
+    config_path.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    managed = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
+    original_init = (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8")
+
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v2'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+    original_rename = Path.rename
+
+    def _rename(self, target):
+        if self.resolve() == managed.resolve():
+            raise OSError("snapshot file in use")
+        return original_rename(self, target)
+
+    monkeypatch.setattr("deerflow.extensions.manager.Path.rename", _rename)
+
+    with pytest.raises(OSError, match="snapshot file in use"):
+        manager.upgrade(str(source), yes=True)
+
+    assert (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8") == original_init
+    assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"][0]["config"] == {"label": "keep-this"}
+    assert list((root / "backend" / "extensions" / "sources").glob(".*.upgrade-*")) == []
+
+
+def test_failed_upgrade_restores_snapshot_when_a_concurrent_dependency_edit_blocks_lock_rollback(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    root = tmp_path / "deer-flow"
+    source = tmp_path / "demo-source"
+    root.mkdir()
+    source.mkdir()
+    _write_host_project(root)
+    _write_local_extension(source)
+    manager = ExtensionManager(root)
+    manager.install(str(source), yes=True)
+    original_init = (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo" / "demo_extension" / "__init__.py").read_text(encoding="utf-8")
+    pyproject_path = root / "backend" / "pyproject.toml"
+
+    (source / "demo_extension" / "__init__.py").write_text(
+        "MARKER = 'v2'\ndef install(registry, config):\n    return None\n",
+        encoding="utf-8",
+    )
+
+    def _fail_after_operator_edit(*_args, **_kwargs):
+        pyproject_path.write_text(
+            pyproject_path.read_text(encoding="utf-8") + "\n# operator edit during upgrade\n",
+            encoding="utf-8",
+        )
+        raise RuntimeError("simulated dependency sync failure")
+
+    monkeypatch.setattr("deerflow.extensions.manager._sync_environment", _fail_after_operator_edit)
+
+    with pytest.raises(RuntimeError, match="recovery.*dependency"):
+        manager.upgrade(str(source), yes=True)
+
+    managed = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
+    assert (managed / "demo_extension" / "__init__.py").read_text(encoding="utf-8") == original_init
+    assert "# operator edit during upgrade" in pyproject_path.read_text(encoding="utf-8")
+    assert list((root / "backend" / "extensions" / "sources").glob(".*.upgrade-*")) == []
 
 
 def test_install_defaults_to_a_fail_open_plugin_record(tmp_path: Path) -> None:
@@ -380,7 +679,7 @@ def test_mutating_operations_are_serialized_for_one_checkout(tmp_path: Path, mon
     release_first = threading.Event()
     second_entered = threading.Event()
 
-    def _fake_install(self, source: str, *, yes: bool, required: bool):
+    def _fake_install(self, source: str, *, yes: bool, required: bool, replace: bool = False):
         if source == "first":
             first_entered.set()
             assert release_first.wait(timeout=5)
@@ -464,9 +763,7 @@ def test_explicit_invalid_project_root_does_not_fall_back_to_current_checkout(
         find_project_root()
 
 
-def test_install_git_source_discovers_and_enables_its_packaging_entry_point(
-    tmp_path: Path,
-) -> None:
+def test_install_git_source_discovers_and_enables_its_packaging_entry_point(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-git-source"
     root.mkdir()
@@ -577,9 +874,7 @@ def _write_audit_host(backend: Path) -> None:
     )
 
 
-def test_locked_local_source_audit_accepts_deployable_relative_references(
-    tmp_path: Path,
-) -> None:
+def test_locked_local_source_audit_accepts_deployable_relative_references(tmp_path: Path) -> None:
     backend = tmp_path / "backend"
     backend.mkdir()
     _write_audit_host(backend)
@@ -772,9 +1067,7 @@ wheels = [
     assert caplog.text == ""
 
 
-def test_locked_local_source_audit_rejects_absolute_paths_even_inside_allowed_roots(
-    tmp_path: Path,
-) -> None:
+def test_locked_local_source_audit_rejects_absolute_paths_even_inside_allowed_roots(tmp_path: Path) -> None:
     backend = tmp_path / "backend"
     backend.mkdir()
     _write_audit_host(backend)
@@ -802,9 +1095,7 @@ source = {{ editable = "{workspace_member.as_posix()}" }}
         _validate_locked_local_sources(lock_path, backend)
 
 
-def test_file_urls_are_rejected_because_they_cannot_enter_the_docker_build_context(
-    tmp_path: Path,
-) -> None:
+def test_file_urls_are_rejected_because_they_cannot_enter_the_docker_build_context(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
     _write_host_project(root)
@@ -813,9 +1104,7 @@ def test_file_urls_are_rejected_because_they_cannot_enter_the_docker_build_conte
         ExtensionManager(root).install("git+file:///outside/demo.git@deadbeef", yes=True)
 
 
-def test_install_rolls_back_when_the_declared_entry_point_cannot_be_imported(
-    tmp_path: Path,
-) -> None:
+def test_install_rolls_back_when_the_declared_entry_point_cannot_be_imported(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -892,9 +1181,7 @@ database:
     assert "database:\n  url: sqlite:///data.db" in updated
 
 
-def test_toggle_preserves_the_next_section_header_and_crlf_style(
-    tmp_path: Path,
-) -> None:
+def test_toggle_preserves_the_next_section_header_and_crlf_style(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
     _write_host_project(root)
@@ -1150,7 +1437,6 @@ def test_deerflow_extensions_remove_uninstalls_dependency_source_and_activation(
     assert not (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").exists()
     pyproject = (root / "backend" / "pyproject.toml").read_text(encoding="utf-8")
     assert "deerflow-extension-demo" not in pyproject
-    assert read_source_lock(root / "backend" / "extensions.lock.json").entries == ()
 
 
 def test_remove_one_configured_instance_keeps_its_shared_distribution_runnable(
@@ -1185,10 +1471,7 @@ def test_remove_one_configured_instance_keeps_its_shared_distribution_runnable(
 
     assert removed == "first"
     assert yaml.safe_load(config_path.read_text(encoding="utf-8"))["plugins"] == [second]
-    assert (
-        pyproject_path.read_bytes(),
-        lock_path.read_bytes(),
-    ) == dependency_files_before
+    assert (pyproject_path.read_bytes(), lock_path.read_bytes()) == dependency_files_before
     assert (root / "backend" / "extensions" / "sources" / "deerflow-extension-demo").is_dir()
     _assert_demo_entry_point_loads(root / "backend")
 
@@ -1213,9 +1496,7 @@ def test_install_prompts_for_trust_when_yes_is_not_supplied(
     assert "executes code with Gateway privileges" in capsys.readouterr().out
 
 
-def test_failed_entry_point_discovery_rolls_back_dependency_and_lock(
-    tmp_path: Path,
-) -> None:
+def test_failed_entry_point_discovery_rolls_back_dependency_and_lock(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "broken-git-source"
     root.mkdir()
@@ -1347,9 +1628,7 @@ def test_uv_add_partial_writes_are_rolled_back_when_the_command_fails(
     assert uv_commands == ["add", "sync"]
 
 
-def test_local_install_rejects_symlinks_before_copying_or_resolving(
-    tmp_path: Path,
-) -> None:
+def test_local_install_rejects_symlinks_before_copying_or_resolving(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -1358,7 +1637,7 @@ def test_local_install_rejects_symlinks_before_copying_or_resolving(
     _write_local_extension(source)
     outside = tmp_path / "operator-secret.txt"
     outside.write_text("do not vendor me", encoding="utf-8")
-    (source / "linked-secret.txt").symlink_to(outside)
+    symlink_or_skip(source / "linked-secret.txt", outside)
     original_pyproject = (root / "backend" / "pyproject.toml").read_bytes()
 
     with pytest.raises(ValueError, match="symbolic links"):
@@ -1369,9 +1648,7 @@ def test_local_install_rejects_symlinks_before_copying_or_resolving(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="named pipes are POSIX-specific")
-def test_local_install_rejects_special_files_before_snapshotting(
-    tmp_path: Path,
-) -> None:
+def test_local_install_rejects_special_files_before_snapshotting(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -1426,9 +1703,7 @@ def test_local_install_rejects_distribution_names_that_escape_the_managed_root(
     assert not (root / "backend" / "extensions").exists()
 
 
-def test_install_adopts_an_existing_manual_plugin_instead_of_loading_it_twice(
-    tmp_path: Path,
-) -> None:
+def test_install_adopts_an_existing_manual_plugin_instead_of_loading_it_twice(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -1508,9 +1783,7 @@ def test_install_rejects_identity_collisions_with_a_different_entry_point(
     assert "deerflow-extension-demo" not in (root / "backend" / "pyproject.toml").read_text(encoding="utf-8")
 
 
-def test_install_replaces_inline_empty_plugins_with_one_schema_valid_block(
-    tmp_path: Path,
-) -> None:
+def test_install_replaces_inline_empty_plugins_with_one_schema_valid_block(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     source = tmp_path / "demo-source"
     root.mkdir()
@@ -1629,9 +1902,7 @@ def test_plugins_rewrite_preserves_a_following_section_with_an_unconventional_ke
     assert config[next_key] == {"nested": "keep-me"}
 
 
-def test_plugins_rewrite_preserves_trailing_content_below_a_final_plugins_block(
-    tmp_path: Path,
-) -> None:
+def test_plugins_rewrite_preserves_trailing_content_below_a_final_plugins_block(tmp_path: Path) -> None:
     """The manager appends `plugins:` at end of file, so the steady-state shape
     has no following key; trailing operator notes still must survive a toggle."""
     root = tmp_path / "deer-flow"
@@ -1652,9 +1923,7 @@ def test_plugins_rewrite_preserves_trailing_content_below_a_final_plugins_block(
     assert config["log_level"] == "info"
 
 
-def test_null_plugins_is_treated_as_the_runtime_default_and_can_be_managed(
-    tmp_path: Path,
-) -> None:
+def test_null_plugins_is_treated_as_the_runtime_default_and_can_be_managed(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
     _write_host_project(root)
@@ -1665,9 +1934,7 @@ def test_null_plugins_is_treated_as_the_runtime_default_and_can_be_managed(
     assert manager.list_configured() == ()
 
 
-def test_list_uses_the_same_boolean_coercion_as_the_runtime_loader(
-    tmp_path: Path,
-) -> None:
+def test_list_uses_the_same_boolean_coercion_as_the_runtime_loader(tmp_path: Path) -> None:
     root = tmp_path / "deer-flow"
     root.mkdir()
     _write_host_project(root)
@@ -1745,13 +2012,11 @@ def test_remove_rolls_back_package_lock_config_source_and_environment_when_confi
     manager.install(str(source), yes=True)
     pyproject_path = root / "backend" / "pyproject.toml"
     lock_path = root / "backend" / "uv.lock"
-    source_lock_path = root / "backend" / "extensions.lock.json"
     config_path = root / "config.yaml"
     managed_source = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
     before = (
         pyproject_path.read_bytes(),
         lock_path.read_bytes(),
-        source_lock_path.read_bytes(),
         config_path.read_bytes(),
     )
 
@@ -1763,12 +2028,7 @@ def test_remove_rolls_back_package_lock_config_source_and_environment_when_confi
     with pytest.raises(OSError, match="replacement failure"):
         manager.remove("demo")
 
-    assert (
-        pyproject_path.read_bytes(),
-        lock_path.read_bytes(),
-        source_lock_path.read_bytes(),
-        config_path.read_bytes(),
-    ) == before
+    assert (pyproject_path.read_bytes(), lock_path.read_bytes(), config_path.read_bytes()) == before
     assert managed_source.is_dir()
     present = subprocess.run(
         [
@@ -1867,11 +2127,7 @@ def test_uv_remove_partial_writes_are_rolled_back_when_the_command_fails(
     lock_path = root / "backend" / "uv.lock"
     config_path = root / "config.yaml"
     managed_source = root / "backend" / "extensions" / "sources" / "deerflow-extension-demo"
-    before = (
-        pyproject_path.read_bytes(),
-        lock_path.read_bytes(),
-        config_path.read_bytes(),
-    )
+    before = (pyproject_path.read_bytes(), lock_path.read_bytes(), config_path.read_bytes())
     uv_commands: list[str] = []
 
     def _partially_write_then_fail(command, _backend_dir):
@@ -1892,11 +2148,7 @@ def test_uv_remove_partial_writes_are_rolled_back_when_the_command_fails(
     with pytest.raises(subprocess.CalledProcessError):
         manager.remove("demo")
 
-    assert (
-        pyproject_path.read_bytes(),
-        lock_path.read_bytes(),
-        config_path.read_bytes(),
-    ) == before
+    assert (pyproject_path.read_bytes(), lock_path.read_bytes(), config_path.read_bytes()) == before
     assert managed_source.is_dir()
     assert uv_commands == ["remove", "sync"]
 
@@ -2136,7 +2388,7 @@ def test_install_uses_one_controlled_uv_project_and_deferred_sync(
         if command[0] == "uv":
             uv_calls.append((list(command), kwargs))
             if command[1] == "add":
-                _simulate_uv_local_add(root)
+                (root / "backend" / "uv.lock").write_text('version = 1\nrequires-python = ">=3.12"\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0)
         return subprocess.CompletedProcess(command, 0, stdout='[["demo", "demo_extension:install"]]\n')
 
@@ -2337,7 +2589,7 @@ def test_entry_point_discovery_tolerates_interpreter_startup_output(
             return subprocess.CompletedProcess(command, 0, stdout="uv 0.11.1\n")
         if command[0] == "uv":
             if command[1] == "add":
-                _simulate_uv_local_add(root)
+                (root / "backend" / "uv.lock").write_text('version = 1\nrequires-python = ">=3.12"\n', encoding="utf-8")
             return subprocess.CompletedProcess(command, 0)
         return subprocess.CompletedProcess(
             command,

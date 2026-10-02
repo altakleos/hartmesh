@@ -10,47 +10,16 @@ import asyncio
 import json
 import logging
 import re
+import weakref
 from datetime import UTC, datetime
 from typing import Any
 
-from deerflow_extension_api import TenantReferenceV1
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from deerflow.constants import RETRIEVAL_OBSERVATION_EVENT_CATEGORY, RETRIEVAL_OBSERVATION_EVENT_TYPE
 from deerflow.persistence.models.run_event import RunEventRow
-from deerflow.persistence.run.model import RunRow
-from deerflow.persistence.sql_clock import (
-    coerce_database_wall_clock,
-    database_wall_clock_expression,
-)
-from deerflow.retrieval import retrieval_observation_event_metadata
-from deerflow.runtime.events.appender import RuntimeEventAuthority, RuntimeEventOwnershipLost
 from deerflow.runtime.events.message_identity import message_identity
-from deerflow.runtime.events.store.base import (
-    AppendOutcome,
-    RetrievalPairAppendOutcome,
-    RunEventStore,
-    find_paired_retrieval_observation,
-    prepare_retrieval_pair,
-    reconcile_existing_retrieval_pair,
-    validate_idempotent_append,
-)
-from deerflow.runtime.tool_evidence import (
-    TOOL_RECEIPT_CATEGORY,
-    TOOL_RECEIPT_OUTCOME_EVENT,
-    TOOL_RECEIPT_STARTED_EVENT,
-    DurableToolReceiptV1,
-    ToolReceiptIntegrityError,
-    ToolReceiptOwnershipLost,
-    canonical_digest,
-    parse_tool_receipt_event,
-    receipt_event_metadata,
-    require_started_transition,
-    require_tool_attempt_binding_fence,
-    reserve_attempt_from_events,
-    tool_writer_fence_digest,
-)
+from deerflow.runtime.events.store.base import RunEventStore
 from deerflow.runtime.user_context import AUTO, _AutoSentinel, get_current_user, resolve_user_id
 from deerflow.utils.time import coerce_iso
 
@@ -58,41 +27,22 @@ logger = logging.getLogger(__name__)
 
 
 class DbRunEventStore(RunEventStore):
-    def __init__(
-        self,
-        session_factory: async_sessionmaker[AsyncSession],
-        *,
-        max_trace_content: int = 10240,
-        tenant: TenantReferenceV1 | None = None,
-    ):
-        if tenant is not None and not isinstance(tenant, TenantReferenceV1):
-            raise TypeError("tenant must be TenantReferenceV1 or None")
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, max_trace_content: int = 10240):
         self._sf = session_factory
         self._max_trace_content = max_trace_content
-        self._tenant = tenant
         # Per-thread asyncio locks serialize seq assignment for concurrent
         # in-process writers on the same thread. The DB-level FOR UPDATE /
         # advisory lock guards cross-process races; this guards the common
         # single-process case where two coroutines interleave between the
         # max(seq) read and the INSERT and would otherwise collide on seq.
-        self._write_locks: dict[str, asyncio.Lock] = {}
-
-    @property
-    def _tenant_columns(self) -> dict[str, str | None]:
-        return {
-            "tenant_ref": None if self._tenant is None else self._tenant.public_ref,
-            "tenant_digest": None if self._tenant is None else self._tenant.digest,
-        }
-
-    def _scope_event(self, statement: Any) -> Any:
-        if self._tenant is None:
-            return statement
-        return statement.where(RunEventRow.tenant_digest == self._tenant.digest)
-
-    def _scope_run(self, statement: Any) -> Any:
-        if self._tenant is None:
-            return statement
-        return statement.where(RunRow.tenant_digest == self._tenant.digest)
+        #
+        # The weak registry preserves one lock generation while an admitted
+        # holder/waiter still references it. A separate pin keeps the historical
+        # one-lock-per-live-thread behavior until delete_by_thread() explicitly
+        # retires that thread; after retirement, outstanding users alone keep
+        # the generation alive until they drain.
+        self._write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = weakref.WeakValueDictionary()
+        self._write_lock_pins: dict[str, asyncio.Lock] = {}
 
     def _get_write_lock(self, thread_id: str) -> asyncio.Lock:
         """Return (creating if needed) the per-thread seq-assignment lock."""
@@ -100,6 +50,9 @@ class DbRunEventStore(RunEventStore):
         if lock is None:
             lock = asyncio.Lock()
             self._write_locks[thread_id] = lock
+        # A fresh caller after deletion makes the thread live again. Repin the
+        # current generation so normal live-thread registry lifetime is stable.
+        self._write_lock_pins[thread_id] = lock
         return lock
 
     @staticmethod
@@ -189,22 +142,21 @@ class DbRunEventStore(RunEventStore):
         return ids
 
     @staticmethod
-    async def _max_seq_for_thread(
-        session: AsyncSession,
-        thread_id: str,
-        *,
-        tenant: TenantReferenceV1 | None = None,
-    ) -> int | None:
-        """Return the current max seq while serializing writers per thread.
+    async def _acquire_thread_mutation_fence(session: AsyncSession, thread_id: str) -> None:
+        """Take the cross-process thread mutation fence, if the dialect has one.
 
         PostgreSQL rejects ``SELECT max(...) FOR UPDATE`` because aggregate
-        results are not lockable rows. As a release-safe workaround, take a
-        transaction-level advisory lock keyed by thread_id before reading the
-        aggregate. Other dialects keep the existing row-locking statement.
+        results are not lockable rows, so it serializes a thread's mutations with
+        a transaction-level advisory lock keyed by ``thread_id``. This is the
+        database half of the contract whose in-process half is
+        ``_get_write_lock()``: every thread mutation — ``put``, ``put_batch``,
+        ``put_if_absent`` and both deletions — takes this fence before touching
+        rows, so an admitted writer can never land a row between a deletion's
+        count and its commit.
+
+        Dialects without a cross-process fence (SQLite) rely on the in-process
+        per-thread lock alone, so this is a no-op there.
         """
-        stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
-        if tenant is not None:
-            stmt = stmt.where(RunEventRow.tenant_digest == tenant.digest)
         bind = session.get_bind()
         dialect_name = bind.dialect.name if bind is not None else ""
 
@@ -213,6 +165,22 @@ class DbRunEventStore(RunEventStore):
                 text("SELECT pg_advisory_xact_lock(hashtext(CAST(:thread_id AS text))::bigint)"),
                 {"thread_id": thread_id},
             )
+
+    @staticmethod
+    async def _max_seq_for_thread(session: AsyncSession, thread_id: str) -> int | None:
+        """Return the current max seq while serializing writers per thread.
+
+        Takes the shared thread mutation fence before reading the aggregate, so
+        the read is ordered against every other mutation of the same thread.
+        Other dialects keep the existing row-locking statement.
+        """
+        await DbRunEventStore._acquire_thread_mutation_fence(session, thread_id)
+
+        stmt = select(func.max(RunEventRow.seq)).where(RunEventRow.thread_id == thread_id)
+        bind = session.get_bind()
+        dialect_name = bind.dialect.name if bind is not None else ""
+
+        if dialect_name == "postgresql":
             return await session.scalar(stmt)
 
         return await session.scalar(stmt.with_for_update())
@@ -232,19 +200,13 @@ class DbRunEventStore(RunEventStore):
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
-                    max_seq = await self._max_seq_for_thread(
-                        session,
-                        thread_id,
-                        tenant=self._tenant,
-                    )
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
                     seq = (max_seq or 0) + 1
                     row = RunEventRow(
-                        **self._tenant_columns,
                         thread_id=thread_id,
                         run_id=run_id,
                         user_id=user_id,
                         event_type=event_type,
-                        idempotency_key=None,
                         category=category,
                         content=db_content,
                         event_metadata=metadata,
@@ -266,11 +228,7 @@ class DbRunEventStore(RunEventStore):
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
-                    max_seq = await self._max_seq_for_thread(
-                        session,
-                        thread_id,
-                        tenant=self._tenant,
-                    )
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
                     seq = max_seq or 0
                     rows = []
                     for e in events:
@@ -281,12 +239,10 @@ class DbRunEventStore(RunEventStore):
                         content, metadata = self._truncate_trace(category, content, metadata)
                         db_content, metadata = self._content_to_db(content, metadata)
                         row = RunEventRow(
-                            **self._tenant_columns,
                             thread_id=e["thread_id"],
                             run_id=e["run_id"],
                             user_id=e.get("user_id", user_id),
                             event_type=e["event_type"],
-                            idempotency_key=e.get("idempotency_key"),
                             category=category,
                             content=db_content,
                             event_metadata=metadata,
@@ -307,7 +263,6 @@ class DbRunEventStore(RunEventStore):
         content="",
         metadata=None,
         created_at=None,
-        user_id: str | None | _AutoSentinel = AUTO,
     ):
         """Idempotently insert a run-scoped singleton event.
 
@@ -319,18 +274,13 @@ class DbRunEventStore(RunEventStore):
         """
         content, metadata = self._truncate_trace(category, content, metadata)
         db_content, metadata = self._content_to_db(content, metadata)
-        explicit_user_id = not isinstance(user_id, _AutoSentinel)
-        resolved_user_id = self._user_id_from_context() if not explicit_user_id else user_id
+        user_id = self._user_id_from_context()
         async with self._get_write_lock(thread_id):
             async with self._sf() as session:
                 async with session.begin():
-                    max_seq = await self._max_seq_for_thread(
-                        session,
-                        thread_id,
-                        tenant=self._tenant,
-                    )
+                    max_seq = await self._max_seq_for_thread(session, thread_id)
                     stmt = (
-                        self._scope_event(select(RunEventRow))
+                        select(RunEventRow)
                         .where(
                             RunEventRow.thread_id == thread_id,
                             RunEventRow.run_id == run_id,
@@ -341,26 +291,12 @@ class DbRunEventStore(RunEventStore):
                     )
                     existing = await session.scalar(stmt)
                     if existing is not None:
-                        if explicit_user_id:
-                            if existing.user_id is None:
-                                # Older background recovery writes had no
-                                # request ContextVar and therefore persisted a
-                                # NULL owner. Repair that one-way missing fact
-                                # under the same singleton/thread write lock.
-                                existing.user_id = resolved_user_id
-                                await session.flush()
-                            elif existing.user_id != resolved_user_id:
-                                raise RuntimeError(
-                                    "run event singleton user identity conflicts with the authoritative run owner",
-                                )
                         return self._row_to_dict(existing), False
                     row = RunEventRow(
-                        **self._tenant_columns,
                         thread_id=thread_id,
                         run_id=run_id,
-                        user_id=resolved_user_id,
+                        user_id=user_id,
                         event_type=event_type,
-                        idempotency_key=None,
                         category=category,
                         content=db_content,
                         event_metadata=metadata,
@@ -369,525 +305,6 @@ class DbRunEventStore(RunEventStore):
                     )
                     session.add(row)
                 return self._row_to_dict(row), True
-
-    @staticmethod
-    async def _database_now(session: AsyncSession) -> datetime:
-        bind = session.get_bind()
-        dialect_name = "" if bind is None else bind.dialect.name
-        observed = await session.scalar(select(database_wall_clock_expression(dialect_name)))
-        if observed is None:
-            raise RuntimeError("database clock is unavailable")
-        return coerce_database_wall_clock(observed)
-
-    @classmethod
-    async def _lease_clock_for_run(
-        cls,
-        session: AsyncSession,
-        row: RunRow | None,
-    ) -> datetime | None:
-        if row is None or row.lease_expires_at is None:
-            return None
-        return await cls._database_now(session)
-
-    @staticmethod
-    def _require_owned_run(
-        row: RunRow | None,
-        *,
-        owner_id: str,
-        lease_epoch: int,
-        database_now: datetime | None,
-        allowed_statuses: tuple[str, ...] = ("running",),
-    ) -> RunRow:
-        if not allowed_statuses or any(status not in {"pending", "running"} for status in allowed_statuses):
-            raise ValueError("allowed_statuses must contain active run states")
-        if row is None or row.operation_kind != "run" or row.status not in allowed_statuses or row.owner_worker_id != owner_id or row.state_version != lease_epoch:
-            raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
-        deadline = row.lease_expires_at
-        if deadline is not None:
-            if deadline.tzinfo is None:
-                deadline = deadline.replace(tzinfo=UTC)
-            if database_now is None or deadline <= database_now:
-                raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
-        return row
-
-    def _require_runtime_authority(
-        self,
-        row: RunRow | None,
-        authority: RuntimeEventAuthority,
-        *,
-        database_now: datetime | None,
-    ) -> RunRow:
-        configured_digest = None if self._tenant is None else self._tenant.digest
-        try:
-            row = self._require_owned_run(
-                row,
-                owner_id=authority.owner_id,
-                lease_epoch=authority.lease_epoch,
-                database_now=database_now,
-                allowed_statuses=("pending", "running"),
-            )
-        except ToolReceiptOwnershipLost:
-            raise RuntimeEventOwnershipLost("runtime_event_ownership_lost") from None
-        if authority.tenant_digest != configured_digest or row.tenant_digest != authority.tenant_digest or row.thread_id != authority.thread_id or row.run_id != authority.run_id:
-            raise RuntimeEventOwnershipLost("runtime_event_ownership_lost")
-        return row
-
-    async def append_fenced_batch(
-        self,
-        authority: RuntimeEventAuthority,
-        events: list[dict],
-    ) -> list[dict]:
-        if not events:
-            return []
-        for event in events:
-            authority.require_event_identity(event)
-        async with self._get_write_lock(authority.thread_id):
-            async with self._sf() as session:
-                async with session.begin():
-                    run = await session.scalar(self._scope_run(select(RunRow)).where(RunRow.run_id == authority.run_id).with_for_update())
-                    database_now = await self._lease_clock_for_run(session, run)
-                    run = self._require_runtime_authority(
-                        run,
-                        authority,
-                        database_now=database_now,
-                    )
-                    max_seq = await self._max_seq_for_thread(
-                        session,
-                        authority.thread_id,
-                        tenant=self._tenant,
-                    )
-                    seq = max_seq or 0
-                    rows: list[RunEventRow] = []
-                    for event in events:
-                        seq += 1
-                        category = event.get("category", "trace")
-                        content, metadata = self._truncate_trace(
-                            category,
-                            event.get("content", ""),
-                            event.get("metadata"),
-                        )
-                        db_content, metadata = self._content_to_db(content, metadata)
-                        row = RunEventRow(
-                            **self._tenant_columns,
-                            thread_id=authority.thread_id,
-                            run_id=authority.run_id,
-                            user_id=run.user_id,
-                            event_type=event["event_type"],
-                            idempotency_key=None,
-                            category=category,
-                            content=db_content,
-                            event_metadata=metadata,
-                            seq=seq,
-                            created_at=(datetime.fromisoformat(event["created_at"]) if event.get("created_at") else datetime.now(UTC)),
-                        )
-                        session.add(row)
-                        rows.append(row)
-                return [self._row_to_dict(row) for row in rows]
-
-    async def append_fenced_if_absent(
-        self,
-        authority: RuntimeEventAuthority,
-        event: dict,
-    ) -> tuple[dict, bool]:
-        authority.require_event_identity(event)
-        async with self._get_write_lock(authority.thread_id):
-            async with self._sf() as session:
-                async with session.begin():
-                    run = await session.scalar(self._scope_run(select(RunRow)).where(RunRow.run_id == authority.run_id).with_for_update())
-                    database_now = await self._lease_clock_for_run(session, run)
-                    run = self._require_runtime_authority(
-                        run,
-                        authority,
-                        database_now=database_now,
-                    )
-                    max_seq = await self._max_seq_for_thread(
-                        session,
-                        authority.thread_id,
-                        tenant=self._tenant,
-                    )
-                    existing = await session.scalar(
-                        self._scope_event(select(RunEventRow))
-                        .where(
-                            RunEventRow.thread_id == authority.thread_id,
-                            RunEventRow.run_id == authority.run_id,
-                            RunEventRow.event_type == event["event_type"],
-                        )
-                        .order_by(RunEventRow.seq.asc())
-                        .limit(1)
-                    )
-                    if existing is not None:
-                        return self._row_to_dict(existing), False
-                    category = event.get("category", "trace")
-                    content, metadata = self._truncate_trace(
-                        category,
-                        event.get("content", ""),
-                        event.get("metadata"),
-                    )
-                    db_content, metadata = self._content_to_db(content, metadata)
-                    row = RunEventRow(
-                        **self._tenant_columns,
-                        thread_id=authority.thread_id,
-                        run_id=authority.run_id,
-                        user_id=run.user_id,
-                        event_type=event["event_type"],
-                        idempotency_key=None,
-                        category=category,
-                        content=db_content,
-                        event_metadata=metadata,
-                        seq=(max_seq or 0) + 1,
-                        created_at=(datetime.fromisoformat(event["created_at"]) if event.get("created_at") else datetime.now(UTC)),
-                    )
-                    session.add(row)
-                return self._row_to_dict(row), True
-
-    async def append_idempotent(
-        self,
-        run_id,
-        *,
-        event_type,
-        idempotency_key,
-        body,
-        owner_id,
-        lease_epoch,
-    ) -> AppendOutcome:
-        detached = validate_idempotent_append(
-            event_type=event_type,
-            idempotency_key=idempotency_key,
-            body=body,
-        )
-        # Resolve only the thread for the in-process lock. Ownership is checked
-        # again from a row lock in the insertion transaction.
-        async with self._sf() as lookup_session:
-            thread_id = await lookup_session.scalar(
-                self._scope_run(select(RunRow.thread_id)).where(
-                    RunRow.run_id == run_id,
-                )
-            )
-        if not isinstance(thread_id, str):
-            raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
-        async with self._get_write_lock(thread_id):
-            async with self._sf() as session:
-                async with session.begin():
-                    run = await session.scalar(self._scope_run(select(RunRow)).where(RunRow.run_id == run_id).with_for_update())
-                    database_now = await self._lease_clock_for_run(session, run)
-                    run = self._require_owned_run(
-                        run,
-                        owner_id=owner_id,
-                        lease_epoch=lease_epoch,
-                        database_now=database_now,
-                    )
-                    max_seq = await self._max_seq_for_thread(
-                        session,
-                        thread_id,
-                        tenant=self._tenant,
-                    )
-                    existing = await session.scalar(
-                        self._scope_event(select(RunEventRow))
-                        .where(
-                            RunEventRow.run_id == run_id,
-                            RunEventRow.event_type == event_type,
-                            RunEventRow.idempotency_key == idempotency_key,
-                        )
-                        .limit(1)
-                    )
-                    if existing is not None:
-                        record = self._row_to_dict(existing)
-                        if canonical_digest(record["content"]) != canonical_digest(detached):
-                            raise ToolReceiptIntegrityError("receipt_idempotency_conflict")
-                        parse_tool_receipt_event(record)
-                        return AppendOutcome(event=record, created=False)
-                    receipt = DurableToolReceiptV1.from_event_body(detached, occurred_at=datetime.now(UTC))
-                    if receipt.phase != "started":
-                        start_rows = await session.execute(
-                            self._scope_event(select(RunEventRow)).where(
-                                RunEventRow.run_id == run_id,
-                                RunEventRow.event_type == TOOL_RECEIPT_STARTED_EVENT,
-                                RunEventRow.idempotency_key == f"{receipt.receipt_id}:start",
-                            )
-                        )
-                        require_started_transition(
-                            [self._row_to_dict(start_row) for start_row in start_rows.scalars()],
-                            receipt,
-                        )
-                    row = RunEventRow(
-                        **self._tenant_columns,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        user_id=run.user_id,
-                        event_type=event_type,
-                        idempotency_key=idempotency_key,
-                        category=TOOL_RECEIPT_CATEGORY,
-                        content=json.dumps(detached, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                        event_metadata={
-                            "content_is_json": True,
-                            "content_is_dict": True,
-                            **receipt_event_metadata(
-                                receipt,
-                                writer_owner_id=owner_id,
-                                writer_lease_epoch=lease_epoch,
-                            ),
-                        },
-                        seq=(max_seq or 0) + 1,
-                        created_at=datetime.now(UTC),
-                    )
-                    session.add(row)
-                return AppendOutcome(event=self._row_to_dict(row), created=True)
-
-    async def reserve_tool_attempt(
-        self,
-        run_id,
-        *,
-        binding,
-        tool_call_id,
-        tool_name,
-        request_projection_digest,
-        observed_node_attempt,
-        expected_attempt,
-        owner_id,
-        lease_epoch,
-        capability_kind=None,
-    ) -> AppendOutcome:
-        binding = require_tool_attempt_binding_fence(
-            binding,
-            run_id=run_id,
-            owner_id=owner_id,
-            lease_epoch=lease_epoch,
-        )
-        async with self._sf() as lookup_session:
-            thread_id = await lookup_session.scalar(
-                self._scope_run(select(RunRow.thread_id)).where(
-                    RunRow.run_id == run_id,
-                )
-            )
-        if not isinstance(thread_id, str):
-            raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
-        async with self._get_write_lock(thread_id):
-            async with self._sf() as session:
-                async with session.begin():
-                    run = await session.scalar(self._scope_run(select(RunRow)).where(RunRow.run_id == run_id).with_for_update())
-                    database_now = await self._lease_clock_for_run(session, run)
-                    run = self._require_owned_run(
-                        run,
-                        owner_id=owner_id,
-                        lease_epoch=lease_epoch,
-                        database_now=database_now,
-                    )
-                    # Sequence assignment's advisory lock is also the
-                    # cross-process attempt-reservation serialization point.
-                    max_seq = await self._max_seq_for_thread(
-                        session,
-                        thread_id,
-                        tenant=self._tenant,
-                    )
-                    result = await session.execute(
-                        self._scope_event(select(RunEventRow))
-                        .where(
-                            RunEventRow.run_id == run_id,
-                            RunEventRow.event_type.in_(
-                                (
-                                    TOOL_RECEIPT_STARTED_EVENT,
-                                    TOOL_RECEIPT_OUTCOME_EVENT,
-                                    RETRIEVAL_OBSERVATION_EVENT_TYPE,
-                                )
-                            ),
-                        )
-                        .order_by(RunEventRow.seq.asc())
-                    )
-                    events = [self._row_to_dict(event_row) for event_row in result.scalars()]
-                    receipt, existing, terminal = reserve_attempt_from_events(
-                        events,
-                        binding=binding,
-                        tool_call_id=tool_call_id,
-                        tool_name=tool_name,
-                        request_projection_digest=request_projection_digest,
-                        observed_node_attempt=observed_node_attempt,
-                        expected_attempt=expected_attempt,
-                        capability_kind=capability_kind,
-                    )
-                    if existing is not None:
-                        return AppendOutcome(
-                            event=dict(existing),
-                            created=False,
-                            terminal_event=(dict(terminal) if terminal is not None else None),
-                            retrieval_observation_event=find_paired_retrieval_observation(
-                                events,
-                                terminal,
-                            ),
-                        )
-                    body = validate_idempotent_append(
-                        event_type=TOOL_RECEIPT_STARTED_EVENT,
-                        idempotency_key=receipt.idempotency_key,
-                        body=receipt.to_event_body(),
-                    )
-                    row = RunEventRow(
-                        **self._tenant_columns,
-                        thread_id=thread_id,
-                        run_id=run_id,
-                        user_id=run.user_id,
-                        event_type=TOOL_RECEIPT_STARTED_EVENT,
-                        idempotency_key=receipt.idempotency_key,
-                        category=TOOL_RECEIPT_CATEGORY,
-                        content=json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
-                        event_metadata={
-                            "content_is_json": True,
-                            "content_is_dict": True,
-                            **receipt_event_metadata(
-                                receipt,
-                                writer_owner_id=owner_id,
-                                writer_lease_epoch=lease_epoch,
-                                include_capability_marker=True,
-                                capability_kind=capability_kind,
-                            ),
-                        },
-                        seq=(max_seq or 0) + 1,
-                        created_at=datetime.now(UTC),
-                    )
-                    session.add(row)
-                return AppendOutcome(event=self._row_to_dict(row), created=True)
-
-    async def append_retrieval_pair(
-        self,
-        run_id,
-        *,
-        receipt_body,
-        observation_body,
-        owner_id,
-        lease_epoch,
-    ) -> RetrievalPairAppendOutcome:
-        prepared = prepare_retrieval_pair(
-            receipt_body,
-            observation_body,
-        )
-        receipt_body = prepared.receipt_body
-        observation_body = prepared.observation_body
-        receipt = prepared.receipt
-        observation = prepared.observation
-        async with self._sf() as lookup_session:
-            thread_id = await lookup_session.scalar(
-                self._scope_run(select(RunRow.thread_id)).where(
-                    RunRow.run_id == run_id,
-                )
-            )
-        if not isinstance(thread_id, str):
-            raise ToolReceiptOwnershipLost("tool_receipt_ownership_lost")
-        async with self._get_write_lock(thread_id):
-            async with self._sf() as session:
-                async with session.begin():
-                    run = await session.scalar(self._scope_run(select(RunRow)).where(RunRow.run_id == run_id).with_for_update())
-                    database_now = await self._lease_clock_for_run(session, run)
-                    run = self._require_owned_run(
-                        run,
-                        owner_id=owner_id,
-                        lease_epoch=lease_epoch,
-                        database_now=database_now,
-                    )
-                    max_seq = await self._max_seq_for_thread(
-                        session,
-                        thread_id,
-                        tenant=self._tenant,
-                    )
-                    rows = await session.execute(
-                        self._scope_event(select(RunEventRow)).where(
-                            RunEventRow.run_id == run_id,
-                            RunEventRow.event_type.in_(
-                                (
-                                    TOOL_RECEIPT_STARTED_EVENT,
-                                    TOOL_RECEIPT_OUTCOME_EVENT,
-                                    RETRIEVAL_OBSERVATION_EVENT_TYPE,
-                                )
-                            ),
-                        )
-                    )
-                    events = [self._row_to_dict(event_row) for event_row in rows.scalars()]
-                    require_started_transition(events, receipt)
-                    existing_receipt = next(
-                        (event for event in events if event.get("event_type") == TOOL_RECEIPT_OUTCOME_EVENT and event.get("idempotency_key") == receipt.idempotency_key),
-                        None,
-                    )
-                    existing_observation = next(
-                        (event for event in events if event.get("event_type") == RETRIEVAL_OBSERVATION_EVENT_TYPE and event.get("idempotency_key") == observation.idempotency_key),
-                        None,
-                    )
-                    receipt_created, observation_created = reconcile_existing_retrieval_pair(
-                        prepared,
-                        existing_receipt=existing_receipt,
-                        existing_observation=existing_observation,
-                    )
-                    seq = max_seq or 0
-                    created_rows: list[RunEventRow] = []
-                    if existing_receipt is None:
-                        seq += 1
-                        receipt_row = RunEventRow(
-                            **self._tenant_columns,
-                            thread_id=thread_id,
-                            run_id=run_id,
-                            user_id=run.user_id,
-                            event_type=TOOL_RECEIPT_OUTCOME_EVENT,
-                            idempotency_key=receipt.idempotency_key,
-                            category=TOOL_RECEIPT_CATEGORY,
-                            content=json.dumps(
-                                receipt_body,
-                                ensure_ascii=False,
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            ),
-                            event_metadata={
-                                "content_is_json": True,
-                                "content_is_dict": True,
-                                **receipt_event_metadata(
-                                    receipt,
-                                    writer_owner_id=owner_id,
-                                    writer_lease_epoch=lease_epoch,
-                                ),
-                            },
-                            seq=seq,
-                            created_at=datetime.now(UTC),
-                        )
-                        session.add(receipt_row)
-                        created_rows.append(receipt_row)
-                    else:
-                        receipt_row = None
-                    if existing_observation is None:
-                        seq += 1
-                        observation_row = RunEventRow(
-                            **self._tenant_columns,
-                            thread_id=thread_id,
-                            run_id=run_id,
-                            user_id=run.user_id,
-                            event_type=RETRIEVAL_OBSERVATION_EVENT_TYPE,
-                            idempotency_key=observation.idempotency_key,
-                            category=RETRIEVAL_OBSERVATION_EVENT_CATEGORY,
-                            content=json.dumps(
-                                observation_body,
-                                ensure_ascii=False,
-                                sort_keys=True,
-                                separators=(",", ":"),
-                            ),
-                            event_metadata=retrieval_observation_event_metadata(
-                                observation,
-                                task_id=receipt.context.execution_task_id,
-                                writer_fence_digest=tool_writer_fence_digest(
-                                    owner_id,
-                                    lease_epoch,
-                                ),
-                            ),
-                            seq=seq,
-                            created_at=datetime.now(UTC),
-                        )
-                        session.add(observation_row)
-                        created_rows.append(observation_row)
-                    else:
-                        observation_row = None
-                    if created_rows:
-                        await session.flush()
-                    receipt_event = existing_receipt if existing_receipt is not None else self._row_to_dict(receipt_row)
-                    observation_event = existing_observation if existing_observation is not None else self._row_to_dict(observation_row)
-                return RetrievalPairAppendOutcome(
-                    receipt_event=receipt_event,
-                    observation_event=observation_event,
-                    receipt_created=receipt_created,
-                    observation_created=observation_created,
-                )
 
     async def list_messages(
         self,
@@ -899,7 +316,7 @@ class DbRunEventStore(RunEventStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_messages")
-        stmt = self._scope_event(select(RunEventRow)).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
+        stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
         if resolved_user_id is not None:
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
         if before_seq is not None:
@@ -933,7 +350,7 @@ class DbRunEventStore(RunEventStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_events")
-        stmt = self._scope_event(select(RunEventRow)).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id)
+        stmt = select(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id)
         if resolved_user_id is not None:
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
         if event_types:
@@ -963,7 +380,7 @@ class DbRunEventStore(RunEventStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.list_messages_by_run")
-        stmt = self._scope_event(select(RunEventRow)).where(
+        stmt = select(RunEventRow).where(
             RunEventRow.thread_id == thread_id,
             RunEventRow.run_id == run_id,
             RunEventRow.category == "message",
@@ -1001,7 +418,7 @@ class DbRunEventStore(RunEventStore):
         # RunJournal canonically persists AI message rows as
         # ``llm.ai.response``; ``ai_message`` remains for legacy compatibility.
         stmt = (
-            self._scope_event(select(RunEventRow.run_id, func.max(RunEventRow.seq)))
+            select(RunEventRow.run_id, func.max(RunEventRow.seq))
             .where(
                 RunEventRow.thread_id == thread_id,
                 RunEventRow.run_id.in_(run_ids),
@@ -1024,7 +441,7 @@ class DbRunEventStore(RunEventStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ):
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.count_messages")
-        stmt = self._scope_event(select(func.count()).select_from(RunEventRow)).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
+        stmt = select(func.count()).select_from(RunEventRow).where(RunEventRow.thread_id == thread_id, RunEventRow.category == "message")
         if resolved_user_id is not None:
             stmt = stmt.where(RunEventRow.user_id == resolved_user_id)
         async with self._sf() as session:
@@ -1092,27 +509,35 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
+        """Delete every event of *thread_id* inside the thread mutation fence.
+
+        Deletion takes the same critical section as the writers — the in-process
+        per-thread lock plus, on PostgreSQL, the transaction advisory lock — so a
+        writer admitted before this call can no longer land a row between the
+        count below and the commit, which would resurrect a deleted thread. The
+        JSONL store serializes deletion the same way (``_run_mutation``).
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_thread")
-        async with self._sf() as session:
-            count_conditions = [RunEventRow.thread_id == thread_id]
-            if self._tenant is not None:
-                count_conditions.append(RunEventRow.tenant_digest == self._tenant.digest)
-            if resolved_user_id is not None:
-                count_conditions.append(RunEventRow.user_id == resolved_user_id)
-            count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
-            count = await session.scalar(count_stmt) or 0
-            if count > 0:
-                await session.execute(delete(RunEventRow).where(*count_conditions))
-                await session.commit()
-            # Evict the per-thread seq-assignment lock so ``_write_locks`` does
-            # not grow unbounded over the (long-lived, singleton) store's
-            # lifetime. Only pop when no writer is mid-flight; a later write
-            # recreates the lock lazily and seq restarts correctly from the
-            # now-deleted thread.
-            lock = self._write_locks.get(thread_id)
-            if lock is not None and not lock.locked():
-                self._write_locks.pop(thread_id, None)
-            return count
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    await self._acquire_thread_mutation_fence(session, thread_id)
+                    count_conditions = [RunEventRow.thread_id == thread_id]
+                    if resolved_user_id is not None:
+                        count_conditions.append(RunEventRow.user_id == resolved_user_id)
+                    count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
+                    count = await session.scalar(count_stmt) or 0
+                    if count > 0:
+                        await session.execute(delete(RunEventRow).where(*count_conditions))
+            # Retire the live-thread pin, but never remove the weak registry
+            # entry directly. asyncio.Lock.release() clears ``locked()`` before
+            # a queued waiter resumes, so an unlocked check can observe the
+            # handoff window and split one thread onto two lock generations.
+            # Holders/waiters keep the old generation alive until they drain; a
+            # later caller therefore resolves that same lock instead of racing
+            # it with a fresh one.
+            self._write_lock_pins.pop(thread_id, None)
+        return count
 
     async def delete_by_run(
         self,
@@ -1121,16 +546,21 @@ class DbRunEventStore(RunEventStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ):
+        """Delete one run's events inside the thread mutation fence.
+
+        Shares ``delete_by_thread``'s critical section; deleting a single run
+        leaves the thread alive, so the write-lock pin is deliberately kept.
+        """
         resolved_user_id = resolve_user_id(user_id, method_name="DbRunEventStore.delete_by_run")
-        async with self._sf() as session:
-            count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
-            if self._tenant is not None:
-                count_conditions.append(RunEventRow.tenant_digest == self._tenant.digest)
-            if resolved_user_id is not None:
-                count_conditions.append(RunEventRow.user_id == resolved_user_id)
-            count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
-            count = await session.scalar(count_stmt) or 0
-            if count > 0:
-                await session.execute(delete(RunEventRow).where(*count_conditions))
-                await session.commit()
-            return count
+        async with self._get_write_lock(thread_id):
+            async with self._sf() as session:
+                async with session.begin():
+                    await self._acquire_thread_mutation_fence(session, thread_id)
+                    count_conditions = [RunEventRow.thread_id == thread_id, RunEventRow.run_id == run_id]
+                    if resolved_user_id is not None:
+                        count_conditions.append(RunEventRow.user_id == resolved_user_id)
+                    count_stmt = select(func.count()).select_from(RunEventRow).where(*count_conditions)
+                    count = await session.scalar(count_stmt) or 0
+                    if count > 0:
+                        await session.execute(delete(RunEventRow).where(*count_conditions))
+        return count

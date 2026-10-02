@@ -17,12 +17,6 @@ from pathlib import Path
 from typing import BinaryIO
 
 from deerflow.constants import BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME
-from deerflow.runtime.run_evidence import (
-    MAX_MANIFEST_BYTES,
-    RUN_EVIDENCE_MANIFEST_PATH,
-    EvidenceArtifactV1,
-    RunEvidenceSnapshotV1,
-)
 
 _VIRTUAL_PREFIX = "mnt/user-data/outputs/"
 _EDIT_TEMP_PREFIX = ".artifact-edit-"
@@ -471,112 +465,6 @@ def build_artifact_archive(
         size = output.tell()
         output.seek(0)
         return ArtifactArchiveResult(output, size, len(members), input_bytes)
-    except Exception:
-        output.close()
-        raise
-
-
-def build_run_evidence_archive(
-    outputs_dir: Path,
-    virtual_paths: Iterable[str],
-    *,
-    snapshot: RunEvidenceSnapshotV1,
-    user_data_dir: Path,
-    extra_reserved_dir_names: Iterable[str] = (),
-    deadline_monotonic: float | None = None,
-    cancel_event: threading.Event | None = None,
-) -> ArtifactArchiveResult:
-    """Build a manifest-bearing archive from one immutable runtime snapshot.
-
-    Artifact entries are hashed while their bytes are copied from the same
-    open descriptors.  The manifest is created only from those copy results,
-    so its size and digest claims describe exactly the bytes already written
-    to the ZIP.
-    """
-
-    if not isinstance(snapshot, RunEvidenceSnapshotV1):
-        raise ArtifactArchiveError("The evidence snapshot is invalid")
-    paths = list(dict.fromkeys(virtual_paths))
-    if tuple(paths) != snapshot.artifact_paths:
-        raise ArtifactArchiveError("The evidence snapshot does not match the requested artifacts")
-    deadline = time.monotonic() + BUILD_TIMEOUT_SECONDS if deadline_monotonic is None else deadline_monotonic
-    members = _validated_members(
-        outputs_dir,
-        paths,
-        user_data_dir=user_data_dir,
-        extra_reserved_dir_names={
-            *extra_reserved_dir_names,
-            RUN_EVIDENCE_MANIFEST_PATH.split("/", 1)[0],
-        },
-        deadline=deadline,
-        allow_empty=True,
-        cancel_event=cancel_event,
-    )
-    members = [
-        _ArchiveMember(
-            path=member.path,
-            entry=unicodedata.normalize("NFC", member.entry),
-            initial=member.initial,
-            components=member.components,
-        )
-        for member in members
-    ]
-    members.sort(key=lambda member: member.entry)
-
-    output = tempfile.TemporaryFile("w+b")
-    try:
-        if hasattr(os, "fchmod"):
-            os.fchmod(output.fileno(), 0o600)
-        input_bytes = 0
-        copied_members: list[_CopiedArchiveMember] = []
-        with zipfile.ZipFile(
-            output,
-            "w",
-            zipfile.ZIP_STORED,
-            allowZip64=False,
-        ) as archive:
-            for member in members:
-                copied = _copy_member(
-                    archive,
-                    member,
-                    deadline,
-                    MAX_TOTAL_BYTES - input_bytes,
-                    cancel_event,
-                )
-                copied_members.append(copied)
-                input_bytes += copied.size
-
-            manifest = snapshot.to_manifest(
-                tuple(
-                    EvidenceArtifactV1(
-                        path=copied.entry,
-                        size=copied.size,
-                        sha256=copied.sha256,
-                    )
-                    for copied in copied_members
-                )
-            )
-            manifest_bytes = manifest.canonical_bytes()
-            if len(manifest_bytes) > MAX_MANIFEST_BYTES:
-                raise _too_large(f"An evidence manifest must be at most {MAX_MANIFEST_BYTES} bytes")
-            _check_deadline(deadline, cancel_event)
-            info = zipfile.ZipInfo(RUN_EVIDENCE_MANIFEST_PATH)
-            info.date_time = (1980, 1, 1, 0, 0, 0)
-            info.create_system = 0
-            info.compress_type = zipfile.ZIP_STORED
-            archive.writestr(info, manifest_bytes)
-
-        _check_deadline(deadline, cancel_event)
-        size = output.tell()
-        output.seek(0)
-        return ArtifactArchiveResult(
-            file=output,
-            size=size,
-            member_count=len(copied_members),
-            input_bytes=input_bytes,
-            manifest_digest=manifest.manifest_digest,
-            bundle_ref=manifest.bundle_ref,
-        )
     except Exception:
         output.close()
         raise

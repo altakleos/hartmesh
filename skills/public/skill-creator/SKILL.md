@@ -60,11 +60,9 @@ In DeerFlow, the sandbox filesystem is isolated. Files written with `write_file`
 
 4. **Eval workspace files are OK in sandbox**. Test prompts, benchmark data, eval viewer HTML, grading results, etc. are NOT skill files — you can write these to `/mnt/user-data/outputs/` or `/mnt/user-data/workspace/` using sandbox `write_file` as usual.
 
-5. **To read an existing skill's SKILL.md**, call `describe_skill("<name>")` and `read_file` the `Location` it reports. Do not assume a path: where a skill is mounted differs between deployments, and a durable invocation executes an immutable snapshot rather than the live tree.
+5. **To read an existing skill's SKILL.md**, use `read_file("/mnt/skills/custom/<name>/SKILL.md")` in the sandbox (it maps to the per-user skill directory).
 
 6. **Updating an existing skill**: use `skill_manage(action="edit")` or `skill_manage(action="patch")`. Do NOT copy to `/tmp/` first — `skill_manage` handles the per-user storage directly.
-
-7. **A skill you write must not name an absolute skills path in its own command examples.** The package does not know where it is mounted, and a durable invocation mounts only its immutable snapshot, so an absolute path under the skills mount names a place its reader does not have. Write each command as `SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/x.py"` — the assignment a statement of its own, since in front of the script without the `;` it is not set yet when bash expands the path — and state once, near the first command, that `$SKILL_DIR` is the skill's own directory — the one `describe_skill` reports as `Directory`. Another skill's files are addressed the same way, through the `Directory` reported for it.
 
 ### Workflow in DeerFlow
 

@@ -23,7 +23,7 @@ from deerflow.skills.security_static_scanner import (
     enforce_static_scan,
 )
 from deerflow.skills.storage import get_or_new_user_skill_storage
-from deerflow.skills.storage.skill_storage import SkillStorage
+from deerflow.skills.storage.skill_storage import SkillStorage, read_text_or_none
 from deerflow.skills.types import SKILL_MD_FILE
 from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
@@ -133,20 +133,6 @@ async def _skill_manage_impl(
         replace: Replacement text for patch.
         expected_count: Optional expected number of replacements for patch.
     """
-    context = runtime.context if runtime is not None else None
-    governed = isinstance(context, dict) and context.get("accepted_tool_plane_revision") is not None
-    if not governed:
-        from deerflow.config import get_app_config
-        from deerflow.config.tool_plane_config import (
-            governed_tool_plane_enabled,
-        )
-
-        try:
-            governed = governed_tool_plane_enabled(get_app_config())
-        except (FileNotFoundError, RuntimeError):
-            governed = False
-    if governed:
-        raise ValueError("Direct skill mutation is disabled for this run; stage, validate, and promote a governed revision instead.")
     name = SkillStorage.validate_skill_name(name)
     user_id = resolve_runtime_user_id(runtime)
     lock = _get_lock(user_id, name)
@@ -237,8 +223,12 @@ async def _skill_manage_impl(
             if path is None or content is None:
                 raise ValueError("path and content are required for write_file.")
             target = await _to_thread(skill_storage.ensure_safe_support_path, name, path)
+            if await _to_thread(target.is_dir):
+                raise ValueError(f"Supporting file path '{path}' is a directory, not a file.")
             exists = await _to_thread(target.exists)
-            prev_content = await _to_thread(target.read_text, encoding="utf-8") if exists else None
+            # A binary asset (e.g. from a .skill archive) has no previous *text*;
+            # the history record takes None rather than aborting the write.
+            prev_content = await _to_thread(read_text_or_none, target) if exists else None
             executable = "scripts/" in path or path.startswith("scripts/")
             static_findings = await _scan_static_candidate_or_raise(name, {path: content}, skill_storage)
             scan = await _scan_or_raise(content, executable=executable, location=f"{name}/{path}", static_findings=static_findings)

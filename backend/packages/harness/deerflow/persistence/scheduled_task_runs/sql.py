@@ -11,14 +11,17 @@ from sqlalchemy.orm import aliased
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
-from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
+from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, keeps_pause
+from deerflow.persistence.scheduled_tasks.model import (
+    ACTIVE_RUN_STATUSES,
+    TERMINAL_RUN_STATUSES,
+    ScheduledTaskRow,
+    ScheduledTaskRunStatus,
+)
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
 
-TERMINAL_RUN_STATUSES: frozenset[str] = frozenset({"success", "failed", "skipped", "interrupted"})
-QUEUED_RUN_STATUSES: tuple[str, ...] = ("queued",)
 EXECUTING_RUN_STATUSES: tuple[str, ...] = ("launching", "running")
-ACTIVE_RUN_STATUSES: tuple[str, ...] = (*QUEUED_RUN_STATUSES, *EXECUTING_RUN_STATUSES)
 _SCHEDULER_BUDGET_LOCK_KEY = 4694001
 
 
@@ -63,12 +66,9 @@ class ScheduledTaskRunRepository:
         self._sf = session_factory
         self._run_repository = run_repository or RunRepository(session_factory)
 
-    def _scope_run_statement(self, statement: Any) -> Any:
-        return self._run_repository.scope_run_statement(statement)
-
     @staticmethod
     def _row_to_dict(row: ScheduledTaskRunRow) -> dict[str, Any]:
-        data = row.to_dict()
+        data = row.to_dict(exclude={"occurrence_seq", "launch_accounted"})
         for key in (
             "scheduled_for",
             "lease_expires_at",
@@ -106,7 +106,10 @@ class ScheduledTaskRunRepository:
         candidate: RunRow,
     ) -> None:
         """Repair the parent update if launch committed before bookkeeping."""
-        if task is None or task.last_run_id == candidate.run_id:
+        if task is None:
+            return
+        account_launch(task, row, candidate.run_id)
+        if task.last_run_id == candidate.run_id or not can_project(task, row):
             return
         launched_at = candidate.created_at
         if launched_at.tzinfo is None:
@@ -120,9 +123,9 @@ class ScheduledTaskRunRepository:
             task.timezone,
             now=launched_at,
         )
-        task.run_count += 1
         task.lease_owner = None
         task.lease_expires_at = None
+        task.updated_at = datetime.now(UTC)
         if task.schedule_type == "once":
             if candidate.status == "success":
                 task.status = "completed"
@@ -136,9 +139,7 @@ class ScheduledTaskRunRepository:
             else:
                 task.status = "running"
                 task.last_error = None
-        elif task.status != "paused":
-            # A pause -- the owner's, or a hold while the owner is turned off
-            # -- outlasts the occurrence it did not stop.
+        elif not (row.trigger == "manual" and task.status == "paused"):
             task.status = "enabled"
             task.last_error = candidate.error if candidate.status in {"error", "timeout", "interrupted"} else None
 
@@ -165,12 +166,14 @@ class ScheduledTaskRunRepository:
             scheduled_for=scheduled_for,
             trigger=trigger,
             status=status,
+            launch_accounted=False,
             created_at=datetime.now(UTC),
         )
         async with self._sf() as session:
-            task: ScheduledTaskRow | None = None
+            # Every occurrence with a parent participates in the same DB
+            # ordering, including terminal records and uncoordinated callers.
+            task = await self._lock_task(session, task_id)
             if coordinate_with_task:
-                task = await self._lock_task(session, task_id)
                 if task is None or (expected_task_user_id is not None and task.user_id != expected_task_user_id):
                     await session.rollback()
                     raise ScheduledTaskAdmissionRejected(task_id, reason="not_found")
@@ -196,8 +199,19 @@ class ScheduledTaskRunRepository:
                 if active_status is not None:
                     await session.rollback()
                     raise ActiveScheduledRunConflict(task_id)
+            if task is not None:
+                row.occurrence_seq = await session.scalar(
+                    update(ScheduledTaskRow)
+                    .where(ScheduledTaskRow.id == task_id)
+                    .values(
+                        last_occurrence_seq=ScheduledTaskRow.last_occurrence_seq + 1,
+                        # Sequence allocation is not a user-visible task edit.
+                        updated_at=ScheduledTaskRow.updated_at,
+                    )
+                    .returning(ScheduledTaskRow.last_occurrence_seq)
+                )
             session.add(row)
-            if task is not None and release_task_lease_status is not None:
+            if coordinate_with_task and task is not None and release_task_lease_status is not None:
                 task.status = release_task_lease_status
                 task.lease_owner = None
                 task.lease_expires_at = None
@@ -206,47 +220,40 @@ class ScheduledTaskRunRepository:
                 await session.commit()
             except IntegrityError:
                 await session.rollback()
-                # Only active-status inserts can trip the partial unique index
-                # ``uq_scheduled_task_run_active``; a terminal-status row (e.g.
-                # a "skipped" tombstone) is outside its predicate and cannot
-                # conflict, so any IntegrityError there is a genuine fault and
-                # is re-raised untranslated.
-                if status in ACTIVE_RUN_STATUSES:
+                # A primary-key/sequence conflict is not necessarily an active
+                # slot conflict. Preserve the database error unless an active
+                # occurrence actually exists after rollback.
+                if status in ACTIVE_RUN_STATUSES and await session.scalar(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)).limit(1)):
                     raise ActiveScheduledRunConflict(task_id) from None
                 raise
             await session.refresh(row)
             return self._row_to_dict(row)
 
-    async def list_by_task(self, task_id: str, *, limit: int = 50, offset: int = 0) -> list[dict[str, Any]]:
-        stmt = (
-            select(ScheduledTaskRunRow)
-            .where(ScheduledTaskRunRow.task_id == task_id)
-            .order_by(
-                ScheduledTaskRunRow.created_at.desc(),
-                ScheduledTaskRunRow.id.desc(),
-            )
-            .limit(limit)
-            .offset(offset)
-        )
+    async def list_by_task(
+        self,
+        task_id: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        status: ScheduledTaskRunStatus | None = None,
+    ) -> list[dict[str, Any]]:
+        stmt = select(ScheduledTaskRunRow).where(ScheduledTaskRunRow.task_id == task_id)
+        if status is not None:
+            stmt = stmt.where(ScheduledTaskRunRow.status == status)
+        stmt = stmt.order_by(ScheduledTaskRunRow.created_at.desc(), ScheduledTaskRunRow.id.desc()).limit(limit).offset(offset)
         async with self._sf() as session:
             result = await session.execute(stmt)
             return [self._row_to_dict(row) for row in result.scalars()]
 
-    async def count_active_runs(self) -> int:
-        """Count launch claims and live runs; waiting rows do not consume slots."""
-        stmt = select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES))
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            return int(result.scalar() or 0)
-
     async def list_overdue_running(self, *, started_before: datetime, limit: int) -> list[dict[str, Any]]:
-        """Occurrences still ``running`` that started before the cutoff, oldest first.
+        """Occurrences still ``running`` that started before the cutoff, oldest first, each with its task's owner.
 
         ``started_at`` is written when the run is launched, so a row without it
         (one whose launch bookkeeping failed) is never overdue here.
         """
         stmt = (
-            select(ScheduledTaskRunRow)
+            select(ScheduledTaskRunRow, ScheduledTaskRow.user_id)
+            .join(ScheduledTaskRow, ScheduledTaskRow.id == ScheduledTaskRunRow.task_id)
             .where(
                 ScheduledTaskRunRow.status == "running",
                 ScheduledTaskRunRow.started_at.is_not(None),
@@ -257,7 +264,14 @@ class ScheduledTaskRunRepository:
         )
         async with self._sf() as session:
             result = await session.execute(stmt)
-            return [self._row_to_dict(row) for row in result.scalars()]
+            return [{**self._row_to_dict(row), "user_id": user_id} for row, user_id in result.all()]
+
+    async def count_active_runs(self) -> int:
+        """Count launch claims and live runs; waiting rows do not consume slots."""
+        stmt = select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES))
+        async with self._sf() as session:
+            result = await session.execute(stmt)
+            return int(result.scalar() or 0)
 
     async def list_queued_runs(self, *, limit: int) -> list[dict[str, Any]]:
         older = aliased(ScheduledTaskRunRow)
@@ -319,11 +333,23 @@ class ScheduledTaskRunRepository:
     ) -> dict[str, Any] | None:
         """Atomically move one waiting row into the lease-fenced launch phase."""
         async with self._sf() as session:
-            if session.get_bind().dialect.name == "postgresql":
+            dialect = session.get_bind().dialect.name
+            if dialect == "postgresql":
                 await session.execute(
                     text("SELECT pg_advisory_xact_lock(:lock_key)"),
                     {"lock_key": _SCHEDULER_BUDGET_LOCK_KEY},
                 )
+            elif dialect == "sqlite":
+                # The budget count below is only meaningful if no peer can
+                # claim between it and the UPDATE. A deferred SQLite
+                # transaction does not reserve the writer until that UPDATE,
+                # which is too late: every claimer would read the same stale
+                # count and pass. BEGIN IMMEDIATE takes the writer first, the
+                # same reservation _lock_task makes for a parent row, and it
+                # serializes claimers in other processes sharing the file too.
+                # The claim targets one row, but the budget is global, so this
+                # has to be the database-wide writer rather than a row lock.
+                await session.execute(text("BEGIN IMMEDIATE"))
             executing = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES)))
             if int(executing or 0) >= global_max_concurrent_runs:
                 await session.rollback()
@@ -437,7 +463,7 @@ class ScheduledTaskRunRepository:
                 row.lease_owner = None
                 row.lease_expires_at = None
 
-                if task is not None:
+                if task is not None and can_project(task, row):
                     if task.status == "paused":
                         # A concurrent/later pause owns the parent presentation.
                         task.lease_owner = None
@@ -490,13 +516,10 @@ class ScheduledTaskRunRepository:
             row.lease_owner = None
             row.lease_expires_at = None
 
-            if task is not None:
-                if row.trigger == "manual" or task.status == "paused":
-                    # Nothing ran. A manual trigger never consumes the
-                    # schedule, and a pause placed while this launch was in
-                    # flight stands.
+            if task is not None and can_project(task, row):
+                if row.trigger == "manual":
                     task_status = task.status or "enabled"
-                    next_at = task.next_run_at if row.trigger == "manual" else compute_next_run_at(task.schedule_type, task.schedule_spec, task.timezone, now=now)
+                    next_at = task.next_run_at
                 else:
                     task_status = "failed" if task.schedule_type == "once" else "enabled"
                     next_at = compute_next_run_at(
@@ -505,7 +528,10 @@ class ScheduledTaskRunRepository:
                         task.timezone,
                         now=now,
                     )
-                task.status = task_status
+                if not keeps_pause(task, task_status):
+                    # A task held while this occurrence was launching -- its
+                    # owner was turned off -- stays paused through the failure.
+                    task.status = task_status
                 task.next_run_at = next_at
                 task.last_run_at = now
                 task.last_run_id = None
@@ -636,6 +662,18 @@ class ScheduledTaskRunRepository:
             row = await session.get(ScheduledTaskRunRow, run_record_id)
             if row is None:
                 return False
+            # The lease-owner / terminal guards are only as fresh as the row
+            # they read: on SQLite a plain SELECT sees a snapshot that a
+            # concurrent requeue + re-claim can invalidate before this session
+            # commits (the same staleness #5777 fixed for the parent task's
+            # lease release). Take the parent's writer first — the same
+            # task -> run lock order every other mutating path uses — and
+            # re-read the row under it (populate_existing: the identity map
+            # would otherwise serve the pre-lock row back untouched).
+            await self._lock_task(session, row.task_id)
+            row = await session.get(ScheduledTaskRunRow, run_record_id, with_for_update=True, populate_existing=True)
+            if row is None:
+                return False
             if protect_terminal and row.status in TERMINAL_RUN_STATUSES:
                 # The launch-path "running" write lost the race against the
                 # completion hook; keep the terminal status/error and only
@@ -669,38 +707,6 @@ class ScheduledTaskRunRepository:
                 row.finished_at = finished_at
             await session.commit()
             return True
-
-    async def end_active_run(
-        self,
-        run_record_id: str,
-        *,
-        status: str,
-        run_id: str | None,
-        error: str | None,
-        finished_at: datetime,
-    ) -> bool:
-        """End an occurrence that has not ended yet, once, and say whether this call did.
-
-        A compare-and-set on the row's status: the occurrence is ended by
-        whoever gets there first (the run's completion, or the scheduler at the
-        run's time limit), and the other is told it lost and changes nothing.
-        ``update_status`` overwrites whatever is there; this never rewrites a
-        terminal occurrence. ``run_id`` is recorded only when given.
-        """
-        values: dict[str, Any] = {
-            "status": status,
-            "error": error,
-            "finished_at": finished_at,
-            "lease_owner": None,
-            "lease_expires_at": None,
-        }
-        if run_id is not None:
-            values["run_id"] = run_id
-        stmt = update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == run_record_id, ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)).values(**values)
-        async with self._sf() as session:
-            result = await session.execute(stmt)
-            await session.commit()
-            return bool(result.rowcount)
 
     async def has_active_runs(self, task_id: str) -> bool:
         stmt = (
@@ -873,15 +879,11 @@ class ScheduledTaskRunRepository:
             await session.commit()
             return stale
 
-    async def _find_underlying_run(
-        self,
-        session: AsyncSession,
-        row: ScheduledTaskRunRow,
-        task: ScheduledTaskRow | None,
-    ) -> RunRow | None:
+    @staticmethod
+    async def _find_underlying_run(session: AsyncSession, row: ScheduledTaskRunRow, task: ScheduledTaskRow | None) -> RunRow | None:
         run_ids = [candidate for candidate in (row.run_id, task.last_run_id if task is not None else None) if candidate]
         for run_id in dict.fromkeys(run_ids):
-            candidate = (await session.execute(self._scope_run_statement(select(RunRow).where(RunRow.run_id == run_id)))).scalar_one_or_none()
+            candidate = await session.get(RunRow, run_id)
             if candidate is None:
                 continue
             linked_task_run_id = (candidate.metadata_json or {}).get("scheduled_task_run_id")
@@ -890,5 +892,5 @@ class ScheduledTaskRunRepository:
             if linked_task_run_id is None or linked_task_run_id == row.id:
                 return candidate
 
-        result = await session.execute(self._scope_run_statement(select(RunRow)).where(RunRow.metadata_json["scheduled_task_run_id"].as_string() == row.id).order_by(RunRow.created_at.desc()).limit(1))
+        result = await session.execute(select(RunRow).where(RunRow.metadata_json["scheduled_task_run_id"].as_string() == row.id).order_by(RunRow.created_at.desc()).limit(1))
         return result.scalars().first()

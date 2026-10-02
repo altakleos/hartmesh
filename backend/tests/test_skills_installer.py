@@ -90,6 +90,36 @@ class TestShouldIgnoreArchiveEntry:
 
 
 # ---------------------------------------------------------------------------
+# code-file classification shared with SkillScan
+# ---------------------------------------------------------------------------
+
+
+class TestCodeFileClassification:
+    @pytest.mark.parametrize(
+        ("rel_path", "content", "expected"),
+        [
+            ("scripts/data.dat", b"plain", True),
+            ("lib/RUN.PY", b"print()", True),
+            ("bin/tool", b"#!/bin/sh\n", True),
+            ("bin/tool", b"echo", False),
+            ("bin/notes.txt", b"#!/bin/sh\n", False),
+            ("bin/scripts", b"echo", False),
+            ("assets/logo.png", b"\x89PNG", False),
+        ],
+    )
+    def test_installer_applies_the_shared_code_file_rule(self, tmp_path, rel_path, content, expected):
+        import deerflow.skills.installer as installer_module
+        from deerflow.skills.package_files import is_code_file
+
+        path = tmp_path / rel_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+        assert asyncio.run(installer_module._is_code_file(path, Path(rel_path))) is expected
+        assert is_code_file(rel_path, content) is expected
+
+
+# ---------------------------------------------------------------------------
 # resolve_skill_dir_from_archive
 # ---------------------------------------------------------------------------
 
@@ -162,7 +192,7 @@ class TestSafeExtract:
             with pytest.raises(ValueError, match="unsafe"):
                 safe_extract_skill_archive(zf, dest)
 
-    def test_rejects_symlinks(self, tmp_path):
+    def test_skips_symlinks(self, tmp_path):
         zip_path = tmp_path / "sym.zip"
         with zipfile.ZipFile(zip_path, "w") as zf:
             info = zipfile.ZipInfo("link.txt")
@@ -172,51 +202,9 @@ class TestSafeExtract:
         dest = tmp_path / "out"
         dest.mkdir()
         with zipfile.ZipFile(zip_path) as zf:
-            with pytest.raises(ValueError, match="link or special"):
-                safe_extract_skill_archive(zf, dest)
+            safe_extract_skill_archive(zf, dest)
+        assert (dest / "normal.txt").exists()
         assert not (dest / "link.txt").exists()
-
-    @pytest.mark.parametrize(
-        "kind",
-        [stat.S_IFIFO, stat.S_IFCHR, stat.S_IFBLK, stat.S_IFSOCK],
-    )
-    def test_rejects_device_and_other_special_members(self, tmp_path, kind):
-        zip_path = tmp_path / "special.zip"
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            info = zipfile.ZipInfo("my-skill/special")
-            info.create_system = 3
-            info.external_attr = (kind | 0o600) << 16
-            zf.writestr(info, b"")
-        dest = tmp_path / "out"
-        dest.mkdir()
-
-        with zipfile.ZipFile(zip_path) as zf:
-            with pytest.raises(ValueError, match="link or special"):
-                safe_extract_skill_archive(zf, dest)
-
-    def test_rejects_duplicate_normalized_paths(self, tmp_path):
-        zip_path = tmp_path / "duplicate.zip"
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            zf.writestr("my-skill/SKILL.md", "first")
-            zf.writestr("my-skill/./SKILL.md", "second")
-        dest = tmp_path / "out"
-        dest.mkdir()
-
-        with zipfile.ZipFile(zip_path) as zf:
-            with pytest.raises(ValueError, match="duplicate or conflicting"):
-                safe_extract_skill_archive(zf, dest)
-
-    def test_rejects_file_directory_conflicts(self, tmp_path):
-        zip_path = tmp_path / "conflict.zip"
-        with zipfile.ZipFile(zip_path, "w") as zf:
-            zf.writestr("my-skill/scripts", "not a directory")
-            zf.writestr("my-skill/scripts/run.sh", "#!/bin/sh")
-        dest = tmp_path / "out"
-        dest.mkdir()
-
-        with zipfile.ZipFile(zip_path) as zf:
-            with pytest.raises(ValueError, match="duplicate or conflicting"):
-                safe_extract_skill_archive(zf, dest)
 
     def test_rejects_too_many_entries(self, tmp_path):
         """Entry-count cap is independent of total size: 4 tiny files still trips a low max_entries."""
@@ -467,7 +455,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location, static_findings=None):
+        async def _scan(content, *, executable, location, app_config=None, static_findings=None):
             calls.append({"content": content, "executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 
@@ -497,7 +485,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location, static_findings=None):
+        async def _scan(content, *, executable, location, app_config=None, static_findings=None):
             calls.append({"content": content, "executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 
@@ -542,7 +530,7 @@ class TestInstallSkillFromArchive:
         skills_root.mkdir()
         calls = []
 
-        async def _scan(content, *, executable, location, static_findings=None):
+        async def _scan(content, *, executable, location, app_config=None, static_findings=None):
             calls.append({"executable": executable, "location": location})
             return ScanResult(decision="allow", reason="ok")
 

@@ -337,7 +337,6 @@ def test_an_empty_output_still_reports_the_presentation(tmp_path: Path) -> None:
 
 
 def _patch_remote_bash(monkeypatch, execute) -> None:
-    monkeypatch.setattr(sandbox_tools, "_validate_runtime_skill_command", lambda runtime, command: None)
     monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda runtime: object())
     monkeypatch.setattr(sandbox_tools, "is_local_sandbox", lambda runtime: False)
     monkeypatch.setattr(sandbox_tools, "ensure_thread_directories_exist", lambda runtime: None)
@@ -384,7 +383,6 @@ def test_the_bash_tool_presents_on_the_local_sandbox_path_too(tmp_path: Path, mo
         _written(outputs_dir, "r.pdf")
         return "Rendered pdf: /host/path/r.pdf\n"
 
-    monkeypatch.setattr(sandbox_tools, "_validate_runtime_skill_command", lambda runtime, command: None)
     monkeypatch.setattr(sandbox_tools, "ensure_sandbox_initialized", lambda runtime: object())
     monkeypatch.setattr(sandbox_tools, "is_local_sandbox", lambda runtime: True)
     monkeypatch.setattr(sandbox_tools, "is_host_bash_allowed", lambda: True)

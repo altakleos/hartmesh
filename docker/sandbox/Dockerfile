@@ -61,5 +61,12 @@ RUN set -eux; \
     chown -R 1000:1000 "$MPLCONFIGDIR"; \
     test -n "$(ls "$MPLCONFIGDIR"/fontlist-*.json)"
 
+# Closing a PTY must stop its pending executor loop, including commands with
+# a hard timeout (which ignore the idle timeout). Fail on vendor source drift.
+RUN set -eux; \
+    P=/opt/python3.12/lib/python3.12/site-packages/vendors/openhands/runtime/utils/bash.py; \
+    test "$(grep -c '^        while should_continue():' "$P")" = 1; \
+    sed -i 's/^        while should_continue():/        while should_continue() and not self._closed:/' "$P"
+
 ENV BROWSER_NO_SANDBOX=--no-sandbox
 USER 1000:1000

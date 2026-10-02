@@ -10,12 +10,18 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, get_args
 
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
 TOOL_META_KEY = "deerflow_tool_meta"
+PROGRESS_GUARD_ERROR_TYPE = "blocked_by_progress_guard"
+
+ToolResultStatus = Literal["success", "error", "partial_success"]
+RecommendedNextAction = Literal["continue", "rewrite_query", "try_alternative", "summarize", "stop"]
+TOOL_RESULT_STATUSES = frozenset(get_args(ToolResultStatus)) | {"unknown"}
+TOOL_RESULT_NEXT_ACTIONS = frozenset(get_args(RecommendedNextAction)) | {"unknown"}
 
 _ERROR_PREFIX = "Error:"
 _PARTIAL_MARKERS = (
@@ -33,20 +39,15 @@ _PARTIAL_MARKERS = (
 
 @dataclass(frozen=True, slots=True)
 class ToolResultMeta:
-    status: Literal["success", "error", "partial_success"]
+    status: ToolResultStatus
     error_type: str | None
     recoverable_by_model: bool
-    recommended_next_action: Literal["continue", "rewrite_query", "try_alternative", "summarize", "stop"]
+    recommended_next_action: RecommendedNextAction
     source: Literal["exception", "tool_return", "content_analysis", "progress_middleware"]
     #: Who refused. ``origin`` is the destination the call named (one page said
-    #: no: a paywall, a missing page, a slow host) and says nothing about the
-    #: next address. ``provider`` is the path itself (the fetch service refused
-    #: this deployment, a bad key, a proxy demanding credentials) and holds for
-    #: every address this turn; the model cannot route around it by choosing a
-    #: different argument. A keyword rule cannot tell the two apart -- "401"
-    #: reads the same from a paywalled page and from a refusing provider -- so
-    #: only a tool that saw the transport can stamp ``provider``, and the
-    #: default is the claim that needs no such knowledge.
+    #: no) and says nothing about the next address. ``provider`` is the path
+    #: itself and holds for every address this turn. Only a tool that saw the
+    #: transport stamps it; a result without the key reads as ``origin``.
     error_scope: Literal["origin", "provider"] = "origin"
 
 
@@ -107,6 +108,7 @@ _PAGE_CONTENT_TOOL_NAMES: frozenset[str] = frozenset({"web_fetch"})
 # _ERROR_RULES already declares. Derived rather than duplicated so a shell can
 # never drift from the recoverable/next-action contract of its own category.
 _ATTRS_BY_ERROR_TYPE: dict[str, dict[str, object]] = {str(attrs["error_type"]): attrs for _keywords, attrs in _ERROR_RULES}
+TOOL_RESULT_ERROR_TYPES = frozenset(_ATTRS_BY_ERROR_TYPE) | {"unknown", PROGRESS_GUARD_ERROR_TYPE}
 
 # Categories no keyword rule can reach, because the only thing that knows them
 # is the raiser. ``capacity`` is the deployment saying it has no room to run
@@ -261,14 +263,13 @@ def _as_status_line(title: str) -> str | None:
     return " ".join(words) or None
 
 
-def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue", error_scope: str = "origin") -> dict[str, object]:
+def _make_meta(*, status: str, source: str, error_type: str | None = None, recoverable_by_model: bool = True, recommended_next_action: str = "continue") -> dict[str, object]:
     return {
         "status": status,
         "error_type": error_type,
         "recoverable_by_model": recoverable_by_model,
         "recommended_next_action": recommended_next_action,
         "source": source,
-        "error_scope": error_scope,
     }
 
 

@@ -2,6 +2,103 @@
 
 This guide explains how to configure DeerFlow for your environment.
 
+## Prompt overlays
+
+Operators can add instructions around existing system prompts in `config.yaml`.
+Empty or omitted extensions preserve the original prompt exactly. The built-in
+instructions remain present; extensions do not change tool authorization,
+memory admission gates, or runtime limits.
+
+```yaml
+lead_prompt_overlay:
+  prepend: "Use our organization's terminology in reports."
+  append: "Conclude with decisions and unresolved questions."
+subagents:
+  agents:
+    general-purpose:
+      prompt_overlay:
+        append: "Include evidence for research claims."
+    bash:
+      prompt_overlay:
+        prepend: "Prefer reproducible, non-interactive commands."
+memory:
+  backend_config:
+    prompt_prepend: "Prefer concise summaries of lasting preferences."
+    prompt_append: "Preserve explicit corrections without redundant wording."
+```
+
+Merge these into existing sections rather than duplicating YAML keys. Extensions
+are joined with two newlines around the assembled system text. They are literal:
+`{conversation}` and JSON braces are not interpolated. The configuration loader's
+existing `$ENV_VAR` resolution still applies to values beginning with `$`.
+Use YAML block scalars for multiline instructions.
+
+These are trusted operator instructions, never request/body context or per-user
+agent data. Lead extensions apply to the assembled default or custom lead agent;
+its SOUL, skills and runtime guidance remain intact. Subagent extensions also
+support configured custom subagents and never mutate the shared built-in
+registry. Explicit application snapshots remain isolated; subsequent assemblies
+use new settings, while already-built graphs retain their prompt.
+
+DeerMem's current `memory_update` chat prompt handles both summary updates and
+fact extraction; the historical `FACT_EXTRACTION_PROMPT` constant is not a
+separate live extraction call. Its extensions wrap the first system message
+after template rendering, leaving memory and conversation data in their original
+human message. They also work with `prompts_dir` templates, which must include
+a system message when overlays are used. Restart the memory backend/Gateway after
+changing its configuration. Other memory backends do not consume these
+DeerMem-specific fields. Existing external memory templates remain the mechanism
+for complete template replacement; this feature adds no editing endpoint or UI.
+
+## Model request admission
+
+For request-per-minute limits, opt into pacing on each relevant `models[]`
+entry. For example, add this alongside its `name`, `use`, and `model` fields:
+
+```yaml
+request_admission:
+  requests_per_minute: 60
+  group: shared-provider-account
+  max_wait_seconds: 300
+  max_queue_size: 256
+```
+
+Like every other field, these accept `$VAR` environment references; an integer
+field such as `requests_per_minute: $RPM` validates when the variable holds a
+decimal integer.
+
+Calls wait in a bounded FIFO before dispatch. At 60 RPM, admissions are spaced
+at least one second apart, even after idle periods. The first call can proceed
+immediately. Async waiting is cancellable; a cancelled or expired waiter spends
+no admission. Queue overflow and wait expiry fail locally before dispatch.
+The deadline covers admission waiting only, not the provider's response time.
+
+An explicit `group` shares the budget across model profiles using the same
+provider quota. Omit it for a separate budget per configured model name.
+All profiles in a group must have identical settings. The limiter is shared by
+factory-created model instances across threads and event loops, including
+lead agents, subagents and auxiliary models using the standard LangChain
+BaseChatModel invoke/stream hooks. Restart the Gateway after changing,
+disabling or regrouping active policies; conflicting settings fail model
+construction instead of resetting a live budget.
+
+When enabled, exposed SDK `max_retries` settings are set to zero: SDK retries
+would bypass the admission hook. Agent middleware retries still work and each
+new attempt is paced. Calls outside that middleware no longer get SDK retries.
+Custom providers that bypass BaseChatModel admission hooks or perform hidden
+retries need their own integration. A caller-supplied `rate_limiter` cannot be
+combined with `request_admission`.
+
+This is **process-local RPM pacing**, not TPM accounting or a distributed quota
+service. Divide the provider allowance among Gateway workers/replicas and allow
+headroom for other applications. Provider token limits, external consumption,
+billing failures and permanent errors can still fail a task. Existing
+`llm_call.max_concurrent_calls` remains independent: when enabled, its slot is
+held while the underlying model waits for admission, so use shared groups and
+concurrency settings deliberately. Waiting contributes to model-call latency
+and remains subject to the enclosing run's timeout. This option is off by
+default and does not promise unlimited retries or eventual task completion.
+
 ## Config Versioning
 
 `config.example.yaml` contains a `config_version` field that tracks schema changes. When the example version is higher than your local `config.yaml`, the application emits a startup warning:
@@ -12,172 +109,10 @@ Run `make config-upgrade` to merge new fields into your config.
 ```
 
 - **Missing `config_version`** in your config is treated as version 0.
-- Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created).
+- Run `make config-upgrade` to auto-merge missing fields (your existing values are preserved, a `.bak` backup is created). It upgrades the file the Gateway loads, resolved as in [Configuration Priority](#configuration-priority).
 - When changing the config schema, bump `config_version` in `config.example.yaml`.
 
 ## Configuration Sections
-
-### Deployment tenant identity
-
-`deployment.tenant_id` selects one server-owned identity for the Gateway
-process. `DEER_FLOW_TENANT_ID` takes precedence over YAML. The value is a
-lowercase DNS label of 1-63 characters and changing it requires a Gateway
-restart. `durable_production` requires an explicit non-`local` value; local
-development defaults to `local` only when both sources are absent.
-
-Tenant identity is selected by the operator at service startup. It cannot be selected by an API caller and does not replace per-user authorization.
-
-The raw identifier stays in trusted startup configuration. Durable records,
-extensions, health, and lifecycle output use only its pseudonymous reference
-and digest. Each tenant release needs a separate database or PostgreSQL schema;
-the singleton schema binding rejects accidental reuse. See
-[Server-Owned Tenant Identity](TENANT_IDENTITY.md) for the trust boundary,
-migration, rollback, and Redis ACL procedure.
-
-### Database
-
-The `database` section configures the application ORM engine as well as the
-shared persistence backend:
-
-```yaml
-database:
-  backend: postgres
-  postgres_url: $DATABASE_URL
-  pool_size: 5
-  pool_max_overflow: 10
-```
-
-`pool_max_overflow` is a non-negative cap on temporary app ORM connections
-above `pool_size`; its default of 10 matches SQLAlchemy. The
-`DATABASE_POOL_MAX_OVERFLOW` environment variable directly overrides the field
-for deployment systems such as Helm. When the variable is absent, the YAML
-value or the default applies.
-
-Assembly evidence has no client or operator enable switch. Every accepted run
-using a durable lifecycle store requests a descriptor through server-owned
-context, validates it against accepted model/skill/policy anchors, and binds it
-atomically before checkpoint or graph execution. Memory and SQLite exercise the
-same contract for local development; only the separately passing PostgreSQL
-qualification gate supports PostgreSQL locking claims. Lifecycle observation
-returns the bounded digest projection documented in
-[INVOCATION_RUNTIME.md](INVOCATION_RUNTIME.md), never raw prompt, schema,
-middleware configuration, or arbitrary extension data.
-
-Accepted durable runs also require a run-event sink for durable tool receipts.
-`deployment.profile: durable_production` accepts only `run_events.backend: db`,
-which provides fenced attempt reservation and storage-level idempotency. The
-`memory` and `jsonl` adapters implement the same receipt contract for local
-tests/evaluation, but they are not a shared production boundary. A storage
-failure while reserving `started` fails before authorization/provider/tool
-dispatch. `verification.receipts_enabled` controls only compact model-facing
-display receipts; it cannot disable durable evidence for an accepted run.
-
-Receipt events retain bounded classifications and full SHA-256 projection
-digests, never raw arguments, results, credentials, exception messages, or
-headers. A digest supports comparison with a separately available projection;
-it does not make low-entropy material confidential. See
-[RUN_EVENT_STREAM.md](RUN_EVENT_STREAM.md#durable-tool-attempt-evidence) for the
-schema and limitations.
-
-### Accepted execution policy
-
-`execution_policy` defines server ceilings for newly accepted durable runs.
-The accepted `ExecutionBudgetV1` is immutable, so configuration changes apply
-only to later admissions; callers may narrow limits but cannot broaden them.
-Scheduled invocations use the named scheduler profile and the stricter
-`scheduler_max_agent_turns` and `scheduler_max_total_tool_attempts` ceilings.
-
-`execution_policy.accepted_egress` is the run-bound egress ceiling for
-accepted (durable) sandboxes: a `profile`, whether cluster `dns` is allowed,
-and `allow` rules of public `cidr`, `protocol` (TCP or UDP), and optional
-`port`. The default allows no destination and no DNS. Private, loopback,
-link-local, carrier-NAT, multicast, documentation, and cloud-metadata ranges
-are refused. Callers may narrow it through `context.egress_allowance`; the
-provisioner renders the sealed allowance into the accepted Pod's NetworkPolicy.
-
-Durable profiles require `EXECUTION_POLICY_HMAC_KEYS` and
-`EXECUTION_POLICY_HMAC_ACTIVE_KEY_ID` in the Gateway secret environment. Keys
-are unpadded base64url values of at least 32 bytes and never belong in YAML.
-Rotate additively and retain old keys while accepted runs can recover. Local
-mode may use an ephemeral key but remains restart-unqualified. See
-[Execution policy and evidence UI](../../docs/EXECUTION_POLICY_AND_EVIDENCE_UI.md).
-
-### Redis subsystem namespaces
-
-The Gateway derives every covered Redis name from the server-owned tenant
-identity. For tenant public reference `tenant-<digest-prefix>`, the shared base
-is `hm:v1:tenant-<digest-prefix>:redis`; the stream bridge, checkpoint cache,
-and sandbox ownership factories receive their component projection from one
-central adapter.
-
-The old prefix fields remain only as validation inputs during the first
-feature release containing this change:
-
-```yaml
-stream_bridge:
-  type: redis
-  key_prefix: ""
-```
-
-`DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX`,
-`DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX`, and
-`DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX` still take precedence over their YAML
-counterparts when present, but a nonempty value must exactly match its canonical
-tenant-derived projection or the corresponding legacy projection stored by the
-explicit `deerflow deployment bind-tenant` migration command. Startup reads
-the schema binding before constructing Redis consumers; an unrecorded mismatch
-fails with `tenant_namespace_conflict` and names the field. The following
-feature release removes these compatibility inputs.
-
-Use both Redis ACL forms for the canonical base:
-`~hm:v1:tenant-<digest-prefix>:redis*` for keys/streams and
-`&hm:v1:tenant-<digest-prefix>:redis*` for pub/sub channels. Existing Redis data
-is never searched or copied automatically. Follow the bounded inventory,
-offline copy, and verification procedure in
-[Server-Owned Tenant Identity](TENANT_IDENTITY.md#database-binding-and-migration).
-
-### Honcho contextual memory
-
-Select the optional external backend with `memory.manager_class: honcho`.
-The Gateway derives its workspace namespace from `deployment.tenant_id`; the
-reserved `_hartmesh_tenant` projection is server-owned and must not appear in
-operator or API-written `backend_config`. Durable production fails startup if
-the projection is unavailable or malformed. The deprecated `workspace_prefix`
-is dropped with a warning rather than failing startup; memory written under it
-is not migrated.
-
-```yaml
-memory:
-  enabled: true
-  manager_class: honcho
-  mode: middleware
-  backend_config:
-    base_url: https://api.honcho.example
-    api_key: $HONCHO_API_KEY
-    assistant_peer: deerflow
-    message_char_limit: 8000
-    max_injection_chars: 6000
-    timeout_seconds: 10
-    connect_timeout_seconds: 3
-    failure_policy:
-      read: fail_open
-```
-
-Every default workspace is the pseudonymous tenant namespace plus a
-collision-resistant user component. Production `workspace_overrides` may only
-repeat the exact derived workspace for that user; there is no cross-tenant or
-cross-user sharing switch. Local sharing requires `deployment.profile:
-local_development`, a custom override, and the loudly named
-`allow_local_shared_workspaces: true` opt-in. An API key requires HTTPS in
-production. Startup validates configuration but does not probe the provider.
-
-Honcho supplies mutable contextual memory. It is tenant- and user-scoped, but it is not HartMesh's source of truth for admission, checkpoints, invocation status, authorization, or audit evidence.
-
-Accepted durable runs persist only bounded `memory.observation.v1` metadata,
-not memory/query text. Health, readiness, and deployment reports show Honcho
-as an optional contextual backend, not a durable dependency; a degraded
-fail-open Honcho does not make overall readiness fail. Namespace upgrades deliberately have no dual-read;
-use the documented [dry-run mapping and provider-copy procedure](../packages/harness/deerflow/agents/memory/backends/honcho/README.md#existing-workspace-migration).
 
 ### Extensions
 
@@ -186,6 +121,20 @@ from `config.yaml`. Use `mcpServers.<server>.routing` to add soft MCP tool
 preference hints for requests that should prefer a specific MCP server or tool.
 See [MCP Server Configuration](MCP_SERVER.md#routing-hints) for the schema,
 example, and soft-vs-hard routing boundary.
+
+### Recursion Limits
+
+Gateway runs use the top-level `recursion_limit` as their LangGraph super-step
+budget when the request does not include an explicit value. It defaults to
+`100`; raise it for deployments whose normal tasks need longer agent loops.
+Valid request values take precedence, while invalid values fall back to the
+configured default. `max_recursion_limit` (default `1000`) caps both sources to
+limit runaway LLM cost. Both settings are read per run, so changes apply to the
+next request without a Gateway restart.
+
+These settings apply to Gateway API runs. IM channel runs and embedded
+`DeerFlowClient` runs retain their own defaults and can be overridden through
+their channel/client-specific configuration or per-call options.
 
 ### Models
 
@@ -234,6 +183,7 @@ models:
 - `CodexChatModel` loads Codex CLI auth from `~/.codex/auth.json`
 - The Codex Responses endpoint currently rejects `max_tokens` and `max_output_tokens`, so `CodexChatModel` does not expose a request-level token cap
 - `ClaudeChatModel` accepts `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR`, `CLAUDE_CODE_CREDENTIALS_PATH`, or plaintext `~/.claude/.credentials.json`
+- A `CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR` handoff is drained on first use and the token is kept for the life of the process, so every `ClaudeChatModel` instance reuses it
 - On macOS, DeerFlow does not probe Keychain automatically. Use `scripts/export_claude_code_oauth.py` to export Claude Code auth explicitly when needed
 
 To use OpenAI's `/v1/responses` endpoint with LangChain, keep using `langchain_openai:ChatOpenAI` and set:
@@ -385,12 +335,10 @@ models:
 RAGFlow integration is disabled by default. It adds one read-only Agent tool,
 `knowledge_search`. DeerFlow does not persist a copy of dataset or document
 metadata; RAGFlow is the sole source of truth. The configured API key is
-tenant-scoped. An operator-controlled `datasets` list restricts every Agent on
-this deployment to the same dataset-ID allowlist. Evidence-bearing durable runs
-require that list to be non-empty: omitting it retains tenant-wide catalog
-search only for legacy direct/local invocation, which emits no durable
-retrieval observation. An explicitly empty `datasets: []` is rejected rather
-than being treated as tenant-wide access.
+tenant-scoped. An optional operator-controlled `datasets` list restricts every
+Agent on this deployment to the same dataset-ID allowlist; omitting it searches
+all datasets visible to that tenant API key. An explicitly empty `datasets: []`
+is rejected rather than being treated as tenant-wide access.
 
 ```yaml
 tool_groups:
@@ -414,8 +362,8 @@ tools:
     max_total_chars: 8000
 ```
 
-The tool is opt-in through the normal `tools:` list. `datasets` must contain at
-least one ID for normal durable Agent runs. If
+The tool is opt-in through the normal `tools:` list. `datasets` is optional but,
+when present, must contain at least one ID. If
 it contains RAGFlow dataset IDs selected by the deployment operator, DeerFlow
 does not validate their existence while loading configuration; on each search
 it verifies them with ID-filtered requests. If `datasets` is omitted, each
@@ -441,15 +389,87 @@ reachable from the Gateway container or Pod; `localhost` refers to that
 container or Pod, not the host machine.
 
 This integration is retrieval-only. Dataset creation, uploads, parsing, and
-deletion remain in RAGFlow and are not exposed as Agent tools or DeerFlow APIs.
+deletion remain in RAGFlow and are not exposed as Agent tools, workspace pages,
+or DeerFlow APIs. The authenticated `/api/knowledge/retrieval-catalog` routes
+exist only to populate the custom-agent chat selector. The provider-neutral
+`knowledge_base` block only gates DeerFlow's knowledge capability and selector;
+configure the RAGFlow connection and retrieval defaults on the
+`tools[].name: knowledge_search` entry shown above:
 
-RAGFlow, DuckDuckGo, Serply, and Tencent WSA have provider-neutral durable
-retrieval adapters. Their policy ceilings, privacy contract, source
-normalization, observation API, and live qualification procedure are documented
-in [EVIDENCE_BEARING_RETRIEVAL.md](EVIDENCE_BEARING_RETRIEVAL.md). The web
-adapters accept optional `allowed_domains`, `denied_domains`,
-`max_item_bytes`, `max_total_bytes`, and `timeout` fields on the tool entry.
-These are server ceilings; tool arguments may narrow but never widen them.
+```yaml
+knowledge_base:
+  enabled: true
+  scope_selection_enabled: true
+```
+
+When enabled, include the `list_knowledge_bases` tool entry shown above if the
+model should be able to discover configured dataset names. The frontend uses
+`GET /api/features -> knowledge_base` only to gate the custom-agent chat
+selector. RAGFlow API keys and dataset UUIDs are never returned to the browser
+or model. Do not put RAGFlow-specific connection, allowlist, or retrieval
+parameters in `knowledge_base`; they are read only from the provider tool
+entry, so different knowledge providers can use their own settings.
+
+### LightRAG Knowledge Retrieval
+
+LightRAG integration is disabled by default. It is an alternative provider for
+the same read-only `knowledge_search` tool: an operator picks RAGFlow or
+LightRAG by which entry appears in the `tools:` list — the two entries share
+one name, and on duplicate names DeerFlow keeps the **first** configured
+entry, so configure exactly one. Requires LightRAG v1.4.9 or newer: v1.4.8
+introduced the data-retrieval endpoint but returned a pre-envelope response
+shape, and the `status`/`data` envelope plus the citation fields consumed
+here shipped in v1.4.9. DeerFlow does not persist any index
+metadata; LightRAG stays the sole source of truth, and the deployment's
+single indexed workspace is always searched.
+
+```yaml
+tool_groups:
+  - name: knowledge
+
+tools:
+  - name: knowledge_search
+    group: knowledge
+    use: deerflow.community.lightrag.tools:knowledge_search_tool
+    base_url: http://localhost:9621
+    api_key: $LIGHTRAG_API_KEY
+    mode: mix
+    timeout: 30
+    top_k: 60
+    chunk_top_k: 8
+    max_chars_per_chunk: 800
+    max_total_chars: 8000
+```
+
+The tool is opt-in through the normal `tools:` list. Retrieval uses LightRAG's
+`POST /query/data` endpoint, which performs no LLM generation and returns
+structured entities, relationships, chunks, and references; DeerFlow keeps the
+chunks — the document text the selected mode already ranked as relevant — and
+formats them as citation-numbered text, dropping the graph objects to stay
+compact and keep the citation shape shared with the RAGFlow provider. `mode`
+selects the retrieval strategy (`naive`, `local`, `global`, `hybrid`, or
+`mix`; default `mix`, matching the LightRAG API's own `QueryRequest` default;
+`bypass` is rejected because it skips the index entirely). `top_k` bounds the
+entities retrieved in `local` mode or relationships in `global` mode, and the
+optional `chunk_top_k` bounds the text chunks retrieved and kept after
+reranking; both are capped at 1000 by the LightRAG server. Short queries that
+fail LightRAG's minimum-length validation surface the server's readable
+message. `max_chars_per_chunk` / `max_total_chars` bound the model-visible
+output size.
+
+`api_key` is optional because LightRAG may run without authentication. Only
+omit it for loopback or trusted-network deployments — a network-exposed
+LightRAG must have authentication enabled, and then the key is sent as the
+`X-API-Key` header and redacted from every model-visible error and from
+server logs. Blank values are treated as unauthenticated. `base_url` must not
+contain embedded username or password information, and for Docker or
+Kubernetes it must be reachable from the Gateway container or Pod.
+
+Internal identifiers (chunk IDs and the response-local reference IDs) are
+never exposed to the Agent; citations use the operator-readable `file_path`.
+This integration is retrieval-only. Document insertion, indexing, and graph
+mutation remain in LightRAG and are not exposed as Agent tools or DeerFlow
+APIs.
 
 ### Tool Groups
 
@@ -477,7 +497,6 @@ scheduler:
   queue_timeout_seconds: 3600
   min_once_delay_seconds: 60
   recursion_limit: 1000
-  # max_run_seconds: 900      # unset: no wall-time bound on a run
 ```
 
 Notes:
@@ -489,55 +508,18 @@ Notes:
 - A task definition is immutable while an occurrence is `queued`, `launching`, or `running`. This prevents a durable occurrence from mixing its admitted thread with a later prompt or schedule edit. Transitioning a task to paused or deleting it cancels a waiting row; PATCH and resume return a conflict until the active occurrence finishes or is cancelled.
 - A manual trigger remains explicit even while the recurring schedule is paused: it may wait in the durable queue and run later, while the task itself stays paused. Transitioning an enabled task to paused still cancels its waiting occurrence atomically.
 - Queue admission, PATCH/resume, pause, and delete serialize on the parent task row. Per-thread FIFO spans all active states, so an older `launching` or `running` occurrence blocks a newer queued occurrence on the same reused thread as well as an older `queued` occurrence.
-- Multi-instance reconciliation uses the run ownership lease: a live peer run is preserved, an expired `terminalize_v1` run is atomically terminalized before its scheduled row is interrupted, and a stale Pod cannot overwrite a newer Pod's parent-task bookkeeping. An exact-two row remains active and fail-closed while execution takeover is unavailable.
-- `recursion_limit` is the LangGraph super-step cap for scheduler-launched runs (default 1000, matching the web UI's interactive budget). Values above `max_recursion_limit` (default 1000) are clamped. This field is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart. The lead-agent graph spends about 11 steps a model turn, so 1000 steps is about 90 turns and 100 is nine. The scheduler sends it with every launch; a run launched without one would get the Gateway default of 100 steps. A run that reaches the limit ends `error` with `stop_reason: recursion_limit_reached`, and its occurrence is `failed` with `the task used up the number of steps it is allowed, so it stopped before it finished`.
-- `max_run_seconds` (300 to 86400, unset by default: nothing bounds an unattended run's wall time) bounds one occurrence. `recursion_limit` and the execution policy's `scheduler_max_agent_turns` bound its model calls, not its clock, and a run holds one of `max_concurrent_runs` slots until it ends. Each poll (`poll_interval_seconds`, so a run can overshoot by up to that much) finds the occurrences still `running` whose `started_at` is older than the bound, at most 16 per poll. It ends each one `failed` in a single compare-and-set on the occurrence row, with the error `the task did not finish within N minutes, so it was stopped` (`N seconds` when the bound is not a whole number of minutes), writes that error to the task's `last_error` (a `once` task ends `failed`), and then asks the run manager to stop the run, waiting at most 10 s for that. The outcome is decided before the Stop lands, so it does not depend on the run reporting anything or on which Gateway process owns the run. The Stop is asked once and its answer is logged; it is not guaranteed. The occurrence is `failed` whether or not the run stops, and `max_concurrent_runs` counts occurrence rows, so a run that ignores the Stop (a synchronous call in a worker thread outlives it) keeps its sandbox and, on a reused thread, blocks the next occurrence, which is requeued, until it ends. Under `durable_two_gateway_v1` a Stop for a run this process does not hold is `not_active_locally` and changes nothing. The run itself ends `interrupted`, and its completion rewrites neither the occurrence nor the task, because an occurrence is ended once, by whoever gets there first. A run that finished first keeps its own outcome. The clock includes a cold sandbox (80 to 91 s on the tenant profile), which is why the floor is five minutes. A person's own Stop still ends the occurrence `interrupted`.
-- The scheduler has no misfire grace. When it starts, each enabled schedule whose `next_run_at` has already passed runs once, oldest due first, one at a time under `max_concurrent_runs`: a recurring schedule runs once however many times it missed, and a `once` schedule whose time has passed runs late. `queue_timeout_seconds` is counted from when an occurrence is admitted, not from its due time, so an occurrence that waits longer than that behind the runs ahead of it ends `failed` with `scheduled task queue wait timeout exceeded`, and a `once` task then ends `failed`. A paused schedule does not run.
-- A run that a guard or an execution budget cut short (`loop_capped`, `turn_budget_exhausted`, `repeated_tool_loop`, `token_capped` and the like) ends the run `success` with that reason. Its occurrence is `failed`, like a capacity refusal, because nobody reads an unattended answer, and its error is words about the limit (`the task used up the number of steps it is allowed, so it stopped before it finished`), never the code: the code stays on the run's `stop_reason` and in the Gateway log. A reason with no phrase of its own, an extension's included, reads `the task stopped before it finished`. **This applies to every deployment that runs the scheduler**, `max_run_seconds` or not: an occurrence that used to read `success` after such a stop now reads `failed`, and a `once` task ends `failed` instead of `completed`.
-- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `queue_timeout_seconds`, `min_once_delay_seconds`, `max_run_seconds`) are restart-required; edits need a Gateway restart.
+- Multi-instance reconciliation uses the run ownership lease: a live peer run is preserved, an expired lease is atomically taken over before its scheduled row is interrupted, and a stale Pod cannot overwrite a newer Pod's parent-task bookkeeping.
+- `recursion_limit` is the LangGraph super-step cap for scheduler-launched runs (default 1000, matching the web UI's interactive budget). Values above `max_recursion_limit` (default 1000) are clamped. This field is read at dispatch, so a YAML edit applies to the next scheduled run without a Gateway restart.
+- Poller fields (`enabled`, `multi_instance`, `poll_interval_seconds`, `lease_seconds`, `max_concurrent_runs`, `queue_timeout_seconds`, `min_once_delay_seconds`) are restart-required; edits need a Gateway restart.
 - **Upgrade note:** before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either run the scheduler on exactly one Gateway worker or enable `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The startup gate now rejects the unsafe combination instead of allowing it to start silently.
 - **Upgrade note:** in multi-instance mode, `max_concurrent_runs` is cluster-wide rather than per Pod and counts `launching`/`running` occurrences. Waiting `queued` rows remain outside the execution cap; capacity does not multiply with the replica count.
 - **Upgrade note:** `scheduler.multi_instance` and its related scheduler, ownership, and run-event settings are startup-only. Restart all Gateway Pods together after changing them; a ConfigMap update without a coordinated restart leaves the running service on its previous mode.
 - Multi-worker deployments (`GATEWAY_WORKERS > 1`) must use the Postgres database backend, enable run ownership heartbeats, and set `run_events.backend: db`. SQLite silently ignores row-level locks, while memory and JSONL run-event stores are process-local and cannot enforce singleton delivery receipts across workers; startup rejects these combinations. The process-local agentic browser tool group is incompatible with multiple Gateway workers; keep `GATEWAY_WORKERS=1` while `browser_navigate` is enabled. Browser control also requires the backend `browser` extra (`cd backend && uv sync --extra browser && uv run playwright install chromium`); startup detects enabled browser config and fails fast when Playwright is missing, and `/api/features` reports `browser_control.enabled=false` until the runtime is available.
 - The MVP supports thread reuse and fresh-thread-per-run execution modes.
-- The MVP supports only `once` and `cron`.
+- Create/update accept optional `assistant_id` (`lead_agent` by default, or an existing custom agent for the task owner).
+- Create/update accept `once`, `cron`, and `interval`. Interval uses `schedule_spec.every_seconds` (UTC `now + N`, no missed-beat catch-up). N is at least `min_once_delay_seconds` (default 60) and at most 30 days.
 - Manual trigger uses the same scheduled-task resource and run lifecycle.
 - Scheduled task definitions and task-run history are persisted in the application database.
-
-### Download All My Data
-
-Any signed-in person can download all of their own work as one archive
-(`/api/account/export`, [API](API.md#download-all-my-data)). It is prepared
-on the data disk under `{base_dir}/exports` before it is downloaded. The
-section is optional; these are the defaults:
-
-```yaml
-account_export:
-  part_bytes: 2147483648        # 2 GiB, at least 64 MiB
-  min_free_bytes: 1073741824    # 1 GiB
-  expires_after_seconds: 3600   # 60 to 86400
-  max_concurrent: 2             # 1 to 8
-```
-
-- `part_bytes`: past it, the archive comes as numbered parts. A single file
-  larger than it is a part of its own.
-- `min_free_bytes`: the free space the disk keeps. An export is refused before
-  it writes anything when the person's data, plus what the other exports being
-  prepared still have to write, would leave less; it stops and is removed if the
-  disk fills while it runs. So an account larger than the free space minus this
-  cannot be exported until the disk grows. A single file larger than the whole
-  disk (a sparse file, say) is left out and named instead.
-- `expires_after_seconds`: an export is deleted once this long passes with no
-  part downloading, counted from when it is ready and again after each
-  download. Once every part has been downloaded, it goes ten minutes later
-  (or sooner, if this is shorter); until then a part can be downloaded again.
-- `max_concurrent`: exports this Gateway prepares at once. A person has one at
-  a time, and asking again returns it.
-- Read when an export starts, so an edit applies to the next one without a
-  restart.
-- An export lives in the Gateway process that prepares it. Where more than one
-  process serves the deployment (`durable_two_gateway_v1`, or
-  `GATEWAY_WORKERS` above 1), the routes answer 503.
 
 ### Agent Storage
 
@@ -574,12 +556,27 @@ tools:
     group: web
     use: deerflow.community.tavily.tools:web_search_tool
     max_results: 5
+    include_domains:             # Optional: limit search sources to these domains
+      - docs.python.org
+      - developer.mozilla.org
+    exclude_domains: []         # Optional: domains to exclude from search results
     # api_key: $TAVILY_API_KEY  # Optional
 ```
 
+For Tavily, `include_domains` and `exclude_domains` are deployment-only options
+read from the `web_search` tool entry and passed directly to `TavilyClient.search`.
+For a non-empty `include_domains`, DeerFlow also sends `include_domains_mode: filter`
+so Tavily restricts results to those domains rather than merely boosting them.
+Either list may be configured independently. Omitted options are not added to the SDK
+call; explicit empty lists are forwarded as `[]`, meaning no inclusion restriction
+or no excluded domains, respectively. No `include_domains_mode` is sent for an
+empty or omitted `include_domains`. These filters compose with `max_results`
+and the model's optional `time_range`. The model-visible arguments remain `query`
+and `time_range`; the filters do not apply to `web_fetch` or other search providers.
+
 **Built-in Tools**:
-- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute)
-- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless)
+- `web_search` - Search the web (DuckDuckGo, Tavily, Brave, Serply, Exa, InfoQuest, Tencent Cloud WSA, Firecrawl, fastCRW, GroundRoute, Sofya)
+- `web_fetch` - Fetch web pages (Jina AI, Crawl4AI, Exa, InfoQuest, Firecrawl, fastCRW, GroundRoute, Browserless, Sofya, Unbrowse)
 - `web_capture` - Capture rendered webpage screenshots as artifacts (Browserless)
 - `image_search` - Search for reference images (DuckDuckGo, InfoQuest, Serper, Brave)
 - `ls` - List directory contents
@@ -643,6 +640,34 @@ at the service name (e.g. `http://browserless:3000`) instead of `localhost`. See
 the [Browserless project](https://github.com/browserless/browserless) for full
 deployment and configuration options.
 
+### Reading Referenced Conversations
+
+Enable the read-only Gateway tool through the existing tools list:
+
+```yaml
+tools:
+  - name: read_conversation
+    group: conversation
+    use: deerflow.tools.conversation:read_conversation
+```
+
+It is off by default. A run must explicitly submit `conversation_references`
+and have `runs:read` permission before the lead agent receives this tool.
+Custom agents must also permit the `conversation` tool group where they restrict
+groups. References are limited to owned threads and the current run; they do not
+enable history discovery, memory extraction or cross-user access. See the
+[request contract and limits](API.md#referencing-a-previous-conversation).
+Once the tool is listed, `GET /api/features` reports
+`conversation_references.enabled: true` and the per-run cap, so a client can
+show an entry point only where the tool exists; SDK clients that cannot add
+top-level request fields pass the list as `context.conversation_references`.
+
+Reader pages are sized to stay within the `tool_output` budget for
+`read_conversation` (12,000 serialized characters by default), so they are not
+externalized to `.tool-results`. To allow larger pages, raise
+`tool_output.tool_overrides.read_conversation`; a page still holds at most
+20,000 text characters.
+
 ### Sandbox
 
 DeerFlow supports multiple sandbox execution modes. Configure your preferred mode in `config.yaml`:
@@ -658,50 +683,26 @@ sandbox:
 ```yaml
 sandbox:
    use: deerflow.community.aio_sandbox:AioSandboxProvider # Docker-based sandbox
-   # ready_timeout: 60                # cold-start readiness budget in seconds (see below)
-   # replicas: 3                      # hard concurrent-sandbox budget (see below)
-   # capacity_wait_timeout: 5         # seconds an acquisition waits for a slot (see below)
 ```
 
-`replicas` is a **hard budget** on AioSandboxProvider, counted per Gateway
-process. Active containers, parked ones, sets whose teardown did not confirm
-absence, and in-flight reservations all count against it; reuse of a container
-that is already counted (in-process, warm reclaim, backend discovery) never
-spends a second slot. An acquisition that finds the budget full first evicts
-the oldest parked container, which is the ordinary case and costs the evicted
-thread a cold start on its next turn. A live turn's sandbox is never evicted,
-so when every slot is in active use the acquisition waits up to
-`capacity_wait_timeout` seconds (default 5, maximum 300; 0 refuses at once)
-and is then refused with `SANDBOX_CAPACITY_EXCEEDED` — a typed, retryable
-outcome the agent is told not to retry immediately, rather than a container
-the host has no memory for. The wait is bounded everywhere,
-ends at once when the person presses Stop (on every acquisition path a run awaits, the
-accepted projection's worker-thread wait included; a purely synchronous
-caller is bounded by the budget alone), and appears in the turn journal as the `sandbox_capacity_wait` phase
-alongside the `capacity_waits` and `capacity_refusals` counters.
+For AIO images on the supported semver line (`1.9.3` through the recommended
+`1.11.0` image), `sandbox.bash_command_timeout` is enforced server-side through
+the `hard_timeout` API when the image exposes it. DeerFlow's legacy frozen
+`all-in-one-sandbox:latest` image predates that API, so only the host-side
+request is bounded there. On supported semver AIO images, `list_dir` uses a 60
+second server-side hard timeout with a 65 second no-retry host envelope; the
+frozen legacy image only gets the bounded host wait. Timed-out or otherwise
+ambiguous commands are never replayed, and a partial `list_dir` result is never
+returned as a complete listing.
 
-`ready_timeout` is the cold-start readiness budget: after `docker run` returns,
-the provider polls the new container's `/v1/sandbox` for this many seconds and,
-if it has not answered `200` by then, destroys the container under the
-ownership fences and fails the acquisition. On an acquisition a run awaits,
-Stop ends the wait for a container the call started the same way: no further
-probe is sent (a probe already in flight can take up to 5 s), the container is
-torn down, and the turn ends cancelled, not failed. The backend's create call
-and the teardown are not interrupted; a container the backend found already
-running is left to the cancellation rule (it is parked, not destroyed); and a
-turn queued behind the chat's prewarm build waits for that build. Both the synchronous and the
-asynchronous acquisition paths use the same value. It is a number of seconds,
-integer or decimal; the default is 60; the supported range is greater than 0
-and at most 3600. Zero, a negative number, `.inf`, `.nan`, a boolean or text
-refuses to load the configuration rather than turning the deadline off: there is
-no value that disables it. The budget runs on a monotonic clock, every probe and
-sleep is clamped to what is left of it, and a `200` that lands after it has
-passed does not count. Raise it on hosts where the image starts slowly: one-CPU
-sandboxes under gVisor were measured at 80 to 91 seconds to readiness, so the
-released Compose profile sets 120 (`deploy/compose/README.md`, "Sandbox
-readiness budget"). Because ownership of a new container is published before
-the wait starts and renewed during it, a long budget does not let another
-Gateway instance's reconciliation adopt a container that is still starting.
+Explicit AIO shell/bash session creation is a separate control-plane
+operation. DeerFlow bounds those create requests to 5 seconds with SDK
+retries disabled. If a response cannot prove whether creation committed,
+DeerFlow does not replay the create or execute on that session id. The
+affected creation plane is quarantined, bounded best-effort session cleanup
+is attempted, and the container is recycled instead of being returned to the
+warm pool. Session-level cleanup does not clear that quarantine because a
+timed-out create may commit after cleanup has already returned.
 
 **BoxLite micro-VM Sandbox** (runs sandbox code in daemonless OCI micro-VMs):
 ```yaml
@@ -761,60 +762,6 @@ Only set it to `true` after verifying the Gateway's
 and makes newly uploaded files unavailable inside the sandbox.
 
 See [Provisioner Setup Guide](../../docker/provisioner/README.md) for detailed configuration, prerequisites, and troubleshooting.
-
-Durable invocations with nonempty skills require the provisioner's
-`rwx_verified_copy_v2` profile. The Gateway's accepted snapshot must live on the same
-cross-node `ReadWriteMany` home claim mounted by the provisioner. Both the AIO sandbox image and
-the provisioner verifier/gate image must be pinned by SHA-256 digest. The verifier copies the
-content-addressed source into a private per-Pod `emptyDir`, validates the existing canonical
-snapshot digest, and exposes only that copy read-only. The sandbox never mounts the RWX source or
-the mutable live skill trees. V2 binds the admitted Pod isolation digest, Lease and Pod UIDs,
-exact NetworkPolicy UID/spec, immutable evidence/capability Secret UIDs/digests, pinned image
-digests, verifier receipt, and final materialization digest. Provisioner replay and renewal plus
-the worker's pre-execution fences re-read that complete tuple. A parsed v1 receipt is
-compatibility evidence only and remains `empty_only`. Without the v2 profile—or when its
-readiness checks fail—remote AIO
-remains `empty_only` and a nonempty durable invocation fails before model execution. The profile
-does not require same-node placement. It uses only a soft preference for a different Gateway node
-when capacity permits and is intended to work across nodes. A native Kubernetes Lease owns each
-attempt and its Pod, immutable Secrets, and NetworkPolicy; exact renewal and bounded expiry
-reconciliation prevent a replacement Pod from inheriting stale materialization authority. The
-Gateway reads a rotating, audience-bound projected ServiceAccount token for every provisioner
-management request; the provisioner validates the exact namespace, ServiceAccount, and audience
-through Kubernetes TokenReview. Readiness performs that authenticated profile check before
-admission. Repository fake-Kubernetes and Helm-render tests prove contract construction and
-drift rejection; they do not qualify live cross-node CNI/RWX behavior, which remains an
-artifact-bound opt-in release gate. The same management authentication remains enabled when the projection profile is
-disabled so legacy remote AIO calls do not become anonymous.
-
-Selecting `rwx_verified_copy_v2` is necessary but is not itself production
-qualification. Durable accepted sandbox execution also requires a current,
-canonical `deerflow.accepted-sandbox-qualification/v1` companion mounted
-read-only into the Gateway:
-
-```yaml
-sandbox:
-  use: deerflow.community.aio_sandbox:AioSandboxProvider
-  provisioner_url: http://provisioner:8002
-  accepted_skill_projection_profile: rwx_verified_copy_v2
-  accepted_material_qualification_evidence: /var/run/hartmesh/qualification/evidence.json
-  accepted_material_qualification_digest: sha256:<artifact-sha256>
-  accepted_material_qualification_max_age_seconds: 2592000
-```
-
-The evidence path and digest must be configured together. Before admitting a
-nonempty accepted session, the Gateway checks the companion's status, freshness,
-AIO capability profile, explicit race facts, and portable topology-policy digest
-against a fresh provisioner sample, then verifies its embedded v2 image subjects.
-The provisioner also validates the current namespace UID and each PVC UID plus
-its bound PV name on that sample; those deployment-specific values are not
-copied from the qualification namespace. A
-standalone v2 proof, candidate run, or deployment-report reference cannot satisfy
-this runtime gate. This checkout
-ships no passing artifact, so production accepted sandbox execution remains
-disabled until the live qualification lane publishes one. See
-[Accepted Sandbox Execution](ACCEPTED_SANDBOX_EXECUTION.md) for the authority,
-operation-fencing, evidence, recovery, and provider contracts.
 
 **E2B Cloud Sandbox** (runs sandbox code in [E2B](https://e2b.dev) cloud micro-VMs):
 
@@ -898,7 +845,6 @@ sandbox:
    bash_command_timeout: 600          # default remote command timeout seconds
    replicas: 3                        # active + warm cap per gateway process
    idle_timeout: 600                  # warm seconds before destroy; 0 disables
-   accepted_materialization_profile: disabled  # only supported value today
    environment:
       PYTHONUNBUFFERED: "1"
 ```
@@ -924,20 +870,6 @@ Downloads are restricted to `/mnt/user-data` and all file paths reject
 traversal. Multi-process discovery and ownership coordination are not yet
 implemented, so `replicas` is a per-Gateway-process soft cap.
 
-OpenSandbox support for ordinary execution is distinct from HartMesh-qualified immutable accepted material. Nonempty durable skills are supported only for the exact live-qualified profile and artifact.
-
-No OpenSandbox immutable-material profile is qualified in this release. Server
-0.1.14 / SDK 0.1.15 do not expose atomic ownership compare-and-set or independently
-resolved image-digest readback. Candidate read-only-volume and per-command-identity
-surfaces remain live-unqualified as a trusted setup boundary.
-Any non-disabled `accepted_materialization_profile` is rejected at configuration
-validation (a mutable image reports `opensandbox_image_unpinned`; a digest-pinned
-request reports `opensandbox_qualification_unavailable`). The lease, verifier,
-limit, contract-version, and evidence-reference fields in `config.example.yaml`
-are reserved together for a future fully live-qualified profile and do not
-enable it. See the
-[Phase 0 decision](OPENSANDBOX_ACCEPTED_MATERIAL_FEASIBILITY.md).
-
 Choose between local execution or Docker-based isolation:
 
 **Option 1: Local Sandbox** (default, simpler setup):
@@ -948,10 +880,6 @@ sandbox:
 ```
 
 `allow_host_bash` is intentionally `false` by default. DeerFlow's local sandbox is a host-side convenience mode, not a secure shell isolation boundary. If you need `bash`, prefer `AioSandboxProvider`. Only set `allow_host_bash: true` for fully trusted single-user local workflows.
-Local supports only an explicitly empty skill set for durable accepted runs. Its subprocesses
-share the Gateway identity, so a virtual read-only mapping cannot prove nonempty accepted bytes
-immutable. Nonempty durable skill admission therefore fails closed; use AIO for that production
-path.
 
 When `LocalSandboxProvider` runs under `make up`, it runs inside the `deer-flow-gateway` container. In that mode, `sandbox.mounts[].host_path` is resolved from the gateway container's filesystem, not from your Docker host. If you need a local-sandbox custom mount in production Docker, bind the host directory into the gateway service first, then use the in-container path in `config.yaml`:
 
@@ -979,7 +907,6 @@ If the configured `host_path` is not visible to the gateway process, DeerFlow lo
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
   port: 8080
-  auto_start: true
   container_prefix: deer-flow-sandbox
 
   # Optional: Additional mounts
@@ -1017,11 +944,7 @@ rejected. Traffic that ignores proxy environment variables still has no route
 out of the internal bridge. DeerFlow also sets the upstream AIO image's
 `PROXY_SERVER`/`PROXY_EXCLUDE` variables so its Chromium service uses the same
 policy sidecar; standard upper/lower-case HTTP, HTTPS, and ALL proxy variables
-cover shell and package-manager clients. The sidecar's name is also pinned in
-the sandbox's `/etc/hosts` (`--add-host`) with the address Docker assigned on
-the internal bridge: Docker's embedded DNS at `127.0.0.11` is a NAT rule in the
-host network namespace, which a sandbox running under its own network stack
-(gVisor's `runsc` via `DEER_FLOW_SANDBOX_RUNTIME`) never sees.
+cover shell and package-manager clients.
 
 The sidecar is dual-homed between the sandbox's internal bridge and a separate
 per-sandbox egress bridge with inter-container communication disabled. It is
@@ -1082,7 +1005,7 @@ require supply-chain pinning.
 
 #### Sandbox container network exposure and hardening
 
-The sandbox HTTP API (`/v1/shell/*` and friends) has no authentication: anyone who can reach a published sandbox port can execute arbitrary commands in that sandbox. For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox port to `127.0.0.1` so it is not exposed on other host interfaces. For Docker-outside-of-Docker deployments that connect through `host.docker.internal`, the port is bound to the address that hostname actually resolves to — the daemon's `host-gateway-ip` mapping (customizable, possibly IPv6) — so the published port and the address the gateway connects to always match, and the port is no longer published on external network interfaces (previously it was bound to `0.0.0.0`). If resolution fails, the Docker default bridge gateway (via `docker network inspect bridge`, falling back to `172.17.0.1`) is used as a best-effort bind and a warning is logged. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address; setting it to `0.0.0.0` restores the legacy broad bind, which re-exposes the unauthenticated exec API on every interface and should be paired with an external firewall.
+The sandbox HTTP API (`/v1/shell/*` and friends) has no authentication: anyone who can reach a published sandbox port can execute arbitrary commands in that sandbox. For bare-metal Docker sandbox runs that use localhost, DeerFlow binds the sandbox port to `127.0.0.1` so it is not exposed on other host interfaces. For Docker-outside-of-Docker deployments that connect through `host.docker.internal`, the port is bound to the address that hostname actually resolves to — the daemon's `host-gateway-ip` mapping (customizable, possibly IPv6) — so the published port and the address the gateway connects to always match, and the port is no longer published on external network interfaces (previously it was bound to `0.0.0.0`). On Docker Desktop, resolving `host.docker.internal` yields an internal VM gateway address that the host OS cannot bind; because Docker Desktop forwards `host.docker.internal` to host loopback, DeerFlow defaults to `127.0.0.1` for `host.docker.internal` on Desktop daemons. Custom non-loopback sandbox hosts continue to bind their resolved address. If resolution fails, the Docker default bridge gateway (via `docker network inspect bridge`, falling back to `172.17.0.1`) is used as a best-effort bind and a warning is logged. Set `DEER_FLOW_SANDBOX_BIND_HOST` explicitly if your deployment needs a different bind address; setting it to `0.0.0.0` restores the legacy broad bind, which re-exposes the unauthenticated exec API on every interface and should be paired with an external firewall.
 
 Local Docker sandbox containers are also hardened by default: all Linux capabilities are dropped (`--cap-drop=ALL`) except a five-capability compatibility allowlist — `CHOWN`, `FOWNER`, `SETUID`, `SETGID`, and `DAC_OVERRIDE` — while privilege escalation across exec stays blocked with `no-new-privileges` and CPU/memory/PID resources are bounded. `CHOWN`/`SETUID`/`SETGID` support the runtime user handoff and `DAC_OVERRIDE` supports the root nginx master's writes to gem-owned logs. `FOWNER` is specifically required by the newer AIO 1.11.x startup path (regression-tested against the recommended 1.11.0 image), which runs `chmod /run/user/1000` after capabilities are dropped. Images that do not perform that `chmod` do not need `FOWNER`; DeerFlow deliberately does not guess a smaller set from mutable tags, digests, or arbitrary custom images, so the default compatibility allowlist remains version-agnostic.
 
@@ -1090,13 +1013,11 @@ A custom image that is already fully initialized as a non-root user and needs no
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `DEER_FLOW_SANDBOX_BIND_HOST` | loopback / bridge gateway (see above) | Host interface for the sandbox `-p` publish. Must be an IP literal (bare or bracketed IPv6) or a hostname, which is resolved to an address first — Docker publish specs do not accept hostnames. `0.0.0.0` restores the legacy broad bind (risky). |
+| `DEER_FLOW_SANDBOX_BIND_HOST` | loopback (localhost or Docker Desktop with `host.docker.internal`) / host-gateway-ip / bridge gateway | Host interface for the sandbox `-p` publish. Must be an IP literal (bare or bracketed IPv6) or a hostname, which is resolved to an address first — Docker publish specs do not accept hostnames. `0.0.0.0` restores the legacy broad bind (risky). |
 | `DEER_FLOW_SANDBOX_SECCOMP_UNCONFINED` | on | The shipped AIO image's Chromium browser does not start under Docker's default seccomp profile (see the upstream agent-infra sandbox FAQ), so `seccomp=unconfined` remains the default. Set to `0` to run with the built-in profile — passed explicitly as `seccomp=builtin`, so a daemon configured with a different default cannot weaken the opt-out — and only for images verified to start and pass browser checks with it. |
 | `DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS` | on | Keeps the five-capability compatibility set (`CHOWN`/`FOWNER`/`SETUID`/`SETGID`/`DAC_OVERRIDE`). `FOWNER` specifically covers the newer AIO 1.11.x startup `chmod /run/user/1000` path (tested with 1.11.0); images without that step do not need `FOWNER`, but DeerFlow does not infer per-image capability subsets from tags/digests/custom images. Set to `0` only for images that need none of the five — the switch drops the entire set. |
 | `DEER_FLOW_SANDBOX_SECCOMP_PROFILE` | unset | Path to a custom seccomp profile (e.g. a restricted, Chromium-compatible one built from Docker's default plus the namespace syscalls Chromium needs). Takes precedence over the unconfined default. |
-| `DEER_FLOW_SANDBOX_MEMORY` | `2g` | `--memory` limit per sandbox container, with `--memory-swap` pinned to the same value so a sandbox cannot spill past its budget into host swap. `0`/`none` disables both. |
-| `DEER_FLOW_SANDBOX_PROXY_MEMORY` | `256m` | `--memory` (and equal `--memory-swap`) for the restricted-mode network-policy sidecar. `0`/`none` disables the limit. The sidecar's `--cpus 1` and `--pids-limit 128` stay fixed. |
-| `DEER_FLOW_SANDBOX_RUNTIME` | unset (daemon default) | OCI runtime name registered with the Docker daemon (`runtimes` in `daemon.json`, e.g. `runsc` for gVisor), passed through as `--runtime` on the sandbox's `docker run`. Unset or empty emits nothing. Applies to the sandbox only; the network-policy sidecar keeps the daemon default. |
+| `DEER_FLOW_SANDBOX_MEMORY` | `2g` | `--memory` limit per sandbox container. `0`/`none` disables the limit. |
 | `DEER_FLOW_SANDBOX_CPUS` | `2` | `--cpus` limit per sandbox container. `0`/`none` disables the limit. |
 | `DEER_FLOW_SANDBOX_PIDS_LIMIT` | `512` | `--pids-limit` per sandbox container (fork-bomb guard). `0`/`none` disables the limit. |
 | `DEER_FLOW_SANDBOX_CONTAINER_USER` | unset (image default) | Passed through as `--user` (e.g. `1000:1000`). The default AIO image's user is upstream-controlled, so DeerFlow does not force one; set this only if you know your image's runtime user. |
@@ -1110,13 +1031,41 @@ inside the client. This prevents an inherited proxy from returning a misleading
 502 for a healthy local sandbox. Externally hosted sandbox FQDNs and public IPs
 continue to use the normal environment proxy configuration.
 
+### AIO shell-session capacity
+
+Each concurrently running native subagent uses one persistent AIO shell session.
+The semver AIO images from `1.9.3` through `1.11.0` default
+`MAX_SHELL_SESSIONS` to 10 and evict the oldest idle session when an eleventh is
+created. If `subagent_runtime.max_running` is greater than nine, DeerFlow sets
+the container limit to `max_running + 1`; the extra slot leaves room for the lead
+agent's shell. This applies to both locally created containers and provisioner
+Pods. Lower concurrency keeps the image's own default unchanged.
+
+The separate `bash.exec` API uses its own `AIO_BASH_MAX_SESSIONS` pool rather
+than `MAX_SHELL_SESSIONS`. DeerFlow nevertheless creates and closes an explicit
+transient bash session around every env-bearing command, so request-scoped
+secrets and completed command sessions are not retained.
+
+You may set `sandbox.environment.MAX_SHELL_SESSIONS` explicitly. It must be a
+positive integer at least as large as `subagent_runtime.max_running + 1`, or the
+provider fails at startup with the conflicting values. The setting is applied
+when a sandbox is created. Persisted local containers and provisioner Pods report
+their effective value; DeerFlow replaces one whose capacity is below the current
+requirement instead of reusing it. Reuse checks also apply when no explicit
+override is needed for new containers: a previously configured lower limit must
+still fit the current concurrency. The Gateway waits for existing ownership and
+the orphan recovery grace before replacing an incompatible sandbox. A create
+request that encounters a lower-capacity Pod returns HTTP 409 without deleting
+it; a later acquisition can discover and replace it through that same ownership
+check.
+
+If a Service survives deletion of its old Pod, a later create repairs the
+missing Pod. A failed capacity read other than a Pod-not-found response remains
+an error and does not authorize replacement.
+
 ### Building a Custom AIO Sandbox Image
 
 `AioSandboxProvider` talks to the sandbox container through the `agent-sandbox` SDK. The Dockerfile for the default `enterprise-public-cn-beijing.cr.volces.com/vefaas-public/all-in-one-sandbox:latest` image is not part of this repository; DeerFlow treats that image as an upstream AIO sandbox runtime.
-
-This repository's own `docker/sandbox/Dockerfile` (the image the tenant Compose profile pins) follows the pattern below: it layers pinned Python libraries for skill scripts (`duckdb`, imported by the data-analysis skill; `python-docx`, used by the business-report skill's Word render) and a pre-built matplotlib font cache on the upstream base, next to the pandas, openpyxl, xlrd, matplotlib, jinja2 and WeasyPrint the base already carries, so skill scripts install nothing at runtime. The upstream image alone does not carry `duckdb`: on it the data-analysis skill exits with a message naming this Dockerfile instead of installing anything. Add libraries there rather than in a skill script; the build verifies the imports.
-
-The image's entrypoint honours six service switches, each compared to the string `true`: `DISABLE_BROWSER`, `DISABLE_JUPYTER`, `DISABLE_CODE_SERVER`, `DISABLE_VNC`, `DISABLE_MCP_BROWSER` and `DISABLE_NODEJS_REPL` (the last also stops the REPL's on-demand start; the `node` binary stays). `sandbox.environment` in `config.yaml` is how the local Docker backend passes them to every container (`-e`, with values quoted so they load as text). With all six set the sandbox keeps only its API server, nginx and the relay, boots in about half the time and idles at about a fifth of the memory; the tenant Compose profile ships that way and records the figures in `deploy/compose/README.md` ("Slim services profile").
 
 For persistent system or language dependencies, extend the published image and keep its startup command intact:
 
@@ -1191,7 +1140,6 @@ VM created for another root.
 - Each skill has a `SKILL.md` file with metadata
 - Skills are automatically discovered and loaded
 - Available in both local and Docker sandbox via path mapping
-- A tool call chosen in the same assistant message as a skill's first `SKILL.md` read is not run, because it was selected before those instructions could inform it; its result says so, and the next call is chosen with the instructions in hand
 
 Skill installs and agent-managed skill writes also run through native deterministic SkillScan before the LLM scanner:
 
@@ -1230,61 +1178,6 @@ title:
   model_name: null  # null = fast local fallback; set a model name to use LLM title generation
 ```
 
-### Workspace Presentation
-
-What the web workspace shows before anyone has asked for anything:
-
-```yaml
-ui:
-  product_name: HartMesh   # optional; this is the default
-  profile: developer   # or: business
-  starters:
-    - id: business-review
-      title: Monthly business review
-      prompt: >-
-        Build a monthly business review from the spreadsheet I am about to
-        attach, and give me the PDF, Word and Excel versions.
-```
-
-`product_name` is what the product is called wherever a person sees it: the
-sign-in and setup pages, the browser tab, the workspace when the tenant bundle
-names no company, the assistant's own name and DingTalk's message title. One
-line, at most 40 characters; unset, HartMesh. It is served before sign-in by
-the public `GET /api/product`, so treat it as public. Chat-app channels take
-it when they start, so a new name reaches DingTalk after a restart.
-
-`profile: business` keeps the skills, tools, subagents and integrations
-settings screens, and the scheduled-task recipe chips, for administrators, and
-drops the product blurb from Home. Nothing else changes: chats, agents,
-scheduled tasks, channels, memory and a person's own account and preferences
-stay put. Channels and memory are deliberately excluded — the phone someone
-messages the agent from, and what it has remembered about them, are theirs.
-`agents_api.enabled: false` is the switch for Agents.
-
-**This is presentation, not access control.** It hides screens and changes no
-route. `authorization` has no permission covering these APIs — its vocabulary
-is threads, runs and the tool plane — so it is not the lever that closes them.
-An administrator-only action is already refused by the API, and what limits a
-person is their `system_role`. Because `business` tells administrators from
-everyone else, it has no effect when authentication is disabled.
-
-`starters` is what Home offers before anyone types; choosing one fills the
-message box and sends nothing. At most 6, with a 60-character title and a
-2000-character prompt. Leaving it unset takes the profile's default —
-`business` opens on a small built-in set, `developer` on none — and an empty
-list shows no grid. When a grid exists it replaces the built-in suggestion row
-under the composer rather than appearing alongside it.
-
-Two cautions. The titles and prompts are served verbatim to every signed-in
-person, so keep secrets out of them; note that any config string beginning with
-`$` is replaced from the environment before this block is validated. And the
-strings have no per-locale form, so a multi-language deployment gets whichever
-language the operator wrote.
-
-Every field is read per request, so an edit to `config.yaml` reaches the next
-page load without a restart — but a malformed `ui:` block makes the Gateway
-return 503 on every route until it is fixed.
-
 ### GitHub API Token (Optional for GitHub Deep Research Skill)
 
 The default GitHub API rate limits are quite restrictive. For frequent project research, we recommend configuring a personal access token (PAT) with read-only permissions.
@@ -1313,13 +1206,12 @@ models:
 - `SERPER_API_KEY` - Serper (Google Search/Images API) key for `web_search` and `image_search`
 - `SERPLY_API_KEY` - [Serply](https://serply.io) key for `web_search` (Google Search, plus Google News and Google Scholar via `vertical`)
 - `GROUNDROUTE_API_KEY` - GroundRoute meta-search API key for `web_search` and `web_fetch` (routes across Serper, Brave, Exa, Tavily, Firecrawl, Perplexity with gain-share pricing)
+- `SOFYA_API_KEY` - [Sofya](https://sofya.co) key for `web_search` and `web_fetch`
+- `UNBROWSE_API_KEY` - [Unbrowse](https://unbrowse.ai) key for `web_fetch`
 - `BROWSERLESS_TOKEN` - Browserless Cloud token for `web_capture` (optional for self-hosted Browserless)
 - `DEER_FLOW_PROJECT_ROOT` - Project root for relative runtime paths
 - `DEER_FLOW_CONFIG_PATH` - Custom config file path
 - `DEER_FLOW_EXTENSIONS_CONFIG_PATH` - Custom extensions config file path
-- `DEER_FLOW_STREAM_BRIDGE_KEY_PREFIX` - Optional outer Redis namespace for retained run streams
-- `DEER_FLOW_CHECKPOINT_CACHE_KEY_PREFIX` - Direct Redis namespace override for checkpoint history cache entries
-- `DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX` - Direct Redis namespace override for sandbox ownership leases
 - `DEER_FLOW_HOME` - Runtime state directory (defaults to `.deer-flow` under the project root)
 - `DEER_FLOW_SKILLS_PATH` - Skills directory when `skills.path` is omitted
 - `GATEWAY_ENABLE_DOCS` - Set to `false` to disable Swagger UI (`/docs`), ReDoc (`/redoc`), and OpenAPI schema (`/openapi.json`) endpoints (default: `true`)

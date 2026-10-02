@@ -4,7 +4,6 @@ import logging
 from typing import Any
 
 from deerflow.config.extensions_config import ExtensionsConfig, McpServerConfig
-from deerflow.diagnostics import bounded_diagnostic, log_bounded_failure
 from deerflow.mcp.headers import illegal_header_value_reason
 
 logger = logging.getLogger(__name__)
@@ -28,6 +27,8 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
             raise ValueError(f"MCP server '{server_name}' with stdio transport requires 'command' field")
         params["command"] = config.command
         params["args"] = config.args
+        if config.cwd:
+            params["cwd"] = config.cwd
         # Add environment variables if present
         if config.env:
             params["env"] = config.env
@@ -35,6 +36,10 @@ def build_server_params(server_name: str, config: McpServerConfig) -> dict[str, 
         if not config.url:
             raise ValueError(f"MCP server '{server_name}' with {transport_type} transport requires 'url' field")
         params["url"] = config.url
+        if (config.model_extra or {}).get("personal_public_network") is True:
+            from deerflow.mcp.personal_network import personal_httpx_client_factory
+
+            params["httpx_client_factory"] = personal_httpx_client_factory
         # Add headers if present
         if config.headers:
             # A statically configured value the transport would refuse gets the
@@ -75,13 +80,7 @@ def build_servers_config(extensions_config: ExtensionsConfig) -> dict[str, dict[
         try:
             servers_config[server_name] = build_server_params(server_name, server_config)
             logger.info(f"Configured MCP server: {server_name}")
-        except Exception as exc:
-            diagnostic = bounded_diagnostic(
-                code="mcp_server_configuration_failed",
-                operation="build_mcp_server_configuration",
-                error=exc,
-                contribution_id=server_name,
-            )
-            log_bounded_failure(logger, diagnostic, level=logging.ERROR)
+        except Exception as e:
+            logger.error(f"Failed to configure MCP server '{server_name}': {e}")
 
     return servers_config

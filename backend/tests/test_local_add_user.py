@@ -191,9 +191,8 @@ def test_an_existing_address_is_refused_with_the_answer_register_gives(users_db,
 def test_a_user_a_token_and_nobody_are_refused(users_db, monkeypatch: pytest.MonkeyPatch) -> None:
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
-    repo = PersonalAccessTokenRepository(get_session_factory(), tenant=TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference())
+    repo = PersonalAccessTokenRepository(get_session_factory())
     admin = _admin(monkeypatch, _local(open_=True))
     admin.app.state.pat_repo = repo
     minted = admin.post("/api/v1/auth/pats", json={"name": "automation", "scopes": ["threads:read", "threads:write"]}, headers=_csrf(admin))
@@ -205,10 +204,10 @@ def test_a_user_a_token_and_nobody_are_refused(users_db, monkeypatch: pytest.Mon
     # No PAT scope covers the route, so the middleware refuses a token before
     # the route's own session-only guard is reached.
     assert refused.status_code == 403 and refused.json()["detail"] == "PAT credentials are not permitted on this route", refused.text
-    from app.gateway.auth.pat import required_pat_scope
+    from app.gateway.auth.pat import is_pat_allowed_route
     from app.gateway.routers.auth import add_user, require_session_source, router
 
-    assert required_pat_scope("POST", "/api/v1/auth/users") is None
+    assert is_pat_allowed_route("POST", "/api/v1/auth/users") is False
     route = next(route for route in router.routes if getattr(route, "endpoint", None) is add_user)
     assert require_session_source in [dependency.call for dependency in route.dependant.dependencies], "and the route is session-only on its own, as the lockout routes are"
 
@@ -296,9 +295,8 @@ def test_a_reset_leaves_the_accounts_tokens_working_and_confines_only_its_sessio
     from app.gateway.deps import get_local_provider
     from deerflow.persistence.engine import get_session_factory
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
-    repo = PersonalAccessTokenRepository(get_session_factory(), tenant=TenantIdentityV1.from_canonical_id("tenant-a").to_persisted_reference())
+    repo = PersonalAccessTokenRepository(get_session_factory())
     admin = _admin(monkeypatch, _local(open_=False))
     admin.app.state.pat_repo = repo
     minted = admin.post("/api/v1/auth/pats", json={"name": "automation", "scopes": ["threads:read", "threads:write"]}, headers=_csrf(admin))
@@ -321,21 +319,24 @@ def test_a_scheduled_task_of_a_reset_owner_still_runs(monkeypatch: pytest.Monkey
     """Internal launches keep the disabled/inert rule only: a pending setup confines sessions, not the owner's schedules or channels."""
     from app.gateway import services
     from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
-    from app.runtime.invocation import InternalLaunchIntent, InternalSourceKind
+    from app.gateway.internal_auth import INTERNAL_OWNER_USER_ID_HEADER_NAME
 
-    async def resolve_owner(_request, _owner_user_id):
-        return SimpleNamespace(id="owner-1", system_role="admin", oauth_provider=None, oauth_id=None, **owner)
+    class _Provider:
+        async def get_user(self, _owner_user_id):
+            return SimpleNamespace(id="owner-1", system_role="admin", oauth_provider=None, oauth_id=None, **{"disabled_at": None, **owner})
 
-    monkeypatch.setattr(services, "resolve_trusted_internal_owner_for_attribution", resolve_owner)
+    monkeypatch.setattr("app.gateway.deps.get_local_provider", lambda: _Provider())
     monkeypatch.setattr("deerflow.config.app_config.get_app_config", lambda: _local(open_=False))
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(id="internal", system_role="internal"), auth_source=AUTH_SOURCE_INTERNAL))
-    intent = InternalLaunchIntent(thread_id="thread-1", source_kind=InternalSourceKind.scheduled_task, owner_user_id="owner-1", trusted_task_id="task-1", task_run_id="occurrence-1")
-    launch = services._principal_projection_for_intent(request, intent, owner_user_id="owner-1")
+    request = SimpleNamespace(
+        headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: "owner-1"},
+        state=SimpleNamespace(user=SimpleNamespace(id="internal", system_role="internal"), auth_source=AUTH_SOURCE_INTERNAL),
+    )
+    launch = services._refuse_launch_for_refused_owner(request)
     if refused:
         with pytest.raises(ValueError, match="account is disabled"):
             asyncio.run(launch)
     else:
-        assert asyncio.run(launch).identity.effective_subject.subject_id == "owner-1"
+        assert asyncio.run(launch) is None
 
 
 def test_the_added_account_does_not_show_its_password_when_printed(users_db) -> None:

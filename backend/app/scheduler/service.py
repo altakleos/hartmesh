@@ -1,25 +1,16 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import logging
-import re
 import socket
-import time
 import uuid
-from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any, Literal
 
 from fastapi import HTTPException
 
-from app.runtime.deployment import SchedulerLeaseStatsReport
-from app.runtime.invocation import InternalLaunchIntent, InternalLaunchReceipt, InternalSourceKind, InvocationRuntime
-from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected, ScheduledTaskRunRepository
-from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+from deerflow.persistence.scheduled_task_runs import ActiveScheduledRunConflict, ScheduledTaskAdmissionRejected
 from deerflow.runtime import ConflictError, RunRecord
-from deerflow.runtime.runs.worker import RECURSION_LIMIT_STOP_REASON, SANDBOX_CAPACITY_STOP_REASON
 from deerflow.scheduler.schedules import next_run_at
 from deerflow.trace_context import ensure_trace_context
 from deerflow.utils.thread_id import validate_thread_id
@@ -32,156 +23,37 @@ _ACTIVE_RUN_CONFLICT_ERROR = "task already has an active run"
 _RESTART_RECOVERY_ERROR = "interrupted: gateway restarted before the run reached a terminal state"
 _LEASE_RECOVERY_ERROR = "interrupted: the owning gateway stopped renewing its run lease"
 _QUEUE_TIMEOUT_ERROR = "scheduled task queue wait timeout exceeded"
-_SANDBOX_REFUSED_ERROR = "no sandbox was free when the task ran, so its tools did not run"
-
-# How many overdue occurrences one poll ends. Each ended occurrence leaves the
-# overdue set, so the rest are ended by the next poll.
-_OVERDUE_ENDS_PER_POLL = 16
-# How long the poll waits for the run manager to accept one Stop. The occurrence
-# is ended before the Stop is asked, so a slow Stop costs the poll time, not the
-# outcome.
-_STOP_REQUEST_TIMEOUT_SECONDS = 10.0
-# How long the scheduler launches nothing while a run it stopped at the time
-# limit is still unwinding. A run keeps its sandbox until its worker finishes,
-# and the occurrence that counted against ``max_concurrent_runs`` is already
-# ended, so without this the next scheduled run could start beside it. A run
-# that never finishes unwinding holds scheduling for this long, not for good.
-_STOPPING_GRACE_SECONDS = 120
-
-# What the task list tells its owner when a run ended ``success`` yet a guard or
-# an execution budget had cut it short, keyed by the typed stop reason. The
-# reason itself stays on the run record and in the log. A reason with no phrase
-# of its own, an extension's included, reads as the generic ``_STOPPED_EARLY_ERROR``.
-_STOPPED_EARLY_ERROR = "the task stopped before it finished"
-_STOPPED_EARLY_ERRORS: dict[str, str] = {
-    "turn_budget_exhausted": "the task used up the number of steps it is allowed, so it stopped before it finished",
-    "tool_attempt_budget_exhausted": "the task used up the number of actions it is allowed, so it stopped before it finished",
-    "sandbox_operation_budget_exhausted": "the task used up the number of workspace operations it is allowed, so it stopped before it finished",
-    "sandbox_runtime_budget_exhausted": "the task used up the workspace time it is allowed, so it stopped before it finished",
-    "retrieval_budget_exhausted": "the task used up the number of lookups it is allowed, so it stopped before it finished",
-    "repeated_tool_loop": "the task kept repeating the same action, so it was stopped before it finished",
-    "loop_capped": "the task kept repeating the same action, so it was stopped before it finished",
-    "no_progress_loop": "the task stopped making progress, so it was stopped before it finished",
-    # The graph's step limit ends the run ``error`` with a bare reference the owner cannot use.
-    RECURSION_LIMIT_STOP_REASON: "the task used up the number of steps it is allowed, so it stopped before it finished",
-    "token_capped": "the task used up the amount of text it is allowed, so it stopped before it finished",
-    "safety_capped": "the model declined to go on, so the task stopped before it finished",
-    "model_length_capped": "the model's answer was cut off at its length limit, so the task stopped before it finished",
-}
-
-
-def _duration_words(seconds: int) -> str:
-    for unit, size in (("hour", 3600), ("minute", 60)):
-        if seconds % size == 0:
-            count = seconds // size
-            return f"{count} {unit}" if count == 1 else f"{count} {unit}s"
-    return f"{seconds} seconds"
 
 
 class ScheduledTaskService:
     def __init__(
         self,
         *,
-        task_repo: ScheduledTaskRepository,
-        task_run_repo: ScheduledTaskRunRepository,
-        invocation_runtime: InvocationRuntime,
+        task_repo,
+        task_run_repo,
+        launch_run,
         poll_interval_seconds: int,
         lease_seconds: int,
         max_concurrent_runs: int,
         queue_timeout_seconds: int = 3600,
         multi_instance: bool = False,
         run_lease_grace_seconds: int = 10,
-        tenant_digest: str | None = None,
-        max_run_seconds: int | None = None,
-        stop_run: Callable[[str], Awaitable[object]] | None = None,
-        recursion_limit: Callable[[], int] | None = None,
-        run_is_live: Callable[[str], Awaitable[bool]] | None = None,
     ) -> None:
         self._task_repo = task_repo
         self._task_run_repo = task_run_repo
-        self._invocation_runtime = invocation_runtime
+        self._launch_run = launch_run
         self._poll_interval_seconds = poll_interval_seconds
         self._lease_seconds = lease_seconds
         self._max_concurrent_runs = max_concurrent_runs
         self._queue_timeout_seconds = queue_timeout_seconds
         self._multi_instance = multi_instance
         self._run_lease_grace_seconds = run_lease_grace_seconds
-        # A bound on one occurrence's wall time, enforced by ending the
-        # occurrence and asking its run to stop (``stop_run(run_id)``): a run
-        # holds its concurrency slot until it ends, and nobody is watching it.
-        self._max_run_seconds = max_run_seconds
-        self._stop_run = stop_run
-        # The step limit for a scheduled run, read at each dispatch (so an edit
-        # applies to the next run). Without it the application runtime gives a
-        # run the Gateway default of 100 graph steps, about nine model turns.
-        self._recursion_limit = recursion_limit
-        # Whether the run manager still holds a worker for a run, and the runs
-        # this process asked to stop at the time limit, with when it asked.
-        self._run_is_live = run_is_live
-        self._stopping: dict[str, datetime] = {}
-        if (
-            tenant_digest is not None
-            and re.fullmatch(
-                r"[0-9a-f]{64}",
-                tenant_digest,
-            )
-            is None
-        ):
-            raise ValueError("scheduler tenant_digest is invalid")
-        self._tenant_digest = tenant_digest or "single-process"
         self._lease_owner = f"{socket.gethostname()}:{uuid.uuid4().hex}"
         self._task: asyncio.Task | None = None
         self._stop = asyncio.Event()
         self._skip_next_lease_reconciliation = False
-        self._stats_cycles = 0
-        self._stats_database_clock_reads = 0
-        self._stats_due_occurrences_claimed = 0
-        self._stats_launch_claims_acquired = 0
-        self._stats_recovery_transitions = 0
-        self._stats_stale_write_rejections = 0
-        self._stats_dependency_failures = 0
-        self._stats_last_database_time: datetime | None = None
-
-    @property
-    def running(self) -> bool:
-        """Return whether this replica's scheduler loop is currently live."""
-
-        return self._task is not None and not self._task.done()
-
-    @property
-    def lease_stats(self) -> SchedulerLeaseStatsReport:
-        """Return bounded per-replica lease telemetry without owner tokens."""
-
-        return SchedulerLeaseStatsReport(
-            cycles=self._stats_cycles,
-            database_clock_reads=self._stats_database_clock_reads,
-            due_occurrences_claimed=self._stats_due_occurrences_claimed,
-            launch_claims_acquired=self._stats_launch_claims_acquired,
-            recovery_transitions=self._stats_recovery_transitions,
-            stale_write_rejections=self._stats_stale_write_rejections,
-            dependency_failures=self._stats_dependency_failures,
-            last_database_time=self._stats_last_database_time,
-        )
-
-    async def _authority_now(self, *, fallback: datetime) -> datetime:
-        """Resolve lease/admission time from the durable store when available."""
-
-        if fallback.tzinfo is None or fallback.utcoffset() is None:
-            raise ValueError("scheduler authority fallback must be timezone-aware")
-        authority_clock = getattr(self._task_repo, "authority_now", None)
-        if not callable(authority_clock):
-            return fallback.astimezone(UTC)
-        resolved = await authority_clock(fallback=fallback)
-        if not isinstance(resolved, datetime) or resolved.tzinfo is None or resolved.utcoffset() is None:
-            raise RuntimeError("scheduler authority clock returned an invalid timestamp")
-        resolved = resolved.astimezone(UTC)
-        self._stats_database_clock_reads += 1
-        self._stats_last_database_time = resolved
-        return resolved
 
     async def run_once(self, *, now: datetime) -> None:
-        self._stats_cycles += 1
-        now = await self._authority_now(fallback=now)
         if self._multi_instance:
             if self._skip_next_lease_reconciliation:
                 self._skip_next_lease_reconciliation = False
@@ -193,9 +65,6 @@ class ScheduledTaskService:
                 now=now,
             )
         await self._expire_waiting_runs(now=now)
-        await self._stop_overdue_runs(now=now)
-        if await self._a_stopped_run_is_still_unwinding(now=now):
-            return
         await self._drain_queue(now=now)
         # Admission and execution capacity are separate. Due occurrences are
         # persisted even when all execution slots are busy; claim_queued_run()
@@ -206,14 +75,8 @@ class ScheduledTaskService:
             lease_seconds=self._lease_seconds,
             limit=self._max_concurrent_runs,
         )
-        self._stats_due_occurrences_claimed += len(claimed)
         for task in claimed:
-            await self.dispatch_task(
-                task,
-                now=now,
-                trigger="scheduled",
-                _now_is_authoritative=True,
-            )
+            await self.dispatch_task(task, now=now, trigger="scheduled")
 
     @staticmethod
     def _is_overlap_conflict(exc: Exception) -> bool:
@@ -234,7 +97,7 @@ class ScheduledTaskService:
 
     @staticmethod
     def _task_status_for_launch(task: dict[str, Any], *, trigger: str) -> str:
-        # The task-level status to write once InvocationRuntime has produced a live
+        # The task-level status to write once _launch_run has produced a live
         # run. A `once` task stays "running" until handle_run_completion
         # observes the real terminal outcome; declaring "completed" at launch
         # would stick if the run fails or the process dies (startup
@@ -245,44 +108,13 @@ class ScheduledTaskService:
             return "paused"
         return "enabled"
 
-    def _scheduled_occurrence_id(
-        self,
-        task: dict[str, Any],
-        *,
-        scheduled_for: datetime,
-    ) -> str:
-        """Derive one stable identity from tenant, schedule, due time, and version."""
-
-        material = {
-            "occurrence_identity_version": 1,
-            "tenant_digest": self._tenant_digest,
-            "task_id": task["id"],
-            "schedule_version": task.get("schedule_version", 1),
-            "schedule_type": task["schedule_type"],
-            "schedule_spec": task["schedule_spec"],
-            "timezone": task["timezone"],
-            "scheduled_for": scheduled_for.astimezone(UTC).isoformat(),
-        }
-        digest = hashlib.sha256(
-            json.dumps(
-                material,
-                sort_keys=True,
-                separators=(",", ":"),
-                ensure_ascii=False,
-            ).encode()
-        ).hexdigest()
-        return f"task-run-{digest[:48]}"
-
     async def dispatch_task(
         self,
         task: dict[str, Any],
         *,
         now: datetime,
-        trigger: Literal["scheduled", "manual"],
-        _now_is_authoritative: bool = False,
+        trigger: str,
     ) -> dict[str, Any]:
-        if not _now_is_authoritative:
-            now = await self._authority_now(fallback=now)
         expected_lease_owner = self._lease_owner if trigger == "scheduled" else None
         execution_thread_id = task.get("thread_id")
         if task.get("context_mode") == "fresh_thread_per_run" or execution_thread_id is None:
@@ -327,32 +159,13 @@ class ScheduledTaskService:
                 await self._release_admission_lease(task, trigger=trigger)
             return self._existing_active_result(active, execution_thread_id, trigger=trigger)
 
-        scheduled_for = now
-        if trigger == "scheduled":
-            due = task.get("next_run_at")
-            if isinstance(due, str):
-                try:
-                    due = datetime.fromisoformat(due.replace("Z", "+00:00"))
-                except ValueError as exc:
-                    raise RuntimeError("scheduled_task_due_time_invalid") from exc
-            if isinstance(due, datetime):
-                if due.tzinfo is None or due.utcoffset() is None:
-                    due = due.replace(tzinfo=UTC)
-                scheduled_for = due.astimezone(UTC)
-        task_run_id = (
-            self._scheduled_occurrence_id(
-                task,
-                scheduled_for=scheduled_for,
-            )
-            if trigger == "scheduled"
-            else f"task-run-{uuid.uuid4().hex}"
-        )
+        task_run_id = f"task-run-{uuid.uuid4().hex}"
         try:
             await self._task_run_repo.create(
                 run_record_id=task_run_id,
                 task_id=task["id"],
                 thread_id=execution_thread_id,
-                scheduled_for=scheduled_for,
+                scheduled_for=now,
                 trigger=trigger,
                 status="queued",
                 coordinate_with_task=True,
@@ -442,60 +255,28 @@ class ScheduledTaskService:
         )
         if claimed is None:
             return self._queued_result(task_run_id, execution_thread_id)
-        self._stats_launch_claims_acquired += 1
 
-        # Test-only, Redis-armed process-failure barrier. The imported helper
-        # is inert unless the real Kubernetes qualification runtime is
-        # explicitly enabled and this exact point was atomically armed.
-        from deerflow.runtime.kubernetes_qualification import (
-            qualification_service_barrier,
-        )
-
-        await qualification_service_barrier(
-            scenario="scheduler_owner_loss",
-            point="claimed_before_launch",
-            subject_id=task_run_id,
-        )
-
-        # Track whether InvocationRuntime has produced a live run. A bookkeeping
+        # Track whether _launch_run has produced a live run. A bookkeeping
         # failure after launch must retain the non-terminal slot so a later
         # poll cannot start the same occurrence twice.
         launched_run_id: str | None = None
         launched_thread_id: str | None = None
         launch_succeeded = False
         try:
-            receipt = await self._invocation_runtime.launch(
-                InternalLaunchIntent(
-                    thread_id=execution_thread_id,
-                    received_at=time.monotonic(),
-                    assistant_id=task.get("assistant_id"),
-                    input={"messages": [{"role": "user", "content": task["prompt"]}]},
-                    config=({"recursion_limit": self._recursion_limit()} if self._recursion_limit is not None else None),
-                    context={
-                        "non_interactive": True,
-                        **({"user_id": task["user_id"]} if task.get("user_id") else {}),
-                    },
-                    on_disconnect="continue",
-                    multitask_strategy="reject",
-                    source_kind=InternalSourceKind.scheduled_task,
-                    trusted_task_id=task["id"],
-                    task_run_id=task_run_id,
-                    scheduled_trigger=trigger,
-                    owner_user_id=task.get("user_id"),
-                    external_key=task_run_id,
-                    scheduled_system_owned=(task.get("system_owned") is True and "user_id" in task and task.get("user_id") is None),
-                )
+            result = await self._launch_run(
+                thread_id=execution_thread_id,
+                assistant_id=task.get("assistant_id"),
+                prompt=task["prompt"],
+                owner_user_id=task.get("user_id"),
+                metadata={
+                    "scheduled_task_id": task["id"],
+                    "scheduled_task_run_id": task_run_id,
+                    "scheduled_trigger": trigger,
+                },
             )
-            if not isinstance(receipt, InternalLaunchReceipt):
-                raise RuntimeError(f"scheduled invocation start {receipt.value}")
             launch_succeeded = True
-            launched_run_id = receipt.record.run_id
-            launched_thread_id = receipt.record.thread_id
-            await qualification_service_barrier(
-                scenario="scheduler_owner_loss",
-                point="launched_before_record",
-                subject_id=task_run_id,
-            )
+            launched_run_id = result["run_id"]
+            launched_thread_id = result["thread_id"]
             next_at = next_run_at(
                 task["schedule_type"],
                 task["schedule_spec"],
@@ -518,6 +299,7 @@ class ScheduledTaskService:
                 last_thread_id=launched_thread_id,
                 last_error=None,
                 increment_run_count=True,
+                task_run_id=task_run_id,
                 # Same race as the run-row write above: a fast-failing run's
                 # completion hook may have already finalized a `once` task.
                 protect_terminal=True,
@@ -546,7 +328,7 @@ class ScheduledTaskService:
             )
 
             if launch_succeeded:
-                # InvocationRuntime succeeded, so a run is live even though
+                # _launch_run succeeded, so a run is live even though
                 # post-launch bookkeeping raised. Keep the task-run row
                 # "running" so it keeps holding the task's single active slot
                 # (preventing a duplicate launch on the next dispatch) and
@@ -587,6 +369,7 @@ class ScheduledTaskService:
                         # The transient itself is logged above.
                         last_error=None,
                         increment_run_count=True,
+                        task_run_id=task_run_id,
                         protect_terminal=True,
                     )
                 except Exception:
@@ -603,7 +386,7 @@ class ScheduledTaskService:
                     "error": str(exc),
                 }
 
-            # InvocationRuntime itself failed (or a step before it did): no live run
+            # _launch_run itself failed (or a step before it did): no live run
             # was created, so it is safe to release the active slot.
             finalized = await self._task_run_repo.fail_launching_run(
                 task_run_id,
@@ -644,7 +427,6 @@ class ScheduledTaskService:
         )
         if updated:
             return
-        self._stats_stale_write_rejections += 1
         reconciled = await self._task_run_repo.reconcile_launched_run(
             task_run_id,
             task_id=task_id,
@@ -732,104 +514,6 @@ class ScheduledTaskService:
             now=now,
         )
 
-    async def _stop_overdue_runs(self, *, now: datetime) -> None:
-        """End every occurrence that has run past its time limit, then stop its run.
-
-        The occurrence's own ``started_at`` is the clock. The occurrence ends
-        ``failed`` first, in one compare-and-set, and only then is the run asked
-        to stop, so the outcome is decided before the Stop lands and by the
-        scheduler's own row: it does not depend on the run reporting a reason,
-        on which process owns the run, or on the run stopping at all. A run that
-        finished first keeps its own outcome and is left alone.
-        """
-        if self._max_run_seconds is None or self._stop_run is None:
-            return
-        error = f"the task did not finish within {_duration_words(self._max_run_seconds)}, so it was stopped"
-        try:
-            overdue = await self._task_run_repo.list_overdue_running(
-                started_before=now - timedelta(seconds=self._max_run_seconds),
-                limit=_OVERDUE_ENDS_PER_POLL,
-            )
-        except Exception:
-            logger.exception("Scheduled task poll could not look for runs past their time limit; retrying next poll")
-            return
-        for occurrence in overdue:
-            occurrence_id, run_id = occurrence.get("id"), occurrence.get("run_id")
-            if not run_id:
-                continue
-            try:
-                ended = await self._task_run_repo.end_active_run(occurrence_id, status="failed", run_id=run_id, error=error, finished_at=now)
-            except Exception:
-                logger.exception("Scheduled task-run %s: could not end it past its time limit; retrying next poll", occurrence_id)
-                continue
-            if not ended:
-                continue
-            logger.warning("Scheduled task-run %s ran past %s; ended it and stopping run %s", occurrence_id, _duration_words(self._max_run_seconds), run_id)
-            self._stopping[run_id] = now
-            await self._record_task_outcome(occurrence.get("task_id"), None, "failed", error)
-            try:
-                outcome = await asyncio.wait_for(self._stop_run(run_id), timeout=_STOP_REQUEST_TIMEOUT_SECONDS)
-            except Exception:
-                logger.exception("Scheduled task-run %s: run %s was not confirmed stopped after its occurrence ended at the time limit", occurrence_id, run_id)
-            else:
-                # The Stop is asked once. Whether it took is the run manager's
-                # answer, so a refusal is at least visible to an operator.
-                logger.info("Scheduled task-run %s: stop of run %s at the time limit answered %s", occurrence_id, run_id, getattr(outcome, "value", outcome))
-
-    async def _a_stopped_run_is_still_unwinding(self, *, now: datetime) -> bool:
-        """Whether a run stopped at the time limit still holds its worker, and so its sandbox.
-
-        The poll launches and claims nothing while one does, for up to
-        ``_STOPPING_GRACE_SECONDS`` after the Stop. A liveness check that fails
-        does not hold scheduling.
-        """
-        if self._run_is_live is None:
-            return False
-        for run_id, asked_at in list(self._stopping.items()):
-            if now - asked_at >= timedelta(seconds=_STOPPING_GRACE_SECONDS):
-                logger.warning("Run %s did not finish unwinding within %s seconds of its Stop; scheduling resumes", run_id, _STOPPING_GRACE_SECONDS)
-                del self._stopping[run_id]
-                continue
-            try:
-                live = await self._run_is_live(run_id)
-            except Exception:
-                logger.exception("Could not tell whether run %s is still unwinding; scheduling is not held for it", run_id)
-                del self._stopping[run_id]
-                continue
-            if live:
-                return True
-            del self._stopping[run_id]
-        return False
-
-    async def _record_task_outcome(
-        self,
-        task_id: object,
-        user_id: str | None,
-        terminal_status: Literal["success", "failed", "interrupted"],
-        error: str | None,
-    ) -> None:
-        """Write how an occurrence ended onto its task: ``last_error``, and a ``once`` task's single outcome."""
-        if not isinstance(task_id, str):
-            return
-        try:
-            task = await self._task_repo.get(task_id, user_id=user_id) if user_id else await self._task_repo.get_internal(task_id)
-            if task is None:
-                return
-            updates: dict[str, Any] = {"last_error": error}
-            if task["schedule_type"] == "once":
-                # The single occurrence is consumed either way (the run did launch,
-                # so re-arming risks duplicate side effects), but an interrupt ends
-                # as "cancelled", not "failed".
-                if terminal_status == "success":
-                    updates["status"] = "completed"
-                elif terminal_status == "interrupted":
-                    updates["status"] = "cancelled"
-                else:
-                    updates["status"] = "failed"
-            await self._task_repo.update(task_id, user_id=user_id or task.get("user_id"), updates=updates)
-        except Exception:
-            logger.exception("Scheduled task %s: could not record how its occurrence ended", task_id)
-
     async def handle_run_completion(self, record: RunRecord) -> None:
         metadata = record.metadata or {}
         task_id = metadata.get("scheduled_task_id")
@@ -839,20 +523,7 @@ class ScheduledTaskService:
             return
 
         terminal_status: Literal["success", "failed", "interrupted"] | None
-        if record.status.value == "success" and record.stop_reason == SANDBOX_CAPACITY_STOP_REASON:
-            # The agent said the workspace was busy and stopped; nobody reads
-            # an unattended answer, so the occurrence says so itself.
-            terminal_status = "failed"
-            error = _SANDBOX_REFUSED_ERROR
-        elif record.status.value == "success" and record.stop_reason:
-            # A guard or execution budget cut the run short and it still ended
-            # ``success``: the model answered in words. Nobody reads an
-            # unattended answer, so the occurrence says the task did not finish,
-            # in words. The typed reason stays on the run and in the log.
-            terminal_status = "failed"
-            error = _STOPPED_EARLY_ERRORS.get(record.stop_reason, _STOPPED_EARLY_ERROR)
-            logger.info("Scheduled task-run %s: run %s ended success but stopped early (%s)", task_run_id, record.run_id, record.stop_reason)
-        elif record.status.value == "success":
+        if record.status.value == "success":
             terminal_status = "success"
             error = None
         elif record.status.value == "interrupted":
@@ -862,53 +533,53 @@ class ScheduledTaskService:
             error = record.error or "run was interrupted before completion"
         elif record.status.value in {"error", "timeout"}:
             terminal_status = "failed"
-            error = _STOPPED_EARLY_ERRORS[RECURSION_LIMIT_STOP_REASON] if record.stop_reason == RECURSION_LIMIT_STOP_REASON else record.error
+            error = record.error
         else:
             terminal_status = None
             error = record.error
         if terminal_status is None:
             return
 
-        ended = await self._task_run_repo.end_active_run(
-            task_run_id,
-            status=terminal_status,
+        await self._task_repo.complete_run(
+            task_id,
+            user_id=user_id,
+            task_run_id=task_run_id,
             run_id=record.run_id,
+            status=terminal_status,
             error=error,
             finished_at=datetime.now(UTC),
         )
-        if not ended:
-            # The occurrence was already ended, by the scheduler at its time
-            # limit or by recovery, and the first ending stands: this
-            # completion rewrites neither the occurrence nor its task.
-            logger.info("Scheduled task-run %s was already ended; run %s's completion (%s) changes nothing", task_run_id, record.run_id, terminal_status)
-            return
-
-        await self._record_task_outcome(task_id, user_id, terminal_status, error)
 
     async def start(self) -> None:
         if self._task is not None:
             return
         restart_error = _RESTART_RECOVERY_ERROR
         if self._multi_instance:
-            now = await self._authority_now(fallback=datetime.now(UTC))
-            await self._reconcile_active_state(now=now)
+            await self._reconcile_active_state(now=datetime.now(UTC))
             self._skip_next_lease_reconciliation = True
         else:
+            # This destructive sweep is safe only while Gateway lifespan awaits
+            # start(): no request or poll admission can create a run owned by
+            # this process yet. Complete occurrence -> parent recovery before
+            # returning; moving either pass into run_once() can interrupt live
+            # work or race manual admission.
             try:
                 stale = await self._task_run_repo.mark_stale_active_runs(error=restart_error)
                 if stale:
                     logger.warning("Marked %d stale scheduled task run(s) as interrupted after restart", stale)
             except Exception:
                 logger.exception("Failed to sweep stale scheduled task runs at startup")
+                raise
             try:
                 # The run rows above are only half the story: a launched `once`
                 # task is parked in "running" until the (now dead) completion hook
-                # would have finalized it, so reconcile the parent rows too.
+                # would have finalized it.
                 stuck = await self._task_repo.cancel_stuck_once_tasks(error=restart_error)
                 if stuck:
-                    logger.warning("Cancelled %d stuck once task(s) after restart", stuck)
+                    logger.warning("Reconciled %d stuck once task(s) after restart", stuck)
             except Exception:
                 logger.exception("Failed to reconcile stuck once tasks at startup")
+                raise
         self._stop.clear()
         self._task = asyncio.create_task(self._run_loop())
 
@@ -921,7 +592,6 @@ class ScheduledTaskService:
                 lease_grace_seconds=self._run_lease_grace_seconds,
             )
             if stale:
-                self._stats_recovery_transitions += stale
                 logger.warning("Marked %d stale scheduled task run(s) as interrupted after lease reconciliation", stale)
         except Exception:
             logger.exception("Failed to reconcile scheduled task runs with leases")
@@ -932,8 +602,7 @@ class ScheduledTaskService:
                 lease_grace_seconds=self._run_lease_grace_seconds,
             )
             if stuck:
-                self._stats_recovery_transitions += stuck
-                logger.warning("Cancelled %d stuck once task(s) after lease reconciliation", stuck)
+                logger.warning("Reconciled %d stuck once task(s) after lease reconciliation", stuck)
         except Exception:
             logger.exception("Failed to reconcile once tasks with leases")
 
@@ -949,7 +618,6 @@ class ScheduledTaskService:
             try:
                 await self.run_once(now=datetime.now(UTC))
             except Exception:
-                self._stats_dependency_failures += 1
                 # A transient DB error (e.g. SQLite "database is locked") must
                 # not kill the poller task for the rest of the process life.
                 logger.exception("Scheduled task poll failed; retrying next interval")

@@ -32,6 +32,8 @@ from .sandbox_info import PROVENANCE_CREATED, PROVENANCE_REDISCOVERED, SandboxIn
 
 logger = logging.getLogger(__name__)
 
+_AIO_DEFAULT_MAX_SHELL_SESSIONS = 10
+
 
 class _ExistingRestrictedSandbox(RuntimeError):
     def __init__(self, info: SandboxInfo):
@@ -47,6 +49,7 @@ class _ContainerInspection:
     image: str
     networks: frozenset[str]
     relay_token: str | None = None
+    max_shell_sessions: int | None = None
 
 
 @dataclass(frozen=True)
@@ -227,6 +230,11 @@ _DOCKER_BRIDGE_GATEWAY_FALLBACK = "172.17.0.1"
 # value can be tuned or disabled through the corresponding DEER_FLOW_SANDBOX_*
 # environment variable (see _start_container).
 _DEFAULT_SANDBOX_MEMORY = "2g"
+# The trusted network-policy sidecar is a small Python process; its memory
+# limit is tunable through DEER_FLOW_SANDBOX_PROXY_MEMORY (see
+# _start_network_proxy) so a memory-budgeted host can size it from a
+# measurement instead of inheriting this default.
+_DEFAULT_PROXY_MEMORY = "256m"
 _DEFAULT_SANDBOX_CPUS = "2"
 _DEFAULT_SANDBOX_PIDS_LIMIT = "512"
 # The trusted network-policy sidecar is a small Python process; its memory
@@ -282,6 +290,45 @@ def _docker_bridge_gateway_ip() -> str | None:
     return candidate
 
 
+_DOCKER_SERVER_IS_DESKTOP: bool | None = None
+
+
+def _docker_server_is_desktop() -> bool:
+    """Detect Desktop from the daemon, including a Linux DooD Gateway."""
+    global _DOCKER_SERVER_IS_DESKTOP
+    if _DOCKER_SERVER_IS_DESKTOP is not None:
+        return _DOCKER_SERVER_IS_DESKTOP
+    try:
+        result = subprocess.run(
+            ["docker", "info", "--format", "{{json .OperatingSystem}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        logger.warning("Could not identify the Docker server platform; assuming non-Desktop: %s", exc)
+        return False
+    if result.returncode != 0:
+        logger.warning("Could not identify the Docker server platform; assuming non-Desktop: %s", (result.stderr or "").strip())
+        return False
+    raw = (result.stdout or "").strip()
+    try:
+        operating_system = json.loads(raw)
+    except json.JSONDecodeError:
+        operating_system = raw
+    is_desktop = isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
+    _DOCKER_SERVER_IS_DESKTOP = is_desktop
+    return is_desktop
+
+
+def _clear_docker_desktop_cache() -> None:
+    global _DOCKER_SERVER_IS_DESKTOP
+    _DOCKER_SERVER_IS_DESKTOP = None
+
+
+_docker_server_is_desktop.cache_clear = _clear_docker_desktop_cache  # type: ignore[attr-defined]
+
+
 def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | None = None) -> str:
     """Choose the host interface for legacy Docker ``-p`` sandbox publishing.
 
@@ -296,15 +343,21 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
     the address the sandbox host itself resolves to: ``host.docker.internal``
     follows the daemon's ``host-gateway-ip`` mapping (customizable, possibly
     IPv6), so resolving it yields exactly where the gateway will connect —
-    the published port and the advertised sandbox URL always match. Only
-    when resolution fails does the default bridge gateway serve as a
-    best-effort fallback (with a warning). Operators that genuinely need the
-    old broad bind (e.g. remote clients connecting to the sandbox API
-    directly) can restore it with ``DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0`` —
-    that re-exposes an unauthenticated shell endpoint and should be paired
-    with an external firewall. When operators choose an IPv6 loopback
-    sandbox host, bind Docker to IPv6 loopback as well so the advertised
-    sandbox URL and published socket use the same address family.
+    the published port and the advertised sandbox URL always match. On
+    Docker Desktop, resolving ``host.docker.internal`` yields an internal VM
+    gateway address that the host OS cannot bind, so Desktop daemons default
+    to host loopback (127.0.0.1) for ``host.docker.internal``; Desktop forwards
+    ``host.docker.internal`` to host loopback automatically. Custom non-loopback
+    sandbox hosts on Desktop daemons continue to bind their resolved address.
+    Only when resolution fails does the
+    default bridge gateway serve as a best-effort fallback (with a warning).
+    Operators that genuinely need the old broad bind (e.g. remote clients
+    connecting to the sandbox API directly) can restore it with
+    ``DEER_FLOW_SANDBOX_BIND_HOST=0.0.0.0`` — that re-exposes an
+    unauthenticated shell endpoint and should be paired with an external
+    firewall. When operators choose an IPv6 loopback sandbox host, bind
+    Docker to IPv6 loopback as well so the advertised sandbox URL and
+    published socket use the same address family.
     """
     explicit_bind = bind_host if bind_host is not None else os.environ.get("DEER_FLOW_SANDBOX_BIND_HOST", "").strip()
     if explicit_bind:
@@ -332,6 +385,17 @@ def _resolve_docker_bind_host(sandbox_host: str | None = None, bind_host: str | 
         return "[::1]"
     if _is_loopback_sandbox_host(host):
         logger.debug("Docker sandbox bind: 127.0.0.1 (loopback default)")
+        return "127.0.0.1"
+
+    if _docker_server_is_desktop() and host.strip().rstrip(".").lower() in (
+        "host.docker.internal",
+        "gateway.docker.internal",
+        "docker.for.mac.host.internal",
+        "docker.for.mac.localhost",
+        "docker.for.win.host.internal",
+        "docker.for.win.localhost",
+    ):
+        logger.debug("Docker sandbox bind: 127.0.0.1 (Docker Desktop host loopback)")
         return "127.0.0.1"
 
     resolved = _resolve_sandbox_host_address(host)
@@ -542,23 +606,13 @@ class LocalContainerBackend(SandboxBackend):
     # daemon itself is wedged rather than truncating a slow-but-progressing stop.
     _STOP_TIMEOUT_SECONDS = 120.0
     # How long SIGTERM is given before the runtime escalates to SIGKILL. The
-    # default is ten seconds per container, and somebody waits through it:
-    # `_evict_oldest_warm` stops a parked set in the foreground of their next
-    # message, before the turn's first model request. Neither member honours
-    # SIGTERM -- the sandbox's init is a bash script with no trap, the sidecar a
-    # Python server that installs no handler -- so both already die by SIGKILL,
-    # and the grace only decides how long the person waits for it. Measured on
-    # the released images at the profile's limits: 10.94s + 10.68s by default,
-    # 1.74s + 1.63s here, exit 137 either way. A second is still long enough for
-    # an image that later does handle the signal, since `stop` returns as soon
-    # as the process exits and the grace is paid only when it is ignored.
-    #
-    # It does not make a teardown safe for something still writing -- a sandbox
-    # has four writable host mounts under /mnt/user-data, and this is the idle
-    # reaper's and shutdown's stop as well as eviction's -- but the ten seconds
-    # never did either: nothing inside is told to finish, so a process mid-write
-    # is killed just as abruptly, nine seconds later. See the accepted-execution
-    # guide, "What that wait costs".
+    # default is ten seconds per container, and somebody waits through it when
+    # a parked sandbox is stopped ahead of their next message. Neither member
+    # honours SIGTERM -- the sandbox's init is a bash script with no trap, the
+    # sidecar a Python server that installs no handler -- so both already die
+    # by SIGKILL, and the grace only decides how long the person waits for it.
+    # Measured on the released images at the profile's limits: 10.94s + 10.68s
+    # by default, 1.74s + 1.63s here, exit 137 either way.
     _STOP_GRACE_SECONDS = 1
 
     def __init__(
@@ -570,6 +624,7 @@ class LocalContainerBackend(SandboxBackend):
         config_mounts: list,
         environment: dict[str, str],
         network_config: dict[str, object] | None = None,
+        required_shell_sessions: int = 0,
     ):
         """Initialize the local container backend.
 
@@ -579,12 +634,14 @@ class LocalContainerBackend(SandboxBackend):
             container_prefix: Prefix for container names (e.g., "deer-flow-sandbox").
             config_mounts: Volume mount configurations from config (list of VolumeMountConfig).
             environment: Environment variables to inject into containers.
+            required_shell_sessions: Minimum usable capacity, independent of image environment overrides.
         """
         self._image = image
         self._base_port = base_port
         self._container_prefix = container_prefix
         self._config_mounts = config_mounts
         self._environment = environment
+        self._required_shell_sessions = required_shell_sessions
         self._network_config = network_config or {"mode": "open"}
         self._network_mode = str(self._network_config.get("mode", "open"))
         self._allow_synthetic_dns = False
@@ -628,6 +685,18 @@ class LocalContainerBackend(SandboxBackend):
             "deerflow.role": "sandbox",
             "deerflow.network_mode": self._network_mode,
         }
+
+    def _has_compatible_shell_capacity(self, inspection: _ContainerInspection) -> bool:
+        """Check both the runtime minimum and any explicit environment override."""
+        configured = self._environment.get("MAX_SHELL_SESSIONS")
+        required = self._required_shell_sessions
+        try:
+            if configured is not None:
+                required = max(required, int(configured))
+        except (TypeError, ValueError):
+            return False
+        actual = inspection.max_shell_sessions if inspection.max_shell_sessions is not None else _AIO_DEFAULT_MAX_SHELL_SESSIONS
+        return actual >= required
 
     def _network_policy_digest(self) -> str:
         allow_domains = self._network_config.get("allow_domains", [])
@@ -799,25 +868,7 @@ class LocalContainerBackend(SandboxBackend):
 
     def _docker_server_is_desktop(self) -> bool:
         """Detect Desktop from the daemon, including a Linux DooD Gateway."""
-        try:
-            result = subprocess.run(
-                ["docker", "info", "--format", "{{json .OperatingSystem}}"],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
-            logger.warning("Could not identify the Docker server platform; Desktop synthetic DNS answers remain disabled: %s", exc)
-            return False
-        if result.returncode != 0:
-            logger.warning("Could not identify the Docker server platform; Desktop synthetic DNS answers remain disabled: %s", (result.stderr or "").strip())
-            return False
-        raw = (result.stdout or "").strip()
-        try:
-            operating_system = json.loads(raw)
-        except json.JSONDecodeError:
-            operating_system = raw
-        return isinstance(operating_system, str) and "docker desktop" in operating_system.lower()
+        return _docker_server_is_desktop()
 
     def _docker_has_managed_sandboxes(self) -> bool:
         """Keep using Docker while this prefix still has managed sandboxes.
@@ -1038,12 +1089,6 @@ class LocalContainerBackend(SandboxBackend):
                 config_mount_exclusion_root=config_mount_exclusion_root,
                 network_override=network_name,
                 publish_port=False,
-                # The sandbox reaches its proxy by name. Docker's embedded DNS
-                # (127.0.0.11) is a NAT rule in the host network namespace,
-                # which a sandbox running under its own network stack (gVisor's
-                # runsc) never sees, so the name is also pinned in /etc/hosts
-                # with the address Docker assigned on the internal network.
-                extra_hosts={proxy_name: proxy_address},
                 extra_environment={
                     "HTTP_PROXY": proxy_url,
                     "HTTPS_PROXY": proxy_url,
@@ -1058,6 +1103,12 @@ class LocalContainerBackend(SandboxBackend):
                     "PROXY_SERVER": f"{proxy_name}:3128",
                     "PROXY_EXCLUDE": "localhost,127.0.0.1,::1",
                 },
+                # The sandbox reaches its proxy by name. Docker's embedded DNS
+                # (127.0.0.11) is a NAT rule in the host network namespace,
+                # which a sandbox running under its own network stack (gVisor's
+                # runsc) never sees, so the name is also pinned in /etc/hosts
+                # with the address Docker assigned on the internal network.
+                extra_hosts={proxy_name: proxy_address},
                 labels={**self._restricted_labels(sandbox_id, "sandbox"), **(owner_labels or {})},
             )
         except BaseException as exc:
@@ -1153,8 +1204,7 @@ class LocalContainerBackend(SandboxBackend):
             "no-new-privileges",
             *_docker_memory_limit_args("DEER_FLOW_SANDBOX_PROXY_MEMORY", _DEFAULT_PROXY_MEMORY),
             # CPU and PID limits stay fixed: the sidecar relays one sandbox's
-            # traffic and has never needed tuning. The same environment seam
-            # pattern applies if a budget ever requires them.
+            # traffic and has never needed tuning.
             "--cpus",
             "1",
             "--pids-limit",
@@ -1418,6 +1468,14 @@ class LocalContainerBackend(SandboxBackend):
                     created_at=created_at,
                     requires_replacement=True,
                 )
+            if not self._has_compatible_shell_capacity(sandbox_inspection):
+                return SandboxInfo(
+                    sandbox_id=sandbox_id,
+                    sandbox_url="",
+                    container_name=container_name,
+                    created_at=created_at,
+                    requires_replacement=True,
+                )
 
         if self._network_mode != "open":
             proxy_name, _ = self._resource_names(sandbox_id)
@@ -1570,7 +1628,7 @@ class LocalContainerBackend(SandboxBackend):
                 continue
             created_at, host_port = data.created_at, data.host_port
             request_headers: dict[str, str] = {}
-            requires_replacement = persisted_mode != self._network_mode
+            requires_replacement = persisted_mode != self._network_mode or not self._has_compatible_shell_capacity(data)
             if not requires_replacement and self._network_mode != "open":
                 proxy_name, _ = self._resource_names(sandbox_id)
                 proxy_data = inspections.get(proxy_name)
@@ -1751,6 +1809,17 @@ class LocalContainerBackend(SandboxBackend):
             host_port = _extract_host_port(entry, 8080)
             config = entry.get("Config") or {}
             network_settings = entry.get("NetworkSettings") or {}
+            max_shell_sessions: int | None = None
+            configured_shell_sessions = _extract_container_environment(config, "MAX_SHELL_SESSIONS")
+            if configured_shell_sessions is not None:
+                try:
+                    parsed_shell_sessions = int(configured_shell_sessions)
+                    if parsed_shell_sessions > 0:
+                        max_shell_sessions = parsed_shell_sessions
+                    else:
+                        max_shell_sessions = 0
+                except ValueError:
+                    max_shell_sessions = 0
             out[name] = _ContainerInspection(
                 created_at=created_at,
                 host_port=host_port,
@@ -1758,6 +1827,7 @@ class LocalContainerBackend(SandboxBackend):
                 image=str(config.get("Image") or ""),
                 networks=frozenset(str(value) for value in (network_settings.get("Networks") or {})),
                 relay_token=_extract_container_environment(config, RELAY_TOKEN_ENV),
+                max_shell_sessions=max_shell_sessions,
             )
         return out
 
@@ -2026,6 +2096,7 @@ class LocalContainerBackend(SandboxBackend):
         repository, so that runtime keeps its own default rather than gaining
         an argument nobody here has run.
         """
+        # The grace period is sent only to Docker, where it was measured.
         grace = ["-t", str(self._STOP_GRACE_SECONDS)] if self._runtime == "docker" else []
         try:
             subprocess.run(

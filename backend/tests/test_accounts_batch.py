@@ -29,8 +29,6 @@ os.environ.setdefault("AUTH_JWT_SECRET", "test-secret-key-accounts-batch-min-32-
 from app.gateway.auth.accounts import EXIT_UNCONFIRMED_RUNS, MAX_BATCH_SUBJECTS, AccountsCommand, CommandError
 from app.gateway.auth.models import User
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-from app.gateway.refusal_watch import RefusalWatch
-from deerflow.runtime.owner_holdings import OwnerHoldings
 
 ISSUER = "https://login.example.com/realms/tenant"
 
@@ -44,22 +42,18 @@ def anyio_backend():
 def stores(tmp_path) -> Iterator[SimpleNamespace]:
     from deerflow.persistence.engine import close_engine, get_session_factory, init_engine
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
-    from deerflow.persistence.refusal_sweeps import RefusalSweepRepository
     from deerflow.persistence.run import RunRepository
     from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
 
     asyncio.run(init_engine("sqlite", url=f"sqlite+aiosqlite:///{tmp_path}/batch.db", sqlite_dir=str(tmp_path)))
     session_factory = get_session_factory()
     assert session_factory is not None
-    tenant = TenantIdentityV1.from_canonical_id("local").to_persisted_reference()
     try:
         yield SimpleNamespace(
             users=SQLiteUserRepository(session_factory),
-            tokens=PersonalAccessTokenRepository(session_factory, tenant=tenant),
+            tokens=PersonalAccessTokenRepository(session_factory),
             schedules=ScheduledTaskRepository(session_factory),
-            runs=RunRepository(session_factory, tenant=tenant),
-            sweeps=RefusalSweepRepository(session_factory),
+            runs=RunRepository(session_factory),
         )
     finally:
         asyncio.run(close_engine())
@@ -85,8 +79,7 @@ def _command(stores: SimpleNamespace, **kwargs) -> AccountsCommand:
 async def _seed_run(stores: SimpleNamespace, user_id: str, *, role: str | None = None) -> str:
     """A run no worker will ever stop: its cancellation stays unconfirmed until the wait runs out."""
     run_id = str(uuid4())
-    sealed = None if role is None else {"user_id": user_id, "role": role}
-    await stores.runs.put(run_id, thread_id=str(uuid4()), user_id=user_id, status="running", created_at=datetime.now(UTC).isoformat(), principal_projection_json=sealed)
+    await stores.runs.put(run_id, thread_id=str(uuid4()), user_id=user_id, status="running", created_at=datetime.now(UTC).isoformat())
     return run_id
 
 
@@ -215,26 +208,6 @@ async def test_each_entry_is_the_document_the_single_subject_form_prints(stores)
 
 
 @pytest.mark.anyio
-async def test_the_gateway_processes_are_asked_to_look_twice_for_the_whole_batch_not_twice_per_person(stores) -> None:
-    for subject in ("sub-a", "sub-b", "sub-c"):
-        await stores.users.create_user(_account(subject))
-    asked: list[int] = []
-    request_check = stores.sweeps.request_check
-
-    async def _counted() -> int:
-        asked.append(await request_check())
-        return asked[-1]
-
-    stores.sweeps.request_check = _counted
-
-    document = await _command(stores, sweeps=stores.sweeps).run("disable", issuer=ISSUER, subjects=["sub-a", "sub-b", "sub-c"])
-
-    # Once the refusals have committed, and once more after the runs are over.
-    assert len(asked) == 2
-    assert all(set(entry["surfaces"]) >= {"sse_streams", "sandboxes"} for entry in document["identities"])
-
-
-@pytest.mark.anyio
 async def test_a_run_admitted_during_the_wait_is_found_and_counted_for_its_own_identity(stores) -> None:
     """A request that authenticated before the refusal committed can insert a run after the first look."""
     first = await stores.users.create_user(_account("sub-a"))
@@ -310,31 +283,6 @@ async def test_a_run_admitted_during_the_wait_is_found_for_an_identity_that_had_
 
 
 @pytest.mark.anyio
-async def test_one_person_s_run_that_outlasts_the_wait_leaves_everyone_else_confirmed(stores) -> None:
-    """The Gateway processes' second look is left time inside the one wait, so a slow run is its own identity's only."""
-    stuck = await stores.users.create_user(_account("sub-a"))
-    for subject in ("sub-b", "sub-c"):
-        await stores.users.create_user(_account(subject))
-    await _seed_run(stores, str(stuck.id))
-    watch = RefusalWatch(stores.sweeps, OwnerHoldings(), refused_owners=stores.users.list_refused_user_ids, process_id="gw-1", interval_seconds=0.05)
-    wait = 2.0
-    await watch.start()
-    try:
-        started = time.monotonic()
-        document = await _command(stores, sweeps=stores.sweeps, wait_seconds=wait).run("disable", issuer=ISSUER, subjects=["sub-a", "sub-b", "sub-c"])
-        took = time.monotonic() - started
-    finally:
-        await watch.stop()
-
-    assert took < wait + 1.0, took
-    for subject in ("sub-b", "sub-c"):
-        entry = _entry(document, subject)
-        assert entry["surfaces_unconfirmed"] == [] and entry["returncode"] == 0, (subject, entry["surfaces_unconfirmed"])
-    assert _entry(document, "sub-a")["surfaces_unconfirmed"] == ["running_work"]
-    assert document["totals"]["subjects_unconfirmed"] == ["sub-a"] and document["returncode"] == EXIT_UNCONFIRMED_RUNS
-
-
-@pytest.mark.anyio
 async def test_a_fault_listing_one_identity_s_runs_is_that_identity_s_alone(stores, monkeypatch: pytest.MonkeyPatch) -> None:
     broken = await stores.users.create_user(_account("sub-a"))
     fine = await stores.users.create_user(_account("sub-b"))
@@ -354,54 +302,6 @@ async def test_a_fault_listing_one_identity_s_runs_is_that_identity_s_alone(stor
     assert _entry(document, "sub-b")["verdict"] == "disabled" and _entry(document, "sub-b")["runs_found"] == 1
     assert (await stores.runs.get(run_id, user_id=None))["cancel_action"] == "interrupt"
     assert document["totals"]["subjects_failed"] == ["sub-a"] and document["returncode"] == 1
-
-
-@pytest.mark.anyio
-async def test_a_fault_in_a_shared_wait_fails_every_identity_it_left_unfinished_and_still_answers_for_each(stores, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Every refusal has committed by then, so the document must still say who was reached; the one-subject form raises as before."""
-    for subject in ("sub-a", "sub-b"):
-        await stores.users.create_user(_account(subject))
-    await stores.users.create_user(_account("sub-c"))
-    await stores.users.create_user(_account("sub-c", provider="sso-basic", email="sub-c.basic@example.com"))
-
-    async def _unreadable(**kwargs):
-        raise RuntimeError("process record unreadable")
-
-    monkeypatch.setattr(stores.sweeps, "live_processes", _unreadable)
-
-    document = await _command(stores, sweeps=stores.sweeps).run("disable", issuer=ISSUER, subjects=["sub-a", "sub-b", "sub-c"])
-
-    for subject in ("sub-a", "sub-b"):
-        entry = _entry(document, subject)
-        assert entry["verdict"] == "failed" and "process record unreadable" in entry["error"], entry
-    assert _entry(document, "sub-c")["verdict"] == "refused"
-    assert document["totals"]["subjects_failed"] == ["sub-a", "sub-b"] and document["totals"]["subjects_refused"] == ["sub-c"]
-    # The refusals committed before the fault; a re-run finishes what it left.
-    assert {row[1] for row in await stores.users.list_disabled_identities()} == {"sub-a", "sub-b"}
-    with pytest.raises(RuntimeError, match="process record unreadable"):
-        await _command(stores, sweeps=stores.sweeps).run("disable", issuer=ISSUER, subject="sub-a")
-
-
-@pytest.mark.anyio
-async def test_when_every_identity_failed_the_gateway_processes_are_not_asked_to_look(stores, monkeypatch: pytest.MonkeyPatch) -> None:
-    for subject in ("sub-a", "sub-b"):
-        await stores.users.create_user(_account(subject))
-    asked: list[int] = []
-    request_check = stores.sweeps.request_check
-
-    async def _counted() -> int:
-        asked.append(await request_check())
-        return asked[-1]
-
-    async def _refusal_fails(*args):
-        raise RuntimeError("database unreachable")
-
-    stores.sweeps.request_check = _counted
-    monkeypatch.setattr(stores.users, "disable_identity", _refusal_fails)
-
-    document = await _command(stores, sweeps=stores.sweeps).run("disable", issuer=ISSUER, subjects=["sub-a", "sub-b"])
-
-    assert document["totals"]["verdicts"] == {"failed": 2} and asked == []
 
 
 @pytest.mark.anyio

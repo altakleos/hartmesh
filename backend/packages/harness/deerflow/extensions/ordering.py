@@ -76,18 +76,23 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
     reported an empty sequence while iteration yielded the real constraints.
     Deferring the call instead of faking the value keeps one answer.
     """
+    from deerflow.agents.middlewares.artifact_resolution_middleware import ArtifactResolutionMiddleware
     from deerflow.agents.middlewares.provider_refusal_middleware import ProviderRefusalMiddleware
     from deerflow.agents.middlewares.read_before_write_middleware import ReadBeforeWriteMiddleware
     from deerflow.agents.middlewares.sandbox_audit_middleware import SandboxAuditMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
     from deerflow.agents.middlewares.tool_error_handling_middleware import ToolErrorHandlingMiddleware
-    from deerflow.agents.middlewares.tool_output_budget_middleware import ToolOutputBudgetMiddleware
     from deerflow.agents.middlewares.tool_progress_middleware import ToolProgressMiddleware
+    from deerflow.agents.middlewares.tool_promotion_audit_middleware import DeferredToolPromotionAuditMiddleware
     from deerflow.agents.middlewares.tool_receipt_middleware import ToolReceiptMiddleware
-    from deerflow.agents.middlewares.tool_result_sanitization_middleware import ToolResultSanitizationMiddleware
     from deerflow.guardrails.middleware import GuardrailMiddleware
-    from deerflow.sandbox.middleware import SandboxMiddleware
 
     return (
+        OrderingConstraint(
+            outer=DeferredToolPromotionAuditMiddleware,
+            inner=SkillToolPolicyMiddleware,
+            reason=("DeferredToolPromotionAuditMiddleware must observe the policy-filtered tool_search Command so denied schemas are never reported as effective promotions"),
+        ),
         OrderingConstraint(
             outer=ToolProgressMiddleware,
             inner=ToolErrorHandlingMiddleware,
@@ -103,16 +108,6 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
             inner=ToolErrorHandlingMiddleware,
             reason=("ToolReceiptMiddleware reads the deerflow_tool_meta status stamped by ToolErrorHandlingMiddleware when building each receipt, so its wrap_tool_call chain must enclose the stamping step"),
         ),
-        OrderingConstraint(
-            outer=ToolReceiptMiddleware,
-            inner=ToolResultSanitizationMiddleware,
-            reason=("Durable result commitments cover the exact sanitized model-visible result, so ToolReceiptMiddleware must observe ToolResultSanitizationMiddleware's return value"),
-        ),
-        OrderingConstraint(
-            outer=ToolReceiptMiddleware,
-            inner=ToolOutputBudgetMiddleware,
-            reason=("Durable result commitments cover the exact bounded model-visible result, so ToolReceiptMiddleware must observe ToolOutputBudgetMiddleware's return value"),
-        ),
         *(
             OrderingConstraint(
                 outer=ToolReceiptMiddleware,
@@ -120,6 +115,7 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
                 reason=(f"{short_circuiter.__name__} can return or rebuild a ToolMessage without invoking its handler; ToolReceiptMiddleware must wrap it or those results never get a receipt and the ledger silently gaps"),
             )
             for short_circuiter in (
+                ArtifactResolutionMiddleware,
                 GuardrailMiddleware,
                 SandboxAuditMiddleware,
                 ReadBeforeWriteMiddleware,
@@ -127,13 +123,12 @@ def core_ordering_constraints() -> tuple[OrderingConstraint, ...]:
                 ProviderRefusalMiddleware,
             )
         ),
-        OrderingConstraint(
-            outer=ToolReceiptMiddleware,
-            inner=SandboxMiddleware,
-            reason=(
-                "SandboxMiddleware rebuilds tool results into Commands that carry sandbox state and, once upstream's "
-                "egress approval card lands, can replace a result with an approval message and end the turn; "
-                "ToolReceiptMiddleware must enclose it so a receipt never closes over a result the model does not see"
-            ),
+        *(
+            OrderingConstraint(
+                outer=ArtifactResolutionMiddleware,
+                inner=policy,
+                reason="Artifact handles must resolve before argument-sensitive authorization, audit, write and progress policies inspect the call",
+            )
+            for policy in (GuardrailMiddleware, SandboxAuditMiddleware, ReadBeforeWriteMiddleware, ToolProgressMiddleware)
         ),
     )

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import pytest
 
-from deerflow.extensions.artifacts import ExtensionArtifactVerificationError
 from deerflow.extensions.loader import (
     Diagnostic,
     ExtensionLoadError,
@@ -27,49 +26,6 @@ def test_no_specs_yields_empty_result():
     loaded, diagnostics = load_extensions([])
     assert diagnostics == []
     assert loaded.has_middleware_contributors is False
-
-
-def test_production_artifact_failure_precedes_import_even_for_optional_extension(
-    monkeypatch,
-) -> None:
-    resolved = False
-
-    def _must_not_resolve(_path: str):
-        nonlocal resolved
-        resolved = True
-        raise AssertionError("extension import happened before provenance verification")
-
-    monkeypatch.setattr("deerflow.extensions.loader.read_source_lock", lambda _path: object())
-    monkeypatch.setattr("deerflow.extensions.loader.read_artifact_manifest", lambda _path: object())
-    monkeypatch.setattr(
-        "deerflow.extensions.loader.verify_installed_artifact_manifest",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(ExtensionArtifactVerificationError("extension_installed_record_mismatch")),
-    )
-    monkeypatch.setattr("deerflow.extensions.loader.resolve_variable", _must_not_resolve)
-
-    with pytest.raises(ExtensionLoadError, match="extension_installed_record_mismatch"):
-        load_extensions(
-            [ExtensionSpec(use=f"{_FIXTURE}:install_ok", required=False)],
-            deployment_profile="durable_production",
-            source_lock_path="source-lock.json",
-            artifact_manifest_path="artifact-manifest.json",
-        )
-
-    assert resolved is False
-
-
-def test_expected_configuration_digest_mismatch_precedes_import(monkeypatch) -> None:
-    monkeypatch.setattr(
-        "deerflow.extensions.loader.resolve_variable",
-        lambda _path: (_ for _ in ()).throw(AssertionError("extension import happened before configuration verification")),
-    )
-
-    with pytest.raises(ExtensionLoadError, match="extension_configuration_digest_mismatch"):
-        load_extensions(
-            [ExtensionSpec(use=f"{_FIXTURE}:install_ok")],
-            deployment_profile="durable_production",
-            expected_configuration_digest="sha256:" + ("0" * 64),
-        )
 
 
 def test_host_disabled_required_extension_is_skipped_before_resolution(monkeypatch):
@@ -150,12 +106,8 @@ def test_install_failure_rolls_back_partial_registration():
         ExtensionSpec(use=f"{_FIXTURE}:install_ok"),
     ]
     loaded, diagnostics = load_extensions(specs)
-    diagnostic = diagnostics[0]
-    assert diagnostic.level == "error"
-    assert diagnostic.code == "install_failed"
-    assert diagnostic.error_class == "ValueError"
-    assert len(diagnostic.correlation_id or "") == 32
-    assert "boom" not in repr(diagnostic)
+    assert diagnostics[0].level == "error"
+    assert "boom" in diagnostics[0].message
     sources = {source for source, _ in loaded.middleware_contributors}
     assert sources == {f"{_FIXTURE}:install_ok"}
     assert len(loaded.middleware_contributors) == 1, "rollback must clear every partial registration"
@@ -173,37 +125,15 @@ def test_rollback_does_not_remove_a_different_specs_registrations_sharing_the_sa
     because they share a source string."""
     specs = [
         ExtensionSpec(use=f"{_FIXTURE}:install_shared_use", config={"label": "first"}),
-        ExtensionSpec(
-            use=f"{_FIXTURE}:install_shared_use",
-            config={"label": "second", "fail": True},
-        ),
+        ExtensionSpec(use=f"{_FIXTURE}:install_shared_use", config={"label": "second", "fail": True}),
     ]
     loaded, diagnostics = load_extensions(specs)
     assert [d.level for d in diagnostics] == ["error"]
-    assert diagnostics[0].code == "install_failed"
-    assert "boom-shared" not in repr(diagnostics[0])
+    assert "boom-shared" in diagnostics[0].message
     assert len(loaded.middleware_contributors) == 1
     source, contributor = loaded.middleware_contributors[0]
     assert source == f"{_FIXTURE}:install_shared_use"
     assert contributor.tag == "shared:first"
-
-
-def test_duplicate_constraints_registration_remains_ambiguous_after_rollback():
-    from deerflow.extensions.constraints import InvocationConstraintsHost
-
-    specs = [
-        ExtensionSpec(use=f"{_FIXTURE}:install_constraints_v2"),
-        ExtensionSpec(use=f"{_FIXTURE}:install_constraints_v2"),
-    ]
-
-    loaded, diagnostics = load_extensions(specs)
-
-    assert len(loaded.invocation_constraints_provider_factories) == 1
-    assert loaded.invocation_constraints_provider_conflict is True
-    assert [item.code for item in diagnostics] == ["install_failed"]
-    optional_host = InvocationConstraintsHost(loaded)
-    assert optional_host.initialized_capability_ids == frozenset()
-    assert optional_host.startup_diagnostics == ("duplicate_registration",)
 
 
 def test_required_extension_failure_aborts_startup():
@@ -227,9 +157,7 @@ def test_incompatible_declared_api_is_refused_with_actionable_message():
     assert demo_extensions.INSTALLED == [], "an incompatible extension must not run"
 
 
-def test_optional_extension_with_non_string_api_marker_is_skipped_with_a_diagnostic(
-    monkeypatch,
-):
+def test_optional_extension_with_non_string_api_marker_is_skipped_with_a_diagnostic(monkeypatch):
     monkeypatch.setattr(demo_extensions.install_ok, "__deerflow_api__", 101, raising=False)
     spec = ExtensionSpec(use=f"{_FIXTURE}:install_ok")
 
@@ -244,9 +172,7 @@ def test_optional_extension_with_non_string_api_marker_is_skipped_with_a_diagnos
     assert "int" in diagnostics[0].message
 
 
-def test_required_extension_with_non_string_iterable_api_marker_fails_closed(
-    monkeypatch,
-):
+def test_required_extension_with_non_string_iterable_api_marker_fails_closed(monkeypatch):
     class _IterableAPIMarker:
         def split(self, separator: str) -> list[object]:
             return [object()]
@@ -271,9 +197,7 @@ def test_required_extension_with_non_string_iterable_api_marker_fails_closed(
     assert demo_extensions.INSTALLED == [], "an invalid API marker must be rejected before install()"
 
 
-def test_optional_extension_with_unrenderable_api_marker_still_returns_a_diagnostic(
-    monkeypatch,
-):
+def test_optional_extension_with_unrenderable_api_marker_still_returns_a_diagnostic(monkeypatch):
     class _UnrenderableAPIMarker:
         def __str__(self) -> str:
             raise RuntimeError("API marker string rendering exploded")
@@ -323,9 +247,7 @@ def test_extension_api_marker_getter_failure_obeys_required_policy(monkeypatch, 
     assert "could not inspect extension-api version marker" in diagnostics[0].message
 
 
-def test_string_subclass_api_marker_cannot_break_incompatibility_diagnostics(
-    monkeypatch,
-):
+def test_string_subclass_api_marker_cannot_break_incompatibility_diagnostics(monkeypatch):
     class _HostileString(str):
         def split(self, separator: str):
             raise RuntimeError("API marker split exploded")
@@ -366,7 +288,7 @@ def test_compatible_string_subclass_api_marker_can_load(monkeypatch):
     monkeypatch.setattr(
         demo_extensions.install_ok,
         "__deerflow_api__",
-        _HostileString("0.13.0"),
+        _HostileString("0.2.0"),
         raising=False,
     )
 
@@ -379,12 +301,12 @@ def test_compatible_string_subclass_api_marker_can_load(monkeypatch):
 
 def test_newer_minor_declared_api_is_refused():
     """Before 1.0, minors carry no compatibility promise: an extension written
-    against 0.14 may use contracts a 0.13 host does not implement, and the host
+    against 0.2 may use contracts a 0.1 host does not implement, and the host
     must refuse it with an actionable message."""
     spec = ExtensionSpec(use=f"{_FIXTURE}:install_newer_minor_api")
     loaded, diagnostics = load_extensions([spec])
     assert diagnostics[0].level == "error"
-    assert "0.14" in diagnostics[0].message
+    assert "0.2" in diagnostics[0].message
     assert "pip install" in diagnostics[0].message
     assert demo_extensions.INSTALLED == [], "a newer-minor extension must not run on an older host"
 

@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import platform
 import re
@@ -14,7 +13,6 @@ import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
 
 try:
     import yaml
@@ -57,7 +55,6 @@ VAR_REFERENCE_RE = re.compile(r"^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$")
 ENV_SECRET_RE = re.compile(r"(?im)^([A-Z0-9_]*(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|PASSWD|AUTHORIZATION|COOKIE|CREDENTIAL)[A-Z0-9_]*\s*=\s*)(.+)$")
 YAML_SECRET_RE = re.compile(r"(?im)^(\s*[\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|cookie|credential|private[_-]?key)[\w.-]*\s*:\s*)(.+)$")
 BEARER_RE = re.compile(r"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]+")
-PAT_TOKEN_RE = re.compile(r"\bdfp_[A-Za-z0-9]+\b")
 OPENAI_KEY_RE = re.compile(r"\bsk-[A-Za-z0-9_-]{8,}\b")
 URL_USERINFO_RE = re.compile(r"([a-zA-Z][\w+.-]*://)([^/?#\s@]+)@")
 URL_QUERY_SECRET_RE = re.compile(r"(?i)([?&][\w.-]*(?:api[_-]?key|token|secret|password|passwd|authorization|access[_-]?token|credential)[\w.-]*=)([^&\s#]+)")
@@ -83,14 +80,6 @@ ATTENTION_SIGNAL_NAMES = {
     "nginx_missing",
     "dirty_worktree",
 }
-TOPOLOGY_DIGEST_RE = re.compile(r"^[0-9a-f]{64}$")
-TOPOLOGY_REPLICA_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-QUALIFICATION_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$")
-QUALIFICATION_DIGEST_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
-RFC3339_RE = re.compile(
-    r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
-    r"(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
-)
 
 
 def _redact_yaml_secret_match(match: re.Match[str]) -> str:
@@ -111,7 +100,6 @@ def redact_text(text: str) -> str:
     text = ENV_SECRET_RE.sub(r"\1<redacted>", text)
     text = YAML_SECRET_RE.sub(_redact_yaml_secret_match, text)
     text = BEARER_RE.sub(r"\1<redacted>", text)
-    text = PAT_TOKEN_RE.sub("<redacted-pat>", text)
     return OPENAI_KEY_RE.sub("sk-<redacted>", text)
 
 
@@ -180,7 +168,7 @@ def _read_json(path: Path) -> Any:
     if not path.exists():
         return {"present": False}
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        return json.loads(path.read_text(encoding="utf-8-sig"))
     except Exception as exc:
         return {"present": True, "error": f"{type(exc).__name__}: {exc}"}
 
@@ -231,12 +219,9 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
                 [
                     sys.executable,
                     str(project_root / "scripts" / "pnpm.py"),
-                    "--project",
-                    "frontend-hm",
-                    "--",
                     "--version",
                 ],
-                project_root / "frontend-hm",
+                project_root / "frontend",
             ),
             _version_command("uv", ["uv", "--version"], project_root),
             _version_command("nginx", ["nginx", "-v"], project_root),
@@ -245,265 +230,12 @@ def collect_environment(project_root: Path) -> dict[str, Any]:
     }
 
 
-def _safe_tenant_config_projection(config: Any) -> Any:
-    """Replace operator-readable tenant and Honcho identity data with safe projections."""
-
-    if not isinstance(config, dict):
-        return config
-    memory = config.get("memory")
-    manager_class = memory.get("manager_class") if isinstance(memory, dict) else None
-    if isinstance(memory, dict) and isinstance(manager_class, str) and "honcho" in manager_class.lower():
-        backend_config = memory.get("backend_config")
-        if isinstance(backend_config, dict):
-            base_url = backend_config.pop("base_url", None)
-            scheme = ""
-            if isinstance(base_url, str):
-                try:
-                    scheme = urlsplit(base_url).scheme.lower()
-                except ValueError:
-                    pass
-            backend_config["endpoint_posture"] = scheme if scheme in {"http", "https"} else "invalid_or_unset"
-
-            if "workspace_prefix" in backend_config:
-                backend_config["workspace_prefix"] = "<redacted>"
-
-            for key in ("workspace_overrides", "user_peer_overrides"):
-                if key in backend_config:
-                    overrides = backend_config[key]
-                    backend_config[key] = {
-                        "configured_count": len(overrides) if isinstance(overrides, dict) else 0,
-                    }
-            if "assistant_peer" in backend_config:
-                backend_config["assistant_peer"] = "<redacted>"
-            if "_hartmesh_tenant" in backend_config:
-                backend_config["_hartmesh_tenant"] = "<reserved-server-owned>"
-
-    deployment = config.get("deployment")
-    if not isinstance(deployment, dict):
-        return config
-    tenant_id = deployment.pop("tenant_id", None)
-    if tenant_id is None:
-        deployment["tenant_identity"] = {"configured_in_yaml": False}
-        return config
-    if (
-        not isinstance(tenant_id, str)
-        or re.fullmatch(
-            r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
-            tenant_id,
-        )
-        is None
-    ):
-        deployment["tenant_identity"] = {
-            "configured_in_yaml": True,
-            "status": "invalid",
-        }
-        return config
-    canonical = json.dumps(
-        {"version": 1, "tenant_id": tenant_id},
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-        allow_nan=False,
-    ).encode("utf-8")
-    digest = hashlib.sha256(canonical).hexdigest()
-    deployment["tenant_identity"] = {
-        "configured_in_yaml": True,
-        "version": 1,
-        "public_ref": f"tenant-{digest[:16]}",
-        "digest": digest,
-        "prefix_schema_version": 1,
-    }
-    return config
-
-
 def collect_config_summary(config_path: Path) -> Any:
-    return redact_data(_safe_tenant_config_projection(_read_yaml(config_path)))
+    return redact_data(_read_yaml(config_path))
 
 
 def collect_extensions_summary(extensions_config_path: Path) -> Any:
     return redact_data(_read_json(extensions_config_path))
-
-
-def collect_extension_artifact_summary(project_root: Path) -> dict[str, Any]:
-    """Report bounded provenance status without paths, config, or file contents."""
-
-    try:
-        from deerflow.extensions.artifacts import (
-            ExtensionArtifactVerificationError,
-            read_artifact_manifest,
-            read_source_lock,
-        )
-    except Exception:
-        return {
-            "version": 1,
-            "source_lock": {"present": None, "valid": False},
-            "installed_manifest": {"present": None, "valid": False},
-            "source_lock_matches": None,
-            "error_code": "verifier_unavailable",
-        }
-
-    def source_document(path: Path) -> dict[str, Any]:
-        if not path.is_file():
-            return {"present": False, "valid": False}
-        try:
-            value = read_source_lock(path)
-        except ExtensionArtifactVerificationError as exc:
-            return {"present": True, "valid": False, "error_code": exc.code}
-        return {
-            "present": True,
-            "valid": True,
-            "digest": value.digest,
-            "extension_api_version": value.extension_api_version,
-            "entry_count": len(value.entries),
-        }
-
-    def artifact_document(path: Path) -> dict[str, Any]:
-        if not path.is_file():
-            return {"present": False, "valid": False}
-        try:
-            value = read_artifact_manifest(path)
-        except ExtensionArtifactVerificationError as exc:
-            return {"present": True, "valid": False, "error_code": exc.code}
-        return {
-            "present": True,
-            "valid": True,
-            "digest": value.digest,
-            "source_lock_digest": value.source_lock_digest,
-            "extension_api_version": value.extension_api_version,
-            "platform_tag": value.platform_tag,
-            "entry_count": len(value.entries),
-        }
-
-    source_lock = source_document(project_root / "backend" / "extensions.lock.json")
-    installed = artifact_document(project_root / "hartmesh" / "extension-artifacts.json")
-    source_digest = source_lock.get("digest")
-    installed_source_digest = installed.get("source_lock_digest")
-    return {
-        "version": 1,
-        "source_lock": source_lock,
-        "installed_manifest": installed,
-        "source_lock_matches": (source_digest == installed_source_digest if isinstance(source_digest, str) and isinstance(installed_source_digest, str) else None),
-    }
-
-
-def collect_topology_summary(
-    deployment_report_path: Path | None,
-) -> dict[str, Any]:
-    """Extract only safe topology/evidence projections from an admin report."""
-
-    unavailable = {"version": 1, "present": False}
-    if deployment_report_path is None or not deployment_report_path.is_file():
-        return unavailable
-    invalid = {
-        "version": 1,
-        "present": True,
-        "valid": False,
-        "error_code": "deployment_report_invalid",
-    }
-    try:
-        payload = deployment_report_path.read_bytes()
-        if not payload or len(payload) > 64 * 1024:
-            return invalid
-        report = json.loads(payload)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-        return invalid
-    if (
-        not isinstance(report, dict)
-        or report.get("api_version") != "deerflow.deployment/v1"
-    ):
-        return invalid
-    topology = report.get("topology")
-    qualification = report.get("qualification")
-    topology_fields = {
-        "version",
-        "profile",
-        "replica_id",
-        "topology_digest",
-        "ready",
-        "live_compatible_replicas",
-        "degraded_replicas",
-        "qualification_ready",
-        "reason_code",
-    }
-    if not isinstance(topology, dict) or set(topology) != topology_fields:
-        return invalid
-    if (
-        topology.get("version") != 1
-        or topology.get("profile") != "durable_two_gateway_v1"
-        or not isinstance(topology.get("replica_id"), str)
-        or TOPOLOGY_REPLICA_RE.fullmatch(topology["replica_id"]) is None
-        or not isinstance(topology.get("topology_digest"), str)
-        or TOPOLOGY_DIGEST_RE.fullmatch(topology["topology_digest"]) is None
-        or type(topology.get("ready")) is not bool
-        or type(topology.get("qualification_ready")) is not bool
-        or type(topology.get("live_compatible_replicas")) is not int
-        or not 0 <= topology["live_compatible_replicas"] <= 2
-        or type(topology.get("degraded_replicas")) is not int
-        or not 0 <= topology["degraded_replicas"] <= 2
-        or (
-            topology.get("reason_code") is not None
-            and (
-                not isinstance(topology["reason_code"], str)
-                or QUALIFICATION_ID_RE.fullmatch(topology["reason_code"])
-                is None
-            )
-        )
-    ):
-        return invalid
-    if not isinstance(qualification, dict) or set(qualification) != {
-        "version",
-        "status",
-        "trust",
-        "evidence",
-    }:
-        return invalid
-    evidence = qualification.get("evidence")
-    if (
-        qualification.get("version") != 1
-        or qualification.get("status") not in {"qualified", "unqualified"}
-        or qualification.get("trust")
-        not in {"operator_asserted", "none_declared"}
-        or not isinstance(evidence, list)
-        or len(evidence) > 16
-    ):
-        return invalid
-    safe_evidence: list[dict[str, str]] = []
-    evidence_fields = {
-        "qualification_id",
-        "scope",
-        "status",
-        "artifact_digest",
-        "completed_at",
-    }
-    for item in evidence:
-        if not isinstance(item, dict) or set(item) != evidence_fields:
-            return invalid
-        if (
-            not all(
-                isinstance(item.get(name), str)
-                for name in evidence_fields
-            )
-            or QUALIFICATION_ID_RE.fullmatch(item["qualification_id"]) is None
-            or QUALIFICATION_ID_RE.fullmatch(item["scope"]) is None
-            or item["status"] != "passed"
-            or QUALIFICATION_DIGEST_RE.fullmatch(item["artifact_digest"])
-            is None
-            or RFC3339_RE.fullmatch(item["completed_at"]) is None
-        ):
-            return invalid
-        safe_evidence.append({name: item[name] for name in sorted(evidence_fields)})
-    return {
-        "version": 1,
-        "present": True,
-        "valid": True,
-        "topology": {name: topology[name] for name in sorted(topology_fields)},
-        "qualification": {
-            "version": 1,
-            "status": qualification["status"],
-            "trust": qualification["trust"],
-            "evidence": safe_evidence,
-        },
-    }
 
 
 def collect_git_summary(project_root: Path) -> dict[str, Any]:
@@ -511,13 +243,7 @@ def collect_git_summary(project_root: Path) -> dict[str, Any]:
     commands = {
         "branch": ["git", "rev-parse", "--abbrev-ref", "HEAD"],
         "head": ["git", "rev-parse", "HEAD"],
-        "upstream": [
-            "git",
-            "rev-parse",
-            "--abbrev-ref",
-            "--symbolic-full-name",
-            "@{u}",
-        ],
+        "upstream": ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
         "status_short": ["git", "status", "--short", "--branch"],
         "diff_stat": ["git", "diff", "--stat"],
     }
@@ -535,10 +261,7 @@ def _candidate_thread_data_dirs(project_root: Path, thread_id: str) -> list[Path
         project_root / ".deer-flow" / "threads" / thread_id / "user-data",
         project_root / "backend" / ".deer-flow" / "threads" / thread_id / "user-data",
     ]
-    for base in (
-        project_root / ".deer-flow" / "users",
-        project_root / "backend" / ".deer-flow" / "users",
-    ):
+    for base in (project_root / ".deer-flow" / "users", project_root / "backend" / ".deer-flow" / "users"):
         if base.exists():
             candidates.extend(user_dir / "threads" / thread_id / "user-data" for user_dir in base.iterdir() if user_dir.is_dir())
     return candidates
@@ -601,11 +324,7 @@ def collect_thread_summary(project_root: Path, thread_id: str) -> dict[str, Any]
 def collect_doctor_output(project_root: Path) -> dict[str, Any]:
     backend_dir = project_root / "backend"
     cwd = backend_dir if backend_dir.exists() else project_root
-    return _run_command(
-        [sys.executable, str(project_root / "scripts" / "doctor.py")],
-        cwd=cwd,
-        timeout_s=60,
-    )
+    return _run_command([sys.executable, str(project_root / "scripts" / "doctor.py")], cwd=cwd, timeout_s=60)
 
 
 def _command_output(command: dict[str, Any] | None) -> str | None:
@@ -643,15 +362,7 @@ def _git_stdout(git_summary: dict[str, Any], key: str) -> str | None:
 def _doctor_counts(doctor: dict[str, Any] | None) -> tuple[int | None, int | None]:
     if not doctor:
         return (None, None)
-    output = "\n".join(
-        value
-        for value in (
-            _command_output(doctor),
-            doctor.get("stdout"),
-            doctor.get("stderr"),
-        )
-        if isinstance(value, str)
-    )
+    output = "\n".join(value for value in (_command_output(doctor), doctor.get("stdout"), doctor.get("stderr")) if isinstance(value, str))
     match = DOCTOR_STATUS_RE.search(output)
     if not match:
         return (None, None)
@@ -765,35 +476,17 @@ def _reporter_next_steps(status: str, signals: dict[str, bool]) -> list[str]:
 def _evidence_files(*, include_doctor: bool, include_thread_summary: bool) -> list[dict[str, str]]:
     files = [
         ("README.md", "Human-readable entrypoint for the support bundle."),
-        (
-            "issue-summary.md",
-            "Markdown summary intended to be pasted into a GitHub issue.",
-        ),
-        (
-            "ai-issue-draft.md",
-            "GitHub issue draft for AI-assisted filing with required placeholders for unknown user facts.",
-        ),
-        (
-            "triage.json",
-            "Stable machine-readable summary for AI or script-assisted triage.",
-        ),
+        ("issue-summary.md", "Markdown summary intended to be pasted into a GitHub issue."),
+        ("ai-issue-draft.md", "GitHub issue draft for AI-assisted filing with required placeholders for unknown user facts."),
+        ("triage.json", "Stable machine-readable summary for AI or script-assisted triage."),
         ("manifest.json", "Bundle schema, generation time, and privacy declaration."),
         ("environment.json", "OS, Python, and toolchain version probes."),
         ("config-summary.json", "Redacted config.yaml structure."),
         ("extensions-summary.json", "Redacted extensions_config.json structure."),
-        (
-            "extension-artifact-summary.json",
-            "Bounded extension source-lock and installed-manifest digest status.",
-        ),
         ("git.json", "Branch, commit, upstream, status, and diff-stat metadata."),
     ]
     if include_thread_summary:
-        files.append(
-            (
-                "thread-summary.json",
-                "Optional thread workspace/upload/output file manifests only.",
-            )
-        )
+        files.append(("thread-summary.json", "Optional thread workspace/upload/output file manifests only."))
     if include_doctor:
         files.append(("doctor.json", "Redacted make doctor output."))
     return [{"path": path, "description": description} for path, description in files]
@@ -808,7 +501,6 @@ def build_triage_report(
     git_summary: dict[str, Any],
     doctor: dict[str, Any] | None,
     thread_summary: dict[str, Any] | None,
-    extension_artifact_summary: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Build the stable machine-readable summary that maintainers and AI read first."""
     versions = _environment_versions(environment)
@@ -843,7 +535,6 @@ def build_triage_report(
         "platform": environment.get("platform", {}),
         "config": config,
         "extensions": extensions,
-        "extension_artifacts": extension_artifact_summary,
         "git": {
             "branch": _git_stdout(git_summary, "branch"),
             "head": _git_stdout(git_summary, "head"),
@@ -863,10 +554,7 @@ def build_triage_report(
         },
         "reporter_next_steps": _reporter_next_steps(status, signals),
         "maintainer_next_steps": _maintainer_next_steps(status, signals),
-        "evidence_files": _evidence_files(
-            include_doctor=doctor is not None,
-            include_thread_summary=thread_summary is not None,
-        ),
+        "evidence_files": _evidence_files(include_doctor=doctor is not None, include_thread_summary=thread_summary is not None),
         "privacy": manifest["privacy"],
     }
 
@@ -919,11 +607,7 @@ def _os_label(platform_info: dict[str, Any]) -> str:
 
 
 def _platform_details(platform_info: dict[str, Any]) -> str:
-    details = [
-        platform_info.get("machine"),
-        platform_info.get("system"),
-        platform_info.get("release"),
-    ]
+    details = [platform_info.get("machine"), platform_info.get("system"), platform_info.get("release")]
     return ", ".join(str(item) for item in details if item) or "_No response_"
 
 
@@ -1096,7 +780,6 @@ def render_bundle_readme(triage: dict[str, Any]) -> str:
         "- `.env` is not included.",
         "- Raw conversation messages are not included.",
         "- Thread workspace/upload/output file contents are not included; optional thread data is a file manifest only.",
-        "- Honcho endpoints and identity overrides are reduced to transport posture, counts, and redacted markers.",
         "",
     ]
     return "\n".join(lines)
@@ -1129,7 +812,6 @@ def create_support_bundle(
     out_path: Path | None = None,
     config_path: Path | None = None,
     extensions_config_path: Path | None = None,
-    deployment_report_path: Path | None = None,
     thread_id: str | None = None,
     include_doctor: bool = False,
 ) -> Path:
@@ -1161,8 +843,6 @@ def create_support_bundle(
     environment = collect_environment(project_root)
     config_summary = collect_config_summary(config_path)
     extensions_summary = collect_extensions_summary(extensions_config_path)
-    extension_artifact_summary = collect_extension_artifact_summary(project_root)
-    topology_summary = collect_topology_summary(deployment_report_path)
     git_summary = collect_git_summary(project_root)
     thread_summary = collect_thread_summary(project_root, thread_id) if thread_id else None
     doctor = collect_doctor_output(project_root) if include_doctor else None
@@ -1174,7 +854,6 @@ def create_support_bundle(
         git_summary=git_summary,
         doctor=doctor,
         thread_summary=thread_summary,
-        extension_artifact_summary=extension_artifact_summary,
     )
 
     issue_summary = render_issue_summary(triage)
@@ -1188,8 +867,6 @@ def create_support_bundle(
         _write_json(zf, "environment", environment)
         _write_json(zf, "config-summary", config_summary)
         _write_json(zf, "extensions-summary", extensions_summary)
-        _write_json(zf, "extension-artifact-summary", extension_artifact_summary)
-        _write_json(zf, "topology-summary", topology_summary)
         _write_json(zf, "git", git_summary)
         if thread_summary is not None:
             _write_json(zf, "thread-summary", thread_summary)
@@ -1206,32 +883,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     repo_root = Path(__file__).resolve().parents[1]
     parser.add_argument("--project-root", type=Path, default=repo_root, help="DeerFlow project root")
     parser.add_argument("--config", type=Path, default=None, help="Path to config.yaml")
-    parser.add_argument(
-        "--extensions-config",
-        type=Path,
-        default=None,
-        help="Path to extensions_config.json",
-    )
-    parser.add_argument(
-        "--thread-id",
-        default=None,
-        help="Optional thread id to include file manifests for",
-    )
-    parser.add_argument(
-        "--deployment-report",
-        type=Path,
-        default=None,
-        help=(
-            "Optional JSON captured from the authenticated deployment report; "
-            "only safe topology/evidence fields are retained"
-        ),
-    )
+    parser.add_argument("--extensions-config", type=Path, default=None, help="Path to extensions_config.json")
+    parser.add_argument("--thread-id", default=None, help="Optional thread id to include file manifests for")
     parser.add_argument("--out", type=Path, default=None, help="Output zip path")
-    parser.add_argument(
-        "--include-doctor",
-        action="store_true",
-        help="Include redacted make doctor output",
-    )
+    parser.add_argument("--include-doctor", action="store_true", help="Include redacted make doctor output")
     return parser.parse_args(argv)
 
 
@@ -1243,7 +898,6 @@ def main(argv: list[str] | None = None) -> int:
             out_path=args.out,
             config_path=args.config,
             extensions_config_path=args.extensions_config,
-            deployment_report_path=args.deployment_report,
             thread_id=args.thread_id,
             include_doctor=args.include_doctor,
         )

@@ -64,7 +64,13 @@ def _configured_max_results(tool_name: str, default: int = 5) -> int:
     if cfg is None:
         return default
     raw = cfg.get("max_results", default)
-    return int(raw) if not isinstance(raw, int) else raw
+    if isinstance(raw, int):
+        return raw
+    try:
+        return int(raw)
+    except (TypeError, ValueError, OverflowError):
+        logger.warning("Invalid SearXNG max_results=%r; using default %s", raw, default)
+        return default
 
 
 def normalize_results(results: list[dict[str, Any]], max_results: int) -> list[dict[str, str]]:

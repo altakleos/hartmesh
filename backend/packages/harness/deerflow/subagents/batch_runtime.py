@@ -3,13 +3,33 @@
 from __future__ import annotations
 
 import threading
-from typing import Any, Protocol
+from dataclasses import dataclass
+from typing import Any, NotRequired, Protocol, TypedDict
 
-from deerflow.subagents.batch_acceptance import ParentBoundBatchRequest
+
+class BatchItemInput(TypedDict):
+    key: str
+    prompt: str
+    acceptance_criteria: NotRequired[list[str] | None]
+
+
+@dataclass(frozen=True)
+class BatchSubmitRequest:
+    user_id: str
+    thread_id: str
+    run_id: str | None
+    tool_call_id: str
+    submission_key: str
+    title: str
+    subagent_type: str
+    items: list[BatchItemInput]
+    max_live_items: int | None
+    max_running_items: int | None
+    execution_spec: dict[str, Any]
 
 
 class SubagentBatchSubmitter(Protocol):
-    async def accept(self, request: ParentBoundBatchRequest) -> dict[str, Any]: ...
+    async def submit(self, request: BatchSubmitRequest) -> dict[str, Any]: ...
 
     async def get_batch(self, *, batch_id: str, user_id: str) -> dict[str, Any] | None: ...
 

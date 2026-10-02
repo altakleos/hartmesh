@@ -1,38 +1,15 @@
 from datetime import timedelta
 
 import pytest
-from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
 
 from deerflow.mcp.tasks import (
     McpTaskDriverRegistry,
-    McpTaskLineageBinder,
+    TaskReference,
     TaskSnapshot,
     TaskStatus,
     TaskSubmission,
     TaskSubmitRequest,
 )
-from deerflow.runtime.tenant_identity import TenantIdentityV1
-from deerflow.runtime.tool_evidence import build_request_projection
-
-
-def _lineage(server_name: str = "reports"):
-    return McpTaskLineageBinder().for_standalone_api(
-        tenant=TenantIdentityV1.from_canonical_id("test").to_persisted_reference(),
-        principal_identity=InvocationIdentityV1(
-            effective_subject=EffectiveSubjectV1(
-                kind="human",
-                subject_id="user-1",
-                role="member",
-            )
-        ),
-        extension_generation=1,
-        extension_manifest_digest="a" * 64,
-        accepted_origin_digest="b" * 64,
-        server_name=server_name,
-        tool_name="submit",
-        safe_request_projection=build_request_projection("submit", {}),
-        credential_selector=None,
-    )
 
 
 def test_task_snapshot_normalizes_string_statuses():
@@ -70,17 +47,49 @@ def test_submission_rejects_empty_remote_id():
 
 
 def test_task_storage_identifiers_reject_values_longer_than_the_database_columns():
-    with pytest.raises(ValueError):
-        _lineage("s" * 129)
+    for field_name, request_kwargs in (
+        ("server_name", {"server_name": "s" * 129, "task_name": "report"}),
+        ("task_name", {"server_name": "reports", "task_name": "t" * 256}),
+    ):
+        with pytest.raises(ValueError, match=field_name):
+            TaskSubmitRequest(
+                user_id="user-1",
+                thread_id="thread-1",
+                run_id=None,
+                tool_call_id=None,
+                arguments={},
+                **request_kwargs,
+            )
 
-    with pytest.raises(ValueError, match="task_name"):
-        TaskSubmitRequest(
-            user_id="user-1",
-            thread_id="thread-1",
-            lineage=_lineage(),
-            task_name="t" * 256,
-            arguments={},
-        )
+
+def test_incarnation_fields_preserve_legacy_positional_construction():
+    reference_driver_data = {"status_tool": "status"}
+    reference = TaskReference(
+        "task-1",
+        "user-1",
+        "thread-1",
+        "reports",
+        "remote-1",
+        reference_driver_data,
+    )
+    assert reference.driver_data is reference_driver_data
+    assert reference.thread_incarnation is None
+
+    request_driver_data = {"submit_tool": "submit"}
+    request = TaskSubmitRequest(
+        "user-1",
+        "thread-1",
+        "run-1",
+        "call-1",
+        "reports",
+        "Generate report",
+        {},
+        request_driver_data,
+        "task-1",
+    )
+    assert request.driver_data is request_driver_data
+    assert request.local_task_id == "task-1"
+    assert request.thread_incarnation is None
 
 
 def test_driver_registry_rejects_duplicate_names():

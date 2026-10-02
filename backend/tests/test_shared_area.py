@@ -242,7 +242,7 @@ def test_every_local_sandbox_mounts_shared_read_only(shared_paths: Paths, monkey
     monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: shared_paths)
     monkeypatch.setattr("deerflow.sandbox.local.local_sandbox_provider.get_paths", lambda: shared_paths, raising=False)
 
-    mappings = LocalSandboxProvider._build_thread_path_mappings("11111111-1111-1111-1111-111111111111", user_id="owner-a", accepted_skills_only=True)
+    mappings = LocalSandboxProvider._build_thread_path_mappings("11111111-1111-1111-1111-111111111111", user_id="owner-a")
 
     [shared] = [mapping for mapping in mappings if mapping.container_path == SHARED_VIRTUAL_PREFIX]
     assert shared.read_only is True

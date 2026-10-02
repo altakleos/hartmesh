@@ -8,128 +8,60 @@ frames, and consuming stream bridge events.  Router modules
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
 import threading
-import time
-import uuid
-from collections.abc import AsyncIterator, Iterator, Mapping
-from contextlib import asynccontextmanager, contextmanager
+from collections.abc import AsyncIterator, Mapping
+from contextlib import asynccontextmanager
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
-from deerflow_extension_api import (
-    PROVENANCE_KEYS,
-    ActingServiceV1,
-    EffectiveSubjectV1,
-    InvocationIdentityV1,
-    NamespacedContextReferenceV1,
-    OriginContributionRequestV1,
-    PrincipalProjectionV1,
-    ResolvedAgentRevisionReferenceV1,
-    ResolvedProfileRevisionReferenceV1,
-    RunContextContributionRequestV1,
-    SafeContextReferenceV1,
-    SealedOriginV1,
-    TrustedRunContextV1,
-    validate_model_profile_identifier,
-)
+from deerflow_extension_api import PROVENANCE_KEYS
 from fastapi import HTTPException, Request
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, ChatMessage, HumanMessage, SystemMessage
 from langchain_core.messages.utils import convert_to_messages
 from langgraph.types import Command
 
-from app.gateway.auth_disabled import (
-    AUTH_DISABLED_USER_ID,
-    AUTH_SOURCE_AUTH_DISABLED,
-    AUTH_SOURCE_INTERNAL,
-)
-from app.gateway.authorization import AuthorizationResolutionSnapshot
-from app.gateway.authz import require_audited_cancel_permission_if
-from app.gateway.deps import (
-    get_checkpointer,
-    get_local_provider,
-    get_run_context,
-    get_run_manager,
-    get_stream_bridge,
-    get_thread_store,
-)
+from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL
+from app.gateway.authz import require_cancel_permission_if
+from app.gateway.deps import get_checkpointer, get_local_provider, get_run_context, get_run_manager, get_stream_bridge
 from app.gateway.internal_auth import (
     INTERNAL_OWNER_USER_ID_HEADER_NAME,
     INTERNAL_SYSTEM_ROLE,
     get_internal_user,
     get_trusted_internal_owner_user_id,
 )
+from app.gateway.knowledge_scope_admission import admit_message_knowledge_scope
 from app.gateway.run_models import RunCreateRequest
 from app.gateway.utils import sanitize_log_param
-from app.mcp_tasks.errors import (
-    McpTaskNotificationLineageConflictError,
-    PermanentNotificationError,
-)
-from app.runtime.authorization import ProviderInvocationAuthorization
-from app.runtime.constraints import ProviderInvocationConstraints
-from app.runtime.idempotency import (
-    SYSTEM_TASK_OWNER,
-    CanonicalCallerIntent,
-    EffectiveExecutionProjection,
-    canonical_request_digest,
-    canonical_request_value,
-    normalize_external_key,
-    scope_for_channel,
-    scope_for_http,
-    scope_for_scheduler,
-    scope_for_service,
-)
-from app.runtime.invocation import (
-    DurableAdmission,
-    InternalAdmissionIdentity,
-    InternalCancelRequest,
-    InternalLaunchIntent,
-    InternalNativeChannelFacts,
-    InternalSourceKind,
-    InvocationAuthorizationOutcome,
-    InvocationPrincipal,
-    InvocationRuntime,
-    NotFoundOrInvisible,
-    OwnerRefusedLaunchError,
-    PreparedLaunch,
-    TaskFactory,
-    WorkerCoroutine,
-    thaw_host_value,
-)
-from app.runtime.native_binding import InternalVerifiedNativeBindingKind
-from app.runtime.service_identity import validate_persisted_service_id
-from app.runtime.visibility import (
-    ObservationVisibilityResolver,
-    ServiceObservationGrant,
-)
-from deerflow.agents.middlewares.dynamic_context_middleware import (
-    _DYNAMIC_CONTEXT_REMINDER_KEY,
-    _REMINDER_DATE_KEY,
-)
-from deerflow.agents.middlewares.input_sanitization_middleware import (
-    frame_untrusted_text,
-)
+from app.mcp_tasks.errors import PermanentNotificationError
+from deerflow.agents.human_input import read_human_input_response
+from deerflow.agents.middlewares.dynamic_context_middleware import _DYNAMIC_CONTEXT_REMINDER_KEY, _REMINDER_DATE_KEY
+from deerflow.agents.middlewares.input_sanitization_middleware import frame_untrusted_text
+from deerflow.agents.middlewares.message_utils import _SUMMARY_MESSAGE_NAME, is_genuine_user_message
+from deerflow.agents.middlewares.skill_usage import SKILL_USAGE_KEY, SKILL_USAGES_KEY
 from deerflow.agents.middlewares.tool_receipt import TOOL_RECEIPT_KEY, TOOL_RECEIPT_LEDGER_KEY
 from deerflow.agents.middlewares.tool_transform_meta import TOOL_TRANSFORMS_KEY
-from deerflow.agents.middlewares.view_image_middleware import (
-    _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
-)
-from deerflow.config.agents_config import validate_agent_name
+from deerflow.agents.middlewares.view_image_middleware import _IMAGE_CONTEXT_MESSAGE_MARKER_KEY
+from deerflow.config.agents_config import load_agent_config
 from deerflow.config.app_config import get_app_config
 from deerflow.config.database_config import resolve_checkpoint_graph_cache_max
-from deerflow.diagnostics import bounded_diagnostic
-from deerflow.persistence.thread_meta import ThreadMetaAlreadyExistsError
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_KEY, KNOWLEDGE_SCOPE_RUNTIME_KEY
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    is_valid_thread_incarnation,
+)
+from deerflow.projects.context import PROJECT_CONTEXT_MESSAGE_MARKER, resolve_project_context
 from deerflow.runtime import (
     END_SENTINEL,
     HEARTBEAT_SENTINEL,
     ORPHAN_RECOVERY_STOP_REASON,
-    CancelOutcome,
     CheckpointStateAccessor,
     ConflictError,
     DisconnectMode,
-    ExecutionRecoveryPayloadV1,
     RunContext,
     RunManager,
     RunRecord,
@@ -139,22 +71,7 @@ from deerflow.runtime import (
     ThreadOperationKind,
     UnsupportedStrategyError,
     build_state_mutation_graph,
-    project_execution_recovery_config,
     run_agent,
-)
-from deerflow.runtime.accepted_invocation import (
-    INVOCATION_IDENTITY_CONTEXT_KEY,
-    INVOCATION_ORIGIN_CONTEXT_KEY,
-    TRUSTED_RUN_CONTEXT_KEY,
-    AcceptedInvocation,
-    InvocationOrigin,
-    PrincipalProjection,
-    ResolvedAgentMaterialV1,
-    canonical_digest,
-)
-from deerflow.runtime.agent_revision import (
-    RESOLVED_AGENT_MATERIAL_CONTEXT_KEY,
-    resolve_agent_revision,
 )
 from deerflow.runtime.checkpoint_mode import (
     INTERNAL_CHECKPOINT_MODE_KEY,
@@ -163,128 +80,36 @@ from deerflow.runtime.checkpoint_mode import (
     inject_checkpoint_mode,
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
+from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
-from deerflow.runtime.presented_files import PRESENTED_FILES_KEY
-from deerflow.runtime.runs.lifecycle_query import (
-    LifecyclePage,
-    LifecycleQuery,
-    LifecycleVisibilityScope,
-)
-from deerflow.runtime.runs.manager import IdempotencyConflictError
+from deerflow.runtime.keyed_lock import KeyedLockTable
 from deerflow.runtime.runs.naming import resolve_root_run_name
-from deerflow.runtime.runs.store.base import (
-    AdmissionOutcome,
-    CancellationRequestOutcome,
-    RecoveryPolicy,
-)
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
     redact_config_secrets,
     validate_run_metadata_secrets,
 )
 from deerflow.runtime.stream_modes import normalize_stream_modes
-from deerflow.runtime.tenant_identity import (
-    TENANT_REFERENCE_CONTEXT_KEY,
-    TenantIdentityV1,
-    tenant_admission_scope,
-)
 from deerflow.runtime.turn_phases import mark_first_stream_text
-from deerflow.runtime.user_context import (
-    DEFAULT_USER_ID,
-    reset_current_user,
-    set_current_user,
-)
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.sandbox.lease import SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 from deerflow.subagents.status_contract import SUBAGENT_ACCEPTANCE_VERDICT_KEY, SUBAGENT_RECEIPT_VERDICT_KEY, SUBAGENT_TOOL_RECEIPTS_KEY
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_context, ensure_trace_id
-from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY
+from deerflow.utils.assembly_io import run_assembly
+from deerflow.utils.file_io import await_drained
+from deerflow.utils.messages import ORIGINAL_USER_CONTENT_KEY, UNTRUSTED_INPUT_KEY
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
 
 
-def _invocation_principal_from_projection(
-    principal: PrincipalProjection,
-    *,
-    visibility_prevalidated: bool = False,
-) -> InvocationPrincipal:
-    return InvocationPrincipal(
-        user_id=principal.user_id,
-        role=principal.role,
-        oauth_provider=principal.oauth_provider,
-        oauth_id=principal.oauth_id,
-        channel_user_id=principal.channel_user_id,
-        is_internal=principal.is_internal,
-        visibility_prevalidated=visibility_prevalidated,
-        identity=principal.identity,
-    )
+class BusyThreadConflict(HTTPException):
+    """A retryable run-manager admission conflict exposed as HTTP 409."""
 
-
-async def invocation_principal_from_request(
-    request: Request,
-    *,
-    user_id: str | None = None,
-    visibility_prevalidated: bool = False,
-) -> InvocationPrincipal:
-    """Project the authenticated request principal for runtime authorization."""
-    user = getattr(getattr(request, "state", None), "user", None)
-    resolved_user_id = user_id if user_id is not None else getattr(user, "id", None)
-    auth_source = getattr(getattr(request, "state", None), "auth_source", None)
-    if resolved_user_id is None and auth_source == AUTH_SOURCE_AUTH_DISABLED:
-        resolved_user_id = AUTH_DISABLED_USER_ID
-    user_id_value = str(resolved_user_id) if resolved_user_id is not None else None
-    role = getattr(user, "system_role", None)
-    identity = None
-    if role == INTERNAL_SYSTEM_ROLE:
-        owner_user_id = get_trusted_internal_owner_user_id(request)
-        if owner_user_id is not None:
-            owner = await resolve_trusted_internal_owner_for_attribution(
-                request,
-                owner_user_id,
-            )
-            if owner is None:
-                raise ValueError("trusted internal invocation owner could not be revalidated")
-            identity = InvocationIdentityV1(
-                effective_subject=EffectiveSubjectV1(
-                    kind="human",
-                    subject_id=owner_user_id,
-                    role=getattr(owner, "system_role", None),
-                    oauth_provider=getattr(owner, "oauth_provider", None),
-                    oauth_id=getattr(owner, "oauth_id", None),
-                ),
-                acting_service=ActingServiceV1(service_id="gateway-internal"),
-            )
-        else:
-            identity = InvocationIdentityV1(
-                effective_subject=EffectiveSubjectV1(
-                    kind="service",
-                    subject_id="gateway-internal",
-                    role="service",
-                )
-            )
-    if user_id_value is not None:
-        if identity is None:
-            subject_kind = "service" if role == "service" else "human"
-            identity = InvocationIdentityV1(
-                effective_subject=EffectiveSubjectV1(
-                    kind=subject_kind,
-                    subject_id=user_id_value,
-                    role=("service" if subject_kind == "service" else role),
-                    oauth_provider=getattr(user, "oauth_provider", None),
-                    oauth_id=getattr(user, "oauth_id", None),
-                )
-            )
-    return InvocationPrincipal(
-        user_id=user_id_value,
-        role=role,
-        oauth_provider=getattr(user, "oauth_provider", None),
-        oauth_id=getattr(user, "oauth_id", None),
-        is_internal=identity is not None and identity.effective_subject.kind == "service",
-        visibility_prevalidated=visibility_prevalidated,
-        identity=identity,
-    )
+    def __init__(self, detail: str) -> None:
+        super().__init__(status_code=409, detail=detail)
 
 
 @asynccontextmanager
@@ -313,7 +138,6 @@ _TERMINAL_RUN_STATUSES = {
 }
 
 _THREAD_METADATA_SETUP_TIMEOUT_SECONDS = 5.0
-_PREGRAPH_FINALIZE_TIMEOUT_SECONDS = 5.0
 
 _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
     frozenset(
@@ -321,21 +145,24 @@ _SERVER_OWNED_MESSAGE_METADATA_KEYS = (
             _DYNAMIC_CONTEXT_REMINDER_KEY,
             _REMINDER_DATE_KEY,
             _IMAGE_CONTEXT_MESSAGE_MARKER_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
             TOOL_RECEIPT_KEY,
             TOOL_RECEIPT_LEDGER_KEY,
             TOOL_TRANSFORMS_KEY,
+            SKILL_USAGE_KEY,
+            SKILL_USAGES_KEY,
             # Attached when a values frame is serialized, for display ordering only.
             # A replayed message carrying it back would write a thread-scoped seq
             # into the checkpoint, which a fork then re-seeds and reassigns (#4380).
             MESSAGE_SEQ_KEY,
+            # The transient project-context request message marker (spec §12):
+            # a client-supplied copy must never survive into a run, where the
+            # renderer would treat the message as its own.
+            PROJECT_CONTEXT_MESSAGE_MARKER,
             SUBAGENT_TOOL_RECEIPTS_KEY,
             SUBAGENT_RECEIPT_VERDICT_KEY,
             SUBAGENT_ACCEPTANCE_VERDICT_KEY,
-            # Written by a tool result that presented files
-            # (``deerflow.runtime.presented_files``); the delivery journal,
-            # the IM channels and the browser treat it as a fact about what
-            # the host delivered, so a caller must not be able to supply it.
-            PRESENTED_FILES_KEY,
+            UNTRUSTED_INPUT_KEY,
         }
     )
     | PROVENANCE_KEYS
@@ -373,38 +200,6 @@ def _consume_task_result(task: asyncio.Task) -> None:
         task.exception()
 
 
-def _log_thread_metadata_failure(
-    error: BaseException,
-    *,
-    code: str,
-    thread_id: str,
-) -> None:
-    """Emit bounded ownership-metadata diagnostics without exception text."""
-
-    diagnostic = bounded_diagnostic(
-        code=code,
-        operation="ensure_thread_metadata",
-        error=error,
-        capability_id="thread_meta",
-    )
-    logger.warning(
-        "thread metadata operation failed code=%s operation=%s error_class=%s capability_id=%s thread_id=%s correlation_id=%s",
-        diagnostic.code,
-        diagnostic.operation,
-        diagnostic.error_class,
-        diagnostic.capability_id,
-        sanitize_log_param(thread_id),
-        diagnostic.correlation_id,
-        extra={
-            "diagnostic_code": diagnostic.code,
-            "operation": diagnostic.operation,
-            "exception_class": diagnostic.error_class,
-            "capability_id": diagnostic.capability_id,
-            "correlation_id": diagnostic.correlation_id,
-        },
-    )
-
-
 def _log_thread_metadata_task_result(task: asyncio.Task, *, thread_id: str) -> None:
     """Log detached metadata setup failures while ignoring cancellation."""
     if task.cancelled():
@@ -413,85 +208,12 @@ def _log_thread_metadata_task_result(task: asyncio.Task, *, thread_id: str) -> N
         task.result()
     except asyncio.CancelledError:
         return
-    except Exception as exc:
-        _log_thread_metadata_failure(
-            exc,
-            code="thread_metadata_detached_failure",
-            thread_id=thread_id,
+    except Exception:
+        logger.warning(
+            "Failed to ensure thread_meta for %s after worker detached (non-fatal)",
+            sanitize_log_param(thread_id),
+            exc_info=True,
         )
-
-
-def _log_pregraph_stream_failure(
-    error: BaseException,
-    *,
-    operation: str,
-    run_id: str,
-) -> None:
-    """Emit bounded diagnostics when a pre-graph terminal stream write fails."""
-
-    diagnostic = bounded_diagnostic(
-        code="pregraph_stream_finalize_failed",
-        operation=operation,
-        error=error,
-        capability_id="stream_bridge",
-    )
-    logger.warning(
-        "pre-graph stream operation failed code=%s operation=%s error_class=%s capability_id=%s run_id=%s correlation_id=%s",
-        diagnostic.code,
-        diagnostic.operation,
-        diagnostic.error_class,
-        diagnostic.capability_id,
-        sanitize_log_param(run_id),
-        diagnostic.correlation_id,
-        extra={
-            "diagnostic_code": diagnostic.code,
-            "operation": diagnostic.operation,
-            "exception_class": diagnostic.error_class,
-            "capability_id": diagnostic.capability_id,
-            "correlation_id": diagnostic.correlation_id,
-        },
-    )
-
-
-async def _finalize_pregraph_stream(
-    bridge: StreamBridge,
-    record: RunRecord,
-    *,
-    error_message: str | None,
-) -> None:
-    """Close both live and late stream consumers without entering graph preflight."""
-
-    if error_message is not None:
-        try:
-            await bridge.publish(
-                record.run_id,
-                "error",
-                {
-                    "message": error_message,
-                    "name": "RunStartupError",
-                },
-            )
-        except Exception as exc:
-            _log_pregraph_stream_failure(
-                exc,
-                operation="publish_error",
-                run_id=record.run_id,
-            )
-    try:
-        await bridge.publish_end(record.run_id)
-    except Exception as exc:
-        _log_pregraph_stream_failure(
-            exc,
-            operation="publish_end",
-            run_id=record.run_id,
-        )
-        return
-    cleanup = asyncio.create_task(bridge.cleanup(record.run_id, delay=60))
-    cleanup.add_done_callback(_consume_task_result)
-
-
-class _ThreadOwnershipConflict(RuntimeError):
-    """An admitted run cannot execute against another owner's thread state."""
 
 
 async def _ensure_thread_metadata(
@@ -500,41 +222,37 @@ async def _ensure_thread_metadata(
     *,
     owner_user_id: str | None,
     require_existing_thread: bool = False,
-) -> None:
+) -> dict[str, Any]:
     """Ensure an admitted run's thread exists without delaying task attachment."""
     thread_store = run_ctx.thread_store
-    record_owner_user_id = getattr(record, "user_id", None)
-    if owner_user_id and record_owner_user_id and owner_user_id != record_owner_user_id:
-        raise _ThreadOwnershipConflict("thread ownership conflict")
-    effective_owner_user_id = owner_user_id or record_owner_user_id
-    owner_kwargs = {"user_id": effective_owner_user_id} if effective_owner_user_id else {}
-    existing = await thread_store.get(record.thread_id, **owner_kwargs)
-    if existing is None and effective_owner_user_id:
-        await thread_store.claim_unowned(record.thread_id, effective_owner_user_id)
-        existing = await thread_store.get(record.thread_id, **owner_kwargs)
-        if existing is None and await thread_store.get(record.thread_id, user_id=None) is not None:
-            raise _ThreadOwnershipConflict("thread ownership conflict")
+    existing = await thread_store.get(record.thread_id)
+    if existing is None and owner_user_id:
+        unscoped = await thread_store.get(record.thread_id, user_id=None)
+        if unscoped is not None:
+            if unscoped.get("user_id") != owner_user_id:
+                await thread_store.update_owner(record.thread_id, owner_user_id, user_id=None)
+            existing = await thread_store.get(record.thread_id)
     if existing is None:
         if require_existing_thread:
             raise LookupError(f"Thread {record.thread_id} was deleted during run admission")
-        try:
-            await thread_store.create(
-                record.thread_id,
-                assistant_id=record.assistant_id,
-                # A thread spans many runs, so do not pin its metadata to the
-                # server-issued trace ID of the run that happened to create it.
-                metadata={key: value for key, value in (record.metadata or {}).items() if key != DEERFLOW_TRACE_METADATA_KEY},
-                **owner_kwargs,
-            )
-        except ThreadMetaAlreadyExistsError:
-            if effective_owner_user_id:
-                await thread_store.claim_unowned(
-                    record.thread_id,
-                    effective_owner_user_id,
-                )
-            existing = await thread_store.get(record.thread_id, **owner_kwargs)
-            if existing is None:
-                raise _ThreadOwnershipConflict("thread ownership conflict") from None
+        from deerflow.persistence.thread_meta import THREAD_PROJECT_METADATA_KEY
+
+        run_metadata = record.metadata or {}
+        metadata = {
+            key: value
+            for key, value in run_metadata.items()
+            # Strip the run-scoped trace id (existing) and the reserved
+            # membership key: run admission never modifies project membership —
+            # the column is written only by POST /api/threads and
+            # /threads/{id}/move — so the key must not persist either.
+            if key not in (DEERFLOW_TRACE_METADATA_KEY, THREAD_PROJECT_METADATA_KEY)
+        }
+        existing = await thread_store.create(
+            record.thread_id,
+            assistant_id=record.assistant_id,
+            metadata=metadata,
+        )
+    return existing
 
 
 async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecord) -> bool:
@@ -553,39 +271,6 @@ async def _terminal_record_stream_missing(bridge: StreamBridge, record: RunRecor
             exc_info=True,
         )
         return False
-
-
-async def ensure_stream_transport_available(
-    bridge: StreamBridge,
-    run_id: str,
-    *,
-    timeout_seconds: float = 5.0,
-) -> None:
-    """Probe a remote stream transport before committing SSE response headers.
-
-    A Redis-backed subscription performs its first I/O only after Starlette has
-    started the streaming response.  Without this preflight, a Redis outage
-    looks like a successful HTTP 200 followed by a truncated body, leaving
-    reconnecting clients without a bounded retry signal.
-    """
-
-    stream_exists = getattr(bridge, "stream_exists", None)
-    if stream_exists is None:
-        return
-    try:
-        async with asyncio.timeout(timeout_seconds):
-            await stream_exists(run_id)
-    except Exception:
-        logger.warning(
-            "Run stream transport preflight failed for %s",
-            sanitize_log_param(run_id),
-            exc_info=True,
-        )
-        raise HTTPException(
-            status_code=503,
-            detail="Run stream transport temporarily unavailable",
-            headers={"Retry-After": "1"},
-        ) from None
 
 
 async def _orphan_recovery_observed_after_heartbeat(
@@ -611,35 +296,113 @@ async def _orphan_recovery_observed_after_heartbeat(
 # ---------------------------------------------------------------------------
 
 
+def _skips_input_guardrail(additional_kwargs: dict[str, Any], name: Any) -> bool:
+    """Whether these markers would make ``InputSanitizationMiddleware`` skip a message.
+
+    Mirrors ``is_genuine_user_message`` exactly, truthiness included: a
+    ``summary`` name, or a truthy ``hide_from_ui`` without a valid human-input
+    reply. Keying off key presence instead would mark ``hide_from_ui: False``,
+    which never skipped the guardrail and so needs no mark.
+    """
+    if name == _SUMMARY_MESSAGE_NAME:
+        return True
+    return bool(additional_kwargs.get("hide_from_ui")) and read_human_input_response(additional_kwargs) is None
+
+
+def _mark_untrusted_framework_markers(additional_kwargs: dict[str, Any], name: Any) -> dict[str, Any]:
+    """Mark a caller's message whose markers would skip the input guardrail.
+
+    ``is_genuine_user_message`` reads ``hide_from_ui`` and a human
+    ``name="summary"`` as proof the framework wrote the message, and the guardrail
+    skips those — so a caller able to set either one placed raw
+    ``<system-reminder>`` text outside the user-input boundary markers, which the
+    lead-agent prompt declares trusted internal framework data.
+
+    The markers are deliberately *kept*. ``hide_from_ui`` has a second,
+    legitimate role: three frontend senders (quoted conversation context, sidecar
+    context, the agent save command) set it purely to keep a context message out
+    of the transcript, carry no ``human_input_response``, and are hidden by
+    nothing else — removing it would render all three as chat bubbles. Only the
+    guardrail-skipping role is a vulnerability, so the two are separated here
+    instead: the message stays hidden, and ``requires_input_sanitization`` reads
+    this mark and sanitizes it anyway. Marking rather than removing also keeps
+    this boundary from silently changing behaviour that reads the marker for
+    presentation, persistence, or memory filtering.
+
+    HumanInputCard replies need no mark: a valid ``human_input_response`` already
+    makes them genuine, so they are sanitized on that path.
+    """
+    if not _skips_input_guardrail(additional_kwargs, name):
+        return additional_kwargs
+    return {**additional_kwargs, UNTRUSTED_INPUT_KEY: True}
+
+
+def _is_human_message_like(message: Any) -> bool:
+    """Whether *message* is the human role ``is_genuine_user_message`` acts on.
+
+    Only that role reads ``name`` as a framework marker, and ``name`` on a
+    ToolMessage is the tool's own name — reserving it there would rename tools.
+
+    Matched by ``isinstance``, exactly as the predicate this defends does: a
+    ``HumanMessageChunk`` is a ``HumanMessage`` whose ``type`` is not ``"human"``,
+    so a ``type``-based check would leave that subclass's marker settable.
+    """
+    if isinstance(message, BaseMessage):
+        return isinstance(message, HumanMessage)
+    if isinstance(message, dict):
+        return (message.get("type") or message.get("role")) in {"human", "user"}
+    return False
+
+
 def _strip_external_message_metadata(message: Any) -> Any:
-    """Remove server-owned metadata from an untrusted input message."""
+    """Remove server-owned metadata from an untrusted input message.
+
+    Also stamps ``untrusted_input`` on a human message whose caller-owned markers
+    would skip the input guardrail — see ``_mark_untrusted_framework_markers``.
+    The stamp is applied after the strip loop, so a caller cannot preset it.
+    """
     if not isinstance(message, BaseMessage):
         return message
     additional_kwargs = dict(message.additional_kwargs)
     additional_kwargs.pop(ORIGINAL_USER_CONTENT_KEY, None)
     for key in _SERVER_OWNED_MESSAGE_METADATA_KEYS:
         additional_kwargs.pop(key, None)
+    if _is_human_message_like(message):
+        additional_kwargs = _mark_untrusted_framework_markers(additional_kwargs, message.name)
     if additional_kwargs == message.additional_kwargs:
         return message
     return message.model_copy(update={"additional_kwargs": additional_kwargs})
 
 
 def _strip_external_metadata_from_message_like(item: Any) -> Any:
-    """Strip server-owned keys from a message, in object or raw-dict form.
+    """Strip server-owned keys from message-like values outside ``messages``.
 
-    Callers reach the checkpoint by two different routes and the message is a
-    ``BaseMessage`` on one and a plain dict on the other, so both shapes have
-    to be handled here rather than coercing — coercion would change what the
-    caller asked to be written.
+    The top-level ``messages`` channel is canonicalized and role-checked by
+    ``_normalize_input_messages``. Other middleware-contributed channels may
+    still carry either ``BaseMessage`` objects or raw dictionaries, so this
+    helper preserves those shapes while stripping metadata and stamping
+    ``untrusted_input`` where caller-owned markers would skip the guardrail.
     """
     if isinstance(item, BaseMessage):
         return _strip_external_message_metadata(item)
-    if isinstance(item, dict) and isinstance(item.get("additional_kwargs"), dict):
-        additional_kwargs = {key: value for key, value in item["additional_kwargs"].items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
-        if additional_kwargs == item["additional_kwargs"]:
-            return item
-        return {**item, "additional_kwargs": additional_kwargs}
-    return item
+    if not isinstance(item, dict):
+        return item
+    # A missing (or non-dict) ``additional_kwargs`` is the most natural request
+    # shape, and it still needs the mark: the messages reducer coerces the dict
+    # with ``convert_to_messages``, which supplies ``additional_kwargs={}``, so an
+    # unmarked ``name="summary"`` would reach the model on the guardrail's
+    # genuine-user fallback. Treat it as empty for both steps rather than
+    # returning early.
+    source_kwargs = item.get("additional_kwargs")
+    source_kwargs = source_kwargs if isinstance(source_kwargs, dict) else {}
+    additional_kwargs = {key: value for key, value in source_kwargs.items() if key not in _SERVER_OWNED_MESSAGE_METADATA_KEYS and key != ORIGINAL_USER_CONTENT_KEY}
+    if _is_human_message_like(item):
+        additional_kwargs = _mark_untrusted_framework_markers(additional_kwargs, item.get("name"))
+    if additional_kwargs == source_kwargs:
+        # Nothing to change — including the ordinary key-omitted message, which
+        # must not gain an empty dict just by passing through here.
+        return item
+    return {**item, "additional_kwargs": additional_kwargs}
 
 
 #: Server-owned verdict keys on a delegation-ledger entry: runtime-stamped
@@ -662,22 +425,70 @@ def _strip_external_delegation_verdict(entry: Any) -> Any:
     return entry
 
 
-def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
-    """Remove server-owned message metadata from caller-supplied state values.
+def _normalize_input_messages(
+    value: Any,
+    *,
+    location: str,
+    trusted_internal: bool = False,
+) -> list[BaseMessage]:
+    """Coerce once, then check the actual role before any checkpoint write.
 
-    ``normalize_input`` does this for the run path. The thread-state mutation
-    route writes its values straight into a checkpoint, so without the same
-    treatment an authenticated client can persist forged provenance and
-    transform trails — and those keys exist precisely so a later reader can
-    treat them as facts about what the host did.
-
-    Every channel is walked, not just ``messages``: middleware-contributed
-    channels can carry messages too, and popping a key that was never there
-    costs nothing.
+    Match add_messages' list-or-single convention. Checking raw ``role`` keys
+    misses type aliases, (role, content) pairs, constructor envelopes and chunks.
+    The normalized objects are also the ones forwarded to the graph: there is
+    no second, unchecked interpretation of an accepted wire representation.
     """
+    messages = value if isinstance(value, list) else [value]
+    converted: list[BaseMessage] = []
+    for index, item in enumerate(messages):
+        try:
+            message = convert_to_messages([item])[0]
+        except (ValueError, TypeError, NotImplementedError, KeyError) as exc:
+            # LangChain's error may contain the complete caller message.
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid message at {location}[{index}]",
+            ) from exc
+        if not trusted_internal:
+            if isinstance(message, SystemMessage) or (isinstance(message, ChatMessage) and message.role.strip().lower() in {"system", "developer"}):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(f"External system/developer messages are not allowed at {location}[{index}]"),
+                )
+            message = _strip_external_message_metadata(message)
+        converted.append(message)
+    return converted
+
+
+def strip_server_owned_state_metadata(values: Mapping[str, Any]) -> dict[str, Any]:
+    """Validate and sanitize caller-supplied state values before checkpointing.
+
+    The server-owned ``sandbox``, ``thread_data``, and ``viewed_images`` channels
+    are rejected. The ``messages`` channel
+    is canonicalized to a list of ``BaseMessage``
+    objects, rejects external system/developer roles with HTTP 400, and strips
+    server-owned metadata. Other channels keep their existing shapes while
+    forged metadata and delegation verdicts are removed. ``normalize_input``
+    applies the same message boundary to run input.
+
+    The thread-state mutation route writes values straight into a checkpoint,
+    so an authenticated client must not be able to persist forged provenance,
+    transform trails, or privileged message roles. Every channel is walked
+    because middleware-contributed channels can also carry message-like values.
+    """
+    server_owned_channels = {"sandbox", "thread_data", "viewed_images"}
+    rejected = server_owned_channels.intersection(values)
+    if rejected:
+        raise HTTPException(
+            status_code=400,
+            detail=f"External {sorted(rejected)[0]} state is not allowed",
+        )
+
     stripped: dict[str, Any] = {}
     for channel, value in values.items():
-        if channel == "delegations" and isinstance(value, list):
+        if channel == "messages" and value is not None:
+            stripped[channel] = _normalize_input_messages(value, location="values.messages")
+        elif channel == "delegations" and isinstance(value, list):
             stripped[channel] = [_strip_external_delegation_verdict(item) for item in value]
         elif isinstance(value, list):
             stripped[channel] = [_strip_external_metadata_from_message_like(item) for item in value]
@@ -691,7 +502,9 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
 
     Delegates dict→message coercion to ``langchain_core.messages.utils.convert_to_messages``
     so that ``additional_kwargs`` (e.g. uploaded-file metadata — gh #3132), ``id``,
-    ``name``, and non-human roles (ai/system/tool) survive unchanged.  An earlier
+    ``name``, and history roles (ai/tool) survive unchanged. System/developer
+    messages require authenticated internal admission; ordinary API credentials
+    (including admin and PAT callers) do not grant system-prompt authority. An earlier
     hand-rolled version only forwarded ``content`` and collapsed every role to
     ``HumanMessage``, which silently stripped frontend-supplied attachments.
 
@@ -700,35 +513,45 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     of bubbling up as a 500.  The gateway is a system boundary, so per-entry
     validation errors are the right shape for clients to retry against.
 
-    ``original_user_content``, dynamic-context reminder markers, the
-    transient view-image context marker, tool receipts, and delegated receipt
-    metadata/verdicts are server-owned. External callers cannot supply them;
-    trusted internal channel calls may preserve metadata they added before
-    invoking this boundary. The same applies to the ``delegations`` channel:
-    a caller-supplied ledger entry's ``receipt_verdict`` is a forgery and is
-    stripped before the graph runs.
+    The ``sandbox``, ``thread_data``, and ``viewed_images`` channels are also
+    server-owned. External callers cannot select a provider resource by id or
+    supply host image paths; trusted internal run admission may carry restored
+    values.
+
+    ``original_user_content``, dynamic-context reminder markers, the transient
+    view-image context marker, the execution-only knowledge-scope marker, tool
+    receipts, delegated receipt metadata/verdicts, and ``untrusted_input`` are
+    server-owned. External callers cannot supply them; trusted internal channel
+    calls may preserve metadata they added before invoking this boundary. The
+    same applies to the ``delegations`` channel: a caller-supplied ledger entry's
+    ``receipt_verdict`` is a forgery and is stripped before the graph runs.
+
+    ``hide_from_ui`` and a human ``summary`` name are the exception: they stay
+    caller-owned and are deliberately preserved, because ``hide_from_ui`` is also
+    how three frontend senders (quoted conversation context, sidecar context, the
+    agent save command) keep a context message out of the transcript, and nothing
+    else hides those. What they must not do is tell
+    ``is_genuine_user_message`` the framework authored the message, which would
+    skip input sanitization — so a caller's message carrying either marker is
+    stamped with ``untrusted_input`` instead, and
+    ``requires_input_sanitization`` sanitizes it anyway. That key is stripped
+    first, so a caller can neither forge nor clear it. HumanInputCard replies need
+    no stamp: a valid ``human_input_response`` already makes them genuine.
     """
     if raw_input is None:
         return {}
+    if not trusted_internal:
+        server_owned_channels = {"sandbox", "thread_data", "viewed_images"}
+        rejected = server_owned_channels.intersection(raw_input)
+        if rejected:
+            raise HTTPException(
+                status_code=400,
+                detail=f"External {sorted(rejected)[0]} state is not allowed",
+            )
     result = raw_input
     messages = raw_input.get("messages")
-    if messages and isinstance(messages, list):
-        converted: list[Any] = []
-        for index, msg in enumerate(messages):
-            if isinstance(msg, BaseMessage):
-                converted.append(msg)
-            elif isinstance(msg, dict):
-                try:
-                    converted.extend(convert_to_messages([msg]))
-                except (ValueError, TypeError, NotImplementedError) as exc:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Invalid message at input.messages[{index}]: {exc}",
-                    ) from exc
-            else:
-                converted.append(msg)
-        if not trusted_internal:
-            converted = [_strip_external_message_metadata(message) for message in converted]
+    if messages is not None:
+        converted = _normalize_input_messages(messages, location="input.messages", trusted_internal=trusted_internal)
         result = {**raw_input, "messages": converted}
     if not trusted_internal:
         delegations = result.get("delegations")
@@ -739,14 +562,23 @@ def normalize_input(raw_input: dict[str, Any] | None, *, trusted_internal: bool 
     return result
 
 
-def _recovery_graph_input_value(graph_input: dict[str, Any]) -> dict[str, Any]:
-    """Project normalized LangChain messages into lossless JSON semantics."""
+def _canonical_run_record_input(
+    raw_input: dict[str, Any] | None,
+    graph_input: object,
+) -> dict[str, Any] | None:
+    """Persist the same normalized messages that cross run admission.
 
-    projected = dict(graph_input)
-    messages = projected.get("messages")
+    The run record is a client-visible audit surface. Keeping the original raw
+    message there would preserve a non-canonical scope even though the graph
+    receives the validated form.
+    """
+    if not isinstance(graph_input, dict):
+        return raw_input
+    canonical = dict(raw_input or {})
+    messages = graph_input.get("messages")
     if isinstance(messages, list):
-        projected["messages"] = [message.model_dump(mode="json") if isinstance(message, BaseMessage) else message for message in messages]
-    return projected
+        canonical["messages"] = [message.model_dump(mode="json") if isinstance(message, BaseMessage) else message for message in messages]
+    return canonical
 
 
 _DEFAULT_ASSISTANT_ID = "lead_agent"
@@ -770,15 +602,13 @@ _CONTEXT_CONFIGURABLE_KEYS: frozenset[str] = frozenset(
         "max_total_subagents",
         "agent_name",
         "is_bootstrap",
-        "execution_budget",
-        "egress_allowance",
     }
 )
 
 # Keys honored only for internally-authenticated callers (the scheduler path).
-# ``non_interactive`` strips ``ask_clarification`` from the lead-agent toolset;
+# ``interaction_mode`` and ``non_interactive`` control clarification availability;
 # arbitrary HTTP/IM clients must not be able to force autonomous execution.
-_CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
+_CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"interaction_mode", "non_interactive"})
 
 # Server-owned authorization and sandbox lifecycle identity fields. These must
 # never be accepted from client-supplied ``body.config.context`` or
@@ -793,55 +623,27 @@ _CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"non_interactive"})
 _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
     frozenset(
         {
-            "user_role",
-            "oauth_provider",
-            "oauth_id",
             "is_internal",
             "authz_attributes",
             "channel_user_id",
+            "is_subagent",
+            "agent_id",
+            "__run_loop_detection_recorder",
+            "__run_tool_promotion_recorder",
+            "__run_tool_progress_recorder",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
-            "__deerflow_credential_evidence",
-            "credential_evidence",
-            "credential_ref",
-            "effective_authority_digest",
-            "auth_method",
-            INVOCATION_IDENTITY_CONTEXT_KEY,
-            INVOCATION_ORIGIN_CONTEXT_KEY,
-            TRUSTED_RUN_CONTEXT_KEY,
-            TENANT_REFERENCE_CONTEXT_KEY,
-            "accepted_execution_budget",
-            "accepted_egress_allowance",
-            "execution_policy_keyring",
-            "execution_policy_stopped",
-            "tenant",
-            "tenant_id",
-            "tenantId",
-            "tenant_ref",
-            "tenant_digest",
-            "x_tenant_id",
-            "x-tenant-id",
-            "X-Tenant-ID",
+            THREAD_INCARNATION_METADATA_GUARD_KEY,
+            # Server-owned pinned project snapshot (spec §7.1): resolved once
+            # at admission from threads_meta; a client-supplied value must
+            # never survive in either run-config section.
+            PROJECT_CONTEXT_KEY,
+            KNOWLEDGE_SCOPE_KEY,
+            KNOWLEDGE_SCOPE_RUNTIME_KEY,
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
 )
-
-# Every fact admission stamps about what it accepted shares one prefix, and a
-# caller may supply none of them. Enumerating the keys instead would mean a
-# stamp added later is forgeable until someone remembers these two lists --
-# and a forged one is read as an admission decision by whatever trusts it.
-SERVER_OWNED_RUNTIME_CONTEXT_PREFIXES: frozenset[str] = frozenset({"accepted_"})
-
-
-def scrub_server_owned_context(section: dict[str, Any]) -> None:
-    """Remove every server-owned fact a caller may have supplied."""
-
-    for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
-        section.pop(key, None)
-    for key in [name for name in section if isinstance(name, str) and name.startswith(tuple(SERVER_OWNED_RUNTIME_CONTEXT_PREFIXES))]:
-        section.pop(key, None)
-
 
 # Keys forwarded from ``body.context`` into ``config['context']`` ONLY (the
 # runtime context that becomes ``ToolRuntime.context`` / ``runtime.context``),
@@ -858,7 +660,29 @@ def scrub_server_owned_context(section: dict[str, Any]) -> None:
 #   ``disable_clarification`` — set for non-interactive channels (GitHub
 #                              webhooks) so ClarificationMiddleware proceeds
 #                              instead of dead-ending the run.
-_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification"})
+#
+#   ``channel_name``        — trusted channel identity used by interaction policy.
+#
+# These are produced server-side by the channel run policies
+# (``ChannelManager._apply_channel_policy`` and ``app.gateway.github.run_policy``),
+# which reach the Gateway over the internally-authenticated request channel, so
+# they are internal-only as well — see :data:`_INTERNAL_ONLY_CONTEXT_KEYS`.
+_CONTEXT_RUNTIME_ONLY_KEYS: frozenset[str] = frozenset({"github_token", "disable_clarification", "channel_name"})
+
+# Every run-context key an external client may never supply, in either section.
+# The two sets differ only in *where* a legitimate internal caller's value lands
+# (both sections vs. ``context`` alone); their trust requirement is identical.
+#
+# ``disable_clarification`` is not a milder cousin of ``non_interactive``:
+# ``ClarificationMiddleware`` answers every clarification — ``risk_confirmation``
+# included — with "proceed without asking" instead of interrupting, and
+# ``SandboxMiddleware`` reads the two keys as the same non-interactive signal.
+# Accepting it from a client therefore reproduces the effect the
+# ``non_interactive`` gate exists to prevent. ``github_token`` is a live
+# credential that ``bash`` exports as ``GH_TOKEN``/``GITHUB_TOKEN``, and a copy
+# smuggled through ``body.config['configurable']`` would be written to the
+# checkpoint store.
+_INTERNAL_ONLY_CONTEXT_KEYS: frozenset[str] = _CONTEXT_INTERNAL_CALLER_KEYS | _CONTEXT_RUNTIME_ONLY_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS
 
 
 def strip_internal_context_keys(config: dict[str, Any]) -> None:
@@ -872,19 +696,8 @@ def strip_internal_context_keys(config: dict[str, Any]) -> None:
     for section in ("context", "configurable"):
         value = config.get(section)
         if isinstance(value, dict):
-            for key in _CONTEXT_INTERNAL_CALLER_KEYS:
+            for key in _INTERNAL_ONLY_CONTEXT_KEYS | _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
                 value.pop(key, None)
-
-
-def strip_server_owned_assembly_context(config: dict[str, Any]) -> None:
-    """Drop the evidence marker spelling even for authenticated internal callers."""
-
-    from deerflow.runtime.assembly_evidence import strip_assembly_evidence_requirement
-
-    for section in ("context", "configurable"):
-        value = config.get(section)
-        if isinstance(value, dict):
-            strip_assembly_evidence_requirement(value)
 
 
 def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, Any] | None, *, internal: bool = False) -> None:
@@ -904,10 +717,11 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
     by :func:`strip_internal_context_keys`.
 
     A second set of keys (``_CONTEXT_RUNTIME_ONLY_KEYS`` — e.g. ``github_token``,
-    ``disable_clarification``) is forwarded into ``config['context']`` only, never
-    ``configurable``. These are secrets / runtime flags read by tools and middlewares
-    from ``runtime.context``; keeping them out of ``configurable`` avoids persisting a
-    short-lived token in the checkpoint store.
+    ``disable_clarification``) is likewise forwarded only when ``internal`` is True,
+    and then into ``config['context']`` only, never ``configurable``. These are
+    secrets / runtime flags read by tools and middlewares from ``runtime.context``;
+    keeping them out of ``configurable`` avoids persisting a short-lived token in the
+    checkpoint store.
     """
     if not context:
         return
@@ -921,10 +735,12 @@ def merge_run_context_overrides(config: dict[str, Any], context: Mapping[str, An
             if isinstance(runtime_context, dict):
                 runtime_context.setdefault(key, context[key])
     # Context-only keys (secrets / runtime flags) land in ``config['context']``
-    # only — never ``configurable`` (which is persisted in checkpoints).
-    for key in _CONTEXT_RUNTIME_ONLY_KEYS:
-        if key in context and isinstance(runtime_context, dict):
-            runtime_context.setdefault(key, context[key])
+    # only — never ``configurable`` (which is persisted in checkpoints) — and only
+    # for internal callers, the sole legitimate producers.
+    if internal:
+        for key in _CONTEXT_RUNTIME_ONLY_KEYS:
+            if key in context and isinstance(runtime_context, dict):
+                runtime_context.setdefault(key, context[key])
     if "user_id" in context and isinstance(runtime_context, dict):
         runtime_context.setdefault("user_id", context["user_id"])
 
@@ -940,10 +756,7 @@ async def resolve_trusted_internal_owner_for_attribution(request: Request, owner
     try:
         return await get_local_provider().get_user(owner_user_id)
     except Exception:
-        logger.exception(
-            "Failed to resolve trusted internal owner %s",
-            sanitize_log_param(owner_user_id),
-        )
+        logger.exception("Failed to resolve trusted internal owner %s", sanitize_log_param(owner_user_id))
         return None
 
 
@@ -972,10 +785,12 @@ def inject_authenticated_user_context(
     runtime_context = config.setdefault("context", {})
     if not isinstance(runtime_context, dict):
         raise TypeError("run context must be a mapping")
-    scrub_server_owned_context(runtime_context)
+    for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+        runtime_context.pop(key, None)
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
-        scrub_server_owned_context(configurable)
+        for key in _SERVER_OWNED_RUNTIME_CONTEXT_KEYS:
+            configurable.pop(key, None)
     auth_source = getattr(getattr(request, "state", None), "auth_source", None)
     # ``user_id`` is server-owned for EXTERNAL callers: it now selects which
     # user's credential user-scoped MCP auth injects, so a client-forged value
@@ -1048,10 +863,34 @@ def resolve_agent_factory(assistant_id: str | None):
 # client-supplied ``recursion_limit`` verbatim: an arbitrarily large value lets
 # a single run execute unbounded LangGraph super-steps (each at least one LLM
 # call), enabling runaway API cost / DoS. ``_DEFAULT_RECURSION_LIMIT`` is the
-# server default when the client sends nothing; the hard ceiling any client
-# value is clamped to is configurable via ``AppConfig.max_recursion_limit``.
+# fallback when app config cannot be loaded; the normal server default and hard
+# ceiling are configurable via ``AppConfig.recursion_limit`` and
+# ``AppConfig.max_recursion_limit``.
 _DEFAULT_RECURSION_LIMIT = 100
 _DEFAULT_MAX_RECURSION_LIMIT = 1000
+
+
+def _resolve_gateway_recursion_limits() -> tuple[int, int]:
+    """Resolve the run default and ceiling from one hot-reloaded snapshot."""
+    try:
+        app_config = get_app_config()
+        raw = app_config.recursion_limit
+        max_limit = app_config.max_recursion_limit
+        if raw > max_limit:
+            logger.warning(
+                "recursion_limit %d exceeds max_recursion_limit %d; clamped to %d for Gateway runs",
+                raw,
+                max_limit,
+                max_limit,
+            )
+        return min(raw, max_limit), max_limit
+    except Exception:
+        logger.warning(
+            "failed to load app config; falling back to recursion_limit=%d and max_recursion_limit=%d for Gateway runs",
+            _DEFAULT_RECURSION_LIMIT,
+            _DEFAULT_MAX_RECURSION_LIMIT,
+        )
+        return _DEFAULT_RECURSION_LIMIT, _DEFAULT_MAX_RECURSION_LIMIT
 
 
 def _resolve_max_recursion_limit() -> int:
@@ -1067,7 +906,7 @@ def _resolve_max_recursion_limit() -> int:
         return _DEFAULT_MAX_RECURSION_LIMIT
 
 
-def resolve_scheduler_recursion_limit() -> int:
+def _resolve_scheduler_recursion_limit() -> int:
     """Resolve the scheduled-run recursion_limit from ``AppConfig.scheduler``.
 
     Falls back to ``_DEFAULT_RECURSION_LIMIT`` when the app config cannot be
@@ -1104,15 +943,15 @@ def resolve_scheduler_recursion_limit() -> int:
         return _DEFAULT_RECURSION_LIMIT
 
 
-def _clamp_recursion_limit(value: Any, max_limit: int) -> int:
+def _clamp_recursion_limit(value: Any, max_limit: int, default_limit: int) -> int:
     """Clamp a client-supplied ``recursion_limit`` into a safe server range.
 
     Non-integer values (including ``bool``, an ``int`` subclass) and non-positive
-    values fall back to ``_DEFAULT_RECURSION_LIMIT``; valid positive integers are
+    values fall back to the configured default; valid positive integers are
     capped at ``max_limit`` (from ``AppConfig.max_recursion_limit``).
     """
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
-        return _DEFAULT_RECURSION_LIMIT
+        return default_limit
     return min(value, max_limit)
 
 
@@ -1136,16 +975,17 @@ def build_run_config(
     load the matching ``agents/<name>/SOUL.md`` and per-agent config —
     without it the agent silently runs as the default lead agent.
 
-    This mirrors the channel manager's ``_resolve_run_params`` logic so that
-    the LangGraph Platform-compatible HTTP API and the IM channel path behave
-    identically.
+    This mirrors the channel manager's ``_resolve_run_params`` logic except for
+    the recursion default: Gateway API runs use the configured top-level
+    ``recursion_limit``, while IM channel runs retain their own default.
     """
     # Lead-agent recursion budget (LangGraph super-steps for the lead graph
     # only). Independent of subagent depth: a `task()` dispatch runs the whole
     # subagent inside ONE lead tools-node step, and subagents enforce their own
-    # limit via `subagents.max_turns`. Do not conflate this 100 with the
+    # limit via `subagents.max_turns`. Do not conflate this budget with the
     # general-purpose subagent's max_turns.
-    config: dict[str, Any] = {"recursion_limit": _DEFAULT_RECURSION_LIMIT}
+    default_recursion_limit, max_recursion_limit = _resolve_gateway_recursion_limits()
+    config: dict[str, Any] = {"recursion_limit": default_recursion_limit}
     if request_config:
         # LangGraph >= 0.6.0 introduced ``context`` as the preferred way to
         # pass thread-level data and rejects requests that include both
@@ -1194,14 +1034,13 @@ def build_run_config(
         # super-steps (runaway LLM cost / DoS). Applied after the passthrough so
         # it overrides whatever the client sent.
         if "recursion_limit" in request_config:
-            max_limit = _resolve_max_recursion_limit()
-            clamped = _clamp_recursion_limit(request_config["recursion_limit"], max_limit)
+            clamped = _clamp_recursion_limit(request_config["recursion_limit"], max_recursion_limit, default_recursion_limit)
             if clamped != request_config["recursion_limit"]:
                 logger.warning(
                     "build_run_config: clamped client recursion_limit %r -> %d (max %d). thread_id=%s",
                     request_config["recursion_limit"],
                     clamped,
-                    max_limit,
+                    max_recursion_limit,
                     thread_id,
                 )
             config["recursion_limit"] = clamped
@@ -1296,6 +1135,8 @@ def build_checkpoint_state_mutation_accessor(
 # a restart.
 _STATE_ACCESSOR_GRAPH_CACHE_MAX = 64
 _state_accessor_graph_cache: dict[tuple[str | None, str, int | None], tuple[Any, Any, Any]] = {}
+_state_accessor_graph_cache_lock = threading.Lock()
+_state_accessor_graph_build_locks = KeyedLockTable[tuple[str | None, str, int | None]]()
 
 
 def _accessor_graph_cache_max(app_config: Any) -> int:
@@ -1306,31 +1147,52 @@ def _accessor_graph_cache_max(app_config: Any) -> int:
     )
 
 
-def _state_accessor_graph(
-    agent_factory: Any,
-    assistant_id: str | None,
-    mode: str,
-    snapshot_frequency: int | None,
-    config: dict[str, Any],
-) -> Any:
-    app_config = (config.get("context") or {}).get("app_config")
-    key = (assistant_id, mode, snapshot_frequency)
-    cached = _state_accessor_graph_cache.get(key)
-    if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
-        return cached[2]
-    if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
-        _state_accessor_graph_cache.clear()
+def _cached_state_accessor_graph(key: tuple[str | None, str, int | None], agent_factory: Any, app_config: Any) -> Any | None:
+    with _state_accessor_graph_cache_lock:
+        cached = _state_accessor_graph_cache.get(key)
+        if cached is not None and cached[0] is agent_factory and cached[1] is app_config:
+            return cached[2]
+    return None
+
+
+def _cache_state_accessor_graph(key: tuple[str | None, str, int | None], agent_factory: Any, app_config: Any, graph: Any) -> None:
+    with _state_accessor_graph_cache_lock:
+        if len(_state_accessor_graph_cache) >= _accessor_graph_cache_max(app_config):
+            _state_accessor_graph_cache.clear()
+        _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
+
+
+def _build_state_accessor_graph(agent_factory: Any, config: dict[str, Any]) -> Any:
     agent_result = agent_factory(config=config)
     try:
         from deerflow.agents.lead_agent.agent import unwrap_agent_graph
 
-        graph = unwrap_agent_graph(agent_result)
+        return unwrap_agent_graph(agent_result)
     except Exception:
         # A custom factory must keep working even if importing the lead
         # assembly type fails.
-        graph = agent_result
-    _state_accessor_graph_cache[key] = (agent_factory, app_config, graph)
-    return graph
+        return agent_result
+
+
+def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
+    app_config = (config.get("context") or {}).get("app_config")
+    key = (assistant_id, mode, snapshot_frequency)
+    cached = _cached_state_accessor_graph(key, agent_factory, app_config)
+    if cached is not None:
+        return cached
+
+    # Construction runs on assembly-pool threads, so same-key cold misses are
+    # serialized with a thread lock. The re-check under the lock makes
+    # overlapping first readers run the factory exactly once; a waiter whose
+    # factory or app-config identity changed while it waited still rebuilds,
+    # preserving identity-based cache invalidation.
+    with _state_accessor_graph_build_locks.hold(key):
+        cached = _cached_state_accessor_graph(key, agent_factory, app_config)
+        if cached is not None:
+            return cached
+        graph = _build_state_accessor_graph(agent_factory, config)
+        _cache_state_accessor_graph(key, agent_factory, app_config, graph)
+        return graph
 
 
 class _RawCheckpointSnapshot:
@@ -1341,17 +1203,7 @@ class _RawCheckpointSnapshot:
     metadata, config ancestry, created_at) comes straight from the tuple.
     """
 
-    __slots__ = (
-        "checkpoint_exists",
-        "config",
-        "values",
-        "metadata",
-        "parent_config",
-        "created_at",
-        "tasks",
-        "tasks_known",
-        "next",
-    )
+    __slots__ = ("checkpoint_exists", "config", "values", "metadata", "parent_config", "created_at", "tasks", "tasks_known", "next")
 
     def __init__(self, config: dict[str, Any], tup: Any | None) -> None:
         self.checkpoint_exists = tup is not None
@@ -1437,11 +1289,6 @@ def build_checkpoint_state_accessor(
 
     if ctx.app_config is not None:
         config.setdefault("context", {})["app_config"] = ctx.app_config
-    authorization_provider = getattr(ctx, "authorization_provider", None)
-    if authorization_provider is not None:
-        from deerflow.authz.runtime import AUTHORIZATION_PROVIDER_CONTEXT_KEY
-
-        config.setdefault("context", {})[AUTHORIZATION_PROVIDER_CONTEXT_KEY] = authorization_provider
     inject_checkpoint_mode(config, ctx.checkpoint_channel_mode)
 
     agent_factory = resolve_agent_factory(assistant_id)
@@ -1474,6 +1321,34 @@ def build_checkpoint_state_accessor(
         mode=ctx.checkpoint_channel_mode,
     )
     return accessor, config
+
+
+async def abuild_checkpoint_state_accessor(
+    request: Request,
+    *,
+    thread_id: str,
+    assistant_id: str | None = None,
+    checkpoint_id: str | None = None,
+) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
+    """Async variant of :func:`build_checkpoint_state_accessor`.
+
+    Identical accessor construction, but the agent-factory assembly — which
+    re-enters ``get_available_tools()`` and may block on MCP cache
+    initialization — runs off-loop on the dedicated assembly pool so the
+    Gateway event loop keeps making progress (issue #5172). Repeat calls hit
+    ``_state_accessor_graph_cache`` and only pay the thread hop; overlapping
+    cold readers with the same cache key are serialized per key so the
+    factory runs exactly once, and a reader whose factory or app-config
+    identity changed while it waited rebuilds instead of reusing the
+    winner's graph.
+    """
+    return await run_assembly(
+        build_checkpoint_state_accessor,
+        request,
+        thread_id=thread_id,
+        assistant_id=assistant_id,
+        checkpoint_id=checkpoint_id,
+    )
 
 
 async def resolve_thread_assistant_id(
@@ -1515,7 +1390,7 @@ async def build_thread_checkpoint_state_accessor(
     ``AgentMiddleware.state_schema`` from the response.
     """
     assistant_id = await resolve_thread_assistant_id(request, thread_id, fail_closed=fail_closed)
-    return build_checkpoint_state_accessor(
+    return await abuild_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,
@@ -1570,10 +1445,7 @@ async def apply_checkpoint_to_run_config(
             raise HTTPException(status_code=400, detail="checkpoint must be an object")
         checkpoint_thread_id = checkpoint.get("thread_id")
         if checkpoint_thread_id is not None and str(checkpoint_thread_id) != thread_id:
-            raise HTTPException(
-                status_code=400,
-                detail="checkpoint thread_id does not match request thread_id",
-            )
+            raise HTTPException(status_code=400, detail="checkpoint thread_id does not match request thread_id")
         raw_checkpoint_id = checkpoint.get("checkpoint_id")
         if raw_checkpoint_id:
             checkpoint_id = str(raw_checkpoint_id)
@@ -1599,11 +1471,7 @@ async def apply_checkpoint_to_run_config(
     try:
         checkpoint_tuple = await checkpointer.aget_tuple(read_config)
     except Exception as exc:
-        logger.exception(
-            "Failed to validate checkpoint %s for thread %s",
-            checkpoint_id,
-            sanitize_log_param(thread_id),
-        )
+        logger.exception("Failed to validate checkpoint %s for thread %s", checkpoint_id, sanitize_log_param(thread_id))
         raise HTTPException(status_code=500, detail="Failed to validate checkpoint") from exc
     if checkpoint_tuple is None:
         raise HTTPException(status_code=404, detail=f"Checkpoint {checkpoint_id} not found")
@@ -1653,7 +1521,7 @@ async def ensure_checkpoint_history_seeded(
     if await get_checkpointer(request).aget_tuple(checkpoint_config) is None:
         return
 
-    accessor, config = build_checkpoint_state_accessor(
+    accessor, config = await abuild_checkpoint_state_accessor(
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,
@@ -1675,1464 +1543,433 @@ async def ensure_checkpoint_history_seeded(
     logger.info("Seeded %d checkpoint-history events for thread %s", len(events), thread_id)
 
 
+def _message_identifier(message: Any) -> str | None:
+    if isinstance(message, BaseMessage):
+        return str(message.id) if message.id else None
+    if isinstance(message, Mapping):
+        value = message.get("id")
+        return str(value) if value else None
+    return None
+
+
+def _message_additional_kwargs(message: Any) -> Mapping[str, Any]:
+    if isinstance(message, BaseMessage):
+        return message.additional_kwargs
+    if isinstance(message, Mapping):
+        value = message.get("additional_kwargs")
+        return value if isinstance(value, Mapping) else {}
+    return {}
+
+
+def _is_scope_source_human_message(message: Any) -> bool:
+    """Return whether a checkpoint message can originate a recovered scope."""
+    if isinstance(message, HumanMessage):
+        return is_genuine_user_message(message)
+    if not isinstance(message, Mapping):
+        return False
+    if message.get("type") != "human" and message.get("role") not in {"human", "user"}:
+        return False
+    return not _skips_input_guardrail(dict(_message_additional_kwargs(message)), message.get("name"))
+
+
+async def _recover_run_knowledge_scope(
+    request: Request,
+    *,
+    thread_id: str,
+    target_message_id: str | None,
+) -> object | None:
+    """Resolve one replay/resume scope from the authoritative latest checkpoint."""
+    accessor, config = await build_thread_checkpoint_state_accessor(
+        request,
+        thread_id=thread_id,
+    )
+    try:
+        snapshot = await accessor.aget(config)
+    except Exception as exc:
+        logger.exception("Failed to recover knowledge scope for thread %s", sanitize_log_param(thread_id))
+        raise HTTPException(status_code=500, detail="Failed to recover knowledge scope") from exc
+    values = getattr(snapshot, "values", None)
+    messages = values.get("messages") if isinstance(values, Mapping) else None
+    if not isinstance(messages, list):
+        messages = []
+
+    source: Any | None = None
+    if target_message_id:
+        target_index = next(
+            (index for index, message in enumerate(messages) if _message_identifier(message) == target_message_id),
+            None,
+        )
+        if target_index is not None:
+            source = next(
+                (message for message in reversed(messages[:target_index]) if _is_scope_source_human_message(message)),
+                None,
+            )
+        else:
+            # Interrupted assistant output may never reach a checkpoint. Its
+            # source is still the terminal HumanMessage of the latest state.
+            source = next(
+                (message for message in reversed(messages) if _is_scope_source_human_message(message)),
+                None,
+            )
+        if source is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Could not recover the source HumanMessage knowledge_scope",
+            )
+    else:
+        source = next(
+            (message for message in reversed(messages) if _is_scope_source_human_message(message)),
+            None,
+        )
+    if source is None:
+        return None
+    additional_kwargs = _message_additional_kwargs(source)
+    return additional_kwargs.get(KNOWLEDGE_SCOPE_KEY)
+
+
+def _current_human_message(graph_input: object) -> HumanMessage | None:
+    if not isinstance(graph_input, Mapping):
+        return None
+    messages = graph_input.get("messages")
+    if not isinstance(messages, list):
+        return None
+    return next(
+        (message for message in reversed(messages) if isinstance(message, HumanMessage)),
+        None,
+    )
+
+
+async def _load_scope_agent_config(
+    *,
+    assistant_id: str | None,
+    user_id: str | None,
+) -> Any | None:
+    if not assistant_id or assistant_id == _DEFAULT_ASSISTANT_ID:
+        return None
+    normalized = assistant_id.strip().lower().replace("_", "-")
+    try:
+        return await asyncio.to_thread(
+            load_agent_config,
+            normalized,
+            user_id=user_id,
+        )
+    except (FileNotFoundError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail="knowledge_scope assistant configuration could not be resolved",
+        ) from exc
+
+
+async def _validate_scope_thread_binding(
+    run_ctx: RunContext,
+    *,
+    thread_id: str,
+    assistant_id: str | None,
+) -> None:
+    existing = await run_ctx.thread_store.get(thread_id)
+    if not isinstance(existing, Mapping):
+        return
+    bound = existing.get("assistant_id")
+    if isinstance(bound, str) and bound and assistant_id and bound != assistant_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Thread assistant does not match knowledge_scope assistant",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Run lifecycle
 # ---------------------------------------------------------------------------
 
 
-def _bounded_source_value(value: Any) -> str | int | bool | None:
-    if value is None or isinstance(value, (bool, int)):
-        return value
-    rendered = str(value)
-    encoded = rendered.encode("utf-8")[:1024]
-    return encoded.decode("utf-8", errors="ignore")
+class OwnerRefusedLaunchError(ValueError):
+    """An internal launch for an owner whose account nothing may act for."""
 
 
-def _base_origin_references(
-    intent: InternalLaunchIntent,
-    *,
-    include_verified_binding: bool = True,
-) -> dict[str, str | int | bool | None]:
-    if intent.trusted_notification:
-        source = intent.trusted_notification_source
-        if source is None:
-            return {}
-        return {
-            key: _bounded_source_value(source.get(key))
-            for key in (
-                "task_id",
-                "task_lineage_digest",
-                "lineage_status",
-                "parent_run_id",
-                "parent_tool_receipt_id",
-                "terminal_result_version",
-                "notification_kind",
-                "result_digest",
-                "result_status",
-            )
-        }
-    if intent.source_kind is InternalSourceKind.scheduled_task:
-        return {
-            "task_id": _bounded_source_value(intent.trusted_task_id),
-            "task_run_id": _bounded_source_value(intent.task_run_id),
-            "trigger": _bounded_source_value(intent.scheduled_trigger),
-        }
-    if intent.source_kind is InternalSourceKind.native_channel:
-        facts = intent.native_channel
-        if facts is None:
-            return {}
-        references: dict[str, str | int | bool | None] = {
-            "provider": _bounded_source_value(facts.provider),
-            "connection_id": _bounded_source_value(facts.connection_id),
-            "workspace_id": _bounded_source_value(facts.workspace_id),
-            "chat_id": _bounded_source_value(facts.chat_id),
-            "topic_id": _bounded_source_value(facts.topic_id),
-            "provider_message_id": _bounded_source_value(facts.provider_message_id),
-            "channel_user_id": _bounded_source_value(facts.channel_user_id),
-        }
-        if include_verified_binding and facts.verified_binding is not None:
-            references["binding_kind"] = _bounded_source_value(facts.verified_binding.kind.value)
-            references["binding_reference"] = _bounded_source_value(facts.verified_binding.reference)
-        return references
-    if intent.source_kind is InternalSourceKind.service:
-        return {"service_id": _bounded_source_value(intent.trusted_service_id)}
-    return {}
+async def _refuse_launch_for_refused_owner(request: Request) -> None:
+    """Refuse a process-internal launch whose owner was turned off, or is inert in sign-on-only mode.
 
-
-def _origin_request_references(
-    references: Mapping[str, Any],
-) -> tuple[SafeContextReferenceV1, ...]:
-    return tuple(
-        SafeContextReferenceV1(
-            key=key,
-            value=value,
-            storage_class="persistable",
-            purpose="correlation",
-        )
-        for key, value in sorted(references.items())
-    )
-
-
-def _contribution_json(composed: Any) -> tuple[dict[str, Any], ...]:
-    return tuple(
-        {
-            "contribution_id": item.contribution_id,
-            "namespace": item.namespace,
-            "key": item.reference.key,
-            "value": item.reference.value,
-            "storage_class": item.reference.storage_class,
-            "purpose": item.reference.purpose,
-        }
-        for item in (
-            *composed.persistable,
-            *(handle for handle in getattr(composed, "secret_handles", ()) if handle.reference.storage_class == "persistable"),
-        )
-    )
-
-
-def _trusted_contribution_references(
-    composed: Any,
-    *,
-    capability_kind: str,
-) -> tuple[
-    tuple[NamespacedContextReferenceV1, ...],
-    tuple[NamespacedContextReferenceV1, ...],
-    tuple[NamespacedContextReferenceV1, ...],
-]:
-    def convert(items: Any) -> tuple[NamespacedContextReferenceV1, ...]:
-        return tuple(
-            NamespacedContextReferenceV1(
-                capability_id=f"{capability_kind}:{item.contribution_id}",
-                namespace=item.namespace,
-                reference=item.reference,
-            )
-            for item in items
-        )
-
-    return (
-        convert(composed.persistable),
-        convert(getattr(composed, "runtime_only", ())),
-        convert(getattr(composed, "secret_handles", ())),
-    )
-
-
-_EFFECTIVE_EXECUTION_PROJECTION_KEY = "__accepted_request_projection_v1"
-_KEYED_CONFIG_KEYS = frozenset({"recursion_limit", "configurable", "context"})
-_KEYED_CONFIGURABLE_KEYS = frozenset(
-    {
-        "thread_id",
-        "checkpoint_id",
-        "checkpoint_ns",
-        "checkpoint_map",
-        *_CONTEXT_CONFIGURABLE_KEYS,
-        *_CONTEXT_INTERNAL_CALLER_KEYS,
-    }
-)
-_KEYED_CONTEXT_KEYS = frozenset(
-    {
-        *_CONTEXT_CONFIGURABLE_KEYS,
-        *_CONTEXT_INTERNAL_CALLER_KEYS,
-        *_CONTEXT_RUNTIME_ONLY_KEYS,
-        "thread_id",
-        "user_id",
-        "channel_user_id",
-        "channel_name",
-    }
-)
-_DIGEST_CONTEXT_KEYS = frozenset(
-    {
-        "model_name",
-        "mode",
-        "thinking_enabled",
-        "reasoning_effort",
-        "is_plan_mode",
-        "subagent_enabled",
-        "max_concurrent_subagents",
-        "max_total_subagents",
-        "agent_name",
-        "is_bootstrap",
-        "non_interactive",
-        "disable_clarification",
-    }
-)
-
-
-def _keyed_request_error(detail: str) -> HTTPException:
-    return HTTPException(status_code=422, detail=detail)
-
-
-def _validate_keyed_request_shape(intent: InternalLaunchIntent) -> None:
-    if intent.metadata and not intent.trusted_notification:
-        raise _keyed_request_error("Idempotency-Key does not support arbitrary metadata")
-    if intent.command is not None:
-        if not isinstance(intent.command, Mapping) or set(intent.command) != {"resume"}:
-            raise _keyed_request_error("Idempotency-Key supports only command.resume")
-    config = intent.config or {}
-    if not isinstance(config, Mapping):
-        raise _keyed_request_error("keyed request config must be an object")
-    unknown_config = set(config) - _KEYED_CONFIG_KEYS
-    if unknown_config:
-        raise _keyed_request_error(f"Idempotency-Key cannot classify config keys: {', '.join(sorted(unknown_config))}")
-    trusted_internal_keys = {"non_interactive", "disable_clarification"}
-    for section_name, allowed in (
-        ("configurable", _KEYED_CONFIGURABLE_KEYS),
-        ("context", _KEYED_CONTEXT_KEYS),
-    ):
-        section = config.get(section_name)
-        if section is None:
-            continue
-        if not isinstance(section, Mapping):
-            raise _keyed_request_error(f"keyed request config.{section_name} must be an object")
-        unknown = set(section) - allowed
-        if unknown:
-            raise _keyed_request_error(f"Idempotency-Key cannot classify config.{section_name} keys: {', '.join(sorted(unknown))}")
-        if intent.source_kind is InternalSourceKind.http and (forged := set(section) & trusted_internal_keys):
-            raise _keyed_request_error(f"Idempotency-Key cannot accept trusted internal config.{section_name} keys: {', '.join(sorted(forged))}")
-    context = intent.context or {}
-    if not isinstance(context, Mapping):
-        raise _keyed_request_error("keyed request context must be an object")
-    unknown_context = set(context) - _KEYED_CONTEXT_KEYS
-    if unknown_context:
-        raise _keyed_request_error(f"Idempotency-Key cannot classify context keys: {', '.join(sorted(unknown_context))}")
-    if intent.source_kind is InternalSourceKind.http and (forged := set(context) & trusted_internal_keys):
-        raise _keyed_request_error(f"Idempotency-Key cannot accept trusted internal context keys: {', '.join(sorted(forged))}")
-    try:
-        canonical_request_digest(
-            {
-                "input": canonical_request_value(intent.input),
-                "command": canonical_request_value(intent.command),
-                "checkpoint": canonical_request_value(intent.checkpoint),
-            }
-        )
-    except (TypeError, ValueError) as exc:
-        raise _keyed_request_error(f"Idempotency-Key request cannot be projected: {exc}") from exc
-
-
-def _requested_agent_id(intent: InternalLaunchIntent) -> str:
-    if intent.source_kind is InternalSourceKind.native_channel and intent.native_channel is not None:
-        return intent.native_channel.resolved_agent_name or "default"
-    context = intent.context or {}
-    if intent.source_kind is InternalSourceKind.http and context.get("is_bootstrap") is True:
-        # Bootstrap routing is selected by both the mode bit and its validated
-        # agent name. Keep the name in caller intent so two different
-        # bootstrap agents cannot share an idempotency key merely because both
-        # used the bootstrap path. The separator cannot collide with a valid
-        # agent name (agent names are alphanumeric/hyphen only).
-        agent_name = context.get("agent_name")
-        return f"bootstrap:{agent_name}" if isinstance(agent_name, str) else "bootstrap"
-    assistant_id = intent.assistant_id
-    if assistant_id in (None, _DEFAULT_ASSISTANT_ID):
-        return "default"
-    return assistant_id.strip().lower().replace("_", "-")
-
-
-def _caller_execution_context(intent: InternalLaunchIntent) -> dict[str, Any]:
-    requested_config = intent.config or {}
-    if "context" in requested_config:
-        configured = requested_config.get("context")
-    else:
-        configured = requested_config.get("configurable")
-    configured = configured if isinstance(configured, Mapping) else {}
-    body_context = intent.context if isinstance(intent.context, Mapping) else {}
-    result = {key: configured[key] for key in sorted(_DIGEST_CONTEXT_KEYS) if key in configured and configured[key] is not None}
-    for key in sorted(_DIGEST_CONTEXT_KEYS):
-        if key not in result and key in body_context and body_context[key] is not None:
-            result[key] = body_context[key]
-    if intent.source_kind is InternalSourceKind.http:
-        # External agent hints are normalized into ``agent_selector`` below;
-        # these raw context aliases never independently bind a revision.
-        result.pop("agent_name", None)
-        result.pop("is_bootstrap", None)
-    return result
-
-
-def _caller_checkpoint_selection(intent: InternalLaunchIntent) -> dict[str, Any]:
-    requested_config = intent.config or {}
-    configurable = requested_config.get("configurable") if "context" not in requested_config else None
-    configured = configurable if isinstance(configurable, Mapping) else {}
-    inherited = {key: configured[key] for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map") if key in configured and configured[key] is not None}
-
-    checkpoint_id: Any = intent.checkpoint_id
-    checkpoint = intent.checkpoint
-    if checkpoint:
-        checkpoint_id = checkpoint.get("checkpoint_id") or checkpoint_id
-        if checkpoint_id:
-            selected = {
-                "checkpoint_id": str(checkpoint_id),
-                "checkpoint_ns": str(checkpoint.get("checkpoint_ns") or ""),
-            }
-            if checkpoint.get("checkpoint_map") is not None:
-                selected["checkpoint_map"] = checkpoint["checkpoint_map"]
-            return selected
-    elif checkpoint_id:
-        return {"checkpoint_id": str(checkpoint_id), "checkpoint_ns": ""}
-    return inherited
-
-
-def _canonical_caller_intent(intent: InternalLaunchIntent) -> CanonicalCallerIntent:
-    if intent.command and intent.command.get("resume") is not None:
-        input_projection: dict[str, Any] = {
-            "kind": "resume",
-            "value": canonical_request_value(intent.command["resume"]),
-        }
-    else:
-        graph_input = normalize_input(
-            thaw_host_value(intent.input),
-            trusted_internal=intent.source_kind is not InternalSourceKind.http,
-        )
-        input_projection = {
-            "kind": "graph",
-            "value": canonical_request_value(graph_input),
-        }
-    requested_config = intent.config or {}
-    recursion_limit = requested_config.get("recursion_limit") if "recursion_limit" in requested_config else None
-    return CanonicalCallerIntent(
-        {
-            "thread": ({"selection": "explicit", "thread_id": intent.thread_id} if intent.thread_id_explicit else {"selection": "server_assigned"}),
-            "agent_selector": _requested_agent_id(intent),
-            "input": input_projection,
-            "multitask_strategy": intent.multitask_strategy,
-            "checkpoint": canonical_request_value(_caller_checkpoint_selection(intent)),
-            "interrupt_before": canonical_request_value(intent.interrupt_before),
-            "interrupt_after": canonical_request_value(intent.interrupt_after),
-            "execution_context": canonical_request_value(_caller_execution_context(intent)),
-            # A missing or explicit-null limit both select the documented
-            # Gateway default. Every other supplied value remains caller
-            # intent; server clamping belongs only to the effective projection.
-            "recursion_limit": (
-                {"selection": "default"}
-                if recursion_limit is None
-                else {
-                    "selection": "explicit",
-                    "value": canonical_request_value(recursion_limit),
-                }
-            ),
-        }
-    )
-
-
-def _effective_execution_projection(
-    intent: InternalLaunchIntent,
-    *,
-    accepted: AcceptedInvocation,
-    graph_input: Any,
-    config: Mapping[str, Any],
-) -> EffectiveExecutionProjection:
-    configurable = config.get("configurable") if isinstance(config.get("configurable"), Mapping) else {}
-    runtime_context = config.get("context") if isinstance(config.get("context"), Mapping) else {}
-    execution_context: dict[str, Any] = {}
-    for key in sorted(_DIGEST_CONTEXT_KEYS):
-        if key in runtime_context:
-            execution_context[key] = runtime_context[key]
-        elif key in configurable:
-            execution_context[key] = configurable[key]
-    input_projection = {"resume": canonical_request_value(intent.command["resume"])} if intent.command and intent.command.get("resume") is not None else canonical_request_value(graph_input)
-    return EffectiveExecutionProjection(
-        {
-            "accepted_digest_semantics": "canonical_execution_v2",
-            "thread_id": accepted.thread_id,
-            "agent_selector": _requested_agent_id(intent),
-            "agent_revision_digest": accepted.agent_revision.digest,
-            "principal_digest": accepted.principal_digest,
-            "base_origin_digest": accepted.base_origin_digest,
-            "tenant_digest": (accepted.tenant.digest if accepted.tenant is not None else None),
-            "accepted_context_digest": accepted.accepted_context_digest,
-            "runtime_identity_digest": accepted.runtime_identity_digest,
-            "contributor_execution_digest": accepted.contributor_execution_digest,
-            "extension_generation": accepted.extension_generation,
-            **(
-                {
-                    "extension_artifact_manifest_digest": (accepted.extension_artifact_manifest_digest),
-                    "extension_configuration_digest": (accepted.extension_configuration_digest),
-                }
-                if accepted.extension_artifact_manifest_digest is not None
-                else {}
-            ),
-            **({"tool_plane_revision": accepted.tool_plane_revision} if accepted.tool_plane_revision is not None else {}),
-            **({"tool_plane_unmanaged": accepted.tool_plane_unmanaged} if accepted.tool_plane_unmanaged is not None else {}),
-            **({"execution_budget": accepted.execution_budget.to_json()} if accepted.execution_budget is not None else {}),
-            **({"egress_allowance": accepted.egress_allowance.to_json()} if accepted.egress_allowance is not None else {}),
-            "input": input_projection,
-            "command": canonical_request_value(intent.command),
-            "multitask_strategy": intent.multitask_strategy,
-            "checkpoint": canonical_request_value({key: configurable[key] for key in ("checkpoint_id", "checkpoint_ns", "checkpoint_map") if key in configurable}),
-            "interrupt_before": canonical_request_value(intent.interrupt_before),
-            "interrupt_after": canonical_request_value(intent.interrupt_after),
-            "execution_context": canonical_request_value(execution_context),
-            "recursion_limit": config.get("recursion_limit"),
-        }
-    )
-
-
-async def _owner_refusal(user_id: str | None) -> str | None:
-    """Why nothing may act for the run's owner now, or ``None``: the derivation every request uses."""
-    if not user_id:
-        return None
+    HTTP callers were already refused where their credential was read; a due
+    scheduled task or a task notification names its owner in the trusted
+    header and reaches here without passing a credential check.
+    """
+    if getattr(getattr(request, "state", None), "auth_source", None) != AUTH_SOURCE_INTERNAL:
+        return
+    headers = getattr(request, "headers", None) or {}
+    owner_user_id = (headers.get(INTERNAL_OWNER_USER_ID_HEADER_NAME) or "").strip()
+    if not owner_user_id:
+        return
     from app.gateway.auth.mode import owner_is_refused
 
-    return await owner_is_refused(str(user_id))
+    refusal = await owner_is_refused(owner_user_id)
+    if refusal is not None:
+        raise OwnerRefusedLaunchError(f"trusted internal launch owner's account is {refusal}")
 
 
-async def _principal_projection_for_intent(
-    request: Any,
-    intent: InternalLaunchIntent,
+async def start_run(
+    body: RunCreateRequest,
+    thread_id: str,
+    request: Request,
     *,
-    owner_user_id: str | None,
-) -> PrincipalProjection:
-    request_user = getattr(getattr(request, "state", None), "user", None)
-    request_role = getattr(request_user, "system_role", None)
-    internal = request_role == INTERNAL_SYSTEM_ROLE
-    if owner_user_id is not None and internal:
-        owner = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
-        if owner is None:
-            raise ValueError("trusted internal launch owner could not be revalidated")
-        from app.gateway.auth.mode import account_refusal
+    idempotency_key: str | None = None,
+    require_existing_thread: bool = False,
+) -> RunRecord:
+    """Create a RunRecord and launch the background agent task.
 
-        refusal = account_refusal(owner)
-        if refusal is not None:
-            # Every process-internal launch for an owner -- a due scheduled
-            # task, a channel message, an MCP task notification -- resolves
-            # the owner here, so an account nothing may act for starts no run.
-            logger.warning("Internal launch refused: owner %s is %s (%s)", sanitize_log_param(owner_user_id), refusal, intent.source_kind.value)
-            raise OwnerRefusedLaunchError(f"trusted internal launch owner's account is {refusal}")
-        if intent.source_kind is InternalSourceKind.native_channel:
-            facts = intent.native_channel
-            if facts is None or not facts.provider:
-                raise ValueError("native channel identity requires a trusted provider")
-            acting_service = ActingServiceV1(service_id=f"channel:{facts.provider}")
-        elif intent.source_kind is InternalSourceKind.scheduled_task:
-            acting_service = ActingServiceV1(service_id="scheduler")
-        else:
-            acting_service = ActingServiceV1(service_id="gateway-internal")
-        identity = InvocationIdentityV1(
-            effective_subject=EffectiveSubjectV1(
-                kind="human",
-                subject_id=owner_user_id,
-                role=getattr(owner, "system_role", None),
-                oauth_provider=getattr(owner, "oauth_provider", None),
-                oauth_id=getattr(owner, "oauth_id", None),
-            ),
-            acting_service=acting_service,
-        )
-        return PrincipalProjection(
-            user_id=owner_user_id,
-            role=getattr(owner, "system_role", None),
-            oauth_provider=getattr(owner, "oauth_provider", None),
-            oauth_id=getattr(owner, "oauth_id", None),
-            channel_user_id=(intent.context or {}).get("channel_user_id"),
-            is_internal=False,
-            identity=identity,
-        )
-    request_user_id = getattr(request_user, "id", None)
-    auth_source = getattr(getattr(request, "state", None), "auth_source", None)
-    if request_user_id is None and auth_source == AUTH_SOURCE_AUTH_DISABLED:
-        request_user_id = AUTH_DISABLED_USER_ID
-    if internal:
-        if intent.source_kind is InternalSourceKind.scheduled_task and intent.scheduled_system_owned:
-            identity = InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="service", subject_id="scheduler", role="service"))
-        elif intent.source_kind is InternalSourceKind.scheduled_task:
-            raise ValueError("scheduled task launch requires a persisted owner or explicit system ownership")
-        elif intent.source_kind is InternalSourceKind.http:
-            # An authenticated internal HTTP caller is a service subject only
-            # when it is not representing a human. Owner-attributed requests
-            # take the branch above and must revalidate that human first.
-            identity = InvocationIdentityV1(
-                effective_subject=EffectiveSubjectV1(
-                    kind="service",
-                    subject_id="gateway-internal",
-                    role="service",
-                )
-            )
-        else:
-            raise ValueError("internal launch without a represented owner requires an explicit service subject")
-    elif intent.source_kind is InternalSourceKind.service:
-        service_id = intent.trusted_service_id
-        if not service_id:
-            raise ValueError("service launch requires an authenticated service subject")
-        if request_role != "service" or request_user_id is None or str(request_user_id) != service_id:
-            raise ValueError("service launch requires one matching authenticated service identity")
-        identity = InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="service", subject_id=service_id, role="service"))
-    else:
-        if request_user_id is None:
-            raise ValueError("invocation requires an authenticated effective subject")
-        subject_kind = "service" if request_role == "service" else "human"
-        identity = InvocationIdentityV1(
-            effective_subject=EffectiveSubjectV1(
-                kind=subject_kind,
-                subject_id=str(request_user_id),
-                role=("service" if subject_kind == "service" else request_role),
-                oauth_provider=getattr(request_user, "oauth_provider", None),
-                oauth_id=getattr(request_user, "oauth_id", None),
-            )
-        )
-    return PrincipalProjection(
-        user_id=None if internal else (str(request_user_id) if request_user_id is not None else None),
-        role=None if internal else request_role,
-        oauth_provider=None if internal else getattr(request_user, "oauth_provider", None),
-        oauth_id=None if internal else getattr(request_user, "oauth_id", None),
-        channel_user_id=(intent.context or {}).get("channel_user_id") if internal else None,
-        is_internal=identity.effective_subject.kind == "service",
-        identity=identity,
-    )
+    Parameters
+    ----------
+    body : RunCreateRequest
+        The validated request body shared by HTTP and internal launch paths.
+    thread_id : str
+        Target thread.
+    request : Request
+        FastAPI request — used to retrieve singletons from ``app.state``.
+    require_existing_thread : bool
+        Reject a missing thread instead of auto-creating metadata. Internal
+        notification runs use this so a deleted chat cannot be resurrected.
+    """
+    # Cancel-capability gate. interrupt/rollback strategies terminate an already
+    # active run — runs:cancel capability, not runs:create — so a create-only
+    # PAT must not reach them. Enforced here, the single choke point every
+    # run-creation path flows through (HTTP routes and internal launchers
+    # alike), so no entry point can bypass it; regenerate launches pass
+    # multitask_strategy="reject" and are unaffected. Requests without a
+    # stamped auth context (internal/test compositions) skip the gate.
+    require_cancel_permission_if(request, body.multitask_strategy != "reject")
+    await _refuse_launch_for_refused_owner(request)
 
-
-def _base_origin_digest(
-    intent: InternalLaunchIntent,
-    *,
-    include_verified_binding: bool = True,
-) -> str:
-    origin = InvocationOrigin(
-        source_kind=intent.source_kind.value,
-        references=_base_origin_references(
-            intent,
-            include_verified_binding=include_verified_binding,
-        ),
-    )
-    return canonical_digest({"version": 1, "origin": origin.base_json()})
-
-
-_PROCESS_MATERIAL_CLEANUP_TIMEOUT_SECONDS = 5.0
-
-
-async def _release_process_material_bounded(material: ResolvedAgentMaterialV1) -> None:
-    """Release process material off-loop without letting cancellation orphan it."""
-    cleanup = asyncio.create_task(asyncio.to_thread(material.release_process_material))
-    deadline = asyncio.get_running_loop().time() + _PROCESS_MATERIAL_CLEANUP_TIMEOUT_SECONDS
-    cancellation: asyncio.CancelledError | None = None
-    while not cleanup.done():
-        remaining = deadline - asyncio.get_running_loop().time()
-        if remaining <= 0:
-            cleanup.add_done_callback(_consume_task_result)
-            logger.warning(
-                "Accepted agent material cleanup exceeded its bounded deadline error_class=TimeoutError",
-            )
-            break
-        try:
-            await asyncio.wait_for(asyncio.shield(cleanup), timeout=remaining)
-        except asyncio.CancelledError as exc:
-            cancellation = cancellation or exc
-        except TimeoutError:
-            cleanup.add_done_callback(_consume_task_result)
-            logger.warning(
-                "Accepted agent material cleanup exceeded its bounded deadline error_class=TimeoutError",
-            )
-            break
-        except Exception as exc:
-            logger.warning(
-                "Accepted agent material cleanup failed error_class=%s",
-                type(exc).__name__,
-            )
-            break
-    if cancellation is not None:
-        raise cancellation
-
-
-class _RevisionResolutionOwnership:
-    """Transfer a resolver-produced process-material lease without a cancel gap."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._abandoned = False
-        self._resolved: Any | None = None
-
-    def resolve(
-        self,
-        config: dict[str, Any],
-        *,
-        app_config: Any,
-        user_id: str | None,
-        governed_tool_plane_digest: str | None = None,
-        governed_mcp_tool_allowlists: Mapping[
-            str,
-            frozenset[str] | None,
-        ]
-        | None = None,
-    ) -> Any:
-        revision = resolve_agent_revision(
-            config,
-            app_config=app_config,
-            user_id=user_id,
-            governed_tool_plane_digest=governed_tool_plane_digest,
-            governed_mcp_tool_allowlists=governed_mcp_tool_allowlists,
-        )
-        release_material: ResolvedAgentMaterialV1 | None = None
-        with self._lock:
-            if self._abandoned:
-                release_material = revision.material
-            else:
-                self._resolved = revision
-        if isinstance(release_material, ResolvedAgentMaterialV1):
-            try:
-                release_material.release_process_material()
-            except Exception as exc:  # pragma: no cover - defensive cleanup diagnostic
-                logger.warning(
-                    "Late accepted agent material cleanup failed error_class=%s",
-                    type(exc).__name__,
-                )
-        return revision
-
-    def abandon(self) -> ResolvedAgentMaterialV1 | None:
-        with self._lock:
-            self._abandoned = True
-            revision = self._resolved
-            self._resolved = None
-        material = getattr(revision, "material", None)
-        return material if isinstance(material, ResolvedAgentMaterialV1) else None
-
-    def take(self, revision: Any) -> Any:
-        with self._lock:
-            resolved = self._resolved
-            self._resolved = None
-        return resolved if resolved is not None else revision
-
-
-async def _resolve_agent_revision_cancellation_safe(
-    config: dict[str, Any],
-    *,
-    app_config: Any,
-    user_id: str | None,
-    governed_tool_plane_digest: str | None = None,
-    governed_mcp_tool_allowlists: Mapping[
-        str,
-        frozenset[str] | None,
-    ]
-    | None = None,
-) -> Any:
-    ownership = _RevisionResolutionOwnership()
-    resolution = asyncio.create_task(
-        asyncio.to_thread(
-            ownership.resolve,
-            config,
-            app_config=app_config,
-            user_id=user_id,
-            governed_tool_plane_digest=governed_tool_plane_digest,
-            governed_mcp_tool_allowlists=governed_mcp_tool_allowlists,
-        )
-    )
     try:
-        revision = await asyncio.shield(resolution)
-    except asyncio.CancelledError:
-        material = ownership.abandon()
-        resolution.add_done_callback(_consume_task_result)
-        if material is not None:
-            try:
-                await _release_process_material_bounded(material)
-            except asyncio.CancelledError:
-                pass
-        raise
-    return ownership.take(revision)
+        validate_thread_id(thread_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    body_config = getattr(body, "config", None)
+    config_metadata = body_config.get("metadata") if isinstance(body_config, dict) else None
+    try:
+        validate_run_metadata_secrets(getattr(body, "metadata", None))
+        validate_run_metadata_secrets(config_metadata)
+    except LegacyRunMetadataSecretError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
 
-async def _seal_accepted_invocation(
-    *,
-    request: Any,
-    intent: InternalLaunchIntent,
-    config: dict[str, Any],
-    graph_input: Any,
-    owner_user_id: str | None,
-    run_ctx: RunContext,
-) -> AcceptedInvocation:
-    runtime_context = config.get("context") if isinstance(config.get("context"), dict) else {}
-    principal = await _principal_projection_for_intent(
-        request,
-        intent,
-        owner_user_id=owner_user_id,
-    )
-    from app.gateway.credential_evidence import (
-        credential_evidence_for_admission,
-    )
+    stream_modes = normalize_stream_modes(body.stream_mode)
+    bridge = get_stream_bridge(request)
+    run_mgr = get_run_manager(request)
+    run_ctx = get_run_context(request)
 
-    credential_evidence = credential_evidence_for_admission(request, intent)
-    base_references = _base_origin_references(intent)
-    app_state = getattr(getattr(request, "app", None), "state", None)
-    app_config = run_ctx.app_config or get_app_config()
-    tenant_identity = getattr(app_state, "tenant_identity", None)
-    if not isinstance(tenant_identity, TenantIdentityV1):
-        raise RuntimeError("Gateway tenant identity was not resolved during application construction")
-    tenant_reference = tenant_identity.to_persisted_reference()
-    contributor_host = getattr(app_state, "contributor_host", None)
-    empty_contributor_digest = canonical_digest({"version": 1, "execution": []})
-    if contributor_host is None:
-        origin_contributions = SimpleNamespace(
-            persistable=(),
-            runtime_only=(),
-            secret_handles=(),
-            execution_digest=empty_contributor_digest,
-            diagnostics=(),
-        )
-    else:
-        origin_contributions = await contributor_host.contribute_origin(
-            OriginContributionRequestV1(
-                source_kind=intent.source_kind.value,
-                authenticated_subject_reference=principal.user_id,
-                source_references=_origin_request_references(base_references),
-                identity=principal.identity,
-                tenant=tenant_reference,
-            )
-        )
-    for diagnostic in origin_contributions.diagnostics:
-        logger.warning(
-            "Optional invocation contributor omitted capability_id=%s contribution_id=%s diagnostic_code=%s error_class=%s correlation_id=%s",
-            diagnostic.capability_id,
-            diagnostic.contribution_id,
-            diagnostic.diagnostic_code,
-            diagnostic.error_class,
-            diagnostic.correlation_id,
-        )
-    origin_persistable, origin_runtime_only, origin_secret_handles = _trusted_contribution_references(
-        origin_contributions,
-        capability_kind="origin_contributor",
-    )
-    origin = InvocationOrigin(
-        source_kind=intent.source_kind.value,
-        references=base_references,
-        contributor_references=_contribution_json(origin_contributions),
-    )
+    disconnect = DisconnectMode.cancel if body.on_disconnect == "cancel" else DisconnectMode.continue_
 
-    tool_plane_revision: dict[str, object] | None = None
-    tool_plane_unmanaged: dict[str, object] | None = None
-    tool_plane_service = getattr(app_state, "tool_plane_revision_service", None)
-    tool_plane_effective = None
-    tool_plane_runtime = None
-    tool_plane_actor = None
-    if tool_plane_service is not None:
-        from deerflow_extension_api import VerifiedActorContextV1
+    body_context = getattr(body, "context", None) or {}
+    model_name = body_context.get("model_name")
+    # Coerce non-string model_name values to str before truncation.
+    if model_name is not None and not isinstance(model_name, str):
+        model_name = str(model_name)
 
-        from deerflow.tool_plane import (
-            ToolPlaneRevisionError,
-            resolve_tool_plane_runtime,
-        )
-
-        if principal.identity is None:  # pragma: no cover - acceptance invariant
-            raise RuntimeError("credential_evidence_unavailable")
-        tool_plane_actor = VerifiedActorContextV1(
-            identity=principal.identity,
-            credential=credential_evidence,
-            tenant=tenant_reference,
-        )
-        try:
-            tool_plane_effective = await tool_plane_service.effective_for_actor(
-                tool_plane_actor,
-            )
-        except ToolPlaneRevisionError as exc:
-            local_unmanaged = exc.code in {"tool_plane_bootstrap_required", "unmanaged_drift"} and tool_plane_service.durable is False
-            if not local_unmanaged:
-                raise
-            # Continuing is the documented behaviour for a non-durable
-            # deployment whose administrator has not promoted a base
-            # revision. Say so in the acceptance evidence: execution must be
-            # able to tell "this run is ungoverned by decision" from "the
-            # governed material this run needs is missing", and only the
-            # first of those may run a configured retrieval tool.
-            tool_plane_unmanaged = {
-                "version": 1,
-                "deployment_profile": app_config.deployment.profile.value,
-                "governance_state": exc.code,
-            }
-        if tool_plane_effective is not None:
-            tool_plane_runtime = resolve_tool_plane_runtime(
-                app_config,
-                tool_plane_effective,
-            )
-
-    revision = None
-    for attempt in range(3):
-        resolved_app_config = app_config if tool_plane_runtime is None else tool_plane_runtime.app_config
-        revision = await _resolve_agent_revision_cancellation_safe(
-            config,
-            app_config=resolved_app_config,
-            user_id=principal.user_id,
-            governed_tool_plane_digest=(None if tool_plane_effective is None else tool_plane_effective.effective_digest),
-            governed_mcp_tool_allowlists=(None if tool_plane_runtime is None else tool_plane_runtime.allowed_mcp_tools_by_server),
-        )
-        if tool_plane_effective is None:
-            break
-        assert tool_plane_actor is not None
-        try:
-            confirmed = await tool_plane_service.effective_for_actor(tool_plane_actor)
-        except (Exception, asyncio.CancelledError):
-            if revision.material is not None:
-                try:
-                    await _release_process_material_bounded(revision.material)
-                except asyncio.CancelledError:
-                    pass
-            raise
-        if confirmed.effective_digest == tool_plane_effective.effective_digest:
-            tool_plane_effective = confirmed
-            tool_plane_revision = confirmed.to_json()
-            break
-        if revision.material is not None:
-            await _release_process_material_bounded(revision.material)
-        revision = None
-        tool_plane_effective = confirmed
-        tool_plane_runtime = resolve_tool_plane_runtime(app_config, confirmed)
-    else:
-        raise ToolPlaneRevisionError("revision_conflict")
-    if revision is None:  # pragma: no cover - bounded loop invariant
-        raise RuntimeError("accepted agent revision resolution failed")
-    if revision.material is None:  # pragma: no cover - resolver contract
-        raise RuntimeError("accepted agent revision is missing captured material")
-    from deerflow.config.execution_policy_config import ExecutionPolicyConfig
-    from deerflow.runtime.execution_policy import (
-        ToolEquivalenceKeyring,
-        local_ephemeral_keyring,
-        resolve_execution_budget,
-    )
-
-    execution_policy_config = getattr(app_config, "execution_policy", None)
-    if not isinstance(execution_policy_config, ExecutionPolicyConfig):
-        execution_policy_config = ExecutionPolicyConfig()
-    execution_policy_keyring = getattr(
-        app_state,
-        "execution_policy_keyring",
-        None,
-    )
-    if not isinstance(execution_policy_keyring, ToolEquivalenceKeyring):
-        if getattr(app_state, "execution_policy_restart_qualified", False) is True:
-            raise RuntimeError("policy_equivalence_key_unavailable")
-        execution_policy_keyring = local_ephemeral_keyring()
-    requested_budget = runtime_context.get("execution_budget")
-    if requested_budget is not None and not isinstance(requested_budget, Mapping):
-        raise ValueError("execution budget request must be an object")
-    execution_budget = resolve_execution_budget(
-        execution_policy_config,
-        keyring=execution_policy_keyring,
-        max_recursion_limit=int(getattr(app_config, "max_recursion_limit", 1000)),
-        non_interactive=runtime_context.get("non_interactive") is True,
-        requested_limits=requested_budget,
-    )
-    # The accepted Kind's egress is declared here, like its budget: the
-    # operator ceiling narrowed by an optional caller request, sealed into the
-    # runtime identity, and rendered by the Material rather than granted to a
-    # container later.
-    from deerflow.sandbox.egress import resolve_egress_allowance
-
-    requested_egress = runtime_context.get("egress_allowance")
-    if requested_egress is not None and not isinstance(requested_egress, Mapping):
-        raise ValueError("egress allowance request must be an object")
-    egress_allowance = resolve_egress_allowance(
-        getattr(execution_policy_config, "accepted_egress", None),
-        requested=requested_egress,
-    )
-    # Publish the process-local lease into the already-scrubbed host context as
-    # soon as it exists. The normalizer releases it if a later contributor or
-    # sealing step fails before a PreparedLaunch can transfer ownership.
-    runtime_context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = revision.material
-    config["context"] = runtime_context
-
-    public_principal = PrincipalProjectionV1(
-        user_id=principal.user_id,
-        role=principal.role,
-        oauth_provider=principal.oauth_provider,
-        oauth_id=principal.oauth_id,
-        channel_user_id=principal.channel_user_id,
-        is_internal=principal.is_internal,
-        identity=principal.identity,
-    )
-    public_origin_references = _origin_request_references(base_references)
-    origin_contributor_references = (
-        *origin_persistable,
-        *origin_runtime_only,
-        *origin_secret_handles,
-    )
-    final_origin_digest = canonical_digest(
-        {
-            "version": 1,
-            "source_kind": origin.source_kind,
-            "references": [
-                {
-                    "key": reference.key,
-                    "value": reference.value,
-                    "storage_class": reference.storage_class,
-                    "purpose": reference.purpose,
-                }
-                for reference in public_origin_references
-            ],
-            "contributor_references": [reference.to_json() for reference in origin_contributor_references],
-        }
-    )
-    public_origin = SealedOriginV1(
-        source_kind=origin.source_kind,
-        references=public_origin_references,
-        digest=final_origin_digest,
-        contributor_references=origin_contributor_references,
-    )
-    if contributor_host is None:
-        context_contributions = SimpleNamespace(
-            persistable=(),
-            runtime_only=(),
-            secret_handles=(),
-            execution_digest=empty_contributor_digest,
-            diagnostics=(),
-        )
-    else:
-        try:
-            context_contributions = await contributor_host.contribute_run_context(
-                RunContextContributionRequestV1(
-                    principal=public_principal,
-                    origin=public_origin,
-                    thread_id=intent.thread_id,
-                    agent_revision=ResolvedAgentRevisionReferenceV1(
-                        agent_id=revision.agent_id,
-                        digest=revision.digest,
-                    ),
-                    external_key_reference=(normalize_external_key(intent.external_key) if intent.external_key is not None else None),
-                    tenant=tenant_reference,
-                )
-            )
-        except (Exception, asyncio.CancelledError):
-            try:
-                await _release_unattached_agent_material(config)
-            except asyncio.CancelledError:
-                pass
-            raise
-    for diagnostic in context_contributions.diagnostics:
-        logger.warning(
-            "Optional invocation contributor omitted capability_id=%s contribution_id=%s diagnostic_code=%s error_class=%s correlation_id=%s",
-            diagnostic.capability_id,
-            diagnostic.contribution_id,
-            diagnostic.diagnostic_code,
-            diagnostic.error_class,
-            diagnostic.correlation_id,
-        )
-    context_persistable, context_runtime_only, context_secret_handles = _trusted_contribution_references(
-        context_contributions,
-        capability_kind="run_context_contributor",
-    )
-
-    contributor_execution_digest = canonical_digest(
-        {
-            "version": 1,
-            "origin": origin_contributions.execution_digest,
-            "run_context": context_contributions.execution_digest,
-        }
-    )
-    context_references = {
-        key: runtime_context[key]
-        for key in (
-            "non_interactive",
-            "is_plan_mode",
-            "subagent_enabled",
-            "max_concurrent_subagents",
-            "max_total_subagents",
-        )
-        if key in runtime_context
-    }
-    extensions = getattr(app_state, "extensions", None)
-    extension_generation = int(getattr(extensions, "generation", 0))
-    extension_artifact_manifest_digest = getattr(
-        extensions,
-        "artifact_manifest_digest",
-        None,
-    )
-    extension_configuration_digest = getattr(
-        extensions,
-        "extension_configuration_digest",
-        None,
-    )
-    capability_manifest = getattr(app_state, "capability_manifest", None)
-    extension_manifest_digest = getattr(capability_manifest, "digest", None)
-    if principal.identity is None:  # pragma: no cover - new acceptance contract
-        raise RuntimeError("accepted principal is missing split identity")
-    model_profile = revision.material.model_profile
-    profile_id = str(model_profile.get("name") or "default")
-    external_key_reference = normalize_external_key(intent.external_key) if intent.external_key is not None else None
-    trusted_context = TrustedRunContextV1(
-        identity=principal.identity,
-        credential=credential_evidence,
-        tenant=tenant_reference,
-        origin=public_origin,
-        thread_id=intent.thread_id,
-        external_key_reference=external_key_reference,
-        agent_revision=ResolvedAgentRevisionReferenceV1(
-            agent_id=revision.agent_id,
-            digest=revision.digest,
-        ),
-        profile_revision=ResolvedProfileRevisionReferenceV1(
-            profile_id=profile_id,
-            digest=canonical_digest({"version": 1, "model_profile": model_profile}),
-        ),
-        extension_generation=extension_generation,
-        extension_manifest_digest=extension_manifest_digest,
-        extension_artifact_manifest_digest=extension_artifact_manifest_digest,
-        extension_configuration_digest=extension_configuration_digest,
-        persistable_references=(*origin_persistable, *context_persistable),
-        runtime_only_references=(*origin_runtime_only, *context_runtime_only),
-        secret_handles=(*origin_secret_handles, *context_secret_handles),
-    )
-    accepted = AcceptedInvocation.seal(
-        principal=principal,
-        origin=origin,
-        thread_id=intent.thread_id,
-        context_references=context_references,
-        agent_revision=revision,
-        normalized_input=({"resume": canonical_request_value(intent.command["resume"])} if intent.command and intent.command.get("resume") is not None else canonical_request_value(graph_input)),
-        execution_options={
-            "multitask_strategy": intent.multitask_strategy,
-            "interrupt_before": intent.interrupt_before,
-            "interrupt_after": intent.interrupt_after,
-            "checkpoint_id": intent.checkpoint_id,
-            "recursion_limit": config.get("recursion_limit"),
-        },
-        extension_generation=extension_generation,
-        extension_manifest_digest=extension_manifest_digest,
-        extension_artifact_manifest_digest=extension_artifact_manifest_digest,
-        extension_configuration_digest=extension_configuration_digest,
-        tool_plane_revision=tool_plane_revision,
-        tool_plane_unmanaged=tool_plane_unmanaged,
-        execution_budget=execution_budget,
-        egress_allowance=egress_allowance,
-        contributor_execution_digest=contributor_execution_digest,
-        tenant=tenant_reference,
-        trusted_context=trusted_context,
-    )
-    # Required admission audit is written before the accepted plan can reach
-    # the durable run manager. Production construction always installs this
-    # repository; the attribute-absent case preserves private direct-call
-    # harnesses that do not construct a full Gateway application.
-    if app_state is not None and hasattr(app_state, "credential_audit_repo"):
-        from deerflow.persistence.credential_audit import (
-            CredentialAuditUnavailable,
-        )
-
-        credential_audit_repo = getattr(
-            app_state,
-            "credential_audit_repo",
-            None,
-        )
-        if credential_audit_repo is None:
-            raise CredentialAuditUnavailable()
-        verified_actor = trusted_context.verified_actor
-        if verified_actor is None:  # pragma: no cover - constructor invariant
-            raise RuntimeError("credential_evidence_unavailable")
-        try:
-            await credential_audit_repo.record(
-                method=credential_evidence.method,
-                action="admission",
-                credential_ref=credential_evidence.credential_ref,
-                actor_digest=verified_actor.digest,
-                authority_digest=(credential_evidence.effective_authority_digest),
-                route_category="runs",
-            )
-        except Exception as exc:
-            raise CredentialAuditUnavailable() from exc
-    elif isinstance(request, Request):
-        from deerflow.persistence.credential_audit import (
-            CredentialAuditUnavailable,
-        )
-
-        raise CredentialAuditUnavailable()
-    # These objects are server-owned and installed after all caller context is
-    # scrubbed. The worker and delegated subagents inherit the same accepted
-    # revision/generation for construction and audit.
-    runtime_context[RESOLVED_AGENT_MATERIAL_CONTEXT_KEY] = revision.material
-    runtime_context[TENANT_REFERENCE_CONTEXT_KEY] = tenant_reference
-    runtime_context["accepted_agent_revision_digest"] = revision.digest
-    runtime_context["accepted_extension_generation"] = extension_generation
-    if extension_manifest_digest is not None:
-        runtime_context["accepted_extension_manifest_digest"] = extension_manifest_digest
-    if extension_artifact_manifest_digest is not None:
-        runtime_context["accepted_extension_artifact_manifest_digest"] = extension_artifact_manifest_digest
-    if extension_configuration_digest is not None:
-        runtime_context["accepted_extension_configuration_digest"] = extension_configuration_digest
-    if accepted.tool_plane_revision is not None:
-        runtime_context["accepted_tool_plane_revision"] = accepted.tool_plane_revision
-    if accepted.tool_plane_unmanaged is not None:
-        runtime_context["accepted_tool_plane_unmanaged"] = accepted.tool_plane_unmanaged
-    if accepted.execution_budget is not None:
-        runtime_context["accepted_execution_budget"] = accepted.execution_budget
-        runtime_context["execution_policy_keyring"] = execution_policy_keyring
-    if accepted.egress_allowance is not None:
-        runtime_context["accepted_egress_allowance"] = accepted.egress_allowance
-    config["context"] = runtime_context
-    return accepted
-
-
-async def _release_unattached_agent_material(config: dict[str, Any]) -> None:
-    """Release a process-local snapshot lease that never reached a worker."""
-    runtime_context = config.get("context")
-    material = runtime_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY) if isinstance(runtime_context, dict) else None
-    if isinstance(material, ResolvedAgentMaterialV1):
-        runtime_context.pop(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY, None)
-        await _release_process_material_bounded(material)
-
-
-class _GatewayLaunchNormalizer:
-    """Translate a finite internal intent into the current Gateway run plan."""
-
-    def __init__(
-        self,
-        request: Request,
-        *,
-        trust_internal_launch_facts: bool = False,
-    ) -> None:
-        self._request = request
-        self._trust_internal_launch_facts = trust_internal_launch_facts
-        self._identified: dict[int, tuple[InternalLaunchIntent, InternalAdmissionIdentity]] = {}
-        tenant_identity = getattr(
-            getattr(getattr(request, "app", None), "state", None),
-            "tenant_identity",
-            None,
-        )
-        if not isinstance(tenant_identity, TenantIdentityV1):
-            raise RuntimeError("Gateway tenant identity was not resolved during application construction")
-        self._tenant = tenant_identity.to_persisted_reference()
-
-    def _owner_user_id(self, intent: InternalLaunchIntent) -> str | None:
-        if self._trust_internal_launch_facts and intent.source_kind in {
-            InternalSourceKind.scheduled_task,
-            InternalSourceKind.native_channel,
-            InternalSourceKind.service,
-        }:
-            return intent.owner_user_id
-        return get_trusted_internal_owner_user_id(self._request)
-
-    @staticmethod
-    def _validate_native_channel_facts(
-        intent: InternalLaunchIntent,
-    ) -> InternalNativeChannelFacts:
-        facts = intent.native_channel
-        if facts is None or not facts.provider or not facts.chat_id or not facts.channel_user_id:
-            raise ValueError("native channel launch requires authenticated provider, chat, and sender facts")
-        if facts.resolved_assistant_id != intent.assistant_id:
-            raise ValueError("native channel launch assistant does not match its resolved route")
-        context = intent.context or {}
-        if context.get("channel_user_id") != facts.channel_user_id:
-            raise ValueError("native channel launch sender does not match its authenticated source facts")
-        if context.get("channel_name") not in (None, facts.provider):
-            raise ValueError("native channel launch provider does not match its authenticated source facts")
-        if context.get("agent_name") != facts.resolved_agent_name:
-            raise ValueError("native channel launch agent does not match its resolved route")
-        binding = facts.verified_binding
-        if binding is not None:
-            if binding.kind is InternalVerifiedNativeBindingKind.connection:
-                if not facts.connection_id or binding.reference != facts.connection_id:
-                    raise ValueError("native channel connection binding conflicts with its verified source facts")
-            elif binding.kind is InternalVerifiedNativeBindingKind.webhook_route:
-                if facts.connection_id is not None:
-                    raise ValueError("native channel launch has conflicting verified binding sources")
-            else:  # pragma: no cover - enum construction is closed
-                raise ValueError("native channel launch has an unsupported verified binding")
-        if intent.external_key is not None and binding is None:
-            raise ValueError("keyed native-channel admission requires a verified source binding")
-        return facts
-
-    def _metadata(self, intent: InternalLaunchIntent) -> dict[str, Any]:
-        metadata = thaw_host_value(intent.metadata or {})
-        if not self._trust_internal_launch_facts or intent.source_kind is not InternalSourceKind.scheduled_task:
-            return metadata
-        if not intent.trusted_task_id or not intent.task_run_id or intent.scheduled_trigger not in {"scheduled", "manual"}:
-            raise ValueError("scheduled task launch requires trusted task, occurrence, and trigger facts")
-        metadata.update(
-            scheduled_task_id=intent.trusted_task_id,
-            scheduled_task_run_id=intent.task_run_id,
-            scheduled_trigger=intent.scheduled_trigger,
-        )
-        return metadata
-
-    @contextmanager
-    def scope(self, intent: InternalLaunchIntent) -> Iterator[None]:
-        owner_user_id = self._owner_user_id(intent)
-        token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
-        try:
-            yield
-        finally:
-            cached = self._identified.get(id(intent))
-            if cached is not None and cached[0] is intent:
-                self._identified.pop(id(intent), None)
-            if token is not None:
-                reset_current_user(token)
-
-    async def identify(self, intent: InternalLaunchIntent) -> InternalAdmissionIdentity | None:
-        if intent.external_key is None:
-            return None
-        _validate_keyed_request_shape(intent)
-        try:
-            external_key = normalize_external_key(intent.external_key)
-            owner_user_id = self._owner_user_id(intent)
-            principal = await _principal_projection_for_intent(
-                self._request,
-                intent,
-                owner_user_id=owner_user_id,
-            )
-            if intent.source_kind is InternalSourceKind.http:
-                subject_id = principal.user_id
-                if subject_id is None:
-                    raise ValueError("keyed HTTP admission requires an authenticated server subject")
-                auth_source = getattr(getattr(self._request, "state", None), "auth_source", None)
-                configured_kind = getattr(getattr(self._request, "state", None), "principal_kind", None)
-                if auth_source == AUTH_SOURCE_AUTH_DISABLED:
-                    principal_kind = "default-user"
-                elif configured_kind in {"user", "service"}:
-                    principal_kind = configured_kind
-                else:
-                    principal_kind = "service" if principal.role == "service" else "user"
-                external_scope = scope_for_http(principal_kind, subject_id)
-            elif intent.source_kind is InternalSourceKind.native_channel:
-                facts = self._validate_native_channel_facts(intent)
-                binding = facts.verified_binding
-                if binding is None:  # guarded by _validate_native_channel_facts
-                    raise ValueError("keyed native-channel admission requires a verified source binding")
-                external_scope = scope_for_channel(
-                    facts.provider,
-                    binding.reference,
-                    facts.workspace_id or "",
-                    facts.chat_id,
-                    binding_kind=binding.kind.value,
-                )
-            elif intent.source_kind is InternalSourceKind.scheduled_task:
-                self._metadata(intent)
-                if owner_user_id is not None:
-                    scope_owner = owner_user_id
-                elif intent.scheduled_system_owned:
-                    scope_owner = SYSTEM_TASK_OWNER
-                else:
-                    raise ValueError("keyed scheduled admission requires a persisted owner")
-                external_scope = scope_for_scheduler(scope_owner, str(intent.trusted_task_id))
-            elif intent.source_kind is InternalSourceKind.service:
-                if not self._trust_internal_launch_facts or not intent.trusted_service_id or principal.user_id != intent.trusted_service_id or principal.role != "service":
-                    raise ValueError("service admission requires one matching authenticated service identity")
-                external_scope = scope_for_service(intent.trusted_service_id)
-            else:  # pragma: no cover - closed enum
-                raise ValueError(f"unsupported invocation source {intent.source_kind}")
-            if self._tenant is not None:
-                external_scope = tenant_admission_scope(
-                    self._tenant,
-                    external_scope,
-                )
-        except OwnerRefusedLaunchError:
-            # Not a malformed request: its owner is turned off, and the
-            # caller ends the queued work on this rather than retry it.
-            raise
-        except ValueError as exc:
-            if intent.source_kind is InternalSourceKind.http:
-                raise _keyed_request_error(str(exc)) from exc
-            raise
-        identity = InternalAdmissionIdentity(
-            external_scope=external_scope,
-            external_key=external_key,
-            principal_digest=canonical_digest({"version": 1, "principal": principal.to_json()}),
-            base_origin_digest=_base_origin_digest(intent),
-            thread_id=intent.thread_id if intent.thread_id_explicit else None,
-            requested_agent_id=_requested_agent_id(intent),
-            caller_intent=_canonical_caller_intent(intent),
-            user_id=principal.user_id,
-            principal=_invocation_principal_from_projection(principal),
-        )
-        # Retain the intent object alongside its identity: a strong reference
-        # prevents Python from recycling the object ID before normalization.
-        self._identified[id(intent)] = (intent, identity)
-        return identity
-
-    async def validate_replay(
-        self,
-        intent: InternalLaunchIntent,
-        identity: InternalAdmissionIdentity,
-        record: RunRecord,
-    ) -> None:
-        cached = self._identified.get(id(intent))
-        if cached is not None and cached[0] is intent:
-            self._identified.pop(id(intent), None)
-        accepted = record.accepted_invocation
-        if accepted is None:
-            raise IdempotencyConflictError("The retained run has no accepted invocation evidence")
-        if identity.principal_digest != accepted.principal_digest:
-            raise IdempotencyConflictError("Idempotency key has contradictory authenticated principal evidence")
-        if identity.base_origin_digest != accepted.base_origin_digest:
-            facts = intent.native_channel
-            accepted_references = accepted.origin.references
-            legacy_connection_evidence = (
-                intent.source_kind is InternalSourceKind.native_channel
-                and facts is not None
-                and facts.verified_binding is not None
-                and facts.verified_binding.kind is InternalVerifiedNativeBindingKind.connection
-                and "binding_kind" not in accepted_references
-                and "binding_reference" not in accepted_references
-                and _base_origin_digest(intent, include_verified_binding=False) == accepted.base_origin_digest
-            )
-            if not legacy_connection_evidence:
-                raise IdempotencyConflictError("Idempotency key has contradictory authenticated source evidence")
-        if identity.thread_id is not None and identity.thread_id != record.thread_id:
-            raise IdempotencyConflictError("Idempotency key is bound to a different thread")
-        caller_intent = identity.caller_intent
-        stored_caller_intent = record.caller_intent_json
-        if caller_intent is None or not isinstance(stored_caller_intent, Mapping):
-            raise IdempotencyConflictError("The retained run predates canonical caller-intent evidence")
-        try:
-            persisted = CanonicalCallerIntent.from_persisted(stored_caller_intent)
-        except (TypeError, ValueError) as exc:
-            raise IdempotencyConflictError("The retained run has invalid caller-intent evidence") from exc
-        if record.caller_intent_digest_version != caller_intent.digest_version or record.caller_intent_digest != caller_intent.digest or persisted.digest != record.caller_intent_digest:
-            raise IdempotencyConflictError("Idempotency key was already used for a different request")
-
-    async def normalize(self, intent: InternalLaunchIntent) -> PreparedLaunch:
-        cached = self._identified.pop(id(intent), None)
-        identity = cached[1] if cached is not None and cached[0] is intent else None
-        if self._trust_internal_launch_facts and intent.source_kind is InternalSourceKind.native_channel:
-            self._validate_native_channel_facts(intent)
-        try:
-            validate_thread_id(intent.thread_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        metadata = self._metadata(intent)
-        # Trace IDs are server-owned. Replace any caller-supplied value before
-        # the metadata forks into the run record and live graph config.
-        metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
-        config_metadata = thaw_host_value(intent.config.get("metadata")) if isinstance(intent.config, Mapping) else None
-        try:
-            validate_run_metadata_secrets(metadata)
-            validate_run_metadata_secrets(config_metadata)
-        except LegacyRunMetadataSecretError as exc:
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
-
-        stream_modes = normalize_stream_modes(thaw_host_value(intent.stream_mode))
-        bridge = get_stream_bridge(self._request)
-        run_mgr = get_run_manager(self._request)
-        run_ctx = get_run_context(self._request)
-        disconnect = DisconnectMode.cancel if intent.on_disconnect == "cancel" else DisconnectMode.continue_
-
-        body_context = intent.context or {}
-        model_name = body_context.get("model_name")
-        if model_name is not None:
-            try:
-                model_name = validate_model_profile_identifier(model_name, field_name="context.model_name profile identifier")
-            except ValueError as exc:
-                raise HTTPException(status_code=422, detail=str(exc)) from exc
-        # Validate model against the allowlist when a model_name is provided.
-        if model_name and get_app_config().get_model_config(model_name) is None:
+    # Validate model against the allowlist when a model_name is provided.
+    if model_name:
+        app_config = get_app_config()
+        resolved = app_config.get_model_config(model_name)
+        if resolved is None:
             raise HTTPException(
                 status_code=400,
                 detail=f"Model {model_name!r} is not in the configured model allowlist",
             )
 
-        owner_user_id = self._owner_user_id(intent)
-        require_existing_thread = intent.require_existing_thread
-        # Stateless run endpoints carry thread_id in the request *body*, so the
-        # @require_permission(owner_check=True) decorator -- which resolves
-        # ownership from the path param -- cannot protect them. Enforce thread
-        # ownership before admission. Internal channel runs act on behalf of the
-        # connection owner carried in X-DeerFlow-Owner-User-Id, so they remain
-        # scoped exclusively to that owner instead of inheriting the internal
-        # carrier account's thread access.
-        user = getattr(self._request.state, "user", None)
+    owner_user_id = get_trusted_internal_owner_user_id(request)
+    # Stateless run endpoints carry thread_id in the request *body*, so the
+    # @require_permission(owner_check=True) decorator -- which resolves ownership
+    # from the path param -- cannot protect them. Enforce thread ownership here,
+    # before any run is created, so one user cannot start runs on (or read /wait
+    # checkpoint state from) another user's thread. Missing rows (auto-created
+    # temp threads) and NULL-owner rows (shared / pre-auth data) stay accessible
+    # via check_access; only a thread already owned by another user is rejected
+    # with 404, matching thread_runs.py's anti-enumeration behaviour. Internal
+    # channel runs act on behalf of the connection owner carried in
+    # X-DeerFlow-Owner-User-Id, so they are scoped to that owner instead of
+    # bypassing the check -- a leaked internal token must not grant cross-user
+    # thread access.
+    user = getattr(request.state, "user", None)
+
+    async def thread_access_allowed() -> bool:
         if user is None:
-            allowed = not require_existing_thread or await run_ctx.thread_store.get(intent.thread_id) is not None
-        else:
-            access_owner_user_id = owner_user_id if owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE else str(user.id)
+            if not require_existing_thread:
+                return True
+            return await run_ctx.thread_store.get(thread_id) is not None
+        allowed = await run_ctx.thread_store.check_access(
+            thread_id,
+            str(user.id),
+            require_existing=require_existing_thread,
+        )
+        if not allowed and owner_user_id and getattr(user, "system_role", None) == INTERNAL_SYSTEM_ROLE:
+            # Channel workers may also act for the connection owner named in
+            # the trusted header (e.g. claiming a legacy default-owned channel
+            # thread for its real owner).
             allowed = await run_ctx.thread_store.check_access(
-                intent.thread_id,
-                access_owner_user_id,
+                thread_id,
+                owner_user_id,
                 require_existing=require_existing_thread,
             )
-        if not allowed:
-            raise HTTPException(status_code=404, detail=f"Thread {intent.thread_id} not found")
+        return allowed
 
-        agent_factory = resolve_agent_factory(intent.assistant_id)
-        is_internal_caller = getattr(getattr(self._request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
-        if intent.command and intent.command.get("resume") is not None:
-            graph_input = Command(resume=thaw_host_value(intent.command["resume"]))
+    if not await thread_access_allowed():
+        raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+
+    owner_context_token = set_current_user(SimpleNamespace(id=owner_user_id)) if owner_user_id else None
+    try:
+        is_internal_caller = getattr(getattr(request, "state", None), "auth_source", None) == AUTH_SOURCE_INTERNAL
+        # Validate even when resume takes precedence, so ignored input cannot
+        # appear to have been admitted or persist as unchecked run audit data.
+        normalized_input = normalize_input(body.input, trusted_internal=is_internal_caller)
+        agent_factory = resolve_agent_factory(body.assistant_id)
+        command = getattr(body, "command", None)
+        if command and command.get("resume") is not None:
+            graph_input = Command(resume=command["resume"])
         else:
-            graph_input = normalize_input(
-                thaw_host_value(intent.input),
-                trusted_internal=is_internal_caller,
-            )
-        config = build_run_config(
-            intent.thread_id,
-            thaw_host_value(intent.config),
-            metadata,
-            assistant_id=intent.assistant_id,
-        )
-        await apply_checkpoint_to_run_config(
-            config,
-            body=intent,
-            thread_id=intent.thread_id,
-            request=self._request,
-        )
-        # Merge DeerFlow-specific context overrides into both ``configurable``
-        # and ``context``. Only agent-relevant keys are forwarded.
-        merge_run_context_overrides(config, intent.context, internal=is_internal_caller)
-        # Accepted durable workers install the opaque marker later, after
-        # accepted context has been rebuilt. No request channel owns it.
-        strip_server_owned_assembly_context(config)
+            graph_input = normalized_input
+        # deerflow_trace_id is server-issued, so the caller's value is replaced
+        # here at the trust boundary. body.metadata forks two ways -- through
+        # build_run_config into config["metadata"], which the run worker
+        # restamps, and through create_or_reject into the run record, which the
+        # runs API echoes verbatim. Only the first is covered downstream, so
+        # without this the run record is the one surface that persists a forged
+        # id, disagreeing with the response header, the logs, and the
+        # checkpoint. The caller's own metadata keys are preserved.
+        run_metadata = dict(body.metadata) if isinstance(body.metadata, dict) else {}
+        run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
+
+        config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
+        await apply_checkpoint_to_run_config(config, body=body, thread_id=thread_id, request=request)
+
+        # Merge DeerFlow-specific context overrides into both ``configurable`` and ``context``.
+        # The ``context`` field is a custom extension for the langgraph-compat layer
+        # that carries agent configuration (model_name, thinking_enabled, etc.).
+        # Only agent-relevant keys are forwarded; unknown keys (e.g. thread_id) are ignored.
+        merge_run_context_overrides(config, getattr(body, "context", None), internal=is_internal_caller)
         if not is_internal_caller:
-            # ``intent.config`` is free-form and copied by ``build_run_config``;
-            # scrub any internal-only keys smuggled there.
+            # ``body.config`` is free-form and copied verbatim by
+            # ``build_run_config``; scrub internal-only keys smuggled there.
             strip_internal_context_keys(config)
-        internal_owner_user = await resolve_trusted_internal_owner_for_attribution(
-            self._request,
-            owner_user_id,
+
+        replay_kind = run_metadata.get("replay_kind")
+        target_message_id = run_metadata.get("regenerate_from_message_id")
+        scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
+        current_human_message = _current_human_message(graph_input)
+        current_message_has_scope = current_human_message is not None and KNOWLEDGE_SCOPE_KEY in current_human_message.additional_kwargs
+        replay_requires_scope_recovery = isinstance(graph_input, Command) or (isinstance(target_message_id, str) and bool(target_message_id) and (replay_kind != "edit" or not current_message_has_scope))
+        is_human_input_response = current_human_message is not None and "human_input_response" in current_human_message.additional_kwargs
+        # Clarification and edit-replay messages may intentionally replace the
+        # source scope. If either client omits its current selector snapshot,
+        # inherit the source turn's authoritative scope instead of widening the
+        # run to every operator-approved dataset. Other replay paths always use
+        # server recovery regardless of client input.
+        is_scope_recovery = replay_requires_scope_recovery or (is_human_input_response and not current_message_has_scope)
+        recovery_scope = (
+            await _recover_run_knowledge_scope(
+                request,
+                thread_id=thread_id,
+                target_message_id=(target_message_id if isinstance(target_message_id, str) else None),
+            )
+            if is_scope_recovery
+            else None
         )
+        # Match lead-agent assembly: runtime context overrides configurable.
+        # Older API/channel callers may name an agent through context while
+        # retaining lead_agent as their routing assistant ID.
+        scope_runtime_config = dict(config.get("configurable") or {})
+        if isinstance(config.get("context"), dict):
+            scope_runtime_config.update(config["context"])
+        scope_assistant_id = scope_runtime_config.get("agent_name") or _DEFAULT_ASSISTANT_ID
+        # Bootstrap assembly intentionally does not load an agent config: the
+        # new agent may not exist yet and setup_agent creates its definition.
+        agent_config = (
+            await _load_scope_agent_config(
+                assistant_id=scope_assistant_id,
+                user_id=owner_user_id or (str(user.id) if user is not None else None),
+            )
+            if not scope_runtime_config.get("is_bootstrap")
+            else None
+        )
+        # Keep the pre-default identity even when the agent is initially
+        # unbound: adding a default must not reject an already-accepted retry.
+        # The durable input still exposes the original accepted scope.
+        request_input = _canonical_run_record_input(body.input, graph_input) if idempotency_key else None
+        knowledge_default_request_hash = hashlib.sha256(json.dumps(request_input, sort_keys=True, ensure_ascii=False).encode()).hexdigest() if idempotency_key else None
+        accepts_knowledge_default = not is_scope_recovery and not current_message_has_scope and knowledge_default_request_hash is not None
+        admitted_knowledge_scope = admit_message_knowledge_scope(
+            scope_graph_input,
+            assistant_id=scope_assistant_id,
+            app_config=run_ctx.app_config or get_app_config(),
+            agent_config=agent_config,
+            recovery_scope=recovery_scope,
+            recovery=is_scope_recovery,
+        )
+        if admitted_knowledge_scope is not None:
+            await _validate_scope_thread_binding(
+                run_ctx,
+                thread_id=thread_id,
+                assistant_id=body.assistant_id,
+            )
+        run_record_input = _canonical_run_record_input(body.input, graph_input)
+
+        internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
         inject_authenticated_user_context(
             config,
-            self._request,
+            request,
             internal_owner_user=internal_owner_user,
-            request_context=intent.context,
+            request_context=getattr(body, "context", None),
         )
-        if not is_internal_caller:
-            # External agent/config values remain hints until this server-side
-            # route resolution. A body/config value cannot stamp the accepted
-            # agent revision independently of assistant_id.
-            resolved_agent_name = intent.assistant_id if intent.assistant_id not in (None, _DEFAULT_ASSISTANT_ID) else None
-            resolved_bootstrap = False
-            if resolved_agent_name is None and body_context.get("is_bootstrap") is True:
-                try:
-                    resolved_agent_name = validate_agent_name(body_context.get("agent_name"))
-                except ValueError as exc:
-                    raise HTTPException(status_code=422, detail=str(exc)) from exc
-                resolved_bootstrap = resolved_agent_name is not None
-            for section_name in ("context", "configurable"):
-                section = config.get(section_name)
-                if not isinstance(section, dict):
-                    continue
-                section.pop("agent_name", None)
-                section["is_bootstrap"] = resolved_bootstrap
-                if resolved_agent_name is not None:
-                    section["agent_name"] = resolved_agent_name
 
-        recovery_payload_json: dict[str, object] | None = None
-        if run_mgr.admission_recovery_policy is RecoveryPolicy.exact_two_takeover_v1:
-            try:
-                if isinstance(graph_input, Command):
-                    input_kind = "command_resume"
-                    recovery_input = graph_input.resume
-                else:
-                    input_kind = "graph"
-                    recovery_input = _recovery_graph_input_value(graph_input)
-                recovery_payload_json = ExecutionRecoveryPayloadV1(
-                    input_kind=input_kind,
-                    input_value=recovery_input,
-                    config=project_execution_recovery_config(config),
-                    stream_modes=tuple(stream_modes),
-                    stream_subgraphs=intent.stream_subgraphs,
-                    interrupt_before=thaw_host_value(
-                        intent.interrupt_before,
-                    ),
-                    interrupt_after=thaw_host_value(
-                        intent.interrupt_after,
-                    ),
-                ).to_persisted()
-            except (TypeError, ValueError) as exc:
-                # Exact-two recovery cannot silently replay a secret-stripped
-                # or semantically lossy request. Refuse before accepted
-                # material or a durable run row exists.
-                raise HTTPException(
-                    status_code=422,
-                    detail=str(exc),
-                ) from exc
+        conversation_references = list(getattr(body, "conversation_references", None) or [])
+        if conversation_references:
+            from app.gateway.conversation_access import prepare_conversation_reader
 
-        try:
-            accepted_invocation = await _seal_accepted_invocation(
-                request=self._request,
-                intent=intent,
-                config=config,
-                graph_input=graph_input,
-                owner_user_id=owner_user_id,
-                run_ctx=run_ctx,
+            prepared = prepare_conversation_reader(
+                conversation_references,
+                request=request,
+                user_id=owner_user_id or (str(user.id) if user is not None else None),
+                run_context=run_ctx,
+                run_manager=run_mgr,
+                app_config=get_app_config(),
             )
-        except Exception:
-            await _release_unattached_agent_material(config)
-            raise
-        # Start authorization receives a canonical digest for every launch,
-        # including unkeyed calls. Only keyed admission persists the internal
-        # projection and uses it for replay comparison.
-        try:
-            effective_execution = _effective_execution_projection(
-                intent,
-                accepted=accepted_invocation,
-                graph_input=graph_input,
-                config=config,
-            )
-        except Exception:
-            await _release_unattached_agent_material(config)
-            raise
-        caller_intent = identity.caller_intent if identity is not None else None
+            reader, source_ids = prepared
+            run_ctx = replace(run_ctx, conversation_reader=reader)
+            if isinstance(graph_input, dict):
+                # Keep this endpoint's list-only wire contract even though
+                # message admission canonicalizes single-message shorthand.
+                raw_messages = (body.input or {}).get("messages")
+                if raw_messages is not None and not isinstance(raw_messages, list):
+                    raise HTTPException(status_code=422, detail="input.messages must be a list")
+                reference_messages = graph_input.get("messages")
+                if reference_messages is None:
+                    reference_messages = []
+                # ``normalize_input`` guarantees a list here. The raw-input
+                # check above is the authoritative list-only wire validation.
+                # Reference IDs are user-selected data. Keep them out of the
+                # system prompt and grant no authority from this persisted hint.
+                graph_input = {
+                    **graph_input,
+                    "messages": [
+                        *reference_messages,
+                        HumanMessage(
+                            content="Read-only conversation references for this run: " + json.dumps(source_ids),
+                            additional_kwargs={"hide_from_ui": True},
+                        ),
+                    ],
+                }
+        # Resolve and pin the thread's project context once per run (spec
+        # §7.1): middlewares and tools read only this server-owned snapshot —
+        # nothing re-resolves membership mid-run, and admission never writes
+        # membership (§10.7). Resolution failure degrades to unassigned with a
+        # warning inside the resolver; it never fails the run.
+        project_context = await resolve_project_context(
+            run_ctx.thread_store,
+            getattr(request.app.state, "project_repo", None),
+            thread_id,
+            getattr(request.app.state, "project_document_repo", None),
+        )
+        if project_context is not None:
+            config["context"][PROJECT_CONTEXT_KEY] = project_context
 
-        entered_run_agent = False
-
-        async def run_after_metadata_body(record: RunRecord) -> None:
-            nonlocal entered_run_agent
-            requires_owned_metadata = bool(owner_user_id or getattr(record, "user_id", None))
+        async def run_after_metadata(record: RunRecord) -> None:
             metadata_task = asyncio.create_task(
                 _ensure_thread_metadata(
                     run_ctx,
@@ -3143,104 +1980,94 @@ class _GatewayLaunchNormalizer:
             )
             abort_task = asyncio.create_task(record.abort_event.wait())
             metadata_failure_logged = False
-            startup_failure: str | None = None
-            abort_before_metadata = False
+            metadata_failure: Exception | None = None
+            metadata_record: dict[str, Any] | None = None
             try:
                 done, _ = await asyncio.wait(
                     (metadata_task, abort_task),
                     timeout=_THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
                     return_when=asyncio.FIRST_COMPLETED,
                 )
-                if abort_task in done:
-                    abort_before_metadata = True
-                elif metadata_task in done:
+                if metadata_task in done:
                     try:
-                        metadata_task.result()
+                        metadata_record = metadata_task.result()
                     except asyncio.CancelledError:
                         pass
-                    except _ThreadOwnershipConflict as exc:
-                        metadata_failure_logged = True
-                        _log_thread_metadata_failure(
-                            exc,
-                            code="thread_ownership_conflict",
-                            thread_id=intent.thread_id,
-                        )
-                        startup_failure = "Thread ownership conflict prevented execution"
                     except Exception as exc:
                         metadata_failure_logged = True
-                        _log_thread_metadata_failure(
-                            exc,
-                            code="thread_metadata_setup_failed",
-                            thread_id=intent.thread_id,
+                        metadata_failure = exc
+                        logger.warning(
+                            "Failed to ensure thread_meta for %s%s",
+                            sanitize_log_param(thread_id),
+                            "" if require_existing_thread else " (non-fatal)",
+                            exc_info=True,
                         )
-                        if require_existing_thread:
-                            startup_failure = str(exc)
-                        elif requires_owned_metadata:
-                            startup_failure = "Thread ownership metadata was unavailable before execution"
                 elif abort_task not in done:
-                    _log_thread_metadata_failure(
-                        TimeoutError("thread metadata setup deadline elapsed"),
-                        code="thread_metadata_setup_timeout",
-                        thread_id=intent.thread_id,
+                    logger.warning(
+                        "Timed out ensuring thread_meta for %s after %.1fs",
+                        sanitize_log_param(thread_id),
+                        _THREAD_METADATA_SETUP_TIMEOUT_SECONDS,
                     )
-                    if requires_owned_metadata or require_existing_thread:
-                        startup_failure = "Thread ownership metadata was unavailable before execution"
+                    if require_existing_thread:
+                        metadata_failure = TimeoutError("Timed out verifying existing thread metadata")
             finally:
                 if metadata_task.done():
-                    if not metadata_failure_logged:
-                        _log_thread_metadata_task_result(
-                            metadata_task,
-                            thread_id=intent.thread_id,
-                        )
+                    if metadata_record is None and not metadata_failure_logged:
+                        try:
+                            metadata_record = metadata_task.result()
+                        except asyncio.CancelledError:
+                            pass
+                        except Exception as exc:
+                            metadata_failure_logged = True
+                            metadata_failure = exc
+                            logger.warning(
+                                "Failed to ensure thread_meta for %s%s",
+                                sanitize_log_param(thread_id),
+                                "" if require_existing_thread else " (non-fatal)",
+                                exc_info=True,
+                            )
                 else:
                     metadata_task.cancel()
                     metadata_task.add_done_callback(
                         lambda task: _log_thread_metadata_task_result(
                             task,
-                            thread_id=intent.thread_id,
+                            thread_id=thread_id,
                         )
                     )
                 if not abort_task.done():
                     abort_task.cancel()
                     abort_task.add_done_callback(_consume_task_result)
-            if startup_failure is None and not abort_before_metadata:
-                # Read again as the run starts: a request that authenticated
-                # just before its owner was turned off can still have admitted
-                # this run, and it must not execute for a person nothing may
-                # act for, whichever process picked it up.
-                try:
-                    refusal = await _owner_refusal(getattr(record, "user_id", None))
-                except Exception as exc:
-                    # Unanswerable is not "allowed": fail the start like any
-                    # other start-up failure rather than leave the run pending.
-                    logger.warning("Run %s not started: its owner's account could not be read (%s)", sanitize_log_param(record.run_id), type(exc).__name__)
-                    startup_failure = "The owner's account could not be read; the run was not started"
-                else:
-                    if refusal is not None:
-                        logger.warning("Run %s refused at start: its owner's account is %s", sanitize_log_param(record.run_id), refusal)
-                        startup_failure = f"The owner's account is {refusal}; the run was not started"
-            if startup_failure is not None:
-                failure_retained = await run_mgr.fail_start_if_pending(
+            if metadata_failure is not None and require_existing_thread:
+                await run_mgr.fail_start_if_pending(
                     record.run_id,
-                    error=startup_failure,
+                    error=str(metadata_failure),
                 )
-                if not failure_retained:
-                    await run_mgr.finalize_pending_cancellation(record.run_id)
-                await _finalize_pregraph_stream(
-                    bridge,
-                    record,
-                    error_message=(startup_failure if failure_retained else None),
-                )
-                return
-            if abort_before_metadata:
-                await run_mgr.finalize_pending_cancellation(record.run_id)
-                await _finalize_pregraph_stream(
-                    bridge,
-                    record,
-                    error_message=None,
-                )
-                return
-            entered_run_agent = True
+            # Continue through run_agent even after metadata abort, timeout,
+            # or strict verification failure:
+            # its startup barrier is the single path that turns pending
+            # cancellation into no-agent-construction plus publish_end.
+            incarnation_kwargs: dict[str, str | None] = {}
+            if metadata_record is None:
+                if not record.abort_event.is_set():
+                    logger.warning(
+                        "Thread metadata for %s is unavailable; MCP access will fail closed",
+                        sanitize_log_param(thread_id),
+                    )
+            else:
+                if "incarnation" not in metadata_record:
+                    logger.warning(
+                        "Thread metadata for %s has no incarnation; MCP access will fail closed",
+                        sanitize_log_param(thread_id),
+                    )
+                else:
+                    incarnation = metadata_record["incarnation"]
+                    if is_valid_thread_incarnation(incarnation):
+                        incarnation_kwargs["thread_incarnation"] = incarnation
+                    else:
+                        logger.warning(
+                            "Thread metadata for %s has an invalid incarnation; MCP access will fail closed",
+                            sanitize_log_param(thread_id),
+                        )
             await run_agent(
                 bridge,
                 run_mgr,
@@ -3249,821 +2076,100 @@ class _GatewayLaunchNormalizer:
                 agent_factory=agent_factory,
                 graph_input=graph_input,
                 config=config,
-                stream_modes=list(stream_modes),
-                stream_subgraphs=intent.stream_subgraphs,
-                interrupt_before=thaw_host_value(intent.interrupt_before),
-                interrupt_after=thaw_host_value(intent.interrupt_after),
+                stream_modes=stream_modes,
+                stream_subgraphs=body.stream_subgraphs,
+                interrupt_before=body.interrupt_before,
+                interrupt_after=body.interrupt_after,
+                knowledge_scope=admitted_knowledge_scope,
+                **incarnation_kwargs,
             )
 
-        async def run_after_metadata(record: RunRecord) -> None:
-            try:
-                await run_after_metadata_body(record)
-            except asyncio.CancelledError:
-                if entered_run_agent or not record.abort_event.is_set():
+        try:
+            async with goal_thread_lock(thread_id):
+                await ensure_checkpoint_history_seeded(
+                    request,
+                    thread_id=thread_id,
+                    assistant_id=body.assistant_id,
+                )
+                # A strict caller may have observed the thread before a
+                # concurrent delete removed it while checkpoint preparation
+                # yielded. Recheck immediately before durable admission. The
+                # delete route holds a durable thread-operation reservation,
+                # so after this point either the run or the delete wins; they
+                # cannot both succeed across Gateway workers.
+                if require_existing_thread and not await thread_access_allowed():
+                    raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+                record = await run_mgr.create_or_reject(
+                    thread_id,
+                    body.assistant_id,
+                    on_disconnect=disconnect,
+                    metadata=run_metadata,
+                    # Persist a secret-redacted copy of the config: the run record is
+                    # written to runs.kwargs_json and echoed by the run API, so a
+                    # request-scoped secret (#3861) must not ride along. The live
+                    # config built above keeps the secrets for the actual run.
+                    kwargs={
+                        "input": run_record_input,
+                        **({"knowledge_default_request_hash": knowledge_default_request_hash} if accepts_knowledge_default else {}),
+                        "config": redact_config_secrets(body.config),
+                        **({"conversation_references": conversation_references} if conversation_references else {}),
+                    },
+                    multitask_strategy=body.multitask_strategy,
+                    model_name=model_name,
+                    user_id=owner_user_id,
+                    idempotency_key=idempotency_key,
+                )
+
+                if record.idempotency_reused:
+                    stored = record.kwargs or {}
+                    stored_input = stored.get("input")
+                    # New runs persist the admitted, canonical message snapshot
+                    # so a scope display cannot be rewritten through the run
+                    # record. Accept the raw request as well for records written
+                    # by older Gateway versions, while comparing canonical
+                    # retries to the same representation as the stored record.
+                    matches_default_request = knowledge_default_request_hash is not None and stored.get("knowledge_default_request_hash") == knowledge_default_request_hash
+                    # Pre-feature unscoped records may already contain normalized
+                    # messages, but have no digest. Compare them before injecting
+                    # today's default; explicit scopes and recovery do not use
+                    # this compatibility path.
+                    matches_legacy_default_request = accepts_knowledge_default and "knowledge_default_request_hash" not in stored and stored_input == request_input
+                    matches_input = matches_default_request or matches_legacy_default_request or stored_input == body.input or stored_input == run_record_input
+                    if not matches_input or record.assistant_id != body.assistant_id or stored.get("conversation_references", []) != conversation_references:
+                        raise HTTPException(
+                            status_code=409,
+                            detail="Idempotency-Key already used with a different request",
+                        )
+                    return record
+
+                worker = run_after_metadata(record)
+                try:
+                    # No await is allowed between durable admission and task
+                    # attachment. Metadata setup runs inside the attached
+                    # worker so a pending cancellation can bypass stalled
+                    # thread-store IO and still reach run_agent's startup
+                    # barrier / stream finalization.
+                    record.task = asyncio.create_task(worker)
+                except Exception as exc:
+                    worker.close()
+                    await run_mgr.fail_start_if_pending(
+                        record.run_id,
+                        error=f"Failed to attach run worker: {exc}",
+                    )
                     raise
+        except ConflictError as exc:
+            raise BusyThreadConflict(str(exc)) from exc
+        except UnsupportedStrategyError as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from exc
 
-                async def finalize_cancelled_pregraph() -> None:
-                    await run_mgr.finalize_pending_cancellation(record.run_id)
-                    await _finalize_pregraph_stream(
-                        bridge,
-                        record,
-                        error_message=None,
-                    )
+        # Title sync is handled by worker.py's finally block which reads the
+        # title from the checkpoint and calls thread_store.update_display_name
+        # after the run completes.
 
-                finalizer = asyncio.create_task(finalize_cancelled_pregraph())
-                finalizer.add_done_callback(_consume_task_result)
-                deadline = asyncio.get_running_loop().time() + _PREGRAPH_FINALIZE_TIMEOUT_SECONDS
-                while not finalizer.done():
-                    remaining = deadline - asyncio.get_running_loop().time()
-                    if remaining <= 0:
-                        finalizer.cancel()
-                        _log_pregraph_stream_failure(
-                            TimeoutError("pre-graph cancellation finalizer deadline elapsed"),
-                            operation="cancelled_worker_finalize",
-                            run_id=record.run_id,
-                        )
-                        return
-                    try:
-                        await asyncio.wait_for(
-                            asyncio.shield(finalizer),
-                            timeout=remaining,
-                        )
-                    except asyncio.CancelledError:
-                        continue
-                    except TimeoutError as exc:
-                        finalizer.cancel()
-                        _log_pregraph_stream_failure(
-                            exc,
-                            operation="cancelled_worker_finalize",
-                            run_id=record.run_id,
-                        )
-                        return
-                finalizer.result()
-
-        try:
-            prepared = PreparedLaunch(
-                thread_id=intent.thread_id,
-                assistant_id=intent.assistant_id,
-                on_disconnect=disconnect,
-                metadata=metadata,
-                kwargs={
-                    # The stored kwargs are echoed by the run API, so persist a
-                    # secret-redacted config while retaining live secrets above.
-                    "input": thaw_host_value(intent.input),
-                    "config": redact_config_secrets(thaw_host_value(intent.config)),
-                    **({_EFFECTIVE_EXECUTION_PROJECTION_KEY: effective_execution.to_persisted()} if identity is not None else {}),
-                },
-                multitask_strategy=intent.multitask_strategy,
-                model_name=model_name,
-                user_id=accepted_invocation.principal.user_id,
-                worker=run_after_metadata,
-                accepted_invocation=accepted_invocation,
-                external_scope=identity.external_scope if identity is not None else None,
-                external_key=identity.external_key if identity is not None else None,
-                request_digest=effective_execution.digest,
-                request_digest_version=effective_execution.digest_version,
-                caller_intent_json=caller_intent.to_persisted() if caller_intent is not None else None,
-                caller_intent_digest=caller_intent.digest if caller_intent is not None else None,
-                caller_intent_digest_version=caller_intent.digest_version if caller_intent is not None else None,
-                recovery_payload_json=recovery_payload_json,
-                principal=_invocation_principal_from_projection(accepted_invocation.principal),
-                require_existing_thread=require_existing_thread,
-            )
-        except Exception:
-            await _release_unattached_agent_material(config)
-            raise
-        return prepared
-
-
-class _GatewayDurableRuns:
-    """Gateway adapter over the harness run manager and admission lock."""
-
-    def __init__(self, request: Request) -> None:
-        self._request = request
-        self._projection_reservations: dict[int, object] = {}
-        self._projection_supersessions: dict[int, object] = {}
-
-    @asynccontextmanager
-    async def admission_scope(self, thread_id: str) -> AsyncIterator[None]:
-        async with goal_thread_lock(thread_id):
-            yield
-
-    async def _reserve_after_pending_clear(self, launch: PreparedLaunch, material):
-        """Reserve once more if a stranded clear was what held the thread.
-
-        Returns the reservation when finishing that clear freed the thread,
-        and ``None`` whenever it did not -- because there was no pending clear,
-        because the provider still cannot prove the material gone, or because
-        a live owner took the thread in between. Every ``None`` leaves the
-        caller on exactly the path it was already on.
-
-        The reservation itself is the authority on whether the thread is free,
-        not the bool: parking the sandbox is the one step that runs after the
-        fence is already released, so a refusal there can report failure over
-        a thread that is genuinely available.
-        """
-        import asyncio as _asyncio
-
-        from deerflow.runtime.skill_projection import (
-            SkillProjectionBusyError,
-            SkillProjectionEvidence,
-            get_skill_projection_coordinator,
-        )
-        from deerflow.sandbox.accepted_projection import (
-            complete_pending_projection_clear,
-        )
-
-        user_id = launch.user_id or DEFAULT_USER_ID
-        await _asyncio.to_thread(
-            complete_pending_projection_clear,
-            user_id=user_id,
-            thread_id=launch.thread_id,
-        )
-        snapshot = material.skill_snapshot
-        try:
-            return get_skill_projection_coordinator().reserve_admission(
-                user_id=user_id,
-                thread_id=launch.thread_id,
-                reservation_id=f"admission:{uuid.uuid4().hex}",
-                snapshot_id=None if snapshot is None else snapshot.snapshot_id,
-                evidence=SkillProjectionEvidence.from_snapshot(snapshot),
-            )
-        except SkillProjectionBusyError:
-            return None
-
-    async def prepare_admission(self, launch: PreparedLaunch) -> None:
-        run_manager = get_run_manager(self._request)
-        launch_identity = id(launch)
-        if launch.external_scope is not None and launch.external_key is not None:
-            existing = await run_manager.get_by_external_identity(
-                launch.external_scope,
-                launch.external_key,
-                user_id=launch.user_id,
-            )
-            if existing is not None:
-                # The optimistic lookup raced a creator. Let the atomic store
-                # classify equal replay versus digest conflict; neither case
-                # is blocked by the creator's still-live projection.
-                return
-
-        accepted = launch.accepted_invocation
-        material = accepted.agent_revision.material if accepted is not None else None
-        if material is not None:
-            from deerflow.runtime.skill_projection import (
-                SkillProjectionBusyError,
-                SkillProjectionEvidence,
-                get_skill_projection_coordinator,
-            )
-
-            snapshot = material.skill_snapshot
-            try:
-                reservation = get_skill_projection_coordinator().reserve_admission(
-                    user_id=launch.user_id or DEFAULT_USER_ID,
-                    thread_id=launch.thread_id,
-                    reservation_id=f"admission:{uuid.uuid4().hex}",
-                    snapshot_id=None if snapshot is None else snapshot.snapshot_id,
-                    evidence=SkillProjectionEvidence.from_snapshot(snapshot),
-                )
-            except SkillProjectionBusyError as exc:
-                coordinator = get_skill_projection_coordinator()
-                # A thread whose last release could not confirm stays fenced as
-                # clearing, and nothing holds the consumer token that would
-                # retry it any more. This admission is the next thing that
-                # wants the thread, so it finishes that clear before deciding
-                # the thread is busy; a clear that still cannot confirm leaves
-                # the state exactly as it was.
-                reservation = await self._reserve_after_pending_clear(launch, material)
-                if reservation is not None:
-                    self._projection_reservations[launch_identity] = reservation
-                else:
-                    replacement = launch.multitask_strategy in ("interrupt", "rollback")
-                    if not replacement:
-                        raise ConflictError(
-                            "Thread has an invocation-owned skill projection",
-                        ) from exc
-                    try:
-                        supersession = coordinator.fence_committed_owner(
-                            user_id=launch.user_id or DEFAULT_USER_ID,
-                            thread_id=launch.thread_id,
-                        )
-                    except SkillProjectionBusyError:
-                        raise ConflictError(
-                            "Thread has an invocation-owned skill projection",
-                        ) from exc
-                    self._projection_supersessions[launch_identity] = supersession
-            else:
-                self._projection_reservations[launch_identity] = reservation
-        try:
-            await ensure_checkpoint_history_seeded(
-                self._request,
-                thread_id=launch.thread_id,
-                assistant_id=launch.assistant_id,
-            )
-        except (Exception, asyncio.CancelledError):
-            reservation = self._projection_reservations.pop(launch_identity, None)
-            self._projection_supersessions.pop(launch_identity, None)
-            if reservation is not None:
-                from deerflow.runtime.skill_projection import (
-                    get_skill_projection_coordinator,
-                )
-
-                get_skill_projection_coordinator().abort_admission(reservation)
-            raise
-
-    async def find_by_external_identity(
-        self,
-        identity: InternalAdmissionIdentity,
-    ) -> RunRecord | None:
-        return await get_run_manager(self._request).get_by_external_identity(
-            identity.external_scope,
-            identity.external_key,
-            user_id=identity.user_id,
-        )
-
-    @staticmethod
-    async def _terminalize_unattached_candidate(
-        run_manager: RunManager,
-        candidate_run_id: str,
-    ) -> None:
-        fail_start = getattr(run_manager, "fail_start_if_pending", None)
-        if not callable(fail_start):
-            return
-        cleanup = asyncio.create_task(
-            fail_start(
-                candidate_run_id,
-                error="worker_attachment_failed",
-            ),
-            name=f"deerflow-abort-admission-handoff-{candidate_run_id}",
-        )
-        while not cleanup.done():
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                continue
-        cleanup.result()
-
-    async def admit(
-        self,
-        launch: PreparedLaunch,
-        *,
-        candidate_run_id: str,
-    ) -> DurableAdmission | RunRecord:
-        run_manager = get_run_manager(self._request)
-        launch_identity = id(launch)
-        reservation = self._projection_reservations.pop(launch_identity, None)
-        supersession = self._projection_supersessions.pop(launch_identity, None)
-        try:
-            if getattr(launch, "require_existing_thread", False):
-                thread_store = get_run_context(self._request).thread_store
-                exists = (
-                    await thread_store.check_access(
-                        launch.thread_id,
-                        launch.user_id,
-                        require_existing=True,
-                    )
-                    if launch.user_id
-                    else await thread_store.get(launch.thread_id, user_id=None) is not None
-                )
-                if not exists:
-                    raise HTTPException(status_code=404, detail=f"Thread {launch.thread_id} not found")
-            if launch.external_scope is None:
-                record = await run_manager.create_or_reject(
-                    launch.thread_id,
-                    launch.assistant_id,
-                    candidate_run_id=candidate_run_id,
-                    on_disconnect=launch.on_disconnect,
-                    metadata=thaw_host_value(launch.metadata),
-                    kwargs=thaw_host_value(launch.kwargs),
-                    multitask_strategy=launch.multitask_strategy,
-                    model_name=launch.model_name,
-                    user_id=launch.user_id,
-                    accepted_invocation=launch.accepted_invocation,
-                    recovery_payload_json=(thaw_host_value(launch.recovery_payload_json) if launch.recovery_payload_json is not None else None),
-                )
-                if reservation is not None:
-                    from deerflow.runtime.skill_projection import (
-                        get_skill_projection_coordinator,
-                    )
-
-                    get_skill_projection_coordinator().promote_admission(
-                        reservation,
-                        run_id=record.run_id,
-                    )
-                elif supersession is not None:
-                    from deerflow.runtime.skill_projection import (
-                        SkillProjectionEvidence,
-                        get_skill_projection_coordinator,
-                    )
-
-                    snapshot = launch.accepted_invocation.agent_revision.material.skill_snapshot
-                    get_skill_projection_coordinator().promote_supersession(
-                        supersession,
-                        run_id=record.run_id,
-                        snapshot_id=None if snapshot is None else snapshot.snapshot_id,
-                        evidence=SkillProjectionEvidence.from_snapshot(snapshot),
-                    )
-                return record
-            if launch.external_key is None or launch.request_digest is None or launch.request_digest_version is None or launch.caller_intent_json is None or launch.caller_intent_digest is None or launch.caller_intent_digest_version is None:
-                raise RuntimeError("keyed launch is missing canonical admission evidence")
-            admission = await run_manager.ensure_or_reject(
-                launch.thread_id,
-                launch.assistant_id,
-                candidate_run_id=candidate_run_id,
-                on_disconnect=launch.on_disconnect,
-                metadata=thaw_host_value(launch.metadata),
-                kwargs=thaw_host_value(launch.kwargs),
-                multitask_strategy=launch.multitask_strategy,
-                model_name=launch.model_name,
-                user_id=launch.user_id,
-                accepted_invocation=launch.accepted_invocation,
-                external_scope=launch.external_scope,
-                external_key=launch.external_key,
-                request_digest=launch.request_digest,
-                request_digest_version=launch.request_digest_version,
-                caller_intent_json=thaw_host_value(launch.caller_intent_json),
-                caller_intent_digest=launch.caller_intent_digest,
-                caller_intent_digest_version=launch.caller_intent_digest_version,
-                recovery_payload_json=(thaw_host_value(launch.recovery_payload_json) if launch.recovery_payload_json is not None else None),
-            )
-            if reservation is not None:
-                from deerflow.runtime.skill_projection import (
-                    get_skill_projection_coordinator,
-                )
-
-                coordinator = get_skill_projection_coordinator()
-                if admission.outcome is AdmissionOutcome.created:
-                    coordinator.promote_admission(
-                        reservation,
-                        run_id=admission.record.run_id,
-                    )
-                else:
-                    coordinator.abort_admission(reservation)
-            elif supersession is not None and admission.outcome is AdmissionOutcome.created:
-                from deerflow.runtime.skill_projection import (
-                    SkillProjectionEvidence,
-                    get_skill_projection_coordinator,
-                )
-
-                snapshot = launch.accepted_invocation.agent_revision.material.skill_snapshot
-                get_skill_projection_coordinator().promote_supersession(
-                    supersession,
-                    run_id=admission.record.run_id,
-                    snapshot_id=None if snapshot is None else snapshot.snapshot_id,
-                    evidence=SkillProjectionEvidence.from_snapshot(snapshot),
-                )
-            return DurableAdmission(record=admission.record, outcome=admission.outcome)
-        except BaseException:
-            from deerflow.runtime.skill_projection import (
-                get_skill_projection_coordinator,
-            )
-
-            coordinator = get_skill_projection_coordinator()
-            if reservation is not None:
-                coordinator.abort_admission(reservation)
-            try:
-                await self._terminalize_unattached_candidate(
-                    run_manager,
-                    candidate_run_id,
-                )
-            finally:
-                # The manager must first prove terminal state or retain the
-                # exact candidate in its compensator. Only then may this
-                # process release the accepted execution material.
-                coordinator.release_unactivated_run(
-                    user_id=launch.user_id or DEFAULT_USER_ID,
-                    thread_id=launch.thread_id,
-                    run_id=candidate_run_id,
-                )
-            raise
-
-    async def attach_worker(
-        self,
-        record: RunRecord,
-        worker: WorkerCoroutine,
-        task_factory: TaskFactory,
-    ) -> asyncio.Task[None]:
-        return await get_run_manager(self._request).attach_worker_once(
-            record.run_id,
-            worker,
-            task_factory,
-        )
-
-    async def fail_start(self, record: RunRecord, error: str) -> None:
-        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-        try:
-            await get_run_manager(self._request).fail_start_if_pending(
-                record.run_id,
-                error=error,
-            )
-        finally:
-            get_skill_projection_coordinator().release_unactivated_run(
-                user_id=record.user_id or DEFAULT_USER_ID,
-                thread_id=record.thread_id,
-                run_id=record.run_id,
-            )
-
-    async def cancel_start(self, record: RunRecord) -> None:
-        """Cancel one admitted row that never transferred to a worker."""
-
-        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-        try:
-            await get_run_manager(self._request).cancel_start_if_pending(
-                record.run_id,
-            )
-        finally:
-            get_skill_projection_coordinator().release_unactivated_run(
-                user_id=record.user_id or DEFAULT_USER_ID,
-                thread_id=record.thread_id,
-                run_id=record.run_id,
-            )
-
-    async def observe(
-        self,
-        run_id: str,
-        principal: InvocationPrincipal,
-    ) -> RunRecord | None:
-        user_id = None if principal.visibility_prevalidated or principal.role == "admin" else principal.user_id
-        record = await get_run_manager(self._request).get(
-            run_id,
-            user_id=user_id,
-        )
-        # RunManager applies ``user_id`` while hydrating from its durable
-        # store, but an already-local record is returned before that store
-        # filter runs. Recheck the owner here for facades that have not
-        # already completed a route/thread visibility decision.
-        if record is not None and record.operation_kind is not ThreadOperationKind.run:
-            return None
-        if record is not None and user_id is not None and record.user_id != user_id:
-            return None
         return record
-
-    async def observe_granted(
-        self,
-        run_id: str,
-        grant: ServiceObservationGrant,
-    ) -> RunRecord | None:
-        record = await get_run_manager(self._request).get(
-            run_id,
-            user_id=None,
-        )
-        if record is None or record.operation_kind is not ThreadOperationKind.run:
-            return None
-        return record if grant.permits(record) else None
-
-    async def context_visible(
-        self,
-        thread_id: str,
-        principal: InvocationPrincipal,
-    ) -> bool:
-        if principal.visibility_prevalidated:
-            return True
-        user_id = None if principal.role == "admin" else principal.user_id
-        thread_store = get_thread_store(self._request)
-        if user_id is None:
-            if await thread_store.get(thread_id, user_id=None) is not None:
-                return True
-        elif await thread_store.check_access(
-            thread_id,
-            user_id,
-            require_existing=True,
-        ):
-            return True
-        # Preserve read access for legacy contexts that predate thread_meta,
-        # while keeping a truly unknown context indistinguishable from one
-        # owned by somebody else.
-        records = await get_run_manager(self._request).list_by_thread(
-            thread_id,
-            user_id=user_id,
-            limit=1,
-        )
-        return bool(records)
-
-    async def context_visible_granted(
-        self,
-        thread_id: str,
-        scope: LifecycleVisibilityScope,
-    ) -> bool:
-        return await get_run_manager(self._request).context_visible_in_scope(
-            thread_id,
-            scope,
-        )
-
-    async def query_lifecycle(self, query: LifecycleQuery) -> LifecyclePage:
-        return await get_run_manager(self._request).query_lifecycle(query)
-
-    async def cancel(
-        self,
-        cancel_request: InternalCancelRequest,
-    ) -> CancelOutcome | CancellationRequestOutcome:
-        if cancel_request.expected_state_version is not None:
-            user_id = None if cancel_request.principal.visibility_prevalidated or cancel_request.principal.role == "admin" else cancel_request.principal.user_id
-            return await get_run_manager(self._request).request_cancel_fenced(
-                cancel_request.run_id,
-                action=cancel_request.action,
-                expected_state_version=cancel_request.expected_state_version,
-                user_id=user_id,
-            )
-        return await get_run_manager(self._request).cancel(
-            cancel_request.run_id,
-            action=cancel_request.action,
-        )
-
-
-def _build_invocation_authorization(request: Any) -> ProviderInvocationAuthorization:
-    app_state = getattr(getattr(request, "app", None), "state", None)
-    settings = getattr(app_state, "invocation_authorization_config", None)
-    if settings is None:
-        from deerflow.config.authorization_config import (
-            InvocationOperationsAuthorizationConfig,
-        )
-
-        settings = InvocationOperationsAuthorizationConfig()
-    resolver = getattr(app_state, "authorization_provider_resolver", None)
-
-    def resolve() -> AuthorizationResolutionSnapshot:
-        if resolver is None:
-            raise RuntimeError("Gateway authorization provider resolver is unavailable")
-        return resolver.resolve(get_app_config().authorization)
-
-    return ProviderInvocationAuthorization(settings, resolve)
-
-
-def _build_invocation_constraints(
-    request: Any,
-) -> ProviderInvocationConstraints:
-    app_state = getattr(getattr(request, "app", None), "state", None)
-    return ProviderInvocationConstraints(
-        getattr(app_state, "invocation_constraints_host", None),
-        getattr(app_state, "capability_health_monitor", None),
-    )
-
-
-def raise_for_invocation_authorization(
-    result: Any,
-    *,
-    operation: str,
-) -> None:
-    """Translate finite internal authorization failures at the HTTP facade."""
-    if result is InvocationAuthorizationOutcome.denied:
-        raise HTTPException(status_code=403, detail=f"Invocation {operation} denied")
-    if result is InvocationAuthorizationOutcome.indeterminate:
-        raise HTTPException(
-            status_code=503,
-            detail=f"Invocation {operation} authorization indeterminate",
-        )
-
-
-def invocation_observation_enabled(request: Any) -> bool:
-    """Return the Gateway's startup-snapshotted observe opt-in."""
-    app_state = getattr(getattr(request, "app", None), "state", None)
-    settings = getattr(app_state, "invocation_authorization_config", None)
-    return settings is not None and settings.observe_enabled is True
-
-
-def _observation_visibility(request: Any) -> ObservationVisibilityResolver | None:
-    """Return the application-owned service visibility resolver, when configured."""
-
-    app_state = getattr(getattr(request, "app", None), "state", None)
-    return getattr(app_state, "service_observation_visibility_resolver", None)
-
-
-async def authorize_context_observation(
-    request: Request,
-    thread_id: str,
-    principal: InvocationPrincipal,
-) -> None:
-    """Authorize one already-visible context feed with the coherent provider."""
-    decision = await _build_invocation_authorization(request).authorize_context_observe(
-        thread_id,
-        principal,
-    )
-    raise_for_invocation_authorization(decision.outcome, operation="observe")
-
-
-def build_invocation_runtime(request: Request) -> InvocationRuntime:
-    """Construct a request-scoped runtime from typed Gateway adapters."""
-    return InvocationRuntime(
-        normalizer=_GatewayLaunchNormalizer(request),
-        runs=_GatewayDurableRuns(request),
-        authorization=_build_invocation_authorization(request),
-        constraints=_build_invocation_constraints(request),
-        visibility=_observation_visibility(request),
-        mcp_tasks=getattr(request.app.state, "mcp_task_repo", None),
-        subagent_batches=getattr(
-            request.app.state,
-            "subagent_batch_repo",
-            None,
-        ),
-        admission_fence=request.app.state.runtime_readiness,
-    )
-
-
-def build_scheduled_invocation_runtime(app: Any) -> InvocationRuntime:
-    """Construct the scheduler's process-internal application runtime."""
-    request = SimpleNamespace(
-        app=app,
-        headers={},
-        state=SimpleNamespace(
-            user=get_internal_user(),
-            auth_source=AUTH_SOURCE_INTERNAL,
-        ),
-        cookies={},
-    )
-    return InvocationRuntime(
-        normalizer=_GatewayLaunchNormalizer(
-            request,
-            trust_internal_launch_facts=True,
-        ),
-        runs=_GatewayDurableRuns(request),
-        authorization=_build_invocation_authorization(request),
-        constraints=_build_invocation_constraints(request),
-        visibility=_observation_visibility(request),
-        mcp_tasks=getattr(app.state, "mcp_task_repo", None),
-        subagent_batches=getattr(app.state, "subagent_batch_repo", None),
-        admission_fence=app.state.runtime_readiness,
-    )
-
-
-def build_channel_invocation_runtime(app: Any) -> InvocationRuntime:
-    """Construct the native-channel process-internal application runtime."""
-    request = SimpleNamespace(
-        app=app,
-        headers={},
-        state=SimpleNamespace(
-            user=get_internal_user(),
-            auth_source=AUTH_SOURCE_INTERNAL,
-        ),
-        cookies={},
-    )
-    return InvocationRuntime(
-        normalizer=_GatewayLaunchNormalizer(
-            request,
-            trust_internal_launch_facts=True,
-        ),
-        runs=_GatewayDurableRuns(request),
-        authorization=_build_invocation_authorization(request),
-        constraints=_build_invocation_constraints(request),
-        visibility=_observation_visibility(request),
-        mcp_tasks=getattr(app.state, "mcp_task_repo", None),
-        subagent_batches=getattr(app.state, "subagent_batch_repo", None),
-        admission_fence=app.state.runtime_readiness,
-    )
-
-
-def build_service_invocation_runtime(
-    app: Any,
-    *,
-    authenticated_service_id: str,
-) -> InvocationRuntime:
-    """Construct an embedded-service runtime with a host-owned identity."""
-
-    authenticated_service_id = validate_persisted_service_id(authenticated_service_id)
-    request = SimpleNamespace(
-        app=app,
-        headers={},
-        state=SimpleNamespace(
-            user=SimpleNamespace(
-                id=authenticated_service_id,
-                system_role="service",
-                oauth_provider=None,
-                oauth_id=None,
-            ),
-            auth_source=AUTH_SOURCE_INTERNAL,
-            principal_kind="service",
-        ),
-        cookies={},
-    )
-    return InvocationRuntime(
-        normalizer=_GatewayLaunchNormalizer(
-            request,
-            trust_internal_launch_facts=True,
-        ),
-        runs=_GatewayDurableRuns(request),
-        authorization=_build_invocation_authorization(request),
-        constraints=_build_invocation_constraints(request),
-        visibility=_observation_visibility(request),
-        mcp_tasks=getattr(app.state, "mcp_task_repo", None),
-        subagent_batches=getattr(app.state, "subagent_batch_repo", None),
-        admission_fence=app.state.runtime_readiness,
-    )
-
-
-def _launch_intent(
-    body: RunCreateRequest,
-    thread_id: str,
-    *,
-    external_key: str | None = None,
-    thread_id_explicit: bool = True,
-    require_existing_thread: bool = False,
-    trusted_notification: bool = False,
-    trusted_notification_source: Mapping[str, Any] | None = None,
-    received_at: float | None = None,
-) -> InternalLaunchIntent:
-    return InternalLaunchIntent(
-        thread_id=thread_id,
-        assistant_id=getattr(body, "assistant_id", None),
-        input=getattr(body, "input", None),
-        command=getattr(body, "command", None),
-        metadata=getattr(body, "metadata", None),
-        config=getattr(body, "config", None),
-        context=getattr(body, "context", None),
-        checkpoint_id=getattr(body, "checkpoint_id", None),
-        checkpoint=getattr(body, "checkpoint", None),
-        interrupt_before=getattr(body, "interrupt_before", None),
-        interrupt_after=getattr(body, "interrupt_after", None),
-        stream_mode=getattr(body, "stream_mode", None),
-        stream_subgraphs=getattr(body, "stream_subgraphs", False),
-        on_disconnect=getattr(body, "on_disconnect", "cancel"),
-        multitask_strategy=getattr(body, "multitask_strategy", "reject"),
-        external_key=external_key,
-        thread_id_explicit=thread_id_explicit,
-        require_existing_thread=require_existing_thread,
-        trusted_notification=trusted_notification,
-        trusted_notification_source=trusted_notification_source,
-        received_at=received_at,
-    )
-
-
-def _http_idempotency_key(request: Request) -> str | None:
-    headers = getattr(request, "headers", {})
-    for name, value in headers.items():
-        if str(name).lower() == "idempotency-key":
-            return value
-    return None
-
-
-async def start_run(
-    body: RunCreateRequest,
-    thread_id: str,
-    request: Request,
-    *,
-    thread_id_explicit: bool = True,
-    idempotency_key: str | None = None,
-    require_existing_thread: bool = False,
-    trusted_notification: bool = False,
-    trusted_notification_source: Mapping[str, Any] | None = None,
-) -> RunRecord:
-    """FastAPI compatibility adapter for application-owned invocation launch."""
-    # Stamped first: the turn's journal reports everything from here to the
-    # worker's admission as the launch interval.
-    received_at = time.monotonic()
-    # Interrupt and rollback terminate an active run, so they require the
-    # cancel capability in addition to run creation. Internal/test requests
-    # without a stamped auth context retain their existing behavior.
-    await require_audited_cancel_permission_if(
-        request,
-        body.multitask_strategy != "reject",
-    )
-    try:
-        validate_thread_id(thread_id)
-    except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    body_config = getattr(body, "config", None)
-    config_metadata = body_config.get("metadata") if isinstance(body_config, dict) else None
-    try:
-        validate_run_metadata_secrets(getattr(body, "metadata", None))
-        validate_run_metadata_secrets(config_metadata)
-    except LegacyRunMetadataSecretError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
-    from app.gateway.credential_evidence import CredentialEvidenceError
-    from deerflow.persistence.credential_audit import (
-        CredentialAuditUnavailable,
-    )
-
-    runtime = build_invocation_runtime(request)
-    try:
-        receipt = await runtime.launch(
-            _launch_intent(
-                body,
-                thread_id,
-                external_key=idempotency_key or _http_idempotency_key(request),
-                thread_id_explicit=thread_id_explicit,
-                require_existing_thread=require_existing_thread,
-                trusted_notification=trusted_notification,
-                trusted_notification_source=trusted_notification_source,
-                received_at=received_at,
-            )
-        )
-    except ConflictError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except OwnerRefusedLaunchError as exc:
-        # An internal caller launching for an owner who is turned off: a
-        # refusal, not a fault. Kept as the cause, for a caller that ends its
-        # queued work on it.
-        raise HTTPException(status_code=403, detail=str(exc)) from exc
-    except UnsupportedStrategyError as exc:
-        raise HTTPException(status_code=501, detail=str(exc)) from exc
-    except (CredentialAuditUnavailable, CredentialEvidenceError) as exc:
-        raise HTTPException(
-            status_code=503,
-            detail="Required credential evidence unavailable",
-        ) from exc
-    raise_for_invocation_authorization(receipt, operation="start")
-    if receipt is NotFoundOrInvisible.not_found_or_invisible:
-        raise HTTPException(status_code=404, detail="Invocation not found")
-    return receipt.record
+    finally:
+        if owner_context_token is not None:
+            reset_current_user(owner_context_token)
 
 
 async def launch_scheduled_thread_run(
@@ -4076,7 +2182,6 @@ async def launch_scheduled_thread_run(
     owner_user_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Launch the legacy scheduler adapter with the live recursion budget."""
     if request is None:
         if app is None:
             raise ValueError("launch_scheduled_thread_run requires request or app")
@@ -4094,7 +2199,11 @@ async def launch_scheduled_thread_run(
         input={"messages": [{"role": "user", "content": prompt}]},
         command=None,
         metadata=metadata or {},
-        config={"recursion_limit": resolve_scheduler_recursion_limit()},
+        config={"recursion_limit": _resolve_scheduler_recursion_limit()},
+        # ``user_id`` mirrors what IM channels put in ``body.context`` so
+        # runtime-context consumers without a ContextVar fallback (e.g.
+        # user-scoped GuardrailMiddleware providers) see the owning user;
+        # ``inject_authenticated_user_context`` skips the internal user.
         context=({"non_interactive": True, "user_id": owner_user_id} if owner_user_id else {"non_interactive": True}),
         webhook=None,
         checkpoint_id=None,
@@ -4131,21 +2240,13 @@ async def launch_scheduled_thread_run(
 
 def _mcp_task_notification_prompt(event: dict[str, Any]) -> str:
     """Build the internal user turn for one immutable MCP task event snapshot."""
-    payload = frame_untrusted_text(
-        json.dumps(
-            event,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            default=str,
-        )
-    )
+    payload = frame_untrusted_text(json.dumps(event, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
     instruction = (
         "A durable background MCP task has an update that requires the user's attention. "
         "Explain the update clearly and concisely. Do not expose or ask for a remote task ID. "
         "When status is input_required, show the question but explain that this MCP integration "
         "cannot resume the remote task with user input yet. When tracking_degraded is true, explain "
-        "that checks will continue at a lower frequency."
+        "that DeerFlow will continue retrying at a lower frequency."
     )
     return f"{instruction}\n\n{payload}"
 
@@ -4158,73 +2259,10 @@ async def launch_mcp_task_notification_run(
     owner_user_id: str,
     task_id: str,
     dispatch_version: int,
-    source: dict[str, Any],
+    dispatch_attempt: int,
     event: dict[str, Any],
 ) -> dict[str, Any]:
     """Idempotently launch the Agent run that delivers one task event."""
-    expected_source_fields = {
-        "version",
-        "tenant_digest",
-        "task_id",
-        "task_lineage_digest",
-        "lineage_status",
-        "parent_run_id",
-        "parent_tool_receipt_id",
-        "terminal_result_version",
-        "notification_kind",
-        "result_digest",
-        "result_status",
-    }
-    if set(source) != expected_source_fields:
-        raise ValueError("invalid MCP task notification source")
-    if source["version"] != 1 or source["task_id"] != task_id or source["terminal_result_version"] != dispatch_version:
-        raise ValueError("invalid MCP task notification source binding")
-    if not isinstance(task_id, str) or not task_id or len(task_id.encode("utf-8")) > 64:
-        raise ValueError("invalid MCP task notification task id")
-    for field in ("tenant_digest", "result_digest"):
-        value = source[field]
-        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
-            raise ValueError("invalid MCP task notification source digest")
-    lineage_digest = source["task_lineage_digest"]
-    if lineage_digest is not None and (not isinstance(lineage_digest, str) or re.fullmatch(r"[0-9a-f]{64}", lineage_digest) is None):
-        raise ValueError("invalid MCP task notification lineage digest")
-    lineage_status = source["lineage_status"]
-    if lineage_status not in {"verified", "legacy_unavailable"}:
-        raise ValueError("invalid MCP task notification lineage status")
-    if lineage_status == "verified" and lineage_digest is None:
-        raise ValueError("verified MCP task notification requires lineage")
-    if lineage_status == "legacy_unavailable" and (lineage_digest is not None or source["parent_run_id"] is not None or source["parent_tool_receipt_id"] is not None):
-        raise ValueError("legacy MCP task notification cannot claim parent lineage")
-    parent_run_id = source["parent_run_id"]
-    if parent_run_id is not None and (not isinstance(parent_run_id, str) or not parent_run_id or len(parent_run_id.encode("utf-8")) > 64):
-        raise ValueError("invalid MCP task notification parent run")
-    parent_receipt_id = source["parent_tool_receipt_id"]
-    if parent_receipt_id is not None and (not isinstance(parent_receipt_id, str) or re.fullmatch(r"tr_[0-9a-f]{64}", parent_receipt_id) is None):
-        raise ValueError("invalid MCP task notification parent receipt")
-    if source["notification_kind"] not in {
-        "terminal",
-        "input_required",
-        "tracking_degraded",
-    }:
-        raise ValueError("invalid MCP task notification kind")
-    if source["result_status"] not in {
-        "submitted",
-        "working",
-        "input_required",
-        "completed",
-        "failed",
-        "cancelled",
-    }:
-        raise ValueError("invalid MCP task notification result status")
-    safe_metadata = {
-        "task_id": task_id,
-        "task_lineage_digest": lineage_digest,
-        "lineage_status": source["lineage_status"],
-        "terminal_result_version": dispatch_version,
-        "notification_kind": source["notification_kind"],
-        "result_digest": source["result_digest"],
-        "result_status": source["result_status"],
-    }
     request = SimpleNamespace(
         app=app,
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
@@ -4244,7 +2282,11 @@ async def launch_mcp_task_notification_run(
         },
         command=None,
         metadata={
-            "mcp_task_notification": safe_metadata,
+            "mcp_task_notification": {
+                "task_id": task_id,
+                "dispatch_version": dispatch_version,
+                "dispatch_attempt": dispatch_attempt,
+            }
         },
         config=None,
         context={"non_interactive": True, "user_id": owner_user_id},
@@ -4263,16 +2305,10 @@ async def launch_mcp_task_notification_run(
         if_not_exists="create",
         feedback_keys=None,
     )
-    notification_key_digest = canonical_digest(
-        {
-            "version": 1,
-            "tenant_digest": source["tenant_digest"],
-            "mcp_task_id": task_id,
-            "terminal_result_version": dispatch_version,
-            "notification_kind": source["notification_kind"],
-        }
-    )
-    idempotency_key = f"mcp-task-notification:{notification_key_digest}"
+    idempotency_key = f"mcp-task:{task_id}:{dispatch_version}:{dispatch_attempt}"
+    # Non-HTTP entry point, same as launch_scheduled_thread_run above: the MCP
+    # task service drives this from its own background loop, so one scope per
+    # notification keeps every delivery attempt separately correlatable.
     try:
         with ensure_trace_context():
             record = await start_run(
@@ -4281,17 +2317,11 @@ async def launch_mcp_task_notification_run(
                 request,
                 idempotency_key=idempotency_key,
                 require_existing_thread=True,
-                trusted_notification=True,
-                trusted_notification_source=source,
             )
     except HTTPException as exc:
-        if isinstance(exc.__cause__, OwnerRefusedLaunchError):
-            raise exc.__cause__ from None
-        if exc.status_code == 409:
-            if isinstance(exc.__cause__, IdempotencyConflictError):
-                raise McpTaskNotificationLineageConflictError() from exc
+        if isinstance(exc, BusyThreadConflict):
             raise ConflictError(str(exc.detail)) from exc
-        if exc.status_code == 404:
+        if exc.status_code in {400, 401, 403, 404, 409, 422, 501}:
             raise PermanentNotificationError(str(exc.detail)) from exc
         raise
     return {"run_id": record.run_id, "thread_id": record.thread_id}
@@ -4304,6 +2334,7 @@ async def sse_consumer(
     run_mgr: RunManager,
     *,
     apply_on_disconnect: bool = True,
+    emit_gap_on_missing_stream: bool = False,
 ):
     """Async generator that yields SSE frames from the bridge.
 
@@ -4318,16 +2349,41 @@ async def sse_consumer(
     connection, and a read-only observer closing a join must not cancel the
     run (a runs:read-only credential would otherwise cancel without
     runs:cancel just by disconnecting).
+
+    ``emit_gap_on_missing_stream`` is a separate creating-retry signal, default
+    ``False``. ``create_or_reject`` sets ``record.idempotency_reused`` on the
+    shared cached record and never clears it, so this function must not read
+    that flag. Thread-scoped ``/runs/stream`` passes True only for this
+    request's reuse; default callers (joins, stateless ``/api/runs/stream``,
+    tests) keep ``end`` when a terminal record's stream is gone.
     """
     last_event_id = request.headers.get("Last-Event-ID")
     if await _terminal_record_stream_missing(bridge, record):
+        if emit_gap_on_missing_stream:
+            # Creating-endpoint retry: a bare `end` looks like the run
+            # produced nothing. Point the client at durable state instead.
+            yield format_sse(
+                "gap",
+                {
+                    "code": "stream_replay_gap",
+                    "run_id": record.run_id,
+                    "requested_event_id": last_event_id,
+                    "earliest_available_event_id": None,
+                    "latest_available_event_id": None,
+                    "recovery": "reload_durable_state",
+                },
+            )
+            return
         yield format_sse("end", None)
         return
 
     gap_emitted = False
+    terminal_emitted = False
+    disconnect_observed = False
     try:
         async for entry in bridge.subscribe(record.run_id, last_event_id=last_event_id):
             if await request.is_disconnected():
+                disconnect_observed = True
                 break
 
             if isinstance(entry, StreamGap):
@@ -4347,27 +2403,37 @@ async def sse_consumer(
 
             if entry is HEARTBEAT_SENTINEL:
                 if await _orphan_recovery_observed_after_heartbeat(record, run_mgr):
+                    terminal_emitted = True
                     yield format_sse("end", None)
                     return
                 yield ": heartbeat\n\n"
                 continue
 
             if entry is END_SENTINEL:
+                terminal_emitted = True
                 yield format_sse("end", None, event_id=entry.id or None)
                 return
 
             mark_first_stream_text(record.run_id, entry.event, entry.data)
             yield format_sse(entry.event, entry.data, event_id=entry.id or None)
 
+        if not disconnect_observed:
+            raise RuntimeError("stream bridge subscription ended before a terminal event")
+    except (GeneratorExit, asyncio.CancelledError):
+        # Starlette closes the response generator or cancels its request task
+        # when the creator connection disappears. Ordinary bridge exceptions
+        # must not be mistaken for that client-owned lifecycle signal.
+        disconnect_observed = True
+        raise
     finally:
         # store_only records are cross-worker observation handles. An explicit
         # cancel-then-stream action has already persisted its request before
         # subscribing; a plain join disconnect must not invent a new
         # cancellation request. Only apply on_disconnect to locally-owned runs,
         # and only on the creator's own stream — never on an observer join.
-        if apply_on_disconnect and not gap_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
+        if disconnect_observed and apply_on_disconnect and not gap_emitted and not terminal_emitted and not record.store_only and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
-                await run_mgr.cancel(record.run_id)
+                await await_drained(run_mgr.cancel(record.run_id))
 
 
 async def wait_for_run_completion(
@@ -4404,8 +2470,13 @@ async def wait_for_run_completion(
         disconnected.  Callers must skip checkpoint serialization on
         ``False`` so a partial checkpoint is not returned as a normal
         response.
+
+    Raises:
+        RuntimeError: The bridge subscription ended without a terminal event.
+        Other bridge failures propagate unchanged.
     """
     completed = False
+    disconnect_observed = False
     if await _terminal_record_stream_missing(bridge, record):
         return True
 
@@ -4431,11 +2502,17 @@ async def wait_for_run_completion(
                     completed = True
                     return True
                 if await request.is_disconnected():
+                    disconnect_observed = True
                     return False
                 # Heartbeats and regular events: keep waiting for END_SENTINEL.
             if not gap_seen:
-                return completed
+                raise RuntimeError("stream bridge subscription ended before a terminal event")
+    except asyncio.CancelledError:
+        # Request-task cancellation is the non-streaming equivalent of
+        # Starlette closing an SSE response generator.
+        disconnect_observed = True
+        raise
     finally:
-        if not completed and record.status in (RunStatus.pending, RunStatus.running):
+        if disconnect_observed and not completed and record.status in (RunStatus.pending, RunStatus.running):
             if record.on_disconnect == DisconnectMode.cancel:
-                await run_mgr.cancel(record.run_id)
+                await await_drained(run_mgr.cancel(record.run_id))

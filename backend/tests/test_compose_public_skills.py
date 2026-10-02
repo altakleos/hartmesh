@@ -22,14 +22,6 @@ from unittest.mock import patch
 import pytest
 import yaml
 from _config_singleton_guard import restore_config_singletons  # noqa: F401 -- autouse fixture
-from deerflow_extension_api import (
-    CredentialEvidenceV1,
-    EffectiveSubjectV1,
-    InvocationIdentityV1,
-    TenantReferenceV1,
-    VerifiedActorContextV1,
-    effective_authority_digest_v1,
-)
 
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.paths import Paths
@@ -37,14 +29,6 @@ from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 from deerflow.skills.projection import rebuild_skill_projections
 from deerflow.skills.review import LocalDirectoryReader, analyze_skill_package
 from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
-from deerflow.tool_plane import (
-    GovernedSkillArtifactStore,
-    GovernedToolPlaneValidator,
-    InMemoryToolPlaneRevisionRepository,
-    LockedFileToolPlaneProjection,
-    ToolPlaneRevisionScopeV1,
-    ToolPlaneRevisionService,
-)
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PROFILE = REPO_ROOT / "deploy" / "compose"
@@ -64,7 +48,7 @@ EXCLUDED_BY_POLICY = ("chart-visualization", "claude-to-deerflow", "find-skills"
 # assignments in scripts, subprocess use, a sensitive capability declaration):
 # a governed base holding any one of them could never be promoted. Each must
 # still be refused, or its exclusion is stale (a test below pins that).
-EXCLUDED_BY_REVIEW = ("github-deep-research", "image-generation", "music-generation", "skill-creator", "vercel-deploy-claimable", "video-generation")
+EXCLUDED_BY_REVIEW = ("github-deep-research", "image-generation", "music-generation", "skill-creator", "vercel-deploy", "video-generation")
 EXCLUDED = EXCLUDED_BY_POLICY + EXCLUDED_BY_REVIEW
 EXCLUSION_LINE = f'EXCLUDED_PUBLIC_SKILLS="{" ".join(sorted(EXCLUDED))}"'  # run.sh keeps the list alphabetical
 SEED_LINE = f'sh "$PROFILE/gateway/seed_skills.sh" {IMAGE_PUBLIC} "$DEER_FLOW_HOME/skills" $EXCLUDED_PUBLIC_SKILLS'
@@ -109,8 +93,7 @@ def _seeded_names() -> set[str]:
 
 def _declared_names() -> set[str]:
     """The ``name:`` each seeded package declares in its SKILL.md frontmatter,
-    which is what the tool plane keys its manifest by (one package directory,
-    ``vercel-deploy-claimable``, declares a different name)."""
+    which is the name a person and the agent call it by."""
     names = set()
     for package in _seeded_names():
         text = (PUBLIC / package / "SKILL.md").read_text(encoding="utf-8")
@@ -128,7 +111,7 @@ def test_backend_image_carries_the_public_skill_library() -> None:
     copy = "COPY skills/public ./skills/public"
     assert dockerfile.count(copy) == 1
     assert dockerfile.index(copy) > runtime_stage, "the library ships in the runtime stage"
-    assert dockerfile.index(copy) > dockerfile.index("COPY --from=builder /app/contracts ./contracts"), "last, so a skill edit rebuilds only its own layer"
+    assert dockerfile.index(copy) > dockerfile.rindex("COPY --from=builder"), "last of the copies, so a skill edit rebuilds only its own layer"
     assert "WORKDIR /app" in dockerfile[runtime_stage:], f"the copy lands at {IMAGE_PUBLIC}"
 
     ignore = DOCKERIGNORE.read_text(encoding="utf-8").splitlines()
@@ -349,126 +332,3 @@ def _review_blocks(package: Path) -> set[str]:
     maps exactly those severities to a failed validation)."""
     facts = analyze_skill_package(LocalDirectoryReader(package).read())
     return {str(finding["rule_id"]) for finding in facts["findings"] if finding["severity"] in {"blocker", "error"}}
-
-
-@pytest.mark.parametrize("name", EXCLUDED_BY_REVIEW)
-def test_every_review_exclusion_is_still_refused_by_the_profiles_review(name: str) -> None:
-    assert _review_blocks(PUBLIC / name), f"{name} now passes the review; drop it from EXCLUDED_PUBLIC_SKILLS in run.sh so the tenant gets it"
-
-
-@pytest.mark.parametrize("name", sorted(EXCLUDED_BY_POLICY))
-def test_policy_exclusions_are_not_review_refusals(name: str) -> None:
-    assert not _review_blocks(PUBLIC / name), f"{name} is excluded by policy, not by the review; list it under EXCLUDED_BY_REVIEW instead"
-
-
-_TENANT = TenantReferenceV1(version=1, public_ref="tenant-aaaaaaaaaaaaaaaa", digest="a" * 64)
-
-
-def _admin() -> VerifiedActorContextV1:
-    return VerifiedActorContextV1(
-        identity=InvocationIdentityV1(effective_subject=EffectiveSubjectV1(kind="human", subject_id="admin-1", role="admin")),
-        credential=CredentialEvidenceV1(
-            method="session",
-            credential_ref=None,
-            effective_authority_digest=effective_authority_digest_v1(("tool_plane:admin",)),
-            authority_categories=("tool_plane",),
-        ),
-        tenant=_TENANT,
-    )
-
-
-@pytest.mark.asyncio
-async def test_the_governed_tool_plane_admits_the_seeded_library_and_a_reseed_is_not_drift(projection_env, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The profile keeps ``tool_plane.enabled: true`` with
-    ``validation_requires_skill_review: true`` under the ``local_development``
-    deployment profile: the seeded set is usable at once (this profile never
-    fails readiness on governance state), and an administrator who governs it
-    captures exactly the seeded bytes. A restart re-seeds the same bytes, which
-    is not drift; a release that changes a skill is, and the same capture is
-    the repair. The revision repository is substituted (the tenant's is the
-    SQL one); the projection, artifact store, review and drift computation
-    are the real ones."""
-    env = projection_env
-    template = env.template
-    assert template["deployment"]["profile"] == "local_development"
-    policy = template["tool_plane"]
-    assert policy["enabled"] is True and policy["validation_requires_skill_review"] is True
-
-    config_path = env.home / "extensions_config.json"
-    shutil.copy(PROFILE / "extensions_config.json", config_path)
-    monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_path))
-    monkeypatch.setenv("DEER_FLOW_HOME", str(env.home))
-    integrations_root = env.home / "integrations" / "skills"
-    integrations_root.mkdir(parents=True)
-    artifacts = GovernedSkillArtifactStore(env.home / "tool-plane" / "candidates")
-    projection = LockedFileToolPlaneProjection(config_path=config_path, skills_root=env.skills_root, integrations_root=integrations_root, artifact_store=artifacts)
-    repository = InMemoryToolPlaneRevisionRepository(tenant=_TENANT)
-    service = ToolPlaneRevisionService(
-        repository=repository,
-        projection=projection,
-        validator=GovernedToolPlaneValidator(
-            policy_digest="b" * 64,
-            artifact_store=artifacts,
-            durable=False,
-            allowed_mcp_transports=tuple(policy["allowed_mcp_transports"]),
-            allowed_mcp_stdio_commands=tuple(policy["allowed_mcp_stdio_commands"]),
-            allowed_mcp_endpoint_hosts=tuple(policy["allowed_mcp_endpoint_hosts"]),
-            allow_private_mcp_endpoints=policy["allow_private_mcp_endpoints"],
-            allowed_managed_integration_providers=tuple(policy["allowed_managed_integration_providers"]),
-            forbidden_skill_capabilities=tuple(policy["forbidden_skill_capabilities"]),
-            maximum_mcp_servers=policy["maximum_mcp_servers"],
-            maximum_skills=policy["maximum_skills"],
-            require_complete_review=policy["validation_requires_skill_review"],
-        ),
-        artifact_store=artifacts,
-        durable=False,
-    )
-    admin = _admin()
-    base = ToolPlaneRevisionScopeV1(kind="deployment_base")
-    # The profile's seeded extensions_config.json is {"mcpServers":{},"skills":{}},
-    # so the Gateway computes no pre-governance material to adopt: the status
-    # is unmanaged, never bootstrap_required.
-    await service.initialize(existing_projection=await projection.has_existing_projection())
-    assert (await service.admin_status(base, admin)).governance_state == "unmanaged"
-    assert await service.readiness_reason() is None, "local_development: an ungoverned library never blocks readiness"
-
-    staged = await service.stage_current_projection(admin)
-    record = await repository.get(staged.revision_id)
-    assert record is not None
-    captured = {entry["name"]: entry for entry in record.manifest["public_skills"]}
-    assert set(captured) == _declared_names()
-    assert len(captured) == len(_seeded_names())
-    assert all(entry["enabled"] for entry in captured.values())
-
-    report = await service.validate(staged.revision_id, admin)
-    assert report.result == "passed", sorted((finding.severity, finding.code, finding.location or "") for finding in report.findings if finding.severity != "warning")
-    warnings = {"resource.missing", "resource.unreferenced", "resource.escaping-link", "network-cleartext-http", "network-local-http", "shell-env-dump"}
-    assert {finding.code for finding in report.findings} <= warnings, "the upstream library's review warnings; none blocks promotion"
-    promoted = await service.promote(staged.revision_id, admin)
-    assert promoted.state == "promoted"
-    governed = await service.admin_status(base, admin)
-    assert governed.governance_state == "governed" and governed.drift is False
-    before = _tree(env.skills_root / "public")
-
-    # A restart: run.sh seeds the same image bytes again.
-    assert _seed(PUBLIC, env.skills_root, *EXCLUDED).returncode == 0
-    assert _tree(env.skills_root / "public") == before
-    after_restart = await service.admin_status(base, admin)
-    assert after_restart.governance_state == "governed" and after_restart.drift is False
-    assert await service.readiness_reason() is None
-
-    # An upgrade to an image whose library changed.
-    changed = env.home / "next-image" / "public"
-    shutil.copytree(PUBLIC, changed)
-    (changed / "business-report" / "SKILL.md").write_text((PUBLIC / "business-report" / "SKILL.md").read_text(encoding="utf-8") + "\nA later release.\n", encoding="utf-8")
-    assert _seed(changed, env.skills_root, *EXCLUDED).returncode == 0
-    drifted = await service.admin_status(base, admin)
-    assert drifted.governance_state == "governed" and drifted.drift is True
-    assert await service.readiness_reason() is None, "still usable; the notice is the operator's cue to capture again"
-
-    recaptured = await service.stage_current_projection(admin)
-    assert (await service.validate(recaptured.revision_id, admin)).result == "passed"
-    assert (await service.promote(recaptured.revision_id, admin)).state == "promoted"
-    repaired = await service.admin_status(base, admin)
-    assert repaired.governance_state == "governed" and repaired.drift is False
-    assert _tree(env.skills_root / "public") == {path: content for path, content in _tree(changed).items() if path.split("/", 1)[0] not in EXCLUDED}

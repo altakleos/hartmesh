@@ -22,7 +22,7 @@ def _app(ui: UiConfig) -> FastAPI:
 
 def test_the_name_is_the_one_the_operator_configured() -> None:
     with TestClient(_app(UiConfig(product_name="Acme Assist"))) as client:
-        response = client.get("/api/product")
+        response = client.get("/api/v1/auth/product")
 
     assert response.status_code == 200
     assert response.json() == {"name": "Acme Assist"}
@@ -30,12 +30,12 @@ def test_the_name_is_the_one_the_operator_configured() -> None:
 
 def test_a_deployment_that_names_nothing_is_hartmesh() -> None:
     with TestClient(_app(UiConfig())) as client:
-        assert client.get("/api/product").json() == {"name": "HartMesh"}
+        assert client.get("/api/v1/auth/product").json() == {"name": "HartMesh"}
 
 
 def test_the_name_is_public_and_nothing_next_to_it_is() -> None:
-    assert _is_public("/api/product")
-    assert not _is_public("/api/product/logo")
+    assert _is_public("/api/v1/auth/product")
+    assert not _is_public("/api/v1/auth/product/logo")
     assert not _is_public("/api/features")
 
 
@@ -44,6 +44,6 @@ def test_the_gateway_mounts_the_route() -> None:
     # factory, so the route cannot be left unmounted while they still pass.
     from app.gateway.app import create_app
 
-    routes = [route for route in create_app().routes if getattr(route, "path", None) == "/api/product"]
+    routes = [route for route in create_app().routes if getattr(route, "path", None) == "/api/v1/auth/product"]
     assert [sorted(route.methods) for route in routes] == [["GET"]]
     assert routes[0].endpoint is product.get_product

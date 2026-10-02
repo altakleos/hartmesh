@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 import subprocess
 import sys
@@ -14,21 +15,28 @@ FRONTEND_DIR = PROJECT_ROOT / "frontend"
 COREPACK_NOTICE = "Using pnpm via Corepack."
 
 
+def _absolute(executable: str) -> str:
+    """*executable* as an absolute path when it is a file here.
+
+    The command runs from the selected project's directory, so a relative
+    entry on PATH would stop resolving there. A path that is not a file on
+    this machine (a Windows shim named on another platform) is left as found.
+    """
+    path = Path(executable)
+    return str(path.resolve()) if path.exists() else str(path)
+
+
 def find_pnpm_command() -> list[str] | None:
     """Return the preferred pnpm-compatible command for this machine."""
-    pnpm_path = shutil.which("pnpm")
-    if pnpm_path:
-        return [str(Path(pnpm_path).resolve())]
+    pnpm_names = ("pnpm.cmd", "pnpm") if os.name == "nt" else ("pnpm", "pnpm.cmd")
+    for name in pnpm_names:
+        if pnpm_path := shutil.which(name):
+            return [_absolute(pnpm_path)]
 
-    pnpm_cmd_path = shutil.which("pnpm.cmd")
-    if pnpm_cmd_path:
-        return [str(Path(pnpm_cmd_path).resolve())]
-
-    corepack_path = shutil.which("corepack")
-    if not corepack_path:
-        corepack_path = shutil.which("corepack.cmd")
-    if corepack_path:
-        return [str(Path(corepack_path).resolve()), "pnpm"]
+    corepack_names = ("corepack.cmd", "corepack") if os.name == "nt" else ("corepack", "corepack.cmd")
+    for name in corepack_names:
+        if corepack_path := shutil.which(name):
+            return [_absolute(corepack_path), "pnpm"]
     return None
 
 

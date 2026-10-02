@@ -22,26 +22,13 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from deerflow_extension_api import API_VERSION
 from packaging.requirements import InvalidRequirement, Requirement
-
-from deerflow.extensions.artifacts import (
-    SNAPSHOT_IGNORED_DIRECTORY_NAMES,
-    SNAPSHOT_IGNORED_FILE_SUFFIXES,
-    build_source_lock,
-    normalize_distribution_name,
-    validate_local_snapshot,
-    write_source_lock,
-)
 
 logger = logging.getLogger(__name__)
 
 _ENTRY_POINT_GROUP = "deerflow.extensions"
 _LOCK_RETRY_INTERVAL_SECONDS = 0.2
-_SNAPSHOT_IGNORES = (
-    *sorted(SNAPSHOT_IGNORED_DIRECTORY_NAMES),
-    *(f"*{suffix}" for suffix in SNAPSHOT_IGNORED_FILE_SUFFIXES),
-)
+_SNAPSHOT_IGNORES = (".git", ".venv", "venv", "__pycache__", "*.pyc")
 _DISTRIBUTION_NAME = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _SENSITIVE_FILENAMES = {".npmrc", ".pypirc", "credentials.json"}
 _SENSITIVE_SUFFIXES = {".key", ".pem", ".p12", ".pfx"}
@@ -136,7 +123,6 @@ class ExtensionManager:
         self.project_root = Path(project_root).resolve()
         self.backend_dir = self.project_root / "backend"
         self.pyproject_path = self.backend_dir / "pyproject.toml"
-        self.source_lock_path = self.backend_dir / "extensions.lock.json"
         if config_path is not None:
             selected_config = Path(config_path).expanduser()
         else:
@@ -145,14 +131,19 @@ class ExtensionManager:
             selected_config = root_config if root_config.is_file() or not legacy_config.is_file() else legacy_config
         self.config_path = selected_config.resolve()
 
-    def install(self, source: str, *, yes: bool = False, required: bool = False) -> InstalledExtension:
+    def install(self, source: str, *, yes: bool = False, required: bool = False, replace: bool = False) -> InstalledExtension:
         """Install an extension source and enable its packaging entry point."""
         with _manager_lock(self.project_root):
-            return self._install(source, yes=yes, required=required)
+            return self._install(source, yes=yes, required=required, replace=replace)
 
-    def _install(self, source: str, *, yes: bool, required: bool) -> InstalledExtension:
+    def upgrade(self, source: str, *, yes: bool = False) -> InstalledExtension:
+        """Replace an installed extension source without dropping its private config or enabled state."""
+        return self.install(source, yes=yes, replace=True)
+
+    def _install(self, source: str, *, yes: bool, required: bool, replace: bool) -> InstalledExtension:
         if not yes:
-            raise PermissionError("installing an extension executes trusted third-party code; pass yes=True to continue")
+            action = "upgrading" if replace else "installing"
+            raise PermissionError(f"{action} an extension executes trusted third-party code; pass yes=True to continue")
 
         source_argument = Path(source).expanduser()
         if _is_link_like(source_argument):
@@ -170,32 +161,55 @@ class ExtensionManager:
             managed_source = (managed_root / normalized_distribution).resolve()
             if not managed_source.is_relative_to(managed_root):
                 raise ValueError(f"invalid extension distribution name: {distribution!r}")
-            if managed_source.exists():
+            if managed_source.exists() and not replace:
                 raise FileExistsError(f"extension source is already installed: {managed_source}")
+            if replace and not managed_source.exists():
+                raise ValueError(f"extension source is not installed: {managed_source}; use install")
             uv_source = str(managed_source.relative_to(self.backend_dir))
         else:
             if source_argument.exists():
                 raise ValueError("local extension sources must be directories so they can be snapshotted for deployment")
             _validate_remote_source(source)
+            if replace:
+                try:
+                    remote_distribution = _normalize_distribution(Requirement(source).name)
+                except InvalidRequirement:
+                    remote_distribution = None
+                if remote_distribution is not None:
+                    if remote_distribution not in _extension_dependency_names(self.pyproject_path):
+                        raise ValueError(f"extension {remote_distribution!r} is not installed; use install")
+                elif _installed_git_distribution(source, self.pyproject_path) is None:
+                    # Bare git+ URLs are not named Requirements; resolve them
+                    # against the already-installed extensions group instead.
+                    raise ValueError("extension source is not installed; use install")
         # uv add/sync execute the package's build backend. A config this manager
         # could never write to must fail before that code runs, not afterwards
         # through rollback.
         self._read_plugins()
         _require_supported_uv(self.backend_dir)
 
-        dependencies_before = _extension_dependency_names(self.pyproject_path)
+        specs_before = _extension_dependencies(self.pyproject_path)
+        sources_before = _uv_sources(self.pyproject_path)
         dependency_snapshots = (
             _FileSnapshot.capture(self.pyproject_path),
             _FileSnapshot.capture(self.backend_dir / "uv.lock"),
         )
-        source_lock_snapshot = _FileSnapshot.capture(self.source_lock_path)
         managed_dependency_contents: tuple[bytes | None, ...] | None = None
-        managed_source_lock_content: bytes | None = None
-        source_lock_written = False
         uv_attempted = False
+        staging_root: Path | None = None
+        staged_source: Path | None = None
         try:
             if managed_source is not None:
                 managed_source.parent.mkdir(parents=True, exist_ok=True)
+                if replace and managed_source.exists():
+                    staging_root = Path(
+                        tempfile.mkdtemp(
+                            prefix=f".{managed_source.name}.upgrade-",
+                            dir=managed_source.parent,
+                        )
+                    )
+                    staged_source = staging_root / "source"
+                    managed_source.rename(staged_source)
                 shutil.copytree(
                     source_path,
                     managed_source,
@@ -228,10 +242,12 @@ class ExtensionManager:
             _validate_locked_local_sources(self.backend_dir / "uv.lock", self.backend_dir)
             _sync_environment(self.project_root, self.backend_dir, self.config_path)
             if metadata is None:
-                added = _extension_dependency_names(self.pyproject_path) - dependencies_before
-                if len(added) != 1:
-                    raise RuntimeError("could not identify the distribution added by uv")
-                distribution = next(iter(added))
+                distribution = _identify_uv_added_distribution(
+                    self.pyproject_path,
+                    specs_before=specs_before,
+                    sources_before=sources_before,
+                    replace=replace,
+                )
                 name, use = _discover_installed_entry_point(self.backend_dir, distribution)
                 metadata = (distribution, name, use)
             else:
@@ -239,27 +255,19 @@ class ExtensionManager:
                 if installed_entry_point != metadata[1:]:
                     raise ValueError("installed extension entry point does not match its source metadata")
             distribution, name, use = metadata
-            original_config, plugins = self._read_plugins()
-            plugin = {
-                "name": name,
-                "package": distribution,
-                "use": use,
-                "enabled": True,
-                "required": required,
-                "config": {},
-            }
-            _merge_plugin(plugins, plugin)
-            source_lock = build_source_lock(
-                self.backend_dir,
-                plugins=tuple(item for item in plugins if isinstance(item, dict)),
-                extension_api_version=API_VERSION,
+            self._enable_plugin(
+                {
+                    "name": name,
+                    "package": distribution,
+                    "use": use,
+                    "enabled": True,
+                    "required": required,
+                    "config": {},
+                },
+                preserve_enabled=replace,
             )
-            if _read_optional_bytes(self.source_lock_path) != source_lock_snapshot.content:
-                raise RuntimeError("extension installation preserved a concurrent source-lock edit")
-            write_source_lock(self.source_lock_path, source_lock)
-            source_lock_written = True
-            managed_source_lock_content = self.source_lock_path.read_bytes()
-            _write_plugins_block(self.config_path, original_config, plugins)
+            if staging_root is not None:
+                shutil.rmtree(staging_root, ignore_errors=True)
         except BaseException as operation_error:
             # _enable_plugin performs the only config mutation as the final,
             # atomic step. A failure before it must not roll back an operator
@@ -273,15 +281,21 @@ class ExtensionManager:
                     strict=True,
                 )
             )
+            if staging_root is not None:
+                # Key restore off staging, not a flag set after rename: a failed
+                # rename must leave the live snapshot in place and only remove
+                # the empty .*.upgrade-* directory.
+                if staged_source is not None and staged_source.exists():
+                    if managed_source is not None:
+                        shutil.rmtree(managed_source, ignore_errors=True)
+                    staged_source.rename(managed_source)
+                shutil.rmtree(staging_root, ignore_errors=True)
+            elif managed_source is not None and not dependency_recovery_conflict:
+                shutil.rmtree(managed_source, ignore_errors=True)
             if dependency_recovery_conflict:
                 raise RuntimeError("extension installation recovery preserved a concurrent dependency-file edit") from operation_error
-            source_lock_recovery_conflict = source_lock_written and _read_optional_bytes(self.source_lock_path) != managed_source_lock_content
             for snapshot in dependency_snapshots:
                 snapshot.restore()
-            if source_lock_written and not source_lock_recovery_conflict:
-                source_lock_snapshot.restore()
-            if managed_source is not None:
-                shutil.rmtree(managed_source, ignore_errors=True)
             # The recovery sync itself may rewrite the dependency files, so the
             # second restore has to run even when that sync fails.
             try:
@@ -295,10 +309,6 @@ class ExtensionManager:
             finally:
                 for snapshot in dependency_snapshots:
                     snapshot.restore()
-                if source_lock_written and not source_lock_recovery_conflict:
-                    source_lock_snapshot.restore()
-            if source_lock_recovery_conflict:
-                raise RuntimeError("extension installation recovery preserved a concurrent source-lock edit") from operation_error
             raise
 
         return InstalledExtension(name=name, distribution=distribution, use=use)
@@ -335,14 +345,11 @@ class ExtensionManager:
             _FileSnapshot.capture(self.pyproject_path),
             _FileSnapshot.capture(self.backend_dir / "uv.lock"),
         )
-        source_lock_snapshot = _FileSnapshot.capture(self.source_lock_path)
         config_snapshot = _FileSnapshot.capture(self.config_path)
         staging_root: Path | None = None
         staged_source: Path | None = None
         managed_dependency_contents: tuple[bytes | None, ...] | None = None
         managed_config_content: bytes | None = None
-        managed_source_lock_content: bytes | None = None
-        source_lock_written = False
         uv_attempted = False
         try:
             # Deactivate first so an abrupt process exit cannot leave a required
@@ -383,16 +390,6 @@ class ExtensionManager:
                 staged_source = staging_root / "source"
                 managed_source.rename(staged_source)
             _sync_environment(self.project_root, self.backend_dir, self.config_path)
-            source_lock = build_source_lock(
-                self.backend_dir,
-                plugins=tuple(item for item in plugins if isinstance(item, dict)),
-                extension_api_version=API_VERSION,
-            )
-            if _read_optional_bytes(self.source_lock_path) != source_lock_snapshot.content:
-                raise RuntimeError("extension removal preserved a concurrent source-lock edit")
-            write_source_lock(self.source_lock_path, source_lock)
-            source_lock_written = True
-            managed_source_lock_content = self.source_lock_path.read_bytes()
         except BaseException as operation_error:
             expected_contents = managed_dependency_contents or tuple(snapshot.content for snapshot in dependency_snapshots)
             dependency_recovery_conflict = any(
@@ -405,7 +402,6 @@ class ExtensionManager:
             )
             current_config_content = self.config_path.read_bytes() if self.config_path.is_file() else None
             config_recovery_conflict = managed_config_content is not None and current_config_content != managed_config_content
-            source_lock_recovery_conflict = source_lock_written and _read_optional_bytes(self.source_lock_path) != managed_source_lock_content
             if staged_source is not None and staged_source.exists() and not managed_source.exists():
                 staged_source.rename(managed_source)
             if staging_root is not None:
@@ -414,8 +410,6 @@ class ExtensionManager:
                 raise RuntimeError("extension removal recovery preserved a concurrent dependency-file edit") from operation_error
             for snapshot in dependency_snapshots:
                 snapshot.restore()
-            if source_lock_written and not source_lock_recovery_conflict:
-                source_lock_snapshot.restore()
             if managed_config_content is not None and not config_recovery_conflict:
                 config_snapshot.restore()
             # The recovery sync itself may rewrite the dependency files, so the
@@ -431,12 +425,8 @@ class ExtensionManager:
             finally:
                 for snapshot in dependency_snapshots:
                     snapshot.restore()
-                if source_lock_written and not source_lock_recovery_conflict:
-                    source_lock_snapshot.restore()
             if config_recovery_conflict:
                 raise RuntimeError("extension removal recovery preserved a concurrent config edit") from operation_error
-            if source_lock_recovery_conflict:
-                raise RuntimeError("extension removal recovery preserved a concurrent source-lock edit") from operation_error
             raise
         if staging_root is not None:
             shutil.rmtree(staging_root, ignore_errors=True)
@@ -461,9 +451,27 @@ class ExtensionManager:
             )
         return tuple(configured)
 
-    def _enable_plugin(self, plugin: dict[str, Any]) -> None:
+    def _enable_plugin(self, plugin: dict[str, Any], *, preserve_enabled: bool = False) -> None:
         original, plugins = self._read_plugins()
-        _merge_plugin(plugins, plugin)
+        exact_use_matches = [item for item in plugins if isinstance(item, dict) and item.get("use") == plugin["use"]]
+        identity_conflicts = [item for item in plugins if isinstance(item, dict) and item not in exact_use_matches and (item.get("name") == plugin["name"] or _same_distribution(item.get("package"), plugin["package"]))]
+        if len(exact_use_matches) > 1 or identity_conflicts:
+            raise ValueError(f"multiple configured plugins conflict with extension {plugin['name']!r}")
+        if exact_use_matches:
+            existing = exact_use_matches[0]
+            existing_package = existing.get("package")
+            if existing.get("name") not in (None, plugin["name"]) or (existing_package is not None and not _same_distribution(existing_package, plugin["package"])):
+                raise ValueError(f"configured plugin conflicts with extension {plugin['name']!r}")
+            existing["name"] = plugin["name"]
+            existing["package"] = plugin["package"]
+            existing["use"] = plugin["use"]
+            if not preserve_enabled:
+                existing["enabled"] = True
+            existing.setdefault("required", plugin["required"])
+            existing.setdefault("config", {})
+            _write_plugins_block(self.config_path, original, plugins)
+            return
+        plugins.append(plugin)
         _write_plugins_block(self.config_path, original, plugins)
 
     def _read_plugins(self) -> tuple[str, list[Any]]:
@@ -491,10 +499,9 @@ class ExtensionManager:
 
 
 def _normalize_distribution(name: str) -> str:
-    try:
-        return normalize_distribution_name(name)
-    except ValueError as exc:
-        raise ValueError(f"invalid extension distribution name: {name!r}") from exc
+    if not _DISTRIBUTION_NAME.fullmatch(name):
+        raise ValueError(f"invalid extension distribution name: {name!r}")
+    return re.sub(r"[-_.]+", "-", name).lower()
 
 
 def _retry_until_locked(acquire: Callable[[], None], *, sleep: Callable[[float], None] = time.sleep) -> None:
@@ -557,28 +564,6 @@ def _same_distribution(left: object, right: object) -> bool:
         return False
 
 
-def _merge_plugin(plugins: list[Any], plugin: dict[str, Any]) -> None:
-    """Apply one manager-owned activation declaration to an in-memory list."""
-
-    exact_use_matches = [item for item in plugins if isinstance(item, dict) and item.get("use") == plugin["use"]]
-    identity_conflicts = [item for item in plugins if isinstance(item, dict) and item not in exact_use_matches and (item.get("name") == plugin["name"] or _same_distribution(item.get("package"), plugin["package"]))]
-    if len(exact_use_matches) > 1 or identity_conflicts:
-        raise ValueError(f"multiple configured plugins conflict with extension {plugin['name']!r}")
-    if exact_use_matches:
-        existing = exact_use_matches[0]
-        existing_package = existing.get("package")
-        if existing.get("name") not in (None, plugin["name"]) or (existing_package is not None and not _same_distribution(existing_package, plugin["package"])):
-            raise ValueError(f"configured plugin conflicts with extension {plugin['name']!r}")
-        existing["name"] = plugin["name"]
-        existing["package"] = plugin["package"]
-        existing["use"] = plugin["use"]
-        existing["enabled"] = True
-        existing.setdefault("required", plugin["required"])
-        existing.setdefault("config", {})
-        return
-    plugins.append(plugin)
-
-
 def _read_local_extension_metadata(source: Path) -> tuple[str, str, str]:
     pyproject = source / "pyproject.toml"
     if not pyproject.is_file():
@@ -613,7 +598,28 @@ def _validate_entry_point(name: str, use: str) -> None:
 
 
 def _validate_local_snapshot(source: Path) -> None:
-    validate_local_snapshot(source)
+    ignored_names = {".git", ".venv", "venv", "__pycache__"}
+    for directory, dirnames, filenames in os.walk(source, followlinks=False):
+        directory_path = Path(directory)
+        retained_dirs: list[str] = []
+        for name in dirnames:
+            if name in ignored_names:
+                continue
+            candidate = directory_path / name
+            if _is_link_like(candidate):
+                raise ValueError("local extension snapshots cannot contain symbolic links or junctions")
+            retained_dirs.append(name)
+        dirnames[:] = retained_dirs
+        for name in filenames:
+            candidate = directory_path / name
+            if name == ".env" or name.startswith(".env.") or name in _SENSITIVE_FILENAMES or Path(name).suffix.lower() in _SENSITIVE_SUFFIXES:
+                raise ValueError(f"local extension snapshot contains a likely sensitive file: {name}")
+            if name.endswith(".pyc"):
+                continue
+            if _is_link_like(candidate):
+                raise ValueError("local extension snapshots cannot contain symbolic links or junctions")
+            if not candidate.is_file():
+                raise ValueError("local extension snapshots may contain only directories and regular files")
 
 
 def _is_link_like(path: Path) -> bool:
@@ -655,6 +661,22 @@ def _strip_git_prefix(reference: str) -> str:
     return reference[4:] if reference.lower().startswith("git+") else reference
 
 
+def _git_repository_identity(reference: str) -> tuple[str, int | None, str] | None:
+    """Host, port, and path that identify a Git repo, ignoring ref and fragment."""
+    parsed = urllib.parse.urlsplit(_strip_git_prefix(reference.strip()))
+    if parsed.scheme.lower() not in {"http", "https"}:
+        return None
+    host = parsed.hostname
+    if host is None:
+        return None
+    path = parsed.path.rsplit("@", 1)[0].rstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    if not path:
+        return None
+    return (host.lower(), parsed.port, path)
+
+
 def _is_scp_like_reference(source: str) -> bool:
     # The bare shorthand is checked directly; a PEP 508 direct reference keeps
     # it behind the requirement name, which packaging strips off the URL.
@@ -679,18 +701,81 @@ def _normalize_query_key(key: str) -> str:
     return re.sub(r"[^A-Za-z0-9]+", "-", camel_case_split).strip("-").lower()
 
 
-def _extension_dependency_names(pyproject: Path) -> set[str]:
+def _extension_dependencies(pyproject: Path) -> tuple[str, ...]:
     with pyproject.open("rb") as stream:
         document = tomllib.load(stream)
     dependencies = document.get("dependency-groups", {}).get("extensions", [])
+    return tuple(dependency for dependency in dependencies if isinstance(dependency, str))
+
+
+def _uv_sources(pyproject: Path) -> dict[str, Any]:
+    with pyproject.open("rb") as stream:
+        document = tomllib.load(stream)
+    sources = document.get("tool", {}).get("uv", {}).get("sources", {})
+    return sources if isinstance(sources, dict) else {}
+
+
+def _distribution_name_from_spec(spec: str) -> str | None:
+    match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", spec)
+    if match is None:
+        return None
+    return _normalize_distribution(match.group(1))
+
+
+def _identify_uv_added_distribution(
+    pyproject: Path,
+    *,
+    specs_before: tuple[str, ...],
+    sources_before: dict[str, Any],
+    replace: bool,
+) -> str:
+    names_before: set[str] = set()
+    for spec in specs_before:
+        name = _distribution_name_from_spec(spec)
+        if name is not None:
+            names_before.add(name)
+    added_names = _extension_dependency_names(pyproject) - names_before
+    if len(added_names) == 1:
+        return next(iter(added_names))
+    added_specs = [spec for spec in _extension_dependencies(pyproject) if spec not in specs_before]
+    if len(added_specs) == 1:
+        name = _distribution_name_from_spec(added_specs[0])
+        if name is not None:
+            return name
+    if replace:
+        changed_sources = [name for name, source in _uv_sources(pyproject).items() if isinstance(name, str) and sources_before.get(name) != source]
+        if len(changed_sources) == 1:
+            return _normalize_distribution(changed_sources[0])
+    raise RuntimeError("could not identify the distribution added by uv")
+
+
+def _extension_dependency_names(pyproject: Path) -> set[str]:
     names: set[str] = set()
-    for dependency in dependencies:
-        if not isinstance(dependency, str):
-            continue
-        match = re.match(r"\s*([A-Za-z0-9][A-Za-z0-9._-]*)", dependency)
-        if match:
-            names.add(_normalize_distribution(match.group(1)))
+    for dependency in _extension_dependencies(pyproject):
+        name = _distribution_name_from_spec(dependency)
+        if name is not None:
+            names.add(name)
     return names
+
+
+def _installed_git_distribution(source: str, pyproject: Path) -> str | None:
+    """Return the extensions-group distribution already pinned to this Git repo."""
+    requested = _git_repository_identity(source)
+    if requested is None:
+        return None
+    installed = _extension_dependency_names(pyproject)
+    for name, declared in _uv_sources(pyproject).items():
+        if not isinstance(name, str) or not isinstance(declared, dict):
+            continue
+        git_url = declared.get("git")
+        if not isinstance(git_url, str):
+            continue
+        if _git_repository_identity(git_url) != requested:
+            continue
+        normalized = _normalize_distribution(name)
+        if normalized in installed:
+            return normalized
+    return None
 
 
 _LOCK_LOCAL_PATH_KEYS = frozenset({"path", "directory", "editable", "virtual"})

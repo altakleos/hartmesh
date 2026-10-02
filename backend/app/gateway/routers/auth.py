@@ -4,12 +4,11 @@ import asyncio
 import logging
 import os
 import re
-import secrets
 import time
 import urllib.parse
 from ipaddress import ip_address, ip_network
 
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, Response, status
 from fastapi.security import OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field, field_validator
 from starlette.responses import RedirectResponse
@@ -47,6 +46,7 @@ from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_AT
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider, require_admin_user
+from app.gateway.utils import constant_time_equals
 from deerflow.config.auth_config import OIDCProviderConfig
 
 logger = logging.getLogger(__name__)
@@ -555,14 +555,26 @@ async def change_password(request: Request, response: Response, body: ChangePass
 
 @router.get("/me", response_model=UserResponse)
 async def get_me(request: Request):
-    """Get current authenticated user info."""
+    """Get current authenticated user info, including effective permissions."""
     user = await get_current_user_from_request(request)
+    auth = getattr(getattr(request, "state", None), "auth", None)
+    if auth is not None:
+        # AuthMiddleware already resolved the per-request permission set (with
+        # PAT-scope intersection and internal-caller semantics applied) — reuse
+        # it instead of evaluating the provider a second time.
+        permissions: list[str] = list(auth.permissions)
+    else:
+        # Middleware-less composition: resolve exactly as _authenticate does.
+        from app.gateway.authz import resolve_route_permissions_for_request
+
+        permissions = await resolve_route_permissions_for_request(request, user)
     return UserResponse(
         id=str(user.id),
         email=user.email,
         system_role=user.system_role,
         needs_setup=user.needs_setup,
         oauth_provider=user.oauth_provider,
+        permissions=permissions,
     )
 
 
@@ -674,19 +686,6 @@ class PATSummaryResponse(BaseModel):
     revoked_at: str | None
 
 
-class CredentialAuditResponse(BaseModel):
-    credential_ref: str | None
-    actor_digest: str | None
-    method: str
-    authority_digest: str | None
-    action: str
-    route_category: str
-    reason_code: str | None
-    first_occurred_at: str
-    last_occurred_at: str
-    event_count: int
-
-
 def _pat_summary(record: dict) -> PATSummaryResponse:
     return PATSummaryResponse(
         id=str(record["id"]),
@@ -719,23 +718,13 @@ async def create_pat(request: Request, body: PATCreateRequest):
 
     token = generate_pat_token()
     expires_at = datetime.now(UTC) + timedelta(days=body.expires_in_days) if body.expires_in_days is not None else None
-    from deerflow.persistence.credential_audit import (
-        CredentialAuditUnavailable,
+    record = await get_pat_repo(request).create(
+        user_id=str(user.id),
+        name=body.name.strip(),
+        scopes=scopes,
+        token_digest=pat_token_digest(token),
+        expires_at=expires_at,
     )
-
-    try:
-        record = await get_pat_repo(request).create(
-            user_id=str(user.id),
-            name=body.name.strip(),
-            scopes=scopes,
-            token_digest=pat_token_digest(token),
-            expires_at=expires_at,
-        )
-    except CredentialAuditUnavailable as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Required audit record unavailable",
-        ) from exc
     return PATCreatedResponse(
         id=str(record["id"]),
         name=str(record["name"]),
@@ -756,60 +745,13 @@ async def list_pats(request: Request):
     return [_pat_summary(record) for record in records]
 
 
-@router.get(
-    "/pats/{pat_id}/audit",
-    response_model=list[CredentialAuditResponse],
-    dependencies=[Depends(require_session_source)],
-)
-async def list_pat_audit(
-    request: Request,
-    pat_id: str,
-    limit: int = Query(default=50, ge=1, le=100),
-):
-    """Return bounded, secret-free audit aggregates for one owned PAT."""
-
-    from app.gateway.deps import get_pat_repo
-
-    user = await get_current_user_from_request(request)
-    observations = await get_pat_repo(request).list_audit_for_user(
-        pat_id,
-        str(user.id),
-        limit=limit,
-    )
-    if observations is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Token not found",
-        )
-    return [
-        CredentialAuditResponse(
-            **{
-                **observation,
-                "first_occurred_at": str(observation["first_occurred_at"]),
-                "last_occurred_at": str(observation["last_occurred_at"]),
-            }
-        )
-        for observation in observations
-    ]
-
-
 @router.delete("/pats/{pat_id}", response_model=MessageResponse, dependencies=[Depends(require_session_source)])
 async def revoke_pat(request: Request, pat_id: str):
     """Revoke one of the session user's tokens. Revocation is immediate."""
     from app.gateway.deps import get_pat_repo
 
     user = await get_current_user_from_request(request)
-    from deerflow.persistence.credential_audit import (
-        CredentialAuditUnavailable,
-    )
-
-    try:
-        revoked = await get_pat_repo(request).revoke(pat_id, str(user.id))
-    except CredentialAuditUnavailable as exc:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Required audit record unavailable",
-        ) from exc
+    revoked = await get_pat_repo(request).revoke(pat_id, str(user.id))
     if not revoked:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Token not found")
     return MessageResponse(message="Token revoked")
@@ -975,7 +917,9 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     """Create the first admin account on initial system setup.
 
     Only callable when no admin exists. Returns 409 Conflict if an admin
-    already exists.
+    already exists, including when a concurrent first-boot request won the
+    claim: the account is created through an atomic check-and-insert rather
+    than a count followed by a create.
 
     On success, the admin account is created with ``needs_setup=False`` and
     the session cookie is set.
@@ -987,26 +931,27 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     """
     if sign_on_only():
         raise sign_on_required()
-    admin_count = await get_local_provider().count_admin_users()
-    if admin_count > 0:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
-        )
+    already_initialized = HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+    )
+
+    # Fast path only: an initialized system answers without hashing a
+    # password. The claim below is what actually decides, because a count
+    # read here cannot exclude a request already in flight.
+    if await get_local_provider().count_admin_users() > 0:
+        raise already_initialized
 
     try:
-        user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="admin", needs_setup=False)
+        user = await get_local_provider().create_first_admin(email=body.email, password=body.password)
     except ValueError:
-        admin_count = await get_local_provider().count_admin_users()
-        if admin_count == 0:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
-            )
         raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=AuthErrorResponse(code=AuthErrorCode.SYSTEM_ALREADY_INITIALIZED, message="System already initialized").model_dump(),
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
         )
+
+    if user is None:
+        raise already_initialized
 
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request, remember_me=body.remember_me)
@@ -1232,7 +1177,7 @@ async def oauth_callback(
     if not state_payload:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing or expired OIDC state cookie")
 
-    if not secrets.compare_digest(state_payload.state, state):
+    if not constant_time_equals(state_payload.state, state):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="OIDC state mismatch")
 
     # ── Resolve redirect URI ─────────────────────────────────────────

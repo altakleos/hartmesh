@@ -15,8 +15,7 @@ three-state semantics (see :mod:`deerflow.runtime.user_context`):
 from __future__ import annotations
 
 import abc
-from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar, Final
 
 from deerflow.runtime.user_context import AUTO, _AutoSentinel
 
@@ -24,55 +23,37 @@ from deerflow.runtime.user_context import AUTO, _AutoSentinel
 # ``frontend/src/core/threads/utils.ts`` and
 # ``frontend/tests/e2e/utils/mock-api.ts``.
 THREAD_PINNED_METADATA_KEY = "deerflow_pinned"
+THREAD_ARCHIVED_METADATA_KEY = "deerflow_archived"
+
+# Cross-component metadata key. Keep in sync with
+# ``frontend/src/core/threads/utils.ts`` and
+# ``frontend/tests/e2e/utils/mock-api.ts``.
+THREAD_PROJECT_METADATA_KEY = "deerflow_project_id"
+
+
+class _ProjectFilterUnset:
+    """Sentinel for ``search(project_id=...)``: absent filter vs explicit unassigned."""
+
+    _instance: ClassVar[_ProjectFilterUnset | None] = None
+
+    def __new__(cls) -> _ProjectFilterUnset:
+        if cls._instance is None:
+            cls._instance = super().__new__(cls)
+        return cls._instance
+
+    def __repr__(self) -> str:
+        return "<PROJECT_FILTER_UNSET>"
+
+
+PROJECT_FILTER_UNSET: Final = _ProjectFilterUnset()
 
 
 class InvalidMetadataFilterError(ValueError):
     """Raised when all client-supplied metadata filter keys are rejected."""
 
 
-class ThreadMetaAlreadyExistsError(RuntimeError):
-    """Raised when a create would replace an existing thread metadata row."""
-
-
-@dataclass(frozen=True, slots=True)
-class ThreadMetaRunProjection:
-    """One authority-bound run projection into mutable thread metadata.
-
-    ``active_state_version`` identifies the execution epoch owned by
-    ``owner_worker_id``.  A terminal projection additionally carries the exact
-    terminal version plus the prior owner/active epoch captured by that
-    owner's successful status transition. The store independently proves that
-    full authority tuple and that this is still the latest admitted normal run
-    before applying either field.
-    """
-
-    run_id: str
-    thread_id: str
-    owner_worker_id: str
-    active_state_version: int
-    status: str
-    terminal_state_version: int | None = None
-    display_name: str | None = None
-
-    @property
-    def run_status(self) -> str:
-        """Return the exact durable run status this projection represents."""
-
-        return "success" if self.status == "idle" else self.status
-
-    def __post_init__(self) -> None:
-        if not self.run_id or not self.thread_id or not self.owner_worker_id:
-            raise ValueError("run, thread, and owner identifiers are required")
-        if type(self.active_state_version) is not int or self.active_state_version < 0:
-            raise ValueError("active_state_version must be a non-negative integer")
-        if self.status == "running":
-            if self.terminal_state_version is not None:
-                raise ValueError("a running projection cannot carry a terminal version")
-        elif self.status in {"idle", "error", "timeout", "interrupted"}:
-            if type(self.terminal_state_version) is not int or self.terminal_state_version <= self.active_state_version:
-                raise ValueError("a terminal projection requires a later terminal version")
-        else:
-            raise ValueError("unsupported run-derived thread status")
+class ThreadOwnershipConflictError(Exception):
+    """Raised when create would overwrite a thread owned by another user."""
 
 
 class ThreadMetaStore(abc.ABC):
@@ -85,13 +66,27 @@ class ThreadMetaStore(abc.ABC):
         user_id: str | None | _AutoSentinel = AUTO,
         display_name: str | None = None,
         metadata: dict | None = None,
+        project_id: str | None = None,
     ) -> dict:
-        """Create a row without replacing an existing thread.
+        """Create a thread row; when ``project_id`` is set, validate the
+        project inside the insert transaction and raise
+        ``ProjectNotAssignableError`` on failure (no partial row)."""
 
-        Raise :class:`ThreadMetaAlreadyExistsError` when ``thread_id`` is
-        already present.
+    @abc.abstractmethod
+    async def claim_unowned(self, thread_id: str, owner: str) -> bool:
+        """Atomically claim a legacy row whose owner is ``None``.
+
+        Returns ``True`` only when this call changed ``user_id`` from ``None``
+        to ``owner``. Missing and already-owned rows return ``False``.
         """
-        pass
+
+    @abc.abstractmethod
+    async def set_project(self, thread_id: str, project_id: str | None, *, user_id: str | None | _AutoSentinel = AUTO) -> bool:
+        """Atomically move a thread into/out of a project (RFC v2 §5.2).
+
+        Returns False when the thread is missing/foreign, or the target
+        project is missing/foreign/archived. Must not touch ``updated_at``.
+        """
 
     @abc.abstractmethod
     async def get(self, thread_id: str, *, user_id: str | None | _AutoSentinel = AUTO) -> dict | None:
@@ -103,11 +98,16 @@ class ThreadMetaStore(abc.ABC):
         *,
         metadata: dict[str, Any] | None = None,
         status: str | None = None,
+        archived: bool | None = None,
+        project_id: str | None | _ProjectFilterUnset = PROJECT_FILTER_UNSET,
         limit: int = 100,
         offset: int = 0,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> list[dict[str, Any]]:
         """Search threads.
+
+        ``archived=None`` includes all threads; False includes legacy rows
+        without a true archive flag. Filtering precedes pagination.
 
         Results are ordered with pinned threads first
         (``metadata.deerflow_pinned is True``), then by ``updated_at`` and
@@ -130,22 +130,6 @@ class ThreadMetaStore(abc.ABC):
     async def update_status(self, thread_id: str, status: str, *, user_id: str | None | _AutoSentinel = AUTO) -> None:
         pass
 
-    async def project_run(
-        self,
-        projection: ThreadMetaRunProjection,
-        *,
-        user_id: str | None | _AutoSentinel = AUTO,
-    ) -> bool:
-        """Conditionally project one authoritative latest run.
-
-        Return ``True`` only when the title/status mutation was applied.  A
-        missing row, failed owner check, stale execution fence, or older run is
-        a fail-closed ``False``.  Human/admin mutation methods remain separate.
-        """
-
-        del projection, user_id
-        return False
-
     @abc.abstractmethod
     async def update_metadata(self, thread_id: str, metadata: dict, *, touch: bool = True, user_id: str | None | _AutoSentinel = AUTO) -> None:
         """Merge ``metadata`` into the thread's metadata field.
@@ -167,17 +151,6 @@ class ThreadMetaStore(abc.ABC):
 
         Intended for trusted internal repair/migration paths. No-op if the
         row does not exist or the caller fails the owner check.
-        """
-        pass
-
-    @abc.abstractmethod
-    async def claim_unowned(self, thread_id: str, owner_user_id: str) -> bool:
-        """Atomically assign a legacy NULL-owned row to ``owner_user_id``.
-
-        Return ``True`` only when this call changed the row. Missing rows and
-        rows that already have any owner return ``False``. This operation is
-        the only supported adoption path; unlike :meth:`update_owner`, it can
-        never transfer an owned thread.
         """
         pass
 

@@ -129,5 +129,5 @@ def test_the_projection_and_the_worker_share_one_sentence() -> None:
     """
     from deerflow.runtime.runs import worker
 
-    assert worker._DELIVERY_INCOMPLETE_ERROR is DELIVERY_INCOMPLETE_ERROR
+    assert worker._DELIVERY_INCOMPLETE_ERROR == DELIVERY_INCOMPLETE_ERROR
     assert worker._delivery_error({"produced_paths": ["/out/a.pdf"]}) == DELIVERY_INCOMPLETE_ERROR

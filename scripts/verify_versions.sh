@@ -60,6 +60,13 @@ printf 'backend/pyproject.toml: %s\n' "$PY_VERSION"
 printf 'backend/uv.lock:        %s\n' "$LOCK_VERSION"
 printf 'frontend-hm/package.json:  %s\n' "$JS_VERSION"
 
+# uv.lock records a pre-release without the separator the other sources write:
+# `2.2.0-dev` there is `2.2.0dev`. Compare the lock in that spelling; a release
+# version (`2.1.0`, `2.1.0+build.5`) has no separator and is compared as is.
+lock_spelling() {
+  printf '%s' "$1" | sed -E 's/-(dev|a|b|rc|alpha|beta|pre)/\1/'
+}
+
 # mismatch <name> <actual> <expected>: prints a GitHub Actions annotation and
 # returns 1 when they differ, 0 when equal.
 mismatch() {
@@ -78,13 +85,13 @@ if [ -n "$EXPECTED" ]; then
   mismatch "Chart.yaml version"     "$CHART_VERSION" "$EXPECTED" || status=1
   mismatch "Chart.yaml appVersion"  "$APP_VERSION"   "$EXPECTED" || status=1
   mismatch "backend/pyproject.toml" "$PY_VERSION"    "$EXPECTED" || status=1
-  mismatch "backend/uv.lock"        "$LOCK_VERSION"  "$EXPECTED" || status=1
+  mismatch "backend/uv.lock"        "$LOCK_VERSION"  "$(lock_spelling "$EXPECTED")" || status=1
   mismatch "frontend-hm/package.json"  "$JS_VERSION"    "$EXPECTED" || status=1
 else
   echo
   mismatch "Chart.yaml appVersion"  "$APP_VERSION"  "$CHART_VERSION" || status=1
   mismatch "backend/pyproject.toml" "$PY_VERSION"   "$CHART_VERSION" || status=1
-  mismatch "backend/uv.lock"        "$LOCK_VERSION" "$CHART_VERSION" || status=1
+  mismatch "backend/uv.lock"        "$LOCK_VERSION" "$(lock_spelling "$CHART_VERSION")" || status=1
   mismatch "frontend-hm/package.json"  "$JS_VERSION"   "$CHART_VERSION" || status=1
 fi
 

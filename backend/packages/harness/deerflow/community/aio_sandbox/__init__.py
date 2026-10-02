@@ -1,4 +1,3 @@
-from .accepted_materializer import AioAcceptedMaterializer
 from .aio_sandbox import AioSandbox
 from .aio_sandbox_provider import AioSandboxProvider
 from .backend import SandboxBackend
@@ -9,7 +8,6 @@ from .sandbox_info import SandboxInfo
 __all__ = [
     "AioSandbox",
     "AioSandboxProvider",
-    "AioAcceptedMaterializer",
     "LocalContainerBackend",
     "RemoteSandboxBackend",
     "SandboxBackend",

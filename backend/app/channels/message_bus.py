@@ -12,8 +12,6 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from app.runtime.native_binding import InternalVerifiedNativeBinding
-
 logger = logging.getLogger(__name__)
 
 DEFAULT_INBOUND_QUEUE_MAXSIZE = 1000
@@ -58,11 +56,6 @@ class InboundMessage:
         owner_user_id: DeerFlow user id that owns the channel connection.
             Platform user ids stay in ``user_id``.
         workspace_id: Optional external workspace/guild/team id.
-        verified_source_binding: Host-owned source binding. Provider payloads
-            and arbitrary metadata cannot populate this field.
-        verified_provider_event_digest: Host-owned digest of the authenticated
-            request body and bounded routing event. Arbitrary metadata cannot
-            populate it.
         files: Optional list of file attachments (platform-specific dicts).
         metadata: Arbitrary extra data from the channel.
         created_at: Unix timestamp when the message was created.
@@ -78,8 +71,6 @@ class InboundMessage:
     connection_id: str | None = None
     owner_user_id: str | None = None
     workspace_id: str | None = None
-    verified_source_binding: InternalVerifiedNativeBinding | None = None
-    verified_provider_event_digest: str | None = None
     files: list[dict[str, Any]] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
     created_at: float = field(default_factory=time.time)
@@ -192,10 +183,7 @@ class MessageBus:
         if isinstance(inbound_queue_maxsize, bool) or not isinstance(inbound_queue_maxsize, int) or inbound_queue_maxsize <= 0:
             raise ValueError("inbound_queue_maxsize must be a positive integer")
 
-        # Durable receipt wake-ups intentionally share the dispatch queue. A
-        # wake-up carries only a receipt id; ChannelManager reloads and fences
-        # the authoritative row before reconstructing an InboundMessage.
-        self._inbound_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=inbound_queue_maxsize)
+        self._inbound_queue: asyncio.Queue[InboundMessage] = asyncio.Queue(maxsize=inbound_queue_maxsize)
         # Provider callbacks may reserve capacity from SDK-owned threads before
         # scheduling async identity/ack preparation on the Gateway loop.
         self._inbound_admission_lock = threading.Lock()
@@ -284,14 +272,14 @@ class MessageBus:
             if token in self._inbound_reservations:
                 self._inbound_reservations.remove(token)
 
-    async def get_inbound(self) -> Any:
+    async def get_inbound(self) -> InboundMessage:
         """Block until the next inbound message is available."""
         msg = await self._inbound_queue.get()
         with self._inbound_admission_lock:
             self._inbound_queued -= 1
         return msg
 
-    def get_inbound_nowait(self) -> Any:
+    def get_inbound_nowait(self) -> InboundMessage:
         """Return one queued message immediately and release admission capacity."""
         msg = self._inbound_queue.get_nowait()
         with self._inbound_admission_lock:
@@ -340,27 +328,8 @@ class MessageBus:
     def inbound_queue_maxsize(self) -> int:
         return self._inbound_queue.maxsize
 
-    async def publish_receipt_wakeup(self, wakeup: Any) -> None:
-        """Enqueue a loss-tolerant durable-receipt notification."""
-
-        with self._inbound_admission_lock:
-            admitted = self._inbound_queued + len(self._inbound_reservations)
-            if not self._accepting_inbound or admitted >= self._inbound_queue.maxsize:
-                logger.warning(
-                    "[Bus] durable receipt wakeup dropped; periodic receipt polling will recover it",
-                )
-                return
-            try:
-                self._inbound_queue.put_nowait(wakeup)
-            except asyncio.QueueFull:  # pragma: no cover - accounting invariant
-                logger.warning(
-                    "[Bus] durable receipt wakeup raced with queue capacity; periodic polling will recover it",
-                )
-                return
-            self._inbound_queued += 1
-
     @property
-    def inbound_queue(self) -> asyncio.Queue[Any]:
+    def inbound_queue(self) -> asyncio.Queue[InboundMessage]:
         """Expose the queue for read-only size/empty inspection."""
         return self._inbound_queue
 

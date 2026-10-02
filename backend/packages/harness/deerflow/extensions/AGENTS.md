@@ -1,32 +1,5 @@
 ### Python Extension System (Runtime and Distribution)
 
-HartMesh combines upstream middleware/task/service/router/model-observer
-contributions with singular typed authorization, invocation-constraint, Origin,
-run-context, and MCP-interceptor capabilities. The host pins
-`deerflow-extension-api` exactly and stamps loader-owned provenance; public
-contracts must never import `deerflow` or `app`. Required capabilities and
-malformed authoritative contributions fail startup, while optional contributor
-diagnostics remain bounded and redacted. One frozen extension generation is
-bound to each accepted durable invocation and cannot change mid-run.
-
-Artifact provenance proves which extension bytes/configuration HartMesh admitted. Extensions still execute with Gateway privileges and must come from a trusted operator source.
-`artifacts.py` is the single deep module for source normalization, local-tree
-hashing, uv-lock extraction, installed `RECORD` verification, safe configuration
-projection, canonical documents, and mismatch codes. Do not duplicate its uv
-parser, file walker, or projector in manager, build, loader, CI, or reporting
-code. Artifact, configuration, generation, and capability-manifest digests stay
-distinct; the capability manifest also binds every registered contribution to
-its loader-stamped source-entry digest without serializing contribution objects.
-
-Required MCP preparation remains additive to host-owned durable task lineage.
-The Capability Host may attach transient headers and record bounded accepted
-decision/evidence references, but an extension cannot construct, replace, or
-rewrite `McpTaskLineageV1`. For an Agent-created durable task, the core binder
-still requires the active host-reserved tool receipt plus the accepted tenant,
-principal, run, revision, assembly, catalog, extension generation/manifest, and
-Origin anchors. The remote submit runs only after required preparation succeeds,
-and the task row is created only after that submit returns a handle.
-
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in
 `config.yaml`. Keep this list out of `extensions_config.json`: the latter is writable
@@ -37,16 +10,14 @@ cannot load; optional plugins fail open with attributed diagnostics.
 Packaged extensions use one PEP 621 entry point in the
 `deerflow.extensions` group, for example
 `example = "deerflow_extension_example:install"`. The operator CLI is dispatched from
-the existing `deerflow` console script to `extensions/cli.py` and exposes these
-surfaces: `install SOURCE [--yes]`, `list`, `enable NAME`, `disable NAME`,
-`remove NAME`, read-only `verify`, bounded `manifest [--json]`, and secret-safe
-`config-digest --config PATH`. `NAME` resolves against the entry-point name, distribution name, or
+the existing `deerflow` console script to `extensions/cli.py` and exposes only these
+surfaces: `install SOURCE [--yes]`, `upgrade SOURCE [--yes]`, `list`, `enable NAME`,
+`disable NAME`, and `remove NAME`. `NAME` resolves against the entry-point name, distribution name, or
 `module:install` value. The root `make extension-*` targets are convenience wrappers;
 because they execute from `backend/`, documentation should use absolute local source
 paths with `SOURCE=` unless backend-relative behavior is intentional.
 
-`ExtensionManager` is the only source-lock writer and owns the package/config
-transaction. Install runs a controlled
+`ExtensionManager` owns the package/config transaction. Install runs a controlled
 `uv add --project <backend> --group extensions --no-workspace --no-sync -- <source>`, updates the dedicated
 `[dependency-groups].extensions` list and `uv.lock`, discovers exactly one packaging entry
 point, and inserts or adopts one
@@ -57,11 +28,7 @@ deleted snapshot — into a Gateway startup abort recoverable only through shell
 it is an explicit `install --required` opt-in rather than the managed default. Adoption of
 an existing hand-written record preserves whatever `required` the operator already chose.
 Enable/disable changes only the host-level `enabled` flag and preserves
-private configuration, so it changes only the deployment configuration digest
-and never `backend/extensions.lock.json`. Install/remove regenerate that source
-lock inside the same cross-process transaction as the dependency files,
-snapshot, and plugin declaration; rollback/conflict handling covers it too.
-Remove runs `uv remove --group extensions`, removes the plugin
+private configuration. Remove runs `uv remove --group extensions`, removes the plugin
 record, and deletes its managed source snapshot. Install validates the selected config
 file before running any uv command, because `uv add`/`uv sync` execute the package's build
 backend: a config this manager could never write to must fail before that code runs, not
@@ -86,17 +53,20 @@ and `UV_INSECURE_HOST`, which would remove the TLS validation the HTTPS-only sou
 depends on; index, proxy, cache, and credential-provider settings remain available.
 The `--no-workspace` boundary requires uv 0.8.0 or newer. The stock Docker paths pin uv
 0.11.1, and the manager fails before mutation when the host uv is older.
-All install/remove/enable/disable mutations for a checkout hold the cross-process
+All install/upgrade/remove/enable/disable mutations for a checkout hold the cross-process
 `.deer-flow/extension-manager.lock`; remove deactivates config before changing the package
 declaration, and rollback preserves a concurrent external config edit instead of replacing
-it. The MVP has no in-place upgrade: operators retain private config, remove the old
-package, install the new source pin, and restore that config.
+it. Upgrade replaces a managed local snapshot (or re-pins a package requirement that is already
+in the `extensions` group) and adopts the existing `plugins:` record so private `config`,
+`required`, and `enabled` stay put. It fails closed if that local snapshot, requirement, or Git source is not
+already installed; a plain `install` still refuses an already-snapshotted local directory.
+Failed upgrades restore the previous snapshot even when a concurrent dependency-file edit
+blocks lock/pyproject rollback, then leave that operator edit in place.
 
 Local-directory installs are snapshots, not editable links. The manager validates the
 source, derives the destination from the normalized distribution name, and copies it to
 `backend/extensions/sources/<distribution>/`. It ignores Git metadata, virtual
-environments, `__pycache__`, generated `.ruff_cache`, and bytecode in both
-copying and hashing; rejects symbolic links, path-escaping
+environments, Python caches, and bytecode; rejects symbolic links, path-escaping
 distribution names, and likely credential files; and the root `.dockerignore` explicitly
 re-includes the entire managed tree so package READMEs, native modules, and assets reach
 the backend builder. These checks prevent common packaging accidents, not malicious
@@ -145,11 +115,8 @@ targets use `uv sync --locked`; direct backend `make dev`/`make gateway` use
 locked sync and then launch with `uv run --no-sync`; the production Docker builder syncs
 the same copied backend project and lock, and both image runtime commands use
 `--no-sync`. Thus production may download locked remote artifacts while building an
-image. After that locked sync, the image build is the only writer of
-`/app/hartmesh/extension-artifacts.json`; startup verifies it and the packaged
-source lock before resolving any extension entry point. Production container
-startup never resolves or installs an extension from the network. Local and
-Docker-dev pre-start syncs may fetch missing locked artifacts.
+image, but production container startup never resolves or installs an extension from the
+network. Local and Docker-dev pre-start syncs may fetch missing locked artifacts.
 `docker/dev-entrypoint.sh` retries a failed sync once after recreating `.venv`, but keeps
 `--locked` on the retry: that repairs a broken virtualenv, not a stale lock. A second
 failure aborts with recovery instructions instead of starting uvicorn against an
@@ -163,9 +130,9 @@ newer uv can bump `uv.lock`'s `revision` (or make `uv lock --check` disagree wit
 generated elsewhere) while CI stays green, and the pinned uv in the production image then
 fails on the committed lock. `backend/tests/test_ci_uv_version_pin.py` keeps the four
 locations in step, which makes a uv upgrade one deliberate, reviewable change.
-Rebuild the Gateway image after changing the managed set. Every install, enable, disable,
-remove, or config mutation also requires a Gateway restart because plugin loading is
-startup-only.
+Rebuild the Gateway image after changing the managed set. Every install, upgrade, enable,
+disable, remove, or config mutation also requires a Gateway restart because plugin loading
+is startup-only.
 The root management wrappers bootstrap the checkout environment without the extension group
 via `uv run --frozen --no-group extensions`, so a broken or disappeared extension source cannot
 trigger project validation before the operator can list, disable, or remove it, while a
@@ -174,9 +141,10 @@ entry, the manager owns the controlled locked sync.
 
 The public package is `packages/extension-api/` and must never import `deerflow` or carry
 framework dependencies. Extensions declare any FastAPI, LangChain, or LangGraph imports
-themselves. Its registry contract exposes seven contribution kinds: middleware
+themselves. Its registry contract exposes eight contribution kinds: middleware
 contributors, task-lifecycle contributors, system-model-call observers, agent-assembly
-observers, context-compaction observers, Gateway-lifetime services, and eager routers. Middleware contributions declare lead/subagent scope, stable
+observers, context-compaction observers, Gateway-lifetime services, eager routers, and
+experimental full-stack plugins (`registry.plugin()`, see `docs/full-stack-plugins.md`). Middleware contributions declare lead/subagent scope, stable
 order, and a semantic placement (`MODEL_LOGICAL`, `MODEL_PHYSICAL`, `TOOL_VISIBLE`,
 `TOOL_RAW`, or `STANDARD`) rather than a fragile list index. `extensions/stack.py` is the
 single final composition point; do not inject inside
@@ -190,13 +158,6 @@ on first use — `ordering.py::core_ordering_constraints()` and `stack.py::_anch
 which is `assert_ordering` / composition time, already inside the middleware builder.
 Defer by deferring the *call*; do not fake a resolved value with a lazy container
 subclass, which reports one answer when iterated and another when measured.
-`ToolReceiptMiddleware` must enclose every middleware that can return or rebuild a
-`ToolMessage` without invoking its handler: Guardrail, SandboxAudit, ReadBeforeWrite,
-ToolProgress, and `SandboxMiddleware`. The sandbox middleware rebuilds tool results into
-`Command`s carrying sandbox state and, once upstream's egress approval card is absorbed,
-can replace a result with an approval message and end the turn; a receipt closed outside
-it would commit the ledger to a result the model never saw. Both runtime builders satisfy
-the constraint today and `tests/test_tool_error_handling_middleware.py` pins it.
 
 **Agent assembly observation.** `assemble_lead_agent()` returns
 `LeadAgentAssembly(graph, descriptor)`; `make_lead_agent()` remains the
@@ -214,20 +175,6 @@ host build would move every agent's fingerprint on every redeploy and make that
 finer question unanswerable — `build` stays a reported field a consumer can
 compare directly. Registered `AgentAssemblyObserver`s are notified
 synchronously at the end of construction; failures are contained per observer.
-The host may add reserved, fingerprinted effective policies without changing
-the public descriptor member types. In particular,
-`hartmesh.tool_recovery.v1` is a host-derived map for explicitly reconcilable
-tools. It is not an extension-authored retry promise and must not be added to
-the extension-api 0.13 `ToolDescriptor` wire shape.
-
-Assembly observers remain observational and fail-open. Accepted durable runs
-independently request the same descriptor through a server-owned opaque context
-sentinel, validate it against accepted anchors, and atomically bind bounded V1
-evidence before graph execution. An observer failure therefore neither prevents
-that authoritative bind nor authorizes execution without it. The persisted
-evidence contains only identifiers and full digests; observers do not supply its
-accepted model, skill, policy, revision, or extension anchors. It is an execution
-record, not a cryptographic code attestation.
 Gateway `resolve_agent_factory()` now returns `assemble_lead_agent`, so every
 consumer must unwrap `.graph` — a third-party factory returning a bare graph
 stays supported.
@@ -330,8 +277,63 @@ detached task store, the same fallback `notify_system_model_call` uses when its 
 supplies none.
 
 Gateway services start in registration order after the persistence engine and session
-factory are ready. Each receives the same `ExtensionRuntimeDeps` snapshot containing the
-app store, projected host policy, and session factory. Start failures are attributed and
+factory are ready. Ungranted services share an `ExtensionRuntimeDeps` snapshot containing the
+app store, projected host policy, session factory, and optional read-only
+`RunEvidenceReader`. `plugins[].host_access.model_invocation` optionally binds a model invoker
+to each service via the host-only `ModelInvocationService` adapter. The loader captures
+one `ModelInvocationScope` per installation, not per `use` string, so duplicate sources
+cannot inherit one another's roles. Its semaphore is shared by that installation's
+services; its admission ceiling is twice the concurrency limit, checked before
+payload processing. Provider work is shielded from caller cancellation and retains
+both budgets until actual completion, including synchronous LangChain executor calls
+and offloaded construction. Abandoned construction cannot dispatch a model request.
+Provider-task cancellation is a normalized failure; only a new cancellation of
+the invoking task propagates. Compare cancellation counts against invocation entry
+so previously handled caller cancellations do not mask provider failures.
+Failed-install positional rollback also removes its adapters. The adapter
+receives startup config through `start_with_host`, while extensions receive only the
+neutral invoker in a replaced deps snapshot. No-grant services preserve their old path.
+Failed start and stop revoke the service's handle and cancel queued/in-flight
+callers; they do not release slots owned by still-running provider work. Structured
+schema checks and output validation run in terminable isolated Python children,
+with pipe I/O on admission-bounded dedicated threads (Windows selector-loop compatible,
+independent of a potentially saturated provider executor). Cancellation kills and
+reaps those children before releasing admission.
+Grants and model profiles are startup snapshots; changing them requires restarting the
+Gateway. Calls use the normal model factory and attributed tracing, return plain text,
+usage counts and optionally locally validated JSON objects, and never return raw model
+objects or provider exception chains. See `backend/docs/extension-model-invocation.md`.
+
+The Gateway constructs the configured run and event stores before
+services so the reader is usable from `start()`. Changed-run discovery uses an opaque,
+scope-bound cursor over `(change_seq, run_id)`; a run that changes after it was returned may
+be replayed, but an unreturned run cannot be skipped. Legacy rows start at `change_seq=0`
+and sort by run id. Deletion is deliberately not represented by a tombstone, so the feed
+covers creations and changes to retained rows only; synchronization consumers must poll
+`get_run_status()` for known runs and treat `None` as absent when deletion reconciliation
+is required. A DB run store preserves positions across restarts, while memory only provides
+process-lifetime ordering. Per-run events retain the event store's thread-scoped
+`after_seq` semantics; metadata has only the legacy `auth_token` key removed (there is no
+other redaction), event content is returned unchanged, and status comes from the
+authoritative run store. The reader passes its fixed scope to
+event reads explicitly, including global `None`, so ambient request identity cannot
+change its visibility. Content and redacted metadata are deep-copied snapshots: DTO
+fields are frozen, but nested containers remain locally mutable without touching host
+storage. The production Gateway injects one
+app-scoped reader with `user_id=None`, deliberately granting trusted operator extensions
+global cross-user visibility because services have no request principal. User-facing contributed
+routes must use `resolve_run_evidence_reader(request)` or `require_run_evidence_reader(request)`;
+the Gateway binds that reader to the authenticated principal rather than a caller-supplied user ID.
+The factory rejects empty or whitespace-padded IDs instead of normalizing authorization identities.
+The resolver requires the request's effective `runs:read` permission and never widens admin
+or internal callers to global visibility. Unsupported hosts resolve to `None` (the required
+helper raises `NotImplementedError`); denied access raises `PermissionError`. Extensions map
+these to 503/403 at their HTTP boundary. The public API remains framework-independent.
+A host embedding the harness may instead bind a reader to one user. This is not a sandbox boundary: services
+already retain `session_factory` and execute with Gateway privileges. Empty pages mean
+caught up or not visible, never unsupported -- absence is represented
+by `ExtensionRuntimeDeps.run_evidence_reader is None`, and protocol defaults raise
+`NotImplementedError`. Start failures are attributed and
 fail open. The runtime captures `app.state.extensions` once, registers cleanup before the
 start batch, and stops the attempted service prefix in reverse order after run/subagent
 drain but before store, checkpointer, and engine teardown. Each stop has an independent
@@ -410,13 +412,13 @@ that the current host silently ignores.
 Temporary commits use an empty repository-local hook directory. They must not run developer or CI Git hooks.
 Tests for hook behavior must create and invoke their own hook fixtures.
 
-## Replica-safety declarations
+## Full-stack contributions
 
-Gateway-lifetime/background services declare exactly one public
-`ReplicaSafety`: `stateless_replica_safe`, `shared_store_fenced`,
-`singleton_leased`, `single_replica_only`, or `unclassified`. The exact
-two-Gateway profile rejects the last two and requires health/fence evidence for
-the shared-store/leased forms. Both replicas freeze the same artifact,
-configuration, contribution, and capability digests. V1 permits the empty
-canonical set or only the specifically qualified first-party governance
-artifact; no other extension inherits its evidence.
+`registry.plugin(PluginContribution(...))` registers optional browser code, backend actions
+and model tools under one deployment-owned namespace. The public method defaults to False
+for older hosts; accepted contributions share source attribution and positional rollback.
+`plugins.py` in Gateway serves descriptors, hashed JS assets and authenticated action calls.
+No online settings write API is added. `plugin_tools.py` joins normal tool assembly with
+the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
+public-field projection is an allowlist. Package code is trusted, not sandboxed. See
+`docs/full-stack-plugins.md` and the independently packaged bookmark example.

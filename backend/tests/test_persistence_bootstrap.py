@@ -48,7 +48,7 @@ from deerflow.persistence.migrations._helpers import _normalize_default
 asyncio_test = pytest.mark.asyncio
 
 
-HEAD = "0047_identity_holds"
+HEAD = _get_head_revision()
 BASELINE = "0001_baseline"
 
 
@@ -61,9 +61,14 @@ async def _table_names(engine) -> set[str]:
         return await conn.run_sync(lambda c: set(sa.inspect(c).get_table_names()))
 
 
-async def _runs_columns(engine) -> set[str]:
+async def _table_columns(engine, table_name: str) -> dict[str, dict]:
     async with engine.connect() as conn:
-        return await conn.run_sync(lambda c: {col["name"] for col in sa.inspect(c).get_columns("runs")})
+        columns = await conn.run_sync(lambda c: sa.inspect(c).get_columns(table_name))
+    return {column["name"]: column for column in columns}
+
+
+async def _runs_columns(engine) -> set[str]:
+    return set(await _table_columns(engine, "runs"))
 
 
 async def _runs_column_meta(engine, column_name: str) -> dict:
@@ -149,6 +154,10 @@ async def test_empty_branch_creates_all_and_stamps_head(tmp_path: Path) -> None:
         assert "token_usage_by_model" in await _runs_columns(engine)
         assert "cancel_action" in await _runs_columns(engine)
         assert "cancel_requested_at" in await _runs_columns(engine)
+        thread_columns = await _table_columns(engine, "threads_meta")
+        task_columns = await _table_columns(engine, "mcp_tasks")
+        assert thread_columns["incarnation"]["nullable"] is True
+        assert task_columns["thread_incarnation"]["nullable"] is True
         operation_kind = await _runs_column_meta(engine, "operation_kind")
         assert operation_kind["nullable"] is False
         assert await _alembic_version(engine) == HEAD
@@ -358,7 +367,6 @@ def test_type_equivalent_matches_known_dialect_synonyms() -> None:
     assert _type_equivalent(sa.JSON(), "JSONB()") is True
     assert _type_equivalent("JSON", "JSONB") is True
     assert _type_equivalent("JSONB", "JSON") is True
-    assert _type_equivalent(sa.String(length=96), "VARCHAR(96)") is True
 
 
 def test_type_equivalent_catches_wholesale_type_mismatch() -> None:
@@ -854,19 +862,6 @@ class TestDecideState:
 
 def test_head_revision_is_expected() -> None:
     assert _get_head_revision() == HEAD
-
-
-def test_revision_ids_fit_the_default_alembic_version_column() -> None:
-    """Every revision must fit PostgreSQL's default VARCHAR(32) ledger."""
-    from alembic.config import Config  # noqa: PLC0415
-    from alembic.script import ScriptDirectory  # noqa: PLC0415
-
-    migrations_dir = Path(__file__).resolve().parents[1] / "packages/harness/deerflow/persistence/migrations"
-    config = Config()
-    config.set_main_option("script_location", str(migrations_dir))
-    revisions = ScriptDirectory.from_config(config).walk_revisions()
-
-    assert all(len(revision.revision) <= 32 for revision in revisions)
 
 
 def test_baseline_revision_id_is_known() -> None:

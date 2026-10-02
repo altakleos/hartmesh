@@ -1,17 +1,10 @@
 import errno
-import threading
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
-from test_accepted_skill_snapshots import _fenced_release
 
-from deerflow.sandbox.accepted_material import (
-    AcceptedMaterialCapability,
-    AcceptedSkillSandboxBindingError,
-    AcceptedSkillSandboxBindingV1,
-)
 from deerflow.sandbox.local.local_sandbox import LocalSandbox, PathMapping
 from deerflow.sandbox.local.local_sandbox_provider import LocalSandboxProvider
 
@@ -337,6 +330,79 @@ class TestSymlinkEscapes:
         assert "/mnt/data/nested/linked-dir/" in entries
         assert "/mnt/data/dir-link" not in entries
 
+    def test_list_dir_raises_when_path_is_missing(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/data/missing")
+
+    def test_list_dir_raises_when_only_nested_virtual_mount_exists(self, tmp_path):
+        nested_mount = tmp_path / "nested"
+        nested_mount.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(
+                    container_path="/mnt/virtual/deep/child",
+                    local_path=str(nested_mount),
+                    read_only=True,
+                ),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/virtual")
+
+    def test_list_dir_raises_when_direct_virtual_mount_is_missing(self, tmp_path):
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(
+                    container_path="/mnt/virtual/child",
+                    local_path=str(tmp_path / "missing"),
+                    read_only=True,
+                ),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/virtual")
+
+    def test_list_dir_raises_when_parent_mount_is_a_file(self, tmp_path):
+        parent_file = tmp_path / "parent-file"
+        parent_file.write_text("not a directory", encoding="utf-8")
+        child_mount = tmp_path / "child"
+        child_mount.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/virtual", local_path=str(parent_file), read_only=True),
+                PathMapping(container_path="/mnt/virtual/child", local_path=str(child_mount), read_only=True),
+            ],
+        )
+
+        with pytest.raises(FileNotFoundError):
+            sandbox.list_dir("/mnt/virtual")
+
+    def test_list_dir_empty_directory_returns_empty(self, tmp_path):
+        mount_dir = tmp_path / "mount"
+        mount_dir.mkdir()
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/data", local_path=str(mount_dir), read_only=False),
+            ],
+        )
+
+        assert sandbox.list_dir("/mnt/data") == []
+
     def test_write_file_blocks_symlink_into_nested_read_only_mount(self, tmp_path):
         repo_dir = tmp_path / "repo"
         repo_dir.mkdir()
@@ -570,213 +636,60 @@ class TestMultipleMounts:
         assert "/mnt/data/file.txt" in masked
         assert str(mount_dir) not in masked
 
+    @pytest.mark.parametrize("suffix", ["", ":3:needle", " 3 needle"])
+    def test_reverse_resolve_keeps_mount_spelling_for_symlink_resolving_outside(self, tmp_path, suffix):
+        """A link under a mount whose target is outside every mount must not turn
+        into the target's host path.
 
-# The material a provisioned sandbox is for; the projection Material binds it later.
-_EMPTY_BINDING = AcceptedSkillSandboxBindingV1(snapshot_id=None)
+        ``grep -n`` output (``link.py:3:...``) used to hide this only because the
+        whole line was resolved as one nonexistent file; once a match ends at
+        ``:``, the link itself is resolved like any whitespace-terminated path.
+        """
+        workspace = (tmp_path / "workspace").resolve()
+        workspace.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "secret.py").write_text("needle\n")
+        _symlink_to(outside / "secret.py", workspace / "link.py")
+        sandbox = LocalSandbox("test", [PathMapping(container_path="/mnt/user-data/workspace", local_path=str(workspace))])
+
+        masked = sandbox._reverse_resolve_paths_in_output(f"{workspace}/link.py{suffix}")
+
+        assert masked == f"/mnt/user-data/workspace/link.py{suffix}"
+        # Structured results take the same path back: ``glob`` returned the target's host path.
+        assert sandbox.glob("/mnt/user-data/workspace", "*.py") == (["/mnt/user-data/workspace/link.py"], False)
+
+    def test_reverse_resolve_prefers_the_mount_a_symlink_resolves_into(self, tmp_path):
+        """The spelling fallback applies only when resolution leaves every mount."""
+        workspace = (tmp_path / "workspace").resolve()
+        uploads = (tmp_path / "uploads").resolve()
+        workspace.mkdir()
+        uploads.mkdir()
+        (uploads / "doc.md").write_text("x\n")
+        _symlink_to(uploads / "doc.md", workspace / "doc.md")
+        sandbox = LocalSandbox(
+            "test",
+            [
+                PathMapping(container_path="/mnt/user-data/workspace", local_path=str(workspace)),
+                PathMapping(container_path="/mnt/user-data/uploads", local_path=str(uploads)),
+            ],
+        )
+
+        assert sandbox._reverse_resolve_path(str(workspace / "doc.md")) == "/mnt/user-data/uploads/doc.md"
+
+    def test_reverse_resolve_spelling_fallback_does_not_keep_dot_dot_escapes(self, tmp_path):
+        """``mount/../x`` is outside the mount by spelling too, so it must not come
+        back as ``/mnt/.../../x`` -- a virtual path forward resolution rejects."""
+        workspace = (tmp_path / "workspace").resolve()
+        workspace.mkdir()
+        sandbox = LocalSandbox("test", [PathMapping(container_path="/mnt/user-data/workspace", local_path=str(workspace))])
+
+        resolved = sandbox._reverse_resolve_path(f"{workspace}/../outside/secret.py")
+
+        assert not resolved.startswith("/mnt/user-data/workspace")
 
 
 class TestLocalSandboxProviderMounts:
-    @pytest.fixture
-    def accepted_local_sandbox(self, tmp_path, monkeypatch):
-        from collections import OrderedDict
-
-        from deerflow.config.paths import Paths
-
-        paths = Paths(base_dir=tmp_path / "state")
-        skills = tmp_path / "skills"
-        projection = SimpleNamespace(
-            public=skills / "public",
-            custom=skills / "custom",
-            legacy=skills / "legacy",
-            integrations=skills / "integrations",
-        )
-        for value in vars(projection).values():
-            value.mkdir(parents=True, exist_ok=True)
-        config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
-        provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
-        provider._skills_container_path = config.skills.container_path
-        provider._path_mappings = []
-        provider._generic_sandbox = None
-        provider._thread_sandboxes = OrderedDict()
-        provider._max_cached_threads = 10
-        provider._lock = threading.Lock()
-        monkeypatch.setattr(provider, "_ensure_skills_projection", lambda *_a, **_kw: projection)
-
-        with (
-            patch("deerflow.config.get_app_config", return_value=config),
-            patch("deerflow.config.paths.get_paths", return_value=paths),
-        ):
-            sandbox_id = provider.provision_accepted_skills("thread-a", user_id="owner-a", binding=_EMPTY_BINDING)
-            sandbox = provider.get(sandbox_id)
-            assert isinstance(sandbox, LocalSandbox)
-            yield provider, sandbox_id
-
-    def test_accepted_local_sandbox_is_empty_only(self, accepted_local_sandbox):
-        provider, sandbox_id = accepted_local_sandbox
-
-        assert provider.has_accepted_skill_isolation(sandbox_id)
-        assert provider.accepted_skill_material_capability(sandbox_id) is AcceptedMaterialCapability.EMPTY_ONLY
-        from deerflow.runtime.accepted_invocation import ResolvedAgentMaterialV1
-        from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
-        from deerflow.sandbox.accepted_projection import require_runtime_accepted_skill_isolation
-
-        material = ResolvedAgentMaterialV1(
-            agent_id="lead-agent",
-            storage_source="test",
-            storage_version="1",
-            agent_config=None,
-            soul="",
-            model_profile={},
-            skill_snapshot=SimpleNamespace(snapshot_id="a" * 64),
-        )
-        runtime = SimpleNamespace(
-            context={RESOLVED_AGENT_MATERIAL_CONTEXT_KEY: material},
-        )
-        with pytest.raises(
-            AcceptedSkillSandboxBindingError,
-            match="accepted_skill_snapshot_immutability_unsupported",
-        ):
-            require_runtime_accepted_skill_isolation(
-                provider,
-                runtime,
-                sandbox_id=sandbox_id,
-            )
-
-    def test_ordinary_acquire_cannot_replace_invocation_owned_accepted_sandbox(
-        self,
-        tmp_path,
-        monkeypatch,
-    ):
-        from collections import OrderedDict
-
-        from deerflow.config.paths import Paths
-        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-        paths = Paths(base_dir=tmp_path / "state")
-        skills = tmp_path / "skills"
-        projection = SimpleNamespace(
-            public=skills / "public",
-            custom=skills / "custom",
-            legacy=skills / "legacy",
-            integrations=skills / "integrations",
-        )
-        for value in vars(projection).values():
-            value.mkdir(parents=True, exist_ok=True)
-        config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
-        provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
-        provider._skills_container_path = config.skills.container_path
-        provider._path_mappings = []
-        provider._generic_sandbox = None
-        provider._thread_sandboxes = OrderedDict()
-        provider._max_cached_threads = 10
-        provider._lock = threading.Lock()
-        monkeypatch.setattr(provider, "_ensure_skills_projection", lambda *_a, **_kw: projection)
-        coordinator = get_skill_projection_coordinator()
-        coordinator.claim_committed_run(
-            user_id="owner-fenced",
-            thread_id="thread-fenced",
-            run_id="run-fenced",
-            snapshot_id=None,
-        )
-
-        try:
-            with (
-                patch("deerflow.config.get_app_config", return_value=config),
-                patch("deerflow.config.paths.get_paths", return_value=paths),
-            ):
-                accepted_id = provider.provision_accepted_skills(
-                    "thread-fenced",
-                    user_id="owner-fenced",
-                    binding=_EMPTY_BINDING,
-                )
-                accepted = provider.get(accepted_id)
-                assert accepted is not None
-
-                with pytest.raises(
-                    AcceptedSkillSandboxBindingError,
-                    match="accepted_skill_snapshot_isolation_conflict",
-                ):
-                    provider.acquire("thread-fenced", user_id="owner-fenced")
-
-                assert provider.get(accepted_id) is accepted
-                assert provider.has_accepted_skill_isolation(accepted_id)
-        finally:
-            assert coordinator.release_unactivated_run(
-                user_id="owner-fenced",
-                thread_id="thread-fenced",
-                run_id="run-fenced",
-            )
-
-    def test_accepted_acquisition_exposes_only_immutable_snapshot_mount(self, tmp_path, monkeypatch):
-        from collections import OrderedDict
-
-        from deerflow.config.paths import Paths
-        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-        paths = Paths(base_dir=tmp_path / "state")
-        skills = tmp_path / "skills"
-        projection = SimpleNamespace(
-            public=skills / "public",
-            custom=skills / "custom",
-            legacy=skills / "legacy",
-            integrations=skills / "integrations",
-        )
-        for value in vars(projection).values():
-            value.mkdir(parents=True, exist_ok=True)
-        config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"))
-        provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
-        provider._skills_container_path = config.skills.container_path
-        provider._path_mappings = [
-            PathMapping("/mnt/skills/public", str(projection.public), True),
-        ]
-        provider._generic_sandbox = None
-        provider._thread_sandboxes = OrderedDict()
-        provider._max_cached_threads = 10
-        provider._lock = threading.Lock()
-        monkeypatch.setattr(provider, "_ensure_skills_projection", lambda *_a, **_kw: projection)
-
-        with (
-            patch("deerflow.config.get_app_config", return_value=config),
-            patch("deerflow.config.paths.get_paths", return_value=paths),
-        ):
-            sandbox_id = provider.provision_accepted_skills("thread-a", user_id="owner-a", binding=_EMPTY_BINDING)
-            accepted = provider.get(sandbox_id)
-            assert accepted is not None
-            accepted_paths = {mapping.container_path for mapping in accepted.path_mappings}
-
-            assert "/mnt/skills/.accepted" in accepted_paths
-            assert not accepted_paths.intersection(
-                {
-                    "/mnt/skills/public",
-                    "/mnt/skills/custom",
-                    "/mnt/skills/legacy",
-                    "/mnt/skills/integrations",
-                }
-            )
-            coordinator = get_skill_projection_coordinator()
-            unpublished = _fenced_release(coordinator, user_id="owner-a", thread_id="thread-a", sandbox_id=sandbox_id, run_id="run-before-publication")
-            try:
-                assert provider.clear_accepted_skill_snapshot(unpublished) is False
-                assert provider.ensure_accepted_skill_snapshot_absent(unpublished)
-            finally:
-                assert coordinator.finalize_release(unpublished)
-
-            legacy_id = provider.acquire("thread-a", user_id="owner-a")
-            legacy = provider.get(legacy_id)
-            assert legacy is not None
-            legacy_paths = {mapping.container_path for mapping in legacy.path_mappings}
-            assert "/mnt/skills/.accepted" not in legacy_paths
-            assert "/mnt/skills/public" in legacy_paths
-            assert "/mnt/skills/custom" in legacy_paths
-
-            reacquired_id = provider.provision_accepted_skills("thread-a", user_id="owner-a", binding=_EMPTY_BINDING)
-            reacquired = provider.get(reacquired_id)
-            assert reacquired is not None
-            reacquired_paths = {mapping.container_path for mapping in reacquired.path_mappings}
-            assert "/mnt/skills/.accepted" in reacquired_paths
-            assert "/mnt/skills/public" not in reacquired_paths
-            assert "/mnt/skills/custom" not in reacquired_paths
-
     def test_skill_isolation_capability_fails_closed_when_host_bash_is_enabled(self):
         provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
 
@@ -1168,42 +1081,6 @@ class TestLocalSandboxProviderResetClearsSingleton:
             sandbox=sandbox_config,
         )
 
-    def test_reset_refuses_to_clear_an_invocation_owned_projection(self):
-        from deerflow.runtime.skill_projection import get_skill_projection_coordinator
-
-        provider = LocalSandboxProvider.__new__(LocalSandboxProvider)
-        provider._lock = threading.Lock()
-        provider._generic_sandbox = object()
-        provider._thread_sandboxes = {("reset-owner", "reset-thread"): object()}
-        coordinator = get_skill_projection_coordinator()
-        reservation = coordinator.reserve_admission(
-            user_id="reset-owner",
-            thread_id="reset-thread",
-            reservation_id="local-reset-reservation",
-            snapshot_id=None,
-        )
-        coordinator.promote_admission(reservation, run_id="local-reset-run")
-
-        try:
-            with pytest.raises(
-                AcceptedSkillSandboxBindingError,
-                match="accepted_skill_snapshot_projection_in_use",
-            ):
-                provider.reset()
-
-            assert provider._generic_sandbox is not None
-            assert ("reset-owner", "reset-thread") in provider._thread_sandboxes
-        finally:
-            assert coordinator.release_unactivated_run(
-                user_id="reset-owner",
-                thread_id="reset-thread",
-                run_id="local-reset-run",
-            )
-
-        provider.reset()
-        assert provider._generic_sandbox is None
-        assert provider._thread_sandboxes == {}
-
     def test_reset_sandbox_provider_clears_local_singleton(self, tmp_path):
         from deerflow.config.sandbox_config import VolumeMountConfig
         from deerflow.sandbox import local as local_module
@@ -1323,35 +1200,3 @@ class TestLocalSandboxProviderResetClearsSingleton:
             assert lsp_module._singleton is None
         finally:
             lsp_module._singleton = None
-
-
-class TestUserFilesMapping:
-    def test_thread_path_mappings_reach_the_persons_files(self, tmp_path):
-        """The local provider maps /mnt/user-data/files to the same per-user directory on every thread."""
-        from deerflow.config.paths import Paths
-
-        paths = Paths(base_dir=tmp_path / "home")
-        skills_dir = tmp_path / "skills"
-        (skills_dir / "public").mkdir(parents=True)
-        (skills_dir / "custom").mkdir()
-        config = SimpleNamespace(
-            skills=SimpleNamespace(
-                container_path="/mnt/skills",
-                get_skills_path=lambda: skills_dir,
-                use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
-            )
-        )
-
-        with (
-            patch("deerflow.config.get_app_config", return_value=config),
-            patch("deerflow.config.paths.get_paths", return_value=paths),
-        ):
-            first = LocalSandboxProvider._build_thread_path_mappings("thread-a", user_id="alice")
-            second = LocalSandboxProvider._build_thread_path_mappings("thread-b", user_id="alice")
-
-        files_a = next(mapping for mapping in first if mapping.container_path == "/mnt/user-data/files")
-        files_b = next(mapping for mapping in second if mapping.container_path == "/mnt/user-data/files")
-        assert files_a.local_path == str(paths.user_files_dir("alice"))
-        assert files_b.local_path == files_a.local_path
-        assert files_a.read_only is False
-        assert paths.user_files_dir("alice").is_dir()

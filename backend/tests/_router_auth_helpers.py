@@ -13,7 +13,8 @@ This module provides two surfaces:
 1. :func:`make_authed_test_app` — wraps ``FastAPI()`` with a tiny
    ``BaseHTTPMiddleware`` that stamps a fake user / AuthContext on every
    request, plus a permissive ``thread_store`` mock on
-   ``app.state``. Use from TestClient-based router tests.
+   ``app.state``. Owner-scoped tests can opt into binding that user to the
+   request context. Use from TestClient-based router tests.
 
 2. :func:`call_unwrapped` — invokes the underlying function bypassing
    the ``@require_permission`` decorator chain by walking ``__wrapped__``.
@@ -37,11 +38,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.types import ASGIApp
 
 from app.gateway.auth.models import User
-from app.gateway.auth_disabled import AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION
 from app.gateway.authz import AuthContext, Permissions
-from app.gateway.credential_evidence import build_boundary_credential_evidence
-from deerflow.persistence.credential_audit import InMemoryCredentialAuditRepository
-from deerflow.runtime.tenant_identity import TenantIdentityV1
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 # Default permission set granted to the stub user. Mirrors `_ALL_PERMISSIONS`
 # in authz.py — kept inline so the tests don't import a private symbol.
@@ -52,9 +50,10 @@ _STUB_PERMISSIONS: list[str] = [
     Permissions.RUNS_CREATE,
     Permissions.RUNS_READ,
     Permissions.RUNS_CANCEL,
-    Permissions.TOOL_PLANE_READ,
-    Permissions.TOOL_PLANE_MUTATE,
-    Permissions.TOOL_PLANE_ADMIN,
+    Permissions.MEMORY_READ,
+    Permissions.MEMORY_WRITE,
+    Permissions.AGENTS_READ,
+    Permissions.AGENTS_WRITE,
 ]
 
 
@@ -76,32 +75,34 @@ class _StubAuthMiddleware(BaseHTTPMiddleware):
     authenticated context and skips its own re-authentication path.
     """
 
-    def __init__(self, app: ASGIApp, user_factory: Callable[[], User]) -> None:
+    def __init__(self, app: ASGIApp, user_factory: Callable[[], User], bind_current_user: bool = False, signed_in: bool = False) -> None:
         super().__init__(app)
         self._user_factory = user_factory
+        self._bind_current_user = bind_current_user
+        self._signed_in = signed_in
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         user = self._user_factory()
-        auth_source = AUTH_SOURCE_INTERNAL if getattr(user, "system_role", None) == "internal" else AUTH_SOURCE_SESSION
         request.state.user = user
         request.state.auth = AuthContext(user=user, permissions=list(_STUB_PERMISSIONS))
-        request.state.auth_source = auth_source
-        request.state.credential_evidence = build_boundary_credential_evidence(
-            auth_source=auth_source,
-            permissions=_STUB_PERMISSIONS,
-        )
-        return await call_next(request)
-
-
-class _ReadyAdmissionFence:
-    async def ready_for_admission(self) -> bool:
-        return True
+        if self._signed_in:
+            # As the real middleware records it: a person in a browser, unless the stub is the internal caller.
+            request.state.auth_source = "internal" if getattr(user, "system_role", None) == "internal" else "session"
+        if not self._bind_current_user:
+            return await call_next(request)
+        token = set_current_user(user)
+        try:
+            return await call_next(request)
+        finally:
+            reset_current_user(token)
 
 
 def make_authed_test_app(
     *,
     user_factory: Callable[[], User] | None = None,
     owner_check_passes: bool = True,
+    bind_current_user: bool = False,
+    signed_in: bool = False,
 ) -> FastAPI:
     """Build a FastAPI test app with stub auth + permissive thread_store.
 
@@ -111,9 +112,13 @@ def make_authed_test_app(
             that need a stable id across requests.
         owner_check_passes: When True (default), ``thread_store.check_access``
             returns True for every call so ``@require_permission(owner_check=True)``
-            never blocks the route under test, and ``thread_store.get``
-            answers with a row. Pass False to verify that permission failures
-            surface correctly.
+            never blocks the route under test. Pass False to verify that
+            permission failures surface correctly.
+        bind_current_user: Also bind the stub user to the request's user
+            context when a test needs to assert owner-scoped behavior.
+        signed_in: Also record how the stub user authenticated
+            (``request.state.auth_source``), for routes that read the current
+            user from the request or require an interactive session.
 
     Returns:
         A ``FastAPI`` app with the stub middleware installed and
@@ -122,7 +127,7 @@ def make_authed_test_app(
     """
     factory = user_factory or _make_stub_user
     app = FastAPI()
-    app.add_middleware(_StubAuthMiddleware, user_factory=factory)
+    app.add_middleware(_StubAuthMiddleware, user_factory=factory, bind_current_user=bind_current_user, signed_in=signed_in)
 
     repo = MagicMock()
     repo.check_access = AsyncMock(return_value=owner_check_passes)
@@ -131,11 +136,6 @@ def make_authed_test_app(
     # ``owner_check_passes`` so both gates answer the same way by default.
     repo.get = AsyncMock(return_value={"thread_id": "stub"} if owner_check_passes else None)
     app.state.thread_store = repo
-    app.state.runtime_readiness = _ReadyAdmissionFence()
-    app.state.tenant_identity = TenantIdentityV1.from_canonical_id("local")
-    app.state.credential_audit_repo = InMemoryCredentialAuditRepository(
-        tenant=app.state.tenant_identity.to_persisted_reference(),
-    )
 
     return app
 

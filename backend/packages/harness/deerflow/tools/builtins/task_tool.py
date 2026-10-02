@@ -9,15 +9,8 @@ import uuid
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, cast
+from typing import TYPE_CHECKING, Annotated, Any, Literal, cast
 
-from deerflow_extension_api import (
-    ConstraintProjectionV1,
-    ConstraintProjectionV2,
-    InvocationIdentityV1,
-    SealedOriginV1,
-    TrustedRunContextV1,
-)
 from langchain.tools import InjectedToolCallId, tool
 from langchain_core.callbacks import BaseCallbackManager
 from langchain_core.messages import ToolMessage
@@ -26,49 +19,22 @@ from langgraph.types import Command
 
 from deerflow.agents.middlewares.receipt_verification import verify_receipt_citations
 from deerflow.authz.principal import normalize_authz_attributes
-from deerflow.authz.runtime import authorization_provider_from_context
+from deerflow.community.ragflow.sources import cited_source_artifact
 from deerflow.config import get_app_config
 from deerflow.extensions import resolve_run_extensions
-from deerflow.runtime.accepted_invocation import (
-    INVOCATION_IDENTITY_CONTEXT_KEY,
-    INVOCATION_ORIGIN_CONTEXT_KEY,
-    TRUSTED_RUN_CONTEXT_KEY,
-    ResolvedAgentMaterialV1,
-    canonical_digest,
-)
-from deerflow.runtime.agent_revision import RESOLVED_AGENT_MATERIAL_CONTEXT_KEY
-from deerflow.runtime.constraints import (
-    INVOCATION_CONSTRAINTS_CONTEXT_KEY,
-    SUBAGENT_RESERVATION_CONTEXT_KEY,
-    InvocationSubagentDispatchLedger,
-    InvocationSubagentReservation,
-    SubagentDispatchOutcome,
-)
-from deerflow.runtime.skill_projection import (
-    SKILL_PROJECTION_TOKEN_CONTEXT_KEY,
-    SkillProjectionConsumerToken,
-)
-from deerflow.runtime.tool_evidence import (
-    TOOL_EVIDENCE_CONTEXT_KEY,
-    TOOL_EVIDENCE_SINK_KEY,
-    DurableToolReceiptSink,
-    ToolEvidenceRuntimeBinding,
-    cross_loop_receipt_sink,
-    stable_subagent_task_id,
+from deerflow.knowledge_scope import KNOWLEDGE_SCOPE_RUNTIME_KEY, execution_scope
+from deerflow.mcp_scope import (
+    THREAD_INCARNATION_CONTEXT_KEY,
+    THREAD_INCARNATION_METADATA_GUARD_KEY,
+    runtime_thread_incarnation,
 )
 from deerflow.runtime.user_context import resolve_runtime_user_id
-from deerflow.sandbox.security import (
-    LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
-    is_host_bash_allowed,
-)
-from deerflow.subagents import (
-    SubagentExecutor,
-    get_available_subagent_names,
-    get_subagent_config,
-)
+from deerflow.sandbox.security import LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE, is_host_bash_allowed
+from deerflow.subagents import SubagentExecutor, get_available_subagent_names, get_subagent_config
 from deerflow.subagents.acceptance_checks import check_acceptance_criteria, render_acceptance_section
 from deerflow.subagents.capacity import SubagentExecutionCapacity
 from deerflow.subagents.config import resolve_subagent_model_name
+from deerflow.subagents.context_snapshot import ParentContextSnapshot
 from deerflow.subagents.executor import (
     SubagentStatus,
     cleanup_background_task,
@@ -83,8 +49,10 @@ from deerflow.subagents.status_contract import (
     format_subagent_result_message,
     make_subagent_additional_kwargs,
 )
+from deerflow.tools.sync import make_sync_tool_wrapper
 from deerflow.tools.types import Runtime
 from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, resolve_trace_id
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.custom_events import aemit_custom_event
 
 if TYPE_CHECKING:
@@ -128,7 +96,7 @@ def _record_middleware_on_parent_loop(journal: Any, kwargs: dict[str, Any]) -> N
 
 
 class _ParentLoopMiddlewareRecorderProxy:
-    """Forward subagent loop-detection events to the parent run's event loop.
+    """Forward narrowly scoped subagent middleware events to the parent loop.
 
     ``RunJournal`` owns parent-loop tasks and may wrap an event store backed by
     a loop-bound SQL pool. Subagents execute on a persistent isolated loop, so
@@ -136,10 +104,24 @@ class _ParentLoopMiddlewareRecorderProxy:
     """
 
     def __init__(self, journal: Any, loop: asyncio.AbstractEventLoop) -> None:
+        journal_owner_loop = getattr(journal, "_owner_loop", None)
+        if isinstance(journal_owner_loop, asyncio.AbstractEventLoop) and journal_owner_loop is not loop:
+            raise ValueError("subagent middleware recorder loop must match the RunJournal owner loop")
         self._journal = journal
         self._loop = loop
         self._state_lock = threading.Lock()
         self._closed = False
+        self._claimed_tool_promotions: set[str] = set()
+
+    def claim_tool_promotions(self, tool_names: list[str]) -> list[str]:
+        """Atomically deduplicate promotions within this one child execution."""
+        candidates = sorted(set(tool_names))
+        with self._state_lock:
+            if self._closed:
+                return []
+            claimed = [name for name in candidates if name not in self._claimed_tool_promotions]
+            self._claimed_tool_promotions.update(claimed)
+        return claimed
 
     def record_middleware(self, **kwargs: Any) -> None:
         with self._state_lock:
@@ -178,16 +160,7 @@ class _ParentLoopMiddlewareRecorderProxy:
 
 def _is_subagent_terminal(result: Any) -> bool:
     """Return whether a background subagent result is safe to clean up."""
-    return (
-        result.status
-        in {
-            SubagentStatus.COMPLETED,
-            SubagentStatus.FAILED,
-            SubagentStatus.CANCELLED,
-            SubagentStatus.TIMED_OUT,
-        }
-        or getattr(result, "completed_at", None) is not None
-    )
+    return result.status in {SubagentStatus.COMPLETED, SubagentStatus.FAILED, SubagentStatus.CANCELLED, SubagentStatus.TIMED_OUT} or getattr(result, "completed_at", None) is not None
 
 
 def _peek_subagent_result(execution_id: str, *, trace_id: str) -> Any:
@@ -464,9 +437,10 @@ def bind_task_tool(
     """Return a task tool bound to one explicit SDK runtime capacity.
 
     The copied tool keeps the original name, description, and argument schema;
-    only its coroutine is wrapped. ``ContextVar`` keeps concurrent direct
-    factories isolated while the resolved capacity is passed into the executor
-    before work crosses to the persistent subagent event loop.
+    its coroutine and sync func are wrapped around the bound coroutine.
+    ``ContextVar`` keeps concurrent direct factories isolated while the
+    resolved capacity is passed into the executor before work crosses to the
+    persistent subagent event loop.
     """
 
     original_coroutine = task_tool.coroutine
@@ -482,7 +456,15 @@ def bind_task_tool(
             _explicit_app_config.reset(config_token)
             _explicit_execution_capacity.reset(capacity_token)
 
-    return task_tool.model_copy(update={"coroutine": bound_coroutine})
+    # The source tool may carry a sync func around the unbound coroutine (set
+    # in place by _ensure_sync_invocable_tool) or none at all; either way the
+    # copy's sync path must go through the bound coroutine.
+    return task_tool.model_copy(
+        update={
+            "coroutine": bound_coroutine,
+            "func": make_sync_tool_wrapper(bound_coroutine, task_tool.name),
+        }
+    )
 
 
 def _schedule_deferred_subagent_cleanup(
@@ -650,6 +632,7 @@ def _task_result_command(
     model_name: str | None = None,
     usage: dict[str, int] | None = None,
     tool_receipts: list[dict] | None = None,
+    source_messages: list[dict] | None = None,
     receipt_verdict: dict | None = None,
     acceptance_verdict: dict | None = None,
 ) -> Command:
@@ -665,6 +648,7 @@ def _task_result_command(
                     content=content,
                     tool_call_id=tool_call_id,
                     name="task",
+                    artifact=cited_source_artifact(source_messages or [], content),
                     additional_kwargs=make_subagent_additional_kwargs(
                         status,
                         result=result,
@@ -691,6 +675,7 @@ async def task_tool(
     *,
     acceptance_criteria: list[str] | None = None,
     description: str = "",
+    context_mode: Literal["isolated", "snapshot"] = "isolated",
 ) -> str | Command:
     """Delegate a bounded task to a specialized subagent in its own context.
 
@@ -753,6 +738,22 @@ async def task_tool(
       every criterion that cannot be checked deterministically is marked
       UNVERIFIED — never silently passed. A `holds` leaf is execution evidence,
       not a guarantee that the deliverable is correct.
+    - JSON deliverables can opt into `file:<path> json-valid`: validate complete UTF-8 JSON
+      syntax up to 50,000 bytes, rejecting NaN/Infinity. Oversize files, incomplete reads,
+      or parser resource limits return UNVERIFIED. No schema or business validation;
+      .json files are not checked automatically.
+    - `completed` means execution ended, not task acceptance. Read each criterion
+      and retain useful work. For `does not hold`, inspect the reason and repair
+      or recheck only the unmet condition, reusing unaffected outputs.
+      `UNVERIFIED` is missing evidence, not a failed condition: verify load-bearing
+      criteria against actual artifacts or primary evidence; when confirmation
+      is unavailable, preserve uncertainty. Handle both kinds in mixed results.
+    - Reuse outputs with `holds` checks while spot-checking load-bearing claims
+      beyond their scope. Without a checklist, inspect the self-report's handles.
+      Any further delegation must name the missing condition and cover only
+      remaining work. Do not repeat an unchanged attempt or restart the whole
+      task. Stay within the remaining delegation and execution budget; when
+      exhausted, deliver confirmed results with explicit gaps and uncertainty.
 
     Args:
         prompt: The task description for the subagent. Be specific and clear about what needs to be done.
@@ -769,66 +770,55 @@ async def task_tool(
             back marked UNVERIFIED. Example for a report-writing delegation:
             ["file:../outputs/report.md non-empty"]. Omit for open-ended
             exploration where no crisp acceptance condition exists.
+            JSON example: ["file:../outputs/report.json json-valid"].
         description: Optional short (3-5 word) description of the task for logging/display.
+        context_mode: Defaults to isolated (only the delegated prompt). Choose
+            snapshot when relevant requirements or failed approaches are spread
+            across the parent conversation: it adds retained history and its
+            summary as background at dispatch time, increasing input tokens.
+            The child keeps its own role/tools; later parent turns are not synced.
+            Historical tool actions are not evidence of child completion.
     """
+    if context_mode not in {"isolated", "snapshot"}:
+        return _task_result_command(tool_call_id=tool_call_id, status="failed", error=f"Unknown context_mode '{context_mode}'. Use isolated or snapshot.")
     runtime_app_config = _get_runtime_app_config(runtime)
     metadata: dict = runtime.config.get("metadata", {}) if runtime is not None else {}
-    parent_context = runtime.context if runtime is not None else None
-    parent_context = parent_context if isinstance(parent_context, dict) else {}
-    from deerflow.sandbox.session import current_sandbox_session
-
-    # The child borrows the parent's declared session. The declaration is the
-    # only carrier: nothing read from the runtime context dict can stand in.
-    sandbox_session = current_sandbox_session()
-    resolved_agent_material = parent_context.get(RESOLVED_AGENT_MATERIAL_CONTEXT_KEY)
-    if not isinstance(resolved_agent_material, ResolvedAgentMaterialV1):
-        resolved_agent_material = None
-
-    resolved_subagent_definition = None
     allowed_subagents = metadata.get("allowed_subagents")
-    if resolved_agent_material is not None:
-        catalog = resolved_agent_material.subagent_catalog
-        available_subagent_names = list(catalog.allowed_names)
-        resolved_subagent_definition = catalog.get(subagent_type)
-        if resolved_subagent_definition is None:
-            return _task_result_command(
-                tool_call_id=tool_call_id,
-                status="failed",
-                error="subagent_not_accepted",
-            )
-        config = resolved_subagent_definition.to_subagent_config()
+    if allowed_subagents is None:
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
     else:
-        if allowed_subagents is None:
-            available_subagent_names = get_available_subagent_names(app_config=runtime_app_config) if runtime_app_config is not None else get_available_subagent_names()
-        else:
-            available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
+        available_subagent_names = get_available_subagent_names(app_config=runtime_app_config, allowed_subagents=allowed_subagents) if runtime_app_config is not None else get_available_subagent_names(allowed_subagents=allowed_subagents)
 
-        # Preserve the dedicated sandbox-policy guidance before the generic
-        # registry/policy membership gate filters bash from the visible catalog.
-        if subagent_type == "bash":
-            host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
-            if not host_bash_allowed:
-                return _task_result_command(
-                    tool_call_id=tool_call_id,
-                    status="failed",
-                    error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
-                )
-
-        # Get subagent configuration
-        config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
-        if config is None or subagent_type not in available_subagent_names:
-            if available_subagent_names:
-                available = ", ".join(available_subagent_names)
-            elif allowed_subagents is not None:
-                available = "none permitted by caller policy"
-            else:
-                available = "none"
-            error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
+    # Preserve the dedicated sandbox-policy guidance before the generic
+    # registry/policy membership gate filters bash from the visible catalog.
+    if subagent_type == "bash":
+        host_bash_allowed = is_host_bash_allowed(runtime_app_config) if runtime_app_config is not None else is_host_bash_allowed()
+        if not host_bash_allowed:
             return _task_result_command(
                 tool_call_id=tool_call_id,
                 status="failed",
-                error=error,
+                error=LOCAL_BASH_SUBAGENT_DISABLED_MESSAGE,
             )
+
+    # Get subagent configuration
+    config = get_subagent_config(subagent_type, app_config=runtime_app_config) if runtime_app_config is not None else get_subagent_config(subagent_type)
+    if config is None or subagent_type not in available_subagent_names:
+        if available_subagent_names:
+            available = ", ".join(available_subagent_names)
+        elif allowed_subagents is not None:
+            available = "none permitted by caller policy"
+        else:
+            available = "none"
+        error = f"Unknown subagent type '{subagent_type}'. Available: {available}"
+        return _task_result_command(
+            tool_call_id=tool_call_id,
+            status="failed",
+            error=error,
+        )
+    # Rejected delegations must not serialize the retained history. Capture
+    # after delegation validation, before child setup (including tool loading).
+    context_snapshot = ParentContextSnapshot.from_state(runtime.state) if context_mode == "snapshot" and runtime is not None else None
+
     # Build config overrides
     overrides: dict = {}
 
@@ -878,6 +868,10 @@ async def task_tool(
     # None when absent (e.g. internal-auth runs) so guardrail behavior is
     # unchanged. Without this, role-aware policy silently mis-attributes any
     # tool call delegated to a subagent (user_role=None).
+    parent_context = runtime.context if runtime is not None else None
+    parent_context = parent_context if isinstance(parent_context, dict) else {}
+    if parent_context.get(THREAD_INCARNATION_METADATA_GUARD_KEY) is True:
+        runtime_thread_incarnation(runtime)
     user_role = parent_context.get("user_role")
     oauth_provider = parent_context.get("oauth_provider")
     oauth_id = parent_context.get("oauth_id")
@@ -885,57 +879,26 @@ async def task_tool(
     # IM-channel sender identity: group chats share one thread across senders,
     # so delegated bash commands need the dispatching turn's channel_user_id.
     channel_user_id = parent_context.get("channel_user_id")
-    # The accepted records are installed by the worker after it scrubs caller
-    # context.  They remain distinct: identity describes subject authority and
-    # delegation, while Origin describes the trusted source/transport.
-    trusted_run_context = parent_context.get(TRUSTED_RUN_CONTEXT_KEY)
-    if not isinstance(trusted_run_context, TrustedRunContextV1):
-        trusted_run_context = None
-    if trusted_run_context is None:
-        invocation_identity = parent_context.get(INVOCATION_IDENTITY_CONTEXT_KEY)
-        if not isinstance(invocation_identity, InvocationIdentityV1):
-            invocation_identity = None
-        invocation_origin = parent_context.get(INVOCATION_ORIGIN_CONTEXT_KEY)
-        if not isinstance(invocation_origin, SealedOriginV1):
-            invocation_origin = None
-        # Legacy consumers still receive is_internal, but an accepted identity is
-        # authoritative and a human represented by an internal service stays human.
-        is_internal = invocation_identity.effective_subject.kind == "service" if invocation_identity is not None else parent_context.get("is_internal") is True
-        authz_attributes = normalize_authz_attributes(parent_context.get("authz_attributes"))
+    # Propagate authorization identity: is_internal (strict bool) and
+    # authz_attributes (validated Mapping, copied). These follow the same
+    # server-side provenance as user_role/oauth — see inject_authenticated_user_context.
+    is_internal = parent_context.get("is_internal") is True
+    authz_attributes = normalize_authz_attributes(parent_context.get("authz_attributes"))
     # The run's immutable extension snapshot, published by the run worker. Stays
     # None outside that path (embedded client, standalone LangGraph Server), where
     # the executor keeps its process-singleton fallback.
     run_extensions = resolve_run_extensions(parent_context)
-    authorization_provider = authorization_provider_from_context(parent_context)
-    invocation_constraints = parent_context.get(INVOCATION_CONSTRAINTS_CONTEXT_KEY)
-    subagent_reservation = parent_context.get(SUBAGENT_RESERVATION_CONTEXT_KEY)
-    accepted_extension_generation = parent_context.get("accepted_extension_generation")
-    accepted_extension_manifest_digest = parent_context.get("accepted_extension_manifest_digest")
-    accepted_extension_artifact_manifest_digest = parent_context.get("accepted_extension_artifact_manifest_digest")
-    accepted_extension_configuration_digest = parent_context.get("accepted_extension_configuration_digest")
-    skill_projection_token = parent_context.get(SKILL_PROJECTION_TOKEN_CONTEXT_KEY)
-    if not isinstance(skill_projection_token, SkillProjectionConsumerToken):
-        skill_projection_token = None
-    tool_evidence_binding = parent_context.get(TOOL_EVIDENCE_CONTEXT_KEY)
-    tool_evidence_sink = parent_context.get(TOOL_EVIDENCE_SINK_KEY)
-    if not isinstance(tool_evidence_binding, ToolEvidenceRuntimeBinding) or not isinstance(tool_evidence_sink, DurableToolReceiptSink):
-        tool_evidence_binding = None
-        tool_evidence_sink = None
-    from deerflow.extensions.mcp import (
-        build_mcp_preparation_audit_sink,
-        mcp_invocation_facts_from_context,
-    )
-
-    mcp_invocation_facts = mcp_invocation_facts_from_context(parent_context)
-    mcp_preparation_audit_sink = build_mcp_preparation_audit_sink(parent_context)
     # Request-level correlation id, distinct from the short ``trace_id`` above
     # that labels this one subagent execution in log prefixes. The parent
     # runtime context is authoritative (worker._bind_trace_id always fills it);
     # the ambient fallback covers tools invoked outside a Gateway run.
-    deerflow_trace_id = resolve_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY) or metadata.get(DEERFLOW_TRACE_METADATA_KEY))
+    deerflow_trace_id = resolve_trace_id(parent_context.get(DEERFLOW_TRACE_METADATA_KEY))
+    knowledge_scope = None
+    if KNOWLEDGE_SCOPE_RUNTIME_KEY in parent_context:
+        knowledge_scope = execution_scope(parent_context[KNOWLEDGE_SCOPE_RUNTIME_KEY])
 
     parent_available_skills = metadata.get("available_skills")
-    if parent_available_skills is not None and resolved_agent_material is None:
+    if parent_available_skills is not None:
         overrides["skills"] = _merge_skill_allowlists(list(parent_available_skills), config.skills)
 
     if overrides:
@@ -963,82 +926,15 @@ async def task_tool(
         "subagent_enabled": False,
         "include_upload_tool": upload_state_available,
     }
+    if metadata.get("mcp_plugins") is not None:
+        available_tools_kwargs["mcp_plugins"] = metadata["mcp_plugins"]
     if resolved_app_config is not None:
         available_tools_kwargs["app_config"] = resolved_app_config
-    from deerflow.tools.tools import (
-        accepted_mcp_server_ids_from_context,
-        accepted_mcp_tool_allowlists_from_context,
-    )
-
-    allowed_mcp_server_ids = accepted_mcp_server_ids_from_context(parent_context)
-    if allowed_mcp_server_ids is not None:
-        available_tools_kwargs["allowed_mcp_server_ids"] = allowed_mcp_server_ids
-    allowed_mcp_tools = accepted_mcp_tool_allowlists_from_context(parent_context)
-    if allowed_mcp_tools is not None:
-        available_tools_kwargs["allowed_mcp_tools_by_server"] = allowed_mcp_tools
-    if resolved_agent_material is not None and resolved_agent_material.mcp_tool_objects is not None:
-        available_tools_kwargs["mcp_tools_snapshot"] = resolved_agent_material.mcp_tool_objects
-    tools = get_available_tools(**available_tools_kwargs)
-
-    dispatch_ledger = subagent_reservation if isinstance(subagent_reservation, InvocationSubagentDispatchLedger) else None
-    dispatch_ticket = None
-    if dispatch_ledger is not None:
-        snapshot = resolved_agent_material.skill_snapshot if resolved_agent_material is not None else None
-        dispatch_intent_digest = canonical_digest(
-            {
-                "version": 1,
-                "prompt": prompt,
-                "subagent_type": subagent_type,
-                "subagent_config": {
-                    "name": config.name,
-                    "system_prompt": config.system_prompt,
-                    "tools": config.tools,
-                    "disallowed_tools": config.disallowed_tools,
-                    "skills": config.skills,
-                    "effective_model": effective_model,
-                    "max_turns": config.max_turns,
-                    "timeout_seconds": config.timeout_seconds,
-                },
-                "effective_tools": sorted(str(getattr(item, "name", type(item).__name__)) for item in tools),
-                "accepted_agent_revision_digest": parent_context.get("accepted_agent_revision_digest"),
-                "accepted_extension_generation": accepted_extension_generation,
-                "accepted_extension_manifest_digest": accepted_extension_manifest_digest,
-                "accepted_extension_artifact_manifest_digest": accepted_extension_artifact_manifest_digest,
-                "accepted_extension_configuration_digest": accepted_extension_configuration_digest,
-                "constraint_evidence_digest": getattr(
-                    invocation_constraints,
-                    "evidence_digest",
-                    None,
-                ),
-                "skill_snapshot_id": getattr(snapshot, "snapshot_id", None),
-                "skill_snapshot_digest": getattr(snapshot, "content_digest", None),
-                "subagent_definition_digest": (resolved_subagent_definition.definition_digest if resolved_subagent_definition is not None else None),
-                "parent_subagent_catalog_digest": (resolved_agent_material.subagent_catalog.digest if resolved_agent_material is not None else None),
-            }
-        )
-        dispatch_ticket = dispatch_ledger.acquire(
-            tool_call_id,
-            dispatch_intent_digest,
-        )
-        if dispatch_ticket.outcome is SubagentDispatchOutcome.exhausted:
-            return _task_result_command(
-                tool_call_id=tool_call_id,
-                status="failed",
-                error=f"Invocation subagent limit ({dispatch_ledger.limit}) reached",
-            )
-        if dispatch_ticket.outcome is SubagentDispatchOutcome.conflict:
-            return _task_result_command(
-                tool_call_id=tool_call_id,
-                status="failed",
-                error="Subagent dispatch ID was reused with different intent",
-            )
-        if dispatch_ticket.outcome is SubagentDispatchOutcome.replay:
-            return await dispatch_ledger.replay_result(dispatch_ticket)
-
-    def complete_dispatch(result: str | Command) -> str | Command:
-        if dispatch_ledger is not None and dispatch_ticket is not None:
-            dispatch_ledger.complete(dispatch_ticket, result)
-        return result
+    # Assemble off-loop: tool assembly may block on MCP cache initialization,
+    # which must not stall the calling event loop (issue #5172).
+    if run_extensions is not None:
+        available_tools_kwargs["extensions"] = run_extensions
+    tools = await run_assembly(get_available_tools, **available_tools_kwargs)
 
     # Create executor
     executor_kwargs = {
@@ -1048,9 +944,18 @@ async def task_tool(
         "sandbox_state": sandbox_state,
         "thread_data": thread_data,
         "uploaded_files": uploaded_files,
+        "thread_id": thread_id,
         "trace_id": trace_id,
+        "user_id": user_id,
+        "user_role": user_role,
+        "oauth_provider": oauth_provider,
+        "oauth_id": oauth_id,
+        "run_id": run_id,
         "channel_user_id": channel_user_id,
+        "is_internal": is_internal,
+        "authz_attributes": authz_attributes,
         "deerflow_trace_id": deerflow_trace_id,
+        "knowledge_scope": knowledge_scope,
         # RFC #4651 PR3: lead-supplied acceptance criteria are handed to the
         # executor, which appends them to the subagent's task HumanMessage as
         # untrusted data (sanitized and boundary-framed by
@@ -1059,98 +964,37 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
-    if trusted_run_context is not None:
-        executor_kwargs["trusted_run_context"] = trusted_run_context
-    else:
-        executor_kwargs.update(
-            thread_id=thread_id,
-            user_id=user_id,
-            user_role=user_role,
-            oauth_provider=oauth_provider,
-            oauth_id=oauth_id,
-            run_id=run_id,
-            is_internal=is_internal,
-            authz_attributes=authz_attributes,
-            invocation_identity=invocation_identity,
-            invocation_origin=invocation_origin,
-        )
-    loop_detection_recorder = None
+    # Carry the host-captured lifecycle, including legacy None, without
+    # inventing a legacy scope for missing context or re-reading thread state.
+    if THREAD_INCARNATION_CONTEXT_KEY in parent_context:
+        executor_kwargs["thread_incarnation"] = parent_context[THREAD_INCARNATION_CONTEXT_KEY]
+    if context_snapshot is not None:
+        executor_kwargs["context_snapshot"] = context_snapshot
+    middleware_recorder = None
     parent_journal = parent_context.get("__run_journal")
     if parent_journal is not None:
         # The task tool runs on the parent run's loop. Pass only a proxy across
         # the isolated-subagent boundary so middleware persistence is delivered
         # on the loop that owns the RunJournal and its event store.
-        loop_detection_recorder = _ParentLoopMiddlewareRecorderProxy(
+        middleware_recorder = _ParentLoopMiddlewareRecorderProxy(
             parent_journal,
             asyncio.get_running_loop(),
         )
-        executor_kwargs["loop_detection_recorder"] = loop_detection_recorder
+        executor_kwargs["loop_detection_recorder"] = middleware_recorder
+        executor_kwargs["tool_promotion_recorder"] = middleware_recorder
+        executor_kwargs["tool_progress_recorder"] = middleware_recorder
     if resolved_app_config is not None:
         executor_kwargs["app_config"] = resolved_app_config
     if run_extensions is not None:
         executor_kwargs["extensions"] = run_extensions
-    if authorization_provider is not None:
-        executor_kwargs["authorization_provider"] = authorization_provider
-    if isinstance(invocation_constraints, (ConstraintProjectionV1, ConstraintProjectionV2)):
-        executor_kwargs["invocation_constraints"] = invocation_constraints
-    if isinstance(subagent_reservation, InvocationSubagentReservation):
-        executor_kwargs["subagent_reservation"] = subagent_reservation
-    if type(accepted_extension_generation) is int and accepted_extension_generation >= 0:
-        executor_kwargs["accepted_extension_generation"] = accepted_extension_generation
-    if isinstance(accepted_extension_manifest_digest, str) and len(accepted_extension_manifest_digest) == 64 and all(character in "0123456789abcdef" for character in accepted_extension_manifest_digest):
-        executor_kwargs["accepted_extension_manifest_digest"] = accepted_extension_manifest_digest
-    if (
-        isinstance(accepted_extension_artifact_manifest_digest, str)
-        and accepted_extension_artifact_manifest_digest.startswith("sha256:")
-        and len(accepted_extension_artifact_manifest_digest) == 71
-        and all(character in "0123456789abcdef" for character in accepted_extension_artifact_manifest_digest.removeprefix("sha256:"))
-    ):
-        executor_kwargs["accepted_extension_artifact_manifest_digest"] = accepted_extension_artifact_manifest_digest
-    if (
-        isinstance(accepted_extension_configuration_digest, str)
-        and accepted_extension_configuration_digest.startswith("sha256:")
-        and len(accepted_extension_configuration_digest) == 71
-        and all(character in "0123456789abcdef" for character in accepted_extension_configuration_digest.removeprefix("sha256:"))
-    ):
-        executor_kwargs["accepted_extension_configuration_digest"] = accepted_extension_configuration_digest
-    if mcp_invocation_facts is not None:
-        executor_kwargs["mcp_invocation_facts"] = mcp_invocation_facts
-    if mcp_preparation_audit_sink is not None:
-        executor_kwargs["mcp_preparation_audit_sink"] = mcp_preparation_audit_sink
-    if resolved_agent_material is not None:
-        executor_kwargs["resolved_agent_material"] = resolved_agent_material
-    if skill_projection_token is not None:
-        executor_kwargs["skill_projection_token"] = skill_projection_token
-    if sandbox_session is not None:
-        executor_kwargs["sandbox_session"] = sandbox_session
-    if tool_evidence_binding is not None and tool_evidence_sink is not None:
-        executor_kwargs["tool_evidence_parent_binding"] = tool_evidence_binding
-        executor_kwargs["tool_evidence_sink"] = cross_loop_receipt_sink(tool_evidence_sink)
-        executor_kwargs["tool_evidence_execution_task_id"] = stable_subagent_task_id(
-            tool_evidence_binding,
-            parent_tool_call_id=tool_call_id,
-            subagent_name=config.name,
-        )
     explicit_capacity = _explicit_execution_capacity.get()
     if explicit_capacity is not None:
         executor_kwargs["execution_capacity"] = explicit_capacity
-    try:
-        executor = SubagentExecutor(**executor_kwargs)
-    except BaseException as exc:
-        if dispatch_ledger is not None and dispatch_ticket is not None:
-            dispatch_ledger.fail(dispatch_ticket, exc)
-        raise
+    executor = SubagentExecutor(**executor_kwargs)
 
     # Keep the provider tool-call ID for stream/message correlation, but use a
     # server-generated execution ID for process-wide background task control.
-    try:
-        if resolved_agent_material is not None:
-            executor.retain_resolved_agent_material(tool_call_id)
-        execution_id = executor.execute_async(prompt, task_id=tool_call_id)
-    except BaseException as exc:
-        if dispatch_ledger is not None and dispatch_ticket is not None:
-            dispatch_ledger.fail(dispatch_ticket, exc)
-        raise
+    execution_id = executor.execute_async(prompt, task_id=tool_call_id)
 
     # Poll for task completion in backend (removes need for LLM to poll)
     poll_count = 0
@@ -1183,21 +1027,15 @@ async def task_tool(
             if result is None:
                 logger.error(f"[trace={trace_id}] Task {tool_call_id} execution {execution_id} not found in background tasks")
                 await aemit_custom_event(
-                    {
-                        "type": "task_failed",
-                        "task_id": tool_call_id,
-                        "error": "Task disappeared from background tasks",
-                    },
+                    {"type": "task_failed", "task_id": tool_call_id, "error": "Task disappeared from background tasks"},
                     writer=writer,
                 )
                 cleanup_background_task(execution_id)
                 error = f"Task {tool_call_id} disappeared from background tasks"
-                return complete_dispatch(
-                    _task_result_command(
-                        tool_call_id=tool_call_id,
-                        status="failed",
-                        error=error,
-                    )
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="failed",
+                    error=error,
                 )
 
             # Log status changes for debugging
@@ -1276,18 +1114,17 @@ async def task_tool(
                         )
                     except Exception:
                         logger.warning(f"[trace={trace_id}] Acceptance checklist failed for task {tool_call_id}; result flows back unchecked", exc_info=True)
-                return complete_dispatch(
-                    _task_result_command(
-                        tool_call_id=tool_call_id,
-                        status="completed",
-                        result=result.result,
-                        stop_reason=result.stop_reason,
-                        model_name=effective_model,
-                        usage=usage,
-                        tool_receipts=receipts,
-                        receipt_verdict=receipt_verdict,
-                        acceptance_verdict=acceptance_verdict,
-                    )
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="completed",
+                    result=result.result,
+                    stop_reason=result.stop_reason,
+                    model_name=effective_model,
+                    usage=usage,
+                    tool_receipts=receipts,
+                    source_messages=getattr(result, "ai_messages", None),
+                    receipt_verdict=receipt_verdict,
+                    acceptance_verdict=acceptance_verdict,
                 )
             elif result.status == SubagentStatus.FAILED:
                 _report_subagent_usage(runtime, result)
@@ -1306,16 +1143,15 @@ async def task_tool(
                 # A turn-capped run with no usable output surfaces as failed +
                 # stop_reason=turn_capped; the cap note lets the lead tell "out
                 # of budget" from "broken subagent".
-                return complete_dispatch(
-                    _task_result_command(
-                        tool_call_id=tool_call_id,
-                        status="failed",
-                        error=result.error,
-                        stop_reason=result.stop_reason,
-                        model_name=effective_model,
-                        usage=usage,
-                        tool_receipts=getattr(result, "tool_receipts", None),
-                    )
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="failed",
+                    error=result.error,
+                    stop_reason=result.stop_reason,
+                    model_name=effective_model,
+                    usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
             elif result.status == SubagentStatus.CANCELLED:
                 _report_subagent_usage(runtime, result)
@@ -1331,15 +1167,14 @@ async def task_tool(
                 )
                 logger.info(f"[trace={trace_id}] Task {tool_call_id} cancelled: {result.error}")
                 cleanup_background_task(execution_id)
-                return complete_dispatch(
-                    _task_result_command(
-                        tool_call_id=tool_call_id,
-                        status="cancelled",
-                        error=result.error,
-                        model_name=effective_model,
-                        usage=usage,
-                        tool_receipts=getattr(result, "tool_receipts", None),
-                    )
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="cancelled",
+                    error=result.error,
+                    model_name=effective_model,
+                    usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
             elif result.status == SubagentStatus.TIMED_OUT:
                 _report_subagent_usage(runtime, result)
@@ -1355,15 +1190,14 @@ async def task_tool(
                 )
                 logger.warning(f"[trace={trace_id}] Task {tool_call_id} timed out: {result.error}")
                 cleanup_background_task(execution_id)
-                return complete_dispatch(
-                    _task_result_command(
-                        tool_call_id=tool_call_id,
-                        status="timed_out",
-                        error=result.error,
-                        model_name=effective_model,
-                        usage=usage,
-                        tool_receipts=getattr(result, "tool_receipts", None),
-                    )
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="timed_out",
+                    error=result.error,
+                    model_name=effective_model,
+                    usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
 
             # Still running, wait before next poll
@@ -1393,19 +1227,16 @@ async def task_tool(
                 request_cancel_background_task(execution_id)
                 _schedule_deferred_subagent_cleanup(runtime, execution_id, trace_id, max_poll_count)
                 message = f"Task polling timed out after {timeout_minutes} minutes. This may indicate the background task is stuck. Status: {result.status.value}"
-                return complete_dispatch(
-                    _task_result_command(
-                        tool_call_id=tool_call_id,
-                        status="polling_timed_out",
-                        error=message,
-                        model_name=effective_model,
-                        usage=usage,
-                        tool_receipts=getattr(result, "tool_receipts", None),
-                    )
+                return _task_result_command(
+                    tool_call_id=tool_call_id,
+                    status="polling_timed_out",
+                    error=message,
+                    model_name=effective_model,
+                    usage=usage,
+                    tool_receipts=getattr(result, "tool_receipts", None),
+                    source_messages=getattr(result, "ai_messages", None),
                 )
     except asyncio.CancelledError:
-        if dispatch_ledger is not None and dispatch_ticket is not None:
-            dispatch_ledger.cancel(dispatch_ticket)
         # Signal the background subagent thread to stop cooperatively, then
         # wait for the terminal result so the final token usage snapshot is
         # reported to the parent RunJournal before the parent worker persists
@@ -1420,9 +1251,7 @@ async def task_tool(
             )
         await _finalize_interrupted_subagent(runtime, execution_id, trace_id, max_poll_count)
         raise
-    except Exception as exc:
-        if dispatch_ledger is not None and dispatch_ticket is not None:
-            dispatch_ledger.fail(dispatch_ticket, exc)
+    except Exception:
         # Unexpected poller failure (emit error, status-lookup bug, writer
         # failure, ...). Mirror the cancellation unwind: stop the subagent
         # cooperatively, report its final usage, and remove the registry entry —
@@ -1450,5 +1279,5 @@ async def task_tool(
             raise asyncio.CancelledError
         raise
     finally:
-        if loop_detection_recorder is not None:
-            await loop_detection_recorder.aclose()
+        if middleware_recorder is not None:
+            await middleware_recorder.aclose()

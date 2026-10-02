@@ -9,19 +9,6 @@ model serves the recorded assistant turns by input hash, so the agent graph
 
 Fixtures are produced by ``scripts/record_gateway.py`` +
 ``scripts/build_fixture_from_jsonl.py`` (manual, needs a key).
-
-The golden ends in a delivery, and until that repair it ended in a
-delivery *failure*. The recorded prompt asks for a file at
-``/mnt/user-data/outputs/note.txt`` and the recorded turns never call
-``present_files``, so for three releases this scenario tripped the
-artifact-delivery fence and the golden's second-to-last frame was the advisory
-``custom`` notice DF13 added. It is now a ``values`` frame carrying
-``artifacts``: the runtime hands over what the turn produced and nobody
-presented, so a recorded trace that asks for a file and gets one ends
-``success``. That change of shape is the point — this golden is the only place
-in the suite where the repair is visible on a real recorded conversation
-rather than a constructed one, so if a later change quietly restores the
-fence here, this test says so.
 """
 
 from __future__ import annotations

@@ -653,44 +653,16 @@ def test_durable_submit_carries_the_request_scoped_headers():
     context reaches the driver through the contextvar LangGraph sets around the
     tool coroutine, several awaits below it.
     """
-    from deerflow_extension_api import EffectiveSubjectV1, InvocationIdentityV1
     from langchain_core.messages import AIMessage
     from langchain_core.tools import tool as make_tool
     from langgraph.graph import END, START, StateGraph
     from langgraph.prebuilt import ToolNode
 
-    from deerflow.mcp.tasks import (
-        McpTaskLineageBinder,
-        TaskSubmitRequest,
-        configured_credential_selector,
-    )
+    from deerflow.mcp.tasks import TaskSubmitRequest
     from deerflow.mcp.tasks.ordinary import OrdinaryMcpTaskDriver
-    from deerflow.runtime.tenant_identity import TenantIdentityV1
-    from deerflow.runtime.tool_evidence import build_request_projection
 
-    task_config = _task_config()
-    caller, opened, session_context = _task_caller(task_config)
+    caller, opened, session_context = _task_caller(_task_config())
     driver = OrdinaryMcpTaskDriver(caller)
-    lineage = McpTaskLineageBinder().for_standalone_api(
-        tenant=TenantIdentityV1.from_canonical_id("test").to_persisted_reference(),
-        principal_identity=InvocationIdentityV1(
-            effective_subject=EffectiveSubjectV1(
-                kind="human",
-                subject_id="user-1",
-                role="member",
-            )
-        ),
-        extension_generation=1,
-        extension_manifest_digest="a" * 64,
-        accepted_origin_digest="b" * 64,
-        server_name="reports",
-        tool_name="submit",
-        safe_request_projection=build_request_projection("submit", {}),
-        credential_selector=configured_credential_selector(
-            "reports",
-            task_config.mcp_servers["reports"],
-        ),
-    )
 
     @make_tool
     async def submit_report() -> str:
@@ -699,7 +671,9 @@ def test_durable_submit_carries_the_request_scoped_headers():
             TaskSubmitRequest(
                 user_id="user-1",
                 thread_id="thread-1",
-                lineage=lineage,
+                run_id=None,
+                tool_call_id=None,
+                server_name="reports",
                 task_name="reports",
                 arguments={},
                 driver_data=dict(_DRIVER_DATA),

@@ -19,7 +19,7 @@ import os
 import threading
 import time
 import uuid
-from types import MappingProxyType
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -32,13 +32,8 @@ from deerflow.community.aio_sandbox.ownership import (
     make_sandbox_ownership_store,
     resolve_ownership_config,
 )
-from deerflow.community.aio_sandbox.ownership.factory import (
-    resolve_ownership_key_prefix,
-)
-from deerflow.config.deployment_config import DeploymentConfig
 from deerflow.config.sandbox_config import SandboxOwnershipConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig
-from deerflow.runtime.tenant_identity import TenantIdentityV1, TenantSubsystem
 
 REDIS_TEST_URL = os.environ.get("DEER_FLOW_TEST_REDIS_URL", "redis://localhost:6379/15")
 
@@ -365,8 +360,95 @@ def test_ttl_multiplier_below_two_is_rejected():
 @pytest.mark.parametrize("field", ["renewal_interval_seconds", "ttl_multiplier"])
 @pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
 def test_lease_timing_rejects_non_finite_values(field, value):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="finite"):
         SandboxOwnershipConfig(**{field: value})
+
+
+def test_lease_timing_rejects_finite_values_with_infinite_product():
+    with pytest.raises(ValueError, match="lease TTL must be finite"):
+        SandboxOwnershipConfig(
+            renewal_interval_seconds=1e308,
+            ttl_multiplier=4.0,
+        )
+
+
+def test_redis_lease_timing_rejects_ttl_above_signed_64_bit_milliseconds():
+    ttl_seconds_above_limit = 2**63 / 1000
+
+    with pytest.raises(ValueError, match="signed 64-bit millisecond range"):
+        SandboxOwnershipConfig(
+            type="redis",
+            renewal_interval_seconds=ttl_seconds_above_limit / 4,
+            ttl_multiplier=4.0,
+        )
+
+
+def test_redis_lease_timing_rejects_ttl_without_absolute_expiry_headroom():
+    ttl_seconds_at_safe_limit = 2**62 / 1000
+
+    with pytest.raises(ValueError, match="absolute-expiry headroom"):
+        SandboxOwnershipConfig(
+            type="redis",
+            renewal_interval_seconds=ttl_seconds_at_safe_limit / 4,
+            ttl_multiplier=4.0,
+        )
+
+
+def test_redis_lease_timing_rejects_ttl_below_one_millisecond():
+    with pytest.raises(ValueError, match="at least 1 millisecond"):
+        SandboxOwnershipConfig(
+            type="redis",
+            renewal_interval_seconds=0.0004,
+            ttl_multiplier=2,
+        )
+
+
+def test_redis_lease_timing_allows_one_millisecond_ttl():
+    config = SandboxOwnershipConfig(
+        type="redis",
+        renewal_interval_seconds=0.0005,
+        ttl_multiplier=2,
+    )
+
+    assert compute_lease_ttl(config) * 1000 == pytest.approx(1)
+
+
+def test_redis_lease_timing_allows_operational_ttl():
+    config = SandboxOwnershipConfig(
+        type="redis",
+        renewal_interval_seconds=60 * 60,
+        ttl_multiplier=24,
+    )
+
+    assert compute_lease_ttl(config) == 24 * 60 * 60
+
+
+@pytest.mark.parametrize(
+    ("renewal_interval_seconds", "expected_ttl_milliseconds"),
+    [
+        pytest.param(0.0009, 2, id="lower-bound"),
+        pytest.param((2**62 - 1024) / 2000, 2**62 - 1024, id="upper-bound"),
+    ],
+)
+def test_redis_store_rounds_validated_ttl_up_near_range_boundaries(renewal_interval_seconds, expected_ttl_milliseconds):
+    from deerflow.community.aio_sandbox.ownership.redis import RedisOwnershipStore
+
+    config = SandboxOwnershipConfig(
+        type="redis",
+        renewal_interval_seconds=renewal_interval_seconds,
+        ttl_multiplier=2,
+    )
+    ttl_seconds = compute_lease_ttl(config)
+
+    store = RedisOwnershipStore(
+        owner_id="A",
+        redis_url="redis://unused",
+        ttl_seconds=ttl_seconds,
+        client=MagicMock(),
+    )
+
+    assert store._ttl_ms == expected_ttl_milliseconds
+    assert store._ttl_ms >= ttl_seconds * 1000
 
 
 def test_owner_ids_are_unique_per_instance():
@@ -423,58 +505,6 @@ def test_no_env_defaults_to_memory(monkeypatch):
     monkeypatch.delenv("DEER_FLOW_STREAM_BRIDGE_REDIS_URL", raising=False)
     monkeypatch.delenv("DEER_FLOW_SANDBOX_OWNERSHIP_REDIS_URL", raising=False)
     assert resolve_ownership_config(None).type == "memory"
-
-
-def test_ownership_key_prefix_env_overrides_config(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import deerflow.community.aio_sandbox.ownership.redis as redis_module
-
-    captured: dict[str, object] = {}
-
-    def fake_store(**kwargs: object) -> object:
-        captured.update(kwargs)
-        return object()
-
-    monkeypatch.setattr(redis_module, "RedisOwnershipStore", fake_store)
-    monkeypatch.setenv("DEER_FLOW_SANDBOX_OWNERSHIP_KEY_PREFIX", "from-env")
-
-    make_sandbox_ownership_store(
-        SandboxOwnershipConfig(
-            type="redis",
-            redis_url="redis://fake",
-            key_prefix="from-config",
-        ),
-        owner_id="owner",
-    )
-
-    assert captured["key_prefix"] == "from-env"
-
-
-def test_ownership_prefix_is_derived_from_server_tenant_namespace() -> None:
-    identity = TenantIdentityV1.resolve(
-        deployment_config=DeploymentConfig(tenant_id="tenant-a"),
-        environ=MappingProxyType({}),
-    )
-    config = SandboxOwnershipConfig(type="redis")
-
-    assert resolve_ownership_key_prefix(
-        config,
-        tenant_namespace=identity.namespace(TenantSubsystem.REDIS),
-    ) == (f"{identity.namespace(TenantSubsystem.REDIS).key_prefix}deerflow:sandbox:owner")
-
-
-def test_ownership_prefix_rejects_conflicting_explicit_value() -> None:
-    identity = TenantIdentityV1.resolve(
-        deployment_config=DeploymentConfig(tenant_id="tenant-a"),
-        environ=MappingProxyType({}),
-    )
-
-    with pytest.raises(ValueError, match="sandbox.ownership.key_prefix"):
-        resolve_ownership_key_prefix(
-            SandboxOwnershipConfig(type="redis", key_prefix="another-tenant"),
-            tenant_namespace=identity.namespace(TenantSubsystem.REDIS),
-        )
 
 
 # ── Redis-specific: failure surfaces as OwnershipBackendError ───────────────

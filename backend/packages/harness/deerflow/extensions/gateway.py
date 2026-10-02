@@ -22,6 +22,7 @@ from typing import Any
 from deerflow_extension_api import ExtensionRuntimeDeps
 
 from deerflow.extensions.loader import Diagnostic
+from deerflow.extensions.model_access import ModelInvocationService
 from deerflow.extensions.policy import project_host_policy
 from deerflow.extensions.registry import LoadedExtensions
 
@@ -35,7 +36,6 @@ _RouteMethods = frozenset[str] | None
 _RouteScopes = frozenset[str]
 _HOST_PUBLIC_PATH_PREFIXES = (
     "/health",
-    "/ready",
     "/docs",
     "/redoc",
     "/openapi.json",
@@ -51,7 +51,7 @@ _HOST_PUBLIC_EXACT_PATHS = frozenset(
         "/api/v1/auth/setup-status",
         "/api/v1/auth/initialize",
         "/api/v1/auth/providers",
-        "/api/product",
+        "/api/v1/auth/product",
     }
 )
 _HOST_CSRF_EXEMPT_EXACT_PATHS = frozenset({"/api/v1/auth/me"})
@@ -579,6 +579,7 @@ async def start_services(
     app_config: Any,
     session_factory: Any | None,
     *,
+    run_evidence_reader: Any | None = None,
     attempted_services: list[tuple[str, Any]] | None = None,
 ) -> list[Diagnostic]:
     """Start extension services in registration order, failing open per item."""
@@ -590,6 +591,7 @@ async def start_services(
         app_store=extensions.app_store,
         policy=project_host_policy(app_config),
         session_factory=session_factory,
+        run_evidence_reader=run_evidence_reader,
     )
     for entry in extensions.services:
         source, service = entry
@@ -599,7 +601,10 @@ async def start_services(
             attempted_services.append(entry)
         cancellation_count = _cancellation_count()
         try:
-            await service.start(deps)
+            if isinstance(service, ModelInvocationService):
+                await service.start_with_host(deps, app_config)
+            else:
+                await service.start(deps)
         except asyncio.CancelledError:
             if _cancellation_count() > cancellation_count:
                 raise

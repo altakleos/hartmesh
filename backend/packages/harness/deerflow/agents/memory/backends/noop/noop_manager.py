@@ -45,7 +45,7 @@ from pydantic import PrivateAttr
 
 # ABC contract -- the ONE allowed `from deerflow` in this backend folder.
 # Change this single line (to the other agent's MemoryManager) to port.
-from deerflow.agents.memory.manager import MemoryManager, MemoryWriterActivityV1
+from deerflow.agents.memory.manager import MemoryManager
 
 from .config import NoopConfig
 
@@ -122,6 +122,7 @@ class NoopMemoryManager(MemoryManager):
         *,
         agent_name: str | None = None,
         thread_id: str | None = None,
+        query: str | None = None,
     ) -> str:
         return ""
 
@@ -170,10 +171,6 @@ class NoopMemoryManager(MemoryManager):
     def shutdown_flush(self, timeout: float) -> bool:
         """Nothing is ever queued, so shutdown drain is a clean no-op success."""
         return True
-
-    def writer_activity(self) -> MemoryWriterActivityV1:
-        """Nothing is ever written, so nothing is ever outstanding."""
-        return MemoryWriterActivityV1()
 
     # ── Tier 3 hooks (inherit base defaults; override if your backend supports) ──
     # warm / reload_memory / fact CRUD are tier-3 optional hooks ON the base
