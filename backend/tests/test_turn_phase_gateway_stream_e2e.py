@@ -283,6 +283,12 @@ def serve_gateway(home: Path, *, config_yaml: str = _MINIMAL_CONFIG_YAML) -> Ite
     loopback_port = loopback.getsockname()[1]
     loopback_url = f"http://127.0.0.1:{loopback_port}"
 
+    # The Gateway's start-up attaches its log filters to every root handler,
+    # pytest's session-wide ones included; they are put back at tear-down so
+    # no later test reads records this Gateway's filters rewrote.
+    root_handler_filters = [(handler, list(handler.filters)) for handler in logging.root.handlers]
+    httpx_logger_filters = list(logging.getLogger("httpx").filters)
+
     server = uvicorn.Server(uvicorn.Config(create_app(), log_level="warning", lifespan="on"))
     thread = threading.Thread(target=lambda: asyncio.run(server.serve(sockets=[loopback])), name="turn-phase-e2e-gateway", daemon=True)
     thread.start()
@@ -290,14 +296,25 @@ def serve_gateway(home: Path, *, config_yaml: str = _MINIMAL_CONFIG_YAML) -> Ite
     def _tear_down() -> None:
         server.should_exit = True
         thread.join(timeout=30)
+        if thread.is_alive():
+            # Its shutdown closes the process-wide database engine. Left
+            # running, it would do that underneath whichever test came next,
+            # which then fails for no reason of its own.
+            server.force_exit = True
+            thread.join(timeout=120)
+        gateway_stopped = not thread.is_alive()
         with contextlib.suppress(OSError):
             loopback.close()
         journal_logger.removeHandler(sink)
         journal_logger.setLevel(previous_level)
+        for handler, filters in root_handler_filters:
+            handler.filters[:] = filters
+        logging.getLogger("httpx").filters[:] = httpx_logger_filters
         from deerflow.sandbox.sandbox_provider import shutdown_sandbox_provider
 
         shutdown_sandbox_provider()
         monkeypatch.undo()
+        assert gateway_stopped, "the test Gateway did not stop; its shutdown would run during a later test"
 
     # A Gateway that refuses to start is a result some suites assert on; the
     # environment and singletons this function set must not outlive it either,

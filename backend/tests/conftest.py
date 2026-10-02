@@ -182,3 +182,26 @@ def _auto_user_context(request):
         yield
     finally:
         reset_current_user(token)
+
+
+@pytest.fixture(autouse=True)
+def _log_handlers_keep_their_filters():
+    """Undo the log filters a test's Gateway start-up attaches to the root handlers.
+
+    Starting the Gateway installs its URL redaction and trace filters on every
+    root handler present, and pytest's own session-wide handlers are among
+    them. A filter left there rewrites every later record in place, so a test
+    that reads a URL back from ``caplog`` passed or failed by whichever test
+    happened to run before it.
+    """
+    import logging
+
+    handlers = [(handler, list(handler.filters)) for handler in logging.root.handlers]
+    httpx_logger = logging.getLogger("httpx")
+    httpx_filters = list(httpx_logger.filters)
+    try:
+        yield
+    finally:
+        for handler, filters in handlers:
+            handler.filters[:] = filters
+        httpx_logger.filters[:] = httpx_filters
