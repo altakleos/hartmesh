@@ -1766,6 +1766,37 @@ def test_get_thread_history_returns_iso_for_legacy_checkpoint_metadata() -> None
         assert _ISO_TIMESTAMP_RE.match(entry["created_at"]), entry
 
 
+@pytest.mark.parametrize("empty", [False, True])
+def test_get_thread_history_preserves_rendered_channels_without_exposing_internal_state(empty: bool) -> None:
+    app, _store, _checkpointer = _build_thread_app()
+    artifacts = [] if empty else ["/mnt/user-data/outputs/review.report.json", "/mnt/user-data/outputs/review.pdf"]
+    todos = [] if empty else [{"content": "Review the report", "status": "pending"}]
+    goal = None if empty else {"objective": "Review August", "status": "active"}
+    snapshot = SimpleNamespace(
+        config={"configurable": {"checkpoint_id": "rendered-history"}},
+        parent_config={},
+        metadata={},
+        values={"title": "August review", "artifacts": artifacts, "todos": todos, "goal": goal, "sandbox": {"sandbox_id": "internal"}, "viewed_images": ["internal.png"]},
+        created_at="2026-10-02T00:00:00Z",
+        next=(),
+    )
+    accessor = SimpleNamespace(ahistory=AsyncMock(return_value=[snapshot, snapshot]))
+    with patch.object(threads, "build_thread_checkpoint_state_accessor", AsyncMock(return_value=(accessor, {}))), TestClient(app) as client:
+        response = client.post("/api/threads/rendered-history/history", json={"limit": 2})
+
+    assert response.status_code == 200, response.text
+    values = response.json()[0]["values"]
+    assert values["artifacts"] == artifacts
+    assert values["todos"] == todos
+    if empty:
+        assert "goal" not in values
+    else:
+        assert values["goal"] == goal
+    assert "sandbox" not in values
+    assert "viewed_images" not in values
+    assert response.json()[1]["values"] == {"title": "August review"}
+
+
 def test_get_thread_history_associates_tool_messages_from_checkpoint_turn() -> None:
     app, _store, checkpointer = _build_thread_app()
     app.state.run_event_store = SimpleNamespace(find_latest_ai_message_run_ids=AsyncMock(return_value={}))

@@ -1749,8 +1749,16 @@ async def get_thread_history(
                 values["title"] = title
             if thread_data := materialized_values.get("thread_data"):
                 values["thread_data"] = thread_data
-
             if is_latest_checkpoint:
+                # Reopened chats hydrate rendered state from history, without
+                # a live values frame. Project only the newest returned entry,
+                # like messages, rather than repeating cumulative state.
+                # Empty lists clear stale UI state; an unset goal must not
+                # clear a local override. Internal sandbox state stays private.
+                for key in ("artifacts", "todos", "goal"):
+                    if (value := materialized_values.get(key)) is not None:
+                        values.update(serialize_channel_values_for_api({key: value}))
+
                 messages = materialized_values.get("messages")
                 if messages:
                     serialized_msgs = serialize_channel_values_for_api({"messages": messages}).get("messages", [])
