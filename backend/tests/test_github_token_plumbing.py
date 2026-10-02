@@ -167,10 +167,22 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
         data = _FakeData()
 
     class _FakeShell:
+        def create_session(self, *, id, **_kwargs):
+            captured.setdefault("sessions", []).append(id)
+
         def exec_command(self, *, command, no_change_timeout=None, **kwargs):
+            if command.startswith("printf 'DF_ABORT_SNAPSHOT '"):
+                return SimpleNamespace(data=SimpleNamespace(output="DF_ABORT_SNAPSHOT\n", status="completed", exit_code=0))
             captured.setdefault("first_command", command)
+            captured.setdefault("command_sessions", []).append(kwargs["id"])
             captured["command"] = command
             return _FakeResult()
+
+        def kill_process(self, **_kwargs):
+            pass
+
+        def delete_session(self, *_args, **_kwargs):
+            pass
 
     sbx = _new_aio_sandbox_with_session_state()
     sbx._lock = __import__("threading").Lock()
@@ -186,6 +198,7 @@ def test_aio_sandbox_no_env_leaves_command_unchanged() -> None:
     # abort token; from then on a command reaches the shell exactly as written.
     assert captured["first_command"].endswith("; echo hello") and captured["first_command"].startswith(f"export {ABORT_TOKEN_ENV}=df-")
     assert captured["command"] == "echo hello"
+    assert captured["command_sessions"] == [captured["sessions"][0]] * 2
 
 
 # ---------------------------------------------------------------------------

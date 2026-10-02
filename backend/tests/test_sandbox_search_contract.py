@@ -97,7 +97,15 @@ def provider(request, tmp_path, monkeypatch):
     elif name == "aio":
         from deerflow.community.aio_sandbox import aio_sandbox as module
 
-        client = SimpleNamespace(file=transport, shell=SimpleNamespace(exec_command=transport.aio_shell))
+        client = SimpleNamespace(
+            file=transport,
+            shell=SimpleNamespace(
+                exec_command=transport.aio_shell,
+                create_session=lambda **_kwargs: None,
+                kill_process=lambda **_kwargs: None,
+                delete_session=lambda *_args, **_kwargs: None,
+            ),
+        )
         monkeypatch.setattr(module, "AioSandboxClient", lambda **kwargs: client)
         monkeypatch.setattr(module, "sandbox_http_trust_env", lambda _url: True)
         sandbox = module.AioSandbox("search-contract", "http://127.0.0.1:1", home_dir=str(tmp_path))
