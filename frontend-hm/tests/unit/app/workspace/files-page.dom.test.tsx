@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
   screen,
   within,
 } from "@testing-library/react";
+import { useSyncExternalStore } from "react";
 
 /**
  * The Files page: what the person kept, from every conversation.
@@ -44,7 +46,16 @@ rs.mock("next/navigation", () => ({
     replace: routerReplace,
     prefetch: rs.fn(),
   }),
-  useSearchParams: () => new URLSearchParams(window.location.search),
+  useSearchParams: () =>
+    new URLSearchParams(
+      useSyncExternalStore(
+        (onChange) => {
+          window.addEventListener("popstate", onChange);
+          return () => window.removeEventListener("popstate", onChange);
+        },
+        () => window.location.search,
+      ),
+    ),
 }));
 rs.mock("sonner", () => ({ toast: { success: rs.fn(), error: rs.fn() } }));
 // The tab title asks the deployment whose workspace this is; not what this is about.
@@ -182,6 +193,10 @@ function openSharedTab() {
 
 describe("FilesPage", () => {
   beforeEach(() => {
+    routerReplace.mockImplementation((url: string) => {
+      window.history.replaceState(null, "", url);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    });
     files.data = { files: [AUGUST, NOTES], count: 2, truncated: false };
     files.error = null;
     files.isPending = false;
@@ -209,6 +224,28 @@ describe("FilesPage", () => {
     // One page, two tabs: the heading names the page, so clicking "My files"
     // in the sidebar never lands on a page headed something else.
     expect(screen.getByRole("heading", { level: 1 }).textContent).toBe("Files");
+  });
+
+  it("follows same-page links and history query changes without remounting", () => {
+    const view = renderPage();
+    for (const [query, expected] of [
+      ["?tab=shared", "shared-files-list"],
+      ["", "my-files-list"],
+      ["?tab=shared", "shared-files-list"],
+      ["?tab=unknown", "my-files-list"],
+    ]) {
+      act(() =>
+        window.history.replaceState(null, "", `/workspace/files${query}`),
+      );
+      view.rerender(
+        <I18nContext.Provider
+          value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+        >
+          <FilesPage />
+        </I18nContext.Provider>,
+      );
+      expect(screen.getByTestId(expected!)).toBeTruthy();
+    }
   });
 
   it("puts the open tab in the URL, so a copied link lands where the person was", () => {

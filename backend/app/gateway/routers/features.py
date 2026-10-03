@@ -18,7 +18,7 @@ from app.gateway.deps import get_config
 from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
 from deerflow.config.app_config import AppConfig
-from deerflow.config.tenant_bundle import MAX_COMPANY_NAME_CHARS, TenantBundle, configured_tenant_bundle
+from deerflow.config.tenant_bundle import MAX_COMPANY_NAME_CHARS, MAX_SUPPORT_URL_CHARS, TenantBundle, configured_tenant_bundle
 from deerflow.config.ui_config import MAX_STARTER_PROMPT_CHARS, MAX_STARTER_TITLE_CHARS, MAX_STARTERS, UiConfig
 from deerflow.subagents.capacity import configured_subagent_max_running
 
@@ -90,12 +90,20 @@ class BrandColors(BaseModel):
     secondary: str | None = Field(..., description="Secondary brand colour as #rrggbb, or null")
 
 
+class ProviderSupport(BaseModel):
+    """Operator support, separate from the customer's workspace identity."""
+
+    display_name: str | None = Field(default=None, max_length=MAX_COMPANY_NAME_CHARS)
+    support_url: str | None = Field(default=None, max_length=MAX_SUPPORT_URL_CHARS)
+
+
 class BrandingFeature(BaseModel):
     """Whose workspace this is, as the tenant bundle says; every field is optional."""
 
     company_name: str | None = Field(..., max_length=MAX_COMPANY_NAME_CHARS, description="The company the workspace shows, or null for the product's own name")
     colors: BrandColors
     has_logo: bool = Field(..., description="Whether GET /api/branding/logo serves a picture")
+    provider: ProviderSupport = Field(default_factory=ProviderSupport)
 
 
 class FeaturesResponse(BaseModel):
@@ -157,6 +165,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
             company_name=bundle.company_name,
             colors=BrandColors(primary=bundle.primary, secondary=bundle.secondary),
             has_logo=bundle.logo is not None,
+            provider=ProviderSupport(display_name=bundle.provider_name, support_url=bundle.support_url),
         ),
     )
 

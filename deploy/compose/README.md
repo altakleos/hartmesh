@@ -966,6 +966,8 @@ The layout is the skill's contract, and every file is optional:
 ├── logo.png            PNG or JPEG, next to brand.json (an SVG is refused:
 │                       it can carry a stylesheet or an image reference that
 │                       reaches out)
+├── provider.json       {"display_name": "Example Hosting",
+│                        "support_url": "https://support.example.com/help"}
 ├── starters.json       [{"id": "business-review", "title": "...", "prompt": "..."}]
 │                       -- the same shape and rules as `ui.starters`: at most
 │                       six, distinct ids, plain text; present, it *is* the grid
@@ -973,6 +975,17 @@ The layout is the skill's contract, and every file is optional:
                         own `profiles/` (a `services-generic.json` here replaces
                         the built-in one)
 ```
+
+`provider.json` configures the workspace menu's **Contact support** action.
+`display_name` is an optional plain line of at most 80 characters; it names the
+service provider without changing the customer brand or product name.
+`support_url` must be an absolute HTTPS URL of at most 2048 characters, without
+credentials, whitespace or backslashes. Missing or invalid URLs hide the action;
+invalid names leave a generic **Contact support** label. Validation problems
+name only the field/rule in the Gateway log. The destination appears through
+`/api/features` after sign-in. The app adds no conversation, account or credential data to the link and
+suppresses the referrer. It does not submit a
+support request automatically. Keep credentials out of the configured URL.
 
 Create it before the first `up` that carries this profile, owned by the
 Gateway and sandbox user:

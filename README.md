@@ -37,6 +37,14 @@ Files saved to My Files or Shared become available only after the copy finishes;
 new copies never overwrite existing files. An interrupted Share request finishes
 recording or rolling back its copy before another publication begins.
 
+The Files page follows the selected tab in its URL, including Shared links and
+browser history. If report download availability cannot be checked, the card
+offers **Retry check**; it checks the files again without regenerating them.
+Operators can add a **Contact support** link to the workspace's **Settings and
+more** menu through the tenant bundle's optional `provider.json`. Customer
+branding and provider support remain separate; see the
+[tenant bundle configuration](deploy/compose/README.md#tenant-bundle).
+
 Redis-backed login lockouts count concurrent failures atomically across workers;
 an expired-lock check cannot overwrite a newer failure or administrator unlock.
 Redis failure or sustained write contention refuses login until the store is

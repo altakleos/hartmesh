@@ -1,6 +1,12 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 
 /**
  * DF16: the card must offer a render only while its file is actually there.
@@ -313,5 +319,39 @@ describe("ReportCard current renders", () => {
       expect(screen.getByText(enUS.businessReport.noRenders)).toBeTruthy(),
     );
     expect(fetchWithAuth).not.toHaveBeenCalled();
+  });
+});
+
+describe("report availability recovery", () => {
+  it("offers a probe retry for a 503 and recovers without generating a document", async () => {
+    serveByPath({ [PDF]: 503 });
+    renderCard({ artifacts: [REPORT, PDF] });
+    const retry = await screen.findByRole("button", { name: "Retry check" });
+    expect(downloadLinks()).toHaveLength(0);
+    expect(screen.queryByText(enUS.businessReport.noRenders)).toBeNull();
+    serveByPath({ [PDF]: 206 });
+    fireEvent.click(retry);
+    await waitFor(() => expect(downloadLinks()).toHaveLength(1));
+    expect(screen.queryByRole("button", { name: "Retry check" })).toBeNull();
+    expect(fetchWithAuth.mock.calls).toHaveLength(2);
+    expect(myFiles.save).not.toHaveBeenCalled();
+    expect(shareWithEveryone).not.toHaveBeenCalled();
+  });
+
+  it("keeps a confirmed format available while another could not be checked", async () => {
+    serveByPath({ [PDF]: 206, [DOCX]: 503, [XLSX]: 403 });
+    renderCard();
+    await screen.findByRole("button", { name: "Retry check" });
+    expect(downloadLinks()).toHaveLength(1);
+    expect(downloadLinks()[0]).toContain(`${NAME}.pdf`);
+    expect(screen.queryByText(enUS.businessReport.noRenders)).toBeNull();
+  });
+
+  it("does not confuse offline probes with missing files", async () => {
+    fetchWithAuth.mockRejectedValue(new Error("offline"));
+    renderCard({ artifacts: [REPORT, PDF] });
+    await screen.findByRole("button", { name: "Retry check" });
+    expect(downloadLinks()).toHaveLength(0);
+    expect(screen.queryByText(enUS.businessReport.noRenders)).toBeNull();
   });
 });

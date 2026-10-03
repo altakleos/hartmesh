@@ -237,3 +237,59 @@ def test_the_app_config_carries_the_section(tmp_path: Path) -> None:
     config = AppConfig.model_validate({"sandbox": {"use": "test"}, "tenant_bundle": {"path": str(tmp_path)}})
     assert config.tenant_bundle.path == str(tmp_path)
     assert AppConfig.model_validate({"sandbox": {"use": "test"}}).tenant_bundle.path is None
+
+
+def test_provider_support_is_separate_from_customer_brand(tmp_path: Path) -> None:
+    root = _bundle(tmp_path, FULL_BRAND)
+    (root / "provider.json").write_text(json.dumps({"display_name": "  Example Hosting  ", "support_url": "https://support.example.test/help"}), encoding="utf-8")
+    bundle = load_tenant_bundle(root)
+    assert bundle.company_name == FULL_BRAND["company_name"]
+    assert bundle.provider_name == "Example Hosting"
+    assert bundle.support_url == "https://support.example.test/help"
+    assert bundle.problems == ()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "javascript:alert(1)",
+        "http://support.example.test",
+        "//support.example.test",
+        "https:///help",
+        "https://user:secret@example.test/",
+        "https://example.test:wrong/",
+        "https://example.test\\evil/",
+        "https://exam\nple.test/",
+        "https://exa mple.test/",
+        "x" * 2049,
+        42,
+    ],
+)
+def test_invalid_support_destination_is_absent_without_losing_brand(tmp_path: Path, url: object) -> None:
+    root = _bundle(tmp_path, FULL_BRAND)
+    (root / "provider.json").write_text(json.dumps({"display_name": "Hosting", "support_url": url}), encoding="utf-8")
+    bundle = load_tenant_bundle(root)
+    assert bundle.support_url is None
+    assert bundle.provider_name == "Hosting"
+    assert bundle.company_name == FULL_BRAND["company_name"]
+    assert bundle.problems == ("provider.json: support_url must be an HTTPS URL without credentials, whitespace or backslashes (at most 2048 characters)",)
+
+
+@pytest.mark.parametrize("name", ["", " \n ", "Bad\nName", "Bad\u202eName", "x" * 81, 42])
+def test_invalid_provider_name_leaves_a_generic_support_link(tmp_path: Path, name: object) -> None:
+    root = _bundle(tmp_path)
+    (root / "provider.json").write_text(json.dumps({"display_name": name, "support_url": "https://help.example.test/"}), encoding="utf-8")
+    bundle = load_tenant_bundle(root)
+    assert bundle.provider_name is None
+    assert bundle.support_url == "https://help.example.test/"
+    assert len(bundle.problems) == 1
+
+
+def test_provider_file_is_optional_and_malformed_file_only_removes_provider(tmp_path: Path) -> None:
+    root = _bundle(tmp_path, FULL_BRAND)
+    assert load_tenant_bundle(root).support_url is None
+    (root / "provider.json").write_text("[]", encoding="utf-8")
+    bundle = load_tenant_bundle(root)
+    assert bundle.support_url is None and bundle.provider_name is None
+    assert bundle.company_name == FULL_BRAND["company_name"]
+    assert bundle.problems == ("provider.json: not a JSON object",)

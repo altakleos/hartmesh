@@ -56,7 +56,7 @@ def _app_with_config(
     return app
 
 
-NO_BRANDING = {"company_name": None, "colors": {"primary": None, "secondary": None}, "has_logo": False}
+NO_BRANDING = {"company_name": None, "colors": {"primary": None, "secondary": None}, "has_logo": False, "provider": {"display_name": None, "support_url": None}}
 
 
 def _default_ui_payload() -> dict:
@@ -292,7 +292,7 @@ def test_features_reports_the_tenant_bundle_s_brand(tmp_path: Path) -> None:
     with TestClient(_app_with_config(agents_api_enabled=True, tenant_bundle_path=_bundle(tmp_path, BRAND))) as client:
         payload = client.get("/api/features").json()
 
-    assert payload["branding"] == {"company_name": "Example Services Co.", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}, "has_logo": True}
+    assert payload["branding"] == {"company_name": "Example Services Co.", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}, "has_logo": True, "provider": {"display_name": None, "support_url": None}}
 
 
 def test_a_bundle_without_a_picture_still_names_the_company(tmp_path: Path) -> None:
@@ -330,3 +330,15 @@ def test_a_deployment_that_names_no_bundle_reports_no_brand() -> None:
         payload = client.get("/api/features").json()
 
     assert payload["branding"] == NO_BRANDING
+
+
+def test_features_exposes_support_separately_from_customer_identity(tmp_path: Path) -> None:
+    (tmp_path / "brand.json").write_text(json.dumps({"company_name": "Customer"}), encoding="utf-8")
+    provider = tmp_path / "provider.json"
+    provider.write_text(json.dumps({"display_name": "Hosting", "support_url": "https://help.example.test/"}), encoding="utf-8")
+    with TestClient(_app_with_config(agents_api_enabled=True, tenant_bundle_path=str(tmp_path))) as client:
+        branding = client.get("/api/features").json()["branding"]
+        assert branding["company_name"] == "Customer"
+        assert branding["provider"] == {"display_name": "Hosting", "support_url": "https://help.example.test/"}
+        provider.write_text(json.dumps({"support_url": "javascript:alert(1)"}), encoding="utf-8")
+        assert client.get("/api/features").json()["branding"]["provider"]["support_url"] is None

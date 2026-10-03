@@ -50,3 +50,48 @@ test.describe("My files", () => {
     await expect(page.getByTestId("my-files-empty")).toBeVisible();
   });
 });
+
+test("same-page Shared navigation and browser history follow the URL", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page, { threads: [], files: [AUGUST] });
+  await page.route("**/api/shared", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ files: [], count: 0, truncated: false }),
+    }),
+  );
+  await page.goto("/workspace/files");
+  await expect(page.getByTestId("my-files-list")).toBeVisible();
+  await page.route("**/api/shared/publish", (route) =>
+    route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        ...AUGUST,
+        virtual_path:
+          "/mnt/user-data/shared/Reports/2026-08-business-review.pdf",
+        can_remove: true,
+      }),
+    }),
+  );
+  await page
+    .getByRole("button", { name: `Share with everyone ${AUGUST.name}` })
+    .click();
+  await page.getByRole("button", { name: "Open Shared", exact: true }).click();
+  await expect(page.getByTestId("shared-files-empty")).toBeVisible();
+  await page.goBack();
+  await expect(page.getByTestId("my-files-list")).toBeVisible();
+  await page.goForward();
+  await expect(page.getByTestId("shared-files-empty")).toBeVisible();
+  await page.getByTestId("files-tab-mine").click();
+  await expect(page).toHaveURL(/\/workspace\/files$/);
+  await expect(page.getByTestId("my-files-list")).toBeVisible();
+  await page.getByTestId("files-tab-shared").click();
+  await expect(page).toHaveURL(/\?tab=shared$/);
+  await page.reload();
+  await expect(page.getByTestId("shared-files-empty")).toBeVisible();
+  await page.evaluate(() => window.history.pushState(null, "", "?tab=unknown"));
+  await expect(page.getByTestId("my-files-list")).toBeVisible();
+});

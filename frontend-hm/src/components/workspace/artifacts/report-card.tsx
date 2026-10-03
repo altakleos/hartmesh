@@ -417,10 +417,30 @@ export function ReportCard({
         {/* Only once the verdict is final. "No file to download yet" while a
             probe is still out is a false statement the person acts on, and
             it is the one thing worse than the stale link this replaced. */}
-        {renders.length === 0 && presentedKnown && live.isSettled && (
-          <p className="text-muted-foreground mt-4 text-sm">
-            {t.businessReport.noRenders}
-          </p>
+        {renders.length === 0 &&
+          presentedKnown &&
+          live.isSettled &&
+          !live.hasUncertain && (
+            <p className="text-muted-foreground mt-4 text-sm">
+              {t.businessReport.noRenders}
+            </p>
+          )}
+        {live.hasUncertain && (
+          <div className="mt-4 flex flex-wrap items-center gap-2" role="status">
+            <p className="text-muted-foreground text-sm">
+              {t.businessReport.checkFailed}
+            </p>
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={live.isFetching}
+              onClick={live.retry}
+            >
+              {live.isFetching
+                ? t.businessReport.checkingRenders
+                : t.businessReport.retryCheck}
+            </Button>
+          </div>
         )}
         {renders.length > 0 && (
           <div className="mt-4 flex flex-wrap gap-2">

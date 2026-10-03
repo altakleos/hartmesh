@@ -143,6 +143,8 @@ describe("branding", () => {
       primary: "#0a6b3d",
       secondary: "#9ccdb4",
       hasLogo: true,
+      providerName: null,
+      supportURL: null,
     });
   });
 
@@ -156,6 +158,8 @@ describe("branding", () => {
       primary: null,
       secondary: null,
       hasLogo: false,
+      providerName: null,
+      supportURL: null,
     });
   });
 
@@ -176,6 +180,43 @@ describe("branding", () => {
       primary: null,
       secondary: null,
       hasLogo: false,
+      providerName: null,
+      supportURL: null,
     });
+  });
+});
+
+describe("provider support", () => {
+  it("keeps customer and provider names distinct", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({
+        branding: {
+          company_name: "Customer",
+          provider: {
+            display_name: "Hosting",
+            support_url: "https://help.example.test/help",
+          },
+        },
+      }),
+    );
+    const branding = await fetchBranding();
+    expect(branding.companyName).toBe("Customer");
+    expect(branding.providerName).toBe("Hosting");
+    expect(branding.supportURL).toBe("https://help.example.test/help");
+  });
+  it.each([
+    "javascript:alert(1)",
+    "http://help.example.test",
+    "//help.example.test",
+    "https://user:secret@example.test",
+    "https://exam\nple.test",
+    "https://example.test\\path",
+    "not a url",
+    42,
+  ])("drops an invalid support destination: %s", async (support_url) => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse({ branding: { provider: { support_url } } }),
+    );
+    expect((await fetchBranding()).supportURL).toBeNull();
   });
 });

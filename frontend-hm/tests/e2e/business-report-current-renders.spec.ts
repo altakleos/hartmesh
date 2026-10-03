@@ -69,7 +69,10 @@ function presentedEverything() {
 
 async function openTheReport(
   page: Page,
-  { live }: { live: readonly string[] },
+  {
+    live,
+    unavailable = [],
+  }: { live: readonly string[]; unavailable?: readonly string[] },
 ) {
   const probed: string[] = [];
   mockLangGraphAPI(page, {
@@ -103,6 +106,8 @@ async function openTheReport(
       `**/api/threads/${THREAD_ID}/artifacts${path}*`,
       (route) => {
         probed.push(`${path}|${route.request().headers().range ?? ""}`);
+        if (unavailable.includes(path))
+          return route.fulfill({ status: 503, body: "Unavailable" });
         if (!live.includes(path)) {
           // What the tenant's browser got for a deleted render.
           return route.fulfill({ status: 404, body: "Not Found" });
@@ -204,4 +209,30 @@ test.describe("report card current renders", () => {
       card.getByRole("link", { name: "Download the PDF" }),
     ).toHaveCount(0);
   });
+});
+
+test("a temporary availability failure offers a check retry", async ({
+  page,
+}) => {
+  const { card } = await openTheReport(page, {
+    live: [],
+    unavailable: [PDF_PATH],
+  });
+  await expect(card.getByRole("button", { name: "Retry check" })).toBeVisible();
+  await expect(card.getByText("No file to download yet")).toHaveCount(0);
+  await expect(
+    card.getByRole("link", { name: "Download the PDF" }),
+  ).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath("report-retry.png") });
+  await page.route(
+    `**/api/threads/${THREAD_ID}/artifacts${PDF_PATH}*`,
+    (route) => route.fulfill({ status: 206, body: "x" }),
+  );
+  await card.getByRole("button", { name: "Retry check" }).click();
+  await expect(
+    card.getByRole("link", { name: "Download the PDF" }),
+  ).toBeVisible();
+  await expect(card.getByRole("button", { name: "Retry check" })).toHaveCount(
+    0,
+  );
 });

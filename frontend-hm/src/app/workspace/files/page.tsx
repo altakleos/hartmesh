@@ -65,13 +65,10 @@ export default function FilesPage() {
   const { t } = useI18n();
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [tab, setTabState] = useState<FilesTab>(() =>
-    tabOf(searchParams?.get("tab") ?? null),
-  );
+  const tab = tabOf(searchParams?.get("tab") ?? null);
   // The tab is also written back to the URL, so a person who copies the link
   // sends their colleague to the tab they were looking at.
   const setTab = (next: FilesTab) => {
-    setTabState(next);
     router.replace(
       next === "shared" ? "/workspace/files?tab=shared" : "/workspace/files",
     );

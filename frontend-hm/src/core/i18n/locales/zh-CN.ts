@@ -188,6 +188,9 @@ export function createZhCN(product: string): Translations {
       downloadExcel: "Excel",
       checksHeading: "核对",
       notIncludedHeading: "未包含",
+      checkFailed: "部分下载文件暂时无法检查，请重试。",
+      retryCheck: "重新检查",
+      checkingRenders: "检查中…",
       noRenders: "暂无可下载的文件 —— 可以让助手生成 PDF、Word 或 Excel 版本。",
       downloadRender: (format) => `下载 ${format}`,
       checkStatus: {
@@ -709,6 +712,8 @@ export function createZhCN(product: string): Translations {
 
     // Workspace
     workspace: {
+      contactSupport: "联系支持",
+      providerSupport: (providerName) => `联系 ${providerName} 支持`,
       settingsAndMore: "设置和更多",
       about: `关于 ${product}`,
       aboutCompany: (companyName: string) => `关于 ${companyName}`,

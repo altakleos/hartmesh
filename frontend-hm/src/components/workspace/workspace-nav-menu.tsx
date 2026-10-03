@@ -4,6 +4,7 @@ import {
   ChevronsUpDown,
   DownloadIcon,
   InfoIcon,
+  LifeBuoyIcon,
   Settings2Icon,
   SettingsIcon,
 } from "lucide-react";
@@ -57,7 +58,7 @@ export function WorkspaceNavMenu() {
   const { open: isSidebarOpen } = useSidebar();
   const { t } = useI18n();
   // About is the company's when the tenant bundle names one, else the product's.
-  const { companyName } = useBranding();
+  const { companyName, providerName, supportURL } = useBranding();
 
   useEffect(() => {
     setMounted(true);
@@ -100,6 +101,21 @@ export function WorkspaceNavMenu() {
                   )}
                 </DropdownMenuGroup>
                 <DropdownMenuSeparator />
+                {supportURL && (
+                  <DropdownMenuItem asChild>
+                    <a
+                      href={supportURL}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      referrerPolicy="no-referrer"
+                    >
+                      <LifeBuoyIcon />
+                      {providerName
+                        ? t.workspace.providerSupport(providerName)
+                        : t.workspace.contactSupport}
+                    </a>
+                  </DropdownMenuItem>
+                )}
                 <DropdownMenuItem
                   onClick={() => {
                     openSettings("about");

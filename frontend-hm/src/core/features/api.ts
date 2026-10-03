@@ -31,6 +31,7 @@ export interface FeaturesResponse {
     company_name?: unknown;
     colors?: { primary?: unknown; secondary?: unknown };
     has_logo?: unknown;
+    provider?: { display_name?: unknown; support_url?: unknown };
   };
 }
 
@@ -44,6 +45,8 @@ export interface Branding {
   secondary: string | null;
   /** Whether `logoURL()` serves a picture. */
   hasLogo: boolean;
+  providerName: string | null;
+  supportURL: string | null;
 }
 
 export interface SubagentBatchesCapability {
@@ -108,6 +111,30 @@ function color(value: unknown): string | null {
   return typeof value === "string" && HEX_COLOR.test(value) ? value : null;
 }
 
+function supportURL(value: unknown): string | null {
+  if (
+    typeof value !== "string" ||
+    value.length > 2048 ||
+    /[\s\\\p{Cc}\p{Cf}]/u.test(value)
+  ) {
+    return null;
+  }
+  try {
+    const authority = /^https:\/\/([^/?#]+)/i.exec(value)?.[1];
+    if (!authority || /[@%]/.test(authority)) return null;
+    const url = new URL(value);
+    return url.protocol === "https:" &&
+      url.hostname &&
+      url.port !== "0" &&
+      !url.username &&
+      !url.password
+      ? url.href
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * The company the workspace shows. A Gateway from before this existed reports
  * no `branding`, which is the same as a bundle that names nothing.
@@ -122,11 +149,23 @@ export function selectBranding(features: FeaturesResponse): Branding {
     typeof branding?.company_name === "string"
       ? branding.company_name.trim()
       : "";
+  const provider = branding?.provider;
+  const providerName =
+    typeof provider?.display_name === "string"
+      ? provider.display_name.trim()
+      : "";
   return {
     companyName: name.length > 0 ? name : null,
     primary: color(branding?.colors?.primary),
     secondary: color(branding?.colors?.secondary),
     hasLogo: branding?.has_logo === true,
+    providerName:
+      providerName &&
+      providerName.length <= 80 &&
+      !/[\p{Cc}\p{Cf}]/u.test(providerName)
+        ? providerName
+        : null,
+    supportURL: supportURL(provider?.support_url),
   };
 }
 

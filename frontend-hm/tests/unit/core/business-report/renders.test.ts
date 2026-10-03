@@ -35,7 +35,7 @@ test("asks the authenticated artifact route for a single byte", async () => {
 
   await expect(
     probeReportRenderLive({ threadId: THREAD, path: PDF }),
-  ).resolves.toBe(true);
+  ).resolves.toBe("present");
 
   expect(fetchWithAuth).toHaveBeenCalledTimes(1);
   const [url, init] = fetchWithAuth.mock.calls[0] as [string, RequestInit];
@@ -57,11 +57,11 @@ test("a 200 counts as live: the range was ignored, the file is still there", asy
 
   await expect(
     probeReportRenderLive({ threadId: THREAD, path: PDF }),
-  ).resolves.toBe(true);
+  ).resolves.toBe("present");
   expect(cancel).toHaveBeenCalledTimes(1);
 });
 
-test.each([[400], [403], [404], [500]])(
+test.each([[400], [403], [404]])(
   "a %d is not a download link",
   async (status) => {
     const { response } = respond(status);
@@ -71,7 +71,7 @@ test.each([[400], [403], [404], [500]])(
 
     await expect(
       probeReportRenderLive({ threadId: THREAD, path: PDF }),
-    ).resolves.toBe(false);
+    ).resolves.toBe("absent");
   },
 );
 
@@ -82,7 +82,7 @@ test("a network failure is not a download link", async () => {
 
   await expect(
     probeReportRenderLive({ threadId: THREAD, path: PDF }),
-  ).resolves.toBe(false);
+  ).resolves.toBe("error");
 });
 
 test("a body that refuses to cancel does not turn a live file dead", async () => {
@@ -99,7 +99,7 @@ test("a body that refuses to cancel does not turn a live file dead", async () =>
 
   await expect(
     probeReportRenderLive({ threadId: THREAD, path: PDF }),
-  ).resolves.toBe(true);
+  ).resolves.toBe("present");
 });
 
 test("the query identity separates two drafts that share every filename", async () => {
@@ -115,3 +115,14 @@ test("the query identity separates two drafts that share every filename", async 
 
   expect(draft2).not.toEqual(draft3);
 });
+
+test.each([429, 500, 503])(
+  "a %d means the file could not be checked",
+  async (status) => {
+    fetchWithAuth.mockResolvedValue(respond(status).response);
+    const { probeReportRenderLive } = await import("@/core/business-report");
+    await expect(
+      probeReportRenderLive({ threadId: THREAD, path: PDF }),
+    ).resolves.toBe("error");
+  },
+);
