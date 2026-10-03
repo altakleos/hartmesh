@@ -101,9 +101,7 @@ describe("useArtifactContent", () => {
     });
   });
 
-  it("gives a report the report's preview budget, not the text preview's", async () => {
-    // The card is drawn from the whole body, rows included; under the 1 MiB
-    // text budget a report of some 4,300 rows stopped being a card (C8).
+  it("requests a report projection with a bounded source fallback", async () => {
     const reportPath =
       "/mnt/user-data/outputs/reports/august/august.report.json";
     renderHook(
@@ -123,6 +121,7 @@ describe("useArtifactContent", () => {
         isMock: false,
         full: false,
         previewMaxBytes: REPORT_PREVIEW_MAX_BYTES,
+        reportPreview: true,
       });
     });
     expect(REPORT_PREVIEW_MAX_BYTES).toBeGreaterThan(1024 * 1024);

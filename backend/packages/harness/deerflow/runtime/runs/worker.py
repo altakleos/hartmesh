@@ -97,10 +97,10 @@ from deerflow.trace_context import DEERFLOW_TRACE_METADATA_KEY, ensure_trace_id,
 from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
-from deerflow.workspace_changes import capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
+from deerflow.workspace_changes import capture_output_snapshot, capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
-from .delivery import DELIVERY_INCOMPLETE_STOP_REASON, publish_delivery_failure
+from .delivery import DELIVERY_INCOMPLETE_STOP_REASON, DELIVERY_SCAN_INCOMPLETE_ERROR, output_scan_incomplete, publish_delivery_failure
 from .manager import ConflictError, RunManager, RunRecord, RunStartOutcome
 from .naming import resolve_root_run_name
 from .schemas import RunStatus, ThreadOperationKind
@@ -342,7 +342,7 @@ def _presented_path_covers_output(presented_path: str, produced_path: str) -> bo
 
 def _delivery_content_with_outputs(
     content: dict[str, Any],
-    produced_paths: list[str],
+    produced_paths: list[str] | None,
     runtime_presented: list[str] | None = None,
 ) -> dict[str, Any]:
     """Attach a delivery verdict when this run created or modified outputs.
@@ -353,12 +353,21 @@ def _delivery_content_with_outputs(
     is what ``RuntimeDeliveryMiddleware`` handed over inside the graph and
     reaches here through ``runtime.context``.
     """
-    if not produced_paths:
-        return content
-
     by_runtime = list(dict.fromkeys(runtime_presented or []))
     tagged = content.get("presented_files", [])
     presented_paths = list(dict.fromkeys([*content.get("by_tool", {}).get("present_files", []), *(tagged if isinstance(tagged, list) else []), *by_runtime]))
+    if produced_paths is None:
+        return {
+            **content,
+            **({"presented_by_runtime": by_runtime} if by_runtime else {}),
+            "presented_paths": presented_paths,
+            "verification": {"source": "outputs_changed", "scan_complete": False},
+            "stage": "verification_incomplete",
+            "satisfied": False,
+        }
+    if not produced_paths:
+        return content
+
     matched_paths = [produced_path for produced_path in produced_paths if any(_presented_path_covers_output(presented_path, produced_path) for presented_path in presented_paths)]
     satisfied = bool(matched_paths)
     verdict = {
@@ -390,6 +399,8 @@ def _runtime_presented_files(runtime_context: Any) -> list[str]:
 
 def _delivery_error(content: dict[str, Any]) -> str | None:
     """Return the terminal error when no changed output was presented."""
+    if output_scan_incomplete(content):
+        return DELIVERY_SCAN_INCOMPLETE_ERROR
     if not content.get("produced_paths") or content.get("satisfied") is True:
         return None
     return _DELIVERY_INCOMPLETE_ERROR
@@ -419,16 +430,18 @@ async def _produced_output_paths(
     thread_id: str,
     user_id: str | None,
     extra_excluded_dir_names: frozenset[str] | None = None,
-) -> list[str]:
+) -> list[str] | None:
     """Detect regular output files created or modified by this run."""
-    if before is None:
-        return []
+    if before is None or before.truncated:
+        return None
     try:
-        after = await capture_workspace_snapshot(thread_id, user_id=user_id, include_text=False, extra_excluded_dir_names=extra_excluded_dir_names)
+        after = await capture_output_snapshot(thread_id, user_id=user_id, extra_excluded_dir_names=extra_excluded_dir_names)
+        if after.truncated:
+            return None
         return get_changed_output_paths(before, after)
     except Exception:
         logger.warning("Could not detect produced output artifacts for run thread %s", thread_id, exc_info=True)
-        return []
+        return None
 
 
 # Keep this streaming policy separate from middleware write-authorization sets.
@@ -983,6 +996,7 @@ async def _run_agent(
     deferred_finalization_interrupt: BaseException | None = None
     pre_run_checkpoint_id: str | None = None
     pre_run_workspace_snapshot: WorkspaceSnapshot | None = None
+    pre_run_output_snapshot: WorkspaceSnapshot | None = None
     workspace_changes_user_id: str | None = None
     workspace_excluded_dir_names: frozenset[str] | None = None
     snapshot_capture_failed = False
@@ -1182,10 +1196,14 @@ async def _run_agent(
 
         if event_store is not None:
             workspace_changes_user_id = get_effective_user_id()
+            workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
+            try:
+                pre_run_output_snapshot = await capture_output_snapshot(thread_id, user_id=workspace_changes_user_id, extra_excluded_dir_names=workspace_excluded_dir_names)
+            except Exception:
+                logger.warning("Could not capture pre-run output snapshot for run %s", run_id, exc_info=True)
             # Resolved once per run so the pre-run snapshot, the post-run
             # delivery scan, and the workspace-changes scan all agree on the
             # same exclusion set.
-            workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
                 pre_run_workspace_snapshot = await capture_workspace_snapshot(
                     thread_id,
@@ -1592,11 +1610,15 @@ async def _run_agent(
             # collects the most severe / first / all reasons) instead of each
             # guard writing directly to the same key.
             stop_reason = runtime_context.get("stop_reason") if runtime_context is not None else None
-            produced_output_paths = await _produced_output_paths(
-                pre_run_workspace_snapshot,
-                thread_id=thread_id,
-                user_id=workspace_changes_user_id,
-                extra_excluded_dir_names=workspace_excluded_dir_names,
+            produced_output_paths = (
+                await _produced_output_paths(
+                    pre_run_output_snapshot,
+                    thread_id=thread_id,
+                    user_id=workspace_changes_user_id,
+                    extra_excluded_dir_names=workspace_excluded_dir_names,
+                )
+                if event_store is not None
+                else []
             )
             delivery_content = _delivery_content_with_outputs(
                 journal.get_delivery_content() if journal is not None else _empty_delivery_content(),
@@ -1708,9 +1730,13 @@ async def _run_agent(
                     logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
 
                 if delivery_content is None:
-                    if produced_output_paths is None:
+                    if not persist_completion:
+                        # Preflight/admission failed before execution started;
+                        # no output scan was due for this run.
+                        produced_output_paths = []
+                    elif produced_output_paths is None:
                         produced_output_paths = await _produced_output_paths(
-                            pre_run_workspace_snapshot,
+                            pre_run_output_snapshot,
                             thread_id=thread_id,
                             user_id=workspace_changes_user_id,
                             extra_excluded_dir_names=workspace_excluded_dir_names,
@@ -1947,6 +1973,7 @@ async def _run_agent(
                 task_store = None
                 task_info = None
                 pre_run_workspace_snapshot = None
+                pre_run_output_snapshot = None
                 delivery_content = None
                 produced_output_paths = None
                 graph_input = {}

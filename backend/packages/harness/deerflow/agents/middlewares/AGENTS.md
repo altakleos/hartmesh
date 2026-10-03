@@ -1,5 +1,14 @@
 ### Middleware Chain
 
+RuntimeDeliveryMiddleware and the run worker use `capture_output_snapshot`
+for delivery, with the configured tool-output spill directory excluded on both
+paths. Full workspace snapshots remain separate for history diffs. A partial
+baseline cannot auto-present files; missing/partial delivery scans persist
+`verification.scan_complete: false` and fail completed runs. Scanner limits
+bound files and visited directories; read/walk failures mark the snapshot
+incomplete. The live/durable notice projects this as `scan_complete: false`
+without claiming any missing paths. Metadata scans preserve prompt cancellation without cache resources.
+
 Compaction keeps state `SystemMessage`s; transient instructions use request
 wrappers, and fully rescued partitions skip compaction. If latest-user rescue
 empties an AI/Tool-only window, use `_build_summary_input_text(strategy="last")`;

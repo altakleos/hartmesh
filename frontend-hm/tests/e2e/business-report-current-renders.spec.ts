@@ -88,7 +88,7 @@ async function openTheReport(
     ],
   });
   await page.route(
-    `**/api/threads/${THREAD_ID}/artifacts${REPORT_PATH}`,
+    `**/api/threads/${THREAD_ID}/artifacts${REPORT_PATH}*`,
     (route) =>
       route.fulfill({
         status: 200,

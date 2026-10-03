@@ -4,8 +4,133 @@ import {
   ARTIFACT_PREVIEW_MAX_BYTES,
   loadArtifactContent,
 } from "@/core/artifacts/loader";
+import { parseBusinessReport } from "@/core/business-report";
+
+import reportFixture from "../../../fixtures/business-report/2026-08-business-review.report.json";
 
 describe("loadArtifactContent", () => {
+  it("refetches canonical source when CORS hides the projection marker", async () => {
+    const fetchMock = rs
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response('{"only":"card"}', {
+          headers: { ETag: `"${"a".repeat(64)}"` },
+        }),
+      )
+      .mockResolvedValueOnce(new Response('{"raw_rows":[1]}'));
+    const loaded = await loadArtifactContent({
+      filepath: "/mnt/user-data/outputs/month.report.json",
+      threadId: "thread-1",
+      reportPreview: true,
+    });
+    expect(loaded.projected).toBe(false);
+    expect(loaded.content).toBe('{"raw_rows":[1]}');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("loads a card projection with the canonical revision and fetches full bytes only on demand", async () => {
+    const source = JSON.stringify({
+      ...reportFixture,
+      raw_rows: [{ private: "source rows" }],
+    });
+    const projection = JSON.stringify({
+      ...Object.fromEntries(
+        ["version", "kpis", "sections", "charts", "checks", "notes"].map(
+          (key) => [key, (reportFixture as Record<string, unknown>)[key]],
+        ),
+      ),
+      meta: Object.fromEntries(
+        [
+          "title",
+          "period",
+          "draft",
+          "brand",
+          "company",
+          "currency",
+          "inputs",
+        ].map((key) => [
+          key,
+          (reportFixture.meta as Record<string, unknown>)[key],
+        ]),
+      ),
+    });
+    const requests: string[] = [];
+    rs.spyOn(globalThis, "fetch").mockImplementation(async (input) => {
+      const url =
+        typeof input === "string"
+          ? input
+          : input instanceof URL
+            ? input.href
+            : input.url;
+      requests.push(url);
+      return new Response(
+        url.includes("report_preview=true") ? projection : source,
+        {
+          headers: url.includes("report_preview=true")
+            ? {
+                ETag: `"${"a".repeat(64)}"`,
+                "X-Artifact-Projection": "business-report-v1",
+                "X-Artifact-Source-Bytes": String(source.length),
+              }
+            : {},
+        },
+      );
+    });
+    const args = {
+      filepath: "/mnt/user-data/outputs/month.report.json",
+      threadId: "thread-1",
+      reportPreview: true,
+    };
+    const preview = await loadArtifactContent(args);
+    expect(preview.projected).toBe(true);
+    expect(preview.sha256).toBe("a".repeat(64));
+    expect(preview.totalBytes).toBe(source.length);
+    expect(parseBusinessReport(preview.content)).toEqual(
+      parseBusinessReport(source),
+    );
+    expect(preview.content).not.toContain("source rows");
+    expect(requests).toHaveLength(1);
+    const full = await loadArtifactContent({ ...args, full: true });
+    expect(full.content).toBe(source);
+    expect(full.projected).toBe(false);
+    expect(requests[1]).not.toContain("report_preview");
+  });
+
+  it.each([413, 415, 422, 501])(
+    "retains a bounded source preview when projection returns %s",
+    async (status) => {
+      const fetchMock = rs
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(new Response("unavailable", { status }))
+        .mockResolvedValueOnce(new Response("{malformed source"));
+      const loaded = await loadArtifactContent({
+        filepath: "/mnt/user-data/outputs/month.report.json",
+        threadId: "thread-1",
+        reportPreview: true,
+      });
+      expect(loaded.content).toBe("{malformed source");
+      expect(loaded.projected).toBe(false);
+      expect(fetchMock).toHaveBeenCalledTimes(2);
+      expect(
+        new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get("Range"),
+      ).toBe(`bytes=0-${ARTIFACT_PREVIEW_MAX_BYTES - 1}`);
+    },
+  );
+
+  it("does not fall back around a denied projection", async () => {
+    const fetchMock = rs
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response("Forbidden", { status: 403 }));
+    await expect(
+      loadArtifactContent({
+        filepath: "/mnt/user-data/outputs/month.report.json",
+        threadId: "thread-1",
+        reportPreview: true,
+      }),
+    ).rejects.toThrow("403");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
   afterEach(() => {
     rs.restoreAllMocks();
     rs.unstubAllGlobals();

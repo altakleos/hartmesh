@@ -101,7 +101,7 @@ from deerflow.runtime.presented_files import (
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.lease import sandbox_command_scope
 from deerflow.workspace_changes.diff import get_changed_output_paths
-from deerflow.workspace_changes.recorder import capture_workspace_snapshot
+from deerflow.workspace_changes.recorder import capture_output_snapshot
 
 logger = logging.getLogger(__name__)
 
@@ -170,10 +170,11 @@ def _final_assistant_message(turn_messages: list[Any]) -> AIMessage | None:
 class RuntimeDeliveryMiddleware(AgentMiddleware[AgentState]):
     """Hand over the files a turn produced and the model did not present."""
 
-    def __init__(self, *, max_tracked_runs: int = 1000) -> None:
+    def __init__(self, *, max_tracked_runs: int = 1000, extra_excluded_dir_names: frozenset[str] | None = None) -> None:
         super().__init__()
         self._lock = threading.Lock()
         self._snapshots: BoundedDict[tuple[str, str], Any] = BoundedDict(max_tracked_runs)
+        self._excluded_dir_names = extra_excluded_dir_names
 
     def release_policy_parameters(self) -> dict[str, object]:
         return {"scope": "thread outputs root", "source": "filesystem diff", "curation": "model selection wins"}
@@ -189,7 +190,7 @@ class RuntimeDeliveryMiddleware(AgentMiddleware[AgentState]):
             # that ignored it would be a second, quieter way around the same
             # rule.
             return None
-        return await capture_workspace_snapshot(thread_id, user_id=get_effective_user_id(), include_text=False)
+        return await capture_output_snapshot(thread_id, user_id=get_effective_user_id(), extra_excluded_dir_names=self._excluded_dir_names)
 
     @override
     def before_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -224,7 +225,9 @@ class RuntimeDeliveryMiddleware(AgentMiddleware[AgentState]):
             return None
         try:
             after = await self._snapshot(runtime)
-            if after is None:
+            if after is None or before.truncated or after.truncated:
+                # A partial baseline could mislabel an existing output as new.
+                # The worker reports incomplete verification in its receipt.
                 return None
             produced = get_changed_output_paths(before, after)
         except Exception:

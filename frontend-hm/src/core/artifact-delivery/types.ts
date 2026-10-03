@@ -18,6 +18,8 @@ export interface ArtifactDeliveryFailure {
   undeliveredPaths: string[];
   /** Exact total, which can exceed `undeliveredPaths.length`. */
   undeliveredCount: number;
+  /** The scan was incomplete; the run cannot assert an output count. */
+  verificationIncomplete?: boolean;
 }
 
 export const ARTIFACT_DELIVERY_INCOMPLETE_EVENT =
@@ -40,13 +42,16 @@ function readFailure(
   value: Record<string, unknown>,
 ): ArtifactDeliveryFailure | null {
   const undeliveredPaths = readStringArray(value.undelivered_paths);
+  const verificationIncomplete = value.scan_complete === false;
   if (
     typeof value.run_id !== "string" ||
     !value.run_id ||
     typeof value.message !== "string" ||
     !value.message ||
     undeliveredPaths === null ||
-    undeliveredPaths.length === 0 ||
+    (!verificationIncomplete && undeliveredPaths.length === 0) ||
+    (verificationIncomplete &&
+      (undeliveredPaths.length !== 0 || value.undelivered_count !== 0)) ||
     typeof value.undelivered_count !== "number" ||
     !Number.isInteger(value.undelivered_count) ||
     value.undelivered_count < undeliveredPaths.length
@@ -59,6 +64,7 @@ function readFailure(
     message: value.message,
     undeliveredPaths,
     undeliveredCount: value.undelivered_count,
+    ...(verificationIncomplete ? { verificationIncomplete: true } : {}),
   };
 }
 

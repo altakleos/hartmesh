@@ -10,9 +10,8 @@ import {
 import { loadArtifactContent, loadArtifactContentFromToolCall } from "./loader";
 
 /**
- * A report card is drawn from the whole `report.json`, rows included, so its
- * preview budget is the report's, not the text preview's (C8: at 1 MiB a
- * report of about 4,300 rows stopped being a card and became JSON).
+ * The report budget also bounds source fallback when a card projection is
+ * unavailable. The canonical document can include thousands of source rows.
  */
 function previewBudgetOf(filepath: string) {
   return isBusinessReportPath(filepath)
@@ -47,8 +46,21 @@ export function useArtifactContent({
     return null;
   }, [filepath, isWriteFile, thread]);
 
+  const queryKey = useMemo(
+    () => [
+      "artifact",
+      filepath,
+      threadId,
+      isMock,
+      fullContentRequested,
+      ...(isBusinessReportPath(filepath) && !fullContentRequested
+        ? ["report-preview"]
+        : []),
+    ],
+    [filepath, threadId, isMock, fullContentRequested],
+  );
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["artifact", filepath, threadId, isMock, fullContentRequested],
+    queryKey,
     queryFn: () => {
       return loadArtifactContent({
         filepath,
@@ -56,6 +68,7 @@ export function useArtifactContent({
         isMock,
         full: fullContentRequested,
         ...previewBudgetOf(filepath),
+        ...(isBusinessReportPath(filepath) ? { reportPreview: true } : {}),
       });
     },
     enabled,
@@ -79,9 +92,11 @@ export function useArtifactContent({
   }, [filepath, threadId]);
 
   return {
+    queryKey,
     content: isWriteFile ? content : data?.content,
     url: isWriteFile ? undefined : data?.url,
     sha256: isWriteFile ? undefined : data?.sha256,
+    projected: isWriteFile ? false : (data?.projected ?? false),
     truncated: isWriteFile ? false : (data?.truncated ?? false),
     previewBytes: isWriteFile ? undefined : data?.previewBytes,
     totalBytes: isWriteFile ? undefined : data?.totalBytes,

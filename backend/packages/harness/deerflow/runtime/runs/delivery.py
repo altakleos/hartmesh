@@ -39,6 +39,12 @@ DELIVERY_EVENT_TYPE = "run.delivery"
 #: which keeps an unbounded run error off a ``runs:read`` surface that
 #: ``RunResponse`` deliberately omits it from.
 DELIVERY_INCOMPLETE_ERROR = "Artifact delivery incomplete: no produced output artifact was presented"
+DELIVERY_SCAN_INCOMPLETE_ERROR = "Artifact delivery verification failed: output scan incomplete"
+
+
+def output_scan_incomplete(content: Mapping[str, Any]) -> bool:
+    verification = content.get("verification")
+    return isinstance(verification, Mapping) and verification.get("scan_complete") is False
 
 
 def _path_list(value: Any) -> list[str]:
@@ -117,6 +123,7 @@ async def publish_delivery_failure(bridge: Any, run_id: str, *, message: str, co
                 "type": DELIVERY_INCOMPLETE_EVENT_TYPE,
                 "run_id": run_id,
                 "message": message,
+                **({"scan_complete": False} if output_scan_incomplete(content) else {}),
                 "undelivered_paths": undelivered[:MAX_DISCLOSED_UNDELIVERED_PATHS],
                 "undelivered_count": len(undelivered),
             },
@@ -147,9 +154,9 @@ async def get_run_delivery_response(
     ``stop_reason`` is the authority on *whether* this run failed delivery: it
     is committed with the terminal status in the same write, whereas the receipt
     is best-effort and a run can be fenced without one. So a missing or
-    unreadable receipt yields "nothing to show" rather than a notice with no
-    files under it — a correction that names no file is worse than the silence
-    it replaces, exactly as the live frame's parser already decides.
+    unreadable receipt yields "nothing to show". A receipt explicitly recording
+    an incomplete scan instead yields a verification notice without file paths:
+    neither the live nor durable view can claim which outputs are missing.
     """
     if stop_reason != DELIVERY_INCOMPLETE_STOP_REASON:
         return unavailable_delivery_response()
@@ -165,6 +172,17 @@ async def get_run_delivery_response(
     content = events[0].get("content")
     if not isinstance(content, dict):
         return unavailable_delivery_response()
+
+    if output_scan_incomplete(content):
+        return {
+            "available": True,
+            "version": 1,
+            "run_id": run_id,
+            "message": DELIVERY_SCAN_INCOMPLETE_ERROR,
+            "scan_complete": False,
+            "undelivered_paths": [],
+            "undelivered_count": 0,
+        }
 
     paths = undelivered_paths(content)
     if not paths:

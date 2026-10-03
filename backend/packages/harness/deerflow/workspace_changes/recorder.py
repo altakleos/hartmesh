@@ -40,11 +40,14 @@ def build_thread_workspace_roots(thread_id: str, *, user_id: str | None = None) 
     ]
 
 
-def _prepare_capture(thread_id: str, *, user_id: str | None, include_text: bool) -> tuple[list[WorkspaceRoot], Path | None]:
+def _prepare_capture(thread_id: str, *, user_id: str | None, include_text: bool, outputs_only: bool = False) -> tuple[list[WorkspaceRoot], Path | None]:
     # Worker thread: resolving the sandbox roots hits the filesystem, and mkdtemp
     # creates the text cache directory — both blocking IO that must stay off the
     # event loop.
-    roots = build_thread_workspace_roots(thread_id, user_id=user_id)
+    if outputs_only:
+        roots = [WorkspaceRoot(name="outputs", host_path=get_paths().sandbox_outputs_dir(thread_id, user_id=user_id), virtual_prefix="/mnt/user-data/outputs")]
+    else:
+        roots = build_thread_workspace_roots(thread_id, user_id=user_id)
     text_cache_dir = Path(tempfile.mkdtemp(prefix="deerflow-workspace-changes-")) if include_text else None
     return roots, text_cache_dir
 
@@ -130,12 +133,13 @@ async def capture_workspace_snapshot(
     limits: WorkspaceChangeLimits | None = None,
     include_text: bool = True,
     extra_excluded_dir_names: frozenset[str] | None = None,
+    outputs_only: bool = False,
 ) -> WorkspaceSnapshot:
     # `_prepare_capture` creates the text cache dir inside the worker, so the
     # handoff must be cancellation-safe: if the run is cancelled after mkdtemp
     # but before we receive the path, the shielded worker still finishes and we
     # reclaim its result to remove the orphaned dir before re-raising.
-    prepare = asyncio.ensure_future(asyncio.to_thread(_prepare_capture, thread_id, user_id=user_id, include_text=include_text))
+    prepare = asyncio.ensure_future(asyncio.to_thread(_prepare_capture, thread_id, user_id=user_id, include_text=include_text, outputs_only=outputs_only))
     try:
         roots, text_cache_dir = await asyncio.shield(prepare)
     except asyncio.CancelledError:
@@ -184,6 +188,24 @@ async def capture_workspace_snapshot(
         if text_cache_dir is not None:
             await _remove_text_cache_dir(text_cache_dir)
         raise
+
+
+async def capture_output_snapshot(
+    thread_id: str,
+    *,
+    user_id: str | None = None,
+    limits: WorkspaceChangeLimits | None = None,
+    extra_excluded_dir_names: frozenset[str] | None = None,
+) -> WorkspaceSnapshot:
+    """Capture delivery evidence with its own budget; never scan workspace."""
+    return await capture_workspace_snapshot(
+        thread_id,
+        user_id=user_id,
+        limits=limits,
+        include_text=False,
+        outputs_only=True,
+        extra_excluded_dir_names=extra_excluded_dir_names,
+    )
 
 
 async def record_workspace_changes(

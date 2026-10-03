@@ -1,5 +1,14 @@
 # Gateway routers
 
+Artifact `report_preview=true` projects output report JSON behind the existing
+thread read/owner gate. Read at most 16 MiB through one no-follow descriptor;
+return at most 1 MiB of card fields with the original bytes' SHA-256 and size.
+Keep parsing/serialization off-loop and drain it on cancellation. No projection
+cache or stored report mutation; `download=true` always returns the original.
+Malformed/oversized/unsupported projections retain a bounded source-preview
+fallback in the UI; ownership and path denials do not. Platforms without safe
+descriptor-relative reads return 501 so source preview remains available.
+
 Workspace prewarm checks `sandbox:execute` before provider lookup/scheduling,
 using the shared request authorization helper off-loop. Denial returns 202
 with `scheduled: false, reason: forbidden`; thread ownership still applies.

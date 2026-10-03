@@ -14,6 +14,23 @@ from deerflow.trace_context import get_current_trace_id, request_trace_context
 
 
 class TestSyncMutualExclusion:
+    def test_try_hold_skips_contention_and_reclaims_entries(self):
+        serializer = AcquireSerializer()
+        try:
+            with serializer.hold("busy"):
+                with serializer.try_hold("busy") as held:
+                    assert not held
+                with serializer.try_hold("other") as held:
+                    assert held
+            assert serializer._table == {}
+            with serializer.try_hold("busy") as held:
+                assert held
+            assert serializer._table == {}
+        finally:
+            serializer.close()
+        with pytest.raises(RuntimeError, match="closed"), serializer.try_hold("closed"):
+            pass
+
     def test_same_key_never_overlaps(self):
         serializer = AcquireSerializer()
         active = 0

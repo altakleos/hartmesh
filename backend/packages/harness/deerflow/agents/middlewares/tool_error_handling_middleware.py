@@ -419,7 +419,7 @@ def _build_runtime_middlewares(
     # one the delivery fence already asserts must be delivered.
     from deerflow.agents.middlewares.runtime_delivery_middleware import RuntimeDeliveryMiddleware
 
-    thread_hooks.append(RuntimeDeliveryMiddleware())
+    thread_hooks.append(RuntimeDeliveryMiddleware(extra_excluded_dir_names=frozenset({app_config.tool_output.storage_subdir})))
 
     # Layer 3 — post-processing append-only middlewares.
     tail: list[AgentMiddleware] = []

@@ -179,6 +179,9 @@ export function createEnUS(product: string): Translations {
     },
 
     artifactDelivery: {
+      verificationTitle: "File delivery could not be verified",
+      verificationDescription:
+        "The output check did not finish. Review the files before relying on this reply's completion claim.",
       title: (count) =>
         count === 1
           ? "1 file wasn't attached to the reply above"

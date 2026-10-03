@@ -46,6 +46,7 @@ import {
   reconcileArtifactDraft,
 } from "@/core/artifacts/editing";
 import { useArtifactContent } from "@/core/artifacts/hooks";
+import { loadArtifactContent } from "@/core/artifacts/loader";
 import { getArtifactViewState } from "@/core/artifacts/preview";
 import { urlOfArtifact } from "@/core/artifacts/utils";
 import {
@@ -201,6 +202,8 @@ export function ArtifactFileDetail({
     content,
     url,
     sha256,
+    projected,
+    queryKey: contentQueryKey,
     truncated,
     previewBytes,
     totalBytes,
@@ -250,6 +253,12 @@ export function ArtifactFileDetail({
     (draft) => draft.draftContent !== draft.baselineContent,
   );
   const isEditing = editingPath === filepath;
+  useEffect(() => {
+    // The side panel can unmount while its draft/editing state survives.
+    // Resuming that edit must restore canonical source without another click.
+    if (isReportFile && (isEditing || isDirty) && !fullContentRequested)
+      loadFullContent();
+  }, [isReportFile, isEditing, isDirty, fullContentRequested, loadFullContent]);
   const canEdit = canEditOpenedArtifact({
     filepath,
     isCodeFile,
@@ -262,7 +271,12 @@ export function ArtifactFileDetail({
   const editorContent = isDirty ? activeDraft.draftContent : visibleContent;
 
   useEffect(() => {
-    if (content === undefined || sha256 === undefined || isWriteFile) {
+    if (
+      content === undefined ||
+      sha256 === undefined ||
+      isWriteFile ||
+      projected
+    ) {
       return;
     }
     setDrafts((current) => {
@@ -273,10 +287,10 @@ export function ArtifactFileDetail({
       }
       return { ...current, [filepath]: next };
     });
-  }, [content, filepath, isWriteFile, setDrafts, sha256]);
+  }, [content, filepath, isWriteFile, projected, setDrafts, sha256]);
 
   const [viewMode, setViewMode] = useState<"code" | "preview">(
-    artifactViewState.initialViewMode,
+    isEditing ? "code" : artifactViewState.initialViewMode,
   );
   const [isInstalling, setIsInstalling] = useState(false);
   const isLoadingFullContent = fullContentRequested && isLoading;
@@ -297,8 +311,12 @@ export function ArtifactFileDetail({
   }, [isDirty, t.artifactEditing.discardChanges]);
 
   const discardDraft = useCallback(() => {
-    const latestContent = content ?? activeDraft.baselineContent;
-    const latestSha256 = sha256 ?? activeDraft.baselineSha256;
+    const latestContent =
+      !projected && content !== undefined
+        ? content
+        : activeDraft.baselineContent;
+    const latestSha256 =
+      !projected && sha256 !== undefined ? sha256 : activeDraft.baselineSha256;
     setDrafts((current) => ({
       ...current,
       [filepath]: {
@@ -310,11 +328,20 @@ export function ArtifactFileDetail({
       },
     }));
     setEditingPath(null);
-  }, [activeDraft, content, filepath, setDrafts, setEditingPath, sha256]);
+  }, [
+    activeDraft,
+    content,
+    filepath,
+    projected,
+    setDrafts,
+    setEditingPath,
+    sha256,
+  ]);
 
   const handleSave = useCallback(async () => {
     if (
       !canEdit ||
+      projected ||
       !isDirty ||
       isSaving ||
       thread.isLoading ||
@@ -344,7 +371,7 @@ export function ArtifactFileDetail({
         },
       }));
       queryClient.setQueryData(
-        ["artifact", filepathFromProps, threadId, isMock, fullContentRequested],
+        contentQueryKey,
         (
           current:
             | { content?: string; url?: string; sha256?: string }
@@ -384,11 +411,12 @@ export function ArtifactFileDetail({
     canEdit,
     filepath,
     filepathFromProps,
-    fullContentRequested,
+    contentQueryKey,
     isDirty,
     isMock,
     isSaving,
     queryClient,
+    projected,
     setDrafts,
     t.artifactEditing,
     thread.isLoading,
@@ -477,6 +505,7 @@ export function ArtifactFileDetail({
               value={viewMode}
               onValueChange={(value) => {
                 if (value) {
+                  if (value === "code" && projected) loadFullContent();
                   setViewMode(value as "code" | "preview");
                 }
               }}
@@ -514,6 +543,7 @@ export function ArtifactFileDetail({
                 tooltip={t.common.edit}
                 disabled={thread.isLoading}
                 onClick={() => {
+                  if (projected) loadFullContent();
                   setViewMode("code");
                   setEditingPath(filepath);
                 }}
@@ -601,9 +631,17 @@ export function ArtifactFileDetail({
                 disabled={!content || truncated}
                 onClick={() => {
                   void (async () => {
-                    const didCopy = await writeTextToClipboard(
-                      editorContent ?? "",
-                    );
+                    const copyContent = projected
+                      ? (
+                          await loadArtifactContent({
+                            filepath,
+                            threadId,
+                            isMock,
+                            full: true,
+                          })
+                        ).content
+                      : (editorContent ?? "");
+                    const didCopy = await writeTextToClipboard(copyContent);
                     if (!didCopy) {
                       toast.error(t.clipboard.failedToCopyToClipboard);
                       return;
@@ -748,6 +786,7 @@ export function ArtifactFileDetail({
           {isCodeFile &&
             !error &&
             effectiveViewMode === "code" &&
+            !projected &&
             !truncated &&
             !isLoading && (
               <CodeEditor

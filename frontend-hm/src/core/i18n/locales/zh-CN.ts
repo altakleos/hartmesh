@@ -172,6 +172,9 @@ export function createZhCN(product: string): Translations {
     },
 
     artifactDelivery: {
+      verificationTitle: "无法验证文件交付",
+      verificationDescription:
+        "输出检查未完成。请先检查文件，再确认此回复所述的任务完成情况。",
       title: (count) => `有 ${count} 个文件没有附在上面这条回复里`,
       description: () =>
         "可在这里打开或下载。上面的回答可能看起来像文件已经附上了。",
