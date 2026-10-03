@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.40] - 2026-10-03
+
 ### Fixes and improvements
 
 - Business reports infer date ordering across complete source columns, validate
@@ -27,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   historical upgrade plans. Docker acceptance can test supplied application
   image digests with disposable PostgreSQL and Redis; CI covers both store modes.
 
+Included changes: [#187](https://github.com/altakleos/hartmesh/pull/187),
+[#188](https://github.com/altakleos/hartmesh/pull/188),
+[#189](https://github.com/altakleos/hartmesh/pull/189),
+[#190](https://github.com/altakleos/hartmesh/pull/190) and
+[#191](https://github.com/altakleos/hartmesh/pull/191).
+
 ### Configuration and API changes
 
 The optional branding `provider.json` supplies support identity and an HTTPS URL.
@@ -34,6 +42,19 @@ Artifact `report_preview=true` responses and their projection/source headers are
 additive. Delivery receipts may carry `verification.scan_complete: false` with
 no disclosed paths when output verification is incomplete. `/health/ready` adds
 a `redis` component; Redis failures return 503 while `/health` remains liveness.
+
+### Verification
+
+- All five [candidate image builds](https://github.com/altakleos/hartmesh/actions/runs/37160174963)
+  passed. Their immutable digests passed signed provenance and build-input checks.
+- [Exact-image browser acceptance](https://github.com/altakleos/hartmesh/actions/runs/37160477084)
+  passed with both SQLite and PostgreSQL/Redis, using real application services
+  and scripted inference. It covers authentication, uploads, streaming, file
+  delivery and sharing, history, account exports and model-error handling.
+- The exact sandbox candidate passed restricted and slim native-Docker smoke
+  tests, including cancellation and PDF, Word and Excel report generation.
+  VM infrastructure, gVisor isolation, OIDC and real-model qualification remain
+  with consumers.
 
 ### Schema changes
 
