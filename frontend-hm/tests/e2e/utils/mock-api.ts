@@ -44,6 +44,7 @@ export type MockThread = {
 
 export type MockAgent = {
   name: string;
+  model?: string;
   description?: string;
   system_prompt?: string;
   tool_groups?: string[] | null;
@@ -1348,7 +1349,15 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         status: 200,
         contentType: "application/json",
         body: JSON.stringify({
-          models: [],
+          models: [
+            {
+              id: "synthetic-model",
+              name: "synthetic-model",
+              model: "synthetic-model",
+              display_name: "Synthetic model",
+              supports_thinking: false,
+            },
+          ],
           token_usage: { enabled: false },
         }),
       });
@@ -1662,6 +1671,11 @@ export function handleRunStream(
   return route.fulfill({
     status: 200,
     contentType: "text/event-stream",
+    // The SDK discovers the created run from this header, as the Gateway does;
+    // the SSE metadata frame alone does not fire its onCreated callback.
+    headers: {
+      "Content-Location": `/api/threads/${threadId}/runs/${MOCK_RUN_ID}`,
+    },
     body,
   });
 }

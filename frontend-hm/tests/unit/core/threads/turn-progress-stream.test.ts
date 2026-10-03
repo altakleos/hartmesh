@@ -67,6 +67,12 @@ async function captureThreadStreamOptions() {
   rs.doMock("@/core/api", () => ({
     getAPIClient: () => ({}),
   }));
+  // Deletion owns this context; these tests exercise only the stream hook.
+  rs.doMock("@/core/file-areas/file-action-lifetime", () => ({
+    useFileActionLifetime: () => {
+      throw new Error("File action lifetime is outside this stream test");
+    },
+  }));
   rs.doMock("@/core/i18n/hooks", () => ({
     useI18n: () => ({
       t: {
@@ -113,6 +119,7 @@ afterEach(() => {
   rs.doUnmock("@tanstack/react-query");
   rs.doUnmock("@langchain/langgraph-sdk/react");
   rs.doUnmock("@/core/api");
+  rs.doUnmock("@/core/file-areas/file-action-lifetime");
   rs.doUnmock("@/core/i18n/hooks");
   rs.doUnmock("@/core/tasks/context");
   rs.doUnmock("@/core/artifact-delivery");

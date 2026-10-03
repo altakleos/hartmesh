@@ -221,6 +221,10 @@ export interface Translations {
     reasoningEffortMediumDescription: string;
     reasoningEffortHigh: string;
     reasoningEffortHighDescription: string;
+    modelsLoading: string;
+    modelsUnavailable: string;
+    modelsLoadFailed: string;
+    modelsRetry: string;
     searchModels: string;
     surpriseMe: string;
     surpriseMePrompt: string;
@@ -666,6 +670,10 @@ export interface Translations {
 
   // Chats
   chats: {
+    deleteChat: string;
+    deleteConfirm: (title: string) => string;
+    deleteFailed: string;
+    deleting: string;
     searchChats: string;
     branchLabel: (title: string, parentTitle: string) => string;
     loadMoreToSearch: string;
@@ -1216,6 +1224,14 @@ export interface Translations {
       cancel: string;
       keyLabel: string;
       keyPlaceholder: string;
+      test: string;
+      testing: string;
+      testHint: string;
+      testAccepted: string;
+      testRejected: string;
+      testInconclusive: string;
+      testNotTestable: string;
+      testError: string;
       saved: string;
       removedToEnvironment: string;
       removedToNone: string;

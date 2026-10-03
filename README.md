@@ -37,6 +37,20 @@ Files saved to My Files or Shared become available only after the copy finishes;
 new copies never overwrite existing files. An interrupted Share request finishes
 recording or rolling back its copy before another publication begins.
 
+Administrators managing provider keys in **Settings → Account** can choose
+**Test key** before saving. Testing sends a short request to a model provider
+without saving the key; it reports acceptance, rejection or an inconclusive
+result. Search and page-reading keys cannot be tested here. Testing is optional
+and may incur provider charges. Saving or removing a key refreshes the model
+list. If the selected model disappears, chat selects the agent's available
+default or the first available model; an empty list keeps the draft and prevents
+sending until a model is available.
+
+Deleting a conversation from its sidebar menu asks for confirmation before
+removing its messages and workspace files. A failed deletion keeps the dialog
+open for retry. Copies already kept in My Files or Shared are independent of
+the conversation.
+
 Business reports retain source precision in their numeric data and Excel formulas,
 rounding monetary values only for display. Malformed amount cells are reported as
 unreadable instead of having digits silently extracted. Conflicting currencies

@@ -12,7 +12,7 @@ import {
   XIcon,
   ZapIcon,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { ConversationEmptyState } from "@/components/ai-elements/conversation";
@@ -48,6 +48,7 @@ import {
   DropdownMenuGroup,
   DropdownMenuLabel,
 } from "@/components/ui/dropdown-menu";
+import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
@@ -55,6 +56,7 @@ import {
   type HumanInputResponse,
 } from "@/core/messages/human-input";
 import { useModels } from "@/core/models/hooks";
+import { selectAvailableModel } from "@/core/models/selection";
 import type { Model } from "@/core/models/types";
 import { useLocalSettings } from "@/core/settings";
 import {
@@ -132,12 +134,28 @@ export function SidecarPanel({ className }: { className?: string }) {
   const sidecar = useSidecar();
   const { thread: parentThread } = useParentThread();
   const [localSettings] = useLocalSettings();
-  const { models, tokenUsageEnabled } = useModels();
+  const {
+    models,
+    tokenUsageEnabled,
+    hasLoadedModels,
+    error: modelsError,
+    isFetching: modelsFetching,
+    refetch: reloadModels,
+  } = useModels();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
   const [creatingThread, setCreatingThread] = useState(false);
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const { mutateAsync: deleteThread, isPending: isDeleting } =
     useDeleteThread();
+  const deleteLifetime = useFileActionLifetime();
+  const deleteInFlight = useRef(false);
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
   const [queuedSubmit, setQueuedSubmit] = useState<{
     message: PromptInputMessage;
     references: SidecarReference[];
@@ -146,15 +164,17 @@ export function SidecarPanel({ className }: { className?: string }) {
     sidecar.sidecarThreadId ?? sidecar.parentThreadId,
   );
 
-  const selectedModel = useMemo(() => {
-    if (models.length === 0) {
-      return undefined;
-    }
-    return (
-      models.find((model) => model.name === sidecar.context.model_name) ??
-      models[0]
-    );
-  }, [models, sidecar.context.model_name]);
+  const selectedModel = useMemo(
+    () => selectAvailableModel(models, sidecar.context.model_name),
+    [models, sidecar.context.model_name],
+  );
+  const modelSubmitError = selectedModel
+    ? null
+    : hasLoadedModels
+      ? t.inputBox.modelsUnavailable
+      : modelsError
+        ? t.inputBox.modelsLoadFailed
+        : t.inputBox.modelsLoading;
 
   const {
     thread,
@@ -323,6 +343,8 @@ export function SidecarPanel({ className }: { className?: string }) {
       onSent?: () => void,
       additionalKwargs?: Record<string, unknown>,
     ) => {
+      if (modelSubmitError || !selectedModel)
+        throw new Error(modelSubmitError ?? t.inputBox.modelsUnavailable);
       const contexts = references.map((reference) => reference.context);
       const parentConversation = buildParentConversationContext(
         parentThread.messages,
@@ -332,6 +354,11 @@ export function SidecarPanel({ className }: { className?: string }) {
           ? buildSidecarContextPrompt(contexts, { parentConversation })
           : null;
       await sendMessage(threadId, message, undefined, {
+        modelContext: {
+          model_name: selectedModel.name,
+          mode: resolveChatMode(sidecar.context.mode, selectedModel),
+          reasoning_effort: sidecar.context.reasoning_effort,
+        },
         additionalInputMessages: hiddenContextPrompt
           ? [
               buildHiddenSidecarContextMessage({
@@ -350,7 +377,15 @@ export function SidecarPanel({ className }: { className?: string }) {
         onSent,
       });
     },
-    [parentThread.messages, sendMessage, sidecar.parentThreadId],
+    [
+      parentThread.messages,
+      sendMessage,
+      sidecar.parentThreadId,
+      sidecar.context,
+      selectedModel,
+      modelSubmitError,
+      t.inputBox.modelsUnavailable,
+    ],
   );
 
   const handleSubmitHumanInput = useCallback(
@@ -385,7 +420,12 @@ export function SidecarPanel({ className }: { className?: string }) {
   );
 
   useEffect(() => {
-    if (!queuedSubmit || !sidecar.sidecarThreadId || thread.isLoading) {
+    if (
+      !queuedSubmit ||
+      !sidecar.sidecarThreadId ||
+      thread.isLoading ||
+      modelSubmitError
+    ) {
       return;
     }
 
@@ -409,6 +449,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     });
   }, [
     queuedSubmit,
+    modelSubmitError,
     sidecar,
     sidecar.sidecarThreadId,
     submitToSidecarThread,
@@ -422,6 +463,10 @@ export function SidecarPanel({ className }: { className?: string }) {
       const files = promptMessageFiles(message);
       if ((!text && message.files.length === 0) || disabled) {
         return;
+      }
+      if (modelSubmitError) {
+        toast.error(modelSubmitError);
+        return Promise.reject(new Error("No available model"));
       }
       const uploadValidation = validateUploadLimits([], files, uploadLimits);
       if (uploadValidation.violations.length > 0) {
@@ -455,6 +500,7 @@ export function SidecarPanel({ className }: { className?: string }) {
     },
     [
       disabled,
+      modelSubmitError,
       ensureSidecarThread,
       reportUploadLimitViolations,
       sidecar,
@@ -471,6 +517,7 @@ export function SidecarPanel({ className }: { className?: string }) {
   }, [sidecar]);
 
   const handleDelete = useCallback(async () => {
+    if (deleteInFlight.current || !deleteLifetime.active) return;
     const threadId = sidecar.sidecarThreadId;
     // Guard: the trash button only opens this dialog once a thread exists, so a
     // missing id here means the draft was cleared underneath us — just close.
@@ -479,17 +526,23 @@ export function SidecarPanel({ className }: { className?: string }) {
       setDeleteDialogOpen(false);
       return;
     }
+    deleteInFlight.current = true;
     try {
       await deleteThread({ threadId });
+      if (!mounted.current || !deleteLifetime.active) return;
       discardDraftAndClose();
       setDeleteDialogOpen(false);
       toast.success(t.sidecar.deleteSuccess);
     } catch (error) {
+      if (!mounted.current || !deleteLifetime.active) return;
       toast.error(
         error instanceof Error ? error.message : t.sidecar.deleteFailed,
       );
+    } finally {
+      deleteInFlight.current = false;
     }
   }, [
+    deleteLifetime,
     deleteThread,
     discardDraftAndClose,
     sidecar.sidecarThreadId,
@@ -575,6 +628,25 @@ export function SidecarPanel({ className }: { className?: string }) {
       </div>
 
       <div className="bg-background/95 shrink-0 px-3 pt-3 pb-4 sm:px-4">
+        {modelSubmitError && (
+          <div
+            role="status"
+            className="text-muted-foreground mb-2 text-sm"
+            data-testid="sidecar-model-availability"
+          >
+            {modelSubmitError}
+            {modelsError && (
+              <button
+                type="button"
+                className="ml-2 underline"
+                disabled={modelsFetching}
+                onClick={() => void reloadModels()}
+              >
+                {t.inputBox.modelsRetry}
+              </button>
+            )}
+          </div>
+        )}
         <PromptInputProvider key={sidecar.parentThreadId}>
           <PromptInput
             className="bg-background/85 rounded-2xl backdrop-blur-sm *:data-[slot='input-group']:rounded-2xl"
@@ -627,7 +699,7 @@ export function SidecarPanel({ className }: { className?: string }) {
                 <Tooltip content={t.sidecar.send}>
                   <PromptInputSubmit
                     className="rounded-full"
-                    disabled={disabled}
+                    disabled={disabled || Boolean(modelSubmitError)}
                     status={
                       thread.isLoading || creatingThread || queuedSubmit
                         ? "submitted"
@@ -648,7 +720,7 @@ export function SidecarPanel({ className }: { className?: string }) {
           // While the delete is in flight the only way out is the (disabled)
           // Cancel button, so ignore overlay/Esc/close-button dismissals that
           // would otherwise hide the dialog and imply the delete was cancelled.
-          if (!open && isDeleting) {
+          if (!open && deleteInFlight.current) {
             return;
           }
           setDeleteDialogOpen(open);
@@ -657,12 +729,12 @@ export function SidecarPanel({ className }: { className?: string }) {
         <DialogContent
           showCloseButton={!isDeleting}
           onEscapeKeyDown={(event) => {
-            if (isDeleting) {
+            if (deleteInFlight.current) {
               event.preventDefault();
             }
           }}
           onInteractOutside={(event) => {
-            if (isDeleting) {
+            if (deleteInFlight.current) {
               event.preventDefault();
             }
           }}
@@ -674,7 +746,9 @@ export function SidecarPanel({ className }: { className?: string }) {
           <DialogFooter>
             <Button
               variant="outline"
-              onClick={() => setDeleteDialogOpen(false)}
+              onClick={() => {
+                if (!deleteInFlight.current) setDeleteDialogOpen(false);
+              }}
               disabled={isDeleting}
             >
               {t.common.cancel}

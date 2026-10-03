@@ -12,7 +12,7 @@ import {
   Trash2,
 } from "lucide-react";
 import Link from "next/link";
-import { useParams, usePathname, useRouter } from "next/navigation";
+import { useParams, usePathname } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
@@ -44,7 +44,6 @@ import {
   SidebarMenuButton,
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
-import { resetThreadChatAfterDelete } from "@/components/workspace/chats/use-thread-chat";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -53,7 +52,6 @@ import {
   type ThreadExportFormat,
 } from "@/core/threads/export";
 import {
-  useDeleteThread,
   useInfiniteThreads,
   usePinThread,
   useRenameThread,
@@ -71,17 +69,16 @@ import { env } from "@/env";
 import { isIMEComposing } from "@/lib/ime";
 
 import { ThreadChannelIcon } from "./thread-channel-source";
+import { useThreadDeleteDialog } from "./thread-delete-dialog";
 import { VirtualThreadList } from "./thread-list-virtualizer";
 
 export function RecentChatList() {
   const { t } = useI18n();
-  const router = useRouter();
   const pathname = usePathname();
-  const { thread_id: threadIdFromPath, agent_name: agentNameFromPath } =
-    useParams<{
-      thread_id: string;
-      agent_name?: string;
-    }>();
+  const { thread_id: threadIdFromPath } = useParams<{
+    thread_id: string;
+    agent_name?: string;
+  }>();
   const {
     data: infiniteThreads,
     fetchNextPage,
@@ -140,7 +137,7 @@ export function RecentChatList() {
     threadListModel.canLoadMore,
   ]);
 
-  const { mutate: deleteThread } = useDeleteThread();
+  const requestDelete = useThreadDeleteDialog();
   const { mutate: renameThread } = useRenameThread();
   const { mutate: updatePinnedThread } = usePinThread();
 
@@ -148,44 +145,6 @@ export function RecentChatList() {
   const [renameDialogOpen, setRenameDialogOpen] = useState(false);
   const [renameThreadId, setRenameThreadId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState("");
-
-  const handleDelete = useCallback(
-    (thread: AgentThread) => {
-      const currentPathname =
-        typeof window === "undefined" ? pathname : window.location.pathname;
-      const threadPath = pathOfThread(thread);
-      const nextThreadPath = pathOfThread("new", {
-        agent_name: agentNameFromPath,
-      });
-      const isNewThreadPath = currentPathname === nextThreadPath;
-      const isCurrentThread =
-        thread.thread_id === threadIdFromPath ||
-        threadPath === currentPathname ||
-        (isNewThreadPath && threads[0]?.thread_id === thread.thread_id);
-
-      deleteThread({
-        threadId: thread.thread_id,
-        onRemoteDeleted: isCurrentThread
-          ? () => {
-              resetThreadChatAfterDelete({
-                deletedThreadId: thread.thread_id,
-                nextPath: nextThreadPath,
-                force: true,
-              });
-              void router.replace(nextThreadPath);
-            }
-          : undefined,
-      });
-    },
-    [
-      agentNameFromPath,
-      deleteThread,
-      pathname,
-      router,
-      threadIdFromPath,
-      threads,
-    ],
-  );
 
   const handleRenameClick = useCallback(
     (threadId: string, currentTitle: string) => {
@@ -430,7 +389,12 @@ export function RecentChatList() {
                             </DropdownMenuSub>
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
-                              onSelect={() => handleDelete(thread)}
+                              onSelect={() =>
+                                requestDelete({
+                                  thread,
+                                  recentThreadId: threads[0]?.thread_id,
+                                })
+                              }
                             >
                               <Trash2 className="text-muted-foreground" />
                               <span>{t.common.delete}</span>

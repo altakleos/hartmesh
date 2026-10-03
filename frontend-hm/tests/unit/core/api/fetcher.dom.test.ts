@@ -16,6 +16,26 @@ describe("api fetcher unauthorized redirect", () => {
     globalThis.fetch = originalFetch;
   });
 
+  it("ignores a late unauthorized response from an aborted account action", async () => {
+    const controller = new AbortController();
+    let respond!: (response: Response) => void;
+    globalThis.fetch = rs.fn(
+      () =>
+        new Promise<Response>((resolve) => {
+          respond = resolve;
+        }),
+    );
+    window.history.replaceState({}, "", "/workspace/chats/another-account");
+    const request = apiFetch("/api/threads/previous-account", {
+      method: "DELETE",
+      signal: controller.signal,
+    });
+    controller.abort();
+    respond(new Response(null, { status: 401 }));
+    await expect(request).rejects.toThrow();
+    expect(window.location.pathname).toBe("/workspace/chats/another-account");
+  });
+
   it("returns the caller to the full URL, query string included", async () => {
     window.history.replaceState(
       {},

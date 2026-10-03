@@ -12,11 +12,12 @@ import { toast } from "sonner";
 interface FileActionLifetime {
   active: boolean;
   toasts: Set<string | number>;
+  signal: AbortSignal;
 }
 
 const FileActionContext = createContext<FileActionLifetime | null>(null);
 
-/** Sequential file actions and their filename-bearing toasts belong to the
+/** Sequential file actions, conversation deletion and filename-bearing toasts belong to the
  * mounted account subtree. An already-sent request can finish, but retiring
  * its caller must prevent another request or a toast in the next account.
  * Mount at the workspace layout so ordinary page navigation keeps Undo and
@@ -27,12 +28,23 @@ export function FileActionLifetimeProvider({
 }: {
   children: ReactNode;
 }) {
-  const lifetime = useRef({ active: true, toasts: new Set<string | number>() });
+  const controller = useRef(new AbortController());
+  const lifetime = useRef({
+    active: true,
+    toasts: new Set<string | number>(),
+    signal: controller.current.signal,
+  });
   useEffect(() => {
     const current = lifetime.current;
+    // StrictMode replays setup after cleanup on the same provider instance.
+    // Future operations read the fresh signal; old requests stay aborted.
+    if (controller.current.signal.aborted)
+      controller.current = new AbortController();
+    current.signal = controller.current.signal;
     current.active = true;
     return () => {
       current.active = false;
+      controller.current.abort();
       current.toasts.forEach((id) => toast.dismiss(id));
       current.toasts.clear();
     };

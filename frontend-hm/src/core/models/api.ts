@@ -11,12 +11,14 @@ const STATIC_MODELS_RESPONSE: ModelsResponse = {
   token_usage: { enabled: false },
 };
 
-export async function loadModels(): Promise<ModelsResponse> {
+export async function loadModels(
+  signal?: AbortSignal,
+): Promise<ModelsResponse> {
   if (isStaticWebsiteOnly()) {
     return STATIC_MODELS_RESPONSE;
   }
 
-  const res = await fetch(`${getBackendBaseURL()}/api/models`);
+  const res = await fetch(`${getBackendBaseURL()}/api/models`, { signal });
   if (!res.ok) {
     await throwGatewayApiError(
       res,
