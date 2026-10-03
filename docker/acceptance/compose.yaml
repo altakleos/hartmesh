@@ -1,0 +1,67 @@
+# Disposable application acceptance, independent of operator .env or data.
+services:
+  provider:
+    image: python:3.12-alpine
+    command: ["python", "/fixture/provider.py"]
+    volumes:
+      - ./provider.py:/fixture/provider.py:ro
+    networks: [acceptance]
+  gateway:
+    image: ${ACCEPTANCE_BACKEND_IMAGE:?runner supplies its unique image}
+    command:
+      - sh
+      - -ec
+      - |
+        mkdir -p /data/skills/public /data/skills/custom
+        printf '{"mcpServers":{},"skills":{}}' > /data/extensions_config.json
+        cd /app/backend
+        exec uv run --no-sync uvicorn app.gateway.app:app --host 0.0.0.0 --port 8001
+    environment:
+      DEER_FLOW_AUTH_DISABLED: "0"
+      AUTH_JWT_SECRET: synthetic-acceptance-jwt-secret-at-least-32-characters
+      DEER_FLOW_INTERNAL_AUTH_TOKEN: synthetic-acceptance-internal-token
+      DEER_FLOW_PROJECT_ROOT: /app
+      DEER_FLOW_HOME: /data
+      DEER_FLOW_CONFIG_PATH: /fixture/config.yaml
+      DEER_FLOW_EXTENSIONS_CONFIG_PATH: /data/extensions_config.json
+      DEER_FLOW_SKILLS_PATH: /data/skills
+      PYTHONPATH: /app/backend
+      LANGSMITH_TRACING: "false"
+      NO_PROXY: provider,gateway,frontend,nginx,localhost,127.0.0.1
+    volumes:
+      - ./acceptance-config.yaml:/fixture/config.yaml:ro
+      - data:/data
+    healthcheck:
+      test: ["CMD", "/app/backend/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5)"]
+      interval: 3s
+      timeout: 6s
+      retries: 40
+    depends_on: [provider]
+    networks: [acceptance]
+  frontend:
+    image: ${ACCEPTANCE_FRONTEND_IMAGE:?runner supplies its unique image}
+    environment:
+      DEER_FLOW_AUTH_DISABLED: "0"
+      DEER_FLOW_INTERNAL_GATEWAY_BASE_URL: http://gateway:8001
+      BETTER_AUTH_SECRET: synthetic-acceptance-frontend-secret
+    networks: [acceptance]
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "127.0.0.1::2026"
+    volumes:
+      - ../nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      gateway:
+        condition: service_healthy
+      frontend:
+        condition: service_started
+    # Docker publishes ports only on a non-internal bridge. The app/model
+    # services stay exclusively on the internal network.
+    networks: [acceptance, ingress]
+volumes:
+  data:
+networks:
+  acceptance:
+    internal: true
+  ingress: {}

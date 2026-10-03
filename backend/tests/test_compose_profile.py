@@ -1272,8 +1272,7 @@ def test_fork_images_are_the_components_the_container_workflow_builds(pin_images
 def _adopt_step() -> tuple[dict, str]:
     workflow = yaml.safe_load((REPO_ROOT / ".github" / "workflows" / "container.yaml").read_text(encoding="utf-8"))
     job = workflow["jobs"]["container"]
-    steps = {step.get("name"): step for step in job["steps"]}
-    return job, steps["Adopt the digest deploy/compose pins for this component"]["run"]
+    return job, next(step for step in job["steps"] if step.get("id") == "adopt")["run"]
 
 
 def test_adopt_step_retags_with_crane_and_asserts_the_digest_before_and_after() -> None:
@@ -1300,10 +1299,10 @@ def test_adopt_step_adopts_only_on_a_tag_push() -> None:
     _, adopt = _adopt_step()
     guard = 'if [ "$GITHUB_EVENT_NAME" != "push" ]; then'
     assert guard in adopt
-    assert adopt.index(guard) < adopt.index('PIN="$(grep'), "a candidate build exits before reading the pins"
+    assert adopt.index(guard) < adopt.index('PIN="$(python3'), "a candidate build exits before reading the verified release references"
     guarded = adopt[adopt.index(guard) : adopt.index("fi", adopt.index(guard))]
     assert 'echo "adopted=false" >> "$GITHUB_OUTPUT"' in guarded and "exit 0" in guarded
-    assert "run scripts/pin_compose_images.py before tagging the release" in adopt, "a tag-form fork line still fails a tag push"
+    assert "verify-candidate" in adopt and adopt.index("verify-candidate") < adopt.index('crane tag "$PIN"')
 
 
 def test_release_workflows_reference_the_compose_profile() -> None:

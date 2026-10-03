@@ -1,0 +1,34 @@
+log_level: warning
+models:
+  - name: acceptance-model
+    display_name: Acceptance Model
+    use: langchain_openai:ChatOpenAI
+    model: acceptance-model
+    api_key: synthetic-local-only
+    base_url: http://provider:8080/v1
+    max_retries: 0
+sandbox:
+  use: deerflow.sandbox.local:LocalSandboxProvider
+skills:
+  path: /data/skills
+  container_path: /mnt/skills
+tool_groups:
+  - name: file:read
+  - name: file:write
+tools:
+  - name: read_file
+    group: file:read
+    use: deerflow.sandbox.tools:read_file_tool
+  - name: write_file
+    group: file:write
+    use: deerflow.sandbox.tools:write_file_tool
+memory:
+  enabled: false
+  injection_enabled: false
+summarization:
+  enabled: false
+agents_api:
+  enabled: true
+database:
+  backend: sqlite
+  sqlite_dir: /data/db

@@ -210,9 +210,10 @@ visibility once nothing still pulls from it.
 Everything above is upstream's release process and is kept as upstream wrote
 it. This section is what this repository does instead. HartMesh is a
 distribution of DeerFlow: upstream's `main` is merged in regularly, and what a
-release ships is the single-VM profile under `deploy/compose/` with the five
-container images it runs. The Helm chart in this tree is upstream's, unchanged
-and not qualified against this build; a release tag here does not publish it.
+release ships is the single-VM profile under `deploy/compose/` and five
+container images, including the separately deployed provisioner. The Helm
+chart in this tree is upstream's, unchanged and not qualified against this
+build; a release tag here does not publish it.
 
 ### Version
 
@@ -228,7 +229,7 @@ container image tag `v2.1.0-hartmesh.1`, and `sha-<first seven characters of
 the commit>` for lookup by commit. `scripts/release_tag_spellings.sh` is the
 one implementation; workflows call it. The images are
 `ghcr.io/<owner>/<repo>-backend`, `-frontend`, `-provisioner`, `-sandbox` and
-`-sandbox-network-proxy`. `ghcr.io/<owner>/<repo>-sandbox-base` is a private
+`-sandbox-network-proxy`. `ghcr.io/<owner>/<repo>-sandbox-base` is a
 cache of the sandbox's upstream base image, not something to deploy.
 
 ### Procedure
@@ -260,10 +261,13 @@ from the same tagged source.
    reads the ref it is dispatched on).
 3. **Build the candidate images** from that commit:
    ```bash
-   gh workflow run container.yaml --ref <that branch> -f version=2.1.0+hartmesh.1
+   gh workflow run container.yaml --repo altakleos/hartmesh --ref <that branch> -f version=2.1.0+hartmesh.1
    ```
    A dispatch builds all five images under the release's tag spelling and
    never reuses a pinned digest, whatever `deploy/compose/images.txt` carries.
+   It refuses a version whose Git tag or GitHub Release already exists;
+   lookup failures also stop publication. Use the canonical `X.Y.Z+hartmesh.N`
+   spelling without a leading `v`. Publication is serialized per version.
    Wait for every job to succeed.
 4. **Pin the compose profile** to the digests that build published, and
    commit the pins:
@@ -284,18 +288,36 @@ from the same tagged source.
    git tag v2.1.0+hartmesh.1
    git push origin v2.1.0+hartmesh.1
    ```
-   The container workflow does not rebuild an image the profile pins. It
-   re-tags the pinned digest unchanged, after checking that the release tag
-   already resolves to it, which only this version's candidate build can have
-   arranged.
+   Before any image is re-tagged, the container workflow verifies all five
+   candidates, including the provisioner. Each immutable digest must carry
+   verified build provenance for this repository's container workflow and a
+   source revision whose tracked build inputs match the tagged source. The
+   candidate's recorded input fingerprint must match too. The four Compose
+   pins must resolve to those candidate digests. Missing or unverifiable
+   evidence stops publication; there is no rebuild fallback.
+
+   Candidates built before these guards lack the required input evidence and
+   cannot be adopted. Build new candidates under an unused version. Once a
+   version has a Git tag or GitHub Release, source corrections require a new
+   version rather than rebuilding or moving the existing release tag. An
+   unchanged tag's publication can be retried after a transient failure.
+
+   Root release notes and Compose pins may change after the candidate build.
+   Changes to image source trees, shipped skills, Dockerfiles, or build controls
+   require another candidate build before tagging. Build-input checks include
+   documentation inside those source trees conservatively. Adoption preserves
+   the candidate bytes and their original build revision, and adds the final
+   commit's `sha-` lookup tag.
 6. **Record the release**, once the five image jobs have succeeded:
    ```bash
-   gh workflow run release-manifest.yaml -f version=2.1.0+hartmesh.1
+   gh workflow run release-manifest.yaml --repo altakleos/hartmesh -f version=2.1.0+hartmesh.1
    ```
    It checks out the tag, resolves each image, checks every line of
-   `deploy/compose/images.txt` against what was published, and attaches
+   `deploy/compose/images.txt` against what was published, repeats the candidate
+   provenance and source checks, and requires both release and final-commit
+   image tags to resolve to those verified digests. It attaches
    `release-manifest.json` to the GitHub Release. The manifest (schema 4)
-   lists the five images by repository, tag and digest, and the compose
+   lists the five images by repository, tag and digest, and the Compose
    profile's `images.txt` with its SHA-256. Verify a downloaded copy offline:
    ```bash
    python3 scripts/verify_release_manifest.py release-manifest.json
@@ -304,16 +326,45 @@ from the same tagged source.
 A package GHCR creates is private until its visibility is changed in the
 package's settings; do that once for each of the five images.
 
+### Docker acceptance
+
+With Docker, the frontend test dependencies, and Playwright Chromium already
+available, run from the repository root:
+
+```bash
+python3 scripts/docker_acceptance.py --artifacts /tmp/hartmesh-docker-acceptance
+```
+
+The runner builds the production backend and `frontend-hm` Dockerfiles from
+tracked working-tree files. It starts a uniquely named Compose project with
+nginx, the Gateway, the frontend, and a scripted OpenAI-compatible model on an
+internal network. Nginx also joins a separate ingress network and is the only
+published service, on a dynamically assigned loopback port. Configuration and
+accounts are synthetic; sandbox tools run inside the disposable Gateway
+container.
+
+The browser journey covers registration and sign-in, upload, a streamed chat
+with tool-created output, download, Files and Shared, persisted history, and
+logout against the real application services. Logs, the result summary, and
+browser failure evidence go to the selected artifact directory. The runner
+removes its own containers, volumes, networks, and uniquely tagged images after
+the run. `.github/workflows/docker-acceptance.yml` runs the same command in CI.
+
+This exercises application integration with SQLite and local sandbox execution.
+It does not qualify model answer quality, PostgreSQL, AIO sandbox isolation, or
+Kubernetes; the corresponding suites remain separate release evidence.
+
 ### The sandbox base image
 
 `docker/sandbox/Dockerfile` builds on upstream's all-in-one sandbox image,
 pinned by digest. The release build reads that base from this repository's
 own `-sandbox-base` cache so that a release does not depend on a third-party
 registry. To move the base: mirror the new digest with
-`gh workflow run sandbox-image-mirror.yaml -f source=<registry>/<image>@sha256:<digest> -f version=<next version>`,
-then change the digest in both `docker/sandbox/Dockerfile` and the sandbox
-entry of `.github/workflows/container.yaml`, and run the sandbox smoke
-workflow before merging.
+`gh workflow run sandbox-image-mirror.yaml --repo altakleos/hartmesh -f source=<registry>/<image>@sha256:<digest> -f version=<next version>`,
+then change the digest in `docker/sandbox/Dockerfile`, the sandbox entry of
+`.github/workflows/container.yaml`, and the restricted-profile base in
+`.github/workflows/sandbox-image-smoke.yml`. Run the sandbox smoke workflow
+before merging.
 
 ### Merging upstream
 

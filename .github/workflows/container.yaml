@@ -1,16 +1,10 @@
 name: Publish Containers
 
 # Two ways in:
-#   * A v* tag push publishes the release images. Components that
-#     deploy/compose/images.txt pins to a digest are not rebuilt: the pinned
-#     digest is retagged with the release tag (a rebuild would produce a new
-#     digest and break the golden VM image's "first start pulls nothing"
-#     property). The retag must not re-encode the manifest: `docker buildx
-#     imagetools create` wraps a single-platform manifest in a new one-child
-#     list and changes the digest (that is how 2.1.0+hartmesh.5 was refused
-#     at the identity freeze), so the step uses `crane tag`, which re-pushes
-#     the same bytes, and asserts the digest before and after. A tag-form
-#     reference in images.txt fails the release.
+#   * A v* tag push verifies all five candidates against the final source and
+#     adopts their immutable digests. Compose image pins must match. `crane
+#     tag` preserves manifest bytes, unlike rebuilding or wrapping a manifest
+#     in a new image index; digest and media type are checked before and after.
 #   * A workflow_dispatch with the release version builds the candidate
 #     images from the dispatched ref under that release's tag spelling, so
 #     scripts/pin_compose_images.py can resolve their digests before the tag
@@ -29,6 +23,12 @@ on:
         required: true
         type: string
 
+# Dispatch accepts only canonical X.Y.Z+hartmesh.N, so this is the same key
+# as its eventual tag push. Keep active publication running to completion.
+concurrency:
+  group: hartmesh-release-${{ github.repository }}-${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+  cancel-in-progress: false
+
 jobs:
   verify-versions:
     # Gate the release: every version source must match the v* tag (or the
@@ -39,8 +39,48 @@ jobs:
     with:
       version: ${{ inputs.version || '' }}
 
-  container:
+  release-policy:
     needs: verify-versions
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      attestations: read
+    outputs:
+      candidates: ${{ steps.candidates.outputs.candidates }}
+    steps:
+      - name: Checkout release source and candidate history
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
+        with:
+          fetch-depth: 0
+      - name: Refuse an existing release version
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: python3 scripts/release_artifacts.py check-unpublished --repository "$GITHUB_REPOSITORY" --version "$RELEASE_VERSION"
+      - name: Log in to the Container registry
+        if: github.event_name == 'push'
+        uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 #v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install crane
+        if: github.event_name == 'push'
+        uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
+      - name: Verify every candidate before permitting any retag
+        if: github.event_name == 'push'
+        id: candidates
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CANDIDATES="$(python3 scripts/release_artifacts.py verify-release --repository "$GITHUB_REPOSITORY" --version "${GITHUB_REF_NAME#v}" --revision "$GITHUB_SHA")"
+          printf 'candidates=%s\n' "$CANDIDATES" >> "$GITHUB_OUTPUT"
+
+  container:
+    needs: [verify-versions, release-policy]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -81,6 +121,8 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 #v6.0.3
+        with:
+          fetch-depth: 0
       - name: Compute the release image tags
         id: identity
         env:
@@ -89,6 +131,15 @@ jobs:
           set -euo pipefail
           scripts/release_tag_spellings.sh "${VERSION#v}" >> "$GITHUB_OUTPUT"
           printf 'short_sha=%s\n' "${GITHUB_SHA:0:7}" >> "$GITHUB_OUTPUT"
+      - name: Record candidate build inputs
+        if: github.event_name == 'workflow_dispatch'
+        id: inputs
+        env:
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          set -euo pipefail
+          FINGERPRINT="$(python3 scripts/release_artifacts.py inputs --component "$COMPONENT" --revision "$GITHUB_SHA")"
+          printf 'fingerprint=%s\n' "$FINGERPRINT" >> "$GITHUB_OUTPUT"
       - name: Log in to the Container registry
         uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 #v3.4.0
         with:
@@ -97,12 +148,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - name: Install crane
         uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
-      - name: Adopt the digest deploy/compose pins for this component
+      - name: Adopt the verified candidate digest for this component
         id: adopt
         env:
           IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
           SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
           GH_TOKEN: ${{ github.token }}
+          COMPONENT: ${{ matrix.component }}
+          RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+          CANDIDATES: ${{ needs.release-policy.outputs.candidates }}
         run: |
           set -euo pipefail
           # Only a tag push adopts. A candidate build (workflow_dispatch) builds
@@ -115,18 +169,12 @@ jobs:
             exit 0
           fi
           REPOSITORY="${REGISTRY}/${IMAGE_NAME}"
-          PIN="$(grep -E "^${REPOSITORY}@sha256:[0-9a-f]{64}$" deploy/compose/images.txt || true)"
-          if [ -z "$PIN" ]; then
-            if grep -Eq "^${REPOSITORY}:" deploy/compose/images.txt; then
-              echo "::error::deploy/compose/images.txt still references ${REPOSITORY} by tag; run scripts/pin_compose_images.py before tagging the release"
-              exit 1
-            fi
-            echo "adopted=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          # The shared preflight verified all five components. Consume its
+          # immutable references, including provisioner (not in the VM profile).
+          PIN="$(python3 -c 'import json, os; print(json.loads(os.environ["CANDIDATES"])[os.environ["COMPONENT"]])')"
           printf '%s' "$GH_TOKEN" | crane auth login "$REGISTRY" -u "$GITHUB_ACTOR" --password-stdin
           if ! crane manifest "$PIN" >/dev/null 2>&1; then
-            echo "::error::${PIN} is pinned by deploy/compose/images.txt but is not in the registry; dispatch the candidate build before pinning"
+              echo "::error::verified candidate ${PIN} is not in the registry"
             exit 1
           fi
           media_type() { crane manifest "$1" | python3 -c 'import json, sys; print(json.load(sys.stdin).get("mediaType", ""))'; }
@@ -142,6 +190,7 @@ jobs:
             echo "::error::${RELEASE_TAG} resolves to ${BEFORE:-nothing}, not the pinned ${PIN_DIGEST}; the candidate build under this version must be what pinned it"
             exit 1
           fi
+          python3 scripts/release_artifacts.py verify-candidate --repository "$GITHUB_REPOSITORY" --version "${RELEASE_VERSION#v}" --component "$COMPONENT" --image "$PIN" --revision "$GITHUB_SHA"
           echo "Adopting ${PIN}: ${RELEASE_TAG} already resolves to the pin (${BEFORE}, ${PIN_MEDIA_TYPE})" | tee -a "$GITHUB_STEP_SUMMARY"
           # crane tag fetches the manifest by digest and pushes the same bytes
           # under the new tag, so the digest cannot change.
@@ -159,7 +208,7 @@ jobs:
           done
           echo "adopted=true" >> "$GITHUB_OUTPUT"
       - name: Extract metadata (tags, labels) for Docker
-        if: steps.adopt.outputs.adopted != 'true'
+        if: github.event_name == 'workflow_dispatch'
         id: meta
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804 #v5.7.0
         with:
@@ -167,8 +216,11 @@ jobs:
           tags: |
             type=raw,value=${{ steps.identity.outputs.image_tag }}
             type=raw,value=sha-${{ steps.identity.outputs.short_sha }}
+          labels: |
+            io.hartmesh.build-inputs=${{ steps.inputs.outputs.fingerprint }}
+            io.hartmesh.release-version=${{ inputs.version }}
       - name: Build and push Docker image
-        if: steps.adopt.outputs.adopted != 'true'
+        if: github.event_name == 'workflow_dispatch'
         id: push
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 #v6.18.0
         with:
@@ -180,7 +232,7 @@ jobs:
           build-args: ${{ matrix.build-args }}
 
       - name: Generate artifact attestation
-        if: steps.adopt.outputs.adopted != 'true'
+        if: github.event_name == 'workflow_dispatch'
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be #v2.4.0
         with:
           subject-name: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME}}

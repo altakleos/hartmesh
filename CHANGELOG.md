@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixes
+
+- File downloads and copies retain the authorized file descriptor throughout
+  access. Personal and Shared publication exposes only completed files. Shared
+  publication settles its record or rollback before cancellation releases its
+  lock.
+- Account changes retire browser queries and pending actions from the previous
+  identity. Provider-key mutations finish their transaction before cancellation
+  releases the mutation lock.
+- Business reports validate complete amount syntax, reject mixed currencies,
+  preserve numeric precision in JSON and Excel, and keep chart failures and
+  revised chart URLs within the React lifecycle.
+- Scheduler completion cannot replace a terminal outcome already recorded by
+  cancellation or a limit. Page extraction keeps its capacity slot until its
+  background worker finishes, and interface feature queries share one request.
+
+### Release assurance
+
+- Candidate publication refuses an existing release version and serializes
+  publication for each canonical version. Final image adoption verifies all
+  five candidates' build provenance and source inputs before publication.
+- A repeatable Docker acceptance journey builds the production application,
+  then checks authentication, upload, streamed tools, file delivery, sharing,
+  and conversation history using a scripted local model. It also runs in CI.
+- Restricted sandbox CI uses the same mirrored base digest as release builds.
+
+### Schema changes
+
+No database schema changes since `v2.2.0+hartmesh.38`.
+
 ## [2.2.0+hartmesh.38] - 2026-10-02
 
 ### Changes since v2.1.0+hartmesh.37
