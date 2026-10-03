@@ -3,6 +3,7 @@
 import { useRouter, usePathname } from "next/navigation";
 import React, {
   createContext,
+  Fragment,
   useContext,
   useState,
   useCallback,
@@ -47,6 +48,8 @@ interface AuthProviderProps {
 export function AuthProvider({ children, initialUser }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(initialUser);
   const [isLoading, setIsLoading] = useState(false);
+  const [isLoggingOut, setIsLoggingOut] = useState(false);
+  const refreshGeneration = React.useRef(0);
   const router = useRouter();
   const pathname = usePathname();
   const staticMode = isStaticWebsiteOnly();
@@ -55,11 +58,13 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
 
   /**
    * Apply a user value supplied by a caller (e.g. banner probe) that has
-   * already fetched it. Equivalent to setUser, exposed with a stable name
-   * so consumers don't reach into React internals.
+   * already fetched it. Invalidate earlier refreshes before publishing the
+   * new identity so a late response cannot restore another account.
    */
   const applyUser = useCallback((next: User | null) => {
+    refreshGeneration.current += 1;
     setUser(next);
+    setIsLoading(false);
   }, []);
 
   /**
@@ -68,6 +73,7 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    */
   const refreshUser = useCallback(async () => {
     if (staticMode) return;
+    const generation = ++refreshGeneration.current;
 
     try {
       setIsLoading(true);
@@ -76,23 +82,26 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       });
 
       if (res.ok) {
-        const data = await res.json();
-        setUser(data);
+        const data = (await res.json()) as User;
+        if (generation !== refreshGeneration.current) return;
+        applyUser(data);
       } else if (res.status === 401) {
+        if (generation !== refreshGeneration.current) return;
         // Session expired or invalid
-        setUser(null);
+        applyUser(null);
         // Redirect to login if on a protected route
         if (pathname?.startsWith("/workspace")) {
           router.push(buildLoginUrl(pathname));
         }
       }
     } catch (err) {
+      if (generation !== refreshGeneration.current) return;
       console.error("Failed to refresh user:", err);
-      setUser(null);
+      applyUser(null);
     } finally {
-      setIsLoading(false);
+      if (generation === refreshGeneration.current) setIsLoading(false);
     }
-  }, [staticMode, pathname, router]);
+  }, [staticMode, pathname, router, applyUser]);
 
   /**
    * Logout - call FastAPI logout endpoint and clear local state
@@ -106,13 +115,18 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
    * logout used to.
    */
   const logout = useCallback(async () => {
-    // Immediately clear local state to prevent UI flicker
-    setUser(null);
-
+    // Static demos have no session to clear and their root returns to this
+    // same workspace layout. Keep it mounted and usable after navigation.
     if (staticMode) {
       router.push("/");
       return;
     }
+
+    // Retire private subscriptions before the request clears the cookie.
+    // Rendering a new anonymous workspace while it is pending could fetch
+    // this account's data again with the still-valid cookie.
+    setIsLoggingOut(true);
+    applyUser(null);
 
     let logoutFailed = false;
     try {
@@ -133,9 +147,10 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
       return;
     }
 
-    // Redirect to home page
-    router.push("/");
-  }, [staticMode, router]);
+    // Leave the workspace layout: its cached root redirect could otherwise
+    // return to this deliberately unmounted subtree instead of the login page.
+    router.push("/login");
+  }, [staticMode, router, applyUser]);
 
   /**
    * Handle visibility change - refresh user when tab becomes visible again.
@@ -169,7 +184,16 @@ export function AuthProvider({ children, initialUser }: AuthProviderProps) {
     applyUser,
   };
 
-  return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
+  // A separate subtree owns all queries, mutations and local display state.
+  // Late callbacks retain only the retired client, never the next account's.
+  const identity = JSON.stringify(
+    user ? [user.id, user.system_role, user.permissions?.slice().sort()] : null,
+  );
+  return (
+    <AuthContext.Provider value={value}>
+      {!isLoggingOut && <Fragment key={identity}>{children}</Fragment>}
+    </AuthContext.Provider>
+  );
 }
 
 /**

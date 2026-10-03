@@ -286,8 +286,8 @@ def test_keep_refuses_a_symlinked_source(paths: Paths, tmp_path: Path) -> None:
     with client:
         response = client.post(f"/api/threads/{THREAD}/files", json={"path": "/mnt/user-data/outputs/link.txt"})
 
-    # The thread resolver follows the link and finds it outside the thread.
-    assert response.status_code == 403
+    # Links are refused lexically, without resolving their target.
+    assert response.status_code == 400
     assert not (paths.user_files_dir(str(user.id)) / "link.txt").exists()
 
 
@@ -353,3 +353,45 @@ def test_keep_refuses_a_link_that_leaves_uploads_and_outputs(paths: Paths, tmp_p
 
     assert response.status_code == 400
     assert not (paths.user_files_dir(str(user.id)) / "scratch.py").exists()
+
+
+def test_keep_refuses_replaced_outputs_root(paths: Paths) -> None:
+    """A symlink cannot redefine what this conversation's outputs root authorizes."""
+    client, user = _client()
+    paths.ensure_thread_dirs(THREAD, user_id=str(user.id))
+    workspace = paths.sandbox_work_dir(THREAD, user_id=str(user.id))
+    (workspace / "scratch.txt").write_bytes(b"workspace only")
+    outputs = paths.sandbox_outputs_dir(THREAD, user_id=str(user.id))
+    outputs.rename(outputs.with_name("old-outputs"))
+    _symlink_to_or_skip(outputs, workspace)
+
+    with client:
+        response = client.post(f"/api/threads/{THREAD}/files", json={"path": "/mnt/user-data/outputs/scratch.txt"})
+
+    assert response.status_code == 400
+    assert not (paths.user_files_dir(str(user.id)) / "scratch.txt").exists()
+
+
+def test_keep_refuses_parent_replaced_after_preflight(paths: Paths, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    client, user = _client()
+    paths.ensure_thread_dirs(THREAD, user_id=str(user.id))
+    parent = paths.sandbox_outputs_dir(THREAD, user_id=str(user.id)) / "Reports"
+    parent.mkdir()
+    (parent / "result.txt").write_bytes(b"allowed")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "result.txt").write_bytes(b"outside")
+    preflight = files_router._keepable_source
+
+    def replace_parent(*args):
+        source = preflight(*args)
+        parent.rename(parent.with_name("original"))
+        _symlink_to_or_skip(parent, outside)
+        return source
+
+    monkeypatch.setattr(files_router, "_keepable_source", replace_parent)
+    with client:
+        response = client.post(f"/api/threads/{THREAD}/files", json={"path": "/mnt/user-data/outputs/Reports/result.txt"})
+
+    assert response.status_code == 400
+    assert not (paths.user_files_dir(str(user.id)) / "result.txt").exists()

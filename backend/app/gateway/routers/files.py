@@ -22,15 +22,14 @@ import stat
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
-from app.gateway.path_utils import resolve_thread_virtual_path
-from app.gateway.routers._file_http import acting_user_id, existing_regular_file, response_plan
-from app.gateway.routers.artifacts import _build_attachment_headers, _build_content_disposition
+from app.gateway.routers._file_http import DescriptorFileResponse, acting_user_id, existing_regular_file
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.files import UserFile, UserFileError, delete_user_file, keep_file, list_user_files, resolve_user_file
+from deerflow.files.store import resolve_under
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -40,9 +39,6 @@ router = APIRouter(tags=["files"])
 #: What a conversation may keep: what the person gave it and what it made for
 #: them. The workspace is scratch, and the person's files are already theirs.
 _KEEPABLE_PREFIXES = (f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PREFIX}/outputs/")
-#: Nothing served from this agent-writable directory may be sniffed into a
-#: type the browser would run.
-_NOSNIFF = {"X-Content-Type-Options": "nosniff"}
 
 __all__ = ["router"]
 
@@ -105,14 +101,7 @@ async def get_file(path: str, request: Request, download: bool = False) -> Respo
     route does, so nothing generated runs in the application origin.
     """
     actual = await asyncio.to_thread(_existing_regular_file, acting_user_id(request), path)
-    force_download, mime_type = await asyncio.to_thread(response_plan, actual, download)
-    if force_download:
-        return FileResponse(path=actual, filename=actual.name, media_type=mime_type, headers=_build_attachment_headers(actual.name, _NOSNIFF))
-    return FileResponse(
-        path=actual,
-        media_type=mime_type,
-        headers={"Content-Disposition": _build_content_disposition("inline", actual.name), **_NOSNIFF},
-    )
+    return DescriptorFileResponse(actual, download=download)
 
 
 @router.delete("/api/files/{path:path}", response_model=DeleteUserFileResponse, summary="Remove One Of My Files")
@@ -132,19 +121,22 @@ async def delete_file(path: str, request: Request) -> DeleteUserFileResponse:
 def _keepable_source(thread_id: str, virtual_path: str, user_id: str) -> Path:
     """Worker-thread body: the host file a conversation may keep, or the HTTP reason it may not.
 
-    The prefix says what the person asked for; the resolved path says what it
-    is, and a link out of uploads or outputs (into the workspace, say) is
-    refused on the second. This is a preflight for the status code: the copy
-    itself opens the source without following a link and checks it again.
+    The prefix and lexical path constrain the source to uploads or outputs.
+    This preflight supplies the status code; the copy opens every path segment
+    relative to a directory descriptor and checks the opened file again.
     """
     normalized = "/" + virtual_path.lstrip("/")
     if not normalized.startswith(_KEEPABLE_PREFIXES):
         raise HTTPException(status_code=400, detail=f"Only files under {' or '.join(prefix.rstrip('/') for prefix in _KEEPABLE_PREFIXES)} can be kept")
-    actual = resolve_thread_virtual_path(thread_id, normalized, user_id=user_id)
     paths: Paths = get_paths()
-    keepable_roots = (paths.sandbox_uploads_dir(thread_id, user_id=user_id).resolve(), paths.sandbox_outputs_dir(thread_id, user_id=user_id).resolve())
-    if not any(actual.is_relative_to(root) for root in keepable_roots):
-        raise HTTPException(status_code=400, detail=f"Not a file of this conversation's uploads or outputs: {virtual_path}")
+    # Preserve the lexical path. Resolving symlinks before checking the roots
+    # can authorize a substituted outputs/uploads directory as a new root.
+    kind, relative = normalized[len(VIRTUAL_PATH_PREFIX) + 1 :].split("/", 1)
+    root = paths.sandbox_uploads_dir(thread_id, user_id=user_id) if kind == "uploads" else paths.sandbox_outputs_dir(thread_id, user_id=user_id)
+    try:
+        actual = resolve_under(root, relative)
+    except UserFileError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
     try:
         metadata = os.lstat(actual)
     except FileNotFoundError:

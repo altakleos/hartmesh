@@ -1,9 +1,19 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { act, cleanup, renderHook } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  render,
+  renderHook,
+  waitFor,
+} from "@testing-library/react";
 import type { PropsWithChildren } from "react";
 
-const toast = rs.hoisted(() => ({ success: rs.fn(), error: rs.fn() }));
+const toast = rs.hoisted(() => ({
+  success: rs.fn(),
+  error: rs.fn(),
+  dismiss: rs.fn(),
+}));
 const router = rs.hoisted(() => ({ push: rs.fn() }));
 
 rs.mock("sonner", () => ({ toast }));
@@ -14,6 +24,7 @@ rs.mock("@/core/files/api", () => ({
   deleteMyFile: rs.fn(),
 }));
 
+import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { keepInMyFiles } from "@/core/files/api";
 import { useSaveToMyFiles } from "@/core/files/hooks";
 import { I18nContext } from "@/core/i18n/context";
@@ -28,11 +39,13 @@ function createWrapper() {
   return function Wrapper({ children }: PropsWithChildren) {
     return (
       <QueryClientProvider client={queryClient}>
-        <I18nContext.Provider
-          value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-        >
-          {children}
-        </I18nContext.Provider>
+        <FileActionLifetimeProvider>
+          <I18nContext.Provider
+            value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+          >
+            {children}
+          </I18nContext.Provider>
+        </FileActionLifetimeProvider>
       </QueryClientProvider>
     );
   };
@@ -54,10 +67,107 @@ describe("useSaveToMyFiles", () => {
     mockedKeep.mockReset();
     toast.success.mockReset();
     toast.error.mockReset();
+    toast.dismiss.mockReset();
     router.push.mockReset();
   });
 
   afterEach(cleanup);
+
+  it("finishes a save batch during same-account navigation away from its card", async () => {
+    let resolve!: (value: ReturnType<typeof kept>) => void;
+    mockedKeep
+      .mockReturnValueOnce(
+        new Promise((done) => {
+          resolve = done;
+        }),
+      )
+      .mockResolvedValue(kept("second.pdf"));
+    const Wrapper = createWrapper();
+    let save!: ReturnType<typeof useSaveToMyFiles>["save"];
+    function Card() {
+      save = useSaveToMyFiles("alice-thread").save;
+      return null;
+    }
+    const mounted = render(
+      <Wrapper>
+        <Card />
+      </Wrapper>,
+    );
+    let saving!: Promise<unknown[]>;
+    act(() => {
+      saving = save([
+        "/mnt/user-data/outputs/first.pdf",
+        "/mnt/user-data/outputs/second.pdf",
+      ]);
+    });
+    await waitFor(() => expect(mockedKeep).toHaveBeenCalledTimes(1));
+    mounted.rerender(
+      <Wrapper>
+        <div>Files page</div>
+      </Wrapper>,
+    );
+    await act(async () => {
+      resolve(kept("first.pdf"));
+      await saving;
+    });
+    expect(mockedKeep).toHaveBeenCalledTimes(2);
+    expect(toast.success).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["success", "failure"])(
+    "stops a retired account's save batch after a pending %s",
+    async (outcome) => {
+      let resolve!: (value: ReturnType<typeof kept>) => void;
+      let reject!: (error: Error) => void;
+      const response = new Promise<ReturnType<typeof kept>>((done, fail) => {
+        resolve = done;
+        reject = fail;
+      });
+      mockedKeep
+        .mockReturnValueOnce(response)
+        .mockResolvedValue(kept("second.pdf"));
+      const { result, unmount } = renderHook(
+        () => useSaveToMyFiles("alice-thread"),
+        { wrapper: createWrapper() },
+      );
+      let saving!: Promise<unknown[]>;
+      act(() => {
+        saving = result.current.save([
+          "/mnt/user-data/outputs/alice.pdf",
+          "/mnt/user-data/outputs/second.pdf",
+        ]);
+      });
+      await waitFor(() => expect(mockedKeep).toHaveBeenCalledTimes(1));
+      unmount(); // AuthProvider retires this subtree when the identity changes.
+      await act(async () => {
+        if (outcome === "success") resolve(kept("alice.pdf"));
+        else reject(new Error("old account request failed"));
+        await saving;
+      });
+      expect(mockedKeep).toHaveBeenCalledTimes(1);
+      expect(toast.success).not.toHaveBeenCalled();
+      expect(toast.error).not.toHaveBeenCalled();
+    },
+  );
+
+  it("dismisses its private filename toast and retires its action on unmount", async () => {
+    mockedKeep.mockResolvedValue(kept("alice-private.pdf"));
+    toast.success.mockReturnValue("saved-toast");
+    const { result, unmount } = renderHook(
+      () => useSaveToMyFiles("alice-thread"),
+      { wrapper: createWrapper() },
+    );
+    await act(async () => {
+      await result.current.save(["/mnt/user-data/outputs/alice-private.pdf"]);
+    });
+    const options = toast.success.mock.calls[0]![1] as {
+      action: { onClick: () => void };
+    };
+    unmount();
+    options.action.onClick();
+    expect(router.push).not.toHaveBeenCalled();
+    expect(toast.dismiss).toHaveBeenCalledWith("saved-toast");
+  });
 
   it("keeps each path and says so once, with a way to the files", async () => {
     mockedKeep.mockImplementation(async (_threadId, { path }) =>

@@ -76,3 +76,65 @@ def test_a_failed_copy_leaves_nothing_behind(tmp_path: Path, monkeypatch: pytest
         store.copy_into(root, source, name="august.pdf", folder=None, folder_mode=0o777, file_mode=0o666)
 
     assert list(root.iterdir()) == []
+
+
+@pytest.mark.parametrize("operation", ["copy", "digest"])
+def test_source_parent_replaced_after_preflight_is_refused(tmp_path: Path, operation: str) -> None:
+    """Neither copying nor hashing may follow a parent installed after validation."""
+    root = tmp_path / "root"
+    root.mkdir()
+    parent = root / "Reports"
+    parent.mkdir()
+    (parent / "result.txt").write_bytes(b"allowed")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "result.txt").write_bytes(b"outside")
+    source = store.resolve_under(root, "Reports/result.txt")
+    parent.rename(root / "original")
+    parent.symlink_to(outside, target_is_directory=True)
+    destination = tmp_path / "destination"
+    destination.mkdir()
+
+    with pytest.raises(store.StoreError):
+        if operation == "copy":
+            store.copy_into(destination, source, name="result.txt", folder=None, folder_mode=0o777, file_mode=0o666)
+        else:
+            store.digest_and_stat(source)
+    assert list(destination.iterdir()) == []
+
+
+def test_source_walk_remains_bound_to_open_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replacing a directory after its descriptor is opened cannot redirect its leaf."""
+    import hashlib
+
+    parent = tmp_path / "Reports"
+    parent.mkdir()
+    (parent / "result.txt").write_bytes(b"allowed")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "result.txt").write_bytes(b"outside")
+    real_open = os.open
+    swapped = False
+
+    def swap_after_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        fd = real_open(path, flags, *args, **kwargs)
+        if str(path) == "Reports" and flags & os.O_DIRECTORY and not swapped:
+            swapped = True
+            parent.rename(tmp_path / "original")
+            parent.symlink_to(outside, target_is_directory=True)
+        return fd
+
+    monkeypatch.setattr(store.os, "open", swap_after_open)
+    digest, metadata = store.digest_and_stat(parent / "result.txt")
+    assert swapped
+    assert digest == hashlib.sha256(b"allowed").hexdigest()
+    assert metadata.st_size == len(b"allowed")
+
+
+def test_source_open_refuses_unsafe_platform_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = tmp_path / "result.txt"
+    source.write_bytes(b"allowed")
+    monkeypatch.setattr(store, "_DIR_FD", False)
+    with pytest.raises(store.StoreError, match="descriptor"):
+        store.digest_and_stat(source)

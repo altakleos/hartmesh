@@ -18,10 +18,12 @@ catalog and the Gateway's own config loader:
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
 import os
 import shutil
 import sys
+import threading
 from pathlib import Path
 
 import pytest
@@ -392,6 +394,150 @@ async def test_a_change_the_database_does_not_take_puts_the_gateway_back_on_what
     assert not (tmp_path / "home" / "config.effective.yaml").exists()
     assert "claude-sonnet-4" not in _model_keys(_live_config())
     assert _model_keys(_live_config())["gpt-4"] == SEED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["add", "replace", "remove"])
+async def test_cancellation_during_install_settles_the_change_before_releasing_the_lock(environ, database, monkeypatch: pytest.MonkeyPatch, change: str) -> None:
+    _, repository = database
+    service = _service(repository, environ)
+    if change != "add":
+        await service.put("openai", OWN, **ADMIN)
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    finished = asyncio.Event()
+    release = threading.Event()
+    install = service._install
+
+    def blocked_install(values, rendered):
+        loop.call_soon_threadsafe(entered.set)
+        try:
+            assert release.wait(10), "test did not release the install worker"
+            install(values, rendered)
+        finally:
+            loop.call_soon_threadsafe(finished.set)
+
+    monkeypatch.setattr(service, "_install", blocked_install)
+    change_call = service.remove("openai", **ADMIN) if change == "remove" else service.put("openai", NEWER, **ADMIN)
+    task = asyncio.create_task(change_call)
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        await asyncio.wait_for(finished.wait(), 5)
+
+    assert task.cancelled()
+    assert not service._lock.locked()
+    expected = SEED if change == "remove" else NEWER
+    assert environ["OPENAI_API_KEY"] == expected
+    assert _model_keys(_live_config())["gpt-4"] == expected
+    stored = await repository.stored()
+    if change == "remove":
+        assert "OPENAI_API_KEY" not in stored
+    else:
+        assert service._read("OPENAI_API_KEY", stored["OPENAI_API_KEY"].ciphertext).key == NEWER
+    assert [event["action"] for event in await repository.events()] == ({"add": ["added"], "replace": ["replaced", "added"], "remove": ["removed", "added"]}[change])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pause_after_commit", [False, True], ids=["before-commit", "after-commit"])
+async def test_cancellation_at_commit_does_not_restore_stale_configuration(environ, database, monkeypatch: pytest.MonkeyPatch, pause_after_commit: bool) -> None:
+    _, repository = database
+    service = _service(repository, environ)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    put = repository.put
+
+    async def paused_put(*args, **kwargs):
+        if pause_after_commit:
+            result = await put(*args, **kwargs)
+        entered.set()
+        await release.wait()
+        return result if pause_after_commit else await put(*args, **kwargs)
+
+    monkeypatch.setattr(repository, "put", paused_put)
+    task = asyncio.create_task(service.put("openai", OWN, **ADMIN))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+
+    assert task.cancelled()
+    assert not service._lock.locked()
+    assert environ["OPENAI_API_KEY"] == OWN
+    assert _model_keys(_live_config())["gpt-4"] == OWN
+    stored = await repository.stored()
+    assert service._read("OPENAI_API_KEY", stored["OPENAI_API_KEY"].ciphertext).key == OWN
+    assert [event["action"] for event in await repository.events()] == ["added"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_cancellation_during_rollback_does_not_admit_the_next_change_early(environ, database, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
+    _, repository = database
+    service = _service(repository, environ)
+    loop = asyncio.get_running_loop()
+    restoring = asyncio.Event()
+    restore_finished = threading.Event()
+    release = threading.Event()
+    install_base = service._install_base
+    put = repository.put
+    installs_during_restore = []
+    install = service._install
+
+    async def fail_first_put(*args, **kwargs):
+        if args[0] == "OPENAI_API_KEY":
+            raise RuntimeError(f"synthetic failure containing {OWN}")
+        return await put(*args, **kwargs)
+
+    def paused_restore():
+        loop.call_soon_threadsafe(restoring.set)
+        try:
+            assert release.wait(10), "test did not release the rollback worker"
+            install_base()
+        finally:
+            restore_finished.set()
+
+    def observed_install(values, rendered):
+        if restoring.is_set() and not restore_finished.is_set():
+            installs_during_restore.append(True)
+        install(values, rendered)
+
+    monkeypatch.setattr(repository, "put", fail_first_put)
+    monkeypatch.setattr(service, "_install_base", paused_restore)
+    monkeypatch.setattr(service, "_install", observed_install)
+    task = asyncio.create_task(service.put("openai", OWN, **ADMIN))
+    queued = None
+    try:
+        await asyncio.wait_for(restoring.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        queued = asyncio.create_task(service.put("anthropic", NEWER, **ADMIN))
+        await asyncio.sleep(0)
+        assert service._lock.locked()
+        assert not task.done()
+    finally:
+        release.set()
+        results = await asyncio.wait_for(asyncio.gather(task, *([queued] if queued else []), return_exceptions=True), 5)
+        assert await asyncio.to_thread(restore_finished.wait, 5)
+
+    assert isinstance(results[0], asyncio.CancelledError)
+    assert results[1]["action"] == "added"
+    assert not installs_during_restore
+    assert environ["OPENAI_API_KEY"] == SEED
+    assert environ["ANTHROPIC_API_KEY"] == NEWER
+    assert _model_keys(_live_config())["claude-sonnet-4"] == NEWER
+    assert set(await repository.stored()) == {"ANTHROPIC_API_KEY"}
+    assert "provider keys: change failed (RuntimeError)" in caplog.text
+    assert OWN not in caplog.text
 
 
 @pytest.mark.asyncio

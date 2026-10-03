@@ -3,6 +3,7 @@ import { useRouter } from "next/navigation";
 import { useCallback } from "react";
 import { toast } from "sonner";
 
+import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
 import { useI18n } from "../i18n/hooks";
 
 import {
@@ -55,6 +56,7 @@ export function useSaveToMyFiles(threadId: string) {
   const { t } = useI18n();
   const router = useRouter();
   const keep = useKeepInMyFiles(threadId);
+  const lifetime = useFileActionLifetime();
   const save = useCallback(
     async (paths: readonly string[], folder?: string) => {
       const kept: MyFileInfo[] = [];
@@ -62,20 +64,25 @@ export function useSaveToMyFiles(threadId: string) {
       // Every path gets its try: a render a rebuild deleted must not stop
       // the ones that exist from being kept.
       for (const path of paths) {
+        if (!lifetime.active) break;
         try {
           kept.push(await keep.mutateAsync({ path, folder }));
         } catch (error) {
+          if (!lifetime.active) break;
           // The Gateway's reason names paths and rules in system words; the
           // person gets what happened and what to do, the console the rest.
           console.error("Save to My files failed:", path, error);
           failed += 1;
         }
       }
+      if (!lifetime.active) return kept;
       if (failed > 0) {
-        toast.error(
-          kept.length > 0
-            ? t.files.savedSome(kept.length, paths.length)
-            : t.files.saveFailed,
+        lifetime.toasts.add(
+          toast.error(
+            kept.length > 0
+              ? t.files.savedSome(kept.length, paths.length)
+              : t.files.saveFailed,
+          ),
         );
         return kept;
       }
@@ -85,24 +92,28 @@ export function useSaveToMyFiles(threadId: string) {
       // Where it went is part of what happened: a report's downloads are
       // filed under their own folder, and a person who is not told goes
       // looking at the root.
-      toast.success(
-        kept.length === 1
-          ? folder
-            ? t.files.savedToFolder(kept[0]!.name, folder)
-            : t.files.saved(kept[0]!.name)
-          : folder
-            ? t.files.savedManyToFolder(kept.length, folder)
-            : t.files.savedMany(kept.length),
-        {
-          action: {
-            label: t.files.openMyFiles,
-            onClick: () => router.push("/workspace/files"),
+      lifetime.toasts.add(
+        toast.success(
+          kept.length === 1
+            ? folder
+              ? t.files.savedToFolder(kept[0]!.name, folder)
+              : t.files.saved(kept[0]!.name)
+            : folder
+              ? t.files.savedManyToFolder(kept.length, folder)
+              : t.files.savedMany(kept.length),
+          {
+            action: {
+              label: t.files.openMyFiles,
+              onClick: () => {
+                if (lifetime.active) router.push("/workspace/files");
+              },
+            },
           },
-        },
+        ),
       );
       return kept;
     },
-    [keep, router, t.files],
+    [keep, lifetime, router, t.files],
   );
   return { save, isPending: keep.isPending };
 }

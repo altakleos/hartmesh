@@ -21,6 +21,13 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 Learn more and see **real demos** on our [**official website**](https://deerflow.tech).
 The landing-page case studies open as allowlisted, read-only showcases without requiring a sign-in.
 
+Hartmesh clears private workspace caches when the signed-in account changes.
+My Files and Shared downloads, copies and hashes refuse symlinks throughout the
+source path; these operations require descriptor-relative no-follow filesystem
+APIs (Linux/macOS) and fail explicitly on unsupported hosts. Interrupted provider-key
+updates settle their database and active configuration changes before accepting
+another edit; refresh settings to see whether the interrupted update completed.
+
 ## Sister Projects
 
 <img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />

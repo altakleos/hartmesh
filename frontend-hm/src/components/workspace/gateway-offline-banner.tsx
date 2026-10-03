@@ -27,8 +27,6 @@ export function GatewayOfflineBanner({
 }: GatewayOfflineBannerProps) {
   const { t } = useI18n();
   const { user, applyUser, refreshUser, logout } = useAuth();
-  // Guard against piling up probe calls while the gateway is still slow.
-  const inFlightRef = useRef(false);
   // Count consecutive 401s so we can distinguish "transient warm-up 401"
   // from "session actually expired" and avoid lying with the banner.
   const authFailuresRef = useRef(0);
@@ -40,10 +38,13 @@ export function GatewayOfflineBanner({
     // for the entire lifetime of the page (gatewayUnavailable is a
     // server-rendered prop and stays true until a full reload).
     if (user !== null) return;
+    let disposed = false;
+    let inFlight = false;
+    const controller = new AbortController();
 
     const probe = async () => {
-      if (inFlightRef.current) return;
-      inFlightRef.current = true;
+      if (disposed || inFlight) return;
+      inFlight = true;
       let res: Response | null = null;
       let errored = false;
       let parsedUser: User | null = null;
@@ -51,6 +52,7 @@ export function GatewayOfflineBanner({
         res = await fetch("/api/v1/auth/me", {
           credentials: "include",
           cache: "no-store",
+          signal: controller.signal,
         });
         // Reuse the probe's own response body instead of triggering a
         // second /auth/me request via refreshUser() — halves the recovery
@@ -68,11 +70,15 @@ export function GatewayOfflineBanner({
           }
         }
       } catch (err) {
+        if (disposed) return;
         console.warn("[gateway-offline-banner] probe failed:", err);
         errored = true;
       } finally {
-        inFlightRef.current = false;
+        inFlight = false;
       }
+      // AuthProvider may have retired this subtree after another probe or
+      // logout. A response already in flight must not restore its identity.
+      if (disposed) return;
 
       const action = decideProbeAction(
         authFailuresRef.current,
@@ -98,6 +104,8 @@ export function GatewayOfflineBanner({
       void probe();
     }, OFFLINE_BANNER_RETRY_INTERVAL_MS);
     return () => {
+      disposed = true;
+      controller.abort();
       window.clearInterval(handle);
     };
   }, [gatewayUnavailable, user, applyUser, refreshUser]);

@@ -24,13 +24,12 @@ from datetime import datetime
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_shared_publications_repo, get_thread_store, get_user_repo, is_admin_user
-from app.gateway.routers._file_http import acting_user_id, existing_regular_file, response_plan
-from app.gateway.routers.artifacts import _build_attachment_headers, _build_content_disposition
+from app.gateway.routers._file_http import DescriptorFileResponse, acting_user_id, existing_regular_file
 from app.gateway.routers.files import _keepable_source
 from deerflow.config.paths import USER_FILES_VIRTUAL_PREFIX, VIRTUAL_PATH_PREFIX
 from deerflow.files import SharedFile, SharedFileError, digest_of, list_shared_files, normalize_relative_path, publish_file, remove_shared_file, resolve_shared_file, resolve_user_file, shared_file_holding
@@ -40,8 +39,6 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["shared"])
 
-#: Nothing served from this directory may be sniffed into a type the browser would run.
-_NOSNIFF = {"X-Content-Type-Options": "nosniff"}
 _CONVERSATION_PREFIXES = (f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PREFIX}/outputs/")
 
 __all__ = ["router"]
@@ -278,10 +275,7 @@ async def get_shared_file(path: str, request: Request, download: bool = False) -
     route does, so nothing published runs in the application origin.
     """
     actual = await asyncio.to_thread(_published_file, path)
-    force_download, mime_type = await asyncio.to_thread(response_plan, actual, download)
-    if force_download:
-        return FileResponse(path=actual, filename=actual.name, media_type=mime_type, headers=_build_attachment_headers(actual.name, _NOSNIFF))
-    return FileResponse(path=actual, media_type=mime_type, headers={"Content-Disposition": _build_content_disposition("inline", actual.name), **_NOSNIFF})
+    return DescriptorFileResponse(actual, download=download)
 
 
 @router.delete("/api/shared/{path:path}", response_model=RemoveSharedFileResponse, summary="Remove One Shared File")

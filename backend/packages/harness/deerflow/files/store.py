@@ -5,9 +5,9 @@ Shared area (:mod:`deerflow.files.shared`) are the same thing at this level:
 a root the Gateway lists, streams, copies into and removes from, with the
 sandbox able to plant links in it (read-write for the person's files, and
 the Gateway must not trust the tree either way). So every path acted on is
-walked one segment at a time without following a link: through directory
-descriptors (``dir_fd``) where the platform has them, and otherwise by
-refusing any segment that ``lstat`` reports as a link. What differs between
+walked one segment at a time without following a link. Reads and copies
+require directory descriptors (``dir_fd``) and no-follow opens; unsupported
+platforms refuse source access. What differs between
 the two areas -- who may write, where the sandbox sees it, what URL serves
 it, what is recorded -- lives in the two modules above this one.
 """
@@ -33,6 +33,7 @@ __all__ = [
     "digest_and_stat",
     "list_under",
     "normalize_relative_path",
+    "open_regular_source",
     "resolve_under",
     "sha256_of",
 ]
@@ -227,17 +228,35 @@ def delete_under(root: Path, path: str) -> None:
         walk.close()
 
 
-def _open_regular_source(source: Path) -> int:
-    """A descriptor on *source* itself, refusing a link and anything but a regular file."""
+def open_regular_source(source: Path) -> int:
+    """Open a regular file without following a link in any path component.
+
+    Keep this descriptor through the operation: a preflighted path alone is
+    not authority to reopen it after a sandbox renames one of its parents.
+    The caller owns the descriptor. Platforms without descriptor-relative
+    opens fail closed rather than reverting to a check-then-open sequence.
+    """
+    if not _DIR_FD or not _O_NOFOLLOW:
+        raise StoreError("Safe file access requires directory descriptors and no-follow opens")
+    absolute = source.absolute()
+    if ".." in absolute.parts:
+        raise StoreError("Path traversal detected")
+    walk = _DirWalk(Path(absolute.anchor))
     try:
-        fd = os.open(source, os.O_RDONLY | _O_NOFOLLOW)
-    except OSError as exc:
-        if exc.errno in (errno.ELOOP, errno.EISDIR):
-            raise StoreError(f"Not a file: {source.name}") from None
-        raise
+        for folder in absolute.parts[1:-1]:
+            walk.descend(folder, create=False, mode=0o777)
+        try:
+            # O_NONBLOCK keeps an unexpected FIFO from hanging before fstat
+            # has a chance to refuse it; it has no effect on regular files.
+            fd = os.open(absolute.name, os.O_RDONLY | _O_NOFOLLOW | os.O_NONBLOCK, dir_fd=walk.fd)
+        except OSError as exc:
+            if exc.errno in (errno.ELOOP, errno.EISDIR, errno.ENXIO, errno.ENOTDIR):
+                raise StoreError(f"Not a file: {source.name}") from None
+            raise
+    finally:
+        walk.close()
     try:
-        metadata = os.fstat(fd)
-        if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
             raise StoreError(f"Not a file: {source.name}")
     except BaseException:
         os.close(fd)
@@ -264,7 +283,7 @@ def sha256_of(source: Path) -> str:
 
 def digest_and_stat(source: Path) -> tuple[str, os.stat_result]:
     """*source*'s SHA-256 and the metadata of the very file that was hashed, from one descriptor."""
-    fd = _open_regular_source(source)
+    fd = open_regular_source(source)
     try:
         digest = hashlib.sha256()
         with os.fdopen(fd, "rb", closefd=False) as reader:
@@ -316,7 +335,7 @@ def copy_into(root: Path, source: Path, *, name: str, folder: str | None, folder
     folders = relative_folder.split("/") if relative_folder else []
     relative_dir = relative_folder + "/" if relative_folder else ""
 
-    source_fd = _open_regular_source(source)
+    source_fd = open_regular_source(source)
     try:
         if _DIR_FD:
             walk = _DirWalk(root)
