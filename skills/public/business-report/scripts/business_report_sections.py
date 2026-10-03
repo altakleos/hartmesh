@@ -5,7 +5,8 @@ Kept apart from report.py so each file stays within the skill scanner's analysis
 
 from __future__ import annotations
 
-from decimal import Decimal
+import math
+from decimal import Decimal, localcontext
 
 import pandas as pd
 from business_report_common import (
@@ -14,6 +15,7 @@ from business_report_common import (
     ROLE_HEADINGS,
     ROLES,
     BuildContext,
+    InputError,
     Period,
     capitalize,
     format_value,
@@ -43,9 +45,21 @@ def _period_rows(ctx: BuildContext, period: Period) -> pd.DataFrame:
     return ctx.all_rows.loc[in_period(ctx.all_rows["date"], period)]
 
 
+def _amount_sum(values: pd.Series) -> float:
+    # Keep fractional cents and small amounts between large cancelling values.
+    amounts = [Decimal(str(value)) for value in values.fillna(0).tolist()]
+    with localcontext() as context:
+        if amounts:
+            span = max(value.adjusted() for value in amounts) - min(value.as_tuple().exponent for value in amounts)
+            context.prec = max(context.prec, span + len(str(len(amounts))) + 2)
+        total = float(sum(amounts, Decimal(0)))
+    if not math.isfinite(total):
+        raise InputError("The amount total exceeds the supported numeric range. Reduce the amounts before building the report.")
+    return total
+
+
 def _revenue(rows: pd.DataFrame) -> float:
-    # Summed as decimals of each value's shortest repr, so five rows of 1.005 total 5.025, not 5.02499…
-    return float(sum((Decimal(repr(value)) for value in rows["amount"].fillna(0).tolist()), Decimal(0)))
+    return _amount_sum(rows["amount"])
 
 
 def _pct_change(current: float, previous: float) -> float | None:
@@ -58,20 +72,20 @@ def _group_table(rows: pd.DataFrame, key: str, first_heading: str, records_headi
     """One row per distinct value, biggest revenue first, the long tail folded into one 'Other' row."""
 
     grouped = rows.groupby(key, sort=False, dropna=False)
-    summary = pd.DataFrame({"count": grouped.size(), "revenue": grouped["amount"].sum(min_count=0)})
+    summary = pd.DataFrame({"count": grouped.size(), "revenue": grouped["amount"].agg(_amount_sum)})
     summary["revenue"] = summary["revenue"].fillna(0)
     if unpaid:
-        summary["unpaid"] = rows.loc[rows["status_group"] == "unpaid"].groupby(key, sort=False, dropna=False)["amount"].sum(min_count=0)
+        summary["unpaid"] = rows.loc[rows["status_group"] == "unpaid"].groupby(key, sort=False, dropna=False)["amount"].agg(_amount_sum)
         summary["unpaid"] = summary["unpaid"].fillna(0)
     summary = summary.sort_values(["revenue", "count"], ascending=[False, False])
-    total_revenue = float(summary["revenue"].sum())
+    total_revenue = _amount_sum(summary["revenue"])
     total_count = int(summary["count"].sum())
     if limit is not None and len(summary) > limit:
         head, tail = summary.iloc[:limit], summary.iloc[limit:]
         if other_row:
-            other = pd.DataFrame({"count": [int(tail["count"].sum())], "revenue": [float(tail["revenue"].sum())]}, index=[f"Other ({len(tail)} {plural_noun})"])
+            other = pd.DataFrame({"count": [int(tail["count"].sum())], "revenue": [_amount_sum(tail["revenue"])]}, index=[f"Other ({len(tail)} {plural_noun})"])
             if unpaid:
-                other["unpaid"] = [float(tail["unpaid"].sum())]
+                other["unpaid"] = [_amount_sum(tail["unpaid"])]
             summary = pd.concat([head, other])
         else:
             summary = head
@@ -91,7 +105,7 @@ def _group_table(rows: pd.DataFrame, key: str, first_heading: str, records_headi
     if unpaid:
         columns.append("Unpaid")
         formats.append("currency")
-        totals.append(number(float(summary["unpaid"].sum())))
+        totals.append(number(_amount_sum(summary["unpaid"])))
     if share:
         columns.append("Share")
         formats.append("percent")
@@ -176,7 +190,7 @@ def build_report(ctx: BuildContext, previous_draft: int, compute_checks) -> tupl
         notes.append(f"Comparison with {last_year.label}: not included, the files have no rows for that period.")
 
     if has_status_groups:
-        unpaid = float(rows.loc[rows["status_group"] == "unpaid", "amount"].fillna(0).sum())
+        unpaid = _revenue(rows.loc[rows["status_group"] == "unpaid"])
         kpis.append({"id": "unpaid", "label": "Unpaid", "value": number(unpaid), "format": "currency"})
     cancelled = int((rows["status_group"] == "cancelled").sum()) if has_status_groups else 0
     zero_amount = int((rows["amount"].fillna(0) == 0).sum())
@@ -318,11 +332,11 @@ def _section_summary(ctx: BuildContext, state: dict) -> dict:
             sentences.append(f"That is {format_value(abs(pct), 'percent')} {direction} {state['previous'].label} ({format_value(_revenue(state['previous_rows']), 'currency', currency)}).")
     if options.summary_length != "short":
         if state["has"]["category"] and state["revenue"]:
-            by_category = rows.groupby("category")["amount"].sum().sort_values(ascending=False)
+            by_category = rows.groupby("category")["amount"].agg(_amount_sum).sort_values(ascending=False)
             share = round_half_up(float(by_category.iloc[0]) / state["revenue"] * 100, 1)
             sentences.append(f"{by_category.index[0]} was the largest {vocab(ctx.profile, 'category', 'category')} at {format_value(share, 'percent')} of {vocab(ctx.profile, 'amount', 'revenue')}.")
         if state["has"]["person"] and state["revenue"]:
-            by_person = rows.groupby("person").agg(revenue=("amount", "sum"), count=("amount", "size")).sort_values("revenue", ascending=False)
+            by_person = rows.groupby("person").agg(revenue=("amount", _amount_sum), count=("amount", "size")).sort_values("revenue", ascending=False)
             leader_count = int(by_person["count"].iloc[0])
             sentences.append(f"{by_person.index[0]} led with {format_value(float(by_person['revenue'].iloc[0]), 'currency', currency)} across {format_value(leader_count, 'integer')} {plural(leader_count, record, records)}.")
         if state["has_status_groups"]:
@@ -486,7 +500,7 @@ def _section_actions(ctx: BuildContext, state: dict) -> dict:
         if pct is not None and pct < 0:
             bullets.append(f"{capitalize(vocab(ctx.profile, 'amount', 'revenue'))} was {format_value(abs(pct), 'percent')} below {state['previous'].label}; check whether fewer {records} or smaller tickets drove it.")
     if state["has"]["category"] and state["revenue"]:
-        by_category = rows.groupby("category")["amount"].sum().sort_values(ascending=False)
+        by_category = rows.groupby("category")["amount"].agg(_amount_sum).sort_values(ascending=False)
         share = round_half_up(float(by_category.iloc[0]) / state["revenue"] * 100, 1)
         if share >= 50:
             bullets.append(f"{by_category.index[0]} is {format_value(share, 'percent')} of {vocab(ctx.profile, 'amount', 'revenue')}; a slow month there moves the whole business.")

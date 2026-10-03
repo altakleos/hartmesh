@@ -28,6 +28,13 @@ APIs (Linux/macOS) and fail explicitly on unsupported hosts. Interrupted provide
 updates settle their database and active configuration changes before accepting
 another edit; refresh settings to see whether the interrupted update completed.
 
+Business reports retain source precision in their numeric data and Excel formulas,
+rounding monetary values only for display. Malformed amount cells are reported as
+unreadable instead of having digits silently extracted. Conflicting currencies
+across files, amount labels or explicit currency columns stop the build;
+`--currency` supplies a unit for unlabeled inputs and does not convert money.
+See the [business-report guide](skills/public/business-report/SKILL.md).
+
 ## Sister Projects
 
 <img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />

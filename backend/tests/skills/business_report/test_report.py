@@ -175,27 +175,24 @@ def test_script_installs_nothing_never_shells_out_and_runs_on_the_image_python()
         assert "importlib" not in source, module.name
 
 
-def test_missing_document_library_exits_with_a_message_naming_the_image(tmp_path, capsys) -> None:
+def test_missing_document_library_exits_with_a_message_naming_the_image(tmp_path, capsys, monkeypatch) -> None:
     shadow = tmp_path / "shadow"
     shadow.mkdir()
     (shadow / "docx.py").write_text("raise ImportError('shadowed for the test')\n", encoding="utf-8")
-    sys.path.insert(0, str(shadow))
+    monkeypatch.syspath_prepend(str(shadow))
+    # Other script test modules may already have loaded this dependency chain.
+    monkeypatch.delitem(sys.modules, "business_report_render", raising=False)
     for name in [key for key in sys.modules if key == "docx" or key.startswith("docx.")]:
-        sys.modules.pop(name)
+        monkeypatch.delitem(sys.modules, name)
+    spec = importlib.util.spec_from_file_location("business_report_shadowed", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    sys.dont_write_bytecode = True
     try:
-        spec = importlib.util.spec_from_file_location("business_report_shadowed", SCRIPT)
-        module = importlib.util.module_from_spec(spec)
-        previous = sys.dont_write_bytecode
-        sys.dont_write_bytecode = True
-        try:
-            with pytest.raises(SystemExit) as raised:
-                spec.loader.exec_module(module)
-        finally:
-            sys.dont_write_bytecode = previous
+        with pytest.raises(SystemExit) as raised:
+            spec.loader.exec_module(module)
     finally:
-        sys.path.remove(str(shadow))
-        for name in [key for key in sys.modules if key == "docx" or key.startswith("docx.")]:
-            sys.modules.pop(name)
+        sys.dont_write_bytecode = previous
 
     assert raised.value.code == 2
     assert "docker/sandbox/Dockerfile" in capsys.readouterr().err
@@ -905,7 +902,8 @@ def test_sub_cent_amounts_are_not_withheld(report, tmp_path, capsys) -> None:
     code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
     assert code == 0, err
     built = _read_report(tmp_path / "out")
-    assert built["kpis"][0]["value"] == 5.03
+    assert Decimal(str(built["kpis"][0]["value"])) == sum([Decimal("1.005")] * 5)
+    assert report.format_value(built["kpis"][0]["value"], "currency") == "$5.03"
     assert next(check for check in built["checks"] if check["id"] == "totals_reconcile")["status"] == "pass"
 
 
@@ -914,7 +912,8 @@ def test_european_amounts_are_read_consistently_by_both_readers(report, tmp_path
     code, out, err = _build(report, capsys, tmp_path / "out", str(path), "--period", "2026-08")
     assert code == 0, err
     built = _read_report(tmp_path / "out")
-    assert built["kpis"][0]["value"] == 7469.13
+    assert Decimal(str(built["kpis"][0]["value"])) == sum(Decimal(value) for value in ("1234.56", "2000", "3000", "1234.567"))
+    assert report.format_value(built["kpis"][0]["value"], "currency") == "$7,469.13"
     assert built["meta"]["build"]["mapping"]["amount"] == "Betrag"
     assert report.detect_number_style(["1.234,56", "2.000,00"]) == "eu"
     assert report.detect_number_style(["1,234.56", "12.50"]) == "us"

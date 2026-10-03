@@ -110,3 +110,12 @@ assignment. Use offline transports. Detection is not behavioral defense; do not 
 the final model input from an isolated hook test. `test_jev_screening_policy.py` uses
 the host descriptor builder to pin policy identity; hash endpoint/prompt text and
 never project credential values.
+
+## Business report numeric contracts
+
+Use independently specified amounts or `csv` + `Decimal` expectations for report
+parsing and reconciliation regressions. Cover currency evidence across all files
+and rows, including explicit currency columns and preference conflicts. Report
+JSON and XLSX cells retain numeric precision; rounding belongs to display formats.
+Check actual XLSX formula operands and cached values, including grouped totals,
+averages and fractional cents, rather than comparing two rounded code paths.
