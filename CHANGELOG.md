@@ -43,6 +43,19 @@ additive. Delivery receipts may carry `verification.scan_complete: false` with
 no disclosed paths when output verification is incomplete. `/health/ready` adds
 a `redis` component; Redis failures return 503 while `/health` remains liveness.
 
+### Verification
+
+- All five [candidate image builds](https://github.com/altakleos/hartmesh/actions/runs/37160174963)
+  passed. Their immutable digests passed signed provenance and build-input checks.
+- [Exact-image browser acceptance](https://github.com/altakleos/hartmesh/actions/runs/37160477084)
+  passed with both SQLite and PostgreSQL/Redis, using real application services
+  and scripted inference. It covers authentication, uploads, streaming, file
+  delivery and sharing, history, account exports and model-error handling.
+- The exact sandbox candidate passed restricted and slim native-Docker smoke
+  tests, including cancellation and PDF, Word and Excel report generation.
+  VM infrastructure, gVisor isolation, OIDC and real-model qualification remain
+  with consumers.
+
 ### Schema changes
 
 No database schema changes since `v2.2.0+hartmesh.39`.
