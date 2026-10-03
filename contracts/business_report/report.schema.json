@@ -317,6 +317,62 @@
                 "type": "string",
                 "minLength": 1
               }
+            },
+            "recheck": {
+              "type": "object",
+              "additionalProperties": false,
+              "description": "Effective calculation choices for independently checking this saved draft. Optional for reports built before these choices were recorded.",
+              "required": [
+                "profile",
+                "mappings",
+                "comparisons",
+                "top_n",
+                "period_was_given",
+                "summary_length"
+              ],
+              "properties": {
+                "profile": {
+                  "type": "object"
+                },
+                "mappings": {
+                  "type": "array",
+                  "minItems": 1,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": {
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    }
+                  }
+                },
+                "comparisons": {
+                  "type": "array",
+                  "items": {
+                    "enum": [
+                      "previous_period",
+                      "same_period_last_year"
+                    ]
+                  }
+                },
+                "top_n": {
+                  "type": [
+                    "integer",
+                    "null"
+                  ],
+                  "minimum": 1
+                },
+                "period_was_given": {
+                  "type": "boolean"
+                },
+                "summary_length": {
+                  "enum": [
+                    "short",
+                    "standard"
+                  ]
+                }
+              }
             }
           }
         },

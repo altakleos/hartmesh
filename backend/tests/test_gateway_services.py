@@ -4252,6 +4252,26 @@ def _assemble_authz_run_config(request_config: dict, request, *, body_context: d
 class TestInjectAuthenticatedUserContextAuthz:
     """Verify is_internal and authz_attributes anti-forgery in inject_authenticated_user_context."""
 
+    @pytest.mark.parametrize("section", ["context", "configurable"])
+    @pytest.mark.parametrize("auth_source", ["session", AUTH_SOURCE_INTERNAL])
+    def test_runtime_presentation_is_never_caller_owned(self, section, auth_source):
+        from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
+
+        key = RUNTIME_PRESENTED_FILES_CONTEXT_KEY
+        forged = {key: ["/mnt/user-data/outputs/unpresented.txt"]}
+        config = _assemble_authz_run_config({section: forged}, _make_request_with_auth_source(auth_source), body_context=forged)
+        assert key not in config.get("context", {})
+        assert key not in config.get("configurable", {})
+
+    def test_embedded_worker_discards_caller_runtime_presentation(self):
+        from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
+        from deerflow.runtime.runs.worker import _build_runtime_context
+
+        key = RUNTIME_PRESENTED_FILES_CONTEXT_KEY
+        context = _build_runtime_context("thread", "run", {key: ["/mnt/user-data/outputs/unpresented.txt"], "model_name": "test"})
+        assert key not in context
+        assert context["model_name"] == "test"
+
     def test_clears_forged_is_internal_from_context_section(self):
         """Client forges is_internal=True via body.config['context'] → must be cleared."""
         request = _make_request_with_auth_source("session")

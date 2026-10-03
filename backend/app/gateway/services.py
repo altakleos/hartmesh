@@ -85,6 +85,7 @@ from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
 from deerflow.runtime.keyed_lock import KeyedLockTable
+from deerflow.runtime.presented_files import RUNTIME_PRESENTED_FILES_CONTEXT_KEY
 from deerflow.runtime.runs.naming import resolve_root_run_name
 from deerflow.runtime.secret_context import (
     LegacyRunMetadataSecretError,
@@ -633,6 +634,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "__run_tool_progress_recorder",
             "langgraph_auth_user",
             "langgraph_auth_user_id",
+            RUNTIME_PRESENTED_FILES_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             # Server-owned pinned project snapshot (spec §7.1): resolved once
             # at admission from threads_meta; a client-supplied value must

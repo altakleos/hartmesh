@@ -726,18 +726,22 @@ def parse_dates(series: pd.Series, order: str | None = None) -> pd.Series:
         {"format": "mixed", "dayfirst": dayfirst},
         {"format": "mixed", "dayfirst": dayfirst, "utc": True},
     )
-    best = None
+    result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
     for kwargs in attempts:
-        parsed = _to_datetime(texts, **kwargs)
+        # A majority format must not hide valid minority dates. Later parsers
+        # only fill unresolved cells, preserving earlier ISO/timezone readings.
+        unresolved = texts[result.isna() & texts.notna()]
+        if unresolved.empty:
+            break
+        parsed = _to_datetime(unresolved, **kwargs)
         if parsed is None:
             continue
-        if int(parsed.notna().sum()) >= 0.9 * present:
-            return parsed
-        if best is None or int(parsed.notna().sum()) > int(best.notna().sum()):
-            best = parsed
-    if best is None:
-        return pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
-    return best
+        # pandas 3 may return microseconds for dates outside the nanosecond
+        # range. Keep the report's stable datetime64[ns] contract; such values
+        # remain unresolved instead of overflowing during the merge.
+        valid = parsed.loc[parsed.between(pd.Timestamp.min, pd.Timestamp.max)].astype("datetime64[ns]")
+        result.loc[valid.index] = valid
+    return result
 
 
 def _currency_evidence(frame: pd.DataFrame, amount_column: str | None) -> dict[str, str]:
@@ -813,7 +817,7 @@ def apply_mapping(frame: pd.DataFrame, roles: dict[str, str | None]) -> CleanFra
     date_column, amount_column = roles.get("date"), roles.get("amount")
     if date_column is None or amount_column is None:
         raise InputError("A date column and an amount column are required.")
-    date_texts = [to_text(value) for value in _sample(frame[date_column])] if not pd.api.types.is_datetime64_any_dtype(frame[date_column]) else []
+    date_texts = frame[date_column].map(to_text).tolist() if not pd.api.types.is_datetime64_any_dtype(frame[date_column]) else []
     date_order = detect_date_order(date_texts)
     ambiguous_example = next((text for text in date_texts if DMY_PATTERN.match(text)), None) if date_order == "ambiguous" else None
     dates = parse_dates(frame[date_column], date_order)
@@ -869,7 +873,7 @@ def _rows_per_month(dates, counted: str = "") -> str:
     return f", {heading}: " + ", ".join(f"{month}: {int(count)}" for month, count in listed.items())
 
 
-def prepare(sources: list[str], period_text: str | None, options: BuildOptions, mapping_override: dict | None, profile: dict) -> BuildContext:
+def prepare(sources: list[str], period_text: str | None, options: BuildOptions, mapping_override: dict | None, profile: dict, *, resolved_mappings: list[dict] | None = None) -> BuildContext:
     """Read, map, clean and filter the inputs; raises DecisionNeeded when a question is due.
 
     ``period_text`` of ``None`` means the caller named no period -- the common
@@ -883,9 +887,11 @@ def prepare(sources: list[str], period_text: str | None, options: BuildOptions, 
         raise InputError("Give at least one CSV, XLSX or XLS file.")
     profile = copy.deepcopy(profile)
     tables = [read_table(source, profile) for source in sources]
+    if resolved_mappings is not None and len(resolved_mappings) != len(tables):
+        raise InputError("The saved mappings do not match the number of inputs; rebuild the report.")
     mappings: list[Mapping] = []
-    for table in tables:
-        mapping = resolve_mapping(table.frame, profile, mapping_override, table.name)
+    for index, table in enumerate(tables):
+        mapping = resolve_mapping(table.frame, profile, resolved_mappings[index] if resolved_mappings is not None else mapping_override, table.name)
         question = mapping_question(mapping, table.name, profile)
         if question:
             # The columns the file does have travel with the question. Without
@@ -962,6 +968,13 @@ def prepare(sources: list[str], period_text: str | None, options: BuildOptions, 
             raise InputError(f"No rows are left in {period.label}: {excluded}; {span}{_rows_per_month(kept['date'], 'after the exclusions')}.")
         # The files have no row in the period at all: count every row, as reading the file would.
         raise InputError(f"No rows fall in {period.label}; {span}{_rows_per_month(all_rows['date'])}.")
+    date_warnings = []
+    for table, clean in zip(tables, cleaned):
+        source = f"{table.name} ({table.sheet})" if table.sheet else table.name
+        if clean.date_order == "ambiguous" and clean.ambiguous_date_example:
+            date_warnings.append(f"{source}: Dates such as {clean.ambiguous_date_example} were read as month/day/year; say if they are day/month/year.")
+        elif clean.date_order == "mixed":
+            date_warnings.append(f"{source}: The date column mixes day/month and month/day values; rows were read one by one and some may sit in the wrong month.")
     return BuildContext(
         tables=tables,
         mappings=mappings,
@@ -973,8 +986,7 @@ def prepare(sources: list[str], period_text: str | None, options: BuildOptions, 
         currency=currency,
         currency_source=currency_source,
         number_style=cleaned[0].number_style,
-        date_order=cleaned[0].date_order,
-        ambiguous_date_example=next((clean.ambiguous_date_example for clean in cleaned if clean.ambiguous_date_example), None),
+        date_order_warnings=sorted(set(date_warnings)),
         excluded_rows=excluded_in_period,
         unparsed_dates=sum(clean.unparsed_dates for clean in cleaned),
         period_was_given=period_text is not None,
@@ -1030,7 +1042,7 @@ def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count:
         f"Used {format_value(count, 'integer')} of {format_value(total_rows, 'integer')} rows: {format_value(outside, 'integer')} {is_are(outside)} outside {period.label}, {format_value(ctx.unparsed_dates, 'integer')} had no usable date"
     )
     used_text += f", {format_value(ctx.excluded_rows, 'integer')} {'was' if ctx.excluded_rows == 1 else 'were'} excluded." if ctx.excluded_rows else "."
-    checks.append({"id": "rows_used", "status": "pass", "text": used_text})
+    checks.append({"id": "rows_used", "status": "warn" if ctx.unparsed_dates else "pass", "text": used_text})
     if not ctx.period_was_given:
         checks.append({"id": "period_choice", "status": "warn", "text": f"No period was asked for, so this report covers {period.label}, where most of the {records} in the file fall. Say another period to change it."})
 
@@ -1057,10 +1069,8 @@ def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count:
     else:
         checks.append({"id": "totals_reconcile", "status": "pass", "text": f"Totals match your file: {format_value(revenue, 'currency', currency)} across {format_value(count, 'integer')} {plural(count, record, records)}."})
 
-    if ctx.date_order == "ambiguous" and ctx.ambiguous_date_example:
-        checks.append({"id": "date_order", "status": "warn", "text": f"Dates such as {ctx.ambiguous_date_example} were read as month/day/year; say if they are day/month/year."})
-    elif ctx.date_order == "mixed":
-        checks.append({"id": "date_order", "status": "warn", "text": "The date column mixes day/month and month/day values; rows were read one by one and some may sit in the wrong month."})
+    if ctx.date_order_warnings:
+        checks.append({"id": "date_order", "status": "warn", "text": " ".join(ctx.date_order_warnings)})
 
     if "id" in rows.columns:
         ids = rows.loc[rows["id"].str.strip() != "", "id"]
@@ -1245,7 +1255,7 @@ def inspect_sources(sources: list[str], profile: dict) -> dict:
         entries = []
         for sheet_name, frame in tables:
             mapping = suggest_mapping(frame, profile)
-            date_texts = [to_text(value) for value in _sample(frame[mapping.roles["date"]])] if mapping.roles["date"] and not pd.api.types.is_datetime64_any_dtype(frame[mapping.roles["date"]]) else []
+            date_texts = frame[mapping.roles["date"]].map(to_text).tolist() if mapping.roles["date"] and not pd.api.types.is_datetime64_any_dtype(frame[mapping.roles["date"]]) else []
             date_order = detect_date_order(date_texts)
             dates = parse_dates(frame[mapping.roles["date"]], date_order) if mapping.roles["date"] else pd.Series(dtype="datetime64[ns]")
             suggestion = suggest_period(dates)
@@ -1628,15 +1638,65 @@ def command_checks(args) -> int:
     report_path = Path(args.report)
     report = _load_report(report_path)
     tenant_dir = resolve_tenant_dir(args.tenant)
-    profile = load_profile(report["meta"].get("profile"), tenant_dir)
     build = report["meta"]["build"]
-    options = BuildOptions(exclusions=list(build.get("exclusions", [])), currency=report["meta"]["currency"]["code"] if report["meta"]["currency"]["source"] == "preferences" else None)
-    ctx = prepare(args.files or build["sources"], report["meta"]["period"]["key"], options, build.get("mapping"), profile)
-    rebuilt, _charts = build_report(ctx, int(report["meta"]["draft"]) - 1, compute_checks)
-    checks = rebuilt["checks"] + [check for check in report.get("checks", []) if check["id"] == "prose_numbers"]
+    try:
+        recipe = build.get("recheck")
+        profile = recipe["profile"] if recipe else load_profile(report["meta"].get("profile"), tenant_dir)
+        options = BuildOptions(exclusions=list(build.get("exclusions", [])), currency=report["meta"]["currency"]["code"] if report["meta"]["currency"]["source"] == "preferences" else None)
+        if recipe:
+            options.comparisons = recipe["comparisons"]
+            options.top_n = recipe["top_n"]
+            options.summary_length = recipe["summary_length"]
+        ctx = prepare(args.files or build["sources"], report["meta"]["period"]["key"], options, None if recipe else build.get("mapping"), profile, resolved_mappings=recipe["mappings"] if recipe else None)
+        if recipe:
+            ctx.period_was_given = recipe["period_was_given"]
+        rebuilt, _charts = build_report(ctx, int(report["meta"]["draft"]) - 1, compute_checks)
+
+        # Uploaded timestamps may change when the identical export is copied.
+        # Hash, sheet and row count identify the input bytes actually checked.
+        def provenance(document):
+            return [(entry["sha256"], entry.get("sheet"), entry["rows"]) for entry in document["meta"]["inputs"]]
+
+        if provenance(report) != provenance(rebuilt):
+            checks = [{"id": "input_provenance", "status": "fail", "text": "The inputs differ from those recorded in this saved draft. Rebuild the report explicitly before using the new data."}]
+        elif _saved_figures(report, legacy=not recipe) != _saved_figures(rebuilt, legacy=not recipe):
+            checks = [{"id": "saved_figures", "status": "fail", "text": "The saved figures do not match the recorded inputs and build choices. Rebuild the report; this check has not changed it."}]
+        else:
+            checks = rebuilt["checks"]
+            # Recheck actual saved prose against independently computed figures,
+            # never numbers admitted by a previous prose-check message.
+            generated = {section["id"]: section.get("paragraphs", []) + section.get("bullets", []) for section in rebuilt["sections"]}
+            bad = [number for section in report["sections"] for text in section.get("paragraphs", []) + section.get("bullets", []) if text not in generated.get(section["id"], []) for number in verify_prose_numbers(rebuilt, text)[1]]
+            if bad or any(check["id"] == "prose_numbers" for check in report.get("checks", [])):
+                checks.append(
+                    {
+                        "id": "prose_numbers",
+                        "status": "fail" if bad else "pass",
+                        "text": f"Saved text contains numbers absent from the report: {', '.join(dict.fromkeys(bad))}. Correct the text explicitly." if bad else "Every number in the saved text matches the report.",
+                    }
+                )
+    except (InputError, DecisionNeeded, KeyError, TypeError, ValueError, OSError) as error:
+        checks = [{"id": "saved_figures", "status": "fail", "text": f"Could not verify this saved draft: {error}. Restore its inputs and build choices or rebuild explicitly."}]
     _write_json(report_path.parent / "checks.json", checks)
     print(checks_line({"checks": checks}))
     return EXIT_WITHHELD if any(check["status"] == "fail" for check in checks) else EXIT_OK
+
+
+def _saved_figures(report: dict, *, legacy: bool) -> dict:
+    """Computed facts, excluding editable prose and presentation preferences."""
+
+    def table(value):
+        # Early reports did not retain the effective profile. Re-resolving their
+        # explicit column mappings can change headings but not the figures.
+        return {key: item for key, item in value.items() if key != "columns" or not legacy} if value is not None else None
+
+    return {
+        "period": report["meta"]["period"],
+        "currency": report["meta"]["currency"]["code"],
+        "kpis": [{key: value for key, value in kpi.items() if key != "label" or not legacy} for kpi in report["kpis"]],
+        "tables": [{"id": section["id"], "table": table(section["table"])} for section in report["sections"] if "table" in section],
+        "rows": table(report["rows"]),
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
