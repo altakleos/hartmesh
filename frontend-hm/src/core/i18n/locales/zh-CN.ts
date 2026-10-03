@@ -247,6 +247,11 @@ export function createZhCN(product: string): Translations {
       reasoningEffortMediumDescription: "多层逻辑分析 + 基础验证",
       reasoningEffortHigh: "高",
       reasoningEffortHighDescription: "全维度逻辑推演 + 多路径验证 + 反推校验",
+      modelsLoading: "正在加载模型…",
+      modelsUnavailable:
+        "没有可用模型。请在账户设置中添加服务商密钥，或联系管理员。",
+      modelsLoadFailed: "模型加载失败。请重试，草稿会保留。",
+      modelsRetry: "重新加载模型",
       searchModels: "搜索模型...",
       surpriseMe: "小惊喜",
       surpriseMePrompt: "给我一个小惊喜吧",
@@ -771,6 +776,10 @@ export function createZhCN(product: string): Translations {
 
     // Chats
     chats: {
+      deleteChat: "删除对话？",
+      deleteConfirm: (title) => `删除“${title}”及其侧边对话？此操作无法撤销。`,
+      deleteFailed: "无法删除对话，请重试。",
+      deleting: "正在删除…",
       searchChats: "搜索对话",
       branchLabel: (title, parentTitle) => `${title}，分叉自 ${parentTitle}`,
       loadMoreToSearch: "加载更多以搜索更早的对话",
@@ -1417,7 +1426,7 @@ export function createZhCN(product: string): Translations {
       providerKeys: {
         title: "服务商密钥",
         description:
-          "AI 模型和网页搜索使用的密钥。在这里设置的密钥会替换工作区初始配置的密钥，从下一条消息开始生效。密钥保存后不会再显示。保存时不会向服务商验证密钥，因此输错的密钥会表现为回复失败。",
+          "用于 AI 模型和网页搜索的密钥。在此设置的密钥会从下一条消息起替代工作区原有密钥，保存后不会再次显示。你可以选择先测试密钥；保存时不会自动测试。",
         groupModels: "AI 模型",
         groupTools: "网页搜索与抓取",
         sourceProduct: "你的密钥",
@@ -1447,6 +1456,15 @@ export function createZhCN(product: string): Translations {
         cancel: "取消",
         keyLabel: "{provider} 密钥",
         keyPlaceholder: "粘贴密钥",
+        test: "测试密钥",
+        testing: "正在测试…",
+        testHint:
+          "可选：向服务商发送一个简短请求，不会保存密钥，服务商可能收取费用。",
+        testAccepted: "服务商已接受此密钥。密钥尚未保存。",
+        testRejected: "服务商拒绝了此密钥。你可以修改，也可以继续保存。",
+        testInconclusive: "服务商未能确认此密钥。你可以重试，也可以继续保存。",
+        testNotTestable: "此服务商不支持在这里测试密钥。你仍可保存密钥。",
+        testError: "密钥测试未完成。你可以重试，也可以继续保存。",
         saved: "已保存。你的下一条消息将使用你的 {provider} 密钥。",
         removedToEnvironment:
           "已移除。{provider} 已恢复使用工作区初始配置的密钥。",

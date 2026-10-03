@@ -24,6 +24,7 @@ import {
   useArtifactDeliveryContext,
 } from "../artifact-delivery";
 import { getBackendBaseURL } from "../config";
+import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
 import { useI18n } from "../i18n/hooks";
 import { getMessageRunId } from "../messages/run-duration";
 import {
@@ -83,7 +84,12 @@ export type ThreadStreamOptions = {
   onFinish?: (state: AgentThreadState) => void;
 };
 
-type SendMessageOptions = {
+export type SendMessageOptions = {
+  /** The composer's current catalog resolution, independent of settings effects. */
+  modelContext?: Pick<
+    LocalSettings["context"],
+    "model_name" | "mode" | "reasoning_effort"
+  >;
   additionalKwargs?: Record<string, unknown>;
   additionalInputMessages?: Message[];
   /**
@@ -97,7 +103,10 @@ type SendMessageOptions = {
 
 type ThreadDeleteClient = {
   threads: {
-    delete: (threadId: string) => Promise<unknown>;
+    delete: (
+      threadId: string,
+      options?: { signal: AbortSignal },
+    ) => Promise<unknown>;
     search: (query: Record<string, unknown>) => Promise<AgentThread[]>;
   };
 };
@@ -2368,7 +2377,12 @@ export function useThreadStream({
             context: {
               ...extraContext,
               ...context,
-              ...runFlagsForMode(context.mode, context.reasoning_effort),
+              ...options?.modelContext,
+              ...runFlagsForMode(
+                options?.modelContext?.mode ?? context.mode,
+                options?.modelContext?.reasoning_effort ??
+                  context.reasoning_effort,
+              ),
               thread_id: threadId,
             },
           },
@@ -3226,11 +3240,12 @@ export function useRunDetail(threadId: string, runId: string) {
   });
 }
 
-async function deleteLocalThreadData(threadId: string) {
+async function deleteLocalThreadData(threadId: string, signal: AbortSignal) {
   const response = await fetch(
     `${getBackendBaseURL()}/api/threads/${encodeURIComponent(threadId)}`,
     {
       method: "DELETE",
+      signal,
     },
   );
 
@@ -3250,20 +3265,49 @@ async function deleteLocalThreadData(threadId: string) {
 async function deleteThreadEverywhere(
   apiClient: ThreadDeleteClient,
   threadId: string,
+  assertActive: () => void,
+  signal: AbortSignal,
 ) {
-  await apiClient.threads.delete(threadId);
-  await deleteLocalThreadData(threadId);
+  await deleteRemoteThread(apiClient, threadId, assertActive, signal);
+  assertActive();
+  await deleteLocalThreadData(threadId, signal);
+  assertActive();
+}
+
+async function deleteRemoteThread(
+  apiClient: ThreadDeleteClient,
+  threadId: string,
+  assertActive: () => void,
+  signal: AbortSignal,
+) {
+  assertActive();
+  try {
+    await apiClient.threads.delete(threadId, { signal });
+  } catch (error) {
+    assertActive();
+    // The SDK exposes HTTP errors as Error instances with a numeric status.
+    // A prior attempt can have deleted the remote row before cleanup failed.
+    if (
+      !(error instanceof Error && "status" in error && error.status === 404)
+    ) {
+      throw error;
+    }
+  }
+  assertActive();
 }
 
 export async function findSidecarThreadIdsForParent(
   apiClient: ThreadSidecarSearchClient,
   parentThreadId: string,
+  assertActive: () => void = () => undefined,
+  signal?: AbortSignal,
 ) {
   const threadIds: string[] = [];
   const limit = 100;
   let offset = 0;
 
   while (true) {
+    assertActive();
     const response = await apiClient.threads.search({
       metadata: {
         [SIDECAR_METADATA_KEY]: true,
@@ -3274,7 +3318,9 @@ export async function findSidecarThreadIdsForParent(
       sortBy: "updated_at",
       sortOrder: "desc",
       select: ["thread_id", "metadata"],
+      ...(signal ? { signal } : {}),
     });
+    assertActive();
 
     for (const thread of response) {
       if (
@@ -3297,14 +3343,19 @@ export async function findSidecarThreadIdsForParent(
 async function deleteSidecarThreadsForParent(
   apiClient: ThreadDeleteClient,
   parentThreadId: string,
+  assertActive: () => void,
+  signal: AbortSignal,
 ) {
   let sidecarThreadIds: string[];
   try {
     sidecarThreadIds = await findSidecarThreadIdsForParent(
       apiClient,
       parentThreadId,
+      assertActive,
+      signal,
     );
   } catch (err) {
+    assertActive();
     console.warn(
       `Failed to look up sidecar threads for parent ${parentThreadId}; skipping cascade cleanup. Orphaned sidecar threads may remain.`,
       err,
@@ -3314,9 +3365,10 @@ async function deleteSidecarThreadsForParent(
 
   const results = await Promise.allSettled(
     sidecarThreadIds.map((threadId) =>
-      deleteThreadEverywhere(apiClient, threadId),
+      deleteThreadEverywhere(apiClient, threadId, assertActive, signal),
     ),
   );
+  assertActive();
 
   const failedDeletions = results
     .map((result, index) =>
@@ -3342,6 +3394,7 @@ async function deleteSidecarThreadsForParent(
 
 export function useDeleteThread() {
   const queryClient = useQueryClient();
+  const lifetime = useFileActionLifetime();
   const apiClient = getAPIClient() as ThreadDeleteClient;
   return useMutation({
     mutationFn: async ({
@@ -3351,16 +3404,28 @@ export function useDeleteThread() {
       threadId: string;
       onRemoteDeleted?: () => void;
     }) => {
+      const signal = lifetime.signal;
+      const assertActive = () => {
+        signal.throwIfAborted();
+        if (!lifetime.active)
+          throw new Error("The conversation's workspace is no longer active.");
+      };
       const deletedSidecarThreadIds = await deleteSidecarThreadsForParent(
         apiClient,
         threadId,
+        assertActive,
+        signal,
       );
-      await apiClient.threads.delete(threadId);
+      await deleteRemoteThread(apiClient, threadId, assertActive, signal);
+      assertActive();
       onRemoteDeleted?.();
-      await deleteLocalThreadData(threadId);
+      assertActive();
+      await deleteLocalThreadData(threadId, signal);
+      assertActive();
       return deletedSidecarThreadIds;
     },
     onSuccess(deletedSidecarThreadIds, { threadId }) {
+      if (!lifetime.active) return;
       const deletedThreadIds = new Set([threadId, ...deletedSidecarThreadIds]);
       queryClient.setQueriesData(
         {
@@ -3388,6 +3453,7 @@ export function useDeleteThread() {
     },
 
     onSettled() {
+      if (!lifetime.active) return;
       void queryClient.invalidateQueries({ queryKey: ["threads", "search"] });
       void queryClient.invalidateQueries({
         queryKey: INFINITE_THREADS_QUERY_KEY_PREFIX,

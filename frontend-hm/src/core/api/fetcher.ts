@@ -81,6 +81,9 @@ export async function fetch(
     headers,
     credentials: "include",
   });
+  // The account can retire after fetch resolves but before this continuation.
+  // Its late 401 must not navigate a newer signed-in account to the login page.
+  init?.signal?.throwIfAborted();
 
   if (res.status === 401) {
     // Include the search string: routes that carry their target in the query

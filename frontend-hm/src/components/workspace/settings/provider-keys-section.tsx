@@ -1,12 +1,15 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { fetch } from "@/core/api/fetcher";
+import { useFileActionLifetime } from "@/core/file-areas/file-action-lifetime";
 import { useI18n } from "@/core/i18n/hooks";
+import { MODELS_QUERY_KEY } from "@/core/models/hooks";
 
 import { SettingsSection } from "./settings-section";
 
@@ -128,6 +131,22 @@ async function readRefusal(res: Response): Promise<Refusal> {
 export function ProviderKeysSection() {
   const { t } = useI18n();
   const copy = t.settings.providerKeys;
+  const queryClient = useQueryClient();
+  const account = useFileActionLifetime();
+  const mutationActive = useRef(false);
+  const lifetime = useRef<AbortController | null>(null);
+  const loadGeneration = useRef(0);
+  const probe = useRef<AbortController | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<
+    "accepted" | "rejected" | "inconclusive" | "not_testable" | "error" | null
+  >(null);
+  const retireTest = () => {
+    probe.current?.abort();
+    probe.current = null;
+    setTesting(false);
+    setTestResult(null);
+  };
   const [status, setStatus] = useState<Status | null>(null);
   const [events, setEvents] = useState<KeyEvent[]>([]);
   const [editing, setEditing] = useState<string | null>(null);
@@ -136,25 +155,45 @@ export function ProviderKeysSection() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
 
-  const load = useCallback(async () => {
-    const res = await fetch("/api/provider-keys");
+  const load = useCallback(async (signal: AbortSignal) => {
+    const generation = ++loadGeneration.current;
+    const current = () =>
+      !signal.aborted && loadGeneration.current === generation;
+    if (!current()) return;
+    const res = await fetch("/api/provider-keys", { signal });
+    if (!current()) return;
     if (!res.ok) {
       setStatus(null);
       return;
     }
     const body = (await res.json()) as Status;
+    if (!current()) return;
     setStatus(body);
     if (body.available) {
-      const history = await fetch("/api/provider-keys/events?limit=5");
+      const history = await fetch("/api/provider-keys/events?limit=5", {
+        signal,
+      });
+      if (!current()) return;
       if (history.ok) {
-        setEvents(((await history.json()) as { events: KeyEvent[] }).events);
+        const nextEvents = ((await history.json()) as { events: KeyEvent[] })
+          .events;
+        if (current()) setEvents(nextEvents);
       }
     }
   }, []);
 
   useEffect(() => {
-    void load().catch(() => setStatus(null));
-  }, [load]);
+    const controller = new AbortController();
+    lifetime.current = controller;
+    void load(controller.signal).catch(() => {
+      if (!controller.signal.aborted) setStatus(null);
+    });
+    return () => {
+      controller.abort();
+      probe.current?.abort();
+      probe.current = null;
+    };
+  }, [load, queryClient]);
 
   if (!status?.available) {
     return null;
@@ -174,7 +213,71 @@ export function ProviderKeysSection() {
         ?.provider ?? variable,
     );
 
+  const refreshModelsAndStatus = async (signal: AbortSignal) => {
+    if (!account.active) return;
+    // The mutation already succeeded even if a later status refresh fails.
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: MODELS_QUERY_KEY }),
+      signal.aborted ? Promise.resolve() : load(signal),
+    ]);
+  };
+
+  const testKey = async (provider: ProviderKey) => {
+    if (probe.current) return;
+    retireTest();
+    const owner = lifetime.current;
+    if (!owner || owner.signal.aborted) return;
+    const controller = new AbortController();
+    probe.current = controller;
+    const current = () =>
+      !owner.signal.aborted &&
+      !controller.signal.aborted &&
+      probe.current === controller;
+    setTesting(true);
+    try {
+      const res = await fetch(
+        `/api/provider-keys/${encodeURIComponent(provider.provider)}/test`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key: draft }),
+          signal: controller.signal,
+        },
+      );
+      if (!current()) return;
+      if (!res.ok) {
+        setTestResult("error");
+        return;
+      }
+      const body = (await res.json()) as { result?: unknown };
+      if (!current()) return;
+      // Only fixed outcomes become UI text. Provider/model/reason fields never
+      // echo a credential or provider-controlled error into the page.
+      const result = body.result;
+      setTestResult(
+        result === "accepted" ||
+          result === "rejected" ||
+          result === "inconclusive" ||
+          result === "not_testable"
+          ? result
+          : "error",
+      );
+    } catch {
+      if (current()) setTestResult("error");
+    } finally {
+      if (current()) {
+        probe.current = null;
+        setTesting(false);
+      }
+    }
+  };
+
   const save = async (provider: ProviderKey) => {
+    const signal = lifetime.current?.signal;
+    if (!signal || signal.aborted || !account.active || mutationActive.current)
+      return;
+    mutationActive.current = true;
+    retireTest();
     setBusy(true);
     setError("");
     setNotice("");
@@ -185,22 +288,30 @@ export function ProviderKeysSection() {
           method: "PUT",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ key: draft }),
+          signal: account.signal,
         },
       );
+      if (!account.active) return;
       if (!res.ok) {
-        setError(refusalCopy(copy, await readRefusal(res)));
+        const refusal = await readRefusal(res);
+        if (!signal.aborted && account.active)
+          setError(refusalCopy(copy, refusal));
         return;
       }
-      setDraft("");
-      setEditing(null);
-      setNotice(
-        copy.saved.replace("{provider}", providerName(provider.provider)),
-      );
-      await load();
+      if (!signal.aborted) {
+        setDraft("");
+        setEditing(null);
+        setNotice(
+          copy.saved.replace("{provider}", providerName(provider.provider)),
+        );
+      }
+      await refreshModelsAndStatus(signal);
     } catch {
-      setError(t.settings.account.networkError);
+      if (!signal.aborted && account.active)
+        setError(t.settings.account.networkError);
     } finally {
-      setBusy(false);
+      mutationActive.current = false;
+      if (!signal.aborted && account.active) setBusy(false);
     }
   };
 
@@ -212,34 +323,48 @@ export function ProviderKeysSection() {
           providerName(provider.provider),
         ),
       )
-    ) {
+    )
       return;
-    }
+    const signal = lifetime.current?.signal;
+    if (!signal || signal.aborted || !account.active || mutationActive.current)
+      return;
+    mutationActive.current = true;
+    retireTest();
     setBusy(true);
     setError("");
     setNotice("");
     try {
       const res = await fetch(
         `/api/provider-keys/${encodeURIComponent(provider.provider)}`,
-        { method: "DELETE" },
+        { method: "DELETE", signal: account.signal },
       );
+      if (!account.active) return;
       if (!res.ok) {
-        setError(refusalCopy(copy, await readRefusal(res)));
+        const refusal = await readRefusal(res);
+        if (!signal.aborted && account.active)
+          setError(refusalCopy(copy, refusal));
         return;
       }
-      const body = (await res.json()) as { provider: ProviderKey };
-      const template =
-        body.provider.source === "environment"
-          ? copy.removedToEnvironment
-          : copy.removedToNone;
-      setNotice(
-        template.replace("{provider}", providerName(provider.provider)),
-      );
-      await load();
+      // Refresh on HTTP success, independent of response-body rendering.
+      const [body] = await Promise.all([
+        res.json() as Promise<{ provider: ProviderKey }>,
+        refreshModelsAndStatus(signal),
+      ]);
+      if (!signal.aborted && account.active) {
+        const template =
+          body.provider.source === "environment"
+            ? copy.removedToEnvironment
+            : copy.removedToNone;
+        setNotice(
+          template.replace("{provider}", providerName(provider.provider)),
+        );
+      }
     } catch {
-      setError(t.settings.account.networkError);
+      if (!signal.aborted && account.active)
+        setError(t.settings.account.networkError);
     } finally {
-      setBusy(false);
+      mutationActive.current = false;
+      if (!signal.aborted && account.active) setBusy(false);
     }
   };
 
@@ -298,6 +423,7 @@ export function ProviderKeysSection() {
                   variant="outline"
                   disabled={busy}
                   onClick={() => {
+                    retireTest();
                     setEditing(provider.variable);
                     setDraft("");
                     setError("");
@@ -337,9 +463,22 @@ export function ProviderKeysSection() {
               aria-label={copy.keyLabel.replace("{provider}", name)}
               placeholder={copy.keyPlaceholder}
               value={draft}
-              onChange={(e) => setDraft(e.target.value)}
+              disabled={busy}
+              onChange={(e) => {
+                retireTest();
+                setDraft(e.target.value);
+              }}
               required
             />
+            <Button
+              type="button"
+              size="sm"
+              variant="outline"
+              disabled={busy || testing || !draft.trim()}
+              onClick={() => void testKey(provider)}
+            >
+              {testing ? copy.testing : copy.test}
+            </Button>
             <Button type="submit" size="sm" disabled={busy || !draft.trim()}>
               {busy ? copy.saving : copy.save}
             </Button>
@@ -349,12 +488,29 @@ export function ProviderKeysSection() {
               variant="ghost"
               disabled={busy}
               onClick={() => {
+                retireTest();
                 setEditing(null);
                 setDraft("");
               }}
             >
               {copy.cancel}
             </Button>
+            <p className="text-muted-foreground basis-full text-xs">
+              {copy.testHint}
+            </p>
+            {testResult && (
+              <p role="status" className="basis-full text-sm">
+                {
+                  {
+                    accepted: copy.testAccepted,
+                    rejected: copy.testRejected,
+                    inconclusive: copy.testInconclusive,
+                    not_testable: copy.testNotTestable,
+                    error: copy.testError,
+                  }[testResult]
+                }
+              </p>
+            )}
           </form>
         )}
       </li>

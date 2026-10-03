@@ -76,6 +76,7 @@ import { useI18n } from "@/core/i18n/hooks";
 import { polishInputDraft } from "@/core/input-polish/api";
 import { isHiddenFromUIMessage } from "@/core/messages/utils";
 import { useModels } from "@/core/models/hooks";
+import { selectAvailableModel } from "@/core/models/selection";
 import {
   buildReferenceMessageMetadata,
   type SidecarContext,
@@ -94,6 +95,7 @@ import {
   type ComposerDraft,
   writeComposerDraft,
 } from "@/core/threads/composer-draft";
+import type { SendMessageOptions } from "@/core/threads/hooks";
 import {
   offersReasoningMode,
   reasoningEffortForMode,
@@ -217,11 +219,7 @@ function escapeXmlAttribute(value: string) {
     .replace(/>/g, "&gt;");
 }
 
-export type InputBoxSubmitOptions = {
-  additionalKwargs?: Record<string, unknown>;
-  additionalInputMessages?: Message[];
-  onSent?: () => void;
-};
+export type InputBoxSubmitOptions = SendMessageOptions;
 
 type VoiceRecognitionStartOptions = {
   focusAfterStart?: boolean;
@@ -287,6 +285,7 @@ export function InputBox({
   draftThreadId = threadId,
   draftAgentName,
   defaultModelName,
+  defaultModelLoading = false,
   initialValue,
   onContextChange,
   onFollowupsVisibilityChange,
@@ -322,6 +321,8 @@ export function InputBox({
    * (issue #4336). ``null`` / undefined = no agent default → use models[0].
    */
   defaultModelName?: string | null;
+  /** Wait for the agent default before replacing an unavailable saved model. */
+  defaultModelLoading?: boolean;
   initialValue?: string;
   onContextChange?: (
     context: Omit<
@@ -345,7 +346,13 @@ export function InputBox({
   const queryClient = useQueryClient();
   const searchParams = useSearchParams();
   const [modelDialogOpen, setModelDialogOpen] = useState(false);
-  const { models } = useModels();
+  const {
+    models,
+    hasLoadedModels,
+    error: modelsError,
+    isFetching: modelsFetching,
+    refetch: reloadModels,
+  } = useModels();
   const { user } = useAuth();
   const { thread, isMock } = useThread();
   const { attachments, textInput } = usePromptInputController();
@@ -549,40 +556,42 @@ export function InputBox({
     uploadLimits,
   ]);
 
+  const selectedModel = useMemo(
+    () =>
+      defaultModelLoading &&
+      !models.some((model) => model.name === context.model_name)
+        ? undefined
+        : selectAvailableModel(
+            models,
+            typeof context.model_name === "string"
+              ? context.model_name
+              : undefined,
+            defaultModelName,
+          ),
+    [models, context.model_name, defaultModelName, defaultModelLoading],
+  );
+  const modelSubmitError =
+    isMock || selectedModel
+      ? null
+      : defaultModelLoading
+        ? t.inputBox.modelsLoading
+        : hasLoadedModels
+          ? t.inputBox.modelsUnavailable
+          : modelsError
+            ? t.inputBox.modelsLoadFailed
+            : t.inputBox.modelsLoading;
+
   useEffect(() => {
-    if (models.length === 0) {
+    if (!selectedModel) return;
+    const nextMode = resolveChatMode(context.mode, selectedModel);
+    if (context.model_name === selectedModel.name && context.mode === nextMode)
       return;
-    }
-    const currentModel = models.find((m) => m.name === context.model_name);
-    // Prefer the active agent's configured default model over models[0] as the
-    // auto-selection fallback, so an agent chat respects the agent's own
-    // default instead of snapping to the first model (issue #4336).
-    const agentDefaultModel = defaultModelName
-      ? models.find((m) => m.name === defaultModelName)
-      : undefined;
-    const fallbackModel = currentModel ?? agentDefaultModel ?? models[0]!;
-    const nextModelName = fallbackModel.name;
-    const nextMode = resolveChatMode(context.mode, fallbackModel);
-
-    if (context.model_name === nextModelName && context.mode === nextMode) {
-      return;
-    }
-
     onContextChange?.({
       ...context,
-      model_name: nextModelName,
+      model_name: selectedModel.name,
       mode: nextMode,
     });
-  }, [context, models, defaultModelName, onContextChange]);
-
-  const selectedModel = useMemo(() => {
-    if (models.length === 0) {
-      return undefined;
-    }
-    return models.find((m) => m.name === context.model_name) ?? models[0];
-  }, [context.model_name, models]);
-
-  const resolvedModelName = selectedModel?.name;
+  }, [context, selectedModel, onContextChange]);
 
   const supportReasoningEffort = useMemo(
     () => selectedModel?.supports_reasoning_effort ?? false,
@@ -1041,6 +1050,10 @@ export function InputBox({
 
   const submitThreadMessage = useCallback(
     (message: PromptInputMessage) => {
+      if (modelSubmitError) {
+        toast.error(modelSubmitError);
+        return Promise.reject(new Error("No available model"));
+      }
       const files = message.files.flatMap((file) =>
         file.file instanceof File ? [file.file] : [],
       );
@@ -1075,6 +1088,15 @@ export function InputBox({
       const quoteContexts = quotes.map((quote) => quote.context);
       pendingDraftSubmissionKeyRef.current = draftKey;
       const submitOptions: InputBoxSubmitOptions = {
+        ...(selectedModel
+          ? {
+              modelContext: {
+                model_name: selectedModel.name,
+                mode: resolveChatMode(context.mode, selectedModel),
+                reasoning_effort: context.reasoning_effort,
+              },
+            }
+          : {}),
         ...(quotes.length
           ? {
               additionalKwargs: buildReferenceMessageMetadata(quoteContexts),
@@ -1097,33 +1119,17 @@ export function InputBox({
           sidecar?.clearConversationQuotes(quoteIds);
         },
       };
-      const submit = () => onSubmit?.(message, submitOptions);
-
-      // Guard against submitting before the initial model auto-selection
-      // effect has flushed thread settings to storage/state.
-      if (resolvedModelName && context.model_name !== resolvedModelName) {
-        onContextChange?.({
-          ...context,
-          model_name: resolvedModelName,
-          mode: resolveChatMode(context.mode, selectedModel),
-        });
-        return new Promise<void>((resolve, reject) => {
-          setTimeout(() => {
-            Promise.resolve(submit()).then(resolve).catch(reject);
-          }, 0);
-        });
-      }
-
-      return submit();
+      // Carry the resolved selection with this submission. Waiting for a
+      // settings effect cannot update an already captured onSubmit callback.
+      return onSubmit?.(message, submitOptions);
     },
     [
       context,
       draftKey,
       invalidateDraftSaveTimer,
-      onContextChange,
       onSubmit,
       reportUploadLimitViolations,
-      resolvedModelName,
+      modelSubmitError,
       selectedModel,
       sidecar,
       t.inputBox.suggestionPlaceholderRequired,
@@ -1160,6 +1166,10 @@ export function InputBox({
         status,
       });
       if (submitAction.kind === "goal") {
+        if (submitAction.command.kind === "set" && modelSubmitError) {
+          toast.error(modelSubmitError);
+          return Promise.reject(new Error("No available model"));
+        }
         if (
           submitAction.command.kind === "set" &&
           isGoalObjectiveTooLong(submitAction.command.objective)
@@ -1209,6 +1219,7 @@ export function InputBox({
       handleCompactCommand,
       handleGoalCommand,
       handleStopStreaming,
+      modelSubmitError,
       selectedSlashSkill,
       status,
       submitThreadMessage,
@@ -1306,6 +1317,17 @@ export function InputBox({
   const isComposerDisabled = disabled === true;
   const isMockThread = isMock === true;
   const composerLocked = isComposerDisabled || polishingInput;
+  const draftSubmitAction = getInputSubmitAction({
+    text: selectedSlashSkill
+      ? `/${selectedSlashSkill.name} ${textInput.value}`
+      : textInput.value,
+    fileCount: attachmentParts.length,
+    status,
+  });
+  const draftNeedsModel =
+    draftSubmitAction.kind === "message" ||
+    (draftSubmitAction.kind === "goal" &&
+      draftSubmitAction.command.kind === "set");
   const inputPolishUndoAvailable =
     !polishingInput &&
     inputPolishUndo !== null &&
@@ -2196,6 +2218,25 @@ export function InputBox({
           </div>
         )}
         <PromptInputHeader className="flex-wrap px-3 pt-3 pb-0 empty:hidden">
+          {modelSubmitError && (
+            <div
+              role="status"
+              className="text-muted-foreground flex w-full items-center gap-2 text-sm"
+              data-testid="model-availability"
+            >
+              <span>{modelSubmitError}</span>
+              {modelsError && (
+                <button
+                  type="button"
+                  className="underline"
+                  disabled={modelsFetching}
+                  onClick={() => void reloadModels()}
+                >
+                  {t.inputBox.modelsRetry}
+                </button>
+              )}
+            </div>
+          )}
           <PromptInputAttachments className="contents p-0">
             {(attachment) => (
               <div className="max-w-60">
@@ -2662,7 +2703,7 @@ export function InputBox({
                 >
                   <div className="flex min-w-0 flex-col text-left">
                     <ModelSelectorName className="text-xs font-normal">
-                      {selectedModel?.display_name}
+                      {selectedModel?.display_name ?? modelSubmitError}
                     </ModelSelectorName>
                   </div>
                 </PromptInputButton>
@@ -2694,7 +2735,12 @@ export function InputBox({
             </ModelSelector>
             <PromptInputSubmit
               className="rounded-full"
-              disabled={composerLocked}
+              disabled={
+                composerLocked ||
+                (status !== "streaming" &&
+                  draftNeedsModel &&
+                  Boolean(modelSubmitError))
+              }
               variant="outline"
               status={status}
               onClick={(e) => {

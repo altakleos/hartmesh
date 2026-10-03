@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 const artifact =
   "Synthetic acceptance artifact.\nUploaded text: UPLOAD-ACCEPTANCE-726\n";
 
-test("production Docker login, upload, streamed tools, files and persisted history", async ({
+test("production Docker login, upload, streamed tools, files, history and confirmed deletion", async ({
   page,
   context,
 }) => {
@@ -117,6 +117,55 @@ test("production Docker login, upload, streamed tools, files and persisted histo
     path: `${test.info().outputDir}/chat.png`,
     fullPage: true,
   });
+
+  const deletionRequests: string[] = [];
+  page.on("request", (request) => {
+    if (request.method() === "DELETE") deletionRequests.push(request.url());
+  });
+  const row = page
+    .locator("[data-sidebar='menu-item']")
+    .filter({ has: page.locator(`a[href='/workspace/chats/${thread}']`) });
+  await row.getByRole("button", { name: "More", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  const confirmation = page.getByRole("alertdialog");
+  await expect(confirmation).toBeVisible();
+  await page.screenshot({
+    path: `${test.info().outputDir}/delete-confirmation.png`,
+    fullPage: true,
+    animations: "disabled",
+  });
+  await confirmation
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  await expect(confirmation).not.toBeVisible();
+  expect(deletionRequests).toEqual([]);
+  expect((await context.request.get(artifactUrl)).status()).toBe(200);
+
+  await row.getByRole("button", { name: "More", exact: true }).click();
+  await page.getByRole("menuitem", { name: "Delete", exact: true }).click();
+  const removed = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === `/api/langgraph/threads/${thread}` &&
+      response.request().method() === "DELETE",
+  );
+  await confirmation
+    .getByRole("button", { name: "Delete", exact: true })
+    .click();
+  expect((await removed).ok()).toBe(true);
+  await expect(confirmation).not.toBeVisible();
+  await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+  expect((await context.request.get(artifactUrl)).status()).toBe(404);
+  await expect(row).toHaveCount(0);
+
+  // Kept and published copies survive removal of their source conversation.
+  await page.goto("/workspace/files");
+  await expect(
+    page.getByRole("link", { name: "acceptance.txt", exact: true }),
+  ).toBeVisible();
+  await page.getByRole("tab", { name: "Shared", exact: true }).click();
+  await expect(
+    page.getByRole("link", { name: "acceptance.txt", exact: true }),
+  ).toBeVisible();
   const logout = await context.request.post("/api/v1/auth/logout", { headers });
   expect(logout.ok()).toBe(true);
   await page.reload();

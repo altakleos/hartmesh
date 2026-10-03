@@ -23,6 +23,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   cancellation or a limit. Page extraction keeps its capacity slot until its
   background worker finishes, and interface feature queries share one request.
 
+### Interface
+
+- Saving or removing a provider key refreshes available models. Chat falls back
+  when its selected model disappears and preserves drafts when no model remains.
+- Administrators can explicitly test a provider key before saving, with clear
+  accepted, rejected, inconclusive and unsupported-test outcomes. Testing does
+  not save the key and is optional.
+- Sidebar conversation deletion requires confirmation, shows pending state and
+  keeps failures available for retry. Delayed deletion cannot redirect a later
+  conversation or continue requests after the account changes.
+
 ### Release assurance
 
 - Candidate publication refuses an existing release version and serializes

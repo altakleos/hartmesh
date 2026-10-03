@@ -268,6 +268,11 @@ export function createEnUS(product: string): Translations {
       reasoningEffortHigh: "High",
       reasoningEffortHighDescription:
         "Full-dimensional Logic Deduction + Multi-path Verification + Backward Check",
+      modelsLoading: "Loading models…",
+      modelsUnavailable:
+        "No models are available. Add a provider key in Account settings or contact an administrator.",
+      modelsLoadFailed: "Models could not be loaded. Retry to send your draft.",
+      modelsRetry: "Reload models",
       searchModels: "Search models...",
       surpriseMe: "Surprise",
       surpriseMePrompt: "Surprise me",
@@ -821,6 +826,11 @@ export function createEnUS(product: string): Translations {
 
     // Chats
     chats: {
+      deleteChat: "Delete conversation?",
+      deleteConfirm: (title) =>
+        `Delete “${title}” and its side chats? This cannot be undone.`,
+      deleteFailed: "Couldn't delete the conversation. Try again.",
+      deleting: "Deleting…",
       searchChats: "Search chats",
       branchLabel: (title, parentTitle) => `${title}, branch of ${parentTitle}`,
       loadMoreToSearch: "Load more to search older conversations",
@@ -1502,7 +1512,7 @@ export function createEnUS(product: string): Translations {
       providerKeys: {
         title: "Provider keys",
         description:
-          "The keys your AI models and web search use. A key you set here replaces the one your workspace was set up with, from the next message on. Once saved, a key is never shown again. Keys aren't checked with the provider when you save them, so a mistyped key shows up as a reply that fails.",
+          "The keys your AI models and web search use. A key you set here replaces the workspace key from the next message. Saved keys are never shown again. Testing is optional; saving does not test the key.",
         groupModels: "AI models",
         groupTools: "Web search and fetch",
         sourceProduct: "Your key",
@@ -1532,6 +1542,19 @@ export function createEnUS(product: string): Translations {
         cancel: "Cancel",
         keyLabel: "{provider} key",
         keyPlaceholder: "Paste the key",
+        test: "Test key",
+        testing: "Testing…",
+        testHint:
+          "Optional: sends a short request to the provider without saving the key. Provider charges may apply.",
+        testAccepted: "The provider accepted this key. It has not been saved.",
+        testRejected:
+          "The provider rejected this key. You can edit it or save it anyway.",
+        testInconclusive:
+          "The provider could not confirm this key. You can retry or save it anyway.",
+        testNotTestable:
+          "This provider cannot test keys here. You can still save the key.",
+        testError:
+          "The key test could not be completed. You can retry or save it anyway.",
         saved: "Saved. Your next message uses your {provider} key.",
         removedToEnvironment:
           "Removed. {provider} is back on the key your workspace was set up with.",

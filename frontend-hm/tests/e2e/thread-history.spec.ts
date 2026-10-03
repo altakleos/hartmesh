@@ -371,6 +371,12 @@ test.describe("Thread history", () => {
     await expect
       .poll(() => latestPageRequestCount, { timeout: 15_000 })
       .toBeGreaterThan(latestPageRequestsBeforeSubmit);
+    // The earlier wheel detached auto-follow. Move the virtualized viewport
+    // to the new tail before checking that its prompt remains in the history.
+    await scroller.evaluate((element) => {
+      element.scrollTop = element.scrollHeight;
+      element.dispatchEvent(new Event("scroll"));
+    });
     await expect(page.getByText(followUpPrompt)).toBeVisible();
 
     let preservedDurationFound = false;
@@ -515,6 +521,10 @@ test.describe("Thread history", () => {
     page,
   }) => {
     mockLangGraphAPI(page, { threads: THREADS });
+    const deletes: string[] = [];
+    page.on("request", (request) => {
+      if (request.method() === "DELETE") deletes.push(request.url());
+    });
 
     await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
     await expect(
@@ -533,12 +543,81 @@ test.describe("Thread history", () => {
     await inactiveThreadItem.hover();
     await inactiveThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    const confirmation = page.getByRole("alertdialog", {
+      name: "Delete conversation?",
+    });
+    await expect(confirmation).toBeVisible();
+    await expect(
+      confirmation.getByRole("button", { name: "Cancel" }),
+    ).toBeFocused();
+    expect(deletes).toEqual([]);
+    await confirmation.getByRole("button", { name: "Cancel" }).click();
+    await expect(confirmation).toBeHidden();
+    expect(deletes).toEqual([]);
+    await expect(sidebar.getByText("Second conversation")).toBeVisible();
+    await inactiveThreadItem.hover();
+    await inactiveThreadItem.getByRole("button", { name: /more/i }).click();
+    await page.getByRole("menuitem", { name: /delete/i }).click();
+    await page.getByTestId("thread-delete-confirm-button").click();
 
     await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
     await expect(
       page.getByText("Response in thread First conversation"),
     ).toBeVisible();
     await expect(sidebar.getByText("Second conversation")).toHaveCount(0);
+  });
+
+  test("conversation deletion stays pending, survives sidebar collapse and retries cleanup", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, { threads: THREADS });
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let cleanupRequests = 0;
+    await page.route(/\/api\/threads\/[^/]+$/, async (route) => {
+      if (route.request().method() !== "DELETE") return route.fallback();
+      cleanupRequests += 1;
+      if (cleanupRequests > 1) return route.fallback();
+      await gate;
+      return route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ detail: "Cleanup failed; retry" }),
+      });
+    });
+    await page.goto(`/workspace/chats/${MOCK_THREAD_ID}`);
+    const sidebar = page.locator("[data-sidebar='sidebar']");
+    const row = sidebar
+      .locator("[data-sidebar='menu-item']")
+      .filter({ hasText: "Second conversation" })
+      .first();
+    await row.hover();
+    await row.getByRole("button", { name: /more/i }).click();
+    await page.getByRole("menuitem", { name: /delete/i }).click();
+    const dialog = page.getByRole("alertdialog", {
+      name: "Delete conversation?",
+    });
+    await page.getByTestId("thread-delete-confirm-button").click();
+    await expect(dialog.getByRole("button", { name: "Cancel" })).toBeDisabled();
+    await expect(page.getByTestId("thread-delete-confirm-button")).toHaveText(
+      "Deleting…",
+    );
+    await page.keyboard.press("Escape");
+    await page
+      .locator('[data-slot="dialog-overlay"]')
+      .click({ position: { x: 5, y: 5 } });
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press("Control+b");
+    release();
+    await expect(dialog.getByRole("alert")).toHaveText("Cleanup failed; retry");
+    await expect(dialog.getByText(/Second conversation/)).toBeVisible();
+    expect(cleanupRequests).toBe(1);
+    await page.getByTestId("thread-delete-confirm-button").click();
+    await expect(dialog).toBeHidden();
+    expect(cleanupRequests).toBe(2);
+    await expect(page).toHaveURL(new RegExp(MOCK_THREAD_ID));
   });
 
   test("new chat does not show previous thread messages after client-side navigation", async ({
@@ -719,11 +798,18 @@ test.describe("Thread history", () => {
       })
       .first();
     await expect(recentThreadItem).toBeVisible();
+    const createdChatPath = await recentThreadItem
+      .getByRole("link")
+      .getAttribute("href");
+    expect(createdChatPath).toBeTruthy();
+    await expect(page).toHaveURL(new RegExp(`${createdChatPath}$`));
     await recentThreadItem.hover();
     await recentThreadItem.getByRole("button", { name: /more/i }).click();
     await page.getByRole("menuitem", { name: /delete/i }).click();
+    await page.getByTestId("thread-delete-confirm-button").click();
 
     await expect(page).toHaveURL(/\/workspace\/chats\/new$/);
+    await expect(page.getByRole("alert")).toHaveText("Local cleanup failed");
     await expect(page.getByText("Previous question")).toHaveCount(0);
     await expect(page.getByText("Hello from DeerFlow!")).toHaveCount(0);
     await expect(page.getByPlaceholder(/how can i assist you/i)).toBeVisible();

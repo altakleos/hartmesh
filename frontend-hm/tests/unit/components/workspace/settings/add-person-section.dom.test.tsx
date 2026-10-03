@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   cleanup,
   fireEvent,
@@ -23,6 +24,7 @@ rs.mock("@/core/auth/AuthProvider", () => ({
 }));
 
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
+import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 
@@ -68,19 +70,27 @@ function installGateway(signOnOnly: boolean) {
   return calls;
 }
 
+const clients: QueryClient[] = [];
 function renderPage() {
+  const client = new QueryClient();
+  clients.push(client);
   return render(
-    <I18nContext.Provider
-      value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-    >
-      <AccountSettingsPage />
-    </I18nContext.Provider>,
+    <QueryClientProvider client={client}>
+      <FileActionLifetimeProvider>
+        <I18nContext.Provider
+          value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+        >
+          <AccountSettingsPage />
+        </I18nContext.Provider>
+      </FileActionLifetimeProvider>
+    </QueryClientProvider>,
   );
 }
 
 afterEach(() => {
   rs.restoreAllMocks();
   cleanup();
+  clients.splice(0).forEach((client) => client.clear());
   role = "admin";
 });
 

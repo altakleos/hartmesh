@@ -9,7 +9,7 @@ export const MODELS_QUERY_KEY = ["models"] as const;
 export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
   const { data, isLoading, isFetching, error, refetch } = useQuery({
     queryKey: MODELS_QUERY_KEY,
-    queryFn: () => loadModels(),
+    queryFn: ({ signal }) => loadModels(signal),
     enabled,
     // Surface persistent gateway failures promptly while retaining one retry
     // for transient startup or network errors.
@@ -25,6 +25,7 @@ export function useModels({ enabled = true }: { enabled?: boolean } = {}) {
   });
   return {
     models: data?.models ?? [],
+    hasLoadedModels: data !== undefined,
     tokenUsageEnabled: data?.token_usage.enabled ?? false,
     isLoading,
     isFetching,

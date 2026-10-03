@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -23,8 +25,10 @@ rs.mock("@/core/auth/AuthProvider", () => ({
 }));
 
 import { AccountSettingsPage } from "@/components/workspace/settings/account-settings-page";
+import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+import { MODELS_QUERY_KEY, useModels } from "@/core/models/hooks";
 
 const KEY = "FAKE-CREDENTIAL-SENTINEL-NOT-A-KEY";
 const copy = enUS.settings.providerKeys;
@@ -62,7 +66,12 @@ function provider(
 
 type GatewayError = { status: number; code: string; message: string };
 
-function installGateway(status: object, putError?: GatewayError) {
+function installGateway(
+  status: object,
+  putError?: GatewayError,
+  probe?: () => Promise<Response>,
+  putResponse?: Promise<Response>,
+) {
   const calls: { url: string; init?: RequestInit }[] = [];
   let current = status;
   rs.spyOn(globalThis, "fetch").mockImplementation(
@@ -74,6 +83,26 @@ function installGateway(status: object, putError?: GatewayError) {
             ? input.toString()
             : input.url;
       calls.push({ url, init });
+      if (url.endsWith("/test"))
+        return (
+          probe?.() ?? Promise.resolve(Response.json({ result: "accepted" }))
+        );
+      if (url.endsWith("/api/models")) {
+        const providers = (current as { providers: Provider[] }).providers;
+        return Promise.resolve(
+          Response.json({
+            models: providers
+              .filter((p) => p.kind === "models" && p.source !== "none")
+              .map((p) => ({
+                name: p.provider,
+                display_name: p.provider,
+                model: p.provider,
+                id: p.provider,
+              })),
+            token_usage: { enabled: false },
+          }),
+        );
+      }
       if (url.includes("/setup-status")) {
         return Promise.resolve(
           Response.json({ needs_setup: false, sign_on_only: true }),
@@ -121,14 +150,24 @@ function installGateway(status: object, putError?: GatewayError) {
             provider("tavily", "TAVILY_API_KEY", "tools", "none"),
           ],
         };
-        return Promise.resolve(
-          Response.json({ action: "added", provider: {} }),
+        return (
+          putResponse ??
+          Promise.resolve(Response.json({ action: "added", provider: {} }))
         );
       }
       if (
         url.endsWith("/api/provider-keys/openai") &&
         init?.method === "DELETE"
       ) {
+        current = {
+          ...(current as { providers: Provider[] }),
+          providers: (current as { providers: Provider[] }).providers.map(
+            (p) =>
+              p.provider === "openai"
+                ? { ...p, source: "none", product_key: "absent" }
+                : p,
+          ),
+        };
         return Promise.resolve(
           Response.json({
             action: "removed",
@@ -156,19 +195,44 @@ const MANAGED = {
   ],
 };
 
-function renderPage() {
-  return render(
-    <I18nContext.Provider
-      value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
-    >
-      <AccountSettingsPage />
-    </I18nContext.Provider>,
+const clients: QueryClient[] = [];
+function ModelObserver() {
+  const { models } = useModels();
+  return (
+    <output data-testid="models">
+      {models.map((model) => model.name).join(",")}
+    </output>
   );
+}
+function renderPage(observeModels = false) {
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+  clients.push(queryClient);
+  const tree = (showSettings = true) => (
+    <QueryClientProvider client={queryClient}>
+      <FileActionLifetimeProvider>
+        <I18nContext.Provider
+          value={{ locale: "en-US", setLocale: () => undefined, t: enUS }}
+        >
+          {showSettings && <AccountSettingsPage />}
+          {observeModels && <ModelObserver />}
+        </I18nContext.Provider>
+      </FileActionLifetimeProvider>
+    </QueryClientProvider>
+  );
+  const rendered = render(tree());
+  return {
+    ...rendered,
+    queryClient,
+    closeSettings: () => rendered.rerender(tree(false)),
+  };
 }
 
 afterEach(() => {
   rs.restoreAllMocks();
   cleanup();
+  clients.splice(0).forEach((client) => client.clear());
   role = "admin";
 });
 
@@ -372,4 +436,239 @@ describe("provider keys in the account settings", () => {
       false,
     );
   });
+});
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((finish) => {
+    resolve = finish;
+  });
+  return { promise, resolve };
+}
+async function editKey(id = "anthropic", name = "Anthropic") {
+  const row = await screen.findByTestId(`provider-key-${id}`);
+  fireEvent.click(
+    Array.from(row.querySelectorAll("button")).find(
+      (button) =>
+        button.textContent === copy.set || button.textContent === copy.replace,
+    )!,
+  );
+  const input = screen.getByLabelText<HTMLInputElement>(
+    copy.keyLabel.replace("{provider}", name),
+  );
+  fireEvent.change(input, { target: { value: KEY } });
+  return input;
+}
+
+describe("provider key feedback and catalog freshness", () => {
+  it("refreshes a mounted, indefinitely cached model catalog after saving without a test", async () => {
+    const calls = installGateway(MANAGED);
+    renderPage(true);
+    await waitFor(() =>
+      expect(screen.getByTestId("models").textContent).toBe("openai"),
+    );
+    await editKey();
+    fireEvent.click(screen.getByRole("button", { name: copy.save }));
+    await waitFor(() =>
+      expect(screen.getByTestId("models").textContent).toBe("openai,anthropic"),
+    );
+    expect(
+      calls.filter((call) => call.url.endsWith("/api/models")),
+    ).toHaveLength(2);
+    expect(calls.some((call) => call.url.endsWith("/test"))).toBe(false);
+  });
+  it("refreshes the model catalog to empty after removing the final key", async () => {
+    installGateway({
+      ...MANAGED,
+      providers: [
+        provider("openai", "OPENAI_API_KEY", "models", "product", "set"),
+      ],
+    });
+    rs.spyOn(window, "confirm").mockReturnValue(true);
+    renderPage(true);
+    await waitFor(() =>
+      expect(screen.getByTestId("models").textContent).toBe("openai"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: copy.remove }));
+    await waitFor(() =>
+      expect(screen.getByTestId("models").textContent).toBe(""),
+    );
+  });
+  it("does not invalidate models when a save is refused", async () => {
+    const calls = installGateway(MANAGED, {
+      status: 422,
+      code: "key_invalid",
+      message: "invalid key",
+    });
+    renderPage(true);
+    await waitFor(() =>
+      expect(screen.getByTestId("models").textContent).toBe("openai"),
+    );
+    await editKey();
+    fireEvent.click(screen.getByRole("button", { name: copy.save }));
+    await screen.findByText("invalid key");
+    expect(
+      calls.filter((call) => call.url.endsWith("/api/models")),
+    ).toHaveLength(1);
+  });
+  it.each([
+    ["accepted", "The provider accepted this key. It has not been saved."],
+    [
+      "rejected",
+      "The provider rejected this key. You can edit it or save it anyway.",
+    ],
+    [
+      "inconclusive",
+      "The provider could not confirm this key. You can retry or save it anyway.",
+    ],
+    [
+      "not_testable",
+      "This provider cannot test keys here. You can still save the key.",
+    ],
+  ])(
+    "reports %s only after an explicit test and never saves",
+    async (result, message) => {
+      const calls = installGateway(MANAGED, undefined, async () =>
+        Response.json({ result, reason: KEY, model: KEY }),
+      );
+      const { queryClient } = renderPage();
+      const input = await editKey();
+      expect(calls.some((call) => call.url.endsWith("/test"))).toBe(false);
+      fireEvent.click(screen.getByRole("button", { name: "Test key" }));
+      await screen.findByText(message);
+      expect(input.value).toBe(KEY);
+      expect(calls.filter((call) => call.url.endsWith("/test"))).toHaveLength(
+        1,
+      );
+      expect(calls.some((call) => call.init?.method === "PUT")).toBe(false);
+      expect(
+        JSON.stringify(queryClient.getQueryCache().getAll()),
+      ).not.toContain(KEY);
+      expect(
+        screen
+          .getByRole("button", { name: copy.save })
+          .hasAttribute("disabled"),
+      ).toBe(false);
+      expect(document.body.textContent).not.toContain(KEY);
+    },
+  );
+  it.each(["edit", "provider", "cancel", "save"])(
+    "retires a pending probe on %s",
+    async (action) => {
+      const response = deferred<Response>();
+      const calls = installGateway(MANAGED, undefined, () => response.promise);
+      renderPage();
+      const input = await editKey();
+      fireEvent.click(screen.getByRole("button", { name: "Test key" }));
+      if (action === "edit")
+        fireEvent.change(input, { target: { value: "another-key" } });
+      if (action === "provider") await editKey("openai", "OpenAI");
+      if (action === "cancel")
+        fireEvent.click(screen.getByRole("button", { name: copy.cancel }));
+      if (action === "save") {
+        fireEvent.click(screen.getByRole("button", { name: copy.save }));
+        await screen.findByText(copy.saved.replace("{provider}", "Anthropic"));
+      }
+      expect(
+        calls.find((call) => call.url.endsWith("/test"))?.init?.signal?.aborted,
+      ).toBe(true);
+      await act(async () =>
+        response.resolve(Response.json({ result: "accepted" })),
+      );
+      expect(
+        screen.queryByText(
+          "The provider accepted this key. It has not been saved.",
+        ),
+      ).toBeNull();
+    },
+  );
+  it("does not follow a retired account's save with catalog or history requests", async () => {
+    const response = deferred<Response>();
+    const calls = installGateway(
+      MANAGED,
+      undefined,
+      undefined,
+      response.promise,
+    );
+    const { unmount, queryClient } = renderPage(true);
+    await waitFor(() =>
+      expect(screen.getByTestId("models").textContent).toBe("openai"),
+    );
+    await editKey();
+    fireEvent.click(screen.getByRole("button", { name: copy.save }));
+    unmount();
+    const before = calls.length;
+    await act(async () => response.resolve(Response.json({ provider: {} })));
+    expect(calls).toHaveLength(before);
+    expect(queryClient.getQueryState(MODELS_QUERY_KEY)?.isInvalidated).toBe(
+      false,
+    );
+  });
+});
+
+it("refreshes models when a save succeeds after closing settings in the same account", async () => {
+  const response = deferred<Response>();
+  const calls = installGateway(MANAGED, undefined, undefined, response.promise);
+  const { closeSettings } = renderPage(true);
+  await waitFor(() =>
+    expect(screen.getByTestId("models").textContent).toBe("openai"),
+  );
+  await editKey();
+  fireEvent.click(screen.getByRole("button", { name: copy.save }));
+  closeSettings();
+  const statusReads = calls.filter((call) =>
+    call.url.endsWith("/api/provider-keys"),
+  ).length;
+  await act(async () => response.resolve(Response.json({ provider: {} })));
+  await waitFor(() =>
+    expect(screen.getByTestId("models").textContent).toBe("openai,anthropic"),
+  );
+  expect(
+    calls.filter((call) => call.url.endsWith("/api/provider-keys")),
+  ).toHaveLength(statusReads);
+});
+
+it("retires a probe while its JSON body is still arriving", async () => {
+  const body = deferred<{ result: string }>();
+  const json = rs.fn(() => body.promise);
+  installGateway(
+    MANAGED,
+    undefined,
+    async () => ({ ok: true, json }) as unknown as Response,
+  );
+  renderPage();
+  const input = await editKey();
+  fireEvent.click(screen.getByRole("button", { name: copy.test }));
+  await waitFor(() => expect(json).toHaveBeenCalledTimes(1));
+  fireEvent.change(input, { target: { value: "replacement" } });
+  await act(async () => body.resolve({ result: "accepted" }));
+  expect(screen.queryByText(copy.testAccepted)).toBeNull();
+});
+
+it("aborts an in-flight models query when its owning cache is cleared", async () => {
+  const response = deferred<Response>();
+  const calls = installGateway(MANAGED);
+  const { queryClient } = renderPage(true);
+  await waitFor(() =>
+    expect(screen.getByTestId("models").textContent).toBe("openai"),
+  );
+  rs.spyOn(globalThis, "fetch").mockImplementation((_input, init) => {
+    calls.push({ url: "pending-models", init });
+    return response.promise;
+  });
+  let refresh!: Promise<void>;
+  act(() => {
+    refresh = queryClient.invalidateQueries({ queryKey: MODELS_QUERY_KEY });
+  });
+  const request = calls.find((call) => call.url === "pending-models");
+  expect(request?.init?.signal?.aborted).toBe(false);
+  const previousLocation = window.location.href;
+  act(() => queryClient.clear());
+  expect(request?.init?.signal?.aborted).toBe(true);
+  await act(async () => {
+    response.resolve(new Response(null, { status: 401 }));
+    await refresh;
+  });
+  expect(window.location.href).toBe(previousLocation);
+  expect(calls.filter((call) => call.url === "pending-models")).toHaveLength(1);
 });

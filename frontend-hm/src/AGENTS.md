@@ -25,9 +25,11 @@ cross-language contract.
    change, disposing queries and isolating late callbacks from the new client.
    Logout unmounts private UI before clearing the cookie; auth refreshes cannot
    restore an identity superseded by logout or another completed probe.
-   Workspace-level FileActionLifetimeProvider retires Files/Shared batches and
-   filename toasts with the account; ordinary page navigation keeps batches and
-   Undo alive. Retired actions cannot issue requests under a later session.
+   Workspace-level FileActionLifetimeProvider retires Files/Shared batches,
+   deletion, key-update follow-ups and filename toasts with the account;
+   navigation keeps batches and Undo alive. Deletion and key mutations use its
+   abort signal, including SDK retries. Retired actions cannot issue requests
+   under another session; aborted responses cannot redirect to login.
    Feature discovery uses one `["features"]` query per QueryClient. Branding,
    browser, MCP tasks, subagent batches, workspace presentation and Agents API
    hooks select from its raw response and share two retries; mount/focus still
@@ -35,6 +37,11 @@ cross-language contract.
    optional capabilities stay disabled, developer screens stay available, and
    Agents API keeps its last-known fallback. Do not split the transport cache
    by selected field or introduce a module-global feature cache.
+   Successful key save/removal invalidates models while the workspace is active,
+   even after Settings closes. Test key never persists credentials; draft/editor
+   changes retire probes, and unmount retires probes, status/history and UI
+   callbacks. Picker and submission share model fallback; an authoritative empty
+   catalog preserves the draft and prevents sending.
    Settings > Tools MCP switch calls the targeted `PATCH /api/mcp/config`
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates
@@ -147,6 +154,10 @@ Edit-and-rerun is deliberately latest-turn-only. `core/messages/utils.ts::getLat
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns composer busy-state wiring.
 - `src/app/workspace/chats/[thread_id]/page.tsx` owns branch-from-turn submission and navigation; sidecar `MessageList` instances do not receive the branch action.
 - `core/threads/thread-branch-tree.ts` projects only loaded, same-pin branch lineage into Recent chats. Missing, malformed, cross-pin, self, or cyclic parents stay top-level; unpinned groups follow their freshest descendant while pinned root order stays stable. `recent-chat-list.tsx` caps visual indentation without changing the recursive order.
+- Sidebar deletion confirmation lives outside virtualized rows to retain
+  pending results and retries. Confirm once, retain failures, and recheck the
+  route before redirecting. Each deletion step checks the workspace lifetime;
+  retirement prevents further requests and callbacks.
 - `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own edit-and-rerun submission wiring because the page must preserve normal/custom-agent run context; `MessageList` only detects the latest editable user turn and renders the inline editor.
 - `src/app/workspace/chats/[thread_id]/page.tsx` gates the Workspace Browser trigger and browser right panel on `/api/features -> browser_control.enabled`; `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` applies the same capability gate and additionally requires the Custom Agent's tool groups to be unrestricted or include `browser`. Default/failed feature discovery hides the browser control so optional backend installs do not show a dead Live socket.
 - `src/app/workspace/chats/[thread_id]/page.tsx` and `src/app/workspace/agents/[agent_name]/chats/[thread_id]/page.tsx` own active-goal display state for their composer overlays.
