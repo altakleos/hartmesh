@@ -673,6 +673,33 @@ def _write_outdated_config(path: Path) -> str:
 
 
 @pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
+@pytest.mark.parametrize(
+    "sandbox",
+    [
+        {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+        {"use": "deerflow.community.aio_sandbox:AioSandboxProvider", "image": "custom/sandbox:latest"},
+        {"use": "deerflow.community.aio_sandbox:AioSandboxProvider", "provisioner_url": "http://provisioner:8002"},
+        {"use": "deerflow.community.aio_sandbox:AioSandboxProvider", "image": "registry.example/verified@sha256:" + "a" * 64, "python_libraries_profile": "hartmesh"},
+    ],
+)
+def test_version_50_upgrade_preserves_sandbox_and_defaults_to_no_library_promise(tmp_path, sandbox):
+    config_path = tmp_path / "config.yaml"
+    original = yaml.safe_dump({"config_version": 50, "sandbox": sandbox})
+    config_path.write_text(original, encoding="utf-8")
+
+    result = _run_config_upgrade_in_checkout(tmp_path, DEER_FLOW_CONFIG_PATH=str(config_path), UV_NO_SYNC="1", UV_OFFLINE="1")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    upgraded = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    assert upgraded["config_version"] == _load_repo_example()["config_version"] >= 51
+    assert config_path.with_suffix(".yaml.bak").read_text(encoding="utf-8") == original
+    for key, value in sandbox.items():
+        assert upgraded["sandbox"][key] == value
+    validated = AppConfig.model_validate(upgraded)
+    assert validated.sandbox.python_libraries_profile == sandbox.get("python_libraries_profile")
+
+
+@pytest.mark.skipif(SCRIPT_BASH is None, reason="repo shell-script tests need Git Bash on Windows")
 def test_config_upgrade_targets_checkout_config_over_legacy_backend_copy(tmp_path):
     """With both copies present, upgrade the checkout config.yaml that `make dev` loads."""
     checkout = tmp_path / "checkout"

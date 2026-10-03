@@ -24,7 +24,7 @@
 # Everything else is copied through unchanged. Paths are literal because this
 # file cannot interpolate them: HARTMESH_DATA_DIR is therefore fixed at
 # /srv/hartmesh by this file (README: "Mount points").
-config_version: 50
+config_version: 51
 log_level: info
 
 models: []
@@ -67,6 +67,8 @@ auth:
 sandbox:
   use: deerflow.community.aio_sandbox:AioSandboxProvider
   image: ghcr.io/altakleos/hartmesh-sandbox@sha256:2ba9ae273d8a084fa6a96855c66a7e06caed8400c26748fddbe5ca71eb8c85d5
+  # The HartMesh image build asserts the imports promised to the lead agent.
+  python_libraries_profile: hartmesh
   port: 8080
   # Concurrent-sandbox ceiling from the memory budget (README: "Memory
   # budget"): two 1 GiB slim sandboxes with their relays sit on the 5.0 GiB

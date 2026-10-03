@@ -27,7 +27,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from _router_auth_helpers import make_authed_test_app
@@ -127,6 +127,7 @@ class _Deployment:
         )
         monkeypatch.setattr(account_export, "memory_export_document", self._memory)
         monkeypatch.setattr(account_export, "owned_agent_documents", lambda user_id: self.agents.get(user_id))
+        monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", lambda: None)
         self.service = account_export.AccountExportService(self.app, paths=self.paths, config=lambda: self.config, spill_dir_name=lambda: SPILL_DIR)
 
     async def _memory(self, user_id: str, *, agent_name: str | None = None) -> dict | None:
@@ -1447,3 +1448,285 @@ def test_where_more_than_one_gateway_process_serves_it_is_unavailable(tmp_path, 
     assert account_export.runs_in_this_process(multi_gateway=False) is False
     monkeypatch.setenv("GATEWAY_WORKERS", "1")
     assert account_export.runs_in_this_process(multi_gateway=False) is True
+
+
+@pytest.fixture
+async def project_export(tmp_path, monkeypatch):
+    """Real owner-filtered SQL repositories and actual shelf bytes, without global persistence."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.projects.sql import ProjectDocumentRepository, ProjectRepository
+    from deerflow.persistence.user.model import UserRow
+    from deerflow.persistence.user.preferences import UserPreferencesRepository
+    from deerflow.projects.documents import shelf_relpath
+
+    deployment = _Deployment(tmp_path, monkeypatch)
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path}/export.db")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessions() as session:
+        session.add_all([UserRow(id=A_ID, email=PERSON_A.email), UserRow(id=B_ID, email=PERSON_B.email)])
+        await session.commit()
+    monkeypatch.setattr("deerflow.persistence.engine.get_session_factory", lambda: sessions)
+    projects = ProjectRepository(sessions)
+    documents = ProjectDocumentRepository(sessions)
+    deployment.app.state.project_repo = projects
+    deployment.app.state.project_document_repo = documents
+
+    async def document(project, data=b"Project original", name="report.txt", converted=None):
+        document_id = uuid4().hex
+        digest = hashlib.sha256(data).hexdigest()
+        relpath = shelf_relpath(project["id"], digest, document_id)
+        row = await documents.insert_active(project["id"], document_id=document_id, name=name, relpath=relpath, sha256=digest, size_bytes=len(data), user_id=project["user_id"])
+        assert row is not None
+        namespace = deployment.paths.user_projects_dir(project["user_id"]) / relpath
+        original = namespace / "original" / name
+        original.parent.mkdir(parents=True, exist_ok=True)
+        original.write_bytes(data)
+        if converted is not None:
+            derived = namespace / "derived" / "converted.md"
+            derived.parent.mkdir()
+            derived.write_bytes(converted)
+        return row, original
+
+    try:
+        yield SimpleNamespace(deployment=deployment, projects=projects, documents=documents, preferences=UserPreferencesRepository(sessions), sessions=sessions, document=document)
+    finally:
+        await deployment.service.close()
+        await engine.dispose()
+
+
+def _project_document_entry(project, document, suffix):
+    return f"projects/{project['id']}/documents/{document['id']}/{suffix}"
+
+
+@pytest.mark.anyio
+async def test_project_export_includes_owned_active_and_archived_work_but_no_trash_or_foreign_rows(project_export):
+    from deerflow.persistence.projects.model import ProjectDocumentRow
+
+    fixture = project_export
+    deployment = fixture.deployment
+    project = await fixture.projects.create(name="Ana project", instructions="Remember the assumptions", presentation={"color": "blue"}, user_id=A_ID)
+    archived = await fixture.projects.create(name="Archived work", user_id=A_ID)
+    removed = await fixture.projects.create(name="DELETED-PROJECT-MARKER", user_id=A_ID)
+    foreign = await fixture.projects.create(name=B_MARKER, user_id=B_ID)
+    active_doc, original = await fixture.document(project, converted=b"# Converted project document")
+    archived_doc, _ = await fixture.document(archived, data=b"Archived original")
+    trash_doc, _ = await fixture.document(project, data=b"TRASHED-DOCUMENT-MARKER")
+    await fixture.document(removed, data=b"DELETED-PROJECT-MARKER")
+    foreign_doc, _ = await fixture.document(foreign, data=B_MARKER.encode())
+    await fixture.documents.trash(trash_doc["id"], project_id=project["id"], user_id=A_ID)
+    await fixture.projects.delete(removed["id"], user_id=A_ID)
+    await fixture.projects.set_status(archived["id"], "archived", user_id=A_ID)
+    # Corrupt cross-owner membership must not defeat the document repository's owner filter.
+    async with fixture.sessions() as session:
+        row = await session.get(ProjectDocumentRow, foreign_doc["id"])
+        row.project_id = project["id"]
+        await session.commit()
+    (original.parent / "unreferenced-secret.txt").write_text("ORPHAN-MARKER", encoding="utf-8")
+    staging = deployment.paths.user_projects_dir(A_ID) / project["id"] / "documents" / ".staging"
+    staging.mkdir(parents=True)
+    (staging / "unfinished.txt").write_text("STAGING-MARKER", encoding="utf-8")
+    await deployment.thread(PERSON_A, "project-thread", "Project conversation")
+    record = await deployment.threads.get("project-thread", user_id=A_ID)
+    await deployment.threads._store.aput(THREADS_NS, "project-thread", {**record, "metadata": {"deerflow_project_id": project["id"]}})
+    await deployment.thread(PERSON_B, "foreign-thread", B_MARKER)
+
+    job = await deployment.export(PERSON_A)
+    assert job.state == "ready"
+    entries = _archive(job)
+    definitions = {row["id"]: row for row in json.loads(entries["projects.json"])}
+    assert set(definitions) == {project["id"], archived["id"]}
+    assert definitions[archived["id"]]["status"] == "archived"
+    assert definitions[project["id"]]["instructions"] == "Remember the assumptions"
+    assert definitions[project["id"]]["presentation"] == {"color": "blue"}
+    assert definitions[project["id"]]["conversation_ids"] == ["project-thread"]
+    exported_doc = definitions[project["id"]]["documents"][0]
+    assert exported_doc["sha256"] == active_doc["sha256"]
+    assert "stored_relpath" not in exported_doc
+    original_entry = _project_document_entry(project, active_doc, "original/report.txt")
+    converted_entry = _project_document_entry(project, active_doc, "derived/converted.md")
+    assert set(exported_doc["files"]) == {original_entry, converted_entry}
+    assert entries[original_entry] == b"Project original"
+    assert entries[converted_entry] == b"# Converted project document"
+    assert entries[_project_document_entry(archived, archived_doc, "original/report.txt")] == b"Archived original"
+    for marker in (B_MARKER, "DELETED-PROJECT-MARKER", "TRASHED-DOCUMENT-MARKER", "ORPHAN-MARKER", "STAGING-MARKER"):
+        assert not _anywhere(entries, marker)
+    manifest_files = {row["path"]: row for row in _manifest(job)["files"]}
+    for name in ("projects.json", original_entry, converted_entry):
+        assert manifest_files[name]["sha256"] == hashlib.sha256(entries[name]).hexdigest()
+    assert not _skipped(job)
+
+
+@pytest.mark.anyio
+async def test_project_export_definitions_and_preferences_need_no_user_directory(project_export):
+    fixture = project_export
+    project = await fixture.projects.create(name="Unstarted project", user_id=A_ID)
+    await fixture.preferences.patch(A_ID, {"notification_enabled": False, "model_name": "chosen-model", "mode": "pro", "reasoning_effort": None, "operator_secret": SENTINEL})
+    await fixture.preferences.patch(B_ID, {"model_name": B_MARKER})
+    assert not fixture.deployment.paths.user_dir(A_ID).exists()
+
+    job = await fixture.deployment.export(PERSON_A)
+    assert job.state == "ready"
+    entries = _archive(job)
+    assert json.loads(entries["preferences.json"]) == {"notification_enabled": False, "model_name": "chosen-model", "mode": "pro", "reasoning_effort": None}
+    assert json.loads(entries["projects.json"])[0]["id"] == project["id"]
+    assert not _anywhere(entries, SENTINEL)
+    assert not _anywhere(entries, B_MARKER)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("damage,reason", [("missing", "vanished"), ("changed", "changed"), ("linked_file", "link"), ("linked_parent", "link"), ("hard_link", "hard_link"), ("unsafe_path", "unsafe_name"), ("unsafe_name", "unsafe_name")])
+async def test_project_export_records_unsafe_or_missing_originals(project_export, tmp_path, damage, reason):
+    from deerflow.persistence.projects.model import ProjectDocumentRow
+
+    fixture = project_export
+    project = await fixture.projects.create(name="Project", user_id=A_ID)
+    document, original = await fixture.document(project)
+    outside = tmp_path / "outside.txt"
+    outside.write_text(SENTINEL, encoding="utf-8")
+    if damage == "missing":
+        original.unlink()
+    elif damage == "changed":
+        original.write_bytes(b"Changed size")
+    elif damage == "linked_file":
+        original.unlink()
+        original.symlink_to(outside)
+    elif damage == "linked_parent":
+        original.unlink()
+        original.parent.rmdir()
+        original.parent.symlink_to(tmp_path, target_is_directory=True)
+    elif damage == "hard_link":
+        original.unlink()
+        os.link(outside, original)
+    else:
+        async with fixture.sessions() as session:
+            row = await session.get(ProjectDocumentRow, document["id"])
+            if damage == "unsafe_path":
+                row.stored_relpath = "../../outside"
+            else:
+                row.name = "../outside.txt"
+            await session.commit()
+    job = await fixture.deployment.export(PERSON_A)
+    assert job.state == "ready"
+    entries = _archive(job)
+    exported_doc = json.loads(entries["projects.json"])[0]["documents"][0]
+    assert exported_doc["files"] == []
+    assert reason in _skipped(job).values()
+    assert not _anywhere(entries, SENTINEL)
+    assert not [name for name in entries if name.startswith("projects/")]
+
+
+@pytest.mark.anyio
+async def test_project_export_bytes_are_subject_to_existing_disk_quota(project_export, monkeypatch):
+    fixture = project_export
+    project = await fixture.projects.create(name="Project", user_id=A_ID)
+    await fixture.document(project, data=b"x" * 100)
+    monkeypatch.setattr(account_export.shutil, "disk_usage", _disk(free=50))
+    job = await fixture.deployment.export(PERSON_A)
+    assert job.state == "failed"
+    assert job.error == "no_space"
+    assert not job.parts
+
+
+def test_project_export_preference_fields_match_the_user_preference_contract():
+    from app.gateway.routers.user_preferences import Preferences
+
+    assert set(account_export.PREFERENCE_FIELDS) == set(Preferences.model_fields)
+
+
+@pytest.mark.anyio
+async def test_project_export_restored_document_keeps_its_old_storage_namespace(project_export):
+    fixture = project_export
+    source = await fixture.projects.create(name="Deleted source", user_id=A_ID)
+    target = await fixture.projects.create(name="Restored work", user_id=A_ID)
+    document, original = await fixture.document(source)
+    await fixture.projects.delete(source["id"], user_id=A_ID)
+    outcome, restored = await fixture.documents.restore(document["id"], target_project_id=target["id"], user_id=A_ID)
+    assert outcome == "restored"
+    assert restored["stored_relpath"].startswith(source["id"])
+
+    job = await fixture.deployment.export(PERSON_A)
+    assert job.state == "ready"
+    entries = _archive(job)
+    definitions = json.loads(entries["projects.json"])
+    assert [row["id"] for row in definitions] == [target["id"]]
+    exported_doc = definitions[0]["documents"][0]
+    expected = _project_document_entry(target, document, "original/report.txt")
+    assert exported_doc["files"] == [expected]
+    assert entries[expected] == original.read_bytes()
+    assert not _skipped(job)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("damage", ["same_size_corruption", "copy_time_missing", "copy_time_parent_link", "copy_time_size_change"])
+async def test_project_export_does_not_advertise_files_rejected_during_copy(project_export, monkeypatch, tmp_path, damage):
+    fixture = project_export
+    project = await fixture.projects.create(name="Project", user_id=A_ID)
+    document, original = await fixture.document(project)
+    data = original.read_bytes()
+    if damage == "same_size_corruption":
+        original.write_bytes(b"X" * len(data))
+    else:
+        real_copy = account_export._Parts.add_file
+
+        def change_before_copy(parts, found, cancel):
+            if found.entry.startswith("projects/"):
+                if damage == "copy_time_missing":
+                    original.unlink()
+                elif damage == "copy_time_size_change":
+                    original.write_bytes(data + b"Changed")
+                else:
+                    replacement = tmp_path / "replacement"
+                    replacement.mkdir()
+                    (replacement / original.name).write_text(SENTINEL, encoding="utf-8")
+                    original.parent.rename(original.parent.with_name("previous"))
+                    original.parent.symlink_to(replacement, target_is_directory=True)
+            return real_copy(parts, found, cancel)
+
+        monkeypatch.setattr(account_export._Parts, "add_file", change_before_copy)
+    job = await fixture.deployment.export(PERSON_A)
+    assert job.state == "ready"
+    entries = _archive(job)
+    assert json.loads(entries["projects.json"])[0]["documents"][0]["files"] == []
+    expected = _project_document_entry(project, document, "original/report.txt")
+    assert expected not in entries
+    assert _skipped(job)[expected] == ("vanished" if damage == "copy_time_missing" else "changed")
+    assert not _anywhere(entries, SENTINEL)
+
+
+@pytest.mark.anyio
+async def test_project_export_oversize_skip_keeps_document_metadata_without_missing_zip_reference(project_export, monkeypatch):
+    fixture = project_export
+    project = await fixture.projects.create(name="Project", user_id=A_ID)
+    document, _ = await fixture.document(project, data=b"x" * 100)
+    monkeypatch.setattr(account_export.shutil, "disk_usage", _disk(free=50, total=50))
+    job = await fixture.deployment.export(PERSON_A)
+    assert job.state == "ready"
+    entries = _archive(job)
+    assert json.loads(entries["projects.json"])[0]["documents"][0]["files"] == []
+    assert _skipped(job)[_project_document_entry(project, document, "original/report.txt")] == "too_large"
+
+
+def test_project_export_rejects_size_drift_before_writing_any_zip_member(tmp_path, monkeypatch):
+    original = tmp_path / "original.txt"
+    original.write_bytes(b"Larger than the reserved file budget")
+    metadata = original.stat()
+    ancestor = tmp_path.stat()
+    opened = []
+    real_open = zipfile.ZipFile.open
+
+    def track_open(archive, name, mode="r", *args, **kwargs):
+        if mode == "w":
+            opened.append(name)
+        return real_open(archive, name, mode, *args, **kwargs)
+
+    monkeypatch.setattr(zipfile.ZipFile, "open", track_open)
+    with zipfile.ZipFile(io.BytesIO(), "w") as archive:
+        with pytest.raises(ArtifactArchiveError) as rejected:
+            copy_file(archive, original, "document.txt", identity=(metadata.st_dev, metadata.st_ino), components=((tmp_path, ancestor.st_dev, ancestor.st_ino),), expected_size=1)
+        assert rejected.value.code == "artifact_changed"
+        assert not archive.namelist()
+    assert not opened

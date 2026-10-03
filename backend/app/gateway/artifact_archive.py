@@ -223,6 +223,7 @@ def _copy_member(
     remaining_total_bytes: int,
     cancel_event: threading.Event | None,
     max_file_bytes: int | None = None,
+    expected_size: int | None = None,
 ) -> _CopiedArchiveMember:
     _check_deadline(deadline, cancel_event)
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
@@ -236,6 +237,8 @@ def _copy_member(
         before = os.fstat(descriptor)
         identity = (before.st_dev, before.st_ino)
         if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or identity != member.identity:
+            raise _changed()
+        if expected_size is not None and before.st_size != expected_size:
             raise _changed()
         file_limit = MAX_FILE_BYTES if max_file_bytes is None else max_file_bytes
         if before.st_size > file_limit:
@@ -376,6 +379,8 @@ def copy_file(
     identity: tuple[int, int],
     components: tuple[tuple[Path, int, int], ...],
     cancel_event: threading.Event | None = None,
+    expected_size: int | None = None,
+    expected_sha256: str | None = None,
 ) -> CopiedFile:
     """Copy one regular file the caller already vetted, with the same guards as an artifact archive and no size limit.
 
@@ -390,6 +395,8 @@ def copy_file(
     of the archive again, so the archive holds only files that were copied
     whole and verified. That needs ``archive`` written to a seekable file. A
     file over ``zipfile.ZIP64_LIMIT`` needs an archive that allows ZIP64.
+    Optional expected size/hash bind immutable source records to the copied
+    bytes; a mismatch uses the same rollback and ``artifact_changed`` error.
     """
     start = archive.start_dir
     try:
@@ -400,7 +407,10 @@ def copy_file(
             sys.maxsize,
             cancel_event,
             max_file_bytes=sys.maxsize,
+            expected_size=expected_size,
         )
+        if (expected_size is not None and copied.size != expected_size) or (expected_sha256 is not None and copied.sha256 != expected_sha256):
+            raise _changed()
     except BaseException:
         _take_back(archive, start)
         raise

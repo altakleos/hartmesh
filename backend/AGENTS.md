@@ -72,7 +72,7 @@ deer-flow/
 │   ├── scripts/benchmark/       # Standalone reproducible backend benchmarks
 │   ├── tests/                 # Test suite
 │   └── docs/                  # Documentation
-├── frontend/                   # Next.js frontend application
+├── frontend-hm/                # HartMesh product UI
 └── skills/                     # Agent skills directory
     ├── public/                # Public skills (committed)
     └── custom/                # Custom skills (gitignored)

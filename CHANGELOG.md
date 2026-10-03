@@ -33,6 +33,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and conversation history using a scripted local model. It also runs in CI.
 - Restricted sandbox CI uses the same mirrored base digest as release builds.
 
+### Maintenance
+
+- Product commands, version guidance and the frontend route map now point to
+  `frontend-hm/`; the upstream `frontend/` remains an immutable reference.
+  The scope guide records which upstream UI features are included, and the
+  release guide uses the HartMesh procedure throughout.
+- Account exports include owned active/archived project definitions, current
+  shelf documents, conversation membership and supported server-side
+  preferences. Trash and other users' data remain excluded; skipped files are
+  identified in the archive.
+- Sandbox library guarantees require an explicit verified-image profile;
+  other environments receive generic guidance. Initialized providers retain
+  their startup declaration until the Gateway restarts.
+
+### Configuration changes
+
+Template version 51 adds optional `sandbox.python_libraries_profile` (default
+`null`). The `hartmesh` declaration requires a verified, digest-pinned local AIO
+image; the Compose distribution enables it. `make config-upgrade` merges the
+new field while preserving existing sandbox choices.
+
 ### Schema changes
 
 No database schema changes since `v2.2.0+hartmesh.38`.

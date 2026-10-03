@@ -1,18 +1,20 @@
 # AGENTS.md
 
-This file provides guidance to AI coding agents (Claude Code, Codex, and others) when working with code in this repository. It is the source of truth; the sibling `CLAUDE.md` imports it via `@AGENTS.md`.
-
-It is the **monorepo orientation layer**: it maps the whole repo and points to the
-module guides that own the depth. For anything inside a module, read that module's
-guide rather than expecting full detail here:
+Coding-agent source of truth; `CLAUDE.md` imports it. Module guides own depth:
 
 - **[backend/AGENTS.md](backend/AGENTS.md)** — backend depth: harness/app split, agent &
   middleware chain, sandbox, MCP, skills, memory, IM channels, persistence/migrations,
   config system, test layout.
-- **[frontend/AGENTS.md](frontend/AGENTS.md)** — frontend depth: Next.js App Router layout,
+- **[frontend-hm/AGENTS.md](frontend-hm/AGENTS.md)** — frontend depth: Next.js App Router layout,
   thread/streaming data flow, code style, commands.
 
 ## What is DeerFlow
+
+HartMesh's product UI lives in `frontend-hm/`. `frontend/` is an exact upstream
+snapshot pinned by `.github/upstream-frontend.json`; never edit it for HartMesh,
+including version bumps, formatting, or guidance. `make check-frontend-isolation`
+checks the snapshot and direct source references. Port upstream UI fixes into
+`frontend-hm/` deliberately; see [the isolation and scope guide](docs/FRONTEND_ISOLATION.md).
 
 DeerFlow is a LangGraph-based AI super-agent system with a full-stack architecture. The
 backend runs a "super agent" with sandboxed execution, persistent memory, subagent
@@ -60,7 +62,9 @@ deer-flow/
 │   ├── packages/extension-api/     # deerflow-extension-api package (import: deerflow_extension_api.*) — public extension contract
 │   ├── packages/harness/           # deerflow-harness package (import: deerflow.*) — agent framework
 │   └── app/                        # FastAPI Gateway + IM channels (import: app.*)
-├── frontend/                       # Next.js frontend (pnpm) — see frontend/AGENTS.md
+├── frontend-hm/                    # HartMesh Next.js app — see frontend-hm/AGENTS.md
+├── frontend/                       # Pinned upstream reference; no HartMesh edits
+├── deploy/                         # Compose distribution and upstream Helm chart
 ├── docker/                         # docker-compose files, nginx config, provisioner
 ├── skills/                         # Agent skills: public/ (committed), custom/ (gitignored)
 │                                    # Managed integration skill packs are global at .deer-flow/integrations/skills/{provider}/
@@ -72,17 +76,13 @@ deer-flow/
 └── docs/                           # Cross-cutting docs, plans, and design notes
 ```
 
-Third-party extensions are loaded from a top-level `plugins:` list in `config.yaml`
-(operator-controlled on purpose — that list causes code to be imported, so it is deliberately
-kept out of the API-writable `extensions_config.json`). Packaged extensions can contribute
-middleware, lifecycle observers, Gateway services, FastAPI HTTP routers, and experimental
-full-stack plugins. Manage them with `deerflow extensions install/upgrade/list/enable/disable/remove` or the root
-`make extension-*` wrappers. Every mutation requires a Gateway restart, and both build
-hooks and extension code execute with Gateway privileges, so only trusted operator sources
-belong in this path. The manager transaction, accepted source forms, lock discipline, and
-contribution contract live in
-[the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md); the user manual
-is `frontend/src/content/{en,zh}/harness/extensions/`.
+Third-party extensions come from the operator-controlled `plugins:` list in
+`config.yaml`, never API-writable `extensions_config.json`: they import code
+with Gateway privileges and must be trusted. They contribute middleware,
+lifecycle observers, Gateway services, routers and experimental full-stack
+plugins. Manage them with `deerflow extensions` or `make extension-*`; restart
+required. See [the extensions guide](backend/packages/harness/deerflow/extensions/AGENTS.md).
+The upstream reference manual is under `frontend/src/content/{en,zh}/harness/extensions/`.
 
 Runtime config lives at the **repo root**: copy `config.example.yaml` → `config.yaml`
 (main app config) and `extensions_config.example.json` → `extensions_config.json` (MCP
@@ -90,28 +90,20 @@ servers + skills). Both real files are gitignored and may be edited at runtime v
 Gateway API. Config schema and resolution order are documented in
 [backend/AGENTS.md](backend/AGENTS.md).
 
-Skill quality review note:
-- `skills/public/skill-reviewer/` is the built-in read-only skill quality reviewer.
-  It uses the harness-layer `review_skill_package` tool and contracts in
-  `contracts/skill_review/`. Model-visible review data is compact and
-  tag-neutralized; full raw payloads stay in tool artifacts. See
-  [backend/AGENTS.md](backend/AGENTS.md) for the non-activation, SkillScan, and
-  `skill-creator` ownership boundaries.
-- CI waivers live in `.github/skill-review-waivers.v1.json` and are enforced by
-  `scripts/review_changed_public_skills.py`. Pull requests may validate waiver
-  edits from their head revision, but only the manifest from the trusted base
-  revision can suppress that run. Entries match one error finding exactly,
-  include the reviewed file's SHA-256 and an expiry date, remain visible in CI
-  output, and can never waive blocker findings. An entry may also preapprove
-  future full-file SHA-256 values, effective only once the manifest change lands
-  in the trusted base — so relying on a waiver takes two merges: the manifest
-  first, the skill change after, then promote the consumed hash to `file_sha256`
-  in a follow-up cleanup.
+Skill review: `skills/public/skill-reviewer/` is the read-only reviewer using
+`review_skill_package` and `contracts/skill_review/`. Model-visible data is
+compact and tag-neutralized; raw payloads stay in artifacts. See the backend
+guide for activation and skill-creator boundaries.
 
-Scheduled-task note:
-- The scheduled-task MVP adds a workspace page at `/workspace/scheduled-tasks` plus a background scheduler service gated by `config.yaml -> scheduler.enabled`.
-- Scheduled background runs are intentionally non-interactive: the lead-agent toolset excludes `ask_clarification` when `context.non_interactive=true`. That key, `disable_clarification`, and `github_token` are honored only for internally-authenticated callers; client-supplied copies are dropped from both `body.context` and `body.config`.
-- Busy scheduled occurrences are persisted as `queued`; `launching` is a short lease-fenced claim, `running` remains the normal Gateway run lifecycle, and `scheduler.queue_timeout_seconds` bounds the durable wait. Do not reintroduce skip-on-overlap or count waiting rows against `max_concurrent_runs`.
+CI waivers (`.github/skill-review-waivers.v1.json`, enforced by
+`scripts/review_changed_public_skills.py`) come only from the trusted base
+manifest, bind one error to its file SHA-256 and expiry, stay visible, and never
+waive blockers. An entry may preapprove future full-file hashes, effective once
+that manifest lands in the trusted base. Merge the waiver before changing the
+skill, then promote the consumed hash to `file_sha256`.
+
+Scheduled tasks use a persisted, lease-fenced queue and non-interactive runs.
+Lifecycle, authorization and concurrency rules live in [backend/AGENTS.md](backend/AGENTS.md).
 
 ## Commands: Root vs. Module
 
@@ -158,19 +150,20 @@ cd backend && make test-blocking-io  # Strict blocking-I/O suite
 cd backend && make lint       # ruff check
 cd backend && make format     # ruff format
 
-# Frontend (see frontend/AGENTS.md for the full set)
-cd frontend && pnpm dev       # Dev server: Webpack by default (override with DEER_FLOW_DEV_BUNDLER=turbo)
-cd frontend && pnpm check     # Lint + type check (run before committing)
-cd frontend && pnpm test      # Unit tests
+# Frontend (see frontend-hm/AGENTS.md for the full set)
+cd frontend-hm && pnpm dev    # Dev server: Webpack by default (override with DEER_FLOW_DEV_BUNDLER=turbo)
+cd frontend-hm && pnpm check  # Lint + type check (run before committing)
+cd frontend-hm && pnpm test   # Unit tests
 ```
 
-Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend/`
+Rule of thumb: **root `make` = the full application**; **`backend/Makefile` and `frontend-hm/`
 (`pnpm`) = per-module work.**
 
-Host pnpm calls use `scripts/pnpm.py`: native Windows tries `pnpm.cmd` before
-`pnpm`; POSIX reverses the order. Its Corepack fallback applies the same ordering
-to `corepack.cmd` and `corepack`. The runner operates from `frontend/` so
-Corepack honors its pinned package-manager version.
+HartMesh host calls use `scripts/pnpm.py --project frontend-hm --`: it prefers
+direct pnpm, falls back to Corepack, and resolves executable paths before
+changing to that project. The no-selector form retains `frontend/` for upstream
+compatibility. `make frontend-config` initializes the product's ignored `.env`,
+preserving an existing destination or migrating the old app's settings.
 
 ### Prerequisites before `make dev`
 
@@ -193,7 +186,7 @@ cd backend && python -m pytest tests/test_compose_default_bind_host.py -q
 cd backend && python -m pytest tests/path/to/test.py::test_func -q
 
 # Frontend (rstest)
-cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
+cd frontend-hm && pnpm rstest run <pattern>  # e.g. pnpm rstest run my-component
 ```
 
 ### Logs
@@ -206,7 +199,7 @@ cd frontend && pnpm rstest run <pattern>     # e.g. pnpm rstest run my-component
 ## Where to Go Next
 
 - Backend work → **[backend/AGENTS.md](backend/AGENTS.md)**
-- Frontend work → **[frontend/AGENTS.md](frontend/AGENTS.md)**
+- Frontend work → **[frontend-hm/AGENTS.md](frontend-hm/AGENTS.md)**
 - Setup & install → **[Install.md](Install.md)**, **[CONTRIBUTING.md](CONTRIBUTING.md)**
 - Project overview & usage → **[README.md](README.md)** (translations: `README_zh.md`,
   `README_ja.md`, `README_fr.md`, `README_ru.md`)
@@ -223,19 +216,18 @@ These apply repo-wide; module guides own the module-specific detail.
   the same change set.
 - **Test-driven development** — features and bug fixes ship with tests. Backend tests live
   in `backend/tests/` (TDD is mandatory there; see [backend/AGENTS.md](backend/AGENTS.md));
-  frontend tests live in `frontend/tests/`.
+  frontend tests live in `frontend-hm/tests/`.
 - **Format before pushing** — run `make format` (backend) / `pnpm check` (frontend). Backend
   CI enforces `ruff format --check`, so formatting must be clean before a push.
 - **Skill text encoding** — treat `SKILL.md` and other textual skill resources as UTF-8;
   Python utilities that read or write them must pass `encoding="utf-8"` rather than
   relying on the platform locale.
-- **Version sources must stay in lockstep** — a release version must match identically in
-  `backend/pyproject.toml`, `frontend/package.json`, and `deploy/helm/deer-flow/Chart.yaml`
-  (`version` + `appVersion`), and `backend/uv.lock` must record the same version for the root
-  package (uv stores its PEP 440 form, e.g. `2.1.0rc0`). Pushing a `v*` git tag triggers CI
-  that runs `scripts/verify_versions.sh` and **blocks all publishing** if any source drifts.
-  Before bumping a version, run `scripts/bump_version.sh <ver>` (aligns the four fields and
-  refreshes `backend/uv.lock` at once — it needs `uv` on `PATH`) and
-  `scripts/verify_versions.sh <ver>` to catch drift early. See [RELEASING.md](RELEASING.md).
+- **Version sources must stay in lockstep** — `backend/pyproject.toml`, the root
+  `deer-flow` entry in `backend/uv.lock` (uv's normalized spelling),
+  `frontend-hm/package.json`, and `deploy/helm/deer-flow/Chart.yaml` (`version`
+  and `appVersion`) must agree. A `v*` tag triggers `scripts/verify_versions.sh`
+  and blocks publishing on drift. Bump with `scripts/bump_version.sh <ver>`
+  (requires uv), verify with `scripts/verify_versions.sh <ver>`; see
+  [RELEASING.md](RELEASING.md).
 - **Don't edit `CLAUDE.md`** — it only contains `@AGENTS.md`. All agent guidance changes
   belong here in `AGENTS.md`; `CLAUDE.md` is a thin import shim.

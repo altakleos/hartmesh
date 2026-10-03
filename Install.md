@@ -1,10 +1,10 @@
-# DeerFlow Install
+# HartMesh Install
 
-This file is for coding agents. If the DeerFlow repository is not already cloned and open, clone `https://github.com/bytedance/deer-flow.git` first, then continue from the repository root.
+This file is for coding agents. If the HartMesh repository is not already cloned and open, clone `https://github.com/altakleos/hartmesh.git` first, then continue from the repository root.
 
 ## Goal
 
-Bootstrap a DeerFlow local development workspace on the user's machine with the least risky path available.
+Bootstrap a HartMesh local development workspace on the user's machine with the least risky path available.
 
 Default preference:
 
@@ -26,17 +26,17 @@ Do not assume API keys or model credentials exist. Set up everything that can be
 
 Consider the setup successful when all of the following are true:
 
-- The DeerFlow repository is cloned and the current working directory is the repo root.
+- The HartMesh repository is cloned and the current working directory is the repo root.
 - `config.yaml` exists.
 - For Docker setup, `make docker-init` completed successfully and Docker prerequisites are prepared, but services are not assumed to be running yet.
 - For local setup, `make check` passed or reported no missing prerequisites, and `make install` completed successfully.
-- The user receives the exact next command to launch DeerFlow.
+- The user receives the exact next command to launch HartMesh.
 - The user also receives any missing model configuration or referenced environment variable names from `config.yaml`, without inspecting secret-bearing files for actual values.
 
 ## Steps
 
-- If the current directory is not the DeerFlow repository root, clone `https://github.com/bytedance/deer-flow.git` if needed, then change into the repository root.
-- Confirm the current directory is the DeerFlow repository root by checking that `Makefile`, `backend/`, `frontend/`, and `config.example.yaml` exist.
+- If the current directory is not the HartMesh repository root, clone `https://github.com/altakleos/hartmesh.git` if needed, then change into the repository root.
+- Confirm the current directory is the HartMesh repository root by checking that `Makefile`, `backend/`, `frontend-hm/`, and `config.example.yaml` exist.
 - Detect whether `config.yaml` already exists.
 - If `config.yaml` does not exist, run `make config`.
 - Detect whether Docker is available and the daemon is reachable with `docker info`.
@@ -50,7 +50,7 @@ Consider the setup successful when all of the following are true:
   - If `make check` reports missing system dependencies such as `node`, `pnpm`, `uv`, or `nginx`, stop and report the missing tools instead of attempting privileged installs.
   - If prerequisites are satisfied, run `make install`.
   - Tell the user the recommended next command is `make dev`.
-- Inspect `config.yaml` only for missing model entries or referenced environment variable placeholders. Do not read `.env`, `frontend/.env`, or other secret-bearing files.
+- Inspect `config.yaml` only for missing model entries or referenced environment variable placeholders. Do not read `.env`, `frontend-hm/.env`, `frontend/.env`, or other secret-bearing files.
 - If no model is configured, tell the user they must add at least one entry under `models` in `config.yaml`.
 - If `config.yaml` references variables such as `$OPENAI_API_KEY`, tell the user which variable names still need real values, but do not verify them by opening secret-bearing files.
 - If the repository already appears configured, avoid repeating expensive work unless it is necessary to verify the environment.

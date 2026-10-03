@@ -20,7 +20,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 50
+config_version: 51
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:
@@ -1670,6 +1670,11 @@ uploads:
 # Executes commands directly on the host machine
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
+  # Optional verified-image declaration; keep null for Local and unverified images.
+  # "hartmesh" requires local AIO and a digest-pinned image whose library imports
+  # were verified by the operator (docker/sandbox/Dockerfile asserts the set).
+  # This is not a runtime probe. Restart Gateway after changing this or the image.
+  python_libraries_profile: null
   # Host bash execution is disabled by default because LocalSandboxProvider is
   # not a secure isolation boundary for shell access. Enable only for fully
   # trusted, single-user local workflows.

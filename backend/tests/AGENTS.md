@@ -133,3 +133,16 @@ slot until that worker exits even after repeated cancellation. Network and queue
 request cancellation remain prompt. Use explicit worker events and slot-acquisition
 signals in regressions, release every held worker in `finally`, and verify the
 four-worker bound against replacement requests while cancelled work is still held.
+
+## Account export completeness
+
+Use real owner-filtered project/document/preference repositories with two owners.
+Exports include active and archived project definitions, conversation membership,
+live originals and existing converted Markdown; deleted projects, trash, staging,
+orphans and arbitrary preference keys stay out. Keep SQL-only accounts exportable.
+Restored documents can retain their old project storage namespace. Plan lexical
+paths and let the existing descriptor-based copy verify ancestors and immutable
+original hashes; never resolve symlinks first. Document `files` lists only ZIP
+entries actually copied, including after quota skips or copy rollback. The export
+is a best-effort readable snapshot, not an automatic restore format or a global
+transaction. Preserve worker draining, disk limits, splitting and manifest hashes.

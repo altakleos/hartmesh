@@ -765,7 +765,7 @@ export function createEnUS(product: string): Translations {
       menuItem: "Download all my data",
       title: "Download all my data",
       description:
-        "A copy of every conversation, every file you uploaded or the assistant made, My files, the skills you made, your memory, your scheduled tasks and your custom agents.",
+        "A copy of your conversations, uploaded and generated files, My files, skills, memory, scheduled tasks, custom agents, active and archived project settings, current project documents, and saved preferences. Deleted projects and trashed project documents are excluded.",
       onlyYours:
         "It includes only your own work: nothing from anyone else, and none of your saved passwords, keys or connection settings.",
       closeAnytime:

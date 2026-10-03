@@ -22,6 +22,11 @@ class SandboxProvider(ABC):
     # must return False whenever shell access can bypass managed path mappings.
     supports_agent_skill_isolation: bool = False
 
+    @property
+    def python_libraries_profile(self) -> str | None:
+        """Verified image declaration frozen at provider startup, if supported."""
+        return None
+
     @abstractmethod
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.
