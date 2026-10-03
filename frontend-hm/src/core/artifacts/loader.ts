@@ -1,6 +1,8 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
 import { fetch } from "@/core/api/fetcher";
+import { parseBusinessReport } from "@/core/business-report";
+import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import type { AgentThreadState } from "../threads";
 
@@ -53,11 +55,13 @@ export async function loadArtifactContent({
   isMock,
   full = false,
   previewMaxBytes = ARTIFACT_PREVIEW_MAX_BYTES,
+  reportPreview = false,
 }: {
   filepath: string;
   threadId: string;
   isMock?: boolean;
   full?: boolean;
+  reportPreview?: boolean;
   /**
    * How much of the file the preview fetches before calling it truncated.
    * A file whose preview is drawn from the whole body (a report card) asks
@@ -70,10 +74,31 @@ export async function loadArtifactContent({
     enhancedFilepath = filepath + "/SKILL.md";
   }
   const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
-  const response = await fetch(url, {
-    cache: "no-store",
-    headers: full ? undefined : { Range: `bytes=0-${previewMaxBytes - 1}` },
-  });
+  const requestProjection =
+    reportPreview && !full && !isMock && !isStaticWebsiteOnly();
+  const response = await fetch(
+    requestProjection ? `${url}?report_preview=true` : url,
+    {
+      cache: "no-store",
+      headers: full ? undefined : { Range: `bytes=0-${previewMaxBytes - 1}` },
+    },
+  );
+  const loadSourcePreview = () =>
+    loadArtifactContent({ filepath, threadId, isMock, full, previewMaxBytes });
+  if (requestProjection && [413, 415, 422, 501].includes(response.status)) {
+    await response.body?.cancel();
+    return loadSourcePreview();
+  }
+  if (
+    requestProjection &&
+    response.ok &&
+    response.headers.get("X-Artifact-Projection") !== "business-report-v1"
+  ) {
+    // An old Gateway or proxy/CORS policy may omit the marker. Its body
+    // cannot safely be treated as canonical source merely because it is JSON.
+    await response.body?.cancel();
+    return loadSourcePreview();
+  }
   const contentRange = parseContentRange(response.headers.get("Content-Range"));
   if (response.status === 416 && contentRange?.total === 0) {
     return {
@@ -82,6 +107,7 @@ export async function loadArtifactContent({
       truncated: false,
       previewBytes: 0,
       totalBytes: 0,
+      projected: false,
       sha256:
         "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", // SHA-256 of empty content (keeps empty artifacts editable on non-secure origins)
     };
@@ -100,16 +126,34 @@ export async function loadArtifactContent({
   // point instead of fabricating U+FFFD at the range boundary.
   const content = new TextDecoder().decode(bytes, { stream: truncated });
   const etag = response.headers.get("etag");
+  const sourceRevision = etag
+    ?.match(/^(?:W\/)?"([0-9a-fA-F]{64})"$/)?.[1]
+    ?.toLowerCase();
+  const projected =
+    requestProjection &&
+    response.headers.get("X-Artifact-Projection") === "business-report-v1";
+  // The existing parser remains authoritative. Never display or edit a
+  // partial projection as though it were the original JSON file.
+  if (
+    projected &&
+    (bytes.byteLength > ARTIFACT_PREVIEW_MAX_BYTES ||
+      !sourceRevision ||
+      parseBusinessReport(content) === null)
+  ) {
+    return loadSourcePreview();
+  }
   const sha256 =
-    etag?.match(/^(?:W\/)?"([0-9a-fA-F]{64})"$/)?.[1]?.toLowerCase() ??
-    (!truncated ? await sha256OfText(content) : undefined);
-  const contentLengthHeader = response.headers.get("Content-Length");
+    sourceRevision ?? (!truncated ? await sha256OfText(content) : undefined);
+  const contentLengthHeader = response.headers.get(
+    projected ? "X-Artifact-Source-Bytes" : "Content-Length",
+  );
   const contentLength =
     contentLengthHeader === null ? undefined : Number(contentLengthHeader);
   return {
     content,
     url,
     sha256,
+    projected,
     truncated,
     previewBytes: bytes.byteLength,
     totalBytes:

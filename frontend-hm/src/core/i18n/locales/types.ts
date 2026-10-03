@@ -151,6 +151,8 @@ export interface Translations {
 
   // Files a run produced but never presented
   artifactDelivery: {
+    verificationTitle: string;
+    verificationDescription: string;
     title: (count: number) => string;
     description: (count: number) => string;
     shownOfTotal: (shown: number, total: number) => string;

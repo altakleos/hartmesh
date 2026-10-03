@@ -51,7 +51,12 @@ function presentReportMessages() {
   ];
 }
 
-async function openTheReport(page: Page) {
+async function openTheReport(
+  page: Page,
+  reportRequests: string[] = [],
+  reportSaves: string[] = [],
+  projectionAvailable = true,
+) {
   mockLangGraphAPI(page, {
     threads: [
       {
@@ -65,13 +70,46 @@ async function openTheReport(page: Page) {
     ],
   });
   await page.route(
-    `**/api/threads/${THREAD_ID}/artifacts${REPORT_PATH}`,
-    (route) =>
-      route.fulfill({
+    `**/api/threads/${THREAD_ID}/artifacts${REPORT_PATH}*`,
+    (route) => {
+      if (route.request().method() === "PUT") {
+        const body = route.request().postDataJSON() as { content: string };
+        reportSaves.push(body.content);
+        return route.fulfill({
+          json: {
+            path: REPORT_PATH,
+            sha256: "b".repeat(64),
+            size: body.content.length,
+          },
+        });
+      }
+      const url = route.request().url();
+      reportRequests.push(url);
+      const projected = new URL(url).searchParams.has("report_preview");
+      if (projected && !projectionAvailable)
+        return route.fulfill({ status: 422, body: "Projection unavailable" });
+      const source = JSON.parse(REPORT_JSON) as Record<string, unknown>;
+      return route.fulfill({
         status: 200,
         contentType: "application/json",
-        body: REPORT_JSON,
-      }),
+        headers: {
+          ETag: `"${"a".repeat(64)}"`,
+          ...(projected
+            ? { "X-Artifact-Projection": "business-report-v1" }
+            : {}),
+        },
+        body: JSON.stringify({
+          ...source,
+          rows: projected ? undefined : source.rows,
+          meta: projected
+            ? { ...(source.meta as Record<string, unknown>), build: undefined }
+            : source.meta,
+          raw_rows: projected
+            ? undefined
+            : [{ canonical_row: "KEEP_SOURCE_ROWS" }],
+        }),
+      });
+    },
   );
   await page.route(
     `**/api/threads/${THREAD_ID}/artifacts${DIRECTORY}/charts/*.png*`,
@@ -104,6 +142,71 @@ async function openTheReport(page: Page) {
 }
 
 test.describe("business report card", () => {
+  for (const mode of ["projection", "fallback", "remount"] as const) {
+    test(`preserves canonical rows through ${mode} editing and saving`, async ({
+      page,
+    }) => {
+      const requests: string[] = [];
+      const saves: string[] = [];
+      if (mode === "remount")
+        await page.setViewportSize({ width: 390, height: 844 });
+      const card = await openTheReport(
+        page,
+        requests,
+        saves,
+        mode !== "fallback",
+      );
+      await expect(card).toBeVisible();
+      expect(requests.length).toBeGreaterThan(0);
+      if (mode !== "fallback")
+        expect(
+          requests.every((url) => url.includes("report_preview=true")),
+        ).toBe(true);
+      const fullResponse =
+        mode !== "fallback"
+          ? page.waitForResponse((response) =>
+              response.url().endsWith(REPORT_PATH),
+            )
+          : null;
+      await page.getByRole("button", { name: "Edit", exact: true }).click();
+      if (fullResponse)
+        expect(await (await fullResponse).text()).toContain("KEEP_SOURCE_ROWS");
+      await page.locator(".cm-content").click();
+      await page.locator(".cm-content").press("Control+End");
+      await expect(
+        page.getByText("KEEP_SOURCE_ROWS", { exact: false }),
+      ).toBeVisible();
+      await expect(
+        page.getByRole("button", { name: "Save", exact: true }),
+      ).toBeDisabled();
+      await page.locator(".cm-content").press("ArrowLeft");
+      await page.keyboard.insertText(',"editor_note":"EDITOR_SAVED"');
+      if (mode === "remount") {
+        await page.keyboard.press("Escape");
+        await expect(page.locator(".cm-content")).toHaveCount(0);
+        await page
+          .getByText("2026-08-business-review.report.json")
+          .first()
+          .click();
+        await expect(page.locator(".cm-content")).toBeVisible();
+      }
+      await page.getByRole("button", { name: "Save", exact: true }).click();
+      await expect.poll(() => saves.length).toBe(1);
+      expect((JSON.parse(saves[0]!) as { raw_rows: unknown }).raw_rows).toEqual(
+        [{ canonical_row: "KEEP_SOURCE_ROWS" }],
+      );
+      expect(
+        (JSON.parse(saves[0]!) as { editor_note: string }).editor_note,
+      ).toBe("EDITOR_SAVED");
+      // A clean saved draft must display the saved cache entry, not revert to
+      // the pre-save fallback body. CodeMirror virtualizes long source lines.
+      await page.locator(".cm-content").press("Control+End");
+      await expect(
+        page.getByText("EDITOR_SAVED", { exact: false }),
+      ).toBeVisible();
+    });
+  }
+
   test("shows a built report as the card its downloads were rendered from", async ({
     page,
   }) => {

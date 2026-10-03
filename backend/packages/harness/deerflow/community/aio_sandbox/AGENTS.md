@@ -1,5 +1,14 @@
 # AIO Sandbox
 
+Prewarming admits at most one speculative create per provider, before executor
+submission. Busy requests skip immediately; the dedicated one-worker executor
+has no admission queue and consumes neither default nor real-acquire workers.
+In-process and cross-process locks are nonblocking for speculation. Cancellation
+signals the existing readiness stop and drains creation/cleanup; reset and
+shutdown close admission and drain the worker before serializer/store teardown.
+Capacity, ownership, failed-destroy quarantine and unclaimed reaping still use
+the ordinary provider lifecycle. Regressions: `test_sandbox_prewarm.py`.
+
 ## Stdin contracts per transport
 
 AIO has two distinct stdin contracts: the persistent `/v1/shell` transport is a

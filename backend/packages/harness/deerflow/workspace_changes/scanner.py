@@ -129,13 +129,25 @@ def scan_workspace_roots(
     excluded_dir_names = EXCLUDED_DIR_NAMES | extra_excluded_dir_names if extra_excluded_dir_names else EXCLUDED_DIR_NAMES
     files: dict[str, FileSnapshot] = {}
     scanned = 0
+    directories = 0
     truncated = False
 
+    def scan_error(_error: OSError) -> None:
+        nonlocal truncated
+        truncated = True
+
     for root in roots:
+        if root.host_path.is_symlink():
+            truncated = True
+            continue
         if not root.host_path.exists():
             continue
 
-        for dirpath, dirnames, filenames in os.walk(root.host_path, followlinks=False):
+        for dirpath, dirnames, filenames in os.walk(root.host_path, followlinks=False, onerror=scan_error):
+            directories += 1
+            # A file budget alone does not bound trees of empty directories.
+            if directories > max(1, resolved_limits.max_scanned_files):
+                return WorkspaceSnapshot(files=files, truncated=True, text_cache_dir=str(cache_dir) if cache_dir is not None else None)
             dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dir_names and not (Path(dirpath) / dirname).is_symlink()]
             for filename in sorted(filenames):
                 if scanned >= resolved_limits.max_scanned_files:
@@ -157,6 +169,8 @@ def scan_workspace_roots(
                     if symlink_snapshot is not None:
                         files[symlink_snapshot.path] = symlink_snapshot
                         scanned += 1
+                    else:
+                        truncated = True
                     continue
                 if not host_file.is_file():
                     continue
@@ -172,6 +186,8 @@ def scan_workspace_roots(
                 if snapshot is not None:
                     files[snapshot.path] = snapshot
                     scanned += 1
+                else:
+                    truncated = True
 
     return WorkspaceSnapshot(
         files=files,

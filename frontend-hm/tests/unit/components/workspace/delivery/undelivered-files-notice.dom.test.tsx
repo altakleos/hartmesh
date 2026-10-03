@@ -91,6 +91,22 @@ afterEach(() => {
 });
 
 describe("UndeliveredFilesNotice", () => {
+  it("shows a durable verification failure without claiming files are missing", async () => {
+    fetchThreadDeliveryFailures.mockResolvedValue(new Set(["run-1"]));
+    fetchRunDelivery.mockResolvedValue({
+      ...failure,
+      undeliveredPaths: [],
+      undeliveredCount: 0,
+      verificationIncomplete: true,
+    });
+    renderNotice({ failures: {}, runId: "run-1" });
+    expect(
+      await screen.findByText("File delivery could not be verified"),
+    ).toBeTruthy();
+    expect(screen.queryByText(/files? wasn't attached/)).toBeNull();
+    expect(screen.queryByRole("link")).toBeNull();
+  });
+
   it("offers the file the run produced and never presented", () => {
     fetchThreadDeliveryFailures.mockResolvedValue(new Set());
     fetchRunDelivery.mockResolvedValue(null);

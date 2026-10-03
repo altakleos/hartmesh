@@ -24,7 +24,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from contextvars import ContextVar
 from functools import partial
@@ -387,6 +387,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         # submitting it behind those waiters makes the holder wait for workers
         # that are themselves waiting for the holder to release the key.
         self._acquire_worker_executor = ThreadPoolExecutor(thread_name_prefix="aio-sandbox-owned-worker")
+        # Lazily started, with admission bounded to one speculative job and no
+        # queue. Cold prewarms cannot consume real acquisition or default workers.
+        self._prewarm_executor: ThreadPoolExecutor | None = None
+        self._prewarm_future: Future[str | None] | None = None
+        self._prewarm_stop: threading.Event | None = None
+        self._prewarm_closed = False
         self._last_activity: dict[str, float] = {}  # sandbox_id -> last activity timestamp
         # Warm pool: released sandboxes whose containers are still running.
         # Maps sandbox_id -> (SandboxInfo, release_timestamp).
@@ -2966,9 +2972,62 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     async def prewarm_async(self, thread_id: str, *, user_id: str | None = None) -> str | None:
         """Build and park ``thread_id``'s sandbox without blocking the event loop."""
-        return await asyncio.to_thread(self.prewarm, thread_id, user_id=user_id)
+        admitted = self._submit_prewarm(thread_id, user_id=user_id)
+        if admitted is None:
+            return None
+        worker, stop = admitted
+        wrapped = asyncio.wrap_future(worker)
+        try:
+            return await asyncio.shield(wrapped)
+        except asyncio.CancelledError:
+            stop.set()
+            worker.cancel()
+            # Keep the caller attached until creation/cleanup has settled,
+            # even if shutdown or repeated Stop requests cancel it again.
+            while not wrapped.done():
+                try:
+                    await asyncio.shield(wrapped)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not wrapped.cancelled():
+                wrapped.exception()
+            raise
 
     def prewarm(self, thread_id: str, *, user_id: str | None = None) -> str | None:
+        """Run one admitted speculative build, or skip it immediately if busy."""
+        admitted = self._submit_prewarm(thread_id, user_id=user_id)
+        return admitted[0].result() if admitted is not None else None
+
+    def _submit_prewarm(self, thread_id: str, *, user_id: str | None) -> tuple[Future[str | None], threading.Event] | None:
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        with self._lock:
+            future = getattr(self, "_prewarm_future", None)
+            if self._shutdown_called or getattr(self, "_prewarm_closed", False) or (future is not None and not future.done()):
+                return None
+            executor = getattr(self, "_prewarm_executor", None)
+            if executor is None:
+                executor = self._prewarm_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="aio-sandbox-prewarm")
+            stop = self._prewarm_stop = threading.Event()
+            context = contextvars.copy_context()
+            context.run(_ACQUISITION_CANCELLED.set, stop)
+            future = self._prewarm_future = executor.submit(context.run, self._prewarm, thread_id, user_id=effective_user_id)
+            return future, stop
+
+    def _stop_prewarm_worker(self) -> None:
+        # Draining a concurrent future needs no event-loop callback. In
+        # particular, synchronous shutdown can safely run on the loop thread.
+        with self._lock:
+            self._prewarm_closed = True
+            stop = getattr(self, "_prewarm_stop", None)
+            if stop is not None:
+                stop.set()
+            executor = getattr(self, "_prewarm_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=True, cancel_futures=True)
+
+    def _prewarm(self, thread_id: str, *, user_id: str) -> str | None:
         """Build and park the container ``thread_id``'s first turn would build.
 
         The container a turn acquires is named by ``(user, thread)`` and shaped
@@ -2985,7 +3044,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
         key = self._thread_key(thread_id, effective_user_id)
-        with self._acquire_serializer.hold(key):
+        with self._acquire_serializer.try_hold(key) as held:
+            if not held or _acquisition_cancelled():
+                return None
             self._ensure_skills_projection(effective_user_id)
             sandbox_id = self._sandbox_id_for_thread(thread_id, effective_user_id)
             with self._lock:
@@ -3000,8 +3061,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             with open(lock_path, "a", encoding="utf-8") as lock_file:
                 locked = False
                 try:
-                    _lock_file_exclusive(lock_file)
-                    locked = True
+                    locked = _try_lock_file_exclusive(lock_file)
+                    if not locked:
+                        return None
                     if self._backend.discover(sandbox_id) is not None:
                         # Already running, started by another worker or left by
                         # an earlier process. The turn's own discovery decides
@@ -3011,6 +3073,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         created = self._create_sandbox(thread_id, sandbox_id, user_id=effective_user_id, allow_eviction=False)
                     except SandboxSlotsBusyError:
                         logger.info("Not prewarming a sandbox for thread %s: every slot is taken", thread_id)
+                        return None
+                    except _AcquisitionCancelledError:
                         return None
                 finally:
                     if locked:
@@ -3022,6 +3086,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 parked = self._warm_pool.get(created)
                 if parked is not None:
                     self._mark_prewarm_unclaimed_locked(created, parked[0])
+            if _acquisition_cancelled():
+                if parked is not None and getattr(parked[0], "provenance", "unknown") == PROVENANCE_CREATED:
+                    self._destroy_warm_entry(created, parked[0], reason="cancelled prewarm", still_reapable=lambda: self._is_unclaimed_prewarm_locked(created, parked[0]))
+                else:
+                    # A create may have rediscovered a pre-existing container.
+                    # Park it normally; cancellation cannot make it our creation.
+                    with self._lock:
+                        self._forget_prewarm_unclaimed_locked(created)
+                return None
         logger.info("Prewarmed sandbox %s for thread %s", created, thread_id)
         return created
 
@@ -3807,6 +3880,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def reset(self) -> None:
         """Release process-local acquire workers when this instance is detached."""
+        self._stop_prewarm_worker()
         self._acquire_serializer.close()
         self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
 
@@ -3816,6 +3890,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             if self._shutdown_called:
                 return
             self._shutdown_called = True
+        self._stop_prewarm_worker()
+        with self._lock:
             sandbox_ids = list(self._sandboxes.keys())
             # Snapshotted, not cleared: `_destroy_warm_entry` re-validates the
             # parked entry's identity inside its reservation and pops it on a

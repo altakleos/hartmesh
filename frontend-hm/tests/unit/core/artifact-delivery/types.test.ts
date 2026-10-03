@@ -16,6 +16,24 @@ const validEvent = {
 };
 
 describe("parseArtifactDeliveryFailure", () => {
+  it("reads an explicit incomplete scan identically live and after reload", () => {
+    const wire = {
+      ...validEvent,
+      scan_complete: false,
+      undelivered_paths: [],
+      undelivered_count: 0,
+    };
+    const failure = parseArtifactDeliveryFailure(wire);
+    expect(failure?.verificationIncomplete).toBe(true);
+    expect(failure?.undeliveredPaths).toEqual([]);
+    expect(
+      parseArtifactDeliveryRecord({ ...wire, available: true, version: 1 }),
+    ).toEqual(failure);
+    expect(
+      parseArtifactDeliveryFailure({ ...wire, scan_complete: true }),
+    ).toBeNull();
+  });
+
   it("reads the run, the reason, and the files left behind", () => {
     expect(parseArtifactDeliveryFailure(validEvent)).toEqual({
       runId: "run-1",

@@ -70,6 +70,25 @@ async def test_a_fenced_run_reports_what_it_never_presented() -> None:
 
 
 @pytest.mark.asyncio
+async def test_an_incomplete_scan_has_the_same_pathless_live_and_durable_notice():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from deerflow.runtime.runs.delivery import publish_delivery_failure
+
+    content = {"verification": {"source": "outputs_changed", "scan_complete": False}, "satisfied": False}
+    response = await _project(_Events([{"content": content}]), stop_reason=DELIVERY_INCOMPLETE_STOP_REASON)
+    assert response["available"] is True
+    assert response["scan_complete"] is False
+    assert response["undelivered_paths"] == []
+    assert response["undelivered_count"] == 0
+    bridge = SimpleNamespace(publish=AsyncMock())
+    await publish_delivery_failure(bridge, "run-1", message=response["message"], content=content)
+    live = bridge.publish.call_args.args[2]
+    assert {key: live[key] for key in ("run_id", "message", "scan_complete", "undelivered_paths", "undelivered_count")} == {key: response[key] for key in ("run_id", "message", "scan_complete", "undelivered_paths", "undelivered_count")}
+
+
+@pytest.mark.asyncio
 async def test_a_fenced_run_without_a_receipt_shows_nothing_rather_than_an_empty_notice() -> None:
     """The receipt is best-effort; a correction naming no file is worse than none."""
     assert await _project(_Events([]), stop_reason=DELIVERY_INCOMPLETE_STOP_REASON) == UNAVAILABLE

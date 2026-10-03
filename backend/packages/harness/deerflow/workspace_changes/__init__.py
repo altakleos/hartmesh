@@ -1,6 +1,6 @@
 from .api import get_workspace_changes_response
 from .diff import compare_snapshots, get_changed_output_paths, get_changed_paths
-from .recorder import capture_workspace_snapshot, record_workspace_changes
+from .recorder import capture_output_snapshot, capture_workspace_snapshot, record_workspace_changes
 from .scanner import scan_workspace_roots
 from .types import (
     WORKSPACE_CHANGES_EVENT_TYPE,
@@ -25,6 +25,7 @@ __all__ = [
     "WorkspaceRoot",
     "WorkspaceSnapshot",
     "capture_workspace_snapshot",
+    "capture_output_snapshot",
     "compare_snapshots",
     "get_changed_output_paths",
     "get_changed_paths",

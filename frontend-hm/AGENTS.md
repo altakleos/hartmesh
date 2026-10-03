@@ -9,6 +9,14 @@ backend boundary. See [the isolation guide](../docs/FRONTEND_ISOLATION.md).
 
 ## Project Overview
 
+Report cards request the bounded `report_preview=true` artifact projection and
+validate it with `parseBusinessReport`. Its revision is the full source SHA-256.
+Projection cache keys differ from source keys; code view, edit, copy and download
+load the canonical source. Never reconcile an editor draft from projection bytes
+or save them. Static/mock/standalone views retain source reads; malformed or
+unsupported projections use the bounded source fallback. Full-file selection is
+scoped to both thread and path, and run completion refreshes the active query.
+
 HartMesh is a Next.js 16 interface to the Gateway's LangGraph-compatible runtime,
 with authenticated conversations, streaming, artifacts, Files/Shared and settings.
 Upstream routes are selected deliberately; current scope is recorded in the
@@ -210,12 +218,10 @@ and static mode skip the probe and stay deterministic.
 
 Three things decide whether a card appears at all: the `.report.json` suffix, a
 body that parses as `version: 1`, and — for each picture — the contract's
-`charts/<id>.png` shape. A report is fetched under its own preview budget,
-`REPORT_PREVIEW_MAX_BYTES` (16 MiB, `core/business-report`), not the text
-preview's 1 MiB: `report.json` embeds every cleaned row of the period (about
-242 bytes each), which the card never draws but the renders need, so under the
-text budget a report of some 4,300 rows arrived truncated and stayed JSON. The
-report budget is around 69,000 rows; past it, _Load full file_ remains. The
+`charts/<id>.png` shape. Card projection reads source up to
+`REPORT_PREVIEW_MAX_BYTES` (16 MiB) and returns at most 1 MiB of display fields.
+The same 16 MiB bound applies to raw-preview fallback; past it, _Load full file_
+remains. Source rows and build provenance stay in the complete report. The
 card's own chrome follows the UI locale while the report body follows
 `meta.lang`, which the skill only ever writes as `en-US`.
 

@@ -95,13 +95,9 @@ const HEX_COLOR = /^#[0-9a-fA-F]{6}$/;
 const DEFAULT_PRIMARY = "#1F4E79";
 
 /**
- * How much of a `report.json` the panel fetches before calling it truncated.
- *
- * The file embeds every cleaned in-period row (about 242 bytes each), which
- * the card never draws but the renders need, so under the text preview's
- * 1 MiB budget a report of roughly 4,300 rows stopped being a card and became
- * JSON. Sixteen MiB is about 69,000 rows — a year of a busy small business —
- * and still a size a phone parses; past it, *Load full file* remains.
+ * Source budget for report projection and the bounded raw-preview fallback.
+ * The card normally receives only display fields; the canonical report keeps
+ * every source row. Beyond this budget, *Load full file* remains available.
  */
 export const REPORT_PREVIEW_MAX_BYTES = 16 * 1024 * 1024;
 

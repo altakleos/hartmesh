@@ -53,6 +53,24 @@ def test_delivery_verification_treats_presented_directory_as_covering_produced_f
 
 
 @pytest.mark.anyio
+async def test_worker_without_event_journal_preserves_unverified_execution(tmp_path, monkeypatch):
+    paths = Paths(tmp_path)
+    monkeypatch.setattr("deerflow.workspace_changes.recorder.get_paths", lambda: paths)
+    manager = RunManager()
+    record = await manager.create("thread-no-journal")
+
+    class Agent:
+        async def astream(self, *args, **kwargs):
+            outputs = paths.sandbox_outputs_dir(record.thread_id, user_id=get_effective_user_id())
+            outputs.mkdir(parents=True, exist_ok=True)
+            (outputs / "result.txt").write_text("result", encoding="utf-8")
+            yield {"messages": [AIMessage("Done")]}
+
+    await run_agent(_make_bridge(), manager, record, ctx=RunContext(checkpointer=None, event_store=None), agent_factory=lambda **kwargs: Agent(), graph_input={}, config={})
+    assert record.status == RunStatus.success
+
+
+@pytest.mark.anyio
 async def test_delivery_event_records_present_files_paths_on_success():
     run_manager = RunManager()
     record = await run_manager.create("thread-1")

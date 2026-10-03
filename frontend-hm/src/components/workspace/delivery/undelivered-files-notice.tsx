@@ -70,10 +70,14 @@ export function UndeliveredFilesNotice({
         </div>
         <div className="min-w-0">
           <div className="text-foreground text-sm font-semibold" id={titleId}>
-            {t.artifactDelivery.title(failure.undeliveredCount)}
+            {failure.verificationIncomplete
+              ? t.artifactDelivery.verificationTitle
+              : t.artifactDelivery.title(failure.undeliveredCount)}
           </div>
           <p className="text-muted-foreground mt-0.5 text-xs">
-            {t.artifactDelivery.description(failure.undeliveredCount)}
+            {failure.verificationIncomplete
+              ? t.artifactDelivery.verificationDescription
+              : t.artifactDelivery.description(failure.undeliveredCount)}
             {truncated
               ? ` ${t.artifactDelivery.shownOfTotal(shown, failure.undeliveredCount)}`
               : ""}
@@ -86,13 +90,15 @@ export function UndeliveredFilesNotice({
         presented nothing, so the route would refuse it. These are the files
         that call should have named.
       */}
-      <ArtifactFileList
-        archiveDownloadsEnabled={false}
-        className="px-3 pb-3"
-        files={failure.undeliveredPaths}
-        skillInstallEnabled={false}
-        threadId={threadId}
-      />
+      {!failure.verificationIncomplete && (
+        <ArtifactFileList
+          archiveDownloadsEnabled={false}
+          className="px-3 pb-3"
+          files={failure.undeliveredPaths}
+          skillInstallEnabled={false}
+          threadId={threadId}
+        />
+      )}
     </div>
   );
 }

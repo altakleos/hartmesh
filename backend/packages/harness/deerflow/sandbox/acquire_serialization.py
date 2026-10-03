@@ -189,6 +189,18 @@ class AcquireSerializer[KeyT: Hashable]:
         finally:
             acquire.release()
 
+    @contextmanager
+    def try_hold(self, key: KeyT) -> Iterator[bool]:
+        """Skip a busy key without adding an executor waiter."""
+        entry = self._checkout(key)
+        held = entry.lock.acquire(blocking=False)
+        try:
+            yield held
+        finally:
+            if held:
+                entry.lock.release()
+            self._checkin(key, entry)
+
     def close(self) -> None:
         """Reject new holders and release executor resources. Idempotent.
 

@@ -186,6 +186,7 @@ def test_gateway_cors_exposes_the_run_metadata_header():
 
     exposed = {value.strip().lower() for value in response.headers.get("access-control-expose-headers", "").split(",")}
     assert "content-location" in exposed
+    assert {"etag", "content-range", "x-artifact-projection", "x-artifact-source-bytes"} <= exposed
 
 
 def test_gateway_cors_rejects_unconfigured_origin():

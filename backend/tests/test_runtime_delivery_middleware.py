@@ -193,7 +193,7 @@ def test_a_run_whose_snapshot_failed_presents_nothing(thread_home: Path, monkeyp
     async def boom(*_args: Any, **_kwargs: Any) -> Any:
         raise OSError("no")
 
-    monkeypatch.setattr(module, "capture_workspace_snapshot", boom)
+    monkeypatch.setattr(module, "capture_output_snapshot", boom)
     middleware, runtime = RuntimeDeliveryMiddleware(), _runtime()
     update = _turn(middleware, runtime, lambda: (thread_home / "out.txt").write_text("hi", encoding="utf-8"), _state(HumanMessage("go"), _answer()))
     assert update is None

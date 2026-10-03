@@ -18,8 +18,10 @@ timings.
 
 from __future__ import annotations
 
+import asyncio
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from _sandbox_provider_fakes import _aio_mod, _make_provider
@@ -296,3 +298,136 @@ async def test_prewarm_async_parks_without_blocking_the_loop(tmp_path, monkeypat
     assert parked is not None
     assert backend.created == [parked]
     assert parked in provider._warm_pool
+
+
+@pytest.mark.asyncio
+async def test_busy_prewarms_do_not_queue_or_starve_real_work(tmp_path, monkeypatch):
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    existing = _acquire(provider, "existing")
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    ready = threading.Event()
+    loop.set_default_executor(ThreadPoolExecutor(max_workers=2))
+
+    def readiness(*_args, **_kwargs):
+        loop.call_soon_threadsafe(entered.set)
+        assert ready.wait(5)
+        return True
+
+    monkeypatch.setattr(_aio_mod(), "wait_for_sandbox_ready", readiness)
+    first = asyncio.create_task(provider.prewarm_async("cold", user_id=USER))
+    duplicates = []
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        duplicates = [asyncio.create_task(provider.prewarm_async(name, user_id=USER)) for name in ["cold"] * 8 + ["other"] * 8]
+        assert await asyncio.wait_for(asyncio.gather(*duplicates), 1) == [None] * 16
+        assert await asyncio.wait_for(asyncio.to_thread(lambda: "config read"), 1) == "config read"
+        assert await asyncio.wait_for(provider.acquire_async("existing", user_id=USER), 1) == existing
+        assert len(backend.created) == 2
+    finally:
+        ready.set()
+        await asyncio.gather(first, *duplicates, return_exceptions=True)
+        provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_prewarm_cancellation_drains_creation_before_returning(tmp_path, monkeypatch):
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+
+    def readiness(*_args, cancelled=None, **_kwargs):
+        loop.call_soon_threadsafe(entered.set)
+        if cancelled is None:
+            return True
+        assert cancelled.wait(3)
+        return False
+
+    monkeypatch.setattr(_aio_mod(), "wait_for_sandbox_ready", readiness)
+    task = asyncio.create_task(provider.prewarm_async("cancelled", user_id=USER))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert backend.destroyed == backend.created
+        assert provider._starting == set()
+        assert provider._warm_pool == {}
+        assert provider._acquire_serializer._table == {}
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_drains_prewarm_without_needing_event_loop_callbacks(tmp_path, monkeypatch):
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+
+    def readiness(*_args, cancelled=None, **_kwargs):
+        loop.call_soon_threadsafe(entered.set)
+        if cancelled is None:
+            return True
+        assert cancelled.wait(3)
+        return False
+
+    monkeypatch.setattr(_aio_mod(), "wait_for_sandbox_ready", readiness)
+    task = asyncio.create_task(provider.prewarm_async("shutdown", user_id=USER))
+    await asyncio.wait_for(entered.wait(), 2)
+    provider.shutdown()
+    await asyncio.gather(task, return_exceptions=True)
+    assert backend.destroyed == backend.created
+    assert provider._starting == set()
+    assert provider._warm_pool == {}
+    assert await provider.prewarm_async("after-shutdown", user_id=USER) is None
+
+
+def test_prewarm_skips_cross_process_lock_contention(tmp_path, monkeypatch):
+    provider, backend = _make_provider(tmp_path, monkeypatch)
+    monkeypatch.setattr(_aio_mod(), "_try_lock_file_exclusive", lambda _file: False)
+    try:
+        assert _prewarm(provider, "busy") is None
+        assert backend.created == []
+    finally:
+        provider.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("rediscovered", [False, True])
+async def test_cancel_after_readiness_rolls_back_only_newly_created_prewarm(tmp_path, monkeypatch, rediscovered):
+    provider, backend = _make_provider(tmp_path, monkeypatch, adopt_on_conflict=rediscovered)
+    sandbox_id = provider._sandbox_id_for_thread("late-cancel", USER)
+    if rediscovered:
+        backend.alive[sandbox_id] = True
+        backend.infos[sandbox_id] = backend._unused_info(sandbox_id)
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    resume = threading.Event()
+    register = provider._register_created_sandbox
+
+    def paused_register(*args, **kwargs):
+        loop.call_soon_threadsafe(entered.set)
+        assert resume.wait(3)
+        return register(*args, **kwargs)
+
+    monkeypatch.setattr(provider, "_register_created_sandbox", paused_register)
+    task = asyncio.create_task(provider.prewarm_async("late-cancel", user_id=USER))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        task.cancel()
+        await asyncio.sleep(0)
+        resume.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        assert provider._starting == set()
+        if rediscovered:
+            assert backend.destroyed == []
+            assert sandbox_id in provider._warm_pool
+            assert sandbox_id not in provider._prewarmed_unclaimed
+        else:
+            assert backend.destroyed == [sandbox_id]
+            assert provider._warm_pool == {}
+    finally:
+        resume.set()
+        await asyncio.gather(task, return_exceptions=True)
+        provider.shutdown()
