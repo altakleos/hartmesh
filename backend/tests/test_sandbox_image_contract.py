@@ -81,7 +81,7 @@ def test_sandbox_smoke_runs_the_image_with_the_restricted_profile() -> None:
     workflow = SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8")
 
     assert "actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3" in workflow
-    assert "docker build --tag deer-flow-sandbox-smoke docker/sandbox" in workflow
+    assert "--tag deer-flow-sandbox-smoke docker/sandbox" in workflow
     assert "--user 1000:1000" in workflow
     assert "--cap-drop=ALL" in workflow
     assert "--security-opt=no-new-privileges" in workflow
@@ -93,6 +93,39 @@ def test_sandbox_smoke_runs_the_image_with_the_restricted_profile() -> None:
     assert "jq --raw-output '.data.stdout'" in workflow
     assert 'test "$shell_user" = "gem"' in workflow
     assert "permission denied|operation not permitted" in workflow
+
+
+def test_restricted_smoke_build_uses_the_release_base_mirror(tmp_path: Path) -> None:
+    """Exercise the workflow's build argv and keep its base aligned with releases."""
+    import yaml
+
+    smoke = yaml.safe_load(SANDBOX_SMOKE_WORKFLOW.read_text(encoding="utf-8"))["jobs"]["restricted-profile"]
+    release = yaml.safe_load((REPO_ROOT / ".github/workflows/container.yaml").read_text(encoding="utf-8"))
+    sandbox = next(item for item in release["jobs"]["container"]["strategy"]["matrix"]["include"] if item["component"] == "sandbox")
+    base = smoke.get("env", {}).get("SANDBOX_BASE_IMAGE")
+    assert base is not None, "restricted smoke must select the release base mirror explicitly"
+    assert sandbox["build-args"] == f"BASE_IMAGE={base}"
+    assert base.startswith("ghcr.io/")
+    digest = base.rsplit("@sha256:", 1)[-1]
+    assert re.fullmatch(r"[0-9a-f]{64}", digest)
+    assert f"@sha256:{digest}" in SANDBOX_DOCKERFILE.read_text(encoding="utf-8")
+
+    # Run only the build step, with an offline docker double, to catch an env
+    # pin that is declared but never passed to Docker (or passed unquoted).
+    docker = tmp_path / "docker"
+    docker.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$CAPTURE_PATH"\n', encoding="utf-8")
+    docker.chmod(0o755)
+    capture = tmp_path / "arguments"
+    build = next(step for step in smoke["steps"] if step.get("name") == "Build the sandbox image")
+    result = subprocess.run(
+        ["bash", "-e", "-c", build["run"]],
+        env={**os.environ, "PATH": f"{tmp_path}:{os.environ['PATH']}", "SANDBOX_BASE_IMAGE": base, "CAPTURE_PATH": str(capture)},
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert capture.read_text(encoding="utf-8").splitlines() == ["build", "--build-arg", f"BASE_IMAGE={base}", "--tag", "deer-flow-sandbox-smoke", "docker/sandbox"]
 
 
 def test_su_shim_preserves_login_environment_and_stdin_for_same_uid(
@@ -335,9 +368,9 @@ def test_sandbox_smoke_pull_budget_fits_inside_the_step_and_job_timeouts() -> No
 def test_every_smoke_job_is_bounded_at_all() -> None:
     """A job with no ``timeout-minutes`` inherits GitHub's six-hour default.
 
-    Both jobs here wait on the same Beijing registry -- one pulls the source
-    images, the other builds ``docker/sandbox`` from a base pinned there -- and
-    a transfer that stops answering has nothing else to stop it. Six hours of
+    Both jobs wait on remote registries -- one pulls compatibility images,
+    the other builds from the release base mirror -- and a transfer that
+    stops answering has nothing else to stop it. Six hours of
     that is a held runner and a PR whose checks never resolve, for a job that
     measures three to five minutes.
     """

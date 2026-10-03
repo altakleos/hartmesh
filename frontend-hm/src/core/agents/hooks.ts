@@ -1,10 +1,12 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
+import { selectAgentsApiEnabled } from "@/core/features/api";
+import { useFeatures } from "@/core/features/hooks";
+
 import {
   createAgent,
   deleteAgent,
-  fetchAgentsApiEnabled,
   getAgent,
   listAgents,
   updateAgent,
@@ -17,15 +19,7 @@ import {
 import type { CreateAgentRequest, UpdateAgentRequest } from "./types";
 
 export function useAgentsApiEnabled() {
-  const { data, isPending } = useQuery({
-    queryKey: ["features", "agents_api"],
-    queryFn: () => fetchAgentsApiEnabled(),
-    // Re-check on every mount so flipping config.yaml + revisiting the
-    // agents section auto-enables the feature without a rebuild.
-    staleTime: 0,
-    refetchOnMount: true,
-    retry: false,
-  });
+  const { data, isPending } = useFeatures(selectAgentsApiEnabled);
 
   // localStorage only exists in the browser, so read the last-known value
   // after mount (not during render). This keeps the first client render equal

@@ -44,18 +44,18 @@ permissions:
 jobs:
   restricted-profile:
     runs-on: ubuntu-latest
-    # This job builds docker/sandbox, whose base is pinned in the same Beijing
-    # registry the job below pulls from, so it waits on the same transfer. It
-    # measures three to five minutes; the bound is here so a registry that
-    # stops answering fails it instead of holding a runner -- and this PR's
-    # checks -- for GitHub's default six hours.
+    # Build from the same immutable GHCR mirror used by release candidates.
+    # The separate compatibility job below still exercises its source images.
+    # Bound registry and build stalls rather than holding a runner for six hours.
     timeout-minutes: 45
+    env:
+      SANDBOX_BASE_IMAGE: ghcr.io/${{ github.repository }}-sandbox-base@sha256:6328d7fd2f0ff0b4c147c3d05b3df1ce331f4a482eb6e550ecd64ed1fcf906e7
     steps:
       - name: Checkout repository
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Build the sandbox image
-        run: docker build --tag deer-flow-sandbox-smoke docker/sandbox
+        run: docker build --build-arg "BASE_IMAGE=$SANDBOX_BASE_IMAGE" --tag deer-flow-sandbox-smoke docker/sandbox
 
       - name: Exercise the restricted runtime profile
         run: |

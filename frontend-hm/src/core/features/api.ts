@@ -61,19 +61,39 @@ export async function fetchFeatures(): Promise<FeaturesResponse> {
 }
 
 export async function fetchAgentsApiEnabled(): Promise<boolean> {
-  return (await fetchFeatures()).agents_api.enabled;
+  return selectAgentsApiEnabled(await fetchFeatures());
+}
+
+export function selectAgentsApiEnabled(features: FeaturesResponse): boolean {
+  return features.agents_api.enabled;
 }
 
 export async function fetchBrowserControlEnabled(): Promise<boolean> {
-  return (await fetchFeatures()).browser_control?.enabled ?? false;
+  return selectBrowserControlEnabled(await fetchFeatures());
+}
+
+export function selectBrowserControlEnabled(
+  features: FeaturesResponse,
+): boolean {
+  return features.browser_control?.enabled ?? false;
 }
 
 export async function fetchMcpTasksEnabled(): Promise<boolean> {
-  return (await fetchFeatures()).mcp_tasks?.enabled ?? false;
+  return selectMcpTasksEnabled(await fetchFeatures());
+}
+
+export function selectMcpTasksEnabled(features: FeaturesResponse): boolean {
+  return features.mcp_tasks?.enabled ?? false;
 }
 
 export async function fetchSubagentBatchesCapability(): Promise<SubagentBatchesCapability> {
-  const feature = (await fetchFeatures()).subagent_batches;
+  return selectSubagentBatchesCapability(await fetchFeatures());
+}
+
+export function selectSubagentBatchesCapability(
+  features: FeaturesResponse,
+): SubagentBatchesCapability {
+  const feature = features.subagent_batches;
   const legacyEnabled = feature?.enabled ?? false;
   return {
     repositoryAvailable: feature?.repository_available ?? legacyEnabled,
@@ -93,7 +113,11 @@ function color(value: unknown): string | null {
  * no `branding`, which is the same as a bundle that names nothing.
  */
 export async function fetchBranding(): Promise<Branding> {
-  const branding = (await fetchFeatures()).branding;
+  return selectBranding(await fetchFeatures());
+}
+
+export function selectBranding(features: FeaturesResponse): Branding {
+  const branding = features.branding;
   const name =
     typeof branding?.company_name === "string"
       ? branding.company_name.trim()
@@ -122,7 +146,13 @@ const MAX_STARTERS = 6;
  * screens away from the people who had them.
  */
 export async function fetchWorkspacePresentation(): Promise<WorkspacePresentation> {
-  const ui = (await fetchFeatures()).ui;
+  return selectWorkspacePresentation(await fetchFeatures());
+}
+
+export function selectWorkspacePresentation(
+  features: FeaturesResponse,
+): WorkspacePresentation {
+  const ui = features.ui;
   const starters = Array.isArray(ui?.starters) ? ui.starters : [];
   return {
     profile: ui?.profile === "business" ? "business" : "developer",

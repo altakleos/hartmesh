@@ -22,14 +22,15 @@ from deerflow.community.direct_fetch.client import DEFAULT_TIMEOUT_SECONDS, Dire
 from deerflow.community.direct_fetch.extraction import InProcessExtractor
 from deerflow.community.web_fetch_outcome import FetchRefusal, describe_refusal, refusal_meta, stamped_result, success_meta
 from deerflow.config import get_app_config
+from deerflow.utils.file_io import await_drained
 
 __all__ = ["PROVIDER_ID", "MAX_RESULT_CHARS", "CONCURRENT_FETCHES", "web_fetch_tool"]
 
 PROVIDER_ID = "direct_http"
 #: How many pages one Gateway process reads at once. Unlike the hosted reader
 #: this replaced, the work now lands on the Gateway itself: up to 2 MiB of
-#: body buffered per fetch and an article extraction that spawns a Node
-#: subprocess, inside the tenant profile's own memory, CPU and pid budget. A
+#: body buffered per fetch and in-process article extraction, inside the
+#: tenant profile's own memory and CPU budget. A
 #: model that issues several fetch calls in one step -- or two tenants' turns
 #: doing so at once -- would otherwise have no ceiling at all. The same bound
 #: the sibling ``web_search`` already applies, for the same reason.
@@ -87,11 +88,17 @@ def _client_from_config(app_config: Any) -> DirectFetchClient:
     return DirectFetchClient(timeout_seconds=timeout, trust_env=trust_env)
 
 
+def _extract_markdown(text: str) -> str:
+    article = _readability.extract_article(text)
+    return article.to_markdown()[:MAX_RESULT_CHARS]
+
+
 async def _extract(page: FetchedPage) -> str:
     if page.content_type == "text/plain":
         return page.text[:MAX_RESULT_CHARS]
-    article = await asyncio.to_thread(_readability.extract_article, page.text)
-    return article.to_markdown()[:MAX_RESULT_CHARS]
+    # Both HTML passes belong to the worker. Cancellation cannot stop a thread,
+    # so retain the enclosing fetch slot until conversion has actually ended.
+    return await await_drained(asyncio.to_thread(_extract_markdown, page.text))
 
 
 @tool("web_fetch", parse_docstring=True)

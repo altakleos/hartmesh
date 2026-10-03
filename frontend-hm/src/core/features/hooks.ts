@@ -4,12 +4,28 @@ import { useEffect } from "react";
 import { useAuth } from "@/core/auth/AuthProvider";
 
 import {
-  fetchBranding,
-  fetchBrowserControlEnabled,
-  fetchMcpTasksEnabled,
-  fetchSubagentBatchesCapability,
-  fetchWorkspacePresentation,
+  type FeaturesResponse,
+  fetchFeatures,
+  selectBranding,
+  selectBrowserControlEnabled,
+  selectMcpTasksEnabled,
+  selectSubagentBatchesCapability,
+  selectWorkspacePresentation,
 } from "./api";
+
+/** All feature observers share transport, retries and the identity's cache. */
+export function useFeatures<T>(select: (features: FeaturesResponse) => T) {
+  return useQuery({
+    queryKey: ["features"],
+    queryFn: fetchFeatures,
+    select,
+    // Re-check when a consumer mounts or the window regains focus, preserving
+    // live deployment changes and recovery after a temporary discovery failure.
+    staleTime: 0,
+    refetchOnMount: true,
+    retry: 2,
+  });
+}
 
 /**
  * Whose workspace this is. A named company replaces the product's name in the
@@ -21,13 +37,7 @@ import {
  * the product's name on every load is the wrong first thing to see.
  */
 export function useBranding() {
-  const { data } = useQuery({
-    queryKey: ["features", "branding"],
-    queryFn: () => fetchBranding(),
-    staleTime: 0,
-    refetchOnMount: true,
-    retry: 2,
-  });
+  const { data } = useFeatures(selectBranding);
   return {
     companyName: data?.companyName ?? null,
     primary: data?.primary ?? null,
@@ -51,14 +61,7 @@ export function useDocumentTitle(page: string, productName: string) {
 }
 
 export function useBrowserControlEnabled() {
-  const { data, isPending } = useQuery({
-    queryKey: ["features", "browser_control"],
-    queryFn: () => fetchBrowserControlEnabled(),
-    staleTime: 0,
-    refetchOnMount: true,
-    retry: false,
-  });
-
+  const { data, isPending } = useFeatures(selectBrowserControlEnabled);
   return {
     enabled: data ?? false,
     isLoading: isPending,
@@ -66,14 +69,7 @@ export function useBrowserControlEnabled() {
 }
 
 export function useMcpTasksEnabled() {
-  const { data, isPending } = useQuery({
-    queryKey: ["features", "mcp_tasks"],
-    queryFn: () => fetchMcpTasksEnabled(),
-    staleTime: 0,
-    refetchOnMount: true,
-    retry: false,
-  });
-
+  const { data, isPending } = useFeatures(selectMcpTasksEnabled);
   return {
     enabled: data ?? false,
     isLoading: isPending,
@@ -81,13 +77,7 @@ export function useMcpTasksEnabled() {
 }
 
 export function useSubagentBatchesCapability() {
-  const { data, isPending } = useQuery({
-    queryKey: ["features", "subagent_batches"],
-    queryFn: () => fetchSubagentBatchesCapability(),
-    staleTime: 0,
-    refetchOnMount: true,
-    retry: false,
-  });
+  const { data, isPending } = useFeatures(selectSubagentBatchesCapability);
   return {
     repositoryAvailable: data?.repositoryAvailable ?? false,
     workerRunning: data?.workerRunning ?? false,
@@ -97,15 +87,7 @@ export function useSubagentBatchesCapability() {
 }
 
 export function useWorkspacePresentation() {
-  const { data, isPending } = useQuery({
-    queryKey: ["features", "ui"],
-    queryFn: () => fetchWorkspacePresentation(),
-    // Matches the sibling feature hooks: a transient failure self-heals on the
-    // next mount instead of leaving the deployment's answer unknown — which,
-    // for the one hook that fails open, means silently reverting to developer.
-    staleTime: 0,
-    refetchOnMount: true,
-  });
+  const { data, isPending } = useFeatures(selectWorkspacePresentation);
   return {
     profile: data?.profile,
     starters: data?.starters,
