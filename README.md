@@ -40,6 +40,10 @@ See the [business-report guide](skills/public/business-report/SKILL.md).
 Missing chart images are omitted from the report card; a new report revision
 retries them without disrupting the rest of the report.
 
+Workspace branding and feature controls share one settings request. Direct page
+fetching keeps its four concurrent slots until extraction finishes, even after
+cancellation, and converts HTML to Markdown off the Gateway's event loop.
+
 ## Sister Projects
 
 <img width="446" height="280" alt="image" align="middle" src="https://github.com/user-attachments/assets/077edef4-d560-41af-bb0d-d0a5f14fcc20" />

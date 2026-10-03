@@ -275,8 +275,8 @@ def test_resolving_a_name_leaves_the_event_loop_free(monkeypatch: pytest.MonkeyP
 
 
 def test_only_a_bounded_number_of_pages_are_read_at_once(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Each fetch buffers up to 2 MiB and extracts in a subprocess, inside the
-    tenant profile's own memory, CPU and pid budget. A model can issue several
+    """Each fetch buffers up to 2 MiB and extracts in process, inside the
+    tenant profile's own memory and CPU budget. A model can issue several
     fetch calls in one step; the ceiling is the tool's, the way it is for
     ``web_search``."""
     live = 0

@@ -28,6 +28,13 @@ cross-language contract.
    Workspace-level FileActionLifetimeProvider retires Files/Shared batches and
    filename toasts with the account; ordinary page navigation keeps batches and
    Undo alive. Retired actions cannot issue requests under a later session.
+   Feature discovery uses one `["features"]` query per QueryClient. Branding,
+   browser, MCP tasks, subagent batches, workspace presentation and Agents API
+   hooks select from its raw response and share two retries; mount/focus still
+   refresh stale data. Keep their own unknown/error defaults: branding waits,
+   optional capabilities stay disabled, developer screens stay available, and
+   Agents API keeps its last-known fallback. Do not split the transport cache
+   by selected field or introduce a module-global feature cache.
    Settings > Tools MCP switch calls the targeted `PATCH /api/mcp/config`
    mutation, disables switches until that mutation's success refetch completes,
    displays the backend error `detail` through a toast, and invalidates

@@ -119,3 +119,17 @@ and rows, including explicit currency columns and preference conflicts. Report
 JSON and XLSX cells retain numeric precision; rounding belongs to display formats.
 Check actual XLSX formula operands and cached values, including grouped totals,
 averages and fractional cents, rather than comparing two rounded code paths.
+
+## Sandbox CI base
+
+The restricted sandbox smoke build must use the release workflow's mirrored
+base at the Dockerfile's digest. Its contract test executes the build step with
+an offline Docker double; keep the separate vendor compatibility pulls intact.
+
+## Direct-fetch worker capacity
+
+HTML extraction and Markdown conversion run in one worker, and retain the fetch
+slot until that worker exits even after repeated cancellation. Network and queued
+request cancellation remain prompt. Use explicit worker events and slot-acquisition
+signals in regressions, release every held worker in `finally`, and verify the
+four-worker bound against replacement requests while cancelled work is still held.
