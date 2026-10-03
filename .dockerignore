@@ -104,3 +104,8 @@ backend/sandbox/
 !backend/extensions/
 !backend/extensions/sources/
 !backend/extensions/sources/**
+
+# Untracked adjacent application material never belongs in release images.
+panel/
+config.yaml
+extensions_config.json

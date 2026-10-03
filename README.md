@@ -611,6 +611,14 @@ release, including upgrade behavior, or explicitly state that there are none.
 See [CHANGELOG.md](CHANGELOG.md) and the
 [HartMesh release procedure](RELEASING.md#hartmesh-distribution-releases).
 
+Run `python3 scripts/docker_acceptance.py --artifacts /tmp/hartmesh-docker-acceptance`
+to build the production Gateway and frontend images and exercise sign-in,
+uploads, chat, file delivery, sharing, and history through nginx in a disposable
+Docker stack. It uses synthetic accounts and a scripted local model; Docker,
+the existing frontend test dependencies, and Playwright Chromium are required.
+The same journey runs in pull-request CI. See the
+[acceptance coverage and evidence](RELEASING.md#docker-acceptance).
+
 `deploy.sh` supports building and starting separately:
 
 ```bash

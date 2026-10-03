@@ -332,3 +332,31 @@ receive a JSON error and close code 1008.
 The support bundle's `extensions_config.json` reader accepts UTF-8 with or
 without a leading BOM, matching the runtime loader. Preserve redaction and
 avoid flagging a valid BOM-prefixed file as a syntax error in triage output.
+
+## Docker acceptance
+
+`docker_acceptance.py` builds production backend/frontend images from current
+tracked working-tree bytes, preserving symlinks and modes; stage new source files
+before running. Never walk or copy ignored operator config or `panel/` into its
+build context. The synthetic model is a separate HTTP service, while Gateway,
+frontend, nginx, authentication and tools stay real. Application and model
+networking is internal; nginx alone also joins an ingress bridge with one random
+loopback port. No host Docker socket is mounted.
+Each run owns unique image names, a Compose project and disposable data volume.
+Keep process-group deadlines, interruption cleanup and result/source-fingerprint
+evidence intact. Tests may initialize synthetic users and exercise actual APIs;
+never add bypass routers or browser API mocks to this acceptance profile.
+
+## Release artifact admission
+
+`release_artifacts.py` admits only canonical `X.Y.Z+hartmesh.N` candidates;
+remote Git tag and GitHub Release lookups must distinguish absence from errors.
+Container and manifest workflows share the version lock. Tag publication first
+verifies every immutable candidate's GitHub attestation, source and build-input
+fingerprint, then passes those exact references to the matrix. Never rebuild on
+a tag event, including the provisioner that the Compose profile does not pin.
+Fingerprints conservatively include copied trees, Docker ignore controls and
+release build configuration. Keep `BUILD_CONTEXTS` and `COMPONENT_INPUTS` aligned
+with the matrix and Dockerfiles; new COPY/ADD sources outside that coverage fail.
+Public skill Markdown is a build input. Root release notes, docs and Compose
+pins may change after the candidate; a source change requires rebuilding it.

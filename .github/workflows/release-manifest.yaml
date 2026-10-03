@@ -8,9 +8,14 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: hartmesh-release-${{ github.repository }}-v${{ inputs.version }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
   packages: read
+  attestations: read
 
 jobs:
   release-manifest:
@@ -20,12 +25,14 @@ jobs:
         uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
         with:
           ref: refs/tags/v${{ inputs.version }}
+          fetch-depth: 0
 
-      - name: Validate and prepare release notes
+      - name: Validate versions and prepare release notes
         env:
           VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
+          bash scripts/verify_versions.sh "$VERSION"
           python3 scripts/release_notes.py "$VERSION" > "$RUNNER_TEMP/release-notes.md"
 
       - name: Install crane
@@ -50,6 +57,16 @@ jobs:
           set -euo pipefail
           printf '%s' "$GH_TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
+      - name: Verify all candidate provenance and final build inputs
+        id: candidates
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          CANDIDATES="$(python3 scripts/release_artifacts.py verify-release --repository "$GITHUB_REPOSITORY" --version "$VERSION" --revision HEAD)"
+          printf 'candidates=%s\n' "$CANDIDATES" >> "$GITHUB_OUTPUT"
+
       - name: Resolve and cross-check published artifacts
         id: resolve
         env:
@@ -57,6 +74,7 @@ jobs:
           IMAGE_BASE: ghcr.io/${{ github.repository }}
           IMAGE_TAG: ${{ steps.identity.outputs.image_tag }}
           SHORT_SHA: ${{ steps.identity.outputs.short_sha }}
+          CANDIDATES: ${{ steps.candidates.outputs.candidates }}
         run: |
           set -euo pipefail
 
@@ -73,28 +91,14 @@ jobs:
             SHA_REFERENCE="${IMAGE_REPOSITORY}:sha-${SHORT_SHA}"
             TAG_DIGEST="$(crane digest "$TAG_REFERENCE")"
             assert_digest "${COMPONENT} release tag" "$TAG_DIGEST"
-            if SHA_DIGEST="$(crane digest "$SHA_REFERENCE" 2>/dev/null)"; then
-              assert_digest "${COMPONENT} sha tag" "$SHA_DIGEST"
-              if [ "$TAG_DIGEST" != "$SHA_DIGEST" ]; then
-                echo "::error::${TAG_REFERENCE} does not match ${SHA_REFERENCE}"
-                exit 1
-              fi
-              REVISION_CHECK="verified"
-            else
-              TAG_LIST_FILE="${RUNNER_TEMP}/${COMPONENT}-tags.txt"
-              if ! crane ls "$IMAGE_REPOSITORY" > "$TAG_LIST_FILE"; then
-                echo "::error::Unable to confirm whether ${SHA_REFERENCE} exists because ${IMAGE_REPOSITORY} tags could not be listed"
-                exit 1
-              fi
-              if grep -Fxq "sha-${SHORT_SHA}" "$TAG_LIST_FILE"; then
-                echo "::error::${SHA_REFERENCE} is listed but its digest could not be resolved"
-                exit 1
-              fi
-              echo "::warning::${SHA_REFERENCE} was not found; recording ${TAG_REFERENCE} as the published identity"
-              echo "::warning::First 50 tags currently present in ${IMAGE_REPOSITORY}:"
-              head -50 "$TAG_LIST_FILE"
-              REVISION_CHECK="tag-not-found"
+            EXPECTED_DIGEST="$(python3 -c 'import json, os, sys; print(json.loads(os.environ["CANDIDATES"])[sys.argv[1].replace("_", "-")].rsplit("@", 1)[1])' "$COMPONENT")"
+            SHA_DIGEST="$(crane digest "$SHA_REFERENCE")"
+            assert_digest "${COMPONENT} sha tag" "$SHA_DIGEST"
+            if [ "$TAG_DIGEST" != "$SHA_DIGEST" ] || [ "$TAG_DIGEST" != "$EXPECTED_DIGEST" ]; then
+              echo "::error::${TAG_REFERENCE} and ${SHA_REFERENCE} must both resolve to the verified candidate ${EXPECTED_DIGEST}"
+              exit 1
             fi
+            REVISION_CHECK="verified"
             printf '%s_repository=%s\n' "$COMPONENT" "$IMAGE_REPOSITORY" >> "$GITHUB_OUTPUT"
             printf '%s_digest=%s\n' "$COMPONENT" "$TAG_DIGEST" >> "$GITHUB_OUTPUT"
             printf '%s_revision_check=%s\n' "$COMPONENT" "$REVISION_CHECK" >> "$GITHUB_OUTPUT"
