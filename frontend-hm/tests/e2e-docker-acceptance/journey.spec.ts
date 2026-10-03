@@ -1,7 +1,26 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 const artifact =
   "Synthetic acceptance artifact.\nUploaded text: UPLOAD-ACCEPTANCE-726\n";
+
+async function openSharedFiles(page: Page) {
+  // Both tabs contain acceptance.txt. Wait for Shared's own fresh response
+  // and list, rather than matching the previous tab during URL navigation.
+  const listing = page.waitForResponse(
+    (response) =>
+      new URL(response.url()).pathname === "/api/shared" &&
+      response.request().method() === "GET",
+  );
+  await page.getByRole("tab", { name: "Shared", exact: true }).click();
+  const response = await listing;
+  expect(response.status(), await response.text()).toBe(200);
+  await expect(page).toHaveURL(/\/workspace\/files\?tab=shared$/);
+  await expect(
+    page
+      .getByTestId("shared-files-list")
+      .getByRole("link", { name: "acceptance.txt", exact: true }),
+  ).toBeVisible();
+}
 
 test("production Docker login, upload, streamed tools, files, history and confirmed deletion", async ({
   page,
@@ -92,10 +111,7 @@ test("production Docker login, upload, streamed tools, files, history and confir
   await expect(
     page.getByRole("link", { name: "acceptance.txt", exact: true }),
   ).toBeVisible();
-  await page.getByRole("tab", { name: "Shared", exact: true }).click();
-  await expect(
-    page.getByRole("link", { name: "acceptance.txt", exact: true }),
-  ).toBeVisible();
+  await openSharedFiles(page);
   await page.screenshot({
     path: `${test.info().outputDir}/files.png`,
     fullPage: true,
@@ -162,10 +178,7 @@ test("production Docker login, upload, streamed tools, files, history and confir
   await expect(
     page.getByRole("link", { name: "acceptance.txt", exact: true }),
   ).toBeVisible();
-  await page.getByRole("tab", { name: "Shared", exact: true }).click();
-  await expect(
-    page.getByRole("link", { name: "acceptance.txt", exact: true }),
-  ).toBeVisible();
+  await openSharedFiles(page);
   const logout = await context.request.post("/api/v1/auth/logout", { headers });
   expect(logout.ok()).toBe(true);
   await page.reload();
