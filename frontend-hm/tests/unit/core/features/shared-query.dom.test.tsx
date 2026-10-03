@@ -133,6 +133,8 @@ describe("shared feature discovery", () => {
         primary: "#123456",
         secondary: null,
         hasLogo: true,
+        providerName: null,
+        supportURL: null,
         isLoading: false,
       },
       browser: { enabled: true, isLoading: false },
@@ -165,6 +167,8 @@ describe("shared feature discovery", () => {
       primary: null,
       secondary: null,
       hasLogo: false,
+      providerName: null,
+      supportURL: null,
       isLoading: false,
     });
     expect(state().browser.enabled).toBe(false);

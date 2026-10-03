@@ -166,6 +166,9 @@ export interface Translations {
     checksHeading: string;
     notIncludedHeading: string;
     noRenders: string;
+    checkFailed: string;
+    retryCheck: string;
+    checkingRenders: string;
     downloadRender: (format: string) => string;
     checkStatus: {
       pass: string;
@@ -613,6 +616,8 @@ export interface Translations {
   // Workspace
   workspace: {
     settingsAndMore: string;
+    contactSupport: string;
+    providerSupport: (providerName: string) => string;
     about: string;
     /** About, for a workspace that carries a company's name. */
     aboutCompany: (companyName: string) => string;

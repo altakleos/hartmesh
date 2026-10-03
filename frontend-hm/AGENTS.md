@@ -147,8 +147,8 @@ the skill's own `format_value`, down to rounding the decimal spelling of a
 number rather than the binary double, so a figure reads the same on the card as
 in the PDF, Word and Excel renders; `tests/unit/core/business-report/` checks
 that against cases generated from the Python. Download buttons appear for each
-render the thread has presented; a render a later rebuild deleted is still
-offered until it is made again. Each chart is addressed inside the report's own
+render the thread has presented and the live probe confirms; a render deleted
+by a later rebuild stays hidden until it is made again. Each chart is addressed inside the report's own
 directory, and the brand colour is spent on rules and borders only, because the
 card renders on whichever ground the viewer's theme paints.
 
@@ -192,18 +192,21 @@ history and never shrinks — a rebuild deletes the previous draft's renders
 while their paths stay in the list — so eligibility alone offered downloads
 that 404 after a revision that rendered nothing. The probe is a
 `Range: bytes=0-0` GET whose body is cancelled unread, so proving a large PDF
-is there costs one byte; 200 and 206 are live, and 400/403/404 and a network
-failure are all fail-closed. It never asks about a path presentation did not
+is there costs one byte; 200 and 206 are live. Missing/refused files are
+absent; server/rate-limit/network failures are uncertain, with a Retry check
+action that refetches only the probes. Unverified links stay hidden; an
+uncertain answer never shows the regenerate notice. It never asks about a path presentation did not
 produce: the delivery fence still decides what may be offered at all, and a
 file existing is not permission to offer a format nobody presented, so nothing
 globs the directory or infers the three conventional names. The query key
-carries the report body's own digest and whether a run has settled, because
+carries the report body's own digest, because
 every draft rewrites the same filenames while the cumulative list stays
 byte-for-byte identical — keyed on the pathname alone, one draft reads
 another's verdict and a slow probe from the previous draft restores a deleted
 link. While the verdict is unknown the card shows neither links nor the "No
 file to download yet" notice, because a false empty is worse than the stale
-link it replaced. Mock and static mode skip the probe and stay deterministic.
+link it replaced. A run settling refetches the same key without blinking confirmed links. Mock
+and static mode skip the probe and stay deterministic.
 
 Three things decide whether a card appears at all: the `.report.json` suffix, a
 body that parses as `version: 1`, and — for each picture — the contract's
@@ -299,6 +302,11 @@ About is that name and the version, nothing else. "Unknown" (still loading,
 or the fetch failed and will retry) is `isLoading`, and every one of those
 surfaces shows neither name until it is false. The sign-in page shows the
 product's name, never the company's: the brand is delivered after sign-in.
+The same authenticated response carries optional provider support from
+`provider.json`: `useBranding` keeps it distinct from company/product identity.
+The workspace menu opens only a validated HTTPS link with no referrer or
+added context. Files tabs derive from `useSearchParams`, including same-page
+navigation and history changes.
 
 One rule governs what happens while the answer is unknown: a control someone
 might need stays offered, and copy the deployment authors waits. So the screens

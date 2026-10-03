@@ -5,9 +5,12 @@ const staticMode = rs.hoisted(() => ({ value: false }));
 rs.mock("@/core/static-mode", () => ({
   isStaticWebsiteOnly: () => staticMode.value,
 }));
-rs.mock("@/core/features", () => ({
-  useBranding: () => ({ companyName: null, primary: null }),
+const branding = rs.hoisted(() => ({
+  companyName: null as string | null,
+  providerName: null as string | null,
+  supportURL: null as string | null,
 }));
+rs.mock("@/core/features", () => ({ useBranding: () => branding }));
 // The dialog has its own tests; here only whether the menu opens it.
 rs.mock("@/components/workspace/account-export-dialog", () => ({
   AccountExportDialog: ({ open }: { open: boolean }) =>
@@ -37,6 +40,9 @@ async function openMenu() {
 afterEach(() => {
   cleanup();
   staticMode.value = false;
+  branding.companyName = null;
+  branding.providerName = null;
+  branding.supportURL = null;
 });
 
 describe("the menu's Download all my data", () => {
@@ -50,5 +56,36 @@ describe("the menu's Download all my data", () => {
     staticMode.value = true;
     await openMenu();
     expect(screen.queryByRole("menuitem", { name: t.menuItem })).toBeNull();
+  });
+});
+
+describe("the configured support entry", () => {
+  it("names the provider without replacing the customer's About entry", async () => {
+    branding.companyName = "Customer";
+    branding.providerName = "Hosting";
+    branding.supportURL = "https://help.example.test/";
+    await openMenu();
+    const link = screen.getByRole("menuitem", {
+      name: "Contact Hosting support",
+    });
+    expect(link.getAttribute("href")).toBe("https://help.example.test/");
+    expect(link.getAttribute("rel")).toBe("noopener noreferrer");
+    expect(link.getAttribute("referrerpolicy")).toBe("no-referrer");
+    expect(link.getAttribute("target")).toBe("_blank");
+    expect(
+      screen.getByRole("menuitem", { name: "About Customer" }),
+    ).toBeTruthy();
+  });
+  it("uses a generic label if only a destination is set", async () => {
+    branding.supportURL = "https://help.example.test/";
+    await openMenu();
+    expect(
+      screen.getByRole("menuitem", { name: "Contact support" }),
+    ).toBeTruthy();
+  });
+  it("offers no dead link while the destination is absent", async () => {
+    branding.providerName = "Hosting";
+    await openMenu();
+    expect(screen.queryByRole("menuitem", { name: /Contact/ })).toBeNull();
   });
 });

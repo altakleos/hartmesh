@@ -160,3 +160,7 @@ or an explicitly injected AppConfig. See `../models/AGENTS.md` for storage and r
 boundaries. `managed_model_providers.py` derives provider defaults from validated
 endpoints; `ManagedModel.runtime_config()` combines them with profile fields.
 `AppConfig.from_file()` remains YAML-only.
+
+The tenant bundle's optional `provider.json` supplies `display_name` and an
+HTTPS `support_url`, separate from customer `brand.json`. Invalid fields degrade
+independently with value-free problems; only authenticated features expose them.

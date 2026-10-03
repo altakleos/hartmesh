@@ -12,6 +12,8 @@ Its layout is the skill's contract (``skills/public/business-report``):
 
 * ``brand.json`` -- ``company_name``, ``logo`` (a PNG or JPEG next to it),
   ``colors.primary`` and ``colors.secondary`` as ``#rrggbb``;
+* ``provider.json`` -- optional service provider ``display_name`` and HTTPS
+  ``support_url`` for the workspace menu, separate from the customer brand;
 * ``starters.json`` -- Home's starter list, the same shape ``ui.starters``
   takes in ``config.yaml`` and validated by the same rules, because it is the
   same list arriving from a different file;
@@ -34,6 +36,7 @@ import logging
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
@@ -47,6 +50,7 @@ logger = logging.getLogger(__name__)
 LOGO_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
 
 MAX_COMPANY_NAME_CHARS = 80
+MAX_SUPPORT_URL_CHARS = 2048
 
 
 class TenantBundleConfig(BaseModel):
@@ -80,6 +84,8 @@ class TenantBundle:
     starters: tuple[StarterConfig, ...] | None
     report_profiles: tuple[str, ...]
     problems: tuple[str, ...]
+    provider_name: str | None = None
+    support_url: str | None = None
 
 
 EMPTY_BUNDLE = TenantBundle(path=None, present=False, company_name=None, primary=None, secondary=None, logo=None, starters=None, report_profiles=(), problems=())
@@ -103,6 +109,7 @@ def load_tenant_bundle(path: str | Path | None) -> TenantBundle:
         if not root.is_dir():
             return _unusable(root, "tenant bundle directory does not exist")
         company_name, primary, secondary, logo = _read_brand(root, problems)
+        provider_name, support_url = _read_provider(root, problems)
         starters = _read_starters(root, problems)
         profiles_dir = root / "report-profiles"
         report_profiles = tuple(sorted(entry.stem for entry in profiles_dir.glob("*.json") if entry.is_file())) if profiles_dir.is_dir() else ()
@@ -118,6 +125,8 @@ def load_tenant_bundle(path: str | Path | None) -> TenantBundle:
         starters=starters,
         report_profiles=report_profiles,
         problems=tuple(problems),
+        provider_name=provider_name,
+        support_url=support_url,
     )
 
 
@@ -135,6 +144,39 @@ def _read_json(path: Path, problems: list[str]) -> object | None:
 
 
 _MALFORMED = object()
+
+
+def _read_provider(root: Path, problems: list[str]) -> tuple[str | None, str | None]:
+    data = _read_json(root / "provider.json", problems)
+    if data is None:
+        return None, None
+    if data is _MALFORMED or not isinstance(data, dict):
+        problems.append("provider.json: not a JSON object")
+        return None, None
+    name = data.get("display_name")
+    if name is not None:
+        if not isinstance(name, str) or not name.strip() or len(name.strip()) > MAX_COMPANY_NAME_CHARS or first_control_or_reordering_character(name, allow_newlines=False) is not None:
+            problems.append("provider.json: display_name must be one plain line of at most 80 characters")
+            name = None
+        else:
+            name = name.strip()
+    url = data.get("support_url")
+    if url is not None and not _valid_support_url(url):
+        problems.append("provider.json: support_url must be an HTTPS URL without credentials, whitespace or backslashes (at most 2048 characters)")
+        url = None
+    return name, url
+
+
+def _valid_support_url(value: object) -> bool:
+    if not isinstance(value, str) or len(value) > MAX_SUPPORT_URL_CHARS or "\\" in value or any(char.isspace() for char in value):
+        return False
+    if first_control_or_reordering_character(value, allow_newlines=False) is not None:
+        return False
+    try:
+        url = urlsplit(value)
+        return url.scheme == "https" and bool(url.hostname) and url.username is None and url.password is None and "%" not in url.netloc and (url.port is None or 0 < url.port <= 65535)
+    except ValueError:
+        return False
 
 
 def _read_brand(root: Path, problems: list[str]) -> tuple[str | None, str | None, str | None, Path | None]:

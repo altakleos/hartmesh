@@ -43,6 +43,8 @@ export function useBranding() {
     primary: data?.primary ?? null,
     secondary: data?.secondary ?? null,
     hasLogo: data?.hasLogo ?? false,
+    providerName: data?.providerName ?? null,
+    supportURL: data?.supportURL ?? null,
     isLoading: data === undefined,
   };
 }

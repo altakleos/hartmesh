@@ -200,6 +200,9 @@ export function createEnUS(product: string): Translations {
       downloadExcel: "Excel",
       checksHeading: "Checks",
       notIncludedHeading: "Not included",
+      checkFailed: "Couldn't check some downloads. Try again.",
+      retryCheck: "Retry check",
+      checkingRenders: "Checking…",
       noRenders:
         "No file to download yet — ask for the PDF, Word or Excel version.",
       downloadRender: (format) => `Download the ${format}`,
@@ -753,6 +756,8 @@ export function createEnUS(product: string): Translations {
 
     // Workspace
     workspace: {
+      contactSupport: "Contact support",
+      providerSupport: (providerName) => `Contact ${providerName} support`,
       settingsAndMore: "Settings and more",
       about: `About ${product}`,
       aboutCompany: (companyName: string) => `About ${companyName}`,

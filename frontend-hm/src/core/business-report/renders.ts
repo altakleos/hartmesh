@@ -54,20 +54,22 @@ function isLiveStatus(status: number) {
 /**
  * Whether `path` resolves as a regular file for this thread, right now.
  *
- * Fail-closed in every direction: a 400 (not a file), 403 (refused), 404
- * (gone) and a network failure all mean "not a download link". Nothing here
- * distinguishes them for the caller, and nothing is retried — a card that
- * cannot prove a file is there offers nothing, which is the whole repair.
+ * Unverified links stay hidden. Missing/refused files and transport failures
+ * have different recovery actions, so retain that distinction for the card.
  */
+export type ReportRenderAvailability = "present" | "absent" | "error";
+
 export async function probeReportRenderLive({
   threadId,
   path,
   isMock,
+  signal,
 }: {
   threadId: string;
   path: string;
   isMock?: boolean;
-}): Promise<boolean> {
+  signal?: AbortSignal;
+}): Promise<ReportRenderAvailability> {
   try {
     // Inside the guard with everything else: this function promises never to
     // throw, and a promise kept only for the part after URL construction
@@ -76,6 +78,8 @@ export async function probeReportRenderLive({
     const response = await fetchWithAuth(url, {
       method: "GET",
       headers: { Range: PROBE_RANGE },
+      cache: "no-store",
+      signal,
     });
     // Drop the body without reading it. Cancelling can itself throw on a
     // already-settled stream in some engines, which must not turn a live
@@ -85,9 +89,12 @@ export async function probeReportRenderLive({
     } catch {
       // Nothing to do: the verdict is the status, not the body.
     }
-    return isLiveStatus(response.status);
+    if (isLiveStatus(response.status)) return "present";
+    return [400, 401, 403, 404, 410, 416].includes(response.status)
+      ? "absent"
+      : "error";
   } catch {
-    return false;
+    return "error";
   }
 }
 
@@ -142,6 +149,9 @@ export type LiveReportRenders = {
    * false-empty flash the repair has to avoid.
    */
   isSettled: boolean;
+  hasUncertain: boolean;
+  isFetching: boolean;
+  retry: () => void;
 };
 
 /**
@@ -185,7 +195,7 @@ export function useLiveReportRenders({
     gcTime: 0,
     retry: false,
     refetchOnWindowFocus: false,
-    queryFn: async () => {
+    queryFn: async ({ signal }) => {
       const verdicts = await Promise.all(
         eligible.map(async (kind) => ({
           kind,
@@ -193,10 +203,16 @@ export function useLiveReportRenders({
             threadId,
             path: reportRenderPath(filepath, kind),
             isMock,
+            signal,
           }),
         })),
       );
-      return verdicts.filter((entry) => entry.live).map((entry) => entry.kind);
+      return {
+        kinds: verdicts
+          .filter((entry) => entry.live === "present")
+          .map((entry) => entry.kind),
+        hasUncertain: verdicts.some((entry) => entry.live === "error"),
+      };
     },
   });
 
@@ -218,12 +234,20 @@ export function useLiveReportRenders({
     return {
       kinds: deterministic ? [...eligible] : [],
       isSettled: true,
+      hasUncertain: false,
+      isFetching: false,
+      retry: () => undefined,
     };
   }
   return {
     // Fail-closed while the answer is unknown *and* if it failed: `data`
     // is only a list once every probe has answered.
-    kinds: query.data ?? [],
+    kinds: query.data?.kinds ?? [],
     isSettled: query.isSuccess || query.isError,
+    hasUncertain: query.isError || (query.data?.hasUncertain ?? false),
+    isFetching: query.isFetching,
+    retry: () => {
+      void refetch();
+    },
   };
 }
