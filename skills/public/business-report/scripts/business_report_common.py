@@ -12,7 +12,7 @@ import math
 import os
 import re
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_HALF_UP, Decimal, localcontext
 from pathlib import Path
 
 try:
@@ -114,19 +114,30 @@ def to_text(value) -> str:
     return text[:MAX_CELL_CHARS]
 
 
+def _quantize(value: Decimal, places: int) -> Decimal:
+    # Finite scientific amounts can exceed Decimal's default 28-digit context.
+    if not value.is_finite():
+        raise InputError("A calculated value exceeds the supported numeric range. Reduce the amounts before building the report.")
+    with localcontext() as context:
+        context.prec = max(context.prec, value.adjusted() + places + 2)
+        return value.quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP)
+
+
 def round_half_up(value, places: int) -> float:
-    return float(Decimal(str(value)).quantize(Decimal(1).scaleb(-places), rounding=ROUND_HALF_UP))
+    return float(_quantize(Decimal(str(value)), places))
 
 
 def number(value):
-    """A JSON-safe number: int when integral, else float rounded to cents."""
+    """A JSON-safe number preserving precision; renderers own display rounding."""
 
     if is_missing(value):
         return None
     as_float = float(value)
-    if as_float.is_integer():
+    if not math.isfinite(as_float):
+        raise InputError("A calculated value exceeds the supported numeric range. Reduce the amounts before building the report.")
+    if as_float.is_integer() and abs(as_float) <= 2**53:
         return int(as_float)
-    return round_half_up(as_float, 2)
+    return as_float
 
 
 def format_value(value, fmt: str, currency: str = "USD") -> str:
@@ -143,14 +154,14 @@ def format_value(value, fmt: str, currency: str = "USD") -> str:
         symbol = CURRENCY_SYMBOLS.get(currency)
         prefix = symbol if symbol else f"{currency} "
         sign = "-" if amount < 0 else ""
-        return f"{sign}{prefix}{abs(amount).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}"
+        return f"{sign}{prefix}{_quantize(amount.copy_abs(), 2):,.2f}"
     if fmt == "integer":
         return f"{int(amount.to_integral_value(rounding=ROUND_HALF_UP)):,}"
     if fmt == "percent":
-        return f"{amount.quantize(Decimal('0.1'), rounding=ROUND_HALF_UP):,.1f}%"
+        return f"{_quantize(amount, 1):,.1f}%"
     if amount == amount.to_integral_value():
         return f"{int(amount):,}"
-    return f"{amount.quantize(Decimal('0.01'), rounding=ROUND_HALF_UP):,.2f}"
+    return f"{_quantize(amount, 2):,.2f}"
 
 
 def axis_label(value, fmt: str, currency: str = "USD") -> str:

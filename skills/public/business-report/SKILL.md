@@ -152,7 +152,7 @@ When `/mnt/tenant/brand.json` exists the script picks up the company name, logo 
 
 ## What the checks mean
 
-- `totals_reconcile`: the report total against an independent sum of the amount column and against each table's total. The only check that withholds the report.
+- `totals_reconcile`: the report total against an independent sum of the amount column and against each table's total. A failed reconciliation withholds the report.
 - `rows_used`: rows read, rows outside the period, rows without a usable date, rows excluded.
 - `date_order`: only when day and month could not be told apart (every value has both parts at 12 or below); says which order was assumed.
 - `duplicate_ids`, `unmapped_rows` (blank person or category, listed as Unassigned or Uncategorized), `unparsed_amounts` (unreadable amounts count as zero; an amount column with no readable value at all is called out), `currency` (stated or assumed), `exclusions`, `external_links` (workbook links are not checked), `prose_numbers` after Step 2.
@@ -174,7 +174,9 @@ Per file and sheet it gives the columns with their type and samples, the suggest
 - Exit `3` for a role: its `columns` list is what the file holds. When one of them clearly carries a role the script did not match (a `Treatment` column where the profile expects a service), map it and build again; the section then takes its heading from that column name. Do not ask the user about it, and do not read the file to see it.
 - A build that succeeded but named columns under `Unused columns:` read the same way: map one when it clearly holds a role the report is missing.
 - A header row that is not the first row needs nothing from you: an export that opens with a company name and a blank line is read from the row that names the columns. "no date and amount column" therefore means the file really has none in the first ten rows -- say what the file does have (`inspect` lists it) and ask which column carries the date and the amount.
-- Amounts in a format the script cannot read count as zero and appear in `unparsed_amounts`, which quotes a few of them as the file wrote them: repeat those to the user, because revenue moved. The decimal separator is decided once per column from the values ("1.234,56" reads as European; "1,234.56" as US).
+- Amounts in a format the script cannot read count as zero and appear in `unparsed_amounts`, which quotes a few of them as the file wrote them: repeat those to the user, because revenue moved. For ordinary amounts, the decimal separator is decided once per column from the values ("1.234,56" reads as European; "1,234.56" as US). Scientific notation accepts an ungrouped mantissa with either decimal separator.
+- Conflicting currencies across input files, amount headers/values, or explicit Currency / Currency Code columns stop the build before any totals are written. Supply inputs expressed in one currency. `--currency` assigns a unit to unlabeled amounts; it never converts money or overrides conflicting currency evidence.
+- Numeric values in `report.json` and Excel retain source and aggregate precision. Displayed monetary values are rounded to cents; a displayed row sum can differ from the displayed total when source amounts contain fractions of a cent. Excel formulas use the underlying values, so recalculation agrees with their saved results.
 - Timestamps that carry a time zone offset are converted to UTC before the period is applied.
 - A `.xls` that is an HTML or CSV export in disguise: save it under the right extension in the workspace first.
 

@@ -32,7 +32,7 @@ import re
 import sys
 import warnings
 from dataclasses import dataclass, field
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation, localcontext
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -98,7 +98,16 @@ SAMPLE_ROWS = 200
 NUMBER_TOKEN = re.compile(r"(?<![A-Za-z0-9.])([$€£]?)(-?\d{1,3}(?:,\d{3})+(?:\.\d+)?|-?\d+(?:\.\d+)?)([%kK])?(?![A-Za-z0-9])")
 SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+")
 DMY_PATTERN = re.compile(r"^\s*(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})\b")
-LETTERS = re.compile(r"[A-Za-z]")
+CURRENCY_TOKENS = {**SYMBOL_TO_CODE, "US$": "USD", "CA$": "CAD", "A$": "AUD", "NZ$": "NZD", **{code: code for code in CURRENCY_CODES}}
+CURRENCY_TOKEN_PATTERN = "(?:" + "|".join(re.escape(token) for token in sorted(CURRENCY_TOKENS, key=len, reverse=True)) + ")"
+CURRENCY_TOKEN = re.compile(r"(?<![A-Za-z])" + CURRENCY_TOKEN_PATTERN + r"(?![A-Za-z])", re.IGNORECASE)
+DOLLAR_CURRENCIES = {"USD", "CAD", "AUD", "NZD", "MXN", "SGD", "HKD"}
+MONEY_CELL = re.compile(
+    rf"(?P<leading>[+-]?)\s*(?:{CURRENCY_TOKEN_PATTERN}\s*){{0,2}}(?P<inner>[+-]?)\s*"
+    rf"(?P<mantissa>[0-9][0-9., ']*|[.,][0-9]+)(?P<exponent>[eE][+-]?[0-9]+)?\s*"
+    rf"(?:{CURRENCY_TOKEN_PATTERN}\s*){{0,2}}(?P<trailing>-?)",
+    re.IGNORECASE,
+)
 
 
 # --- profile, preferences ------------------------------------------------------
@@ -396,13 +405,6 @@ def looks_like_dates(series: pd.Series) -> bool:
     return int(parsed.notna().sum()) >= 0.9 * len(texts)
 
 
-def _strip_currency_words(text: str) -> str:
-    text = re.sub(r"\b(" + "|".join(CURRENCY_CODES) + r")\b", "", text.upper())
-    for symbol in SYMBOL_TO_CODE:
-        text = text.replace(symbol, "")
-    return text
-
-
 def looks_numeric(series: pd.Series) -> bool:
     if pd.api.types.is_numeric_dtype(series) and not pd.api.types.is_bool_dtype(series):
         return True
@@ -410,8 +412,6 @@ def looks_numeric(series: pd.Series) -> bool:
     if not values:
         return False
     texts = [to_text(value) for value in values]
-    if any(LETTERS.search(_strip_currency_words(text)) for text in texts):
-        return False
     style = detect_number_style(texts)
     parsed = sum(1 for text in texts if not math.isnan(parse_amount(text, style)))
     return parsed >= 0.9 * len(texts)
@@ -526,8 +526,24 @@ def mapping_question(mapping: Mapping, table_name: str, profile: dict) -> str | 
 
 EU_STRONG = re.compile(r"\d,\d{1,2}$")
 EU_WEAK = re.compile(r"\d\.\d{3}$")
-US_STRONG = re.compile(r"\d\.\d{1,2}$")
+US_STRONG = re.compile(r"\d\.(?:\d{1,2}|\d{4,})$")
 US_GROUPED = re.compile(r"\d,\d{3}(?:\D|$)")
+
+
+def _money_parts(value) -> tuple[str, str, str] | None:
+    """Validate the whole cell before extracting its sign, mantissa and exponent."""
+    text = str(value).strip().replace("−", "-").replace("\u00a0", " ").replace("\u202f", " ").replace("’", "'")
+    accounting = text.startswith("(") and text.endswith(")")
+    if accounting:
+        text = text[1:-1].strip()
+    match = MONEY_CELL.fullmatch(text)
+    if match is None:
+        return None
+    signs = [match[name] for name in ("leading", "inner", "trailing") if match[name]]
+    if len(signs) + int(accounting) > 1:
+        return None
+    sign = "-" if accounting or signs == ["-"] else ""
+    return sign, match["mantissa"].strip(), match["exponent"] or ""
 
 
 def detect_number_style(values) -> str | None:
@@ -535,10 +551,10 @@ def detect_number_style(values) -> str | None:
 
     eu_strong = us_strong = eu_weak = us_grouped = plain = double_dot = 0
     for value in values:
-        text = to_text(value)
-        if not text:
+        parts = _money_parts(value)
+        if parts is None or parts[2] or (math.isnan(parse_amount(value, "us")) and math.isnan(parse_amount(value, "eu"))):
             continue
-        digits = re.sub(r"[^\d.,]", "", text)
+        digits = parts[1].replace(" ", "").replace("'", "")
         if EU_STRONG.search(digits):
             eu_strong += 1
         elif US_STRONG.search(digits):
@@ -565,72 +581,86 @@ def detect_number_style(values) -> str | None:
     return None
 
 
-def _digits_to_float_text(digits: str, style: str | None) -> str:
-    if style == "eu":
-        return digits.replace(".", "").replace(",", ".")
-    if style == "us":
-        return digits.replace(",", "")
-    if "," in digits and "." in digits:
-        return digits.replace(".", "").replace(",", ".") if digits.rfind(",") > digits.rfind(".") else digits.replace(",", "")
-    if "," in digits:
-        groups = digits.split(",")
-        if all(len(group) == 3 for group in groups[1:]) and len(groups[0]) <= 3:
-            return digits.replace(",", "")
-        return digits.replace(",", ".")
-    return digits
+def _amount_literal(value, style: str | None) -> str | None:
+    """A validated decimal literal; separators are removed only after grouping is checked."""
+    if is_missing(value) or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        return str(value)
+    parts = _money_parts(value)
+    if parts is None:
+        return None
+    sign, mantissa, exponent = parts
+    if exponent:
+        # Scientific mantissas have a decimal separator, never thousands
+        # grouping, even when ordinary money elsewhere uses another locale.
+        if re.fullmatch(r"(?:[0-9]+(?:[.,][0-9]+)?|[.,][0-9]+)", mantissa) is None:
+            return None
+        return sign + mantissa.replace(",", ".") + exponent
+    if style is None:
+        if "," in mantissa and "." in mantissa:
+            style = "eu" if mantissa.rfind(",") > mantissa.rfind(".") else "us"
+        elif "," in mantissa:
+            style = "us" if re.fullmatch(r"[0-9]{1,3}(?:,[0-9]{3})+", mantissa) else "eu"
+        else:
+            style = "us"
+    decimal, grouping = (",", ".") if style == "eu" else (".", ",")
+    integer, separator, fractional = mantissa.partition(decimal)
+    if separator and (not fractional or not re.fullmatch(r"[0-9]+", fractional)):
+        return None
+    # One grouping convention per value, always in groups of three. Arbitrary
+    # spaces, repeated separators and embedded signs cannot invent new digits.
+    group_marks = [mark for mark in (grouping, " ", "'") if mark in integer]
+    if len(group_marks) > 1:
+        return None
+    if group_marks:
+        mark = group_marks[0]
+        if not re.fullmatch(r"[0-9]{1,3}(?:" + re.escape(mark) + r"[0-9]{3})+", integer):
+            return None
+        integer = integer.replace(mark, "")
+    elif integer and not re.fullmatch(r"[0-9]+", integer):
+        return None
+    if not integer and not fractional:
+        return None
+    return sign + (integer or "0") + ("." + fractional if separator else "") + exponent
 
 
 def parse_amount(value, style: str | None = None) -> float:
     """A money cell as a float; NaN when it cannot be read (the caller counts those)."""
 
-    if is_missing(value) or isinstance(value, bool):
-        return math.nan
-    if isinstance(value, (int, float)):
-        return float(value)
-    text = str(value).strip()
-    if not text:
-        return math.nan
-    negative = False
-    if text.startswith("(") and text.endswith(")"):
-        negative, text = True, text[1:-1]
-    if text.endswith("-"):
-        negative, text = True, text[:-1]
-    if text.startswith("-"):
-        negative, text = True, text[1:]
-    digits = re.sub(r"[^\d.,]", "", text)
-    if not re.search(r"\d", digits):
+    literal = _amount_literal(value, style)
+    if literal is None:
         return math.nan
     try:
-        result = float(_digits_to_float_text(digits, style))
-    except ValueError:
+        result = float(literal)
+        if not math.isfinite(result) or (result == 0 and Decimal(literal) != 0):
+            return math.nan
+    except (ValueError, OverflowError, InvalidOperation):
         return math.nan
-    return -result if negative else result
+    return result
 
 
 def _decimal_from_cell(value, style: str | None = None) -> Decimal | None:
     """A second reading of a money cell with Decimal arithmetic, used only by the reconciliation check."""
 
-    if is_missing(value) or isinstance(value, bool):
-        return None
-    if isinstance(value, (int, float)):
-        return Decimal(str(value))
-    text = str(value).strip()
-    sign = -1 if (text.startswith("(") and text.endswith(")")) or text.startswith("-") or text.endswith("-") else 1
-    digits = "".join(char for char in text if char.isdigit() or char in ".,")
-    if not any(char.isdigit() for char in digits):
+    literal = _amount_literal(value, style)
+    if literal is None:
         return None
     try:
-        return sign * Decimal(_digits_to_float_text(digits, style))
-    except InvalidOperation:
+        parsed = Decimal(literal)
+        as_float = float(parsed)
+        return parsed if parsed.is_finite() and math.isfinite(as_float) and (as_float != 0 or parsed == 0) else None
+    except (InvalidOperation, ValueError, OverflowError):
         return None
 
 
-def independent_amount_total(raw_values: list, style: str | None = None) -> float:
-    total = Decimal("0")
-    for value in raw_values:
-        parsed = _decimal_from_cell(value, style)
-        if parsed is not None:
-            total += parsed
+def independent_amount_total(raw_values: list, style: str | None = None, *, styles: list[str | None] | None = None) -> float:
+    source_styles = styles if styles is not None else [style] * len(raw_values)
+    parsed = [amount for value, source_style in zip(raw_values, source_styles, strict=True) if (amount := _decimal_from_cell(value, source_style)) is not None and amount != 0]
+    with localcontext() as context:
+        if parsed:
+            context.prec = max(context.prec, max(amount.adjusted() for amount in parsed) - min(amount.as_tuple().exponent for amount in parsed) + len(str(len(parsed))) + 2)
+        total = sum(parsed, Decimal("0"))
     return float(total)
 
 
@@ -710,25 +740,56 @@ def parse_dates(series: pd.Series, order: str | None = None) -> pd.Series:
     return best
 
 
-def detect_currency(frame: pd.DataFrame, amount_column: str | None) -> tuple[str, str]:
+def _currency_evidence(frame: pd.DataFrame, amount_column: str | None) -> dict[str, str]:
+    """All explicit evidence in the amount column and clearly named currency columns."""
+    evidence: dict[str, str] = {}
     if amount_column is None:
-        return "USD", "assumed"
-    header = to_text(amount_column)
-    code = re.search(r"\b(" + "|".join(CURRENCY_CODES) + r")\b", header.upper())
-    if code:
-        return code.group(1), "header"
-    for symbol, symbol_code in SYMBOL_TO_CODE.items():
-        if symbol in header:
-            return symbol_code, "header"
-    for value in _sample(frame[amount_column]):
-        text = to_text(value)
-        for symbol, symbol_code in SYMBOL_TO_CODE.items():
-            if symbol in text:
-                return symbol_code, "values"
-        code = re.search(r"\b(" + "|".join(CURRENCY_CODES) + r")\b", text.upper())
-        if code:
-            return code.group(1), "values"
-    return "USD", "assumed"
+        return evidence
+
+    def collect(value, source):
+        for match in CURRENCY_TOKEN.finditer(to_text(value)):
+            token = match[0].upper()
+            # A bare dollar sign is ambiguous among dollar currencies. An
+            # explicit code, qualified symbol or preference can disambiguate it.
+            code = "$" if token == "$" else CURRENCY_TOKENS[token]
+            evidence.setdefault(code, source)
+
+    collect(amount_column, "header")
+    for value in frame[amount_column]:
+        collect(value, "values")
+    for column in frame.columns:
+        if normalize_header(column) not in ("currency", "currency code"):
+            continue
+        for value in frame[column]:
+            text = to_text(value)
+            if not text:
+                continue
+            if re.fullmatch(CURRENCY_TOKEN_PATTERN, text, re.IGNORECASE) is None:
+                raise InputError(f"Unrecognized currency {text!r} in column {column!r}; use a supported currency code before building the report.")
+            collect(text, "values")
+    return evidence
+
+
+def _resolve_currency(evidence: dict[str, str], preferred: str | None = None) -> tuple[str, str]:
+    evidence = dict(evidence)
+    if "$" in evidence:
+        explicit = set(evidence) - {"$"}
+        dollar_code = next(iter(explicit)) if len(explicit) == 1 and explicit <= DOLLAR_CURRENCIES else preferred if not explicit and preferred in DOLLAR_CURRENCIES else "USD"
+        evidence.setdefault(dollar_code, evidence.pop("$"))
+    if len(evidence) > 1:
+        raise InputError(
+            f"Mixed currencies ({', '.join(sorted(evidence))}) in the input amount headers, values or currency columns. "
+            "Separate the inputs by currency or convert the source amounts to one currency before building; --currency does not convert amounts."
+        )
+    if preferred and evidence and preferred not in evidence:
+        raise InputError(f"Requested currency {preferred} conflicts with the input currency {next(iter(evidence))}. Convert the source amounts first or choose the input currency; --currency does not convert amounts.")
+    if preferred:
+        return preferred, "preferences"
+    return next(iter(evidence.items())) if evidence else ("USD", "assumed")
+
+
+def detect_currency(frame: pd.DataFrame, amount_column: str | None) -> tuple[str, str]:
+    return _resolve_currency(_currency_evidence(frame, amount_column))
 
 
 @dataclass
@@ -761,6 +822,7 @@ def apply_mapping(frame: pd.DataFrame, roles: dict[str, str | None]) -> CleanFra
     amounts = frame[amount_column].map(lambda value: parse_amount(value, style)).astype(float)
     columns["amount"] = amounts
     columns["amount_raw"] = frame[amount_column]
+    columns["amount_style"] = pd.Series(style, index=frame.index, dtype=object)
     for role in TEXT_ROLES:
         column = roles.get(role)
         if column is not None:
@@ -865,9 +927,11 @@ def prepare(sources: list[str], period_text: str | None, options: BuildOptions, 
             raise InputError("No period was given and no row has a usable date, so there is nothing to report on.")
     else:
         period = parse_period(period_text)
-    currency, currency_source = detect_currency(tables[0].frame, mappings[0].roles["amount"])
-    if options.currency:
-        currency, currency_source = options.currency, "preferences"
+    currency_evidence: dict[str, str] = {}
+    for table, mapping in zip(tables, mappings):
+        for code, source in _currency_evidence(table.frame, mapping.roles["amount"]).items():
+            currency_evidence.setdefault(code, source)
+    currency, currency_source = _resolve_currency(currency_evidence, options.currency)
     within = in_period(all_rows["date"], period)
     excluded_mask = pd.Series(False, index=all_rows.index)
     exclusion_texts: list[str] = []
@@ -927,9 +991,6 @@ def prepare(sources: list[str], period_text: str | None, options: BuildOptions, 
 # --- checks --------------------------------------------------------------------
 
 
-SUM_TOLERANCE_PER_ROW = 0.005  # each rounded table cell may be half a cent off its unrounded value
-
-
 def _like(examples: list[str]) -> str:
     """`` (like "n/a", "see invoice")``, or nothing when there is no example."""
     return f" (like {', '.join(chr(34) + example + chr(34) for example in examples)})" if examples else ""
@@ -971,29 +1032,17 @@ def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count:
     used_text += f", {format_value(ctx.excluded_rows, 'integer')} {'was' if ctx.excluded_rows == 1 else 'were'} excluded." if ctx.excluded_rows else "."
     checks.append({"id": "rows_used", "status": "pass", "text": used_text})
     if not ctx.period_was_given:
-        checks.append(
-            {
-                "id": "period_choice",
-                "status": "warn",
-                "text": f"No period was asked for, so this report covers {period.label}, where most of the {records} in the file fall. Say another period to change it.",
-            }
-        )
+        checks.append({"id": "period_choice", "status": "warn", "text": f"No period was asked for, so this report covers {period.label}, where most of the {records} in the file fall. Say another period to change it."})
 
     beyond = _months_beyond_the_files(ctx.all_rows["date"], period)
     if beyond:
         dates = ctx.all_rows["date"].dropna()
         run = f"{dates.min().strftime('%Y-%m-%d')} to {dates.max().strftime('%Y-%m-%d')}"
-        checks.append(
-            {
-                "id": "period_coverage",
-                "status": "warn",
-                "text": f"{period.label} includes {_join_words(beyond)}, which the files do not reach (they run {run}); its figures and comparisons cover the rest of the period only.",
-            }
-        )
+        checks.append({"id": "period_coverage", "status": "warn", "text": f"{period.label} includes {_join_words(beyond)}, which the files do not reach (they run {run}); its figures and comparisons cover the rest of the period only."})
 
-    independent = independent_amount_total(rows["amount_raw"].tolist(), ctx.number_style)
+    independent = independent_amount_total(rows["amount_raw"].tolist(), styles=[style if pd.notna(style) else None for style in rows["amount_style"]])
     mismatches = []
-    if abs(independent - revenue) > 0.01:
+    if not math.isclose(independent, revenue, rel_tol=1e-12, abs_tol=1e-9):
         mismatches.append(f"the amount column sums to {format_value(independent, 'currency', currency)}")
     for section in sections:
         table = section.get("table")
@@ -1001,7 +1050,7 @@ def compute_checks(ctx: BuildContext, rows: pd.DataFrame, revenue: float, count:
             continue
         index = table["columns"].index("Revenue")
         section_total = sum(row[index] or 0 for row in table["rows"])
-        if abs(section_total - revenue) > 0.01 + SUM_TOLERANCE_PER_ROW * len(table["rows"]):
+        if not math.isclose(section_total, revenue, rel_tol=1e-12, abs_tol=1e-9):
             mismatches.append(f"the {section['heading'].lower()} table sums to {format_value(section_total, 'currency', currency)}")
     if mismatches:
         checks.append({"id": "totals_reconcile", "status": "fail", "text": f"Totals do not match your file: the report says {format_value(revenue, 'currency', currency)} but {', '.join(mismatches)}. The report was withheld."})

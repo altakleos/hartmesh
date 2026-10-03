@@ -40,7 +40,6 @@ from docx.shared import Inches
 
 CHART_SIZE_INCHES = (6.4, 2.9)
 CHART_DPI = 200
-SUM_TOLERANCE_PER_ROW = 0.005  # each rounded cell may be half a cent off its unrounded value
 
 
 def data_uri(path: Path) -> str:
@@ -261,7 +260,9 @@ def render_xlsx(report: dict, path: Path) -> None:
             letter = xlsxwriter.utility.xl_col_to_name(column)
             column_values = [row[column] for row in table["rows"] if isinstance(row[column], (int, float)) and not isinstance(row[column], bool)]
             numeric_total = isinstance(value, (int, float)) and not isinstance(value, bool)
-            reconciles = numeric_total and abs(sum(column_values) - float(value)) <= 0.01 + SUM_TOLERANCE_PER_ROW * len(table["rows"])
+            # Stored cells retain source precision; only binary-float error is
+            # allowed between a live sum's operands and its cached total.
+            reconciles = numeric_total and math.isclose(math.fsum(column_values), float(value), rel_tol=1e-12, abs_tol=1e-12)
             if fmt == "text":
                 sheet.write_string(total_row, column, "" if value is None else str(value), formats["total"])
             elif column in ratios and live_totals and table["rows"]:
