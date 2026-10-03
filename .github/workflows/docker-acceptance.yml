@@ -6,6 +6,13 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      backend_image:
+        description: "Optional backend repository@sha256:digest (requires frontend_image)"
+        type: string
+      frontend_image:
+        description: "Optional frontend repository@sha256:digest (requires backend_image)"
+        type: string
 
 concurrency:
   group: docker-acceptance-${{ github.event.pull_request.number || github.ref }}
@@ -16,10 +23,14 @@ permissions:
 
 jobs:
   acceptance:
-    name: Production Docker acceptance
+    name: Production Docker acceptance (${{ matrix.stores }})
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        stores: [sqlite, postgres-redis]
     steps:
       - uses: actions/checkout@v6
       - uses: actions/setup-node@v4
@@ -32,12 +43,21 @@ jobs:
           cd frontend-hm
           pnpm install --frozen-lockfile
           pnpm exec playwright install chromium --with-deps
-      - name: Build and exercise isolated production stack
-        run: python3 scripts/docker_acceptance.py --artifacts /tmp/hartmesh-docker-acceptance
+      - name: Exercise isolated production stack
+        env:
+          BACKEND_IMAGE: ${{ inputs.backend_image }}
+          FRONTEND_IMAGE: ${{ inputs.frontend_image }}
+          ACCEPTANCE_STORES: ${{ matrix.stores }}
+        run: |
+          args=(--artifacts /tmp/hartmesh-docker-acceptance --stores "$ACCEPTANCE_STORES")
+          if [[ -n "$BACKEND_IMAGE" || -n "$FRONTEND_IMAGE" ]]; then
+            args+=(--backend-image "$BACKEND_IMAGE" --frontend-image "$FRONTEND_IMAGE")
+          fi
+          python3 scripts/docker_acceptance.py "${args[@]}"
       - name: Upload acceptance evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: docker-acceptance
+          name: docker-acceptance-${{ matrix.stores }}
           path: /tmp/hartmesh-docker-acceptance
           retention-days: 7

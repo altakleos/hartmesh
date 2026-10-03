@@ -342,7 +342,12 @@ build context. The synthetic model is a separate HTTP service, while Gateway,
 frontend, nginx, authentication and tools stay real. Application and model
 networking is internal; nginx alone also joins an ingress bridge with one random
 loopback port. No host Docker socket is mounted.
-Each run owns unique image names, a Compose project and disposable data volume.
+Source mode owns unique image names; paired digest arguments reuse supplied
+images without deleting them. `--stores postgres-redis` adds private disposable
+stores; SQLite is the default, and CI covers both. Record running image IDs,
+digests and declared OCI revisions separately from the harness commit/fingerprint.
+Do not imply source-label attestation or full deployment qualification.
+Each run owns a unique Compose project and disposable data volumes.
 Keep process-group deadlines, interruption cleanup and result/source-fingerprint
 evidence intact. Tests may initialize synthetic users and exercise actual APIs;
 never add bypass routers or browser API mocks to this acceptance profile.

@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+
 import { expect, test, type Page } from "@playwright/test";
 
 const artifact =
@@ -38,6 +40,10 @@ test("production Docker login, upload, streamed tools, files, history and confir
   });
   expect(registered.status(), await registered.text()).toBe(201);
   await context.clearCookies();
+  const rejectedLogin = await context.request.post("/api/v1/auth/login/local", {
+    form: { username: email, password: "incorrect-synthetic-password" },
+  });
+  expect(rejectedLogin.status()).toBe(401);
 
   await page.goto("/workspace/chats/new");
   await expect(page).toHaveURL(/\/login(?:\?|$)/);
@@ -133,6 +139,80 @@ test("production Docker login, upload, streamed tools, files, history and confir
     path: `${test.info().outputDir}/chat.png`,
     fullPage: true,
   });
+
+  const exportStarted = await context.request.post("/api/account/export", {
+    headers,
+  });
+  expect(exportStarted.status(), await exportStarted.text()).toBe(202);
+  await expect
+    .poll(async () => {
+      const status = await context.request.get("/api/account/export");
+      expect(status.ok(), await status.text()).toBe(true);
+      return ((await status.json()) as { state: string }).state;
+    })
+    .toBe("ready");
+  const exported = await context.request.get("/api/account/export/parts/1");
+  expect(exported.ok(), await exported.text()).toBe(true);
+  expect(exported.headers()["content-type"]).toContain("application/zip");
+  const archive = await exported.body();
+  const python = process.env.HARTMESH_ACCEPTANCE_PYTHON;
+  if (!python) throw new Error("Run through scripts/docker_acceptance.py");
+  // Use an independent ZIP reader, including CRC and actual member contents.
+  const exportCheck = execFileSync(
+    python,
+    [
+      "-c",
+      `import io, json, sys, zipfile
+with zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read())) as archive:
+    assert archive.testzip() is None
+    prefix = "conversations/" + sys.argv[1]
+    assert archive.read(prefix + "/files/outputs/acceptance.txt").decode() == sys.argv[2]
+    assert archive.read(prefix + "/files/uploads/input.txt") == b"UPLOAD-ACCEPTANCE-726\\n"
+    transcript = json.loads(archive.read(prefix + "/transcript.json"))
+    assert "Acceptance complete. Your synthetic artifact is ready." in json.dumps(transcript)
+print("export verified")`,
+      thread,
+      artifact,
+    ],
+    { input: archive, encoding: "utf8", timeout: 10_000 },
+  );
+  expect(exportCheck.trim()).toBe("export verified");
+  expect(
+    (await context.request.delete("/api/account/export", { headers })).status(),
+  ).toBe(204);
+  expect(
+    (await context.request.get("/api/account/export/parts/1")).status(),
+  ).toBe(404);
+
+  const errorThreadResponse = await context.request.post(
+    "/api/langgraph/threads",
+    {
+      headers,
+      data: { metadata: {} },
+    },
+  );
+  expect(errorThreadResponse.ok()).toBe(true);
+  const errorThread = (await errorThreadResponse.json()) as {
+    thread_id: string;
+  };
+  await context.request.post(
+    `/api/langgraph/threads/${errorThread.thread_id}/runs/wait`,
+    {
+      headers,
+      data: {
+        assistant_id: "lead_agent",
+        input: { messages: [{ role: "user", content: "acceptance:error" }] },
+      },
+    },
+  );
+  const failedRuns = await context.request.get(
+    `/api/langgraph/threads/${errorThread.thread_id}/runs`,
+  );
+  expect(failedRuns.ok()).toBe(true);
+  expect(((await failedRuns.json()) as { status: string }[])[0]?.status).toBe(
+    "error",
+  );
+  expect((await context.request.get("/health/ready")).status()).toBe(200);
 
   const deletionRequests: string[] = [];
   page.on("request", (request) => {

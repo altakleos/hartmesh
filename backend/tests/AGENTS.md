@@ -2,6 +2,11 @@
 
 Backend tests must preserve the runtime invariants they exercise without changing production execution topology.
 
+`test_migration_chain_head.py` compares Alembic's fresh and previous-release
+upgrade plans and pins published ancestry from release fixtures. Keep old
+fixtures immutable; add a new one for a new published head. A single current
+head alone cannot detect a skipped revision inserted behind an applied head.
+
 ## Router auth fixtures
 
 For owner-scoped route assertions, pass a stable `user_factory` and

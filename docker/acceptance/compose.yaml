@@ -27,12 +27,16 @@ services:
       DEER_FLOW_SKILLS_PATH: /data/skills
       PYTHONPATH: /app/backend
       LANGSMITH_TRACING: "false"
-      NO_PROXY: provider,gateway,frontend,nginx,localhost,127.0.0.1
+      ACCEPTANCE_DATABASE_BACKEND: sqlite
+      ACCEPTANCE_DATABASE_URL: ""
+      ACCEPTANCE_STREAM_BACKEND: memory
+      ACCEPTANCE_LOCKOUT_STORE: memory
+      NO_PROXY: provider,gateway,frontend,nginx,postgres,redis,localhost,127.0.0.1
     volumes:
       - ./acceptance-config.yaml:/fixture/config.yaml:ro
       - data:/data
     healthcheck:
-      test: ["CMD", "/app/backend/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=5)"]
+      test: ["CMD", "/app/backend/.venv/bin/python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8001/health/ready', timeout=5)"]
       interval: 3s
       timeout: 6s
       retries: 40

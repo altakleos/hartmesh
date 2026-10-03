@@ -6,6 +6,8 @@ import sqlite3
 import sys
 import time
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -16,10 +18,16 @@ from app.gateway.health import (
     DATABASE_UNREACHABLE,
     _probe_checkpointer_backend,
     check_database_health,
-    readiness_payload,
     resolve_checkpointer_config,
 )
+from app.gateway.health import (
+    readiness_payload as _readiness_payload,
+)
 from deerflow.config.checkpointer_config import CheckpointerConfig
+
+
+async def readiness_payload(config):
+    return await _readiness_payload(config, SimpleNamespace(check=AsyncMock(return_value=DATABASE_NOT_CONFIGURED)))
 
 
 class _FakeConnection:

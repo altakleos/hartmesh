@@ -408,7 +408,23 @@ async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfi
     """Close pooled MCP transports after runtime producers have stopped."""
     try:
         async with langgraph_runtime(app, startup_config):
-            yield
+            from app.gateway.redis_health import RequiredRedisReadiness
+
+            app.state.redis_readiness = RequiredRedisReadiness(getattr(app.state, "stream_bridge", None), tenant_namespace=getattr(app.state, "redis_tenant_namespace", None))
+            try:
+                yield
+            finally:
+
+                async def close_readiness_and_auth():
+                    try:
+                        await app.state.redis_readiness.close()
+                    finally:
+                        try:
+                            await auth.close_auth_clients()
+                        except Exception:
+                            logger.warning("Failed to close authentication clients")
+
+                await await_drained(close_readiness_and_auth())
     finally:
         # RunManager drains active graph tasks when langgraph_runtime exits.
         # Those tasks can still acquire new MCP sessions during earlier
@@ -728,11 +744,6 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 await app.state.account_export.close()
 
         await _shutdown_startup_trash_sweep(app)
-
-        try:
-            await auth.close_oidc_service()
-        except Exception:
-            logger.exception("Failed to close OIDC service")
 
         # Stop channel service on shutdown (bounded to prevent worker hang)
         try:
@@ -1261,11 +1272,12 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
         The checkpointer config comes from the startup snapshot recorded by
         ``langgraph_runtime`` (never hot-reloaded config), so orchestrators can
         gate on the gateway actually being ready rather than merely alive.
-        Returns 503 with ``status: degraded`` when either probe fails or the
-        startup backend cannot be resolved.
+        Required streaming/login Redis is checked through the lifecycle-owned
+        probe (one-second result cache). Returns 503 with ``status: degraded``
+        when any required backend fails or cannot be resolved.
         """
         checkpointer_config = getattr(request.app.state, READINESS_CHECKPOINTER_CONFIG_ATTR, None)
-        status_code, payload = await readiness_payload(checkpointer_config)
+        status_code, payload = await readiness_payload(checkpointer_config, getattr(request.app.state, "redis_readiness", None))
         response.status_code = status_code
         return payload
 

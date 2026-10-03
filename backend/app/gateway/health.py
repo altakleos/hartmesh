@@ -11,7 +11,12 @@ backends can be configured independently:
   ``checkpointer:`` section when present, otherwise derived from ``database:``
   (memory/sqlite/postgres).
 
-Both probes run concurrently beneath a single endpoint-wide deadline
+Required Redis clients are also probed: the actual startup-bound stream bridge
+and the live local-login throttle selection. Their coalesced probe owns its
+workers across request cancellation; completed Redis results live for one second.
+Optional model providers and caches are outside readiness.
+
+The probes run concurrently beneath a single endpoint-wide deadline
 (:data:`_READINESS_DEADLINE_SECONDS`), so normal probe work completes within
 one probe window rather than the sum of both budgets. Connection teardown is
 ownership-critical and is drained to completion after cancellation, so a
@@ -19,8 +24,8 @@ stalled close may outlive the probe/deadline budget. The checkpointer config
 is resolved once at startup from the same snapshot ``langgraph_runtime`` builds
 its resources from and is stored on ``app.state``; probing a hot-reloaded
 config instead could check a backend the running process is not using. A
-``backend=memory`` deployment has nothing to probe and is always considered
-ready; a startup config that cannot be resolved fails closed as unreachable.
+``backend=memory`` persistence has nothing external to probe; required Redis
+still participates. An unresolved startup config fails closed as unreachable.
 Connection-opening probes are serialized behind a strict per-process gate: the
 route is public through the ``/health`` auth prefix, so unlimited concurrent
 requests must never translate into unlimited new PostgreSQL connections.
@@ -40,6 +45,7 @@ from deerflow.persistence.engine import get_engine
 from deerflow.utils.file_io import await_drained
 
 if TYPE_CHECKING:
+    from app.gateway.redis_health import RequiredRedisReadiness
     from deerflow.config.app_config import AppConfig
     from deerflow.config.checkpointer_config import CheckpointerConfig
 
@@ -225,10 +231,10 @@ async def _probe_checkpointer_backend(config: CheckpointerConfig) -> str:
         return await _probe_postgres_backend(config.connection_string, config.postgres_schema)
 
 
-async def readiness_payload(checkpointer_config: CheckpointerConfig | None = None) -> tuple[int, dict[str, str]]:
+async def readiness_payload(checkpointer_config: CheckpointerConfig | None = None, redis_readiness: RequiredRedisReadiness | None = None) -> tuple[int, dict[str, str]]:
     """Return the (status_code, body) pair served by ``GET /health/ready``.
 
-    Probes both persistence halves the gateway depends on: the ORM engine
+    Probes persistence and required Redis: the ORM engine
     behind ``database:`` (repositories) and the effective LangGraph
     checkpointer/Store backend (the legacy ``checkpointer:`` section, otherwise
     derived from ``database:``). The probes run concurrently beneath one
@@ -239,7 +245,8 @@ async def readiness_payload(checkpointer_config: CheckpointerConfig | None = Non
     snapshot recorded by ``langgraph_runtime``; None means no snapshot could be
     resolved, which fails closed as an unreachable backend rather than
     reporting ready. Either backend can be configured independently of the
-    other, so an unreachable probe on either degrades the endpoint.
+    other, so any unreachable probe degrades the endpoint. A missing Redis
+    probe instance also fails closed, rather than claiming a memory profile.
     """
 
     async def _probe_engine() -> str:
@@ -253,20 +260,24 @@ async def readiness_payload(checkpointer_config: CheckpointerConfig | None = Non
             return DATABASE_UNREACHABLE
         return await _probe_checkpointer_backend(checkpointer_config)
 
+    async def _probe_redis() -> str:
+        return DATABASE_UNREACHABLE if redis_readiness is None else await redis_readiness.check()
+
     try:
         async with asyncio.timeout(_READINESS_DEADLINE_SECONDS):
-            database, checkpointer = await asyncio.gather(_probe_engine(), _probe_checkpointer())
+            database, checkpointer, redis = await asyncio.gather(_probe_engine(), _probe_checkpointer(), _probe_redis())
     except TimeoutError:
         logger.error(
             "Readiness probes exceeded the %.1fs endpoint deadline",
             _READINESS_DEADLINE_SECONDS,
         )
-        database = checkpointer = DATABASE_UNREACHABLE
-    degraded = DATABASE_UNREACHABLE in (database, checkpointer)
+        database = checkpointer = redis = DATABASE_UNREACHABLE
+    degraded = DATABASE_UNREACHABLE in (database, checkpointer, redis)
     payload = {
         "status": "degraded" if degraded else "ready",
         "service": "deer-flow-gateway",
         "database": database,
         "checkpointer": checkpointer,
+        "redis": redis,
     }
     return (503 if degraded else 200, payload)

@@ -1,0 +1,41 @@
+# Isolated stores for the same application journey. All credentials are synthetic.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: acceptance
+      POSTGRES_PASSWORD: synthetic-acceptance-postgres
+      POSTGRES_DB: acceptance
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "acceptance", "-d", "acceptance"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+    networks: [acceptance]
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--requirepass", "synthetic-acceptance-redis"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "--no-auth-warning", "-a", "synthetic-acceptance-redis", "ping"]
+      interval: 2s
+      timeout: 3s
+      retries: 40
+    networks: [acceptance]
+  gateway:
+    environment:
+      ACCEPTANCE_DATABASE_BACKEND: postgres
+      ACCEPTANCE_DATABASE_URL: postgresql://acceptance:synthetic-acceptance-postgres@postgres:5432/acceptance
+      ACCEPTANCE_STREAM_BACKEND: redis
+      ACCEPTANCE_LOCKOUT_STORE: redis
+      DEER_FLOW_STREAM_BRIDGE_REDIS_URL: redis://:synthetic-acceptance-redis@redis:6379/0
+    depends_on:
+      provider:
+        condition: service_started
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+volumes:
+  postgres-data:

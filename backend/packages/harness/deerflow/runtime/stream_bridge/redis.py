@@ -86,6 +86,10 @@ class RedisStreamBridge(StreamBridge):
     def _stream_key(self, run_id: str) -> str:
         return f"{self._key_prefix}:{run_id}"
 
+    async def check_health(self) -> bool:
+        """Probe the same pooled client used by streaming, without writing keys."""
+        return bool(await self._redis.ping())
+
     async def _xadd_retained(self, key: str, fields: dict[str, str], *, maxlen: int) -> None:
         if self._stream_ttl_seconds is None:
             await self._redis.xadd(
