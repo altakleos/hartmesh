@@ -53,6 +53,7 @@ from app.gateway.provider_keys.cipher import (
 )
 from app.gateway.provider_keys.probe import ProbeOutcome, probe_model, with_key
 from app.gateway.provider_keys.profile import CatalogProvider, ProfileRenderer, RenderRefused
+from deerflow.utils.file_io import await_drained
 
 logger = logging.getLogger(__name__)
 
@@ -370,7 +371,9 @@ class ProviderKeyService:
         Installed before it is committed, so a change the Gateway could not
         apply is never recorded as made -- a key reported removed while it is
         still in use is the failure this ordering rules out. A commit that
-        fails puts the Gateway back on what is stored.
+        fails puts the Gateway back on what is stored. Once installation
+        begins, cancellation waits for the install/commit-or-restore outcome
+        before releasing the caller's mutation lock.
         """
         stored = await self._repository.stored()
         readings = {name: self._read(name, row.ciphertext) for name, row in stored.items() if name in self._seed}
@@ -386,12 +389,22 @@ class ProviderKeyService:
             rendered = await asyncio.to_thread(self._render, values)
         except RenderRefused as exc:
             raise ProviderKeysRefused("render_refused", f"the deployment's configuration would not render with this change: {exc}", status=422) from None
-        try:
-            await asyncio.to_thread(self._install, values, rendered)
-            return await commit()
-        except BaseException:
-            await self._restore(previous, was_installed)
-            raise
+
+        async def install_and_commit() -> Any:
+            try:
+                await asyncio.to_thread(self._install, values, rendered)
+                return await commit()
+            except BaseException as exc:
+                await self._restore(previous, was_installed)
+                # await_drained propagates caller cancellation after settling
+                # this task. Record its failure before that consumes it, without
+                # exception text that might contain provider credentials.
+                logger.error("provider keys: change failed (%s)", type(exc).__name__)
+                raise
+
+        # Shield the entire transaction, including commit: shielding only the
+        # install could restore the old config after the DB already committed.
+        return await await_drained(install_and_commit())
 
     async def _restore(self, previous: Mapping[str, str | None], was_installed: bool) -> None:
         try:
@@ -400,8 +413,8 @@ class ProviderKeyService:
                 await asyncio.to_thread(self._install, previous, rendered)
             else:
                 await asyncio.to_thread(self._install_base)
-        except Exception:
-            logger.exception("provider keys: a change was not made, and the Gateway could not be put back on the stored keys; restart the Gateway to apply them")
+        except Exception as exc:
+            logger.error("provider keys: could not restore the stored keys (%s); restart the Gateway to apply them", type(exc).__name__)
 
     async def put(self, provider_id: str, key: str, *, actor_id: str, actor_email: str | None) -> dict[str, Any]:
         self._refuse_unless_managed(needs_cipher=True)

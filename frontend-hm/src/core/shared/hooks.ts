@@ -4,6 +4,7 @@ import { useCallback } from "react";
 import { toast } from "sonner";
 
 import { messageForFileAreaError } from "../file-areas";
+import { useFileActionLifetime } from "../file-areas/file-action-lifetime";
 import { useI18n } from "../i18n/hooks";
 
 import {
@@ -63,16 +64,17 @@ export function useShareWithEveryone(threadId?: string) {
   const router = useRouter();
   const publish = usePublishToShared();
   const remove = useRemoveSharedFile();
-  const openShared = useCallback(
-    () => router.push("/workspace/files?tab=shared"),
-    [router],
-  );
+  const lifetime = useFileActionLifetime();
+  const openShared = useCallback(() => {
+    if (lifetime.active) router.push("/workspace/files?tab=shared");
+  }, [lifetime, router]);
   const share = useCallback(
     async (paths: readonly string[], folder?: string) => {
       const outcomes: { path: string; outcome: PublishOutcome }[] = [];
       let failed = 0;
       let lastFailure: unknown = null;
       for (const path of paths) {
+        if (!lifetime.active) break;
         try {
           outcomes.push({
             path,
@@ -83,17 +85,21 @@ export function useShareWithEveryone(threadId?: string) {
             }),
           });
         } catch (error) {
+          if (!lifetime.active) break;
           console.error("Share with everyone failed:", path, error);
           lastFailure = error;
           failed += 1;
         }
       }
       const published = outcomes.map(({ outcome }) => outcome.file);
+      if (!lifetime.active) return published;
       if (failed > 0) {
-        toast.error(
-          published.length > 0
-            ? t.shared.sharedSome(published.length, paths.length)
-            : messageForFileAreaError(lastFailure, t.shared.shareFailed),
+        lifetime.toasts.add(
+          toast.error(
+            published.length > 0
+              ? t.shared.sharedSome(published.length, paths.length)
+              : messageForFileAreaError(lastFailure, t.shared.shareFailed),
+          ),
         );
         return published;
       }
@@ -111,52 +117,63 @@ export function useShareWithEveryone(threadId?: string) {
         // it reads as the wrong file.
         const clicked = outcomes[0]!.path.split("/").pop()!;
         const sharedAs = published[0]!.name;
-        toast.info(
-          published.length > 1
-            ? t.shared.alreadySharedMany(published.length)
-            : clicked === sharedAs
-              ? t.shared.alreadyShared(clicked)
-              : t.shared.alreadySharedAs(clicked, sharedAs),
-          { action: { label: t.shared.openShared, onClick: openShared } },
+        lifetime.toasts.add(
+          toast.info(
+            published.length > 1
+              ? t.shared.alreadySharedMany(published.length)
+              : clicked === sharedAs
+                ? t.shared.alreadyShared(clicked)
+                : t.shared.alreadySharedAs(clicked, sharedAs),
+            { action: { label: t.shared.openShared, onClick: openShared } },
+          ),
         );
         return published;
       }
       // The folder is derived from the file, so the person never chose it:
       // the toast is where they find out which one it was.
-      toast.success(
-        fresh.length === 1
-          ? folder
-            ? t.shared.sharedInFolder(fresh[0]!.name, folder)
-            : t.shared.shared(fresh[0]!.name)
-          : folder
-            ? t.shared.sharedManyInFolder(fresh.length, folder)
-            : t.shared.sharedMany(fresh.length),
-        {
-          // Handing a file to the whole company is one click, so taking it
-          // back is one click too, right where the person is looking.
-          action: {
-            label: t.shared.undo,
-            onClick: () => {
-              void (async () => {
-                try {
-                  for (const file of fresh) {
-                    await remove.mutateAsync(file.path);
+      lifetime.toasts.add(
+        toast.success(
+          fresh.length === 1
+            ? folder
+              ? t.shared.sharedInFolder(fresh[0]!.name, folder)
+              : t.shared.shared(fresh[0]!.name)
+            : folder
+              ? t.shared.sharedManyInFolder(fresh.length, folder)
+              : t.shared.sharedMany(fresh.length),
+          {
+            // Handing a file to the whole company is one click, so taking it
+            // back is one click too, right where the person is looking.
+            action: {
+              label: t.shared.undo,
+              onClick: () => {
+                void (async () => {
+                  try {
+                    for (const file of fresh) {
+                      if (!lifetime.active) return;
+                      await remove.mutateAsync(file.path);
+                    }
+                    if (!lifetime.active) return;
+                    lifetime.toasts.add(
+                      toast.success(t.shared.undone(fresh[0]!.name)),
+                    );
+                  } catch (error) {
+                    if (!lifetime.active) return;
+                    console.error("Undo share failed:", error);
+                    lifetime.toasts.add(
+                      toast.error(
+                        messageForFileAreaError(error, t.shared.removeFailed),
+                      ),
+                    );
                   }
-                  toast.success(t.shared.undone(fresh[0]!.name));
-                } catch (error) {
-                  console.error("Undo share failed:", error);
-                  toast.error(
-                    messageForFileAreaError(error, t.shared.removeFailed),
-                  );
-                }
-              })();
+                })();
+              },
             },
           },
-        },
+        ),
       );
       return published;
     },
-    [openShared, publish, remove, t.shared, threadId],
+    [lifetime, openShared, publish, remove, t.shared, threadId],
   );
   return {
     share,

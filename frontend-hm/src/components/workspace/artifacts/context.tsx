@@ -13,6 +13,7 @@ import {
 
 import { useSidebar } from "@/components/ui/sidebar";
 import type { ArtifactDraftState } from "@/core/artifacts/editing";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { env } from "@/env";
 
 export interface ArtifactsContextType {
@@ -38,7 +39,8 @@ const ArtifactsContext = createContext<ArtifactsContextType | undefined>(
   undefined,
 );
 
-const ARTIFACTS_STORAGE_PREFIX = "deerflow:artifacts:v1";
+// v1 entries did not record an owner and must never be restored.
+const ARTIFACTS_STORAGE_PREFIX = "deerflow:artifacts:v2";
 
 type PersistedArtifactsState = {
   artifacts: string[];
@@ -46,13 +48,13 @@ type PersistedArtifactsState = {
   open: boolean;
 };
 
-function storageKey(pathname: string) {
-  return `${ARTIFACTS_STORAGE_PREFIX}:${encodeURIComponent(pathname)}`;
+function storageKey(userId: string, pathname: string) {
+  return `${ARTIFACTS_STORAGE_PREFIX}:${encodeURIComponent(userId)}:${encodeURIComponent(pathname)}`;
 }
 
-function readPersistedState(pathname: string): PersistedArtifactsState | null {
+function readPersistedState(key: string): PersistedArtifactsState | null {
   try {
-    const raw = window.sessionStorage.getItem(storageKey(pathname));
+    const raw = window.sessionStorage.getItem(key);
     if (!raw) {
       return null;
     }
@@ -83,6 +85,7 @@ interface ArtifactsProviderProps {
 }
 
 export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
+  const { user } = useAuth();
   const [artifacts, setArtifacts] = useState<string[]>([]);
   const [selectedArtifact, setSelectedArtifact] = useState<string | null>(null);
   const [autoSelect, setAutoSelect] = useState(true);
@@ -94,14 +97,11 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
   const [editingPath, setEditingPath] = useState<string | null>(null);
   const { setOpen: setSidebarOpen } = useSidebar();
   const pathname = usePathname();
-  const hydratedPathRef = useRef<string | null>(null);
+  const key = user && pathname ? storageKey(user.id, pathname) : null;
+  const hydratedKeyRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!pathname) {
-      return;
-    }
-
-    const persisted = readPersistedState(pathname);
+    const persisted = key ? readPersistedState(key) : null;
     setArtifacts(persisted?.artifacts ?? []);
     setSelectedArtifact(persisted?.selectedArtifact ?? null);
     setOpen(persisted?.open ?? env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true");
@@ -109,8 +109,8 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
     setAutoSelect(!persisted?.selectedArtifact);
     setDrafts({});
     setEditingPath(null);
-    hydratedPathRef.current = pathname;
-  }, [pathname]);
+    hydratedKeyRef.current = key;
+  }, [key]);
 
   useEffect(() => {
     const hasUnsavedDrafts = Object.values(drafts).some(
@@ -127,18 +127,18 @@ export function ArtifactsProvider({ children }: ArtifactsProviderProps) {
   }, [drafts]);
 
   useEffect(() => {
-    if (!pathname || hydratedPathRef.current !== pathname) {
+    if (!key || hydratedKeyRef.current !== key) {
       return;
     }
     try {
       window.sessionStorage.setItem(
-        storageKey(pathname),
+        key,
         JSON.stringify({ artifacts, selectedArtifact, open }),
       );
     } catch {
       // Browser storage can be disabled or full; panel state must keep working.
     }
-  }, [artifacts, open, pathname, selectedArtifact]);
+  }, [artifacts, open, key, selectedArtifact]);
 
   const select = useCallback(
     (artifact: string, autoSelect = false) => {

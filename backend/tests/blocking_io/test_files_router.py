@@ -82,6 +82,18 @@ async def test_get_file_does_not_block_event_loop(paths: Paths, owner: str) -> N
     assert isinstance(response, FileResponse)
     assert Path(response.path) == target
 
+    messages = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        messages.append(message)
+
+    await response({"type": "http", "method": "GET", "headers": [(b"range", b"bytes=1-3")]}, receive, send)
+    assert messages[0]["status"] == 206
+    assert b"".join(message.get("body", b"") for message in messages) == b"ell"
+
 
 async def test_delete_file_does_not_block_event_loop(paths: Paths, owner: str) -> None:
     target = await _seed_file(paths, "notes.txt", b"hello")

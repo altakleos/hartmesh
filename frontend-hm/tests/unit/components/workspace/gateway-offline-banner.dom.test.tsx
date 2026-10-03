@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -8,7 +9,7 @@ import {
 } from "@testing-library/react";
 
 import { GatewayOfflineBanner } from "@/components/workspace/gateway-offline-banner";
-import { AuthProvider } from "@/core/auth/AuthProvider";
+import { AuthProvider, useAuth } from "@/core/auth/AuthProvider";
 
 // AuthProvider pulls useRouter/usePathname from next/navigation. Hand it a
 // no-op router so logout()'s `router.push("/")` stays inert under happy-dom
@@ -94,6 +95,47 @@ function renderBanner() {
 }
 
 describe("GatewayOfflineBanner logout recovery (#3001)", () => {
+  it("ignores an old probe that completes after another identity has been applied", async () => {
+    let resolve!: (response: Response) => void;
+    // The transport deliberately ignores abort, covering a body already read
+    // or a response queued just before the previous subtree was retired.
+    const pending = new Promise<Response>((done) => {
+      resolve = done;
+    });
+    rs.spyOn(globalThis, "fetch").mockReturnValue(pending);
+    let auth!: ReturnType<typeof useAuth>;
+    function Identity() {
+      auth = useAuth();
+      return <div data-testid="identity">{auth.user?.id ?? "unknown"}</div>;
+    }
+    render(
+      <AuthProvider initialUser={null}>
+        <GatewayOfflineBanner gatewayUnavailable />
+        <Identity />
+      </AuthProvider>,
+    );
+
+    act(() =>
+      auth.applyUser({
+        id: "bob",
+        email: "bob@example.com",
+        system_role: "user",
+        needs_setup: false,
+      }),
+    );
+    await act(async () => {
+      resolve(
+        Response.json({
+          id: "alice",
+          email: "alice@example.com",
+          system_role: "user",
+          needs_setup: false,
+        }),
+      );
+    });
+    expect(screen.getByTestId("identity").textContent).toBe("bob");
+  });
+
   it("renders a <button> (not a GET-style link) as the logout affordance", async () => {
     installFetch();
     renderBanner();
