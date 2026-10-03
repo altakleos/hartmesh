@@ -462,7 +462,13 @@ def authorize_sandbox_for_request(
     from deerflow.authz.sandbox_authz import authorize_sandbox_execution
     from deerflow.sandbox.exceptions import SandboxAuthorizationError
 
-    config = _get_route_authorization_config()
+    # Use the caller's resolved snapshot throughout the gate. A second config
+    # read could turn a known denial into a disabled-config fallback.
+    config = getattr(app_config, "authorization", None)
+    if not isinstance(config, AuthorizationConfig):
+        config = _get_route_authorization_config()
+        if config.enabled is True and config.fail_closed:
+            raise SandboxAuthorizationError(role=getattr(user, "system_role", None))
     if config.enabled is not True:
         return
 

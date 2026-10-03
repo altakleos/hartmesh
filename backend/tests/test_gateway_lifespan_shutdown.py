@@ -555,6 +555,7 @@ def test_lifespan_preserves_flush_budget_when_retrieval_warm_is_still_running() 
 async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
     import deerflow.extensions as extensions
     from app.gateway.app import lifespan
+    from app.subagent_batches.service import batch_owner_allowed
     from deerflow.config.subagent_batches_config import SubagentBatchesConfig
     from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
     from deerflow.extensions.registry import ExtensionRegistry
@@ -592,6 +593,7 @@ async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
     ):
         async with lifespan(app):
             assert app.state.subagent_batch_service._extensions is snapshot
+            assert app.state.subagent_batch_service._owner_access is batch_owner_allowed
 
 
 def _gateway_lifespan_patches(startup_config, *, pool=None, browser_manager=None):

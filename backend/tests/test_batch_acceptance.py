@@ -37,12 +37,16 @@ class SubagentStatus(Enum):
 
 @pytest_asyncio.fixture
 async def env(monkeypatch, tmp_path):
+    # Import the consumer before patching the provider module; otherwise its
+    # from-import captures this fixture's lambda beyond monkeypatch teardown.
+    from deerflow.sandbox import tools as sandbox_tools
+
     paths = Paths(str(tmp_path / "data"))
     monkeypatch.setattr("deerflow.config.paths._paths", paths)
     paths.ensure_thread_dirs("thread-1", user_id="user-1")
     provider = LocalSandboxProvider()
     monkeypatch.setattr("deerflow.sandbox.sandbox_provider.get_sandbox_provider", lambda: provider)
-    monkeypatch.setattr("deerflow.sandbox.tools.get_sandbox_provider", lambda: provider)
+    monkeypatch.setattr(sandbox_tools, "get_sandbox_provider", lambda: provider)
     monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **kwargs: [])
     monkeypatch.setattr(batch_service, "resolve_subagent_model_name", lambda *args, **kwargs: "model-a")
     await init_engine_from_config(DatabaseConfig(backend="sqlite", sqlite_dir=str(tmp_path / "db")))

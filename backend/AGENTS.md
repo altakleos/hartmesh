@@ -84,6 +84,10 @@ regression exercises the production extractor under a generous process deadline.
 
 ## Important Development Guidelines
 
+Redis login counters use bounded WATCH/MULTI, committing TTLs atomically and
+failing closed. Gateway batches inject `batch_owner_allowed`; cancelled claimed
+items stay unconfirmed without worker stop evidence.
+
 ### Documentation Update Policy
 Every code change must keep docs accurate and current: update `README.md` for
 user-facing behavior and the relevant `AGENTS.md` for development changes.

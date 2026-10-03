@@ -57,7 +57,7 @@ import hashlib
 import logging
 import math
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import Any, Literal, Protocol
 
@@ -71,6 +71,10 @@ MAX_TRACKED_KEYS = 10000
 
 #: Ceiling on redis SCAN iterations when listing lockouts for an admin.
 _MAX_SCAN_ITERATIONS = 200
+
+# Bound contention as well as network failure; exhausting this budget fails
+# the login closed instead of admitting an attempt whose failure was lost.
+_MAX_TRANSACTION_RETRIES = 64
 
 KeyKind = Literal["account", "source"]
 
@@ -424,11 +428,11 @@ def _redis_errors() -> tuple[type[BaseException], ...]:
 class RedisLoginThrottleStore:
     """Counters shared across workers and replicas, with per-key TTLs.
 
-    Concurrency is last-writer-wins on the lock fields, deliberately: this is a
-    throttle, not a ledger, and the worst case of a lost update is one failure
-    counted twice or not at all. Every operation is wrapped so a Redis outage
-    surfaces as :class:`LoginThrottleUnavailable` and the login path fails
-    closed rather than silently reverting to unlimited guessing.
+    Account increments and lock evaluation use optimistic transactions, so
+    workers share every failure and an expired-lock cleanup cannot erase a
+    newer record. Record and TTL writes commit together. Redis outages and
+    exhausted transaction retries raise :class:`LoginThrottleUnavailable`;
+    the login path fails closed.
     """
 
     def __init__(self, redis_url: str, *, key_prefix: str, client: Any | None = None) -> None:
@@ -496,10 +500,10 @@ class RedisLoginThrottleStore:
             return False
         now = time.time()
         record = AttemptRecord(fail_count=failures, locked_at=now, locked_duration=policy.source_lockout_seconds, label=source)
-        async with _redis_guard():
-            existing = await self._read(self._source(source))
-            await self._write(self._source(source), record, ttl=policy.source_lockout_seconds)
-        return existing is None or not existing.is_locked
+        return await self._mutate_record(
+            self._source(source),
+            lambda existing: (record, policy.source_lockout_seconds, existing is None or not existing.is_locked),
+        )
 
     async def clear_source(self, source: str) -> bool:
         async with _redis_guard():
@@ -511,7 +515,6 @@ class RedisLoginThrottleStore:
     # -- admin view --
 
     async def lockouts(self, policy: ThrottlePolicy) -> list[LockoutView]:
-        now = time.time()
         views: list[LockoutView] = []
         for kind, pattern, max_attempts, duration in (
             ("account", f"{self._prefix}:acct:*", policy.account_max_attempts, policy.account_lockout_seconds),
@@ -520,14 +523,8 @@ class RedisLoginThrottleStore:
             async with _redis_guard():
                 keys = await self._scan(pattern)
                 for key in keys:
-                    record = await self._read(key)
-                    if record is None:
-                        continue
-                    decision = evaluate_record(record, max_attempts, duration, now)
-                    if decision.expired:
-                        await self._client.delete(key)
-                        continue
-                    if not decision.locked:
+                    record, decision = await self._evaluate(key, max_attempts, duration)
+                    if record is None or not decision.locked:
                         continue
                     views.append(
                         LockoutView(
@@ -563,8 +560,8 @@ class RedisLoginThrottleStore:
                 break
         return found
 
-    async def _read(self, key: str) -> AttemptRecord | None:
-        raw = await self._client.hgetall(key)
+    @staticmethod
+    def _decode_record(raw: dict[str, str]) -> AttemptRecord | None:
         if not raw:
             return None
         try:
@@ -578,43 +575,67 @@ class RedisLoginThrottleStore:
             # A malformed record is a counter, not a credential: drop it and
             # start counting again rather than failing the login path.
             logger.warning("Discarding a malformed login throttle record")
-            await self._client.delete(key)
             return None
 
-    async def _write(self, key: str, record: AttemptRecord, *, ttl: float) -> None:
-        await self._client.hset(
-            key,
-            mapping={
-                "fail_count": record.fail_count,
-                "locked_at": record.locked_at,
-                "locked_duration": record.locked_duration,
-                "label": record.label,
-            },
-        )
-        await self._client.expire(key, max(1, int(math.ceil(ttl))))
+    async def _mutate_record[T](self, key: str, update: Callable[[AttemptRecord | None], tuple[AttemptRecord | None, float, T]]) -> T:
+        """Re-evaluate on contention, including clears and Redis key expiry.
+
+        Even a read-only decision validates its WATCH with EXEC, so a check
+        paused behind a clear/relock does not return an obsolete lockout.
+        Malformed-record deletion is guarded by the same transaction.
+        """
+        from redis.exceptions import WatchError
+
+        async with _redis_guard():
+            for _ in range(_MAX_TRANSACTION_RETRIES):
+                try:
+                    async with self._client.pipeline(transaction=True) as pipe:
+                        await pipe.watch(key)
+                        raw = await pipe.hgetall(key)
+                        previous = self._decode_record(raw)
+                        record, ttl, result = update(previous)
+                        pipe.multi()
+                        if record is None:
+                            if raw:
+                                pipe.delete(key)
+                        elif record != previous:
+                            pipe.hset(
+                                key,
+                                mapping={
+                                    "fail_count": record.fail_count,
+                                    "locked_at": record.locked_at,
+                                    "locked_duration": record.locked_duration,
+                                    "label": record.label,
+                                },
+                            )
+                            pipe.expire(key, max(1, int(math.ceil(ttl))))
+                        await pipe.execute()
+                        return result
+                except WatchError:
+                    continue
+        raise LoginThrottleUnavailable("the login throttle store is contended")
+
+    async def _evaluate(self, key: str, max_attempts: int, lockout_seconds: float) -> tuple[AttemptRecord | None, LockDecision]:
+        def update(record: AttemptRecord | None):
+            decision = evaluate_record(record, max_attempts, lockout_seconds, time.time())
+            replacement = None if decision.expired else decision.commit or record
+            return replacement, lockout_seconds, (replacement, decision)
+
+        return await self._mutate_record(key, update)
 
     async def _locked(self, key: str, max_attempts: int, lockout_seconds: float) -> bool:
-        async with _redis_guard():
-            record = await self._read(key)
-            if record is None:
-                return False
-            decision = evaluate_record(record, max_attempts, lockout_seconds, time.time())
-            if decision.expired:
-                await self._client.delete(key)
-                return False
-            if decision.commit is not None:
-                await self._write(key, decision.commit, ttl=lockout_seconds)
-            return decision.locked
+        _, decision = await self._evaluate(key, max_attempts, lockout_seconds)
+        return decision.locked
 
     async def _record(self, key: str, *, label: str, max_attempts: int, lockout_seconds: float) -> bool:
-        async with _redis_guard():
-            now = time.time()
-            record, locked_now = apply_failure(await self._read(key), label=label, max_attempts=max_attempts, lockout_seconds=lockout_seconds, now=now)
+        def update(previous: AttemptRecord | None):
+            record, locked_now = apply_failure(previous, label=label, max_attempts=max_attempts, lockout_seconds=lockout_seconds, now=time.time())
             # A counting (not yet locked) record still needs a TTL, or a single
             # stray failure would sit in Redis forever.
             ttl = lockout_seconds if record.is_locked else max(lockout_seconds, 3600.0)
-            await self._write(key, record, ttl=ttl)
-            return locked_now
+            return record, ttl, locked_now
+
+        return await self._mutate_record(key, update)
 
 
 class _redis_guard:

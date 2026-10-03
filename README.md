@@ -37,6 +37,12 @@ Files saved to My Files or Shared become available only after the copy finishes;
 new copies never overwrite existing files. An interrupted Share request finishes
 recording or rolling back its copy before another publication begins.
 
+Redis-backed login lockouts count concurrent failures atomically across workers;
+an expired-lock check cannot overwrite a newer failure or administrator unlock.
+Redis failure or sustained write contention refuses login until the store is
+available. Sandbox prewarming also requires the caller's `sandbox:execute`
+permission, in addition to permission to write the conversation.
+
 Administrators managing provider keys in **Settings → Account** can choose
 **Test key** before saving. Testing sends a short request to a model provider
 without saving the key; it reports acceptance, rejection or an inconclusive
@@ -1810,6 +1816,18 @@ An ordinary `task` also receives a defensive snapshot of the dispatching run's c
 [文件上传文档](backend/docs/FILE_UPLOAD.md)。
 
 Durable `batch_task` workers use one app-owned plugin snapshot for tool assembly and execution. Recovered tasks adopt the new worker's plugin snapshot after a Gateway restart; plugin objects are never stored in durable task records.
+
+The Gateway rechecks a durable batch's owner before dispatch, during execution,
+and before checking output files. Disabled or missing accounts, a reduced role,
+or an unavailable account check cancel the batch; a later promotion does not
+expand its saved role. Unlike ordinary runs, batches enforce this demotion
+check without `--end-running-work`. The account `disable` command cancels pending,
+paused and active native batches, and enabling the account does not revive them.
+Cancellation is cooperative. A cancelled item that was ever claimed remains
+reported as unconfirmed by the account command (`execution_stop_confirmed: false`,
+exit 2): the current database has no worker-stop acknowledgement. Repeating the
+command cannot prove execution cleanup or external side effects stopped.
+Remote background MCP tasks are separate and must be cancelled at their server.
 
 Ordinary `task` delegation and explicit durable `batch_task` execution share the startup-scoped `subagent_runtime` process capacity. Batch mode keeps large independent item sets in SQL with separate total, live, and running limits, restart recovery, bounded results, and a thread-scoped Web UI panel. The panel pages through bounded previews on demand; full stored result text is available only through the owner-scoped JSONL export, while internal execution and authorization context never enters owner-facing responses. If the batch worker is later stopped or disabled, threads with persisted batches retain read-only item inspection and JSONL export; execution controls remain disabled until the worker is running again. See `config.example.yaml` and [the implementation contract](docs/plans/2026-08-24-subagent-batch-capacity-implementation.md) for limits and recovery semantics.
 

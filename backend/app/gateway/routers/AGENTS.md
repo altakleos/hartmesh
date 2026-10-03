@@ -1,5 +1,9 @@
 # Gateway routers
 
+Workspace prewarm checks `sandbox:execute` before provider lookup/scheduling,
+using the shared request authorization helper off-loop. Denial returns 202
+with `scheduled: false, reason: forbidden`; thread ownership still applies.
+
 `POST /api/threads/{id}/history` hydrates reopened chats with the rendered
 `artifacts`, `todos`, and non-null `goal` channels in the newest returned
 checkpoint alongside title and messages.

@@ -683,6 +683,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 app.state.mcp_tasks_available = True
 
         from app.subagent_batches import SubagentBatchService
+        from app.subagent_batches.service import batch_owner_allowed
         from deerflow.subagents.batch_runtime import set_subagent_batch_submitter
 
         batch_repo = getattr(app.state, "subagent_batch_repo", None)
@@ -696,6 +697,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
                 config=subagent_batches_config,
                 runtime_config=subagent_runtime_config,
                 extensions=getattr(app.state, "extensions", None),
+                owner_access=batch_owner_allowed,
             )
             app.state.subagent_batch_service = batch_service
             if subagent_batches_config.enabled:
