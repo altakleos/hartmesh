@@ -548,6 +548,9 @@ class ScheduledTaskService:
             status=terminal_status,
             error=error,
             finished_at=datetime.now(UTC),
+            # Timeout or a prior callback may already have committed the
+            # terminal outcome. Fence the occurrence and parent together.
+            only_if_active=True,
         )
 
     async def start(self) -> None:

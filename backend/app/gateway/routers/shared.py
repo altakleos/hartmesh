@@ -33,6 +33,7 @@ from app.gateway.routers._file_http import DescriptorFileResponse, acting_user_i
 from app.gateway.routers.files import _keepable_source
 from deerflow.config.paths import USER_FILES_VIRTUAL_PREFIX, VIRTUAL_PATH_PREFIX
 from deerflow.files import SharedFile, SharedFileError, digest_of, list_shared_files, normalize_relative_path, publish_file, remove_shared_file, resolve_shared_file, resolve_user_file, shared_file_holding
+from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import validate_thread_id
 
 logger = logging.getLogger(__name__)
@@ -237,31 +238,38 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
                 response.status_code = 200
                 names = await _publisher_names([already])
                 return SharedFileInfo.of(held, already, can_remove=_may_remove(already, user_id=user_id, admin=await is_admin_user(request)), publisher=names.get(already.get("published_by", "")))
-        try:
-            published = await asyncio.to_thread(publish_file, source, name=Path(normalized).name, folder=folder)
-        except SharedFileError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from None
-        try:
-            record = await repo.record_publication(
-                path=published.path,
-                size=published.size,
-                sha256=published.sha256 or "",
-                published_by=user_id,
-                from_thread_id=thread_id,
-                from_path=normalized,
-            )
-        except Exception:
-            # The bytes are already in Shared. A file nobody can be shown as the
-            # publisher of is a file only an admin can remove and nobody can
-            # account for, so the copy goes back out rather than outliving its
-            # record. (A path too long for the column is one way here; so is the
-            # database being briefly unavailable.)
-            logger.exception("Could not record the publication of %s; taking the copy back out of Shared", published.path)
+
+        async def copy_and_record() -> tuple[SharedFile, dict]:
             try:
-                await asyncio.to_thread(remove_shared_file, published.path)
+                published = await asyncio.to_thread(publish_file, source, name=Path(normalized).name, folder=folder)
+            except SharedFileError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from None
+            try:
+                record = await repo.record_publication(
+                    path=published.path,
+                    size=published.size,
+                    sha256=published.sha256 or "",
+                    published_by=user_id,
+                    from_thread_id=thread_id,
+                    from_path=normalized,
+                )
             except Exception:
-                logger.exception("Could not take %s back out of Shared; it is there with no publication record", published.path)
-            raise HTTPException(status_code=503, detail="Could not record the publication; nothing was shared") from None
+                # The bytes are already in Shared. A file nobody can be shown as the
+                # publisher of is a file only an admin can remove and nobody can
+                # account for, so the copy goes back out rather than outliving its
+                # record. (A path too long for the column is one way here; so is the
+                # database being briefly unavailable.)
+                logger.exception("Could not record the publication of %s; taking the copy back out of Shared", published.path)
+                try:
+                    await asyncio.to_thread(remove_shared_file, published.path)
+                except Exception:
+                    logger.exception("Could not take %s back out of Shared; it is there with no publication record", published.path)
+                raise HTTPException(status_code=503, detail="Could not record the publication; nothing was shared") from None
+            return published, record
+
+        # A cancelled await does not stop its copy worker. Retain the lock
+        # until both the copy and its record (or rollback) have settled.
+        published, record = await await_drained(copy_and_record())
     logger.info("Published %s to Shared as %s", normalized, published.path)
     return SharedFileInfo.of(published, record, can_remove=True, publisher=(await _publisher_names([record])).get(user_id))
 

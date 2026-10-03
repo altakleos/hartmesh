@@ -248,7 +248,7 @@ describe("ReportCard", () => {
 
     const chart = screen.getByAltText("Revenue by week");
     expect(chart.getAttribute("src")).toBe(
-      `/api/threads/${THREAD}/artifacts${DIRECTORY}/charts/revenue_by_period.png`,
+      `/api/threads/${THREAD}/artifacts${DIRECTORY}/charts/revenue_by_period.png?revision=sha-fixture`,
     );
   });
 

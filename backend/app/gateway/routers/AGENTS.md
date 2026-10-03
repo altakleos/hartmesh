@@ -13,3 +13,9 @@ errors; they must never become permission to reopen a path through symlinked
 parents. Use `deerflow.files.store.open_regular_source` for source reads/copies,
 and retain ownership until every offloaded operation has drained on cancellation.
 Conversation keep/publish sources remain lexical paths within uploads/outputs.
+`files.store.copy_into` uses private hidden staging and descriptor-relative
+exclusive hard links: no placeholders or overwrites of racing names. Verify
+staging ownership/mode before writing; the worker owns cleanup. Unsupported
+atomic publication fails closed.
+Shared publication drains copying, its database record and failure rollback as
+one operation under the deduplication lock before propagating cancellation.

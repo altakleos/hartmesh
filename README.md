@@ -27,6 +27,9 @@ source path; these operations require descriptor-relative no-follow filesystem
 APIs (Linux/macOS) and fail explicitly on unsupported hosts. Interrupted provider-key
 updates settle their database and active configuration changes before accepting
 another edit; refresh settings to see whether the interrupted update completed.
+Files saved to My Files or Shared become available only after the copy finishes;
+new copies never overwrite existing files. An interrupted Share request finishes
+recording or rolling back its copy before another publication begins.
 
 Business reports retain source precision in their numeric data and Excel formulas,
 rounding monetary values only for display. Malformed amount cells are reported as
@@ -34,6 +37,8 @@ unreadable instead of having digits silently extracted. Conflicting currencies
 across files, amount labels or explicit currency columns stop the build;
 `--currency` supplies a unit for unlabeled inputs and does not convert money.
 See the [business-report guide](skills/public/business-report/SKILL.md).
+Missing chart images are omitted from the report card; a new report revision
+retries them without disrupting the rest of the report.
 
 ## Sister Projects
 
@@ -2279,6 +2284,10 @@ Current MVP limits:
 Enable background polling with `config.yaml -> scheduler.enabled`. Manual trigger uses the same scheduled-task resource and execution path.
 
 Scheduled runs use `scheduler.recursion_limit` in `config.yaml` (default `1000`, matching the web UI's interactive budget). Values above `max_recursion_limit` are clamped. This field is read at dispatch, so the next scheduled run picks it up without a Gateway restart.
+
+When a scheduled occurrence reaches its configured time limit, its failed outcome
+and timeout explanation remain in the history even if the worker reports a late
+completion. An occurrence that finishes before the timeout keeps its own outcome.
 
 The background scheduler is single-instance by default. For a multi-pod deployment, set `scheduler.multi_instance: true` and use shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; startup and periodic recovery then preserve live peer runs, atomically return expired launch claims to the queue, take over only expired run leases, and fence stale launch writes. `max_concurrent_runs` is a shared global cap across Pods for `launching`/`running` occurrences; waiting `queued` rows do not consume it. Without those settings, enable the scheduler on exactly one Gateway pod. These scheduler fields are startup-only; restart all Gateway Pods together when changing them.
 

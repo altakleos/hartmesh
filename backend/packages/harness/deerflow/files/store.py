@@ -16,10 +16,14 @@ from __future__ import annotations
 
 import errno
 import hashlib
+import logging
 import os
 import stat
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 from deerflow.uploads.manager import claim_unique_filename, normalize_filename
 
@@ -50,6 +54,8 @@ _O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 #: Whether the platform lets every step be taken relative to an open
 #: directory, which closes the gap between checking a segment and using it.
 _DIR_FD = os.open in os.supports_dir_fd and os.mkdir in os.supports_dir_fd and os.unlink in os.supports_dir_fd and os.stat in os.supports_dir_fd and _O_DIRECTORY != 0
+_ATOMIC_PUBLICATION = os.link in os.supports_dir_fd and os.rmdir in os.supports_dir_fd
+logger = logging.getLogger(__name__)
 
 
 class StoreError(ValueError):
@@ -295,15 +301,52 @@ def digest_and_stat(source: Path) -> tuple[str, os.stat_result]:
     return digest.hexdigest(), metadata
 
 
-def _create_exclusive(directory: Path, safe_name: str, *, dir_fd: int | None, mode: int) -> tuple[str, int]:
-    """Claim the next free name in *directory* with an exclusive create."""
-    seen = set(os.listdir(dir_fd if dir_fd is not None else directory))
+@contextmanager
+def _staged_copy(parent_fd: int) -> Iterator[tuple[int, int]]:
+    """Own hidden staging through completion, protected from other sandbox users.
+
+    The private directory prevents replacement of the hard-link source while
+    the surrounding personal-files directory remains sandbox-writable. All
+    operations remain bound to descriptors if a parent is renamed meanwhile.
+    """
+    while True:
+        staging = f".copy-{uuid4().hex}"
+        try:
+            os.mkdir(staging, 0o700, dir_fd=parent_fd)
+            break
+        except FileExistsError:
+            continue
+    stage_fd = target_fd = None
+    try:
+        stage_fd = os.open(staging, os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW, dir_fd=parent_fd)
+        metadata = os.fstat(stage_fd)
+        if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700:
+            raise StoreError("Private staging directory was replaced or has unsafe permissions")
+        target_fd = os.open("data", os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW, 0o600, dir_fd=stage_fd)
+        yield stage_fd, target_fd
+    finally:
+        if target_fd is not None:
+            os.close(target_fd)
+            try:
+                os.unlink("data", dir_fd=stage_fd)
+            except OSError:
+                logger.warning("Could not remove staged file in %s", staging, exc_info=True)
+        if stage_fd is not None:
+            os.close(stage_fd)
+        try:
+            os.rmdir(staging, dir_fd=parent_fd)
+        except OSError:
+            logger.warning("Could not remove staging directory %s", staging, exc_info=True)
+
+
+def _publish_exclusive(stage_fd: int, parent_fd: int, safe_name: str) -> str:
+    """Atomically give a finished copy its next free name, without overwriting."""
+    seen = set(os.listdir(parent_fd))
     while True:
         candidate = claim_unique_filename(safe_name, seen)
         try:
-            if dir_fd is not None:
-                return candidate, os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode, dir_fd=dir_fd)
-            return candidate, os.open(directory / candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+            os.link("data", candidate, src_dir_fd=stage_fd, dst_dir_fd=parent_fd, follow_symlinks=False)
+            return candidate
         except FileExistsError:
             continue
         except OSError as exc:
@@ -316,9 +359,10 @@ def copy_into(root: Path, source: Path, *, name: str, folder: str | None, folder
     """Copy *source*'s exact bytes under *root* as *name* in *folder*.
 
     A name that already exists is kept: the copy takes the next free
-    ``_N`` suffix, never overwriting. The name is claimed with an exclusive
-    create so two copies racing for one name both land; a copy that fails
-    leaves nothing behind. *source* is opened without following a link and
+    ``_N`` suffix, never overwriting. Hidden staging holds the bytes until
+    copying finishes; an exclusive hard link publishes them atomically, so
+    racing copies both land and readers never see partial content. A failed
+    copy removes its staging. *source* is opened without following a link and
     must be a regular file; the folder is walked without following a link.
     *folder_mode* and *file_mode* are what the area's readers and writers
     need: the person's files are written by the sandbox too, the Shared area
@@ -331,60 +375,25 @@ def copy_into(root: Path, source: Path, *, name: str, folder: str | None, folder
         raise StoreError(str(exc)) from None
     if safe_name.startswith("."):
         raise StoreError(f"Name is hidden: {name!r}")
+    if not _ATOMIC_PUBLICATION:
+        raise StoreError("Atomic file publication requires descriptor-relative hard links")
 
     folders = relative_folder.split("/") if relative_folder else []
     relative_dir = relative_folder + "/" if relative_folder else ""
 
     source_fd = open_regular_source(source)
     try:
-        if _DIR_FD:
-            walk = _DirWalk(root)
-            try:
-                for segment in folders:
-                    walk.descend(segment, create=True, mode=folder_mode)
-                candidate, target_fd = _create_exclusive(root / relative_folder, safe_name, dir_fd=walk.fd, mode=file_mode)
-                try:
-                    try:
-                        sha256 = _copy_bytes(source_fd, target_fd)
-                        os.fchmod(target_fd, file_mode)
-                        metadata = os.fstat(target_fd)
-                    finally:
-                        os.close(target_fd)
-                except BaseException:
-                    try:
-                        os.unlink(candidate, dir_fd=walk.fd)
-                    except OSError:
-                        pass
-                    raise
-            finally:
-                walk.close()
-        else:
-            directory = root
+        walk = _DirWalk(root)
+        try:
             for segment in folders:
-                directory = directory / segment
-                try:
-                    metadata = os.lstat(directory)
-                except FileNotFoundError:
-                    directory.mkdir()
-                    directory.chmod(folder_mode)
-                    continue
-                if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISDIR(metadata.st_mode):
-                    raise StoreError(f"Path goes through a link or a file: {segment}")
-            _refuse_links_along(root, relative_folder)
-            candidate, target_fd = _create_exclusive(directory, safe_name, dir_fd=None, mode=file_mode)
-            try:
-                try:
-                    sha256 = _copy_bytes(source_fd, target_fd)
-                    os.fchmod(target_fd, file_mode)
-                    metadata = os.fstat(target_fd)
-                finally:
-                    os.close(target_fd)
-            except BaseException:
-                try:
-                    os.unlink(directory / candidate)
-                except OSError:
-                    pass
-                raise
+                walk.descend(segment, create=True, mode=folder_mode)
+            with _staged_copy(walk.fd) as (stage_fd, target_fd):
+                sha256 = _copy_bytes(source_fd, target_fd)
+                os.fchmod(target_fd, file_mode)
+                metadata = os.fstat(target_fd)
+                candidate = _publish_exclusive(stage_fd, walk.fd, safe_name)
+        finally:
+            walk.close()
     finally:
         os.close(source_fd)
     return _entry(f"{relative_dir}{candidate}", metadata, sha256=sha256)
