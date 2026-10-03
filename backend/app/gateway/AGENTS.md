@@ -43,13 +43,13 @@ locations and keeps `merge_run_context_overrides` clear. Admission and
 `/api/features` use `conversation_references_enabled()` as the sole configured
 predicate.
 
-FastAPI listens on port 8001. `GET /health` is liveness; `GET /health/ready`
-concurrently probes the ORM engine and effective LangGraph checkpointer/Store
-under one deadline and a strict connection-opening gate. It reads the startup
-config snapshot: legacy `checkpointer:` if set, else `database:`. Unreachable or
-unresolved backends return 503; process-local backends such as `memory` report
-`not_configured`. `GATEWAY_ENABLE_DOCS=false` disables `/docs`, `/redoc`, and
-`/openapi.json`.
+Port 8001: `/health` is liveness; `/health/ready` checks
+ORM, startup checkpointer/Store and required Redis. Failures return 503; memory
+is `not_configured`. Redis probes reuse the startup bridge and live login
+store, coalesce before off-thread config reads, cache for one second and bound
+waiters to 2s. Drain workers before readmission; close
+readiness before auth/runtime clients. Omit probe error details.
+`GATEWAY_ENABLE_DOCS=false` hides `/docs`, `/redoc` and `/openapi.json`.
 
 `build_run_config()` resolves the default LangGraph super-step budget from the
 hot-reloaded top-level `recursion_limit` setting. A valid request-level value

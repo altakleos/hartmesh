@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixes and improvements
+
+- Business reports infer date ordering across complete source columns, validate
+  the saved report against its effective calculations, and preserve authoritative
+  file presentation in ZIP download receipts.
+- Redis login counters update atomically. Account offboarding cancels native
+  batch work and reports unconfirmed worker stops; sandbox prewarming checks
+  the caller's execution permission before allocating resources.
+- Deployments can provide an optional HTTPS support link. Files tabs follow
+  their URL and browser history, and uncertain report download checks offer a
+  retry without claiming that the files are absent.
+- Speculative sandbox prewarms share one bounded worker. Artifact delivery
+  scans outputs independently of workspace scratch files and reports incomplete
+  verification explicitly. Report cards load compact projections while source
+  editing, copying and downloads retain the complete original file.
+- Readiness detects required streaming/login Redis failures, with bounded
+  shared probes and recovery. Published migration ancestry is pinned against
+  historical upgrade plans. Docker acceptance can test supplied application
+  image digests with disposable PostgreSQL and Redis; CI covers both store modes.
+
+### Configuration and API changes
+
+The optional branding `provider.json` supplies support identity and an HTTPS URL.
+Artifact `report_preview=true` responses and their projection/source headers are
+additive. Delivery receipts may carry `verification.scan_complete: false` with
+no disclosed paths when output verification is incomplete. `/health/ready` adds
+a `redis` component; Redis failures return 503 while `/health` remains liveness.
+
+### Schema changes
+
+No database schema changes since `v2.2.0+hartmesh.39`.
+
 ## [2.2.0+hartmesh.39] - 2026-10-03
 
 ### Fixes

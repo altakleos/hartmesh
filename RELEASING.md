@@ -141,6 +141,22 @@ available, run from the repository root:
 python3 scripts/docker_acceptance.py --artifacts /tmp/hartmesh-docker-acceptance
 ```
 
+To test already-built immutable application images with disposable PostgreSQL
+and Redis, use the same journey without rebuilding either application image:
+
+```bash
+python3 scripts/docker_acceptance.py \
+  --backend-image ghcr.io/altakleos/hartmesh-backend@sha256:<backend-digest> \
+  --frontend-image ghcr.io/altakleos/hartmesh-frontend@sha256:<frontend-digest> \
+  --stores postgres-redis --artifacts /tmp/hartmesh-image-acceptance
+```
+
+Both image arguments are required together and must contain full SHA-256
+digests. Missing images are pulled by those digests. Omitting them retains
+source builds; `--stores` also works with that default. SQLite remains the CLI
+default. CI runs both store modes; workflow dispatch accepts the same optional
+image pair. Use a new artifact directory for each run.
+
 The runner builds the production backend and `frontend-hm` Dockerfiles from
 tracked working-tree files. It starts a uniquely named Compose project with
 nginx, the Gateway, the frontend, and a scripted OpenAI-compatible model on an
@@ -149,16 +165,27 @@ published service, on a dynamically assigned loopback port. Configuration and
 accounts are synthetic; sandbox tools run inside the disposable Gateway
 container.
 
-The browser journey covers registration and sign-in, upload, a streamed chat
-with tool-created output, download, Files and Shared, persisted history, and
-logout against the real application services. Logs, the result summary, and
-browser failure evidence go to the selected artifact directory. The runner
-removes its own containers, volumes, networks, and uniquely tagged images after
-the run. `.github/workflows/docker-acceptance.yml` runs the same command in CI.
+The browser journey covers registration, rejected and successful sign-in,
+upload, streamed tools, downloads, Files and Shared, persisted history, account
+export/download/discard, model errors, confirmed deletion and logout against
+real application services. Logs, browser failure evidence and `result.json` go
+to the selected directory. The summary records the store mode, harness commit
+and fixture fingerprint, inspected application image IDs/digests, and actual
+fixture image identities. Each application container's image ID must match its
+recorded image. OCI source revision labels are recorded declarations; this runner
+does not verify build attestations. Source mode separately records the build
+commit and tracked working-tree fingerprint; image mode never labels the harness
+commit as the supplied image's source.
 
-This exercises application integration with SQLite and local sandbox execution.
-It does not qualify model answer quality, PostgreSQL, AIO sandbox isolation, or
-Kubernetes; the corresponding suites remain separate release evidence.
+Cleanup removes only this run's containers, volumes, networks and source-built
+image tags, including on failed setup or interruption. Supplied images and shared
+fixture images are preserved. `.github/workflows/docker-acceptance.yml` runs both
+store modes in CI.
+
+This exercises disposable application/store integration with local sandbox
+execution. It does not qualify a full deployment profile, real model quality,
+AIO/gVisor isolation, OIDC, VM infrastructure or Kubernetes; those remain separate
+consumer qualification. It creates no VM image.
 
 ### The sandbox base image
 
@@ -183,9 +210,19 @@ gate so that a merge cannot leave one behind:
   ```bash
   python3 scripts/verify_frontend_isolation.py --pin <upstream remote>/main
   ```
-- **Database migrations.** This distribution's revisions follow upstream's
-  newest one in a single chain. When upstream adds a revision, point the first
-  distribution revision's `down_revision` at it and update
-  `backend/tests/test_migration_chain_head.py`, which names both ends.
+- **Database migrations.** Preserve every published revision's identity,
+  `down_revision` and `depends_on`. Never insert a new prerequisite behind a
+  published head: Alembic treats it as already applied and silently skips its DDL
+  when upgrading that head, even if fresh installation and single-head checks pass.
+  Append imported upstream DDL after the current HartMesh head. Reconcile revision
+  ID collisions (IDs must fit 32 characters), imported dependencies and ordering
+  before publication; record the upstream-to-HartMesh mapping in the new revision.
+  A branched import needs a reviewed merge/forward migration plan, not automatic
+  reparenting of published revisions. Update the current-head assertions in
+  `backend/tests/test_migration_chain_head.py`, retain its historical ancestry
+  fixtures unchanged, and add an upgrade fixture for each newly published head.
+  Verify both fresh bootstrap and upgrades from supported published heads with
+  existing rows, on SQLite and PostgreSQL. Describe schema changes and upgrade
+  actions in release notes, or explicitly state that there are none.
 - **Version sources.** When upstream changes its version, the four sources
   must agree again: `scripts/verify_versions.sh` says which one does not.

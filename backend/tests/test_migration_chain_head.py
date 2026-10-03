@@ -1,15 +1,18 @@
 """The migration chain ends in this distribution's own revisions, in one line.
 
-Upstream's revisions come first and stay as upstream wrote them; the
-revisions below follow its newest one, each on the one before. A new
-revision is added at the end of ``DISTRIBUTION_REVISIONS``. When a merge
-brings a new upstream revision, that revision is re-pointed to follow the
-last one here, so a database that already carries these keeps one line of
-history.
+Published ancestry is immutable. New work, including imported upstream DDL,
+must be reachable from the published head as well as on a fresh database.
+The release-39 fixture comes from its tag; never regenerate it from HEAD to
+accommodate an ancestry change. Later releases add separate historical fixtures.
 """
 
 from __future__ import annotations
 
+import json
+import shutil
+from pathlib import Path
+
+import pytest
 from alembic.script import ScriptDirectory
 
 from deerflow.persistence import bootstrap
@@ -35,3 +38,41 @@ def test_each_distribution_revision_follows_the_one_before():
         assert script.get_revision(revision).down_revision == previous
         assert len(revision) <= 32, "alembic_version.version_num is VARCHAR(32)"
         previous = revision
+
+
+def _assert_published_upgrade(script: ScriptDirectory) -> None:
+    published = json.loads((Path(__file__).parent / "fixtures/migrations/release_39_ancestry.json").read_text(encoding="utf-8"))
+    for revision, ancestry in published["revisions"].items():
+        actual = script.get_revision(revision)
+        assert actual.down_revision == ancestry["down_revision"], f"Published parent changed: {revision}"
+        assert actual.dependencies == ancestry["depends_on"], f"Published dependencies changed: {revision}"
+    fresh = [step.revision.revision for step in script._upgrade_revs("head", "base")]
+    upgrade = [step.revision.revision for step in script._upgrade_revs("head", published["head"])]
+    assert upgrade == [revision for revision in fresh if revision not in published["revisions"]]
+
+
+def test_published_ancestry_and_previous_release_upgrade_plan():
+    _assert_published_upgrade(ScriptDirectory(str(bootstrap._MIGRATIONS_DIR)))
+
+
+@pytest.mark.parametrize("reparent_published", [False, True], ids=["append-import", "reject-inserted-ancestor"])
+def test_future_import_is_executed_from_published_head(tmp_path, reparent_published):
+    """An inserted ancestor can pass fresh/head checks but be skipped on upgrade."""
+    versions = tmp_path / "versions"
+    shutil.copytree(bootstrap._MIGRATIONS_DIR / "versions", versions, ignore=shutil.ignore_patterns("__pycache__"))
+    imported = "0030_synthetic_import"
+    parent = LAST_UPSTREAM_REVISION if reparent_published else DISTRIBUTION_REVISIONS[-1]
+    (versions / "0030_synthetic_import.py").write_text(f"revision = {imported!r}\ndown_revision = {parent!r}\ndef upgrade():\n    pass\ndef downgrade():\n    pass\n", encoding="utf-8")
+    if reparent_published:
+        first = versions / "0027_account_access.py"
+        first.write_text(first.read_text(encoding="utf-8").replace(f'"{LAST_UPSTREAM_REVISION}"', f'"{imported}"'), encoding="utf-8")
+    script = ScriptDirectory(str(tmp_path))
+    assert len(script.get_heads()) == 1
+    assert imported in [step.revision.revision for step in script._upgrade_revs("head", "base")]
+    if reparent_published:
+        assert script._upgrade_revs("head", DISTRIBUTION_REVISIONS[-1]) == []
+        with pytest.raises(AssertionError, match="Published parent changed"):
+            _assert_published_upgrade(script)
+    else:
+        assert [step.revision.revision for step in script._upgrade_revs("head", DISTRIBUTION_REVISIONS[-1])] == [imported]
+        _assert_published_upgrade(script)

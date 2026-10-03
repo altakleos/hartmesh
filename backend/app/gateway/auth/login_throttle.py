@@ -450,6 +450,10 @@ class RedisLoginThrottleStore:
 
     # -- key space --
 
+    async def check_health(self) -> bool:
+        """Probe the selected counter client's connection without changing counters."""
+        return bool(await self._client.ping())
+
     def _account(self, account: str) -> str:
         return f"{self._prefix}:acct:{account_key(account)}"
 

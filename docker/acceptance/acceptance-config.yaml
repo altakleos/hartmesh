@@ -30,5 +30,11 @@ summarization:
 agents_api:
   enabled: true
 database:
-  backend: sqlite
+  backend: $ACCEPTANCE_DATABASE_BACKEND
   sqlite_dir: /data/db
+  postgres_url: $ACCEPTANCE_DATABASE_URL
+stream_bridge:
+  type: $ACCEPTANCE_STREAM_BACKEND
+auth:
+  local:
+    lockout_store: $ACCEPTANCE_LOCKOUT_STORE
