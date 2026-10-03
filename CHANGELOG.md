@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.40] - 2026-10-03
+
 ### Fixes and improvements
 
 - Business reports infer date ordering across complete source columns, validate
@@ -26,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shared probes and recovery. Published migration ancestry is pinned against
   historical upgrade plans. Docker acceptance can test supplied application
   image digests with disposable PostgreSQL and Redis; CI covers both store modes.
+
+Included changes: [#187](https://github.com/altakleos/hartmesh/pull/187),
+[#188](https://github.com/altakleos/hartmesh/pull/188),
+[#189](https://github.com/altakleos/hartmesh/pull/189),
+[#190](https://github.com/altakleos/hartmesh/pull/190) and
+[#191](https://github.com/altakleos/hartmesh/pull/191).
 
 ### Configuration and API changes
 
