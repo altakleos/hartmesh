@@ -1,5 +1,8 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+Batch `owner_access` is host-owned: check before assembly/launch, lease renewals
+and acceptance. On deny, cancel and drain.
+
 **JSON**: See README. Authorize before local metadata and reads; inaccessible paths stay UNVERIFIED.
 
 Apply each subagent's prompt overlay after assembling its full SystemMessage.

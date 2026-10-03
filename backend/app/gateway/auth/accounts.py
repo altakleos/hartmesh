@@ -124,6 +124,8 @@ person starts afterwards is not above the limit, so a deployer may re-apply
 its record every pass, with or without the flag. With
 local passwords on it refuses to limit the last administrator, because a
 deployment with none offers first-boot setup to whoever reaches it first.
+Durable native batches recheck their saved role against the current account
+on their own: a demotion cancels those items even without the flag.
 
 The ``disable`` and role-limit documents say when each surface stopped:
 ``started_at`` (UTC), ``elapsed_ms`` for the whole command, and under
@@ -140,11 +142,15 @@ done for the person.
 What the document does not cover is not reported as done. A surface is in
 the document only when the command was given the store that lets it look:
 what a Gateway process keeps for a person between requests (a parked
-sandbox, a pooled MCP session, a browser, a queued memory update), a
-subagent batch, and a channel message waiting to be processed are not
+sandbox, a pooled MCP session, a browser, a queued memory update), and a
+channel message waiting to be processed are not
 examined in this build and are absent from ``surfaces``. A parked sandbox
 is stopped by its idle timeout. A background MCP task the person started
 keeps running at its remote server; cancel it there if that matters.
+Native subagent batches are cancelled durably. Cancelled items that were
+ever claimed remain unconfirmed (exit 2), even on repeated commands: this
+schema has no acknowledgement that the worker or its external effects
+stopped. Never-claimed items can be confirmed cancelled from their rows.
 
 Rejoining revives nothing. ``disable`` holds what could start work for the
 person again -- every covered account's active schedules, paused, and its
@@ -385,6 +391,8 @@ class _DurableWork:
     batches_stopped_ms: int | None = None
     #: Asked and failed: the next look asks again.
     failed: set[str] = field(default_factory=set)
+    # Cancellation clears leases but cannot acknowledge execution cleanup.
+    unconfirmed_items: set[str] = field(default_factory=set)
 
 
 @dataclass
@@ -1028,8 +1036,9 @@ class AccountsCommand:
             note += f"; the work waiting to run under {', '.join(not_ended)} could not be ended and may run once the person is enabled again; re-run this command to try again"
         if "subagent_batches" in clock.unconfirmed:
             note += (
-                "; a subagent batch counted under `not_ended` could not be cancelled, or a batch item a Gateway was executing did not stop, "
-                "or a Gateway process named under `processes_unconfirmed` had not looked; re-run this command to see whether it has since"
+                "; subagent batch cancellation is recorded separately from execution stop: `not_ended` includes failed cancellations and "
+                "claimed items whose cleanup is unconfirmed. This deployment has no durable worker-stop acknowledgement; "
+                "re-running alone cannot confirm those items or any external effects have stopped"
             )
         return note
 
@@ -1166,8 +1175,8 @@ class AccountsCommand:
 
         The request is the one a person's own cancel makes, attributed to the
         deployer: it is applied to the batch's rows at once, and each Gateway
-        stops the items it is executing at its look. Where the command is
-        given no batch store, as in this build, there is nothing to ask.
+        stops the items it is executing at its next lease check. Cancelled
+        rows do not confirm that execution or external effects have stopped.
         """
         from deerflow.persistence.subagent_batches.sql import BATCH_TERMINAL_STATUSES
 
@@ -1190,6 +1199,7 @@ class AccountsCommand:
                     if result is not None and result.get("status") in BATCH_TERMINAL_STATUSES:
                         work.batches_ended.add(batch_id)
                         work.batches_stopped_ms = clock.now_ms()
+                work.unconfirmed_items.update(await self._batches.unconfirmed_cancelled_items(user_id))
 
     async def _report_durable_work(self, work: _DurableWork, clock: SurfaceClock, *, committed: int, channels: int) -> None:
         # Reported only where the command was given a batch store: a surface it
@@ -1199,12 +1209,14 @@ class AccountsCommand:
             # items they were executing (``_confirm_processes``): an executing item
             # reads the rows only at its next lease renewal.
             executions = clock.surfaces.pop("subagent_batches", None)
-            executions_confirmed = executions is None or "subagent_batches" not in clock.unconfirmed
-            if not executions_confirmed:
+            batches_not_ended = set(work.batches) - work.batches_ended
+            executions_confirmed = not batches_not_ended and (not work.unconfirmed_items if executions is None else "subagent_batches" not in clock.unconfirmed)
+            if "subagent_batches" in clock.unconfirmed:
                 clock.unconfirmed.remove("subagent_batches")
             process_facts = {key: executions[key] for key in ("processes", "processes_unconfirmed")} if executions is not None else {}
+            process_facts.update(batches_terminal=len(work.batches_ended), execution_stop_confirmed=executions_confirmed)
             items_stopped = executions["count"] if executions is not None else 0
-            not_ended = len(set(work.batches) - work.batches_ended) + (executions["not_ended"] if executions is not None else 0)
+            not_ended = len(batches_not_ended) + (executions["not_ended"] if executions is not None else len(work.unconfirmed_items))
             if not_ended or not executions_confirmed:
                 clock.not_stopped("subagent_batches", ACTION_ENDED, len(work.batches), unconfirmed=True, confirmed_by=CONFIRMED_BY_BATCH_STATUS, items_stopped=items_stopped, not_ended=not_ended, **process_facts)
             else:
@@ -1767,6 +1779,7 @@ async def _run(
     from deerflow.persistence.personal_access_tokens import PersonalAccessTokenRepository
     from deerflow.persistence.run import RunRepository
     from deerflow.persistence.scheduled_tasks import ScheduledTaskRepository
+    from deerflow.persistence.subagent_batches import SubagentBatchRepository
 
     config = get_app_config()
     if config.database.backend == "memory":
@@ -1776,14 +1789,15 @@ async def _run(
         session_factory = get_session_factory()
         if session_factory is None:
             raise CommandError("persistence engine not available (check config.database)")
-        # No process record (``sweeps``), durable MCP tasks, subagent batches
-        # or channel receipts in this build: those surfaces are not reported,
-        # and what a run holds ends with the run this command cancels.
+        # No process stop acknowledgement in this build. Batch cancellation
+        # is durable, but previously claimed items remain explicitly
+        # unconfirmed. Remote MCP tasks are a separate operator surface.
         command_runner = AccountsCommand(
             SQLiteUserRepository(session_factory),
             tokens=PersonalAccessTokenRepository(session_factory),
             schedules=ScheduledTaskRepository(session_factory),
             runs=RunRepository(session_factory),
+            batches=SubagentBatchRepository(session_factory),
             channel_connections=ChannelConnectionRepository(session_factory),
             wait_seconds=wait_seconds,
             **deployment_options(config),

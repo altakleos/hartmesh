@@ -4,6 +4,7 @@ import asyncio
 import logging
 import socket
 import uuid
+from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -50,12 +51,15 @@ class SubagentBatchService:
         app_config: AppConfig | None = None,
         execution_capacity: SubagentExecutionCapacity | None = None,
         extensions: LoadedExtensions | None = None,
+        owner_access: Callable[[dict[str, Any]], Awaitable[bool]] | None = None,
     ) -> None:
         self._repository = repository
         self._config = config
         self._runtime_config = runtime_config
         self._app_config = app_config
         self._execution_capacity = execution_capacity
+        # Hosts own account authority; the standalone harness has no user DB.
+        self._owner_access = owner_access
         # One worker owns one generation, including recovered durable items.
         # Never persist this Python object in the serializable execution_spec.
         self._extensions = extensions if extensions is not None else get_loaded_extensions()
@@ -195,6 +199,9 @@ class SubagentBatchService:
         try:
             batch = item["batch"]
             self._item_batches[item_id] = batch["id"]
+            if not await self._owner_allowed(batch):
+                await self._cancel_for_owner(batch)
+                return
             spec = batch["execution_spec"]
             config_data = spec["subagent_config"]
             if "prompt_overlay" in config_data:
@@ -222,23 +229,6 @@ class SubagentBatchService:
                 app_config=app_config,
                 extensions=self._extensions,
             )
-            # Revalidate durable state before launching: cancel_batch may have
-            # terminalized this item (or its lease may have been lost) while
-            # assembly blocked in the worker thread — the poll loop's checks
-            # only start after execute_async(), so launching without this
-            # check would run work the user already cancelled.
-            lease = await self._repository.renew_item_lease(
-                item_id,
-                lease_owner=self._lease_owner,
-                lease_seconds=self._config.lease_seconds,
-                now=datetime.now(UTC),
-            )
-            if not lease["valid"]:
-                logger.info(
-                    "Durable batch item %s cancelled or lease lost during tool assembly; skipping launch",
-                    item_id,
-                )
-                return
             executor_kwargs = {}
             if THREAD_INCARNATION_CONTEXT_KEY in spec:
                 executor_kwargs[THREAD_INCARNATION_CONTEXT_KEY] = spec[THREAD_INCARNATION_CONTEXT_KEY]
@@ -263,6 +253,21 @@ class SubagentBatchService:
                 **executor_kwargs,
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"
+            if not await self._owner_allowed(batch):
+                await self._cancel_for_owner(batch)
+                return
+            # Validate the lease last: both tool assembly and account lookup
+            # may have overlapped cancellation. No await between this check
+            # and launch. A peer's later cancellation is cooperatively drained.
+            lease = await self._repository.renew_item_lease(
+                item_id,
+                lease_owner=self._lease_owner,
+                lease_seconds=self._config.lease_seconds,
+                now=datetime.now(UTC),
+            )
+            if not lease["valid"]:
+                logger.info("Durable batch item %s cancelled or lease lost before launch", item_id)
+                return
             execution_id = executor.execute_async(prompt, task_id=item_id)
             self._execution_ids[item_id] = execution_id
             marked_running = False
@@ -273,6 +278,7 @@ class SubagentBatchService:
             )
             loop = asyncio.get_running_loop()
             next_renew_at = loop.time() + renew_every
+            owner_cancelled = False
             while True:
                 result = get_background_task_result(execution_id)
                 if result is None:
@@ -286,18 +292,28 @@ class SubagentBatchService:
                     if not marked_running:
                         request_cancel_background_task(execution_id)
                 if result.status.is_terminal:
+                    if owner_cancelled:
+                        # _cancel_for_owner has persisted the refusal. Never
+                        # turn a drained cancellation into an ordinary retry.
+                        return
                     break
                 now_monotonic = loop.time()
                 if now_monotonic >= next_renew_at:
-                    lease = await self._repository.renew_item_lease(
-                        item_id,
-                        lease_owner=self._lease_owner,
-                        lease_seconds=self._config.lease_seconds,
-                        now=datetime.now(UTC),
-                    )
+                    owner_cancelled = owner_cancelled or not await self._owner_allowed(batch)
+                    if owner_cancelled:
+                        # Cancel first, then persist. A lookup/write outage
+                        # must not abandon supervision of active execution.
+                        await self._cancel_for_owner(batch, execution_id)
+                    else:
+                        lease = await self._repository.renew_item_lease(
+                            item_id,
+                            lease_owner=self._lease_owner,
+                            lease_seconds=self._config.lease_seconds,
+                            now=datetime.now(UTC),
+                        )
+                        if not lease["valid"]:
+                            request_cancel_background_task(execution_id)
                     next_renew_at = loop.time() + renew_every
-                    if not lease["valid"]:
-                        request_cancel_background_task(execution_id)
                 try:
                     until_renew = max(0.0, next_renew_at - loop.time())
                     await asyncio.wait_for(
@@ -375,10 +391,49 @@ class SubagentBatchService:
             if execution_id is not None:
                 cleanup_background_task(execution_id)
 
+    async def _owner_allowed(self, batch: dict[str, Any]) -> bool:
+        if self._owner_access is None:
+            return True
+        try:
+            return await asyncio.wait_for(self._owner_access(batch), timeout=min(5.0, self._config.lease_seconds / 6)) is True
+        except Exception:
+            logger.warning("Batch owner access could not be verified (batch_id=%s)", batch["id"], exc_info=True)
+            return False
+
+    async def _cancel_for_owner(self, batch: dict[str, Any], execution_id: str | None = None) -> None:
+        if execution_id is not None:
+            request_cancel_background_task(execution_id)
+        reported = False
+        while not self._stop.is_set():
+            try:
+                await asyncio.wait_for(
+                    self._repository.cancel_batch(batch["id"], user_id=batch["user_id"], reason="Cancelled because batch owner access was refused or could not be verified"),
+                    timeout=min(5.0, self._config.lease_seconds / 6),
+                )
+                return
+            except Exception:
+                if not reported:
+                    logger.warning("Retrying batch owner cancellation (batch_id=%s)", batch["id"], exc_info=True)
+                    reported = True
+            # Retain the refused item until its cancellation commits. Neither
+            # a successful later lookup nor normal finalization may requeue it.
+            try:
+                await asyncio.wait_for(self._stop.wait(), timeout=self._config.poll_interval_seconds)
+            except TimeoutError:
+                pass
+        raise asyncio.CancelledError
+
     async def _check_acceptance_with_lease(self, item, result, app_config):
         """Keep a completed execution leased until its advisory check drains."""
+        check = None
 
         async def renew():
+            if not await self._owner_allowed(item["batch"]):
+                if check is not None:
+                    check.cancel()
+                    await asyncio.gather(check, return_exceptions=True)
+                await self._cancel_for_owner(item["batch"])
+                return False
             lease = await self._repository.renew_item_lease(
                 item["id"],
                 lease_owner=self._lease_owner,

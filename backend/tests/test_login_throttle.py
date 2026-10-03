@@ -521,6 +521,9 @@ async def test_redis_store_translates_backend_errors_into_unavailable():
     """The redis backend surfaces an outage as the fail-closed signal."""
 
     class _DeadRedis:
+        def pipeline(self, **kwargs):
+            raise OSError("connection refused")
+
         async def hgetall(self, key: str):
             raise OSError("connection refused")
 
@@ -713,25 +716,38 @@ class _FakeRedis:
         self.values: dict[str, int] = {}
         self.sets: dict[str, set[str]] = {}
         self.expires: dict[str, int] = {}
+        self.versions: dict[str, int] = {}
+        self.after_read = None
 
     async def hgetall(self, key: str) -> dict[str, str]:
-        return dict(self.hashes.get(key, {}))
+        snapshot = dict(self.hashes.get(key, {}))
+        if self.after_read is not None:
+            hook, self.after_read = self.after_read, None
+            await hook()
+        await asyncio.sleep(0)  # permit real Redis's read/write interleaving
+        return snapshot
 
     async def hset(self, key: str, mapping: dict) -> int:
+        self.versions[key] = self.versions.get(key, 0) + 1
         self.hashes.setdefault(key, {}).update({k: str(v) for k, v in mapping.items()})
         return len(mapping)
 
     async def expire(self, key: str, seconds: int) -> bool:
+        self.versions[key] = self.versions.get(key, 0) + 1
         self.expires[key] = seconds
         return True
 
     async def delete(self, *keys: str) -> int:
         removed = 0
         for key in keys:
+            self.versions[key] = self.versions.get(key, 0) + 1
             removed += self.hashes.pop(key, None) is not None
             removed += self.values.pop(key, None) is not None
             removed += self.sets.pop(key, None) is not None
         return removed
+
+    def pipeline(self, **kwargs):
+        return _FakePipeline(self)
 
     async def incr(self, key: str) -> int:
         self.values[key] = self.values.get(key, 0) + 1
@@ -752,6 +768,153 @@ class _FakeRedis:
         if match is not None:
             keys = [key for key in keys if fnmatch.fnmatchcase(key, match)]
         return 0, keys
+
+
+class _FakePipeline:
+    """WATCH/MULTI conflict semantics; queued commands execute without yielding."""
+
+    def __init__(self, client):
+        self.client = client
+        self.watched = {}
+        self.commands = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def watch(self, key):
+        self.watched[key] = self.client.versions.get(key, 0)
+
+    async def hgetall(self, key):
+        return await self.client.hgetall(key)
+
+    def multi(self):
+        pass
+
+    def hset(self, key, *, mapping):
+        self.commands.append(("hset", (key,), {"mapping": mapping}))
+
+    def expire(self, key, seconds):
+        self.commands.append(("expire", (key, seconds), {}))
+
+    def delete(self, key):
+        self.commands.append(("delete", (key,), {}))
+
+    async def execute(self):
+        from redis.exceptions import WatchError
+
+        if any(self.client.versions.get(key, 0) != version for key, version in self.watched.items()):
+            raise WatchError("concurrent write")
+        for name, args, kwargs in self.commands:
+            await getattr(self.client, name)(*args, **kwargs)
+
+
+async def test_redis_concurrent_account_failures_keep_every_increment():
+    client = _FakeRedis()
+    stores = [RedisLoginThrottleStore("redis://unused", key_prefix="t:atomic", client=client) for _ in range(2)]
+    policy = ThrottlePolicy.from_local_config(LocalAuthConfig())
+    transitions = await asyncio.gather(*(stores[index % 2].record_account_failure(ALICE, policy) for index in range(32)))
+    assert int(client.hashes[stores[0]._account(ALICE)]["fail_count"]) == 32
+    assert sum(transitions) == 1
+    assert await stores[0].account_locked(ALICE, policy)
+
+
+@pytest.mark.parametrize("reader", ["check", "list"])
+@pytest.mark.parametrize("race", ["expiry", "clear"])
+async def test_redis_lock_evaluation_cannot_delete_or_restore_a_newer_record(monkeypatch, reader, race):
+    client = _FakeRedis()
+    store = RedisLoginThrottleStore("redis://unused", key_prefix="t:atomic", client=client)
+    policy = ThrottlePolicy.from_local_config(LocalAuthConfig(account_max_attempts=5, account_lockout_seconds=120))
+    monkeypatch.setattr(login_throttle.time, "time", lambda: 100.0)
+    key = store._account(ALICE)
+    await client.hset(key, mapping={"fail_count": 5, "locked_at": 1 if race == "expiry" else 90, "locked_duration": 60, "label": ALICE})
+    read, release = asyncio.Event(), asyncio.Event()
+
+    async def pause_old_read():
+        read.set()
+        await release.wait()
+
+    client.after_read = pause_old_read
+    pending = asyncio.create_task(store.account_locked(ALICE, policy) if reader == "check" else store.lockouts(policy))
+    await asyncio.wait_for(read.wait(), 1)
+    if race == "clear":
+        assert await store.clear_account(ALICE)
+    await store.record_account_failure(ALICE, policy)
+    release.set()
+    result = await asyncio.wait_for(pending, 1)
+    assert int(client.hashes[key]["fail_count"]) == (6 if race == "expiry" else 1)
+    if race == "expiry":
+        assert result is True if reader == "check" else len(result) == 1
+    else:
+        assert result is False if reader == "check" else result == []
+
+
+async def test_concurrent_account_failures_are_atomic_on_real_redis():
+    redis_asyncio = pytest.importorskip("redis.asyncio")
+    url = os.environ.get("DEER_FLOW_TEST_REDIS_URL", "redis://localhost:6379/15")
+    client = redis_asyncio.Redis.from_url(url, decode_responses=True, socket_connect_timeout=0.5)
+    try:
+        await client.ping()
+    except Exception:
+        await client.aclose()
+        pytest.skip("Redis is not available")
+    prefix = f"test:account-atomic:{uuid.uuid4().hex}"
+    stores = [RedisLoginThrottleStore(url, key_prefix=prefix) for _ in range(2)]
+    policy = ThrottlePolicy.from_local_config(LocalAuthConfig())
+    try:
+        transitions = await asyncio.gather(*(stores[index % 2].record_account_failure(ALICE, policy) for index in range(32)))
+        assert int(await client.hget(stores[0]._account(ALICE), "fail_count")) == 32
+        assert sum(transitions) == 1
+        assert await stores[1].account_locked(ALICE, policy)
+        assert await client.ttl(stores[0]._account(ALICE)) > 0
+        assert await stores[1].clear_account(ALICE)
+        assert not await stores[0].account_locked(ALICE, policy)
+    finally:
+        await client.delete(stores[0]._account(ALICE))
+        await asyncio.gather(*(store.close() for store in stores))
+        await client.aclose()
+
+
+async def test_redis_contention_budget_fails_closed(monkeypatch):
+    from redis.exceptions import WatchError
+
+    calls = 0
+
+    async def always_conflicts(self):
+        nonlocal calls
+        calls += 1
+        raise WatchError("concurrent write")
+
+    monkeypatch.setattr(_FakePipeline, "execute", always_conflicts)
+    monkeypatch.setattr(login_throttle, "_MAX_TRANSACTION_RETRIES", 3)
+    store = RedisLoginThrottleStore("redis://unused", key_prefix="t:busy", client=_FakeRedis())
+    policy = ThrottlePolicy.from_local_config(LocalAuthConfig())
+    with pytest.raises(LoginThrottleUnavailable, match="contended"):
+        await store.record_account_failure(ALICE, policy)
+    assert calls == 3
+
+
+async def test_redis_live_duration_changes_do_not_resurrect_served_locks(monkeypatch):
+    client = _FakeRedis()
+    store = RedisLoginThrottleStore("redis://unused", key_prefix="t:policy", client=client)
+    key = store._account(ALICE)
+    policy = ThrottlePolicy.from_local_config(LocalAuthConfig(account_max_attempts=5, account_lockout_seconds=60))
+    longer = ThrottlePolicy.from_local_config(LocalAuthConfig(account_max_attempts=5, account_lockout_seconds=120))
+    monkeypatch.setattr(login_throttle.time, "time", lambda: 100.0)
+    for _ in range(5):
+        await store.record_account_failure(ALICE, policy)
+    assert client.expires[key] == 60
+    monkeypatch.setattr(login_throttle.time, "time", lambda: 110.0)
+    assert (await store.lockouts(longer))[0].expires_at == 220.0
+    assert float(client.hashes[key]["locked_duration"]) == 120.0
+    assert client.expires[key] == 120
+    assert await store.account_locked(ALICE, policy)
+    assert float(client.hashes[key]["locked_duration"]) == 60.0
+    monkeypatch.setattr(login_throttle.time, "time", lambda: 161.0)
+    assert not await store.account_locked(ALICE, longer)
+    assert key not in client.hashes
 
 
 async def test_redis_backend_locks_lists_and_clears():

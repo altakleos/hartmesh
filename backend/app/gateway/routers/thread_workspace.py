@@ -12,10 +12,13 @@ import logging
 from fastapi import APIRouter, BackgroundTasks, Request
 from pydantic import BaseModel
 
-from app.gateway.authz import require_permission
+from app.gateway.authz import _is_internal_caller, authorize_sandbox_for_request, get_auth_context, require_permission
 from app.gateway.utils import sanitize_log_param
+from deerflow.config.app_config import get_app_config
 from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.sandbox.exceptions import SandboxAuthorizationError
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -59,9 +62,27 @@ async def prewarm_thread_workspace(thread_id: ThreadId, request: Request, backgr
 
     Always answers 202: the build runs after the response and its outcome is
     the provider's log, never this call's. ``scheduled: false`` says the
-    deployment's provider cannot prewarm, and costs nothing.
+    deployment's provider cannot prewarm or the caller lacks sandbox access,
+    and costs nothing.
     """
-    del request
+    auth = get_auth_context(request)
+    user_id = get_effective_user_id()
+    if auth is None or auth.user is None or not user_id:
+        return ThreadWorkspacePrewarmResponse(thread_id=thread_id, scheduled=False, reason="anonymous")
+    try:
+        app_config = await run_assembly(get_app_config)
+    except Exception:
+        logger.info("Prewarm skipped because configuration is unavailable (thread_id=%s)", sanitize_log_param(thread_id))
+        return ThreadWorkspacePrewarmResponse(thread_id=thread_id, scheduled=False, reason="unavailable")
+    try:
+        await run_assembly(
+            authorize_sandbox_for_request,
+            auth.user,
+            is_internal=_is_internal_caller(request, auth.user),
+            app_config=app_config,
+        )
+    except SandboxAuthorizationError:
+        return ThreadWorkspacePrewarmResponse(thread_id=thread_id, scheduled=False, reason="forbidden")
     try:
         prewarm = getattr(get_sandbox_provider(), "prewarm_async", None)
     except Exception:
@@ -69,8 +90,5 @@ async def prewarm_thread_workspace(thread_id: ThreadId, request: Request, backgr
         return ThreadWorkspacePrewarmResponse(thread_id=thread_id, scheduled=False, reason="unavailable")
     if prewarm is None:
         return ThreadWorkspacePrewarmResponse(thread_id=thread_id, scheduled=False, reason="unsupported")
-    user_id = get_effective_user_id()
-    if not user_id:
-        return ThreadWorkspacePrewarmResponse(thread_id=thread_id, scheduled=False, reason="anonymous")
     background.add_task(_prewarm_thread_workspace, prewarm, thread_id, user_id)
     return ThreadWorkspacePrewarmResponse(thread_id=thread_id, scheduled=True)

@@ -188,6 +188,32 @@ class SubagentBatchRepository:
                 return None
             return await self._with_counts(session, batch)
 
+    async def list_active_by_user(self, user_id: str) -> list[dict[str, Any]]:
+        """Every nonterminal batch, including paused work, for offboarding."""
+        async with self._sf() as session:
+            rows = (await session.execute(select(SubagentBatchRow).where(SubagentBatchRow.user_id == user_id, SubagentBatchRow.status.in_(BATCH_ACTIVE_STATUSES)))).scalars()
+            return [self._batch_dict(row) for row in rows]
+
+    async def unconfirmed_cancelled_items(self, user_id: str) -> set[str]:
+        """Cancelled claims are not worker-stop acknowledgements.
+
+        Keep this evidence across repeated offboarding commands. A user
+        cancellation may race the deployer's cancellation, so the reason
+        string must not narrow the query. This schema has no stop-ack field.
+        """
+        async with self._sf() as session:
+            rows = await session.execute(
+                select(SubagentBatchItemRow.id)
+                .join(SubagentBatchRow, SubagentBatchRow.id == SubagentBatchItemRow.batch_id)
+                .where(
+                    SubagentBatchRow.user_id == user_id,
+                    SubagentBatchItemRow.status == "cancelled",
+                    SubagentBatchItemRow.cancel_requested_at.is_not(None),
+                    SubagentBatchItemRow.started_at.is_not(None),
+                )
+            )
+            return set(rows.scalars())
+
     async def list_by_thread(self, thread_id: str, *, user_id: str, limit: int = 20) -> list[dict[str, Any]]:
         async with self._sf() as session:
             rows = list(
@@ -526,10 +552,10 @@ class SubagentBatchRepository:
     async def resume_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
         return await self._set_control(batch_id, user_id=user_id, action="resume")
 
-    async def cancel_batch(self, batch_id: str, *, user_id: str) -> dict[str, Any] | None:
-        return await self._set_control(batch_id, user_id=user_id, action="cancel")
+    async def cancel_batch(self, batch_id: str, *, user_id: str, reason: str = "Cancelled by user") -> dict[str, Any] | None:
+        return await self._set_control(batch_id, user_id=user_id, action="cancel", reason=reason)
 
-    async def _set_control(self, batch_id: str, *, user_id: str, action: str) -> dict[str, Any] | None:
+    async def _set_control(self, batch_id: str, *, user_id: str, action: str, reason: str = "Cancelled by user") -> dict[str, Any] | None:
         now = datetime.now(UTC)
         async with self._sf() as session:
             batch = await session.get(SubagentBatchRow, batch_id, with_for_update=True)
@@ -558,7 +584,7 @@ class SubagentBatchRepository:
                     item.cancel_requested_at = now
                     item.updated_at = now
                     item.status = "cancelled"
-                    item.error = "Cancelled by user"
+                    item.error = reason[:4000]
                     item.lease_owner = None
                     item.lease_expires_at = None
                     item.completed_at = now
