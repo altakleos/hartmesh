@@ -145,6 +145,14 @@ offered until it is made again. Each chart is addressed inside the report's own
 directory, and the brand colour is spent on rules and borders only, because the
 card renders on whichever ground the viewer's theme paints.
 
+Chart failures are component state: React omits the failed figure, and its
+image URL includes the report's content revision (draft number when no digest
+is available). The chart component is keyed by that URL and chart id, so a new
+revision retries reused filenames and bypasses the previous image's cache;
+an old image error cannot hide the new revision. Never remove React-owned DOM
+nodes directly from image callbacks. The chart lifecycle DOM tests cover
+failure, a later report dropping the chart, and retries after revision changes.
+
 **KPI tiles.** They are sized by the space they have, never by the window: the
 card's widest home is a full page and its narrowest is the artifact side panel,
 and a viewport breakpoint cannot tell those apart. It put five tiles in the

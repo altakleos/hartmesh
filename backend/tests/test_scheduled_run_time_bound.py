@@ -53,8 +53,8 @@ def _service(stores: SimpleNamespace, *, stop_run=None, run_is_live=None, max_ru
     )
 
 
-async def _running_occurrence(stores: SimpleNamespace, *, started_at: datetime) -> tuple[str, str, str]:
-    """A cron task with one occurrence that has been running since *started_at*."""
+async def _running_occurrence(stores: SimpleNamespace, *, started_at: datetime, schedule_type: str = "cron") -> tuple[str, str, str]:
+    """A task with one occurrence that has been running since *started_at*."""
     task_id, occurrence_id, run_id = str(uuid4()), str(uuid4()), str(uuid4())
     await stores.schedules.create(
         task_id=task_id,
@@ -64,8 +64,8 @@ async def _running_occurrence(stores: SimpleNamespace, *, started_at: datetime) 
         assistant_id="lead_agent",
         title="Weekly numbers",
         prompt="Send me the weekly numbers",
-        schedule_type="cron",
-        schedule_spec={"cron": "0 9 * * 1"},
+        schedule_type=schedule_type,
+        schedule_spec={"cron": "0 9 * * 1"} if schedule_type == "cron" else {"run_at": started_at.isoformat()},
         timezone="UTC",
         next_run_at=started_at + timedelta(days=7),
     )
@@ -168,6 +168,103 @@ async def test_the_stopped_runs_own_ending_does_not_overwrite_the_outcome(stores
     occurrence = await _occurrence(stores, task_id)
     assert occurrence["status"] == "failed"
     assert "did not finish within 15 minutes" in occurrence["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("schedule_type", ["cron", "once"])
+@pytest.mark.parametrize("fresh_service", [False, True], ids=["same-service", "fresh-service"])
+async def test_completion_after_timeout_commit_preserves_occurrence_and_parent(stores, monkeypatch, schedule_type, fresh_service) -> None:
+    """Completion runs before the timeout caller can record anything in memory."""
+    now = datetime.now(UTC)
+    task_id, occurrence_id, run_id = await _running_occurrence(stores, started_at=now - timedelta(seconds=LIMIT_SECONDS + 5), schedule_type=schedule_type)
+    stopped = []
+
+    async def stop_run(asked):
+        stopped.append(asked)
+
+    service = _service(stores, stop_run=stop_run)
+    completing_service = _service(stores) if fresh_service else service
+    complete_run = stores.schedules.complete_run
+    committed = {}
+
+    async def complete_then_callback(*args, **kwargs):
+        ended = await complete_run(*args, **kwargs)
+        if ended and kwargs["status"] == "failed":
+            committed["occurrence"] = await _occurrence(stores, task_id)
+            committed["parent"] = await stores.schedules.get(task_id, user_id=OWNER)
+            await completing_service.handle_run_completion(_completion(run_id, task_id, occurrence_id))
+        return ended
+
+    monkeypatch.setattr(stores.schedules, "complete_run", complete_then_callback)
+    await service._stop_overdue_runs(now=now)
+
+    assert committed["occurrence"]["status"] == "failed"
+    assert committed["occurrence"]["error"] == "the task did not finish within 15 minutes, so it was stopped"
+    assert await _occurrence(stores, task_id) == committed["occurrence"]
+    assert await stores.schedules.get(task_id, user_id=OWNER) == committed["parent"]
+    if schedule_type == "once":
+        assert committed["parent"]["status"] == "failed"
+    assert stopped == [run_id]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["success", "error", "interrupted"])
+async def test_duplicate_completion_preserves_the_first_terminal_outcome(stores, status) -> None:
+    now = datetime.now(UTC)
+    task_id, occurrence_id, run_id = await _running_occurrence(stores, started_at=now, schedule_type="once")
+    service = _service(stores)
+    record = _completion(run_id, task_id, occurrence_id, status=status)
+    record.error = "first failure" if status == "error" else None
+    await service.handle_run_completion(record)
+    occurrence = await _occurrence(stores, task_id)
+    parent = await stores.schedules.get(task_id, user_id=OWNER)
+
+    await service.handle_run_completion(_completion(run_id, task_id, occurrence_id, status="error" if status == "success" else "success"))
+
+    assert await _occurrence(stores, task_id) == occurrence
+    assert await stores.schedules.get(task_id, user_id=OWNER) == parent
+
+
+@pytest.mark.asyncio
+async def test_completion_winning_after_overdue_selection_is_not_stopped(stores, monkeypatch) -> None:
+    now = datetime.now(UTC)
+    task_id, occurrence_id, run_id = await _running_occurrence(stores, started_at=now - timedelta(seconds=LIMIT_SECONDS + 5))
+    stopped = []
+
+    async def stop_run(asked):
+        stopped.append(asked)
+
+    service = _service(stores, stop_run=stop_run)
+    list_overdue = stores.occurrences.list_overdue_running
+
+    async def select_then_complete(**kwargs):
+        overdue = await list_overdue(**kwargs)
+        await service.handle_run_completion(_completion(run_id, task_id, occurrence_id, status="success"))
+        return overdue
+
+    monkeypatch.setattr(stores.occurrences, "list_overdue_running", select_then_complete)
+    await service._stop_overdue_runs(now=now)
+
+    occurrence = await _occurrence(stores, task_id)
+    assert occurrence["status"] == "success"
+    assert occurrence["error"] is None
+    assert stopped == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("wrong_field", ["user_id", "run_id"])
+async def test_completion_cannot_end_an_occurrence_with_a_different_owner_or_run(stores, wrong_field) -> None:
+    now = datetime.now(UTC)
+    task_id, occurrence_id, run_id = await _running_occurrence(stores, started_at=now)
+    occurrence = await _occurrence(stores, task_id)
+    parent = await stores.schedules.get(task_id, user_id=OWNER)
+    record = _completion(run_id, task_id, occurrence_id, status="success")
+    setattr(record, wrong_field, "unrelated")
+
+    await _service(stores).handle_run_completion(record)
+
+    assert await _occurrence(stores, task_id) == occurrence
+    assert await stores.schedules.get(task_id, user_id=OWNER) == parent
 
 
 @pytest.mark.asyncio

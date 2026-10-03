@@ -6,7 +6,7 @@ import {
   LoaderIcon,
   UsersIcon,
 } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { urlOfArtifact } from "@/core/artifacts/utils";
@@ -188,6 +188,32 @@ function ReportDataTable({
   );
 }
 
+function ReportChartFigure({
+  chart,
+  src,
+}: {
+  chart: ReportChart;
+  src: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  if (failed) {
+    return null;
+  }
+  return (
+    <figure className="mt-3">
+      <img
+        alt={chart.title ?? chart.id.replaceAll("_", " ")}
+        className="border-border w-full rounded-lg border bg-white"
+        loading="lazy"
+        // React owns the figure's removal. Removing its DOM node here leaves
+        // React trying to remove it again when a later report drops the chart.
+        onError={() => setFailed(true)}
+        src={src}
+      />
+    </figure>
+  );
+}
+
 function ReportSectionBlock({
   section,
   chartsById,
@@ -235,21 +261,16 @@ function ReportSectionBlock({
           table={section.table}
         />
       )}
-      {charts.map((chart) => (
-        <figure className="mt-3" key={chart.id}>
-          <img
-            alt={chart.title ?? chart.id.replaceAll("_", " ")}
-            className="border-border w-full rounded-lg border bg-white"
-            loading="lazy"
-            onError={(event) => {
-              // A chart the report names but the turn never wrote; the
-              // document simply omits it rather than framing a broken image.
-              event.currentTarget.closest("figure")?.remove();
-            }}
-            src={chartURL(chart.png)}
+      {charts.map((chart) => {
+        const src = chartURL(chart.png);
+        return (
+          <ReportChartFigure
+            chart={chart}
+            key={JSON.stringify([chart.id, src])}
+            src={src}
           />
-        </figure>
-      ))}
+        );
+      })}
       {section.note && (
         <p className="text-muted-foreground mt-2 text-xs">{section.note}</p>
       )}
@@ -354,12 +375,17 @@ export function ReportCard({
   const myFilesFolder = filingFolderFor(filedUnder, presented);
   const sharedFolder = sharedFolderFor(filedUnder, presented);
 
-  const chartURL = (png: string) =>
-    urlOfArtifact({
+  const chartURL = (png: string) => {
+    const url = urlOfArtifact({
       filepath: reportSiblingPath(filepath, png),
       threadId,
       isMock,
     });
+    // Drafts reuse chart filenames. The revision resets failed-image state
+    // and bypasses the previous image's browser cache when a rebuild lands.
+    const revision = encodeURIComponent(reportRevision ?? String(report.draft));
+    return `${url}${url.includes("?") ? "&" : "?"}revision=${revision}`;
+  };
 
   const renderLabel: Record<ReportRenderKind, string> = {
     pdf: t.businessReport.downloadPdf,

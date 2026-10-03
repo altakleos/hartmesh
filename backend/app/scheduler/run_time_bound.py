@@ -22,7 +22,6 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 
 from app.scheduler.service import ScheduledTaskService
-from deerflow.runtime import RunRecord
 
 logger = logging.getLogger(__name__)
 
@@ -39,9 +38,6 @@ _STOP_REQUEST_TIMEOUT_SECONDS = 10.0
 # ended, so without this the next scheduled run could start beside it. A run
 # that never finishes unwinding holds scheduling for this long, not for good.
 _STOPPING_GRACE_SECONDS = 120
-# How long a run ended at the limit is remembered, so its own late completion
-# does not overwrite the occurrence the scheduler already ended.
-_ENDED_AT_LIMIT_MEMORY = timedelta(days=1)
 
 
 def duration_words(seconds: int) -> str:
@@ -68,7 +64,6 @@ class TimeBoundedScheduledTaskService(ScheduledTaskService):
         # this process asked to stop at the time limit, with when it asked.
         self._run_is_live = run_is_live
         self._stopping: dict[str, datetime] = {}
-        self._ended_at_limit: dict[str, datetime] = {}
 
     @property
     def running(self) -> bool:
@@ -81,21 +76,10 @@ class TimeBoundedScheduledTaskService(ScheduledTaskService):
             return
         await super().run_once(now=now)
 
-    async def handle_run_completion(self, record: RunRecord) -> None:
-        if record.run_id in self._ended_at_limit:
-            # The scheduler ended this occurrence at its time limit; the run's
-            # own ending (an interrupt, because it was asked to stop) is not
-            # the occurrence's outcome.
-            return
-        await super().handle_run_completion(record)
-
     async def _stop_overdue_runs(self, *, now: datetime) -> None:
         """End every occurrence that has run past its time limit, then stop its run."""
         if self._max_run_seconds is None or self._stop_run is None:
             return
-        for run_id, ended_at in list(self._ended_at_limit.items()):
-            if now - ended_at >= _ENDED_AT_LIMIT_MEMORY:
-                del self._ended_at_limit[run_id]
         error = f"the task did not finish within {duration_words(self._max_run_seconds)}, so it was stopped"
         try:
             overdue = await self._task_run_repo.list_overdue_running(
@@ -125,7 +109,6 @@ class TimeBoundedScheduledTaskService(ScheduledTaskService):
                 continue
             if not ended:
                 continue
-            self._ended_at_limit[run_id] = now
             self._stopping[run_id] = now
             logger.warning("Scheduled task-run %s ran past %s; ended it and stopping run %s", occurrence_id, duration_words(self._max_run_seconds), run_id)
             try:

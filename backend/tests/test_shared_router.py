@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import threading
 from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from _router_auth_helpers import make_authed_test_app
+from _router_auth_helpers import call_unwrapped, make_authed_test_app
+from fastapi import Request, Response
 from fastapi.testclient import TestClient
 
 from app.gateway.auth.models import User
@@ -375,6 +378,81 @@ async def test_two_publishes_of_the_same_bytes_at_once_land_once(paths: Paths, r
     assert {response.json()["path"] for response in responses} == {"august.pdf"}
     assert [entry["path"] for entry in listing["files"]] == ["august.pdf"]
     assert len(await _all_records(repo)) == 1
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(("phase", "record_fails"), [("copy", False), ("copy", True), ("record", False), ("record", True), ("rollback", True)])
+async def test_cancelled_publication_settles_bytes_and_record_before_unlocking(paths: Paths, repo, monkeypatch: pytest.MonkeyPatch, phase: str, record_fails: bool) -> None:
+    """Cancellation cannot orphan a copy or release deduplication over unfinished work."""
+    client, user = _client(repo)
+    source = _own_file(paths, user, "report.txt", b"complete report")
+    request = Request({"type": "http", "app": client.app, "state": {"user": user}})
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    worker_finished = asyncio.Event()
+    resume_worker = threading.Event()
+    resume_record = asyncio.Event()
+    publish_file = shared_router.publish_file
+    record_publication = repo.record_publication
+    remove_file = shared_router.remove_shared_file
+
+    def pause_worker():
+        loop.call_soon_threadsafe(entered.set)
+        assert resume_worker.wait(10), "test did not release the publication worker"
+
+    def blocked_copy(*args, **kwargs):
+        try:
+            if phase == "copy":
+                pause_worker()
+            return publish_file(*args, **kwargs)
+        finally:
+            loop.call_soon_threadsafe(worker_finished.set)
+
+    async def blocked_record(**kwargs):
+        if phase == "record":
+            entered.set()
+            await resume_record.wait()
+        if record_fails:
+            raise RuntimeError("database unavailable")
+        return await record_publication(**kwargs)
+
+    def blocked_rollback(path: str):
+        if phase == "rollback":
+            pause_worker()
+        return remove_file(path)
+
+    monkeypatch.setattr(shared_router, "_publish_lock", asyncio.Lock())
+    monkeypatch.setattr(shared_router, "publish_file", blocked_copy)
+    monkeypatch.setattr(repo, "record_publication", blocked_record)
+    monkeypatch.setattr(shared_router, "remove_shared_file", blocked_rollback)
+    token = set_current_user(user)
+    task = asyncio.create_task(call_unwrapped(shared_router.publish, shared_router.PublishRequest(path=source), request, Response()))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert shared_router._publish_lock.locked()
+    finally:
+        resume_worker.set()
+        resume_record.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        await asyncio.wait_for(worker_finished.wait(), 5)
+        reset_current_user(token)
+
+    assert task.cancelled()
+    assert not shared_router._publish_lock.locked()
+    records = await _all_records(repo)
+    root = paths.ensure_shared_dir()
+    if record_fails:
+        assert records == []
+        assert list(root.iterdir()) == []
+    else:
+        assert [record["path"] for record in records] == ["report.txt"]
+        assert list(root.iterdir()) == [root / "report.txt"]
+        assert (root / "report.txt").read_bytes() == b"complete report"
 
 
 @pytest.mark.anyio

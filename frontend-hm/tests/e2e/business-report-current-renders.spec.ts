@@ -94,7 +94,7 @@ async function openTheReport(
       }),
   );
   await page.route(
-    `**/api/threads/${THREAD_ID}/artifacts${DIRECTORY}/charts/*.png`,
+    `**/api/threads/${THREAD_ID}/artifacts${DIRECTORY}/charts/*.png*`,
     (route) =>
       route.fulfill({ status: 200, contentType: "image/png", body: PNG }),
   );
