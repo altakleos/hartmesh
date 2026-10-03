@@ -1,5 +1,6 @@
 import ipaddress
 import math
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -226,6 +227,20 @@ class SandboxConfig(BaseModel):
         default=None,
         description="Sandbox image to use (Docker/AIO, BoxLite OCI, or OpenSandbox image)",
     )
+    python_libraries_profile: Literal["hartmesh"] | None = Field(
+        default=None,
+        description="Operator declaration that the digest-pinned local AIO image passes the HartMesh sandbox library import assertions. Omit for unverified environments; restart after changes.",
+    )
+
+    @model_validator(mode="after")
+    def _validate_python_libraries_profile(self) -> "SandboxConfig":
+        if self.python_libraries_profile is not None:
+            if self.use != "deerflow.community.aio_sandbox:AioSandboxProvider" or getattr(self, "provisioner_url", None):
+                raise ValueError("python_libraries_profile requires AioSandboxProvider with its local container backend (no provisioner_url)")
+            if not self.image or not re.fullmatch(r"[^\s@]+@sha256:[0-9a-f]{64}", self.image):
+                raise ValueError("python_libraries_profile requires an explicit digest-pinned sandbox.image verified by the operator")
+        return self
+
     port: int | None = Field(
         default=None,
         ge=1,

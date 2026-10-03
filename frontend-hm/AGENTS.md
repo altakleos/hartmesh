@@ -9,7 +9,10 @@ backend boundary. See [the isolation guide](../docs/FRONTEND_ISOLATION.md).
 
 ## Project Overview
 
-DeerFlow Frontend is a Next.js 16 web interface for an AI agent system. It communicates with a LangGraph-based backend to provide thread-based AI conversations with streaming responses, artifacts, and a skills/tools system.
+HartMesh is a Next.js 16 interface to the Gateway's LangGraph-compatible runtime,
+with authenticated conversations, streaming, artifacts, Files/Shared and settings.
+Upstream routes are selected deliberately; current scope is recorded in the
+[isolation guide](../docs/FRONTEND_ISOLATION.md#product-scope).
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
 
@@ -52,6 +55,10 @@ provider credentials. `playwright.gateway-auth.config.ts` uses the same
 isolated runner with authentication enabled to verify login, SSR session
 forwarding, CSRF enforcement, and logout through the app's same-origin proxy.
 
+`playwright.docker-acceptance.config.ts` exercises production images and real
+application services with synthetic inference. Run it from the repository root
+through `python3 scripts/docker_acceptance.py`; see [release validation](../RELEASING.md#docker-acceptance).
+
 ## Architecture
 
 ```
@@ -64,12 +71,12 @@ The frontend is a stateful chat application. Users create **threads** (conversat
 
 ### Source Layout (`src/`)
 
-- **`app/`** — Next.js App Router. Routes include `/` (a redirect to the workspace, which sends someone signed out to sign-in), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]` and `/workspace/agents/new` (custom agents), `/workspace/files` (the person's own files, kept across conversations), `/artifacts/view` (chrome-free window that renders one markdown artifact with the panel's own renderer), the `(auth)/{login,setup,auth/callback}` flow, and `/api/…` route handlers (e.g. `/api/memory`).
+- **`app/`** — Next.js App Router. Routes include `/` (a redirect to the workspace, which sends someone signed out to sign-in), `/workspace/chats/[thread_id]` (authenticated chat), `/workspace/agents/[agent_name]/chats/[thread_id]` and `/workspace/agents/new` (custom agents), `/workspace/files` (the person's own files, kept across conversations), `/artifacts/view` (chrome-free window that renders one markdown artifact with the panel's own renderer), the `(auth)/{login,setup,auth/callback}` flow, and `/api/…` route handlers (e.g. `/api/memory`).
 - **`components/`** — React components:
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
   - `workspace/` — Chat page components (messages, artifacts, settings)
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `artifact-delivery/` (run-scoped undelivered-file verdicts, from the stream while the page that heard them is open and from `GET .../runs/{run_id}/delivery` afterwards, so the correction survives a reload), `business-report/` (the `report.json` contract, its formatting and its companion paths), `files/` (the person's own files: list, open, remove, and keeping a conversation's file there), `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `tool-plane/` (governance status/history client and legacy-mutation ceiling), `turn-progress/` (the stage a running turn reports, and the activity row's label from it; a client-made upload placeholder never counts as model output), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `product/` (the deployment's product name), plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `artifact-delivery/` (run-scoped undelivered-file verdicts, from the stream while the page that heard them is open and from `GET .../runs/{run_id}/delivery` afterwards, so the correction survives a reload), `business-report/` (the `report.json` contract, its formatting and its companion paths), `files/` (the person's own files: list, open, remove, and keeping a conversation's file there), `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `turn-progress/` (the stage a running turn reports, and the activity row's label from it; a client-made upload placeholder never counts as model output), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `product/` (the deployment's product name), plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
 
 A presentation — the chips and archive action under an answer — is drawn from
 `additional_kwargs.presented_files` on whichever message carries it, or from a
@@ -304,22 +311,11 @@ under the composer steps aside rather than sitting beside it. `InputBox` also
 mounts on static demo threads, so that gate lives inside `SuggestionList`,
 which a demo thread never reaches.
 
-Skill, MCP, and managed-integration settings are governance-aware. When
-`GET /api/tool-plane/status` succeeds, these existing screens render the safe
-active/history notice and disable their legacy direct mutation controls; they
-must not optimistically call the old write routes. Immutable/exact-two status
-uses the same read-only path and explanation. A status fetch failure is shown as
-an unavailable-governance warning and remains fail-closed for mutation. The UI
-does not render raw candidate archives, scanner payloads, secrets, or another
-user's overlay. Only the explicit `tool_plane_unavailable` response identifies
-the configured legacy opt-out and restores legacy controls; other status errors
-stay fail-closed. See [the governed tool-plane contract](../docs/GOVERNED_TOOL_PLANE.md).
-
 - **`hooks/`** — Shared React hooks
 - **`lib/`** — Utilities (`cn()` from clsx + tailwind-merge)
 - **`styles/`** — Global CSS with Tailwind v4 `@import` syntax and CSS variables for theming
 - **`typings/`** — Ambient TypeScript declarations
-- Root files: `env.js` (env validation)
+- `src/env.js` owns environment validation
 
 More specific `AGENTS.md` files under `src/` contain the frontend sections split from this file.
 

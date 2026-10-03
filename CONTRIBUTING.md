@@ -218,7 +218,7 @@ If you need to start services individually:
    make dev
 
    # Terminal 2: Start Frontend (port 3000)
-   cd frontend
+   cd frontend-hm
    pnpm dev
    ```
 
@@ -265,8 +265,9 @@ deer-flow/
 │   │   └── channels/       # IM channel integrations
 │   ├── docs/               # Backend documentation
 │   └── Makefile            # Backend commands
-├── frontend/               # Frontend application
-│   └── Makefile            # Frontend commands
+├── frontend-hm/            # HartMesh product application
+│   └── Makefile            # Product frontend commands
+├── frontend/               # Pinned upstream reference; do not edit for HartMesh
 └── skills/                 # Agent skills
     ├── public/             # Public skills
     └── custom/             # Custom skills
@@ -284,6 +285,11 @@ Nginx (port 2026) ← Unified entry point
 
 ## Development Workflow
 
+Work on HartMesh UI changes in `frontend-hm/`. The sibling `frontend/` stays
+identical to its pinned upstream commit, including its guidance and version.
+Run `make check-frontend-isolation` before pushing; see
+[source ownership and product scope](docs/FRONTEND_ISOLATION.md).
+
 1. **Create a feature branch**:
    ```bash
    git checkout -b feature/your-feature-name
@@ -298,7 +304,7 @@ Nginx (port 2026) ← Unified entry point
    make format   # ruff check --fix + ruff format
 
    # Frontend
-   cd frontend
+   cd frontend-hm
    pnpm format:write   # Prettier
    ```
 
@@ -306,7 +312,7 @@ Nginx (port 2026) ← Unified entry point
 
 5. **Commit your changes**:
    ```bash
-   git add .
+   git add <changed-paths>
    git commit -m "feat: description of your changes"
    ```
 
@@ -345,11 +351,11 @@ make test-blocking-io
 make test-live
 
 # Frontend unit tests
-cd frontend
+cd frontend-hm
 make test
 
 # Frontend E2E tests (requires Chromium; builds and auto-starts the Next.js production server)
-cd frontend
+cd frontend-hm
 make test-e2e
 ```
 
@@ -364,7 +370,8 @@ Every pull request triggers the following CI workflows:
 
 - **Backend unit tests** — [.github/workflows/backend-unit-tests.yml](.github/workflows/backend-unit-tests.yml)
 - **Frontend unit tests** — [.github/workflows/frontend-unit-tests.yml](.github/workflows/frontend-unit-tests.yml)
-- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered only when `frontend/` files change)
+- **Frontend E2E tests** — [.github/workflows/e2e-tests.yml](.github/workflows/e2e-tests.yml) (triggered by `frontend-hm/`, the pnpm runner or that workflow)
+- **Production Docker acceptance** — [.github/workflows/docker-acceptance.yml](.github/workflows/docker-acceptance.yml), using real application services and synthetic inference
 
 ## Code Style
 

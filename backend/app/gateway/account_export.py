@@ -3,7 +3,7 @@
 A person starts it from their own browser session, and it only ever reads the
 caller's own data (``app.gateway.routers.account_export``): the conversations
 the thread store records under their id, the files under their own user
-directory, and their memory, schedules and custom agents. There is no user-id
+directory, projects, preferences, memory, schedules and custom agents. There is no user-id
 parameter and no administrator path, so no one can export another person's
 work.
 
@@ -22,6 +22,9 @@ The archive::
     scheduled-tasks.json                  each schedule's definition
     agents.json                           each custom agent's definition, where the feature is on
     agents/<name>/memory.json             what each custom agent remembers
+    projects.json                         active and archived projects, documents and conversation membership
+    projects/<id>/documents/<id>/...       originals and existing converted Markdown, excluding trash
+    preferences.json                      the person's saved UI preferences
 
 It holds no credential: no token, provider key or connection secret is in any
 of these, and nothing an administrator configured for the whole company. The
@@ -141,6 +144,18 @@ async def memory_export_document(user_id: str, *, agent_name: str | None = None)
     return memory_router.MemoryResponse(**memory_data).model_dump(mode="json", exclude_none=True)
 
 
+async def preferences_export_document(user_id: str) -> dict[str, Any] | None:
+    """Only durable user settings, never arbitrary rows or operator configuration."""
+    from deerflow.persistence.engine import get_session_factory
+    from deerflow.persistence.user.preferences import UserPreferencesRepository
+
+    sessions = get_session_factory()
+    if sessions is None:
+        return None
+    stored = await UserPreferencesRepository(sessions).get(user_id)
+    return {key: stored[key] for key in PREFERENCE_FIELDS if key in stored}
+
+
 MANIFEST_NAME = "manifest.json"
 README_NAME = "README.md"
 FORMAT = "account-export"
@@ -151,6 +166,9 @@ USER_DATA_AREAS = ("uploads", "outputs", "workspace")
 
 #: What a schedule's definition is; the rest of its row is the scheduler's own bookkeeping.
 SCHEDULE_FIELDS = ("id", "title", "prompt", "schedule_type", "schedule_spec", "timezone", "status", "context_mode", "assistant_id", "thread_id", "overlap_policy", "created_at", "updated_at", "next_run_at", "last_run_at")
+PROJECT_FIELDS = ("id", "name", "instructions", "presentation", "status", "created_at", "updated_at")
+DOCUMENT_FIELDS = ("id", "name", "sha256", "size_bytes", "source_thread_id", "source_kind", "source_name", "created_at", "updated_at")
+PREFERENCE_FIELDS = ("notification_enabled", "model_name", "mode", "reasoning_effort")
 
 #: How long an export stays once every part has been downloaded, for one that did not arrive whole.
 REDOWNLOAD_SECONDS = 600
@@ -288,6 +306,8 @@ class _Found:
     size: int
     #: Shared by every file of one directory.
     components: tuple[tuple[Path, int, int], ...]
+    #: Immutable shelf originals must still match their database content address.
+    sha256: str | None = None
 
 
 @dataclass
@@ -430,7 +450,8 @@ class _Parts:
     def add_file(self, found: _Found, cancel: threading.Event) -> dict[str, Any]:
         self._room(found.size)
         assert self._archive is not None
-        copied = copy_file(self._archive, Path(found.path), found.entry, identity=found.identity, components=found.components, cancel_event=cancel)
+        expected = {"expected_size": found.size, "expected_sha256": found.sha256} if found.sha256 is not None else {}
+        copied = copy_file(self._archive, Path(found.path), found.entry, identity=found.identity, components=found.components, cancel_event=cancel, **expected)
         self._written += copied.size
         return {"path": copied.entry, "size": copied.size, "sha256": copied.sha256, "part": self.number}
 
@@ -526,6 +547,13 @@ def _readme(manifest: dict[str, Any], *, own_files: int, own_bytes: int, has: di
     lines.append("- `memory.json`: what the assistant remembers about you." if has["memory"] else "- There is no `memory.json`: this deployment keeps no memory document to download.")
     lines.append("- `scheduled-tasks.json`: your scheduled tasks." if has["schedules"] else "- There is no `scheduled-tasks.json`: scheduled tasks are not kept on this deployment.")
     lines.append("- `agents.json` and `agents/<name>/memory.json`: your custom agents and what each remembers." if has["agents"] else "- There is no `agents.json`: custom agents are turned off on this deployment.")
+    lines.append(
+        "- `projects.json` and `projects/`: your active and archived project definitions, conversation membership and current document files. Deleted projects and trashed documents are excluded."
+        if has["projects"]
+        else "- There is no `projects.json`: projects are not kept on this deployment."
+    )
+    lines.append("- `preferences.json`: your saved notification and chat preferences." if has["preferences"] else "- There is no `preferences.json`: preferences are not kept on this deployment.")
+    lines += ["", "This is a readable export, not an automatic restore format. Work changed during preparation may reflect different moments; skipped files are listed below."]
     lines += ["", "## Conversations", ""]
     if not manifest["conversations"]:
         lines.append("You have no conversations.")
@@ -822,6 +850,105 @@ class AccountExportService:
             records.setdefault(str(record["thread_id"]), record)
         return list(records.values())
 
+    async def _projects(self, user_id: str) -> list[dict[str, Any]] | None:
+        """Owned active/archived definitions and live shelf rows, independent of filesystem existence.
+
+        Like conversations, this is a best-effort read during a live account,
+        not a transaction spanning every data source and the filesystem.
+        """
+        projects = getattr(self._app.state, "project_repo", None)
+        if projects is None:
+            return None
+        documents = getattr(self._app.state, "project_document_repo", None)
+        if documents is None:
+            raise RuntimeError("Project document persistence is unavailable")
+        rows = await projects.list(user_id=user_id)
+        return [{**row, "documents": await documents.list_active(row["id"], limit=_ALL_THREADS, offset=0, user_id=user_id)} for row in rows]
+
+    @staticmethod
+    def _project_file(root: Path, relative: list[str], entry: str, plan: _Plan, seen: set[str], *, optional: bool = False, size: int | None = None, sha256: str | None = None) -> None:
+        """Vet one row-referenced file lexically; preserve every ancestor for the safe descriptor copy."""
+        components = []
+        directory = root
+        try:
+            for part in [None, *relative[:-1]]:
+                if part is not None:
+                    directory /= part
+                metadata = os.lstat(directory)
+                if _is_link(directory, metadata) or not stat.S_ISDIR(metadata.st_mode):
+                    plan.skipped.append({"path": entry, "reason": "link" if _is_link(directory, metadata) else "not_a_file"})
+                    return
+                components.append((directory, metadata.st_dev, metadata.st_ino))
+            path = directory / relative[-1]
+            metadata = os.lstat(path)
+        except FileNotFoundError:
+            if not optional:
+                plan.skipped.append({"path": entry, "reason": "vanished"})
+            return
+        except OSError:
+            plan.skipped.append({"path": entry, "reason": "unreadable"})
+            return
+        if _is_link(path, metadata):
+            reason = "link"
+        elif not stat.S_ISREG(metadata.st_mode):
+            reason = "not_a_file"
+        elif metadata.st_nlink != 1:
+            reason = "hard_link"
+        elif size is not None and metadata.st_size != size:
+            reason = "changed"
+        else:
+            key = unicodedata.normalize("NFC", entry).casefold()
+            if key not in seen:
+                seen.add(key)
+                plan.files.append(_Found(str(path), entry, (metadata.st_dev, metadata.st_ino), metadata.st_size, tuple(components), sha256))
+                return
+            reason = "name_collision"
+        plan.skipped.append({"path": entry, "reason": reason})
+
+    def _plan_projects(self, user_id: str, projects: list[dict[str, Any]], plan: _Plan, cancel: threading.Event) -> None:
+        """Only live row-referenced originals and converted Markdown; never scan trash or orphan storage."""
+        seen: set[str] = set()
+        root = self._paths.user_dir(user_id)
+        for project in projects:
+            for document in project["documents"]:
+                if cancel.is_set():
+                    raise asyncio.CancelledError
+                prefix = f"projects/{project['id']}/documents/{document['id']}"
+                names = [project["id"], document["id"], document["name"]]
+                relative = document["stored_relpath"].split("/")
+                if any(not name or _unsafe_segment(name) for name in [*names, *relative]):
+                    plan.skipped.append({"path": prefix, "reason": "unsafe_name"})
+                    continue
+                # Restore may retain an OLD project's namespace. Bind it to
+                # this document's content address, within the owner's root.
+                if len(relative) != 5 or relative[1:] != ["documents", document["sha256"][:2], document["sha256"], document["id"]]:
+                    plan.skipped.append({"path": prefix, "reason": "unsafe_name"})
+                    continue
+                self._project_file(root, ["projects", *relative, "original", document["name"]], f"{prefix}/original/{document['name']}", plan, seen, size=document["size_bytes"], sha256=document["sha256"])
+                self._project_file(root, ["projects", *relative, "derived", "converted.md"], f"{prefix}/derived/converted.md", plan, seen, optional=True)
+
+    @staticmethod
+    def _project_definitions(projects: list[dict[str, Any]], records: list[dict[str, Any]], written: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Publish user data fields and successful archive paths, never private storage locations."""
+        membership: dict[str, list[str]] = {}
+        files: dict[tuple[str, str], list[str]] = {}
+        for record in records:
+            project_id = (record.get("metadata") or {}).get("deerflow_project_id")
+            if project_id:
+                membership.setdefault(project_id, []).append(str(record["thread_id"]))
+        for entry in written:
+            parts = entry["path"].split("/")
+            if len(parts) >= 6 and parts[0] == "projects" and parts[2] == "documents":
+                files.setdefault((parts[1], parts[3]), []).append(entry["path"])
+        return [
+            {
+                **{key: row[key] for key in PROJECT_FIELDS},
+                "conversation_ids": membership.get(row["id"], []),
+                "documents": [{**{key: doc[key] for key in DOCUMENT_FIELDS}, "files": files.get((row["id"], doc["id"]), [])} for doc in row["documents"]],
+            }
+            for row in projects
+        ]
+
     async def _schedules(self, user_id: str) -> list[dict[str, Any]] | None:
         repo = getattr(self._app.state, "scheduled_task_repo", None)
         if repo is None:
@@ -871,8 +998,11 @@ class AccountExportService:
         user_id = job.user_id
         progress = job.progress
         records = await self._conversations(user_id)
+        projects = await self._projects(user_id)
         job.stage = "finding files"
         plan = await self._off_loop(job, self._plan, user_id, job.cancel)
+        if projects is not None:
+            await self._off_loop(job, self._plan_projects, user_id, projects, plan, job.cancel)
         self._fit(job, plan, config)
         progress.conversations_total = len(records)
         progress.files_total = len(plan.files)
@@ -916,6 +1046,11 @@ class AccountExportService:
                 progress.bytes_done += found.size
 
             job.stage = "writing definitions"
+            if projects is not None:
+                written.append(await self._off_loop(job, parts.add_bytes, "projects.json", _json(self._project_definitions(projects, records, written))))
+            preferences = await preferences_export_document(user_id)
+            if preferences is not None:
+                written.append(await self._off_loop(job, parts.add_bytes, "preferences.json", _json(preferences)))
             memory = await self._memory(user_id, None, skipped)
             if memory is not None:
                 written.append(await self._off_loop(job, parts.add_bytes, "memory.json", _json(memory)))
@@ -948,7 +1083,12 @@ class AccountExportService:
                 "parts": None,
                 "totals": None,
             }
-            readme = _readme(manifest, own_files=own_files, own_bytes=own_bytes, has={"memory": memory is not None, "schedules": schedules is not None, "agents": agents is not None})
+            readme = _readme(
+                manifest,
+                own_files=own_files,
+                own_bytes=own_bytes,
+                has={"memory": memory is not None, "schedules": schedules is not None, "agents": agents is not None, "projects": projects is not None, "preferences": preferences is not None},
+            )
             written.append(await self._off_loop(job, parts.add_bytes, README_NAME, readme))
             manifest["totals"] = {"conversations": len(conversations), "files": len(written), "bytes": sum(item["size"] for item in written), "skipped": len(skipped)}
             # Last, in the last part, so it can say how many there are.

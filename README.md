@@ -19,7 +19,13 @@ https://github.com/user-attachments/assets/a8bcadc4-e040-4cf2-8fda-dd768b999c18
 ## Official Website
 
 Learn more and see **real demos** on our [**official website**](https://deerflow.tech).
-The landing-page case studies open as allowlisted, read-only showcases without requiring a sign-in.
+
+## HartMesh application
+
+This distribution builds its authenticated workspace from `frontend-hm/`.
+The sibling `frontend/` is the pinned upstream reference. HartMesh's routes and
+selected UI features are listed in the [frontend scope guide](docs/FRONTEND_ISOLATION.md#product-scope);
+the upstream website's landing pages and showcases are separate from this UI.
 
 Hartmesh clears private workspace caches when the signed-in account changes.
 My Files and Shared downloads, copies and hashes refuse symlinks throughout the
@@ -43,6 +49,14 @@ retries them without disrupting the rest of the report.
 Workspace branding and feature controls share one settings request. Direct page
 fetching keeps its four concurrent slots until extraction finishes, even after
 cancellation, and converts HTML to Markdown off the Gateway's event loop.
+
+**Settings and more → Download all my data** includes owned active and archived
+project definitions, their conversation membership and active shelf documents,
+plus saved server-side notification, model, chat-mode and reasoning preferences.
+These accompany conversations, personal files, custom skills, memory, schedules
+and agents. Deleted projects, trashed documents and other users' work are
+excluded. The archive's README and manifest identify skipped files and the
+contents of each download part.
 
 ## Sister Projects
 
@@ -76,6 +90,7 @@ DeerFlow has newly integrated the intelligent search and crawling toolset indepe
 
 - [🦌 DeerFlow - 2.0](#-deerflow---20)
   - [Official Website](#official-website)
+  - [HartMesh application](#hartmesh-application)
   - [Coding Plan from ByteDance Volcengine](#coding-plan-from-bytedance-volcengine)
   - [InfoQuest](#infoquest)
   - [Table of Contents](#table-of-contents)
@@ -460,11 +475,12 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed Docker development guide.
 
 #### Upgrading an existing checkout
 
+Read the release's [schema changes and upgrade notes](CHANGELOG.md) first.
 Keep `config.yaml`, `.env`, and `extensions_config.json`. Stop the services you
 currently use, run `git pull --ff-only`, then start the same mode again. Do not run
 `make config` or `make docker-init` again for a routine source upgrade. If the new
 version requires configuration changes, run `make config-upgrade` before restarting.
-See [Operations and Troubleshooting](frontend/src/content/en/application/operations-and-troubleshooting.mdx#upgrading-an-existing-checkout)
+See [the development guide](CONTRIBUTING.md#development-environment-setup)
 for the commands for each mode.
 
 #### Option 2: Local Development
@@ -484,7 +500,7 @@ such a checkout, use `bash ./scripts/<name>.sh ...`.
    make check  # Verifies Node.js 22+, pnpm, uv, nginx
    ```
 
-   The local `make check`, `make install`, `make dev`, and `make start` entry points use a direct `pnpm` executable when available and otherwise fall back to `corepack pnpm`. With native Windows Python, the shared runner checks `pnpm.cmd` before the generic `pnpm` lookup, which follows `PATH`/`PATHEXT` and may select an `.exe` or `.bat` in the same or an earlier PATH directory. The Corepack fallback likewise checks `corepack.cmd` before `corepack`. POSIX Python keeps the generic names first, including when running under MSYS/Cygwin. The runner and diagnostics resolve repository paths absolutely, so these checks work regardless of the caller's current directory. Corepack runs from `frontend/`, so it honors the `packageManager` version pinned in `frontend/package.json`; enabling a global pnpm shim is not required.
+   The local `make check`, `make install`, `make dev`, and `make start` entry points use a direct `pnpm` executable when available and otherwise fall back to `corepack pnpm`. With native Windows Python, the shared runner checks `pnpm.cmd` before the generic `pnpm` lookup, which follows `PATH`/`PATHEXT` and may select an `.exe` or `.bat` in the same or an earlier PATH directory. The Corepack fallback likewise checks `corepack.cmd` before `corepack`. POSIX Python keeps the generic names first, including when running under MSYS/Cygwin. The runner and diagnostics resolve repository paths absolutely, so these checks work regardless of the caller's current directory. HartMesh callers select `--project frontend-hm`, so Corepack runs from that app and honors `frontend-hm/package.json`; enabling a global pnpm shim is not required.
 
 2. **Install dependencies**:
    ```bash
@@ -540,17 +556,15 @@ DeerFlow runs the agent runtime inside the Gateway API. Development mode enables
 `make start` and `make start-daemon` rebuild the frontend with `next build` on
 every run. To reuse the last build instead, pass `SKIP_FRONTEND_BUILD=1` (or add
 `--skip-frontend-build` when calling `./scripts/serve.sh --prod` directly). This
-is opt-in: it fails fast when `frontend/.next` has no completed build.
+is opt-in: it fails fast when `frontend-hm/.next` has no completed build.
 
 Gateway owns `/api/langgraph/*` and translates those public LangGraph-compatible paths to its native `/api/*` routers behind nginx.
 
-For a read-only demo without the Gateway, run `make build-static` from `frontend/`,
+For a read-only demo without the Gateway, run `make build-static` from `frontend-hm/`,
 then `HOSTNAME=127.0.0.1 PORT=3000 node --env-file=.env .next/standalone/server.js`
 from the same directory. The build includes public demo assets and resolves
-supported demo API reads locally; writes are unavailable. To display the homepage
-GitHub star count, set `GITHUB_OAUTH_TOKEN` in `frontend/.env` before starting Node.
-The token stays on the server; missing credentials or GitHub failures hide the
-count. Restart Node after changing the token; no rebuild is needed.
+supported demo API reads locally; writes are unavailable. This mode opens a
+bundled demo conversation instead of the authenticated workspace.
 
 #### LangGraph Studio (Optional)
 
@@ -641,6 +655,15 @@ DeerFlow supports multiple sandbox execution modes:
 - **Docker Execution** (runs sandbox code in isolated Docker containers)
 - **Docker Execution with Kubernetes** (runs sandbox code in Kubernetes pods via provisioner service)
 
+Python library availability depends on the sandbox environment. The optional
+`sandbox.python_libraries_profile: hartmesh` declares that an operator has
+verified the eight imports asserted by `docker/sandbox/Dockerfile` in an explicit,
+digest-pinned local AIO image. The shipped Compose profile sets this declaration;
+the default is `null`. Local execution, remote provisioners and unverified images
+receive generic dependency guidance. The declaration performs no runtime probe
+or installation. Restart the Gateway after changing the image or profile so its
+prompt and running provider use the same configuration.
+
 Sandbox references in conversation state are server-owned. External run and
 thread-state APIs reject caller-supplied `sandbox` values; when restoring a
 checkpoint, the runtime resolves the reference against the authenticated user
@@ -680,7 +703,12 @@ For stdio file outputs, a bare filename is linked to a uniquely matching file cr
 For HTTP/SSE background-task calls, `session_init_timeout` separately bounds connection setup (including the SSE endpoint event) and MCP initialization together; it stops applying once the tool call begins. Initialization deadline errors identify the server and configured time limit.
 Ordinary `task` subagents retain the parent run's captured thread incarnation for MCP calls, including legacy threads, so delegation preserves the same lifecycle scope.
 MCP tool names are prefixed with `<server_name>_` by default to prevent collisions across servers. If a server already namespaces its own tools, set `tool_name_prefix: false` on that server in `extensions_config.json` to keep the original names. Disable the prefix only when the resulting names remain unique across all enabled servers.
-Signed-in users' notification toggle, default model, conversation mode, and reasoning effort are saved to their account and restored on other browsers or after clearing browser storage. Browser notification permission still needs to be granted on each device. Changes retry after network failures; unsent changes survive a reload in the same tab. Concurrent edits to different fields are preserved; for the same field, the last server write wins. Existing unscoped browser preferences are not uploaded automatically because they have no account owner; reselect those settings once after upgrading. Static demos and auth-disabled development keep browser-local settings. Thread-specific model overrides and other display preferences remain local.
+The Gateway's owner-scoped preferences API persists notification, default model,
+conversation mode and reasoning-effort values supplied by API clients; account
+export includes those saved values. HartMesh's current settings UI keeps these
+choices and thread-specific model overrides in browser storage. It does not
+synchronize them between browsers or upload existing local choices. Browser
+notification permission must also be granted on each device.
 
 In a new chat, the submitted question stays above its streamed reasoning and
 tool steps while the server creates the conversation and confirms the message.
@@ -2181,15 +2209,14 @@ All dict-returning methods are validated against Gateway Pydantic response model
 ## Projects
 
 Projects group related conversations under a shared name, instructions, and
-document shelf.
+document shelf. In HartMesh these capabilities are available through the
+Gateway's `/api/projects` APIs. The product does not currently expose the
+upstream Projects or Trash pages; see [product scope](docs/FRONTEND_ISOLATION.md#product-scope).
 
-A conversation joins a project at creation time (when a project is selected) or
-later through the move menu. Runs never modify membership: submitting a message
+A conversation joins a project through the thread creation or membership APIs.
+Runs never modify membership: submitting a message
 cannot assign or reassign a conversation. Moving a conversation out of a project
 keeps it unassigned until it is explicitly moved again.
-
-Moving a conversation refreshes its header affiliation as well as the project
-lists, including when an older metadata request is still in flight.
 
 Projects require the current database tables and columns. A database stamped
 `0019_thread_incarnations` from the older 0018-based rollout is rejected at
@@ -2200,8 +2227,8 @@ before starting this build against that database.
 ### Project instructions
 
 Each project stores free-form instructions — background, conventions, and
-constraints that apply to every conversation in the project — editable on the
-project page's Instructions tab with a live byte counter. When a run starts on
+constraints that apply to every conversation in the project — editable through
+the project API. When a run starts on
 a member thread, the Gateway pins the project's current state once and renders
 the instructions as a bounded, request-scoped `<project>` block for that run
 only: the block never enters the system prompt or persisted history, and every
@@ -2212,17 +2239,16 @@ are rejected with a `422` at write time and are never silently truncated.
 
 ### Document shelf
 
-Each project has a document shelf for files the whole project shares, managed
-from the project page's Documents section:
+Each project has a document shelf managed through
+`/api/projects/{project_id}/documents`:
 
-- **Upload** a file (button or drag-drop, one file per request). Shelf size
+- **Upload** a file (one file per request). Shelf size
   limits reuse `uploads.max_file_size` (default 50 MiB); re-uploading identical
   content returns the existing entry instead of creating a duplicate.
 - **List** entries with name, size, modified time, and provenance (uploaded vs.
   saved from a conversation), and preview or download any entry.
-- **Save to project** from a thread file: the read-only conversation-files
-  browser below the shelf lists member threads' uploads and outputs, each with
-  a Save to project action.
+- **Save to project** from a member thread's uploads or outputs through the
+  `from-thread` endpoint.
 - **Attach to thread**: copy a shelf file into a thread's uploads through the
   normal ingestion pipeline, so the conversation can work with it directly.
 
@@ -2236,7 +2262,7 @@ documents with the `list_project_documents` and `read_project_document` tools.
 Archiving a project freezes writes but keeps reads. Threads in an archived
 project still run and still receive the project's instructions and shelf index,
 and the shelf remains fully readable: listing, preview/download, the
-conversation-files browser, and attach-to-thread all keep working. Uploads,
+conversation-file listing, and attach-to-thread all keep working. Uploads,
 save-to-project, and moving individual shelf files to trash require an active
 project, and a trashed document cannot be restored into an archived one.
 Deleting an archived project remains allowed and moves its whole shelf to
@@ -2247,12 +2273,10 @@ trash.
 Deleting a shelf document moves it to trash instead of erasing it: the entry
 keeps its bytes and a snapshot of its origin project for
 `projects.trash_retention_days` (default 30) before the retention sweep may
-purge it permanently. The `/workspace/trash` page — reachable from the project
-page's Documents section and the sidebar Projects header — lists trashed
-documents with their origin project and remaining retention, with per-entry
-Restore and Delete permanently actions plus an Empty trash action that
-permanently deletes every document in the trash — immediately, not after the
-retention window; the window only bounds how long an entry may sit there
+purge it permanently. The owner-scoped trash API lists trashed documents with
+their origin project and remaining retention and supports restore, permanent
+deletion, and emptying trash. Permanent deletion is immediate; the retention
+window only bounds how long an entry may sit there
 before the retention sweep reclaims it. Restore returns the document to its
 origin project, or to a project you pick when the origin is gone or archived;
 if the target already holds an identical active file, the entries merge.

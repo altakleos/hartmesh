@@ -1,30 +1,18 @@
-"""What the sandbox image guarantees is importable.
+"""Library guidance backed by an explicit, verified sandbox image declaration.
 
-Why this exists
----------------
-In a released-profile qualification run the model spent tool calls asking the sandbox what it had.
-The successful "Create pdf about muse agent" run opened with::
-
-    python3 -c "import reportlab; ..." ; python3 -c "import fpdf; ..." ;
-    python3 -c "import weasyprint; ..."
-
-and the failed run's very first act was the same question -- which is the call
-that arrived with a shell command where its tool name belonged and ended the run
-(DF23). A probe is a round trip through the sandbox and a model call to read the
-answer, for a fact the image settles at build time.
-
-So the fact is stated where the model plans, instead of being discovered per
-turn. ``docker/sandbox/Dockerfile`` asserts these exact imports at build time --
-the image does not publish if one is missing -- so this list is a promise the
-build already keeps, and ``tests/test_sandbox_preinstalled.py`` fails if the two
-ever disagree.
-
-This is a statement about the image, not a menu: anything else the model needs
-is still an ordinary import that may fail, and it should handle that rather than
-check first.
+``docker/sandbox/Dockerfile`` asserts the HartMesh imports at build time. Other
+environments make no such promise. Rendering reads the initialized provider's
+startup snapshot when available, without starting a provider or probing imports.
 """
 
 from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from deerflow.sandbox.sandbox_provider import get_initialized_sandbox_provider
+
+if TYPE_CHECKING:
+    from deerflow.config.sandbox_config import SandboxConfig
 
 __all__ = ["GUARANTEED_IMPORTS", "preinstalled_libraries_section"]
 
@@ -46,8 +34,14 @@ GUARANTEED_IMPORTS: tuple[str, ...] = (
 _DISTRIBUTION_NOTES = {"docx": "python-docx"}
 
 
-def preinstalled_libraries_section() -> str:
-    """One line for the prompt, built from the list the image asserts."""
+def preinstalled_libraries_section(sandbox_config: SandboxConfig | None = None, *, bash_available: bool = True) -> str:
+    """Only promise imports for the configured or already initialized profile."""
+    if not bash_available:
+        return ""
+    provider = get_initialized_sandbox_provider()
+    profile = getattr(provider, "python_libraries_profile", None) if provider is not None else getattr(sandbox_config, "python_libraries_profile", None)
+    if profile != "hartmesh":
+        return "- Python library availability depends on the configured environment. Use imports needed for the task and handle a missing dependency; no preinstalled library set is guaranteed."
     names = ", ".join(f"{name} ({_DISTRIBUTION_NOTES[name]})" if name in _DISTRIBUTION_NOTES else name for name in GUARANTEED_IMPORTS)
     return (
         f"- Always importable in the sandbox: {names}. "

@@ -2,6 +2,13 @@
 
 Sandbox restore requires a thread ID, even forks.
 
+Library guidance uses the operator's `python_libraries_profile: hartmesh`
+declaration, backed by the sandbox Dockerfile's import assertion. It is not a
+runtime probe. The initialized AIO provider's image/profile snapshot wins over
+reloaded config; cold prompt rendering reads config without creating a provider.
+Unknown environments get generic guidance; runs without bash omit the section.
+`test_sandbox_preinstalled.py` pins these boundaries and the asserted imports.
+
 **Network approval policy**: `SandboxMiddleware` uses
 `resolve_run_interaction_policy()`. Autonomous, webhook, scheduled, legacy
 unattended and GitHub-fallback runs auto-deny; explicit interactive overrides

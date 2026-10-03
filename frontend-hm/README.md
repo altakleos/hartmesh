@@ -21,6 +21,9 @@ for ownership, upstream syncs, and validation.
 
 ### Installation
 
+Run these module commands from `frontend-hm/`. Root commands select this app
+through `scripts/pnpm.py --project frontend-hm --`.
+
 ```bash
 # Install dependencies
 pnpm install
@@ -71,17 +74,23 @@ pnpm start
 ```
 
 The production container vendors the `packageManager`-pinned pnpm release into
-the image under a non-root-readable Corepack cache. Container startup therefore
+a Corepack cache readable by non-root users. Container startup therefore
 does not need egress to a package registry to resolve its toolchain.
 
 ## Site Map
 
 ```
-├── /                    # Redirects to the workspace (sign-in when signed out)
-├── /chats               # Chat list
-├── /chats/new           # New chat page
-└── /chats/[thread_id]   # A specific chat page
+├── /                                  # Workspace redirect (sign-in when signed out)
+├── /workspace/chats                   # Chat list
+├── /workspace/chats/new               # New chat
+├── /workspace/chats/[thread_id]       # A specific conversation
+├── /workspace/files                   # My Files and Shared
+├── /workspace/agents                  # Custom agents
+└── /workspace/scheduled-tasks         # Scheduled tasks
 ```
+
+The [scope guide](../docs/FRONTEND_ISOLATION.md#product-scope) lists the remaining
+routes and distinguishes backend API capabilities from product pages.
 
 ## Configuration
 
@@ -101,12 +110,13 @@ NEXT_PUBLIC_LANGGRAPH_BASE_URL="http://localhost:8001/api"
 ```
 tests/
 ├── e2e/                    # E2E tests (Playwright, Chromium, mocked backend)
+├── e2e-docker-acceptance/   # Real production Docker application journey
 └── unit/                   # Unit tests (mirrors src/ layout)
 src/
 ├── app/                    # Next.js App Router pages
 │   ├── api/                # API routes
 │   ├── workspace/          # Main workspace pages
-│   └── mock/               # Mock/demo pages
+│   └── mock/               # Bundled demo API fixtures
 ├── components/             # React components
 │   ├── ui/                 # Reusable UI components
 │   ├── workspace/          # Workspace-specific components
@@ -126,8 +136,6 @@ src/
 │   └── utils/              # Utility functions
 ├── hooks/                  # Custom React hooks
 ├── lib/                    # Shared libraries & utilities
-├── server/                 # Server-side code
-│   └── better-auth/        # Authentication setup and session helpers
 └── styles/                 # Global styles
 ```
 

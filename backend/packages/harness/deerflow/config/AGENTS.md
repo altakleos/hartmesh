@@ -106,6 +106,11 @@ Extensions are optional only in the fallback *search* mode (priority 3-4 above):
 - `tools[]` - Tool configs with `use` variable path and `group`
 - `tool_groups[]` - Logical groupings for tools
 - `sandbox.use` - Sandbox provider class path
+- `sandbox.python_libraries_profile` - Optional `hartmesh` declaration for a
+  verified, digest-pinned local AIO image; null by default. It rejects other
+  providers, remote provisioners and mutable images only when explicitly set.
+  Version 51 adds the null default through the normal config-upgrade merge.
+  Like the rest of `sandbox`, changes require a Gateway restart.
 - `sandbox.ownership` - Cross-instance sandbox lease storage. Renewal interval
   and TTL multiplier must each be finite, and their derived lease TTL must also
   remain finite. Redis-backed lease TTLs must be at least one millisecond and

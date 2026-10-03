@@ -566,6 +566,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         return {
             "image": sandbox_config.image or DEFAULT_IMAGE,
+            "python_libraries_profile": getattr(sandbox_config, "python_libraries_profile", None),
             "port": sandbox_config.port or DEFAULT_PORT,
             "container_prefix": sandbox_config.container_prefix or DEFAULT_CONTAINER_PREFIX,
             "idle_timeout": idle_timeout if idle_timeout is not None else DEFAULT_IDLE_TIMEOUT,
@@ -592,6 +593,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 configured_skills_path,
             ),
         }
+
+    @property
+    def python_libraries_profile(self) -> str | None:
+        """Keep prompt guidance tied to the same startup snapshot as the image."""
+        return self._config.get("python_libraries_profile")
 
     def sandbox_network_mode(self) -> str:
         return str(self._config.get("network", {}).get("mode", "open"))
