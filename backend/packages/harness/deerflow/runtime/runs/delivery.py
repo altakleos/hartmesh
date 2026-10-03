@@ -66,13 +66,15 @@ def presented_paths(content: Mapping[str, Any]) -> list[str]:
     of presenting tool names exists here or anywhere downstream. A receipt
     written before the tag existed has only ``by_tool``; for those,
     ``present_files`` was the one presenting tool, and that is the fallback.
+    Explicit runtime handover is recorded separately in ``presented_by_runtime``
+    and joins either format. It never grants authority to the broad ``paths``.
     """
     if "presented_files" in content:
-        return list(dict.fromkeys(_path_list(content.get("presented_files"))))
-    by_tool = content.get("by_tool")
-    if not isinstance(by_tool, Mapping):
-        return []
-    return list(dict.fromkeys(_path_list(by_tool.get("present_files"))))
+        tagged = _path_list(content.get("presented_files"))
+    else:
+        by_tool = content.get("by_tool")
+        tagged = _path_list(by_tool.get("present_files")) if isinstance(by_tool, Mapping) else []
+    return list(dict.fromkeys([*tagged, *_path_list(content.get("presented_by_runtime"))]))
 
 
 def undelivered_paths(content: dict[str, Any]) -> list[str]:

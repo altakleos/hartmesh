@@ -1695,12 +1695,13 @@ async def _build_archive_without_abandoning_worker(
 
 
 def _presented_files_from_delivery(events: list[dict]) -> list[str]:
+    from deerflow.runtime.runs.delivery import presented_paths
+
     if len(events) != 1:
         raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
     content = events[0].get("content")
-    by_tool = content.get("by_tool") if isinstance(content, dict) else None
-    presented = by_tool.get("present_files") if isinstance(by_tool, dict) else None
-    if not isinstance(presented, list) or not presented or any(not isinstance(path, str) for path in presented):
+    presented = presented_paths(content) if isinstance(content, dict) else []
+    if not presented:
         raise HTTPException(status_code=409, detail="This response has no verified artifact delivery")
     return presented
 

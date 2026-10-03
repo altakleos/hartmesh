@@ -366,8 +366,7 @@ class BuildContext:
     currency: str
     currency_source: str
     number_style: str | None
-    date_order: str | None
-    ambiguous_date_example: str | None
+    date_order_warnings: list[str]
     excluded_rows: int
     unparsed_dates: int
     unparsed_amounts: int

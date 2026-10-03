@@ -274,6 +274,16 @@ def build_report(ctx: BuildContext, previous_draft: int, compute_checks) -> tupl
                 # The columns no role claimed, so a reader of the report learns one
                 # exists without opening the input again.
                 "unmapped": list(ctx.unmapped_columns),
+                # Effective calculation choices, independent of mutable profile
+                # files and of the first input's (possibly different) headings.
+                "recheck": {
+                    "profile": profile,
+                    "mappings": [dict(mapping.roles) for mapping in ctx.mappings],
+                    "comparisons": list(options.comparisons),
+                    "top_n": options.top_n,
+                    "summary_length": options.summary_length,
+                    "period_was_given": ctx.period_was_given,
+                },
             },
             "brand": {"company": company, "primary": options.brand["primary"], "secondary": options.brand["secondary"], "logo": options.brand.get("logo")},
         },

@@ -130,6 +130,17 @@ The files you named under `present` are already with the user: the tool result n
 - Say what changed and the draft number, for example "Done. Two warranty jobs removed (2 jobs, $0.00). Draft 2."
 - Never modify the uploaded file. Never edit `report.json` by hand; the script owns it.
 
+`checks <report.json> [inputs...]` verifies that saved draft against its recorded
+input hashes and independently recomputed figures, including tables and cleaned
+rows. It also rechecks the numbers in the saved prose. Changed or missing inputs,
+altered figures, or unverifiable build choices return exit `1` and a failed
+`checks.json`; repeat the printed failure to the user. The command never rewrites
+the report or its renders. Use an explicit `build` to incorporate new inputs.
+New reports retain their effective profile, per-file mappings, comparisons and
+customer limit for this check. Older reports without those choices use the
+available profile and default preferences; if they cannot be reproduced, rebuild
+with the intended choices before claiming they are verified.
+
 ## Saving and preferences
 
 The report directory under `/mnt/user-data/outputs/reports/` is what the user downloads or shares; there is no other place to save it in this deployment, so "save" means it is already there, and you say so.
@@ -153,8 +164,8 @@ When `/mnt/tenant/brand.json` exists the script picks up the company name, logo 
 ## What the checks mean
 
 - `totals_reconcile`: the report total against an independent sum of the amount column and against each table's total. A failed reconciliation withholds the report.
-- `rows_used`: rows read, rows outside the period, rows without a usable date, rows excluded.
-- `date_order`: only when day and month could not be told apart (every value has both parts at 12 or below); says which order was assumed.
+- `rows_used`: rows read, rows outside the period, rows without a usable date, rows excluded. Unusable dates produce a warning, since those rows do not contribute to the report.
+- `date_order`: order is inferred from the entire date column. Each source with ambiguous dates (both parts at 12 or below) or conflicting day/month and month/day evidence is named in a warning; the assumed interpretation remains visible. Valid alternative formats are parsed without discarding dates already resolved.
 - `duplicate_ids`, `unmapped_rows` (blank person or category, listed as Unassigned or Uncategorized), `unparsed_amounts` (unreadable amounts count as zero; an amount column with no readable value at all is called out), `currency` (stated or assumed), `exclusions`, `external_links` (workbook links are not checked), `prose_numbers` after Step 2.
 
 Every check is labelled "checked by the report script"; that is what it is.

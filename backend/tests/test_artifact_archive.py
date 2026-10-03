@@ -53,6 +53,7 @@ def _archive_app(
     run_thread_id: str = THREAD_ID,
     run_status: str = "success",
     with_receipt: bool = True,
+    receipt: dict | None = None,
 ) -> tuple[TestClient, MemoryRunStore, MemoryRunEventStore]:
     run_store = MemoryRunStore()
     event_store = MemoryRunEventStore()
@@ -74,7 +75,9 @@ def _archive_app(
                 run_id=RUN_ID,
                 event_type="run.delivery",
                 category="outputs",
-                content={
+                content=receipt
+                if receipt is not None
+                else {
                     "presented": len(presented),
                     "paths": presented,
                     "by_tool": {"present_files": presented},
@@ -149,6 +152,55 @@ def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypa
 
     assert response.status_code == 200
     assert response.json() == {"file_count": 2}
+
+
+@pytest.mark.parametrize("producer", ["present_files", "bash", "runtime", "mixed"])
+def test_archive_reads_tool_and_runtime_delivery_receipts(tmp_path, monkeypatch, producer) -> None:
+    from uuid import uuid4
+
+    from langchain_core.messages import ToolMessage
+    from langgraph.types import Command
+
+    from deerflow.runtime.journal import RunJournal
+    from deerflow.runtime.runs.worker import _delivery_content_with_outputs
+
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    paths = ["/mnt/user-data/outputs/report.pdf", "/mnt/user-data/outputs/report.xlsx"]
+    for name in ("report.pdf", "report.xlsx", "screenshot.png"):
+        (outputs / name).write_bytes(name.encode())
+    journal = RunJournal(RUN_ID, THREAD_ID, None, flush_threshold=1000)
+    if producer != "runtime":
+        tool = "present_files" if producer == "mixed" else producer
+        presented = paths[:1] if producer == "mixed" else paths + paths[:1]
+        callback_id = uuid4()
+        journal.on_tool_start({"name": tool}, "", run_id=callback_id)
+        journal.on_tool_end(Command(update={"artifacts": presented, "messages": [ToolMessage("Presented", name=tool, tool_call_id="call", additional_kwargs={"presented_files": presented})]}), run_id=callback_id)
+    content = journal.get_delivery_content()
+    # A browser artifact is wider than explicit presentation and must stay out.
+    content["paths"].append("/mnt/user-data/outputs/screenshot.png")
+    runtime_paths = paths if producer == "runtime" else paths[1:] if producer == "mixed" else []
+    content = _delivery_content_with_outputs(content, paths, runtime_paths)
+    assert content["satisfied"] is True
+    client, _, _ = _archive_app(monkeypatch, outputs, receipt=content)
+    with client:
+        manifest = client.get(ARCHIVE_URL)
+        response = client.post(ARCHIVE_URL)
+    assert manifest.status_code == 200, manifest.text
+    assert manifest.json() == {"file_count": 2}
+    assert response.status_code == 200, response.text
+    with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
+        assert archive.namelist() == ["report.pdf", "report.xlsx"]
+        assert archive.read("report.pdf") == b"report.pdf"
+        assert archive.read("report.xlsx") == b"report.xlsx"
+
+
+@pytest.mark.parametrize("content", [{"presented_files": "bad"}, {"presented_by_runtime": {"path": "bad"}}, {"presented_files": [None, {}, 1]}, {"paths": ["/mnt/user-data/outputs/screenshot.png"]}])
+def test_archive_malformed_or_incidental_paths_do_not_authorize_download(tmp_path, monkeypatch, content) -> None:
+    client, _, _ = _archive_app(monkeypatch, tmp_path, receipt=content)
+    with client:
+        assert client.get(ARCHIVE_URL).status_code == 409
+        assert client.post(ARCHIVE_URL).status_code == 409
 
 
 @pytest.mark.parametrize(

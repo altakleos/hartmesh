@@ -55,6 +55,12 @@ answers for paginated history. See `docs/skill-usage-ui.md`.
 
 **Run delivery receipts:** Journal artifact evidence and terminal status must finalize before a satisfied goal is cleared. Goal cleanup uses a durable checkpoint-write reservation; delivery failure retains the goal without another continuation. Details: `backend/docs/runtime-guidance-details.md`.
 
+Archive membership uses `runs/delivery.py::presented_paths`: tagged tool paths
+(legacy `by_tool.present_files` fallback) plus explicit `presented_by_runtime`.
+The broad `paths` field includes incidental artifacts and grants no presentation
+authority. `runtime_presented_files` is server-owned at Gateway admission and
+embedded worker startup; only the running middleware may populate it.
+
 **Deferred-tool promotion event deduplication** (`runtime/journal.py`): one
 `RunJournal` owns the lead graph's run-scoped atomic promotion claim. Parallel
 `tool_search` Sends read the same pre-step state, so state diffing alone can

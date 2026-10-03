@@ -670,6 +670,116 @@ def test_checks_can_be_rerun_from_the_report_and_the_inputs(report, small_report
     assert "Totals match your file" in out
 
 
+def _saved_report(report, tmp_path, *, options=None, sources=None, profile=None):
+    if sources is None:
+        source = _write_csv(tmp_path / "input.csv", ["Date", "Amount (USD)", "Customer"], [["2026-08-01", 100, "Alice"], ["2026-08-02", 200, "Bob"]])
+        sources = [str(source)]
+    ctx = report.prepare(sources, "2026-08", options or report.BuildOptions(), None, profile or report.load_profile(None, None))
+    built, _ = report.build_report(ctx, 0, report.compute_checks)
+    path = tmp_path / "saved.report.json"
+    report._write_json(path, built)
+    return path, built
+
+
+def test_checks_refuse_changed_input_even_when_new_totals_reconcile(report, tmp_path, capsys) -> None:
+    path, built = _saved_report(report, tmp_path)
+    original = path.read_bytes()
+    _write_csv(tmp_path / "input.csv", ["Date", "Amount (USD)", "Customer"], [["2026-08-01", 1000, "Alice"]])
+    render = tmp_path / "saved.pdf"
+    render.write_bytes(b"previous render")
+    code, out, err = _run(report, capsys, "checks", str(path))
+    assert code == report.EXIT_WITHHELD, (out, err)
+    checks = json.loads((tmp_path / "checks.json").read_text(encoding="utf-8"))
+    assert any(check["id"] == "input_provenance" and check["status"] == "fail" for check in checks)
+    assert "rebuild" in out.lower()
+    assert "Totals match your file" not in out
+    assert path.read_bytes() == original
+    assert render.read_bytes() == b"previous render"
+
+
+@pytest.mark.parametrize("target", ["kpi", "section", "row"])
+def test_checks_reconcile_the_saved_figures(report, tmp_path, capsys, target) -> None:
+    path, built = _saved_report(report, tmp_path)
+    if target == "kpi":
+        built["kpis"][0]["value"] = 123456
+    elif target == "section":
+        next(section["table"] for section in built["sections"] if "table" in section)["rows"][0][2] = 123456
+    else:
+        built["rows"]["rows"][0][1] = 123456
+    report._write_json(path, built)
+    original = path.read_bytes()
+    code, out, err = _run(report, capsys, "checks", str(path))
+    assert code == report.EXIT_WITHHELD, (out, err)
+    checks = json.loads((tmp_path / "checks.json").read_text(encoding="utf-8"))
+    assert any(check["id"] == "saved_figures" and check["status"] == "fail" for check in checks)
+    assert path.read_bytes() == original
+
+
+def test_checks_revalidate_prose_instead_of_reusing_a_saved_pass(report, tmp_path, capsys) -> None:
+    path, built = _saved_report(report, tmp_path)
+    built, _, _ = report.apply_prose(built, ["Revenue was $300."], None)
+    next(section for section in built["sections"] if section["id"] == "summary")["paragraphs"] = ["Revenue was $123456."]
+    report._write_json(path, built)
+    code, out, err = _run(report, capsys, "checks", str(path))
+    assert code == report.EXIT_WITHHELD, (out, err)
+    checks = json.loads((tmp_path / "checks.json").read_text(encoding="utf-8"))
+    assert next(check for check in checks if check["id"] == "prose_numbers")["status"] == "fail"
+
+
+def test_checks_missing_input_replaces_old_pass_with_explicit_failure(report, tmp_path, capsys) -> None:
+    path, built = _saved_report(report, tmp_path)
+    report._write_json(tmp_path / "checks.json", built["checks"])
+    (tmp_path / "input.csv").unlink()
+    code, out, err = _run(report, capsys, "checks", str(path))
+    assert code != 0
+    checks = json.loads((tmp_path / "checks.json").read_text(encoding="utf-8"))
+    assert any(check["status"] == "fail" and "input.csv" in check["text"] for check in checks)
+
+
+def test_checks_unreadable_input_replaces_old_pass_with_explicit_failure(report, tmp_path, capsys, monkeypatch) -> None:
+    path, built = _saved_report(report, tmp_path)
+    report._write_json(tmp_path / "checks.json", built["checks"])
+    original = path.read_bytes()
+
+    def unreadable(*args, **kwargs):
+        raise PermissionError("input.csv cannot be read")
+
+    monkeypatch.setattr(report, "read_table", unreadable)
+    code, out, err = _run(report, capsys, "checks", str(path))
+    assert code == report.EXIT_WITHHELD, (out, err)
+    checks = json.loads((tmp_path / "checks.json").read_text(encoding="utf-8"))
+    assert any(check["status"] == "fail" and "input.csv" in check["text"] for check in checks)
+    assert path.read_bytes() == original
+
+
+def test_checks_repeat_preferences_custom_profile_and_different_source_columns(report, tmp_path, capsys) -> None:
+    first = _write_csv(tmp_path / "first.csv", ["Date", "Amount (USD)", "Customer"], [["2026-08-01", 100, "Alice"]])
+    second = _write_csv(tmp_path / "second.csv", ["Completed On", "Total (USD)", "Client"], [["2026-08-02", 200, "Bob"], ["2026-07-01", 50, "Alice"]])
+    profile = report.load_profile(None, None)
+    profile["name"] = "custom-profile-not-on-disk"
+    profile["vocabulary"]["amount"] = "sales"
+    path, _ = _saved_report(report, tmp_path, sources=[str(first), str(second)], options=report.BuildOptions(top_n=1, comparisons=[]), profile=profile)
+    code, out, err = _run(report, capsys, "checks", str(path))
+    assert code == 0, (out, err)
+    assert "Totals match your file" in out
+
+
+@pytest.mark.parametrize("short", [False, True])
+def test_checks_accept_unchanged_generated_prose_with_numeric_labels(report, tmp_path, capsys, short) -> None:
+    source = _write_csv(tmp_path / "labels.csv", ["Date", "Amount (USD)", "Category", "Technician"], [["2026-08-01", 100, "Zone 400", "Team 500"], ["2026-08-02", 200, "Zone 400", "Team 500"]])
+    path, _ = _saved_report(report, tmp_path, sources=[str(source)], options=report.BuildOptions(summary_length="short" if short else "standard"))
+    code, out, err = _run(report, capsys, "checks", str(path))
+    assert code == 0, (out, err)
+
+
+def test_checks_accept_plain_legacy_report_without_recheck_recipe(report, tmp_path, capsys) -> None:
+    path, built = _saved_report(report, tmp_path)
+    del built["meta"]["build"]["recheck"]
+    report._write_json(path, built)
+    code, out, err = _run(report, capsys, "checks", str(path))
+    assert code == 0, (out, err)
+
+
 def test_currency_comes_from_values_or_is_stated_as_assumed(report, small_report, august_report) -> None:
     _small_dir, small = small_report
     _august_dir, august = august_report
@@ -867,6 +977,55 @@ def test_day_first_dates_are_read_per_column_not_per_row(report, tmp_path, capsy
     table = json.loads(out)["files"][0]["tables"][0]
     assert table["date_range"] == {"start": "2026-07-30", "end": "2026-08-25"}
     assert table["date_order"] == "day-first"
+
+
+@pytest.mark.parametrize("day_first", [True, False])
+def test_date_order_uses_evidence_after_the_first_two_hundred_rows(report, tmp_path, day_first) -> None:
+    rows = [[f"{day:02d}/08/2026" if day_first else f"08/{day:02d}/2026", "1"] for day in range(1, 32) for _ in range(20)]
+    path = _write_csv(tmp_path / "dates.csv", ["Date", "Amount (USD)"], rows)
+    ctx = report.prepare([str(path)], "2026-08", report.BuildOptions(), None, report.load_profile(None, None))
+    built, _ = report.build_report(ctx, 0, report.compute_checks)
+
+    assert built["kpis"][0]["value"] == 620
+    assert built["kpis"][1]["value"] == 620
+    assert not any(check["id"] == "date_order" for check in built["checks"])
+    inspected = report.inspect_sources([str(path)], report.load_profile(None, None))["files"][0]["tables"][0]
+    assert inspected["date_order"] == ("day-first" if day_first else "month-first")
+    assert inspected["months"] == {"2026-08": 620}
+
+
+def test_date_fallback_keeps_valid_minority_formats_and_warns_about_unusable_rows(report, tmp_path) -> None:
+    path = _write_csv(
+        tmp_path / "formats.csv",
+        ["Date", "Amount (USD)"],
+        [["2026-08-01", "1"]] * 200 + [["August 31, 2026", "1"], ["invalid date", "100"], ["", "100"]],
+    )
+    ctx = report.prepare([str(path)], "2026-08", report.BuildOptions(), None, report.load_profile(None, None))
+    built, _ = report.build_report(ctx, 0, report.compute_checks)
+
+    assert built["kpis"][0]["value"] == 201
+    assert built["kpis"][1]["value"] == 201
+    used = next(check for check in built["checks"] if check["id"] == "rows_used")
+    assert used["status"] == "warn"
+    assert "2 had no usable date" in used["text"]
+    assert used["text"] in report.checks_line(built)
+
+
+def test_date_warnings_cover_every_source_independent_of_file_order(report, tmp_path) -> None:
+    iso = _write_csv(tmp_path / "iso.csv", ["Date", "Amount (USD)"], [["2026-08-01", "1"]])
+    ambiguous = _write_csv(tmp_path / "ambiguous.csv", ["Date", "Amount (USD)"], [["08/09/2026", "2"]])
+    mixed = _write_csv(tmp_path / "mixed.csv", ["Date", "Amount (USD)"], [["25/08/2026", "4"], ["08/26/2026", "8"]])
+    warnings = []
+    for paths in ([iso, ambiguous, mixed], [mixed, ambiguous, iso]):
+        ctx = report.prepare([str(path) for path in paths], "2026-08", report.BuildOptions(), None, report.load_profile(None, None))
+        built, _ = report.build_report(ctx, 0, report.compute_checks)
+        assert built["kpis"][0]["value"] == 15
+        warning = next(check for check in built["checks"] if check["id"] == "date_order")
+        assert warning["status"] == "warn"
+        assert "ambiguous.csv" in warning["text"] and "mixed.csv" in warning["text"]
+        assert "month/day/year" in warning["text"] and "mixes" in warning["text"]
+        warnings.append(warning)
+    assert warnings[0] == warnings[1]
 
 
 def test_ambiguous_slash_dates_are_read_month_first_and_say_so(report, tmp_path, capsys) -> None:
