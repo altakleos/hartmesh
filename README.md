@@ -88,6 +88,8 @@ across files, amount labels or explicit currency columns stop the build;
 Date interpretation uses every input row; ambiguous sources and unusable dates
 remain visible as warnings. Rechecking a saved report verifies its recorded input
 hashes and saved figures, and requires an explicit rebuild when they differ.
+Default actions prioritize review of any computed warnings before acting on
+the figures; clean reports still offer business suggestions.
 See the [business-report guide](skills/public/business-report/SKILL.md).
 
 Each business-report draft publishes as a complete directory under

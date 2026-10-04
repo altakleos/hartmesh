@@ -23,3 +23,8 @@ The optional `--bundle-id` makes same-call `present` paths predictable. Keep
 current state with the drafts when moving a report. A crash after rename may
 leave a complete unadopted bundle; never claim a multi-file replacement is atomic.
 Report JSON and database schemas are unchanged by this directory layout.
+
+Compute quality checks before finalizing default action wording. A warning puts
+review of Checks first, ahead of business suggestions, within the three-bullet
+limit; no fallback may claim the checks need no action. Keep clean reports
+useful and preserve numeric calculations and authored-prose validation.

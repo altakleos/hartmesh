@@ -162,6 +162,41 @@ def _write_csv(path: Path, columns: list[str], rows: list[list[object]]) -> Path
     return path
 
 
+@pytest.mark.parametrize("amounts,currency", [(["10", "n/a"], "USD"), (["10", ""], "USD"), (["10", "20"], None)])
+def test_default_actions_prioritize_computed_warnings_without_clean_reassurance(report, tmp_path, amounts, currency):
+    path = _write_csv(tmp_path / "amounts.csv", ["Date", "Amount"], [["2026-08-01", amounts[0]], ["2026-08-02", amounts[1]]])
+    ctx = report.prepare([str(path)], "2026-08", report.BuildOptions(currency=currency), None, report.load_profile(None, None))
+    built, _ = report.build_report(ctx, 0, report.compute_checks)
+    assert any(check["status"] == "warn" for check in built["checks"])
+    actions = next(section for section in built["sections"] if section["id"] == "actions")["bullets"]
+    assert "warnings" in actions[0].lower() and "checks" in actions[0].lower()
+    assert not any("nothing in the checks" in action.lower() for action in actions)
+    assert next(check for check in built["checks"] if check["id"] == "totals_reconcile")["status"] == "pass"
+    assert built["kpis"][0]["value"] == (30 if currency is None else 10)
+
+
+def test_clean_actions_still_offer_a_useful_business_suggestion(report, tmp_path):
+    path = _write_csv(tmp_path / "clean.csv", ["Date", "Amount"], [["2026-08-01", "10"], ["2026-08-02", "20"]])
+    ctx = report.prepare([str(path)], "2026-08", report.BuildOptions(currency="USD"), None, report.load_profile(None, None))
+    built, _ = report.build_report(ctx, 0, report.compute_checks)
+    assert all(check["status"] != "warn" for check in built["checks"])
+    actions = next(section for section in built["sections"] if section["id"] == "actions")["bullets"]
+    assert any("add a column" in action.lower() for action in actions)
+    assert not any("warnings" in action.lower() for action in actions)
+
+
+def test_warning_action_preserves_business_actions_and_authored_prose_rules(report, tmp_path):
+    path = _write_csv(tmp_path / "unpaid.csv", ["Date", "Amount", "Status"], [["2026-08-01", "10", "Unpaid"], ["2026-08-02", "n/a", "Paid"]])
+    ctx = report.prepare([str(path)], "2026-08", report.BuildOptions(currency="USD"), None, report.load_profile(None, None))
+    built, _ = report.build_report(ctx, 0, report.compute_checks)
+    actions = next(section for section in built["sections"] if section["id"] == "actions")["bullets"]
+    assert "warnings" in actions[0].lower()
+    assert any("$10.00" in action and "unpaid" in action for action in actions[1:])
+    updated, removed, _ = report.apply_prose(built, None, ["Follow up on unpaid work.", "Collect 9,999 dollars."])
+    assert next(section for section in updated["sections"] if section["id"] == "actions")["bullets"] == ["Follow up on unpaid work."]
+    assert removed == ["9,999"]
+
+
 # --- the script itself -------------------------------------------------------
 
 
