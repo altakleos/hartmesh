@@ -18,9 +18,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   version atomically. Login hash upgrades preserve newer credentials and account
   metadata; concurrent password changes return a conflict without a new cookie.
 
+- Session refresh retains the last verified account through temporary transport
+  or response errors, with bounded retry and a recovery action. Verified expiry,
+  logout and account or permission changes still retire private state.
+- Business reports publish complete draft bundles before advancing the current
+  report pointer. Failed renders preserve previous downloads; later drafts use
+  new paths under `drafts/` and retain earlier bundles.
+- Scheduled timeouts preserve their first terminal outcome and hold execution
+  capacity until the owner confirms worker cleanup. Stop retries are bounded;
+  unknown owner retirement survives restarts and may need operator recovery.
+
 ### Schema changes
 
-No database schema changes since `v2.2.0+hartmesh.40`.
+No database schema changes since `v2.2.0+hartmesh.40`. Scheduled retirement uses
+existing occurrence lease fields; report JSON remains version 1, while internal
+bundle manifests use version 2.
 
 ## [2.2.0+hartmesh.40] - 2026-10-03
 

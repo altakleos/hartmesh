@@ -226,3 +226,24 @@ async def test_postgres_once_recovery_uses_occurrence_order_despite_clock_skew(p
         older_row = await session.get(ScheduledTaskRunRow, older["id"])
         newer_row = await session.get(ScheduledTaskRunRow, newer["id"])
         assert newer_row.occurrence_seq > older_row.occurrence_seq
+
+
+@pytest.mark.asyncio
+async def test_postgres_timeout_retirement_holds_budget_and_thread_until_confirmed(postgres_repositories):
+    task_repo, task_run_repo, _ = postgres_repositories
+    now = datetime.now(UTC)
+    for suffix in ("old", "same", "other"):
+        await _create_cron_task(task_repo, f"task-{suffix}", next_run_at=now)
+        await task_run_repo.create(run_record_id=f"occurrence-{suffix}", task_id=f"task-{suffix}", thread_id="shared" if suffix != "other" else "other", scheduled_for=now, trigger="scheduled", status="queued")
+    assert await task_run_repo.update_status("occurrence-old", status="running", run_id="run-old", started_at=now)
+    assert await task_repo.complete_run("task-old", user_id="user-1", task_run_id="occurrence-old", run_id="run-old", status="failed", error="timeout, retirement unconfirmed", finished_at=now, only_if_active=True, retirement_pending=True)
+    before = (await task_run_repo.list_by_task("task-old"))[0]
+    args = dict(now=now, lease_owner="peer", lease_seconds=60)
+    assert await task_run_repo.claim_queued_run("occurrence-other", global_max_concurrent_runs=1, **args) is None
+    assert await task_run_repo.claim_queued_run("occurrence-same", global_max_concurrent_runs=2, **args) is None
+    assert await task_run_repo.count_active_runs() == 1
+    assert not await task_run_repo.confirm_execution_retirement("occurrence-old", run_id="wrong")
+    assert await task_run_repo.confirm_execution_retirement("occurrence-old", run_id="run-old")
+    assert (await task_run_repo.list_by_task("task-old"))[0] == {**before, "lease_owner": None, "execution_retirement_pending": False}
+    claims = await asyncio.gather(*(task_run_repo.claim_queued_run(f"occurrence-{suffix}", global_max_concurrent_runs=1, **args) for suffix in ("same", "other")))
+    assert sum(row is not None for row in claims) == 1

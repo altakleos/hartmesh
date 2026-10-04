@@ -4,13 +4,14 @@ import logging
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, exists, func, or_, select, text, update
+from sqlalchemy import and_, case, exists, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, keeps_pause
+from deerflow.persistence.scheduled_task_runs.retirement import EXECUTION_RETIREMENT_PENDING, holds_occurrence, retirement_pending
 from deerflow.persistence.scheduled_tasks.model import ACTIVE_RUN_STATUSES, ONCE_TASK_STATUS_BY_RUN_STATUS, TERMINAL_RUN_STATUSES, ScheduledTaskRow
 from deerflow.scheduler.schedules import next_run_at as compute_next_run_at
 from deerflow.utils.time import coerce_iso
@@ -147,10 +148,10 @@ class ScheduledTaskRepository:
 
     async def get_active_run_status(self, task_id: str) -> str | None:
         stmt = (
-            select(ScheduledTaskRunRow.status)
+            select(case((retirement_pending(ScheduledTaskRunRow), "running"), else_=ScheduledTaskRunRow.status))
             .where(
                 ScheduledTaskRunRow.task_id == task_id,
-                ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+                holds_occurrence(ScheduledTaskRunRow),
             )
             .limit(1)
         )
@@ -177,7 +178,7 @@ class ScheduledTaskRepository:
                         select(ScheduledTaskRunRow)
                         .where(
                             ScheduledTaskRunRow.task_id == task_id,
-                            ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+                            holds_occurrence(ScheduledTaskRunRow),
                         )
                         .limit(1)
                         .with_for_update()
@@ -186,7 +187,7 @@ class ScheduledTaskRepository:
                 .scalars()
                 .first()
             )
-            if run is not None and run.status in {"launching", "running"}:
+            if run is not None and (run.status in {"launching", "running"} or run.lease_owner == EXECUTION_RETIREMENT_PENDING):
                 await session.rollback()
                 return "executing"
             if run is not None:
@@ -222,7 +223,7 @@ class ScheduledTaskRepository:
                         select(ScheduledTaskRunRow)
                         .where(
                             ScheduledTaskRunRow.task_id == task_id,
-                            ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+                            holds_occurrence(ScheduledTaskRunRow),
                         )
                         .limit(1)
                         .with_for_update()
@@ -231,7 +232,7 @@ class ScheduledTaskRepository:
                 .scalars()
                 .first()
             )
-            if run is not None and run.status in {"launching", "running"}:
+            if run is not None and (run.status in {"launching", "running"} or run.lease_owner == EXECUTION_RETIREMENT_PENDING):
                 await session.rollback()
                 return "executing"
             if run is not None:
@@ -261,10 +262,10 @@ class ScheduledTaskRepository:
                     await session.rollback()
                     raise ActiveScheduledTaskMutationConflict("running")
                 active_status = await session.scalar(
-                    select(ScheduledTaskRunRow.status)
+                    select(case((retirement_pending(ScheduledTaskRunRow), "running"), else_=ScheduledTaskRunRow.status))
                     .where(
                         ScheduledTaskRunRow.task_id == task_id,
-                        ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+                        holds_occurrence(ScheduledTaskRunRow),
                     )
                     .limit(1)
                 )
@@ -304,7 +305,7 @@ class ScheduledTaskRepository:
             active_run_for_task = exists(
                 select(ScheduledTaskRunRow.id).where(
                     ScheduledTaskRunRow.task_id == ScheduledTaskRow.id,
-                    ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+                    holds_occurrence(ScheduledTaskRunRow),
                 )
             )
             if limit <= 0:
@@ -594,6 +595,7 @@ class ScheduledTaskRepository:
         error: str | None,
         finished_at: datetime,
         only_if_active: bool = False,
+        retirement_pending: bool = False,
     ) -> bool:
         """Commit occurrence completion, accounting and eligible parent outcome.
 
@@ -602,20 +604,22 @@ class ScheduledTaskRepository:
         """
         if status not in TERMINAL_RUN_STATUSES:
             raise ValueError(f"unsupported terminal occurrence status: {status!r}")
+        if retirement_pending and (status != "failed" or not only_if_active):
+            raise ValueError("execution retirement requires an active-to-failed transition")
         async with self._sf() as session:
             task = await self._lock_task(session, task_id)
             occurrence = await session.get(ScheduledTaskRunRow, task_run_id, with_for_update=True)
             if occurrence is None or occurrence.task_id != task_id or occurrence.run_id not in (None, run_id) or (task is not None and task.user_id != user_id):
                 await session.rollback()
                 return False
-            if only_if_active and occurrence.status not in ACTIVE_RUN_STATUSES:
+            if occurrence.lease_owner == EXECUTION_RETIREMENT_PENDING or (only_if_active and occurrence.status not in ACTIVE_RUN_STATUSES):
                 await session.rollback()
                 return False
             occurrence.status = status
             occurrence.run_id = run_id
             occurrence.error = error
             occurrence.finished_at = finished_at
-            occurrence.lease_owner = None
+            occurrence.lease_owner = EXECUTION_RETIREMENT_PENDING if retirement_pending else None
             occurrence.lease_expires_at = None
             if task is not None:
                 account_launch(task, occurrence, run_id)
@@ -730,7 +734,7 @@ class ScheduledTaskRepository:
             select(ScheduledTaskRunRow.id)
             .where(
                 ScheduledTaskRunRow.task_id == task_id,
-                ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+                holds_occurrence(ScheduledTaskRunRow),
             )
             .limit(1)
         )
@@ -858,7 +862,7 @@ class ScheduledTaskRepository:
                     select(ScheduledTaskRunRow)
                     .where(
                         ScheduledTaskRunRow.task_id == task.id,
-                        ScheduledTaskRunRow.status.in_(("queued", "launching", "running")),
+                        holds_occurrence(ScheduledTaskRunRow),
                     )
                     .order_by(ScheduledTaskRunRow.created_at.desc())
                     .limit(1)

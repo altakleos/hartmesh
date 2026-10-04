@@ -2401,8 +2401,19 @@ Scheduled runs use `scheduler.recursion_limit` in `config.yaml` (default `1000`,
 When a scheduled occurrence reaches its configured time limit, its failed outcome
 and timeout explanation remain in the history even if the worker reports a late
 completion. An occurrence that finishes before the timeout keeps its own outcome.
+Stop is attempted immediately and retried after 5, 15 and 30 seconds (four attempts
+per scheduler instance, each with a ten-second deadline). A Stop acknowledgement
+does not confirm worker cleanup. The timed-out occurrence continues to hold its
+execution slot and thread until its owner confirms that the worker task is done;
+other free slots remain usable. History exposes `execution_retirement_pending`.
+Missing local workers, store errors and scheduler restarts keep the hold. An
+unconfirmable owner loss can therefore reduce available capacity indefinitely.
+After independently verifying termination of the old worker and its sandbox, an
+operator can use `ScheduledTaskRunRepository.confirm_execution_retirement(id,
+run_id=...)` to release the exact hold without rewriting its timeout history.
+This uses existing lease fields and requires no database schema migration.
 
-The background scheduler is single-instance by default. For a multi-pod deployment, set `scheduler.multi_instance: true` and use shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; startup and periodic recovery then preserve live peer runs, atomically return expired launch claims to the queue, take over only expired run leases, and fence stale launch writes. `max_concurrent_runs` is a shared global cap across Pods for `launching`/`running` occurrences; waiting `queued` rows do not consume it. Without those settings, enable the scheduler on exactly one Gateway pod. These scheduler fields are startup-only; restart all Gateway Pods together when changing them.
+The background scheduler is single-instance by default. For a multi-pod deployment, set `scheduler.multi_instance: true` and use shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`; startup and periodic recovery then preserve live peer runs, atomically return expired launch claims to the queue, take over only expired run leases, and fence stale launch writes. `max_concurrent_runs` is a shared global cap across Pods for `launching`/`running` occurrences and pending timeout retirement; waiting `queued` rows do not consume it. Without those settings, enable the scheduler on exactly one Gateway pod. These scheduler fields are startup-only; restart all Gateway Pods together when changing them.
 
 ### Preview cron occurrences through the API
 
@@ -2420,7 +2431,7 @@ The response contains normalized `cron`, `timezone`, the effective UTC `start_at
 
 - Occurrence ordering applies to rows admitted by upgraded Gateway instances, which project only sequenced occurrences onto the parent task and defer recovery while any occurrence is still live, whichever instance admitted it; a task whose history is entirely unsequenced keeps the previous timestamp ordering until its first sequenced admission. During a rolling upgrade, rows admitted by pre-upgrade instances are projected by those instances themselves, as before the upgrade, and the ordering guarantees hold once every Gateway writer runs the upgraded version. Existing history is not backfilled; the upgrade does not reconstruct past order or repair historical counts.
 - Before upgrading a deployment with `GATEWAY_WORKERS > 1` and `scheduler.enabled: true`, either keep the scheduler on exactly one Gateway worker or configure `scheduler.multi_instance: true` with shared Postgres, `run_ownership.heartbeat_enabled: true`, and `run_events.backend: db`. The upgraded Gateway rejects the unsafe combination at startup instead of starting silently.
-- In multi-instance mode, `scheduler.max_concurrent_runs` is a cluster-wide execution cap, not a per-Pod cap. It includes `launching` and `running` scheduled occurrences, so capacity does not multiply with the number of replicas; durable waiting rows remain outside the cap.
+- In multi-instance mode, `scheduler.max_concurrent_runs` is a cluster-wide execution cap, not a per-Pod cap. It includes `launching`, `running` and pending timeout retirement, so capacity does not multiply with the number of replicas; durable waiting rows remain outside the cap.
 - `scheduler.multi_instance` and the related scheduler, ownership, and run-event settings are startup-only. Apply changes with a coordinated restart of all Gateway Pods; changing the ConfigMap alone does not activate multi-instance recovery.
 
 ## Terminal Workbench (TUI)
