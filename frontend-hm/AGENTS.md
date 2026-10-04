@@ -31,6 +31,8 @@ Upstream routes are selected deliberately; current scope is recorded in the
 - **TanStack Query** (`@tanstack/react-query` ^5.90.17) — Server state management
 - **UI**: Shadcn UI, MagicUI, React Bits, and Vercel AI SDK elements (generated from registries — see Code Style)
 
+Route layouts use Next.js metadata directly; the product has no Nuxt image module.
+
 ## Commands
 
 | Command          | Purpose                                       |
