@@ -16,6 +16,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "backend/app/gateway/provider_keys/AGENTS.md",
     "backend/app/gateway/routers/AGENTS.md",
     "backend/app/channels/AGENTS.md",
+    "backend/app/scheduler/AGENTS.md",
     "backend/packages/harness/deerflow/AGENTS.md",
     "backend/packages/harness/deerflow/agents/AGENTS.md",
     "backend/packages/harness/deerflow/agents/middlewares/AGENTS.md",
@@ -47,6 +48,7 @@ EXPECTED_GUIDANCE_PATHS = {
     "frontend-hm/AGENTS.md",
     "frontend-hm/src/AGENTS.md",
     "scripts/AGENTS.md",
+    "skills/public/business-report/AGENTS.md",
 }
 
 

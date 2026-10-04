@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, exists, func, or_, select, text, update
+from sqlalchemy import exists, func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm import aliased
@@ -12,6 +12,7 @@ from deerflow.persistence.run import RunRepository
 from deerflow.persistence.run.model import RunRow
 from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_task_runs.projection import account_launch, can_project, keeps_pause
+from deerflow.persistence.scheduled_task_runs.retirement import EXECUTION_RETIREMENT_PENDING, blocks_thread, holds_execution, holds_occurrence, retirement_pending
 from deerflow.persistence.scheduled_tasks.model import (
     ACTIVE_RUN_STATUSES,
     TERMINAL_RUN_STATUSES,
@@ -78,6 +79,7 @@ class ScheduledTaskRunRepository:
         ):
             if data.get(key) is not None:
                 data[key] = coerce_iso(data[key])
+        data["execution_retirement_pending"] = row.status in TERMINAL_RUN_STATUSES and row.lease_owner == EXECUTION_RETIREMENT_PENDING
         return data
 
     @staticmethod
@@ -192,13 +194,16 @@ class ScheduledTaskRunRepository:
                     select(ScheduledTaskRunRow.status)
                     .where(
                         ScheduledTaskRunRow.task_id == task_id,
-                        ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+                        holds_occurrence(ScheduledTaskRunRow),
                     )
                     .limit(1)
                 )
                 if active_status is not None:
                     await session.rollback()
                     raise ActiveScheduledRunConflict(task_id)
+            if status in ACTIVE_RUN_STATUSES and await session.scalar(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == task_id, retirement_pending(ScheduledTaskRunRow)).limit(1)):
+                await session.rollback()
+                raise ActiveScheduledRunConflict(task_id)
             if task is not None:
                 row.occurrence_seq = await session.scalar(
                     update(ScheduledTaskRow)
@@ -223,7 +228,7 @@ class ScheduledTaskRunRepository:
                 # A primary-key/sequence conflict is not necessarily an active
                 # slot conflict. Preserve the database error unless an active
                 # occurrence actually exists after rollback.
-                if status in ACTIVE_RUN_STATUSES and await session.scalar(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == task_id, ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES)).limit(1)):
+                if status in ACTIVE_RUN_STATUSES and await session.scalar(select(ScheduledTaskRunRow.id).where(ScheduledTaskRunRow.task_id == task_id, holds_occurrence(ScheduledTaskRunRow)).limit(1)):
                     raise ActiveScheduledRunConflict(task_id) from None
                 raise
             await session.refresh(row)
@@ -266,28 +271,28 @@ class ScheduledTaskRunRepository:
             result = await session.execute(stmt)
             return [{**self._row_to_dict(row), "user_id": user_id} for row, user_id in result.all()]
 
+    async def list_retirement_pending(self, *, limit: int = 16, offset: int = 0) -> list[dict[str, Any]]:
+        stmt = select(ScheduledTaskRunRow).where(retirement_pending(ScheduledTaskRunRow)).order_by(ScheduledTaskRunRow.created_at, ScheduledTaskRunRow.id).limit(limit).offset(offset)
+        async with self._sf() as session:
+            return [self._row_to_dict(row) for row in (await session.execute(stmt)).scalars()]
+
+    async def confirm_execution_retirement(self, run_record_id: str, *, run_id: str) -> bool:
+        """Release only a matching execution hold; never rewrite terminal history."""
+        async with self._sf() as session:
+            result = await session.execute(update(ScheduledTaskRunRow).where(ScheduledTaskRunRow.id == run_record_id, ScheduledTaskRunRow.run_id == run_id, retirement_pending(ScheduledTaskRunRow)).values(lease_owner=None))
+            await session.commit()
+            return result.rowcount == 1
+
     async def count_active_runs(self) -> int:
-        """Count launch claims and live runs; waiting rows do not consume slots."""
-        stmt = select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES))
+        """Count launch claims, live runs and unconfirmed retirement; exclude waiting rows."""
+        stmt = select(func.count()).select_from(ScheduledTaskRunRow).where(holds_execution(ScheduledTaskRunRow))
         async with self._sf() as session:
             result = await session.execute(stmt)
             return int(result.scalar() or 0)
 
     async def list_queued_runs(self, *, limit: int) -> list[dict[str, Any]]:
         older = aliased(ScheduledTaskRunRow)
-        older_same_thread = exists(
-            select(older.id).where(
-                older.thread_id == ScheduledTaskRunRow.thread_id,
-                older.status.in_(ACTIVE_RUN_STATUSES),
-                or_(
-                    older.created_at < ScheduledTaskRunRow.created_at,
-                    and_(
-                        older.created_at == ScheduledTaskRunRow.created_at,
-                        older.id < ScheduledTaskRunRow.id,
-                    ),
-                ),
-            )
-        )
+        older_same_thread = exists(select(older.id).where(blocks_thread(ScheduledTaskRunRow, older)))
         stmt = (
             select(ScheduledTaskRunRow)
             .where(
@@ -313,7 +318,7 @@ class ScheduledTaskRunRepository:
             select(ScheduledTaskRunRow)
             .where(
                 ScheduledTaskRunRow.task_id == task_id,
-                ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+                holds_occurrence(ScheduledTaskRunRow),
             )
             .order_by(ScheduledTaskRunRow.created_at.asc(), ScheduledTaskRunRow.id.asc())
             .limit(1)
@@ -350,24 +355,12 @@ class ScheduledTaskRunRepository:
                 # The claim targets one row, but the budget is global, so this
                 # has to be the database-wide writer rather than a row lock.
                 await session.execute(text("BEGIN IMMEDIATE"))
-            executing = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(ScheduledTaskRunRow.status.in_(EXECUTING_RUN_STATUSES)))
+            executing = await session.scalar(select(func.count()).select_from(ScheduledTaskRunRow).where(holds_execution(ScheduledTaskRunRow)))
             if int(executing or 0) >= global_max_concurrent_runs:
                 await session.rollback()
                 return None
             older = aliased(ScheduledTaskRunRow)
-            older_same_thread = exists(
-                select(older.id).where(
-                    older.thread_id == ScheduledTaskRunRow.thread_id,
-                    older.status.in_(ACTIVE_RUN_STATUSES),
-                    or_(
-                        older.created_at < ScheduledTaskRunRow.created_at,
-                        and_(
-                            older.created_at == ScheduledTaskRunRow.created_at,
-                            older.id < ScheduledTaskRunRow.id,
-                        ),
-                    ),
-                )
-            )
+            older_same_thread = exists(select(older.id).where(blocks_thread(ScheduledTaskRunRow, older)))
             result = await session.execute(
                 update(ScheduledTaskRunRow)
                 .where(
@@ -674,6 +667,9 @@ class ScheduledTaskRunRepository:
             row = await session.get(ScheduledTaskRunRow, run_record_id, with_for_update=True, populate_existing=True)
             if row is None:
                 return False
+            if row.status in TERMINAL_RUN_STATUSES and row.lease_owner == EXECUTION_RETIREMENT_PENDING:
+                await session.rollback()
+                return False
             if protect_terminal and row.status in TERMINAL_RUN_STATUSES:
                 # The launch-path "running" write lost the race against the
                 # completion hook; keep the terminal status/error and only
@@ -713,7 +709,7 @@ class ScheduledTaskRunRepository:
             select(ScheduledTaskRunRow.id)
             .where(
                 ScheduledTaskRunRow.task_id == task_id,
-                ScheduledTaskRunRow.status.in_(ACTIVE_RUN_STATUSES),
+                holds_occurrence(ScheduledTaskRunRow),
             )
             .limit(1)
         )

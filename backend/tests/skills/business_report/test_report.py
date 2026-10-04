@@ -78,6 +78,10 @@ def _build(report, capsys, out_dir: Path, *argv: str) -> tuple[int, str, str]:
 
 
 def _report_path(out_dir: Path) -> Path:
+    pointers = list((out_dir / ".cache/business-report").glob("*.current.json"))
+    if pointers:
+        assert len(pointers) == 1, pointers
+        return out_dir / json.loads(pointers[0].read_text(encoding="utf-8"))["report"]
     paths = sorted(out_dir.glob("*.report.json"))
     assert len(paths) == 1, paths
     return paths[0]
@@ -163,7 +167,7 @@ def _write_csv(path: Path, columns: list[str], rows: list[list[object]]) -> Path
 
 def test_script_installs_nothing_never_shells_out_and_runs_on_the_image_python() -> None:
     modules = sorted((SKILL_DIR / "scripts").glob("*.py"))
-    assert [module.name for module in modules] == ["business_report_common.py", "business_report_render.py", "business_report_sections.py", "report.py"]
+    assert [module.name for module in modules] == ["business_report_common.py", "business_report_publish.py", "business_report_render.py", "business_report_sections.py", "report.py"]
     for module in modules:
         source = module.read_text(encoding="utf-8")
         ast.parse(source, feature_version=(3, 10))
@@ -490,7 +494,7 @@ def test_charts_are_drawn_locally_at_two_times_resolution(report, august_report)
     out_dir, built = august_report
     assert {chart["id"] for chart in built["charts"]} == {"revenue_by_period", "revenue_by_category", "jobs_by_person"}
     for chart in built["charts"]:
-        png = out_dir / chart["png"]
+        png = _report_path(out_dir).parent / chart["png"]
         assert png.is_file()
         header = png.read_bytes()[:24]
         width = int.from_bytes(header[16:20], "big")
@@ -503,7 +507,7 @@ def test_html_is_standalone_and_branded(report, small_report, tmp_path, capsys) 
     tenant = tmp_path / "tenant"
     tenant.mkdir()
     logo = tenant / "logo.png"
-    logo.write_bytes((out_dir / built["charts"][0]["png"]).read_bytes())
+    logo.write_bytes((_report_path(out_dir).parent / built["charts"][0]["png"]).read_bytes())
     (tenant / "brand.json").write_text(json.dumps({"company_name": "Example Services Co.", "logo": "logo.png", "colors": {"primary": "#0a6b3d", "secondary": "#9ccdb4"}}), encoding="utf-8")
 
     code, out, err = _run(report, capsys, "render", str(_report_path(out_dir)), "--to", "html", "--tenant", str(tenant))
@@ -597,10 +601,10 @@ def test_the_same_numbers_appear_in_every_render(report, small_report, capsys) -
     revenue = built["kpis"][0]["value"]
     formatted = report.format_value(revenue, "currency")
 
-    assert formatted in (out_dir / f"{base}.html").read_text(encoding="utf-8")
-    document = Document(str(out_dir / f"{base}.docx"))
+    assert formatted in (_report_path(out_dir).parent / f"{base}.html").read_text(encoding="utf-8")
+    document = Document(str(_report_path(out_dir).parent / f"{base}.docx"))
     assert any(formatted in cell.text for table in document.tables for row in table.rows for cell in row.cells)
-    workbook = openpyxl.load_workbook(out_dir / f"{base}.xlsx")
+    workbook = openpyxl.load_workbook(_report_path(out_dir).parent / f"{base}.xlsx")
     by_person = workbook["By technician"]
     total_row = next(row for row in range(1, 30) if by_person.cell(row=row, column=1).value == "Total")
     referenced = re.fullmatch(r"=SUM\(C2:C(\d+)\)", str(by_person.cell(row=total_row, column=3).value))
@@ -661,7 +665,7 @@ def test_every_other_failure_produces_the_report_with_the_line(report, tmp_path,
 
 def test_checks_can_be_rerun_from_the_report_and_the_inputs(report, small_report, capsys) -> None:
     out_dir, built = small_report
-    (out_dir / "checks.json").unlink()
+    (out_dir / "checks.json").unlink(missing_ok=True)
     code, out, err = _run(report, capsys, "checks", str(_report_path(out_dir)), str(SMALL_CSV))
     assert code == 0, err
     rerun = json.loads((out_dir / "checks.json").read_text(encoding="utf-8"))
@@ -1333,7 +1337,7 @@ def test_an_explicit_mapping_names_the_section_after_the_users_column(report, tm
     assert section["table"]["columns"][0] == "Treatment"
 
 
-def test_a_rebuild_removes_stale_renders_and_says_when_written_text_is_lost(report, tmp_path, capsys) -> None:
+def test_a_rebuild_retains_old_renders_separately_and_says_when_written_text_is_lost(report, tmp_path, capsys) -> None:
     code, out, err = _build(report, capsys, tmp_path / "out", str(SMALL_CSV), "--period", "2026-08")
     assert code == 0, err
     report_path = _report_path(tmp_path / "out")
@@ -1344,14 +1348,14 @@ def test_a_rebuild_removes_stale_renders_and_says_when_written_text_is_lost(repo
     # Rendered after the prose step, because that step now clears the renders of
     # the draft it replaced too; these are the ones the rebuild has to clear.
     for target in ("html", "xlsx"):
-        code, out, err = _run(report, capsys, "render", str(report_path), "--to", target)
+        code, out, err = _run(report, capsys, "render", str(_report_path(tmp_path / "out")), "--to", target)
         assert code == 0, err
 
     code, out, err = _build(report, capsys, tmp_path / "out", str(SMALL_CSV), "--period", "2026-08", "--exclude", "category=Warranty")
     assert code == 0, err
-    assert not report_path.with_name(report_path.name.replace(".report.json", ".html")).exists()
-    assert not report_path.with_name(report_path.name.replace(".report.json", ".xlsx")).exists()
-    assert "Removed stale renders" in out
+    assert not _rendered(tmp_path / "out", "html").exists()
+    assert not _rendered(tmp_path / "out", "xlsx").exists()
+    assert "Removed stale renders" not in out
     assert "written text" in out.lower() and "prose" in out
     assert _read_report(tmp_path / "out")["meta"]["draft"] == 3
 
@@ -1507,7 +1511,7 @@ def test_render_reads_pictures_only_from_the_report_directory_and_the_tenant_bun
     tampered_path.write_text(json.dumps(tampered), encoding="utf-8")
     code, out, err = _run(report, capsys, "render", str(tampered_path), "--to", "html")
     assert code == 0, err
-    html = tampered_path.with_name(tampered_path.name.replace(".report.json", ".html")).read_text(encoding="utf-8")
+    html = _rendered(tampered_dir, "html").read_text(encoding="utf-8")
     assert "data:" not in html
     assert "root:" not in html
 
@@ -1515,9 +1519,9 @@ def test_render_reads_pictures_only_from_the_report_directory_and_the_tenant_bun
     tenant.mkdir()
     (tenant / "logo.svg").write_text('<svg xmlns="http://www.w3.org/2000/svg"><image href="http://127.0.0.1:1/x.png"/></svg>', encoding="utf-8")
     (tenant / "brand.json").write_text(json.dumps({"company_name": "Example Services Co.", "logo": "logo.svg"}), encoding="utf-8")
-    code, out, err = _run(report, capsys, "render", str(tampered_path), "--to", "html", "--tenant", str(tenant))
+    code, out, err = _run(report, capsys, "render", str(_report_path(tampered_dir)), "--to", "html", "--tenant", str(tenant))
     assert code == 0, err
-    html = tampered_path.with_name(tampered_path.name.replace(".report.json", ".html")).read_text(encoding="utf-8")
+    html = _rendered(tampered_dir, "html").read_text(encoding="utf-8")
     assert "svg" not in html and "127.0.0.1" not in html and "Example Services Co." in html
 
 
@@ -1555,11 +1559,9 @@ def test_render_writes_every_named_format_in_one_run(report, small_report, capsy
         assert f"Rendered {target}" in out
 
 
-def test_render_all_means_the_three_formats_the_user_is_given(report, small_report, capsys) -> None:
-    out_dir, _built = small_report
-    for target in ("pdf", "docx", "xlsx", "html"):
-        _rendered(out_dir, target).unlink(missing_ok=True)
-
+def test_render_all_means_the_three_formats_the_user_is_given(report, tmp_path, capsys) -> None:
+    out_dir = tmp_path / "all"
+    assert _build(report, capsys, out_dir, str(SMALL_CSV), "--period", "2026-08")[0] == 0
     code, out, err = _run(report, capsys, "render", str(_report_path(out_dir)), "--to", "all")
 
     assert code == 0, err
@@ -1571,13 +1573,14 @@ def test_render_all_means_the_three_formats_the_user_is_given(report, small_repo
 
 def test_an_unknown_render_target_is_refused_before_a_file_is_written(report, small_report, capsys) -> None:
     out_dir, _built = small_report
-    _rendered(out_dir, "pdf").unlink(missing_ok=True)
 
+    before = {str(p): p.read_bytes() for p in out_dir.rglob("*") if p.is_file()}
     code, _out, err = _run(report, capsys, "render", str(_report_path(out_dir)), "--to", "pdf,jpeg")
 
     assert code != 0
     assert "jpeg" in err
-    assert not _rendered(out_dir, "pdf").exists()
+
+    assert {str(p): p.read_bytes() for p in out_dir.rglob("*") if p.is_file()} == before
 
 
 def test_build_renders_in_the_same_run_when_asked(report, tmp_path, capsys) -> None:
@@ -1631,11 +1634,13 @@ def test_prose_renders_in_the_same_run_when_asked(report, tmp_path, capsys) -> N
     assert "A quiet month." in docx_text
 
 
-def test_prose_removes_the_renders_it_invalidated_when_it_does_not_replace_them(report, tmp_path, capsys) -> None:
+def test_prose_keeps_previous_renders_separate_from_the_new_draft(report, tmp_path, capsys) -> None:
     code, _out, err = _build(report, capsys, tmp_path / "out", str(SMALL_CSV), "--period", "2026-08")
     assert code == 0, err
     code, _out, err = _run(report, capsys, "render", str(_report_path(tmp_path / "out")), "--to", "pdf")
     assert code == 0, err
+    old_pdf = _rendered(tmp_path / "out", "pdf")
+    old_bytes = old_pdf.read_bytes()
     prose = tmp_path / "prose.json"
     prose.write_text(json.dumps({"summary": ["A quiet month."]}), encoding="utf-8")
 
@@ -1645,7 +1650,8 @@ def test_prose_removes_the_renders_it_invalidated_when_it_does_not_replace_them(
     # The PDF still said what draft 1 said; a stale render must not survive to
     # be presented next to a report.json that no longer agrees with it.
     assert not _rendered(tmp_path / "out", "pdf").exists()
-    assert "Removed stale renders" in out and "Render again" in out
+    assert old_pdf.read_bytes() == old_bytes
+    assert "Removed stale renders" not in out
 
 
 def test_prose_prints_the_text_the_report_now_carries(report, tmp_path, capsys) -> None:
@@ -1669,9 +1675,9 @@ def test_every_path_a_run_writes_is_known_before_the_run(report, tmp_path, capsy
     call that makes them, so their names must follow from what it chose: the
     report is named after its `--out` directory, the renders after the report."""
     out_dir = tmp_path / "2026-08-business-review"
-    expected = [out_dir / f"2026-08-business-review.{ext}" for ext in ("report.json", "pdf", "docx", "xlsx")]
+    expected = [out_dir / "drafts/initial" / f"2026-08-business-review.{ext}" for ext in ("report.json", "pdf", "docx", "xlsx")]
 
-    code, _out, err = _build(report, capsys, out_dir, str(SMALL_CSV), "--period", "2026-08", "--render", "pdf,docx,xlsx")
+    code, _out, err = _build(report, capsys, out_dir, str(SMALL_CSV), "--period", "2026-08", "--render", "pdf,docx,xlsx", "--bundle-id", "initial")
 
     assert code == 0, err
     for path in expected:
@@ -1681,11 +1687,11 @@ def test_every_path_a_run_writes_is_known_before_the_run(report, tmp_path, capsy
 def test_a_directory_name_is_slugified_and_name_overrides_it(report, tmp_path, capsys) -> None:
     code, _out, err = _build(report, capsys, tmp_path / "August Review 2026", str(SMALL_CSV), "--period", "2026-08")
     assert code == 0, err
-    assert (tmp_path / "August Review 2026" / "august-review-2026.report.json").is_file()
+    assert _report_path(tmp_path / "August Review 2026").name == "august-review-2026.report.json"
 
     code, _out, err = _build(report, capsys, tmp_path / "other", str(SMALL_CSV), "--period", "2026-08", "--name", "Board Pack")
     assert code == 0, err
-    assert (tmp_path / "other" / "board-pack.report.json").is_file()
+    assert _report_path(tmp_path / "other").name == "board-pack.report.json"
 
 
 def test_a_second_period_does_not_silently_replace_the_report_named_after_the_directory(report, tmp_path, capsys) -> None:
@@ -1820,9 +1826,9 @@ def test_the_doc_makes_the_present_argument_the_handover(report) -> None:
     assert "A `Not attached:` line from the tool" in doc and "a `Note:` line from the script" in doc
     assert 'A result with no "Presented to the user" line handed nothing over' in doc
     # A later-turn render hands the report over with its renders.
-    assert "re-saves the report beside them" in doc
+    assert "new draft directory" in doc
     # The revision case that failed twice is spelled out: same paths, new contents.
-    assert "the same paths as last time are presented again because their contents changed" in doc
+    assert "new paths" in doc and "--bundle-id" in doc
 
 
 def test_render_in_a_later_turn_hands_the_report_over_with_its_renders(report, small_report, capsys) -> None:
@@ -1843,7 +1849,10 @@ def test_render_in_a_later_turn_hands_the_report_over_with_its_renders(report, s
 
     assert code == 0, err
     assert path.read_bytes() == before, "the same report, byte for byte"
-    assert path.stat().st_mtime > old + 60, "re-saved by this run"
+    published = _report_path(out_dir)
+    assert published != path and published.read_bytes() == before
+    assert published.stat().st_mtime > old + 60, "newly written by this run"
+    assert path.stat().st_mtime == old, "the preceding bundle is retained unchanged"
 
 
 def test_the_doc_sends_a_known_period_straight_to_build(report) -> None:
@@ -2068,7 +2077,7 @@ def test_the_doc_shows_present_beside_command_in_one_call(report) -> None:
     assert "build" in words and "--present" not in words
     assert words[words.index("--render") + 1] == "pdf,docx,xlsx"
     out_dir = Path(words[words.index("--out") + 1])
-    assert [Path(p).parent for p in call["present"]] == [out_dir] * 4, "present names what this --out writes"
+    assert [Path(p).parent for p in call["present"]] == [out_dir / "drafts" / words[words.index("--bundle-id") + 1]] * 4, "present names the new complete bundle"
     assert [Path(p).name for p in call["present"]] == [f"{out_dir.name}.{ext}" for ext in ("report.json", "pdf", "docx", "xlsx")]
     assert not re.search(r"```bash\n[^`]*report\.py\" build", doc), "the build example is shown once, as the call"
     assert "`--present`" in doc, "the doc names the mistake the script refuses"

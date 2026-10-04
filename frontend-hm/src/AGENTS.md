@@ -25,6 +25,12 @@ cross-language contract.
    change, disposing queries and isolating late callbacks from the new client.
    Logout unmounts private UI before clearing the cookie; auth refreshes cannot
    restore an identity superseded by logout or another completed probe.
+   Transport/5xx/invalid-body refreshes retain the last verified identity and
+   mounted drafts. Checks have a 10-second abort deadline and three delayed
+   retries; manual/visible-tab checks can recover later. Validate successful
+   bodies with `userSchema`. Only 401, logout or verified account/permission
+   changes retire that identity. Retirement/unmount cancels queued checks and
+   fences late responses, including transports that ignore abort.
    Workspace-level FileActionLifetimeProvider retires Files/Shared batches,
    deletion, key-update follow-ups and filename toasts with the account;
    navigation keeps batches and Undo alive. Deletion and key mutations use its

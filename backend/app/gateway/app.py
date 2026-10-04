@@ -579,24 +579,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         try:
             from app.gateway.services import launch_scheduled_thread_run
             from app.scheduler import ScheduledTaskService
+            from app.scheduler.run_time_bound import get_owned_worker_task
 
             async def _stop_scheduled_run(run_id: str) -> object:
                 # The run manager is resolved when a run is stopped, not when
                 # the scheduler is built, like the other closures over `app`.
                 return await app.state.run_manager.cancel(run_id, action="interrupt")
 
-            async def _scheduled_run_is_live(run_id: str) -> bool:
+            async def _scheduled_run_task(run_id: str) -> asyncio.Task | None:
                 # A run's sandbox is held until its worker task has finished,
                 # which is later than its status reading ``interrupted``.
-                record = await app.state.run_manager.get(run_id)
-                task = getattr(record, "task", None)
-                return task is not None and not task.done()
+                return await get_owned_worker_task(app.state.run_manager, run_id)
 
             if getattr(app.state, "scheduled_task_repo", None) is not None and getattr(app.state, "scheduled_task_run_repo", None) is not None:
                 scheduled_task_service = ScheduledTaskService(
                     max_run_seconds=startup_config.scheduler.max_run_seconds,
                     stop_run=_stop_scheduled_run,
-                    run_is_live=_scheduled_run_is_live,
+                    get_run_task=_scheduled_run_task,
                     task_repo=app.state.scheduled_task_repo,
                     task_run_repo=app.state.scheduled_task_run_repo,
                     launch_run=lambda **kwargs: launch_scheduled_thread_run(app=app, **kwargs),

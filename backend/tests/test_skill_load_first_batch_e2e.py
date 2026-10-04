@@ -109,8 +109,8 @@ def _build(directory: str, period: str = "2026-08") -> dict:
     image runs the guarded form, and the recogniser's tests cover it.
     """
     out = f"/mnt/user-data/outputs/reports/{period}-business-review"
-    command = f'SKILL_DIR="{directory}"; python "$SKILL_DIR/scripts/report.py" build /mnt/user-data/uploads/input.xlsx --period {period} --out {out} --render pdf,docx,xlsx'
-    present = [f"{out}/{period}-business-review.{suffix}" for suffix in ("report.json", "pdf", "docx", "xlsx")]
+    command = f'SKILL_DIR="{directory}"; python "$SKILL_DIR/scripts/report.py" build /mnt/user-data/uploads/input.xlsx --period {period} --out {out} --bundle-id draft-1 --render pdf,docx,xlsx'
+    present = [f"{out}/drafts/draft-1/{period}-business-review.{suffix}" for suffix in ("report.json", "pdf", "docx", "xlsx")]
     return _bash(command, "build", present=present)
 
 
