@@ -294,6 +294,10 @@ def build_report(ctx: BuildContext, previous_draft: int, compute_checks) -> tupl
         "notes": notes,
         "rows": _rows_table(ctx, rows),
     }
+    if any(check["status"] == "warn" for check in report["checks"]):
+        for section in sections:
+            if section["id"] == "actions":
+                section["bullets"] = ["Review the warnings in Checks before using these figures.", *section["bullets"]][:3]
     return report, charts
 
 
@@ -523,9 +527,9 @@ def _section_actions(ctx: BuildContext, state: dict) -> dict:
     if not bullets:
         tables = [name for flag, name in ((state["has"]["category"], vocab(ctx.profile, "category", "category")), (state["has"]["person"], person)) if flag]
         if tables:
-            bullets.append(f"Review the {' and '.join(tables)} {plural(len(tables), 'table')} for anything that looks off; nothing in the checks needs action.")
+            bullets.append(f"Review the {' and '.join(tables)} {plural(len(tables), 'table')} for anything that looks off.")
         else:
-            bullets.append("Nothing in the checks needs action; add a column for the team or the type of work to see where the month came from.")
+            bullets.append("Add a column for the team or the type of work to see where the month came from.")
     return {"id": "actions", "heading": "What to act on", "bullets": bullets[:3]}
 
 

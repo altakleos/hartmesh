@@ -288,6 +288,15 @@ export interface Translations {
   // My files: what the person kept, across conversations
   files: {
     title: string;
+    filterLabel: string;
+    filterPlaceholder: string;
+    clearFilter: string;
+    sortLabel: string;
+    sortName: string;
+    sortNewest: string;
+    foundCount: (found: number, loaded: number) => string;
+    noMatches: string;
+    noMatchesHint: string;
     description: string;
     empty: string;
     emptyHint: string;
@@ -1209,6 +1218,9 @@ export interface Translations {
     providerKeys: {
       title: string;
       description: string;
+      loading: string;
+      loadError: string;
+      retry: string;
       groupModels: string;
       groupTools: string;
       sourceProduct: string;
@@ -1237,6 +1249,8 @@ export interface Translations {
       testAccepted: string;
       testRejected: string;
       testInconclusive: string;
+      testTimeout: string;
+      testRateLimited: string;
       testNotTestable: string;
       testError: string;
       saved: string;

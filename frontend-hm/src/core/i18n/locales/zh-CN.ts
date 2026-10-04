@@ -350,6 +350,16 @@ export function createZhCN(product: string): Translations {
 
     files: {
       title: "我的文件",
+      filterLabel: "查找已加载的文件",
+      filterPlaceholder: "名称或文件夹",
+      clearFilter: "清除筛选",
+      sortLabel: "文件排序",
+      sortName: "名称",
+      sortNewest: "最新",
+      foundCount: (found, loaded) =>
+        `在已加载的 ${loaded.toLocaleString()} 个文件中显示 ${found.toLocaleString()} 个`,
+      noMatches: "已加载的文件中没有匹配项",
+      noMatchesHint: "尝试其他名称或文件夹，或清除筛选。",
       description:
         "你在各个对话中保存下来的文件。在任何对话里，助手都能打开它们。",
       empty: "还没有保存任何文件",
@@ -1435,6 +1445,9 @@ export function createZhCN(product: string): Translations {
         title: "服务商密钥",
         description:
           "用于 AI 模型和网页搜索的密钥。在此设置的密钥会从下一条消息起替代工作区原有密钥，保存后不会再次显示。你可以选择先测试密钥；保存时不会自动测试。",
+        loading: "正在检查服务商密钥…",
+        loadError: "无法检查服务商密钥。请重试。",
+        retry: "重试",
         groupModels: "AI 模型",
         groupTools: "网页搜索与抓取",
         sourceProduct: "你的密钥",
@@ -1471,6 +1484,8 @@ export function createZhCN(product: string): Translations {
         testAccepted: "服务商已接受此密钥。密钥尚未保存。",
         testRejected: "服务商拒绝了此密钥。你可以修改，也可以继续保存。",
         testInconclusive: "服务商未能确认此密钥。你可以重试，也可以继续保存。",
+        testTimeout: "服务商未能及时响应。你可以重试，也可以继续保存密钥。",
+        testRateLimited: "服务商正在限制请求。稍等后重试，也可以继续保存密钥。",
         testNotTestable: "此服务商不支持在这里测试密钥。你仍可保存密钥。",
         testError: "密钥测试未完成。你可以重试，也可以继续保存。",
         saved: "已保存。你的下一条消息将使用你的 {provider} 密钥。",

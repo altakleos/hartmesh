@@ -476,4 +476,112 @@ describe("FilesPage", () => {
     fireEvent.click(within(failure).getByRole("button", { name: "Try again" }));
     expect(files.refetch).toHaveBeenCalled();
   });
+
+  it("finds loaded files by name or folder, and Clear restores focus and rows", () => {
+    renderPage();
+    const filter = screen.getByRole("searchbox", { name: "Find loaded files" });
+    fireEvent.change(filter, { target: { value: "REPORTS/" } });
+    expect(screen.getByTestId("my-file-Reports/august.pdf")).toBeTruthy();
+    expect(screen.queryByTestId("my-file-notes.txt")).toBeNull();
+    expect(screen.getByText("Showing 1 of 2 loaded files")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Clear filter" }));
+    expect(document.activeElement).toBe(filter);
+    expect(screen.getByTestId("my-file-notes.txt")).toBeTruthy();
+  });
+
+  it("distinguishes no matches from empty storage without changing a truncated count", () => {
+    files.data = { files: [AUGUST, NOTES], count: 2, truncated: true };
+    renderPage();
+    fireEvent.change(
+      screen.getByRole("searchbox", { name: "Find loaded files" }),
+      { target: { value: "absent" } },
+    );
+    expect(screen.getByTestId("my-files-no-matches").textContent).toContain(
+      "No loaded files match",
+    );
+    expect(screen.queryByTestId("my-files-empty")).toBeNull();
+    expect(screen.getByText("Showing 0 of 2 loaded files")).toBeTruthy();
+    expect(
+      screen.getByText(
+        "Showing the first 2 files. Delete some to see the rest.",
+      ),
+    ).toBeTruthy();
+  });
+
+  it("sorts by name or newest and addresses duplicate names by their original path", () => {
+    const older = {
+      ...AUGUST,
+      path: "A/report.pdf",
+      name: "report.pdf",
+      modified: 1,
+    };
+    const newer = {
+      ...AUGUST,
+      path: "B/report.pdf",
+      name: "report.pdf",
+      modified: 3,
+    };
+    files.data = {
+      files: [newer, older, { ...NOTES, modified: 2 }],
+      count: 3,
+      truncated: false,
+    };
+    renderPage();
+    const paths = () =>
+      within(screen.getByTestId("my-files-list"))
+        .getAllByRole("row")
+        .map((row) => row.getAttribute("data-testid"));
+    expect(paths()).toEqual([
+      "my-file-notes.txt",
+      "my-file-A/report.pdf",
+      "my-file-B/report.pdf",
+    ]);
+    fireEvent.change(screen.getByRole("combobox", { name: "Sort files" }), {
+      target: { value: "newest" },
+    });
+    expect(paths()).toEqual([
+      "my-file-B/report.pdf",
+      "my-file-notes.txt",
+      "my-file-A/report.pdf",
+    ]);
+    fireEvent.change(
+      screen.getByRole("searchbox", { name: "Find loaded files" }),
+      { target: { value: "B/" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Delete report.pdf" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Delete$/ }));
+    expect(files.deleteMutate).toHaveBeenCalledWith(
+      "B/report.pdf",
+      expect.anything(),
+    );
+  });
+
+  it("matches canonically equivalent Unicode and keeps each tab's filter separate", () => {
+    files.data = {
+      files: [{ ...NOTES, path: "Résumé.txt", name: "Résumé.txt" }],
+      count: 1,
+      truncated: false,
+    };
+    shared.data = { files: [PUBLISHED, PLACED], count: 2, truncated: true };
+    renderPage();
+    fireEvent.change(
+      screen.getByRole("searchbox", { name: "Find loaded files" }),
+      { target: { value: "RE\u0301SUME\u0301" } },
+    );
+    expect(screen.getByTestId("my-file-Résumé.txt")).toBeTruthy();
+    openSharedTab();
+    const filter = screen.getByRole<HTMLInputElement>("searchbox", {
+      name: "Find loaded files",
+    });
+    expect(filter.value).toBe("");
+    fireEvent.change(filter, { target: { value: "Exports" } });
+    expect(screen.getByTestId("shared-file-Exports/jobs.xlsx")).toBeTruthy();
+    expect(screen.queryByTestId("shared-file-Reports/august.pdf")).toBeNull();
+    expect(screen.queryByRole("button", { name: /Remove/ })).toBeNull();
+    expect(screen.getByText("Showing 1 of 2 loaded files")).toBeTruthy();
+    expect(screen.getByText("Showing the first 2 files.")).toBeTruthy();
+    fireEvent.change(filter, { target: { value: "absent" } });
+    expect(screen.getByTestId("shared-files-no-matches")).toBeTruthy();
+    expect(screen.queryByTestId("shared-files-empty")).toBeNull();
+  });
 });

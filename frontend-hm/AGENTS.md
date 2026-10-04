@@ -279,6 +279,23 @@ roles: _Remove_ is offered exactly where it would succeed. Both tabs live under
 one heading, _Files_, so the sidebar entry and the page agree whichever tab is
 open.
 
+Files filters inspect only loaded name/path metadata, with Unicode-normalized
+case matching and deterministic Name/Newest ordering (`core/file-areas/selection`).
+Each mounted tab owns its filter/order; navigation resets them. Shared's newest
+order uses publication time, falling back to modified time. Found and truncated
+counts use the loaded array, and no matches is distinct from empty storage.
+Mobile name cells also show the folder. Keep original file objects and paths for
+downloads, Share, Delete and publication-ID Remove; never mutate query data.
+
+Provider-key status separates loading, confirmed unmanaged and recoverable error.
+Validate status metadata before adopting it; failed reads retain known rows and
+drafts with Retry, while mutation/probe controls require confirmed status. Status
+reads and body parsing have a ten-second deadline and component/account/generation
+fences; optional history cannot retire usable status. Preserve account-owned model
+invalidation after a successful mutation closes Settings. Tool rows explain that
+testing is unsupported; model probes map only fixed timeout/rate-limit hints and
+keep unknown reasons generic. No raw provider errors or keys enter probe copy.
+
 Remove and Undo pass the displayed file's `publication_id` to DELETE as
 `expected_publication_id`; a 409 requires refreshing and choosing the current
 publication. Null explicitly identifies an operator-placed file. Only older

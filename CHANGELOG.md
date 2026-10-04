@@ -28,6 +28,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capacity until the owner confirms worker cleanup. Stop retries are bounded;
   unknown owner retirement survives restarts and may need operator recovery.
 
+### Product
+
+- Default report actions prioritize computed check warnings while keeping
+  business suggestions. Clean reports no longer make an unsupported clean-check claim.
+- Files can filter loaded names and folders, sort by Name or Newest, and show
+  matched counts. Mobile rows include the folder; filtering preserves file and
+  Shared publication identities for actions.
+- Provider-key status shows loading and recoverable failures with Retry while
+  retaining known rows and drafts. Unsupported tool-key tests are explained in
+  advance; model tests use fixed timeout and rate-limit hints.
+
 ### Performance
 
 - Workspace snapshots share a 1 MiB text capture/cache budget while preserving

@@ -375,6 +375,16 @@ export function createEnUS(product: string): Translations {
 
     files: {
       title: "My files",
+      filterLabel: "Find loaded files",
+      filterPlaceholder: "Name or folder",
+      clearFilter: "Clear filter",
+      sortLabel: "Sort files",
+      sortName: "Name",
+      sortNewest: "Newest",
+      foundCount: (found, loaded) =>
+        `Showing ${found.toLocaleString()} of ${loaded.toLocaleString()} loaded files`,
+      noMatches: "No loaded files match",
+      noMatchesHint: "Try another name or folder, or clear the filter.",
       description:
         "What you kept, from every conversation. Your assistant can open these in any chat.",
       empty: "Nothing kept yet",
@@ -1521,6 +1531,9 @@ export function createEnUS(product: string): Translations {
         title: "Provider keys",
         description:
           "The keys your AI models and web search use. A key you set here replaces the workspace key from the next message. Saved keys are never shown again. Testing is optional; saving does not test the key.",
+        loading: "Checking provider keys…",
+        loadError: "Provider keys could not be checked. Try again.",
+        retry: "Retry",
         groupModels: "AI models",
         groupTools: "Web search and fetch",
         sourceProduct: "Your key",
@@ -1559,6 +1572,10 @@ export function createEnUS(product: string): Translations {
           "The provider rejected this key. You can edit it or save it anyway.",
         testInconclusive:
           "The provider could not confirm this key. You can retry or save it anyway.",
+        testTimeout:
+          "The provider did not answer in time. Try again or save the key anyway.",
+        testRateLimited:
+          "The provider is limiting requests. Wait a little, then retry, or save the key anyway.",
         testNotTestable:
           "This provider cannot test keys here. You can still save the key.",
         testError:

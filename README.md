@@ -53,8 +53,11 @@ full-content hash. Workspace change scans also retain directory and file descrip
 unreadable or changing files make verification incomplete rather than complete.
 
 The Files page follows the selected tab in its URL, including Shared links and
-browser history. If report download availability cannot be checked, the card
-offers **Retry check**; it checks the files again without regenerating them.
+browser history. Each tab can filter loaded files by name or folder and sort by
+Name or Newest. Counts and truncation notices describe the loaded entries;
+folders remain visible on mobile. If report download availability cannot be
+checked, the card offers **Retry check**; it checks the files again without
+regenerating them.
 Operators can add a **Contact support** link to the workspace's **Settings and
 more** menu through the tenant bundle's optional `provider.json`. Customer
 branding and provider support remain separate; see the
@@ -71,9 +74,11 @@ Administrators managing provider keys in **Settings → Account** can choose
 without saving the key; it reports acceptance, rejection or an inconclusive
 result. Search and page-reading keys cannot be tested here. Testing is optional
 and may incur provider charges. Saving or removing a key refreshes the model
-list. If the selected model disappears, chat selects the agent's available
-default or the first available model; an empty list keeps the draft and prevents
-sending until a model is available.
+list. A failed status check keeps known providers visible and offers **Retry**;
+key changes pause until the check succeeds. Search and page-reading rows explain
+their unsupported test before editing. If the selected model disappears, chat
+selects the agent's available default or the first available model; an empty list
+keeps the draft and prevents sending until a model is available.
 
 Deleting a conversation from its sidebar menu asks for confirmation before
 removing its messages and workspace files. A failed deletion keeps the dialog
@@ -88,6 +93,8 @@ across files, amount labels or explicit currency columns stop the build;
 Date interpretation uses every input row; ambiguous sources and unusable dates
 remain visible as warnings. Rechecking a saved report verifies its recorded input
 hashes and saved figures, and requires an explicit rebuild when they differ.
+Default actions prioritize review of any computed warnings before acting on
+the figures; clean reports still offer business suggestions.
 See the [business-report guide](skills/public/business-report/SKILL.md).
 
 Each business-report draft publishes as a complete directory under
