@@ -47,6 +47,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Continuation and final scans remain fresh; setup-created outputs can now be
   handed over. Failed resume captures cannot reuse an interrupted baseline.
 
+### Maintenance
+
+- Removed the unused `h3` and `nuxt-og-image` product dependency roots and their
+  exclusive lockfile entries. Retained dependency versions remain unchanged.
+
 ### Schema changes
 
 No database schema changes since `v2.2.0+hartmesh.40`. Scheduled retirement uses
