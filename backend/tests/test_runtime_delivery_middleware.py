@@ -315,3 +315,25 @@ def test_the_middleware_is_in_the_lead_runtime_stack() -> None:
 
     middlewares = build_lead_runtime_middlewares(app_config=AppConfig(models=[], sandbox=SandboxConfig(use="test")), lazy_init=True)
     assert any(isinstance(middleware, RuntimeDeliveryMiddleware) for middleware in middlewares)
+
+
+def test_failed_baseline_after_an_interrupt_cannot_reuse_the_interrupted_snapshot(thread_home, monkeypatch):
+    from deerflow.agents.middlewares import runtime_delivery_middleware as module
+
+    middleware, runtime = RuntimeDeliveryMiddleware(), _runtime()
+
+    async def interrupted_then_failed_resume():
+        await middleware.abefore_agent(_state(), runtime)
+        (thread_home / "draft.txt").write_text("draft", encoding="utf-8")
+        original = module.capture_output_snapshot
+
+        async def failed(*args, **kwargs):
+            raise OSError("fixture capture failure")
+
+        monkeypatch.setattr(module, "capture_output_snapshot", failed)
+        await middleware.abefore_agent(_state(), runtime)
+        monkeypatch.setattr(module, "capture_output_snapshot", original)
+        return await middleware.aafter_agent(_state(HumanMessage("resume"), _answer()), runtime)
+
+    assert asyncio.run(interrupted_then_failed_resume()) is None
+    assert RUNTIME_PRESENTED_FILES_CONTEXT_KEY not in runtime.context

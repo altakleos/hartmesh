@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   capacity until the owner confirms worker cleanup. Stop retries are bounded;
   unknown owner retirement survives restarts and may need operator recovery.
 
+### Performance
+
+- Workspace snapshots share a 1 MiB text capture/cache budget while preserving
+  metadata and small-file hashes. Omitted diffs are marked truncated.
+- The first graph invocation reuses its complete, owned output baseline once.
+  Continuation and final scans remain fresh; setup-created outputs can now be
+  handed over. Failed resume captures cannot reuse an interrupted baseline.
+
 ### Schema changes
 
 No database schema changes since `v2.2.0+hartmesh.40`. Scheduled retirement uses

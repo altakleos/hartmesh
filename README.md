@@ -1983,6 +1983,11 @@ that budget retain change metadata and hashes but show an omitted, truncated
 diff. This limit also bounds the text cache; it does not make an otherwise
 complete output listing incomplete or prevent delivery of those files.
 
+The first agent invocation reuses the run's verified output baseline to avoid
+a duplicate filesystem scan. Later invocations and final delivery checks scan
+again. Files created in the run's outputs directory during agent setup can also
+be handed over when the model omits them.
+
 Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership includes tagged tool presentations and explicit runtime handover from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Report cards load a compact display projection while source view, editing, copying and downloads retain the complete report. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names.
 
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.

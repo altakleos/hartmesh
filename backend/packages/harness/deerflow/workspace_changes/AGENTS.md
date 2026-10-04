@@ -22,3 +22,18 @@ file-size, file-count and directory-walk caps. `recorder.py` does filesystem wor
 off the event loop; cancellation drains text scans before removing their cache.
 Preserve that ownership when changing capture or cleanup. Regressions live in
 `backend/tests/test_workspace_changes.py` and the strict blocking-I/O suite.
+
+`handoff.py` offers the worker's complete metadata-only outputs baseline to
+RuntimeDeliveryMiddleware through a private ContextVar capability during the
+first graph stream. Claim/close are atomic and single-use, bound to effective
+owner, thread, run and exact spill exclusions. Reject delegated command scopes
+before claiming; reject partial, cached or non-output evidence. A mismatch
+invalidates the offer. Stream exit closes it before resetting the ContextVar,
+including exceptions/cancellation, so copied child contexts cannot reuse it.
+Never put this capability in runtime config, graph state or public metadata.
+Continuation baselines, middleware after scans and terminal worker scans remain
+fresh. Setup files created after the worker baseline are part of the same
+delivery interval and can now be handed over. `abefore_agent` clears any old
+same-run baseline before capture; failed resumes must not reuse an interrupted
+snapshot. `test_output_snapshot_handoff.py` counts actual scanner traversals
+through a compiled graph and compares receipts with independent capture.
