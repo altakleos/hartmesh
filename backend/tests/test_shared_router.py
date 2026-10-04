@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import threading
 from pathlib import Path
 from uuid import uuid4
@@ -87,6 +88,13 @@ def _thread_output(paths: Paths, user: User, name: str, content: bytes) -> str:
     directory.mkdir(parents=True, exist_ok=True)
     (directory / name).write_bytes(content)
     return f"/mnt/user-data/outputs/{name}"
+
+
+def _shared_disk_entries(root: Path) -> list[Path]:
+    state = root / ".shared-state"
+    if state.exists():
+        assert list(state.iterdir()) == [state / "mutation.lock"], "all removal staging must settle"
+    return [entry for entry in root.iterdir() if entry != state]
 
 
 # ---------- publishing ----------
@@ -448,10 +456,10 @@ async def test_cancelled_publication_settles_bytes_and_record_before_unlocking(p
     root = paths.ensure_shared_dir()
     if record_fails:
         assert records == []
-        assert list(root.iterdir()) == []
+        assert _shared_disk_entries(root) == []
     else:
         assert [record["path"] for record in records] == ["report.txt"]
-        assert list(root.iterdir()) == [root / "report.txt"]
+        assert _shared_disk_entries(root) == [root / "report.txt"]
         assert (root / "report.txt").read_bytes() == b"complete report"
 
 
@@ -468,7 +476,7 @@ async def test_a_record_store_that_cannot_be_read_shares_nothing(paths: Paths, r
         response = client.post("/api/shared/publish", json={"path": source})
         assert response.status_code == 503, response.text
 
-    assert list(paths.ensure_shared_dir().iterdir()) == []
+    assert _shared_disk_entries(paths.ensure_shared_dir()) == []
 
 
 @pytest.mark.anyio
@@ -497,7 +505,7 @@ async def test_a_source_swapped_for_a_link_after_the_preflight_is_refused_not_a_
         response = client.post("/api/shared/publish", json={"path": source})
         assert response.status_code == 400, response.text
 
-    assert list(paths.ensure_shared_dir().iterdir()) == []
+    assert _shared_disk_entries(paths.ensure_shared_dir()) == []
 
 
 # ---------- reading ----------
@@ -540,6 +548,194 @@ async def test_a_file_placed_by_hand_is_listed_without_a_publisher(paths: Paths,
 
 
 # ---------- removing ----------
+
+
+@pytest.mark.anyio
+async def test_stale_removal_cannot_take_a_later_publication(paths: Paths, repo) -> None:
+    client, user = _client(repo)
+    source = _own_file(paths, user, "report.txt", b"owned fixture")
+    with client:
+        first = client.post("/api/shared/publish", json={"path": source}).json()
+        first_id = first["publication_id"]
+        assert client.delete(f"/api/shared/report.txt?expected_publication_id={first_id}").status_code == 200
+        second = client.post("/api/shared/publish", json={"path": source}).json()
+        stale = client.delete(f"/api/shared/report.txt?expected_publication_id={first_id}")
+        assert stale.status_code == 409
+        assert client.get("/api/shared/report.txt").content == b"owned fixture"
+        assert client.get("/api/shared").json()["files"][0]["publication_id"] == second["publication_id"]
+    assert first_id != second["publication_id"]
+
+
+@pytest.mark.anyio
+async def test_failed_removal_restores_bytes_and_live_record(paths: Paths, repo, monkeypatch) -> None:
+    client, user = _client(repo)
+    source = _own_file(paths, user, "report.txt", b"owned fixture")
+
+    async def refuse(*args, **kwargs):
+        raise RuntimeError("synthetic database failure")
+
+    with client:
+        client.post("/api/shared/publish", json={"path": source})
+        monkeypatch.setattr(repo, "record_removal", refuse)
+        assert client.delete("/api/shared/report.txt").status_code == 503
+        assert client.get("/api/shared/report.txt").content == b"owned fixture"
+        assert client.get("/api/shared").json()["files"][0]["can_remove"] is True
+    [record] = await _all_records(repo)
+    assert record["removed_at"] is None
+
+
+@pytest.mark.anyio
+async def test_cancelled_removal_settles_before_unlocking(paths: Paths, repo, monkeypatch) -> None:
+    client, user = _client(repo)
+    source = _own_file(paths, user, "report.txt", b"owned fixture")
+    with client:
+        client.post("/api/shared/publish", json={"path": source})
+    request = Request({"type": "http", "app": client.app, "state": {"user": user}})
+    entered, release = asyncio.Event(), asyncio.Event()
+    real_record = repo.record_removal
+
+    async def blocked(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        return await real_record(*args, **kwargs)
+
+    monkeypatch.setattr(repo, "record_removal", blocked)
+    monkeypatch.setattr(shared_router, "_publish_lock", asyncio.Lock())
+    token = set_current_user(user)
+    task = asyncio.create_task(call_unwrapped(shared_router.remove_shared, "report.txt", request))
+    try:
+        await asyncio.wait_for(entered.wait(), 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        assert shared_router._publish_lock.locked()
+    finally:
+        release.set()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        reset_current_user(token)
+    assert task.cancelled()
+    assert not shared_router._publish_lock.locked()
+    [record] = await _all_records(repo)
+    assert record["removed_at"] is not None
+    assert not (paths.shared_dir() / "report.txt").exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("committed", [False, True])
+async def test_interrupted_removal_recovers_from_publication_outcome(paths: Paths, repo, committed) -> None:
+    from deerflow.files.shared import shared_mutation_state
+
+    client, user = _client(repo)
+    source = _own_file(paths, user, "report.txt", b"owned fixture")
+    with client:
+        published = client.post("/api/shared/publish", json={"path": source}).json()
+    state = shared_mutation_state()
+    state.acquire()
+    try:
+        pending = state.stage(published["path"], published["publication_id"])
+        pending.close()
+        if committed:
+            await repo.record_removal(published["publication_id"], removed_by=str(user.id))
+    finally:
+        state.close()
+    assert not (paths.shared_dir() / "report.txt").exists()
+    with client:
+        listing = client.get("/api/shared")
+    assert listing.status_code == 200
+    if committed:
+        assert listing.json()["files"] == []
+    else:
+        assert listing.json()["files"][0]["publication_id"] == published["publication_id"]
+        assert (paths.shared_dir() / "report.txt").read_bytes() == b"owned fixture"
+    _shared_disk_entries(paths.shared_dir())
+
+
+@pytest.mark.anyio
+async def test_commit_reply_failure_does_not_restore_a_removed_publication(paths: Paths, repo, monkeypatch) -> None:
+    client, user = _client(repo)
+    source = _own_file(paths, user, "report.txt", b"owned fixture")
+    real_record = repo.record_removal
+
+    async def committed_then_failed(*args, **kwargs):
+        await real_record(*args, **kwargs)
+        raise RuntimeError("synthetic lost commit reply")
+
+    with client:
+        client.post("/api/shared/publish", json={"path": source})
+        monkeypatch.setattr(repo, "record_removal", committed_then_failed)
+        assert client.delete("/api/shared/report.txt").status_code == 503
+        assert client.get("/api/shared").json()["files"] == []
+    [record] = await _all_records(repo)
+    assert record["removed_at"] is not None
+    assert _shared_disk_entries(paths.shared_dir()) == []
+
+
+@pytest.mark.anyio
+async def test_recovery_refuses_a_publication_for_another_staged_path(paths: Paths, repo) -> None:
+    from deerflow.files.shared import shared_mutation_state
+
+    client, user = _client(repo)
+    first = _own_file(paths, user, "first.txt", b"first owned fixture")
+    second = _own_file(paths, user, "second.txt", b"second owned fixture")
+    with client:
+        client.post("/api/shared/publish", json={"path": first})
+        other = client.post("/api/shared/publish", json={"path": second}).json()
+        assert client.delete("/api/shared/second.txt").status_code == 200
+    state = shared_mutation_state()
+    state.acquire()
+    try:
+        pending = state.stage("first.txt", other["publication_id"])
+        staging = paths.shared_dir() / ".shared-state" / pending.name
+        pending.close()
+    finally:
+        state.close()
+    with client:
+        assert client.get("/api/shared").status_code == 503
+    assert (staging / "payload").read_bytes() == b"first owned fixture"
+    assert not (paths.shared_dir() / "first.txt").exists()
+
+
+@pytest.mark.anyio
+@pytest.mark.skipif(os.name != "posix", reason="Shared filesystem locking requires POSIX")
+async def test_process_interruption_releases_lock_and_recovers_owned_publication(paths: Paths, repo) -> None:
+    import fcntl
+    import sys
+
+    client, user = _client(repo)
+    source = _own_file(paths, user, "report.txt", b"owned fixture")
+    with client:
+        publication = client.post("/api/shared/publish", json={"path": source}).json()
+    script = """
+import sys
+from pathlib import Path
+from deerflow.files.shared_removals import SharedMutationState
+state = SharedMutationState(Path(sys.argv[1]))
+state.acquire()
+pending = state.stage('report.txt', sys.argv[2])
+print('staged', flush=True)
+sys.stdin.read()
+"""
+    process = await asyncio.create_subprocess_exec(sys.executable, "-c", script, str(paths.shared_dir()), publication["publication_id"], stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+    try:
+        assert await asyncio.wait_for(process.stdout.readline(), 15) == b"staged\n"
+        fd = os.open(paths.shared_dir() / ".shared-state" / "mutation.lock", os.O_RDWR)
+        try:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            os.close(fd)
+    finally:
+        if process.returncode is None:
+            process.kill()
+        await asyncio.wait_for(process.communicate(), 5)
+    with client:
+        listing = client.get("/api/shared")
+        assert listing.status_code == 200
+        assert listing.json()["files"][0]["publication_id"] == publication["publication_id"]
+        assert client.get("/api/shared/report.txt").content == b"owned fixture"
+    _shared_disk_entries(paths.shared_dir())
 
 
 @pytest.mark.anyio
@@ -688,7 +884,7 @@ async def test_a_conversation_with_no_owner_is_not_everyones_to_publish(paths: P
         response = client.post("/api/shared/publish", json={"path": source, "thread_id": thread_id})
 
     assert response.status_code == 404, response.text
-    assert list(paths.ensure_shared_dir().iterdir()) == []
+    assert _shared_disk_entries(paths.ensure_shared_dir()) == []
 
 
 @pytest.mark.anyio
@@ -707,5 +903,5 @@ async def test_a_publication_that_cannot_be_recorded_shares_nothing(paths: Paths
         assert response.status_code == 503, response.text
         assert client.get("/api/shared").json()["files"] == []
 
-    assert list(paths.ensure_shared_dir().iterdir()) == [], "the copy went back out"
+    assert _shared_disk_entries(paths.ensure_shared_dir()) == [], "the copy went back out"
     assert (paths.ensure_user_files_dir(str(user.id)) / "august.pdf").exists(), "the person's own file is untouched"

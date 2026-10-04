@@ -74,6 +74,8 @@ export interface SharedFileInfo {
   from_thread_id: string | null;
   /** Whether the caller may take this one back: its publisher, or an admin. */
   can_remove: boolean;
+  /** Omitted only by older Gateways; null denotes an operator-placed file. */
+  publication_id?: string | null;
 }
 
 export interface SharedFilesListResponse {
@@ -130,8 +132,17 @@ export async function listSharedFiles(): Promise<SharedFilesListResponse> {
   return response.json() as Promise<SharedFilesListResponse>;
 }
 
-export async function removeSharedFile(path: string): Promise<void> {
-  const response = await fetch(urlOfSharedFile(path), { method: "DELETE" });
+export async function removeSharedFile(
+  path: string,
+  publicationId?: string | null,
+): Promise<void> {
+  const precondition =
+    publicationId === undefined
+      ? ""
+      : `?expected_publication_id=${encodeURIComponent(publicationId ?? "")}`;
+  const response = await fetch(`${urlOfSharedFile(path)}${precondition}`, {
+    method: "DELETE",
+  });
   if (!response.ok) {
     throw new SharedRequestError(
       response.status,

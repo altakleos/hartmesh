@@ -38,3 +38,13 @@ staging ownership/mode before writing; the worker owns cleanup. Unsupported
 atomic publication fails closed.
 Shared publication drains copying, its database record and failure rollback as
 one operation under the deduplication lock before propagating cancellation.
+Every Shared access enters `_shared_mutation`: the process mutex and private
+filesystem advisory lock retain ownership through recovery and settlement.
+Delete authorizes the current publication under that lock; optional
+`expected_publication_id` adds stale-client intent fencing (empty means no record).
+Lists and publication responses carry nullable `publication_id`; Files and Undo
+pass it back. Removal journals stage bytes on the same filesystem before updating
+the immutable publication ID. Recovery must match both record ID and path before
+using the persisted removal outcome; ambiguity refuses access and preserves bytes.
+Drain every removal/recovery worker before releasing either lock. Filesystem lock
+semantics on multi-Gateway shared storage still require deployment qualification.

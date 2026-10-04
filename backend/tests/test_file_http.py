@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,6 +14,18 @@ from app.gateway.routers import files, shared
 from app.gateway.routers._file_http import existing_regular_file
 
 pytestmark = [pytest.mark.asyncio, pytest.mark.skipif(os.name != "posix", reason="Descriptor-relative file serving requires POSIX")]
+
+
+@pytest.fixture(autouse=True)
+def isolate_shared_settlement(monkeypatch):
+    """Shared integration tests own settlement; these tests exercise serving only."""
+
+    @asynccontextmanager
+    async def settled(_repo):
+        yield
+
+    monkeypatch.setattr(shared, "_shared_mutation", settled)
+    monkeypatch.setattr(shared, "get_shared_publications_repo", lambda request: None)
 
 
 async def _receive():

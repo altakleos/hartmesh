@@ -39,6 +39,14 @@ Files saved to My Files or Shared become available only after the copy finishes;
 new copies never overwrite existing files. An interrupted Share request finishes
 recording or rolling back its copy before another publication begins.
 
+Shared Remove and Undo carry the publication ID they displayed, so a stale action
+cannot remove a newer publication at the same path. Publishing and removing share
+a filesystem mutation lock. Removals retain bytes in private `.shared-state`
+staging until the publication record settles; the next Shared access recovers an
+interrupted removal from its recorded outcome. An unavailable or inconsistent
+record keeps the bytes staged and returns a retryable error. Preserve this hidden
+directory with Shared storage and its publication database when backing up or restoring.
+
 Editable artifact previews capture at most 2 MiB so their SHA-256 and byte ranges
 describe the same bytes. Larger artifacts stream from one opened file without a
 full-content hash. Workspace change scans also retain directory and file descriptors;

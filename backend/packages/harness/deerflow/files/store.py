@@ -25,8 +25,6 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from deerflow.uploads.manager import claim_unique_filename, normalize_filename
-
 __all__ = [
     "MAX_LISTED_FILES",
     "MAX_PATH_DEPTH",
@@ -89,6 +87,10 @@ def normalize_relative_path(path: str, *, allow_empty: bool = False) -> str:
     listing never shows them, so nothing addressable is invisible. With
     *allow_empty* the empty path names the root, for a folder argument.
     """
+    # The upload package imports the runtime, whose workspace scanner uses
+    # this primitive. Delay filename helpers until this module is complete.
+    from deerflow.uploads.manager import normalize_filename
+
     if "\x00" in path:
         raise StoreError("Path contains a null byte")
     segments = [segment for segment in path.split("/") if segment != ""]
@@ -363,6 +365,8 @@ def _staged_copy(parent_fd: int) -> Iterator[tuple[int, int]]:
 
 def _publish_exclusive(stage_fd: int, parent_fd: int, safe_name: str) -> str:
     """Atomically give a finished copy its next free name, without overwriting."""
+    from deerflow.uploads.manager import claim_unique_filename
+
     seen = set(os.listdir(parent_fd))
     while True:
         candidate = claim_unique_filename(safe_name, seen)
@@ -390,6 +394,8 @@ def copy_into(root: Path, source: Path, *, name: str, folder: str | None, folder
     need: the person's files are written by the sandbox too, the Shared area
     only by the Gateway.
     """
+    from deerflow.uploads.manager import normalize_filename
+
     relative_folder = normalize_relative_path(folder or "", allow_empty=True)
     try:
         safe_name = normalize_filename(name)

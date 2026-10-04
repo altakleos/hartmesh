@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
@@ -33,6 +35,8 @@ from app.gateway.routers._file_http import DescriptorFileResponse, acting_user_i
 from app.gateway.routers.files import _keepable_source
 from deerflow.config.paths import USER_FILES_VIRTUAL_PREFIX, VIRTUAL_PATH_PREFIX
 from deerflow.files import SharedFile, SharedFileError, digest_of, list_shared_files, normalize_relative_path, publish_file, remove_shared_file, resolve_shared_file, resolve_user_file, shared_file_holding
+from deerflow.files.shared import shared_mutation_state
+from deerflow.files.store import SafeFileAccessUnavailable
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.thread_id import validate_thread_id
 
@@ -44,11 +48,46 @@ _CONVERSATION_PREFIXES = (f"{VIRTUAL_PATH_PREFIX}/uploads/", f"{VIRTUAL_PATH_PRE
 
 __all__ = ["router"]
 
-#: One publish at a time per Gateway, from the "is it there already?" check
+#: One mutation at a time per Gateway, from the "is it there already?" check
 #: to the record of the copy: two requests carrying the same bytes at once
 #: (two tabs, a retried request) would otherwise both find nothing and both
 #: copy. Publishing is a person's click, so serialising it costs nothing.
 _publish_lock = asyncio.Lock()
+
+
+async def _recover_removals(repo, state) -> None:
+    for name in await asyncio.to_thread(state.pending_names):
+        pending = await asyncio.to_thread(state.open_removal, name)
+        try:
+            removed = pending.journal is None or pending.journal["removed"]
+            if pending.publication_id is not None:
+                record = await repo.publication(pending.publication_id)
+                if record is None:
+                    raise SharedFileError("Shared removal recovery needs its publication record")
+                if record.get("path") != pending.path:
+                    raise SharedFileError("Shared removal recovery publication does not match its staged path")
+                removed = record.get("removed_at") is not None
+            await asyncio.to_thread(pending.finish if removed else pending.restore)
+        finally:
+            await asyncio.to_thread(pending.close)
+
+
+@asynccontextmanager
+async def _shared_mutation(repo):
+    async with _publish_lock:
+        state = await asyncio.to_thread(shared_mutation_state)
+        try:
+            try:
+                await await_drained(asyncio.to_thread(state.acquire))
+                await await_drained(_recover_removals(repo, state))
+            except SafeFileAccessUnavailable as exc:
+                raise HTTPException(status_code=501, detail=str(exc)) from None
+            except Exception:
+                logger.exception("Shared removal recovery could not settle; mutation refused")
+                raise HTTPException(status_code=503, detail="Shared removal recovery is unavailable; retry after the storage service recovers") from None
+            yield state
+        finally:
+            await await_drained(asyncio.to_thread(state.close))
 
 
 class SharedFileInfo(BaseModel):
@@ -71,6 +110,8 @@ class SharedFileInfo(BaseModel):
     # Whether the caller may take this one out: its publisher, or an admin.
     # Decided here, per caller, so the page never reasons about roles.
     can_remove: bool = False
+    # A stale Remove/Undo must not act on a newer publication of the same path.
+    publication_id: str | None = None
 
     @classmethod
     def of(cls, entry: SharedFile, record: dict | None, *, can_remove: bool = False, publisher: str | None = None) -> SharedFileInfo:
@@ -85,6 +126,7 @@ class SharedFileInfo(BaseModel):
             published_at=None if record is None else record.get("published_at"),
             from_thread_id=None if record is None else record.get("from_thread_id"),
             can_remove=can_remove,
+            publication_id=None if record is None else record["publication_id"],
         )
 
 
@@ -161,8 +203,9 @@ async def list_shared(request: Request) -> SharedFileListResponse:
     repo = get_shared_publications_repo(request)
     user_id = acting_user_id(request)
     admin = await is_admin_user(request)
-    entries, truncated = await asyncio.to_thread(list_shared_files)
-    records = await repo.live_publications()
+    async with _shared_mutation(repo):
+        entries, truncated = await asyncio.to_thread(list_shared_files)
+        records = await repo.live_publications()
     names = await _publisher_names([records.get(entry.path) for entry in entries])
     files = []
     for entry in entries:
@@ -222,7 +265,7 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
         sha256 = await asyncio.to_thread(digest_of, source)
     except SharedFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    async with _publish_lock:
+    async with _shared_mutation(repo):
         try:
             candidates = await repo.live_publications_holding(sha256, folder=folder)
         except Exception:
@@ -282,17 +325,17 @@ async def get_shared_file(path: str, request: Request, download: bool = False) -
     Active content (HTML, XHTML, SVG) is always a download, as the artifact
     route does, so nothing published runs in the application origin.
     """
-    actual = await asyncio.to_thread(_published_file, path)
+    async with _shared_mutation(get_shared_publications_repo(request)):
+        actual = await asyncio.to_thread(_published_file, path)
     return DescriptorFileResponse(actual, download=download)
 
 
 @router.delete("/api/shared/{path:path}", response_model=RemoveSharedFileResponse, summary="Remove One Shared File")
 @require_permission("threads", "delete")
-async def remove_shared(path: str, request: Request) -> RemoveSharedFileResponse:
+async def remove_shared(path: str, request: Request, expected_publication_id: Annotated[str | None, Query(max_length=128)] = None) -> RemoveSharedFileResponse:
     """Take one file out of Shared. The publisher may, and an admin may; the record stays."""
     repo = get_shared_publications_repo(request)
     user_id = acting_user_id(request)
-    await asyncio.to_thread(_published_file, path)
     # The record is keyed by the path the store settled on, not the spelling
     # the caller sent: `/Reports//r.pdf` names the same file as `Reports/r.pdf`
     # and must find the same record, or the publisher is refused their own file
@@ -301,16 +344,45 @@ async def remove_shared(path: str, request: Request) -> RemoveSharedFileResponse
         relative = normalize_relative_path(path)
     except SharedFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
-    record = await repo.live_publication(relative)
-    if not _may_remove(record, user_id=user_id, admin=await is_admin_user(request)):
-        raise HTTPException(status_code=403, detail="Only the person who published this, or an admin, can remove it")
-    try:
-        await asyncio.to_thread(remove_shared_file, relative)
-    except SharedFileError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from None
-    except FileNotFoundError:
-        raise HTTPException(status_code=404, detail=f"File not found: {path}") from None
-    if record is not None:
-        await repo.record_removal(record["publication_id"], removed_by=user_id)
+    async with _shared_mutation(repo) as state:
+
+        async def remove_and_record():
+            await asyncio.to_thread(_published_file, path)
+            try:
+                record = await repo.live_publication(relative)
+            except Exception:
+                raise HTTPException(status_code=503, detail="Could not read the publication record; nothing was removed") from None
+            current_id = "" if record is None else record["publication_id"]
+            if expected_publication_id is not None and expected_publication_id != current_id:
+                raise HTTPException(status_code=409, detail="This Shared publication changed; refresh before removing it")
+            if not _may_remove(record, user_id=user_id, admin=await is_admin_user(request)):
+                raise HTTPException(status_code=403, detail="Only the person who published this, or an admin, can remove it")
+            try:
+                pending = await asyncio.to_thread(state.stage, relative, current_id or None)
+            except FileNotFoundError:
+                raise HTTPException(status_code=404, detail=f"File not found: {path}") from None
+            except Exception:
+                logger.exception("Could not stage the Shared removal")
+                raise HTTPException(status_code=503, detail="Could not prepare the removal; refresh and retry") from None
+            try:
+                if record is not None:
+                    result = await repo.record_removal(current_id, removed_by=user_id)
+                    if result is None:
+                        raise SharedFileError("The publication record changed during removal")
+                else:
+                    await asyncio.to_thread(pending.mark_removed)
+                await asyncio.to_thread(pending.finish)
+            except Exception:
+                logger.exception("Could not settle the Shared removal; recovering its staged bytes")
+                await asyncio.to_thread(pending.close)
+                try:
+                    await _recover_removals(repo, state)
+                except Exception:
+                    logger.exception("Shared removal remains staged for the next recovery attempt")
+                raise HTTPException(status_code=503, detail="Could not complete the removal; refresh to check its outcome") from None
+            finally:
+                await asyncio.to_thread(pending.close)
+
+        await await_drained(remove_and_record())
     logger.info("Removed %s from Shared", relative)
     return RemoveSharedFileResponse(success=True, message=f"Removed {relative}")
