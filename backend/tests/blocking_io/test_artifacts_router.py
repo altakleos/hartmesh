@@ -1,22 +1,9 @@
 """Regression anchor: serving artifacts must not block the event loop.
 
-``get_artifact`` probes the artifact path (``exists`` / ``is_file``), sniffs
-text-ness (``is_text_file_by_content``),
-and extracts ``.skill`` archive members — all blocking filesystem IO. The
-handler offloads each branch's IO via ``asyncio.to_thread``; if any regresses
-back onto the event loop, the strict Blockbuster gate raises ``BlockingError``
-and these tests fail.
-
-Binary (non-text, non-active-content) artifacts still run the same
-``exists`` / ``is_file`` / ``mimetypes.guess_type`` / ``is_text_file_by_content``
-probes as the text branch, offloaded the same way via ``asyncio.to_thread``.
-What differs is the payload: instead of a read, the handler returns a
-``FileResponse`` that defers its own file IO to ASGI response time (streamed
-via ``anyio.open_file`` when the response is actually sent, which this test
-never triggers) — so awaiting ``get_artifact`` itself for a binary artifact
-does no full-file read; ``FileResponse`` streams the bytes at ASGI send
-time, off the loop, which is why the gate has nothing to catch there
-either way.
+Ordinary artifacts open and prepare their headers during ASGI response
+ownership, then serve bytes from that descriptor. These tests send the
+response under the strict Blockbuster gate, covering preparation, hashing,
+reading and close. Skill archive members are extracted in the handler.
 
 The ``@require_permission`` decorator is bypassed via ``__wrapped__`` so the
 anchor exercises the handler's own filesystem IO, not the authz layer. Imports
@@ -58,6 +45,20 @@ async def _seed(tmp_path: Path, monkeypatch, thread_id: str, virtual_path: str) 
     return target
 
 
+async def _serve(response) -> bytes:
+    messages = []
+
+    async def receive():
+        return {"type": "http.disconnect"}
+
+    async def send(message):
+        messages.append(message)
+
+    await response({"type": "http", "method": "GET", "headers": [], "extensions": {}}, receive, send)
+    assert messages[0]["status"] == 200
+    return b"".join(message.get("body", b"") for message in messages)
+
+
 async def test_get_artifact_text_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
     vpath = "mnt/user-data/outputs/notes.txt"
     target = await _seed(tmp_path, monkeypatch, "t1", vpath)
@@ -68,6 +69,7 @@ async def test_get_artifact_text_does_not_block_event_loop(tmp_path: Path, monke
     assert isinstance(resp, FileResponse)
     assert resp.status_code == 200
     assert Path(resp.path) == target
+    assert await _serve(resp) == b"hello world"
     assert resp.headers.get("content-disposition", "").startswith("inline;")
 
 
@@ -79,12 +81,10 @@ async def test_get_artifact_binary_does_not_block_event_loop(tmp_path: Path, mon
 
     resp = await _get_artifact("t1", vpath, request=None, download=False)
 
-    # Binary artifacts are streamed via FileResponse (so browsers can issue
-    # byte-Range requests) instead of being read into memory up front, so the
-    # file bytes are only touched later during ASGI send, never here.
     assert isinstance(resp, FileResponse)
     assert resp.status_code == 200
     assert Path(resp.path) == target
+    assert await _serve(resp) == payload
     assert resp.headers.get("content-disposition", "").startswith("inline;")
 
 

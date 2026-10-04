@@ -533,20 +533,15 @@ async def change_password(request: Request, response: Response, body: ChangePass
         existing = await provider.get_user_by_email(body.new_email)
         if existing and str(existing.id) != str(user.id):
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already in use").model_dump())
-        user.email = body.new_email
-
-    # Update password + bump version
-    user.password_hash = await hash_password_async(body.new_password)
-    user.token_version += 1
-
-    # Clear setup flag if this is the setup flow
-    if user.needs_setup and body.new_email is not None:
-        user.needs_setup = False
-
-    await provider.update_user(user)
+    try:
+        updated = await provider.replace_password(user, await hash_password_async(body.new_password), new_email=body.new_email)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already in use").model_dump()) from exc
+    if updated is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=AuthErrorResponse(code=AuthErrorCode.INVALID_CREDENTIALS, message="Credentials changed during this request. Sign in again before retrying.").model_dump())
 
     # Re-issue cookie with new token_version
-    token = create_access_token(str(user.id), token_version=user.token_version)
+    token = create_access_token(str(updated.id), token_version=updated.token_version)
     _set_session_cookie(response, token, request, remember_me=body.remember_me)
     _set_csrf_cookie(response, request)
 

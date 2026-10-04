@@ -55,8 +55,12 @@ class LocalAuthProvider(AuthProvider):
 
         if needs_rehash(user.password_hash):
             try:
-                user.password_hash = await hash_password_async(password)
-                await self._repo.update_user(user)
+                return await self._repo.rehash_password(
+                    str(user.id),
+                    expected_password_hash=user.password_hash,
+                    expected_token_version=user.token_version,
+                    password_hash=await hash_password_async(password),
+                )
             except Exception:
                 # Rehash is an opportunistic upgrade; a transient DB error must not
                 # prevent an otherwise-valid login from succeeding.
@@ -121,6 +125,17 @@ class LocalAuthProvider(AuthProvider):
     async def update_user(self, user: User) -> User:
         """Update an existing user."""
         return await self._repo.update_user(user)
+
+    async def replace_password(self, user: User, password_hash: str, *, new_email: str | None = None) -> User | None:
+        """Change the credentials verified by this interactive request."""
+        return await self._repo.replace_password(
+            str(user.id),
+            password_hash,
+            expected_password_hash=user.password_hash,
+            expected_token_version=user.token_version,
+            new_email=new_email,
+            needs_setup=False if new_email is not None else None,
+        )
 
     async def get_user_by_email(self, email: str) -> User | None:
         """Get user by email."""

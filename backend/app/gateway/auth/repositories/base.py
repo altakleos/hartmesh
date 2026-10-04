@@ -100,6 +100,34 @@ class UserRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
+    async def rehash_password(self, user_id: str, *, expected_password_hash: str, expected_token_version: int, password_hash: str) -> User | None:
+        """Upgrade only the hash if the verified credentials are still current.
+
+        Return the write's account snapshot, or None for a stale/missing row.
+        Never adopt a later session version by reloading after commit.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def replace_password(
+        self,
+        user_id: str,
+        password_hash: str,
+        *,
+        expected_password_hash: str | None = None,
+        expected_token_version: int | None = None,
+        new_email: str | None = None,
+        needs_setup: bool | None = None,
+    ) -> User | None:
+        """Change credentials and atomically increment the persisted version.
+
+        Interactive changes supply both expectations; operator resets omit
+        them. Return the write's snapshot or None if its conditions no longer
+        match. Preserve unrelated account fields and unchanged email casing.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
     async def count_users(self) -> int:
         """Return total number of registered users."""
         raise NotImplementedError

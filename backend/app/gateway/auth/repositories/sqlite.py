@@ -417,6 +417,51 @@ class SQLiteUserRepository(UserRepository):
             await session.commit()
         return user
 
+    async def rehash_password(self, user_id: str, *, expected_password_hash: str, expected_token_version: int, password_hash: str) -> User | None:
+        stmt = update(UserRow).where(UserRow.id == user_id, UserRow.password_hash == expected_password_hash, UserRow.token_version == expected_token_version).values(password_hash=password_hash).returning(UserRow)
+        async with self._sf() as session:
+            row = (await session.execute(stmt)).scalar_one_or_none()
+            # Materialize RETURNING before commit. A fresh SELECT afterwards
+            # could give a stale password verification a reset's valid version.
+            result = await self._load(session, row)
+            await session.commit()
+            return result
+
+    async def replace_password(
+        self,
+        user_id: str,
+        password_hash: str,
+        *,
+        expected_password_hash: str | None = None,
+        expected_token_version: int | None = None,
+        new_email: str | None = None,
+        needs_setup: bool | None = None,
+    ) -> User | None:
+        stmt = update(UserRow).where(UserRow.id == user_id)
+        if expected_password_hash is not None:
+            stmt = stmt.where(UserRow.password_hash == expected_password_hash)
+        if expected_token_version is not None:
+            stmt = stmt.where(UserRow.token_version == expected_token_version)
+        values = {"password_hash": password_hash, "token_version": UserRow.token_version + 1}
+        if new_email is not None:
+            canonical = _normalize_email(new_email)
+            changed = func.lower(UserRow.email) != canonical
+            values["email"] = case((changed, canonical), else_=UserRow.email)
+            values["email_released_from"] = case((changed, None), else_=UserRow.email_released_from)
+        if needs_setup is not None:
+            values["needs_setup"] = needs_setup
+        async with self._sf() as session:
+            try:
+                row = (await session.execute(stmt.values(**values).returning(UserRow))).scalar_one_or_none()
+                result = await self._load(session, row)
+                await session.commit()
+            except IntegrityError as exc:
+                await session.rollback()
+                if _is_email_violation(exc):
+                    raise ValueError("Email already registered") from exc
+                raise
+            return result
+
     async def count_users(self) -> int:
         stmt = select(func.count()).select_from(UserRow)
         async with self._sf() as session:

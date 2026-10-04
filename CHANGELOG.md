@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixes
+
+- Artifact downloads, skill archives and workspace capture retain the opened
+  file identity through reads. Unsupported filesystem capabilities fail explicitly.
+- Shared removal checks the displayed publication identity, serializes readers
+  and writers across Gateway processes, and recovers interrupted removals using
+  private durable journals. Back up Shared's private state with its database.
+- Local password changes and administrator resets increment the persisted session
+  version atomically. Login hash upgrades preserve newer credentials and account
+  metadata; concurrent password changes return a conflict without a new cookie.
+
+### Schema changes
+
+No database schema changes since `v2.2.0+hartmesh.40`.
+
 ## [2.2.0+hartmesh.40] - 2026-10-03
 
 ### Fixes and improvements
