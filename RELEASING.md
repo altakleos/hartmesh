@@ -89,7 +89,39 @@ from the same tagged source.
    together. Without it the script refuses while any of those lines is a tag:
    between releases the tree carries the previous release's pins, and pinning
    them again would ship the previous release under the new name.
-5. **Tag and push** the pin commit:
+5. **Test the exact candidate application images**, after pushing the pin
+   commit to that branch:
+   ```bash
+   gh workflow run docker-acceptance.yml --repo altakleos/hartmesh --ref <that branch> \
+     -f backend_image=ghcr.io/altakleos/hartmesh-backend@sha256:<backend-digest> \
+     -f frontend_image=ghcr.io/altakleos/hartmesh-frontend@sha256:<frontend-digest>
+   ```
+   Wait for the whole run to complete successfully, including both SQLite and
+   PostgreSQL/Redis. With `crane` and authenticated `gh` available, provide
+   `GH_TOKEN` with repository Actions, packages and attestations read access,
+   then record that run:
+   ```bash
+   python3 scripts/release_artifacts.py record-acceptance \
+     --repository altakleos/hartmesh --version 2.1.0+hartmesh.1 --run-id <run-id>
+   git add deploy/compose/acceptance.json
+   git commit -m "release: record candidate image acceptance"
+   git push origin <that branch>
+   ```
+   Record creation verifies all five candidates and committed Compose pins,
+   then authenticates the completed run and both attempt-specific result
+   artifacts through GitHub. Each result must show the exact backend/frontend
+   digests, matching inspected/running image IDs, the same workflow/harness
+   inputs, and the fixture declarations and identities. The record (schema 1)
+   binds the version, run, attempt and both archive SHA-256 values. An arbitrary
+   local `result.json` or an uncommitted record cannot admit a release.
+
+   If either store fails, fix the cause and rerun **all jobs**, or dispatch a
+   new complete run. A partial-job rerun cannot combine evidence from different
+   attempts. Regenerate and commit the record before tagging. Changes to the
+   workflow, runner, browser test directory, fixtures or test dependency controls
+   require fresh acceptance; changes to image build inputs also require fresh
+   candidates and pins.
+6. **Tag and push** the commit containing the verified record:
    ```bash
    git tag v2.1.0+hartmesh.1
    git push origin v2.1.0+hartmesh.1
@@ -99,14 +131,21 @@ from the same tagged source.
    verified build provenance for this repository's container workflow and a
    source revision whose tracked build inputs match the tagged source. The
    candidate's recorded input fingerprint must match too. The four Compose
-   pins must resolve to those candidate digests. Missing or unverifiable
-   evidence stops publication; there is no rebuild fallback.
+   pins must resolve to those candidate digests. The same preflight re-verifies
+   the committed acceptance record, authenticated run, artifact hashes and
+   exact-image results before publishing aliases for the release commit. Missing, failed,
+   expired or mismatched evidence stops publication; there is no rebuild fallback.
 
    Candidates built before these guards lack the required input evidence and
    cannot be adopted. Build new candidates under an unused version. Once a
    version has a Git tag or GitHub Release, source corrections require a new
    version rather than rebuilding or moving the existing release tag. An
-   unchanged tag's publication can be retried after a transient failure.
+   unchanged tag's publication can be retried after a transient failure while
+   its acceptance artifacts remain available. Candidate result artifacts request
+   90-day retention, subject to repository retention policy and earlier deletion.
+   A tag is immutable: if its artifacts expire or its recorded run is superseded
+   by another attempt, an incomplete release needs a new version and verified
+   record. Refresh the record before tagging; never move a tag to refresh it.
 
    Root release notes and Compose pins may change after the candidate build.
    Changes to image source trees, shipped skills, Dockerfiles, or build controls
@@ -114,15 +153,16 @@ from the same tagged source.
    documentation inside those source trees conservatively. Adoption preserves
    the candidate bytes and their original build revision, and adds the final
    commit's `sha-` lookup tag.
-6. **Record the release**, once the five image jobs have succeeded:
+7. **Record the release**, once the five image jobs have succeeded:
    ```bash
    gh workflow run release-manifest.yaml --repo altakleos/hartmesh -f version=2.1.0+hartmesh.1
    ```
    It checks out the tag, resolves each image, checks every line of
    `deploy/compose/images.txt` against what was published, repeats the candidate
-   provenance and source checks, and requires both release and final-commit
-   image tags to resolve to those verified digests. It attaches
-   `release-manifest.json` to the GitHub Release. The manifest (schema 4)
+   provenance, source and acceptance checks, and requires both release and
+   final-commit image tags to resolve to those verified digests. It attaches
+   `release-manifest.json` and the separate `release-acceptance.json` record
+   to the GitHub Release. The manifest retains schema 4 and
    lists the five images by repository, tag and digest, and the Compose
    profile's `images.txt` with its SHA-256. Verify a downloaded copy offline:
    ```bash
@@ -170,8 +210,10 @@ upload, streamed tools, downloads, Files and Shared, persisted history, account
 export/download/discard, model errors, confirmed deletion and logout against
 real application services. Logs, browser failure evidence and `result.json` go
 to the selected directory. The summary records the store mode, harness commit
-and fixture fingerprint, inspected application image IDs/digests, and actual
-fixture image identities. Each application container's image ID must match its
+and harness fingerprint, inspected/running application image IDs/digests, actual
+fixture image identities and configured references. Results use schema 2 and
+record workflow/run/attempt context when executed in GitHub Actions. Each
+application container's image ID must match its
 recorded image. OCI source revision labels are recorded declarations; this runner
 does not verify build attestations. Source mode separately records the build
 commit and tracked working-tree fingerprint; image mode never labels the harness

@@ -46,6 +46,7 @@ jobs:
       contents: read
       packages: read
       attestations: read
+      actions: read
     outputs:
       candidates: ${{ steps.candidates.outputs.candidates }}
     steps:
@@ -69,7 +70,7 @@ jobs:
       - name: Install crane
         if: github.event_name == 'push'
         uses: imjasonh/setup-crane@feee3b6bb0d4c68370f256a4502498c9227e5c6b # v0.7
-      - name: Verify every candidate before permitting any retag
+      - name: Verify every candidate and image acceptance before permitting any retag
         if: github.event_name == 'push'
         id: candidates
         env:

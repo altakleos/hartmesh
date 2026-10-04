@@ -58,6 +58,15 @@ No database schema changes since `v2.2.0+hartmesh.40`. Scheduled retirement uses
 existing occurrence lease fields; report JSON remains version 1, while internal
 bundle manifests use version 2.
 
+### Release assurance
+
+- Image adoption and release publication now require authenticated acceptance
+  evidence for the exact candidate backend/frontend digests on both SQLite and
+  PostgreSQL/Redis. Missing, failed, expired or mismatched evidence blocks release
+  adoption and publication; operators commit the verified run/artifact record before
+  tagging. Acceptance results use schema 2 and the record schema 1; the release
+  manifest remains schema 4 and gains a separate acceptance record asset.
+
 ## [2.2.0+hartmesh.40] - 2026-10-03
 
 ### Fixes and improvements

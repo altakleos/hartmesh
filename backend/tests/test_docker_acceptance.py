@@ -162,7 +162,7 @@ def test_supplied_images_are_never_built_or_deleted_and_cleanup_is_scoped(tmp_pa
     def fake_inspect(image, **_kwargs):
         if failure == "inspect":
             raise RuntimeError("synthetic inspect failure")
-        return {"requested": image, "image_id": "sha256:" + "c" * 64, "repo_digests": [image], "source_revision": "d" * 40}
+        return {"requested": image, "image_id": "sha256:" + "c" * 64, "repo_digests": [image] if "@" in image else ["fixture@sha256:" + "a" * 64], "source_revision": "d" * 40}
 
     def fake_output(command, **_kwargs):
         if command[:2] == ["git", "rev-parse"]:
@@ -170,8 +170,10 @@ def test_supplied_images_are_never_built_or_deleted_and_cleanup_is_scoped(tmp_pa
         if "port" in command:
             return "127.0.0.1:32100"
         if "ps" in command:
-            return "owned-container"
+            return command[-1] + "-container"
         if command[:2] == ["docker", "inspect"]:
+            if command[3] == "{{.Config.Image}}":
+                return {"provider": "python:3.12-alpine", "nginx": "nginx:alpine", "postgres": "postgres:16-alpine", "redis": "redis:7-alpine"}[command[-1].removesuffix("-container")]
             return "sha256:" + "c" * 64
         raise AssertionError(command)
 
@@ -192,6 +194,8 @@ def test_supplied_images_are_never_built_or_deleted_and_cleanup_is_scoped(tmp_pa
     monkeypatch.setattr(runner.subprocess, "check_output", fake_output)
     monkeypatch.setattr(runner.urllib.request, "urlopen", lambda *_args, **_kwargs: Login())
     monkeypatch.setattr(runner, "snapshot_tracked", lambda *_args: pytest.fail("image mode copied build source"))
+    for name, value in {"GITHUB_REPOSITORY": "altakleos/hartmesh", "GITHUB_RUN_ID": "1234", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": "e" * 40}.items():
+        monkeypatch.setenv(name, value)
     monkeypatch.setattr(sys, "argv", ["docker_acceptance.py", "--artifacts", str(tmp_path), "--backend-image", backend, "--frontend-image", frontend, "--stores", "postgres-redis"])
     assert runner.main() == (0 if failure is None else 1)
     summary = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
@@ -209,6 +213,8 @@ def test_supplied_images_are_never_built_or_deleted_and_cleanup_is_scoped(tmp_pa
         assert summary["images"]["backend"]["requested"] == backend
         assert summary["images"]["frontend"]["requested"] == frontend
         assert summary["images"]["backend"]["source_revision"] == "d" * 40
+        verifier = load(ROOT / "scripts/release_acceptance.py")
+        verifier.validate_result(summary, "postgres-redis", "altakleos/hartmesh", {"id": 1234, "run_attempt": 2, "head_sha": "e" * 40}, summary["harness_sha256"], {"backend": backend, "frontend": frontend})
 
 
 def test_postgres_redis_fixture_is_private_and_used_by_gateway():
@@ -223,3 +229,24 @@ def test_postgres_redis_fixture_is_private_and_used_by_gateway():
     assert gateway["environment"]["ACCEPTANCE_STREAM_BACKEND"] == "redis"
     assert gateway["environment"]["ACCEPTANCE_LOCKOUT_STORE"] == "redis"
     assert all(gateway["depends_on"][name]["condition"] == "service_healthy" for name in ("postgres", "redis"))
+
+
+def test_release_guard_and_runner_cover_the_same_harness_and_fixture_declarations():
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    verifier = load(ROOT / "scripts/release_acceptance.py")
+    assert runner.HARNESS_PATHS == verifier.HARNESS_PATHS
+    base = yaml.safe_load((ROOT / "docker/acceptance/compose.yaml").read_text(encoding="utf-8"))
+    overlay = yaml.safe_load((ROOT / "docker/acceptance/compose.postgres-redis.yaml").read_text(encoding="utf-8"))
+    services = {**base["services"], **overlay["services"]}
+    assert {name: services[name]["image"] for name in verifier.FIXTURES} == verifier.FIXTURES
+
+
+def test_candidate_workflow_artifacts_are_small_retained_and_bound_to_the_attempt():
+    workflow = yaml.safe_load((ROOT / ".github/workflows/docker-acceptance.yml").read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["acceptance"]["steps"]
+    result = next(step for step in steps if step.get("name") == "Upload candidate acceptance result")
+    assert "workflow_dispatch" in result["if"] and "inputs.backend_image" in result["if"] and "inputs.frontend_image" in result["if"]
+    assert result["with"]["name"] == "candidate-acceptance-${{ matrix.stores }}-${{ github.run_attempt }}"
+    assert result["with"]["path"].endswith("/result.json")
+    assert result["with"]["retention-days"] == 90
+    assert result["with"]["if-no-files-found"] == "error"

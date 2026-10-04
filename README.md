@@ -687,6 +687,10 @@ HartMesh release notes describe database schema changes relative to the previous
 release, including upgrade behavior, or explicitly state that there are none.
 See [CHANGELOG.md](CHANGELOG.md) and the
 [HartMesh release procedure](RELEASING.md#hartmesh-distribution-releases).
+New candidate image adoption also requires a successful GitHub Docker acceptance
+run on the exact backend/frontend digests with both SQLite and PostgreSQL/Redis.
+The release includes a separate acceptance record; the image manifest retains
+schema 4. See the release procedure for evidence retention and retry steps.
 
 Run `python3 scripts/docker_acceptance.py --artifacts /tmp/hartmesh-docker-acceptance`
 to build the production Gateway and frontend images and exercise sign-in,
