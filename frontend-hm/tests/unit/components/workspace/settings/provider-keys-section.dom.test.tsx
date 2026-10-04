@@ -8,6 +8,7 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
+import { StrictMode } from "react";
 
 type Role = "admin" | "user";
 let role: Role = "admin";
@@ -71,6 +72,8 @@ function installGateway(
   putError?: GatewayError,
   probe?: () => Promise<Response>,
   putResponse?: Promise<Response>,
+  statusRead?: (current: object, init?: RequestInit) => Promise<Response>,
+  historyRead?: () => Promise<Response>,
 ) {
   const calls: { url: string; init?: RequestInit }[] = [];
   let current = status;
@@ -109,6 +112,7 @@ function installGateway(
         );
       }
       if (url.includes("/api/provider-keys/events")) {
+        if (historyRead) return historyRead();
         return Promise.resolve(
           Response.json({
             events: [
@@ -176,7 +180,9 @@ function installGateway(
         );
       }
       if (url.endsWith("/api/provider-keys")) {
-        return Promise.resolve(Response.json(current));
+        return (
+          statusRead?.(current, init) ?? Promise.resolve(Response.json(current))
+        );
       }
       return Promise.resolve(new Response(null, { status: 404 }));
     },
@@ -204,7 +210,7 @@ function ModelObserver() {
     </output>
   );
 }
-function renderPage(observeModels = false) {
+function renderPage(observeModels = false, strict = false) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -221,7 +227,7 @@ function renderPage(observeModels = false) {
       </FileActionLifetimeProvider>
     </QueryClientProvider>
   );
-  const rendered = render(tree());
+  const rendered = render(strict ? <StrictMode>{tree()}</StrictMode> : tree());
   return {
     ...rendered,
     queryClient,
@@ -232,6 +238,7 @@ function renderPage(observeModels = false) {
 afterEach(() => {
   rs.restoreAllMocks();
   cleanup();
+  rs.useRealTimers();
   clients.splice(0).forEach((client) => client.clear());
   role = "admin";
 });
@@ -423,7 +430,7 @@ describe("provider keys in the account settings", () => {
         ),
       ).toBe(true),
     );
-    expect(screen.queryByText(copy.title)).toBeNull();
+    await waitFor(() => expect(screen.queryByText(copy.title)).toBeNull());
   });
 
   it("is not offered to someone who is not an administrator", async () => {
@@ -671,4 +678,437 @@ it("aborts an in-flight models query when its owning cache is cleared", async ()
   });
   expect(window.location.href).toBe(previousLocation);
   expect(calls.filter((call) => call.url === "pending-models")).toHaveLength(1);
+});
+
+const recoveryCopy = {
+  loading: "Checking provider keys…",
+  failed: "Provider keys could not be checked. Try again.",
+  retry: "Retry",
+};
+
+describe("recoverable provider status", () => {
+  it("shows loading until the status arrives, including StrictMode replay", async () => {
+    const response = deferred<Response>();
+    installGateway(
+      MANAGED,
+      undefined,
+      undefined,
+      undefined,
+      () => response.promise,
+    );
+    renderPage(false, true);
+    expect(screen.getByText(copy.title)).toBeTruthy();
+    expect(screen.getByText(recoveryCopy.loading)).toBeTruthy();
+    expect(screen.queryByTestId("provider-key-openai")).toBeNull();
+    await act(async () => response.resolve(Response.json(MANAGED)));
+    expect(await screen.findByTestId("provider-key-openai")).toBeTruthy();
+    expect(screen.queryByText(recoveryCopy.loading)).toBeNull();
+  });
+
+  it.each(["503", "network", "invalid JSON", "invalid status"])(
+    "offers Retry after %s without displaying response details",
+    async (failure) => {
+      let reads = 0;
+      installGateway(
+        MANAGED,
+        undefined,
+        undefined,
+        undefined,
+        async (current) => {
+          if (++reads > 1) return Response.json(current);
+          if (failure === "network") throw new Error(KEY);
+          if (failure === "invalid JSON") return new Response(KEY);
+          if (failure === "invalid status")
+            return Response.json({ available: true, providers: KEY });
+          return new Response(KEY, { status: 503 });
+        },
+      );
+      renderPage();
+      expect(await screen.findByText(recoveryCopy.failed)).toBeTruthy();
+      expect(document.body.textContent).not.toContain(KEY);
+      fireEvent.click(screen.getByRole("button", { name: recoveryCopy.retry }));
+      expect(await screen.findByTestId("provider-key-openai")).toBeTruthy();
+      expect(screen.queryByText(recoveryCopy.failed)).toBeNull();
+      expect(reads).toBe(2);
+    },
+  );
+
+  it("keeps known rows after a failed post-save refresh, then retries to current metadata", async () => {
+    let reads = 0;
+    const calls = installGateway(
+      MANAGED,
+      undefined,
+      undefined,
+      undefined,
+      async (current) => {
+        return ++reads === 2
+          ? new Response(null, { status: 503 })
+          : Response.json(current);
+      },
+    );
+    renderPage(true);
+    await editKey();
+    fireEvent.click(screen.getByRole("button", { name: copy.save }));
+    await screen.findByText(recoveryCopy.failed);
+    expect(screen.getByTestId("provider-key-openai")).toBeTruthy();
+    expect(screen.getByTestId("provider-key-anthropic").textContent).toContain(
+      copy.sourceNone,
+    );
+    expect(
+      screen.getByText(copy.saved.replace("{provider}", "Anthropic")),
+    ).toBeTruthy();
+    expect(
+      screen.queryByLabelText(copy.keyLabel.replace("{provider}", "Anthropic")),
+    ).toBeNull();
+    expect(
+      screen
+        .getAllByRole<HTMLButtonElement>("button", { name: copy.set })
+        .every((button) => button.disabled),
+    ).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: recoveryCopy.retry }));
+    await waitFor(() =>
+      expect(
+        screen.getByTestId("provider-key-anthropic").textContent,
+      ).toContain(copy.sourceProduct),
+    );
+    expect(calls.filter((call) => call.init?.method === "PUT")).toHaveLength(1);
+    expect(screen.queryByText(recoveryCopy.failed)).toBeNull();
+  });
+
+  it("keeps status usable when optional change-history cannot be read", async () => {
+    installGateway(
+      MANAGED,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () => {
+        throw new Error(KEY);
+      },
+    );
+    renderPage();
+    expect(await screen.findByTestId("provider-key-openai")).toBeTruthy();
+    await editKey();
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: copy.save })
+        .disabled,
+    ).toBe(false);
+    expect(screen.queryByText(recoveryCopy.failed)).toBeNull();
+    expect(document.body.textContent).not.toContain(KEY);
+  });
+
+  it("keeps a typed draft through a failed refresh after removing another key", async () => {
+    let reads = 0;
+    installGateway(
+      {
+        ...MANAGED,
+        providers: [
+          provider("openai", "OPENAI_API_KEY", "models", "product", "set"),
+          provider("anthropic", "ANTHROPIC_API_KEY", "models", "none"),
+        ],
+      },
+      undefined,
+      undefined,
+      undefined,
+      async (current) =>
+        ++reads === 2
+          ? new Response(null, { status: 503 })
+          : Response.json(current),
+    );
+    rs.spyOn(window, "confirm").mockReturnValue(true);
+    renderPage();
+    const input = await editKey();
+    fireEvent.click(screen.getByRole("button", { name: copy.remove }));
+    await screen.findByText(recoveryCopy.failed);
+    expect(input.value).toBe(KEY);
+    expect(input.disabled).toBe(true);
+    fireEvent.click(screen.getByRole("button", { name: recoveryCopy.retry }));
+    await waitFor(() => expect(input.disabled).toBe(false));
+    expect(input.value).toBe(KEY);
+  });
+
+  it("hides a deployment that explicitly answers unmanaged after a retry", async () => {
+    let reads = 0;
+    installGateway(MANAGED, undefined, undefined, undefined, async () =>
+      ++reads === 1
+        ? new Response(null, { status: 503 })
+        : Response.json({
+            available: false,
+            refusal: { code: "not_available", message: "not here" },
+            providers: [],
+          }),
+    );
+    renderPage();
+    await screen.findByText(recoveryCopy.failed);
+    fireEvent.click(screen.getByRole("button", { name: recoveryCopy.retry }));
+    await waitFor(() => expect(screen.queryByText(copy.title)).toBeNull());
+  });
+
+  it.each(["operator_model_file", "no_wrapping_key"])(
+    "preserves a draft but refuses stale Save/Test when Retry reports %s",
+    async (code) => {
+      let reads = 0;
+      const calls = installGateway(
+        {
+          ...MANAGED,
+          providers: [
+            provider("openai", "OPENAI_API_KEY", "models", "product", "set"),
+            provider("anthropic", "ANTHROPIC_API_KEY", "models", "none"),
+          ],
+        },
+        undefined,
+        undefined,
+        undefined,
+        async (current) => {
+          ++reads;
+          if (reads === 2) return new Response(null, { status: 503 });
+          return Response.json(
+            reads > 2
+              ? { ...current, refusal: { code, message: "setup changed" } }
+              : current,
+          );
+        },
+      );
+      rs.spyOn(window, "confirm").mockReturnValue(true);
+      renderPage();
+      const input = await editKey();
+      fireEvent.click(screen.getByRole("button", { name: copy.remove }));
+      await screen.findByText(recoveryCopy.failed);
+      fireEvent.click(screen.getByRole("button", { name: recoveryCopy.retry }));
+      await waitFor(() =>
+        expect(screen.queryByText(recoveryCopy.loading)).toBeNull(),
+      );
+      expect(input.value).toBe(KEY);
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", { name: copy.save })
+          .disabled,
+      ).toBe(true);
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", { name: copy.test })
+          .disabled,
+      ).toBe(true);
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", { name: copy.cancel })
+          .disabled,
+      ).toBe(false);
+      fireEvent.submit(input.closest("form")!);
+      expect(calls.some((call) => call.init?.method === "PUT")).toBe(false);
+      expect(calls.some((call) => call.url.endsWith("/test"))).toBe(false);
+    },
+  );
+
+  it.each(["transport", "body"])(
+    "settles a stalled %s even if it ignores abort, and fences its late response",
+    async (stall) => {
+      rs.useFakeTimers();
+      const response = deferred<Response>();
+      const body = deferred<object>();
+      let reads = 0;
+      const calls = installGateway(
+        MANAGED,
+        undefined,
+        undefined,
+        undefined,
+        async () => {
+          if (++reads > 1) return Response.json({ ...MANAGED, providers: [] });
+          return stall === "transport"
+            ? response.promise
+            : ({ ok: true, json: () => body.promise } as unknown as Response);
+        },
+      );
+      renderPage();
+      await act(async () => {
+        await rs.advanceTimersByTimeAsync(10_000);
+      });
+      expect(screen.getByText(recoveryCopy.failed)).toBeTruthy();
+      await act(async () => {
+        fireEvent.click(
+          screen.getByRole("button", { name: recoveryCopy.retry }),
+        );
+      });
+      expect(screen.queryByText(recoveryCopy.failed)).toBeNull();
+      const before = calls.length;
+      await act(async () => {
+        response.resolve(Response.json(MANAGED));
+        body.resolve(MANAGED);
+      });
+      expect(calls).toHaveLength(before);
+      expect(screen.queryByTestId("provider-key-openai")).toBeNull();
+    },
+  );
+
+  it("does not make a successful status depend on a stalled history body", async () => {
+    rs.useFakeTimers();
+    const body = deferred<object>();
+    installGateway(
+      MANAGED,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      async () =>
+        ({ ok: true, json: () => body.promise }) as unknown as Response,
+    );
+    renderPage();
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByTestId("provider-key-openai")).toBeTruthy();
+    expect(screen.queryByText(recoveryCopy.loading)).toBeNull();
+    fireEvent.click(
+      screen.getByTestId("provider-key-anthropic").querySelector("button")!,
+    );
+    fireEvent.change(
+      screen.getByLabelText(copy.keyLabel.replace("{provider}", "Anthropic")),
+      { target: { value: KEY } },
+    );
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.queryByText(recoveryCopy.failed)).toBeNull();
+    expect(
+      screen.getByRole<HTMLButtonElement>("button", { name: copy.save })
+        .disabled,
+    ).toBe(false);
+    await act(async () =>
+      body.resolve({
+        events: [
+          {
+            event_id: "late",
+            variable: "ANTHROPIC_API_KEY",
+            action: "added",
+            actor_email: KEY,
+            actor_id: "u-1",
+            occurred_at: "2026-09-23T10:00:00+00:00",
+          },
+        ],
+      }),
+    );
+    expect(document.body.textContent).not.toContain(KEY);
+  });
+
+  it("retires a retried status response with its account and starts the next account empty", async () => {
+    const response = deferred<Response>();
+    let reads = 0;
+    const calls = installGateway(
+      MANAGED,
+      undefined,
+      undefined,
+      undefined,
+      async (current) => {
+        ++reads;
+        if (reads === 1) return new Response(null, { status: 503 });
+        if (reads === 2) return response.promise;
+        return Response.json({ ...current, providers: [] });
+      },
+    );
+    const first = renderPage();
+    await screen.findByText(recoveryCopy.failed);
+    fireEvent.click(screen.getByRole("button", { name: recoveryCopy.retry }));
+    first.unmount();
+    expect(
+      calls.filter((call) => call.url.endsWith("/api/provider-keys"))[1]?.init
+        ?.signal?.aborted,
+    ).toBe(true);
+    renderPage();
+    await waitFor(() =>
+      expect(screen.queryByText(recoveryCopy.loading)).toBeNull(),
+    );
+    const before = calls.length;
+    const previousLocation = window.location.href;
+    await act(async () =>
+      response.resolve(new Response(null, { status: 401 })),
+    );
+    expect(calls).toHaveLength(before);
+    expect(window.location.href).toBe(previousLocation);
+    expect(screen.queryByTestId("provider-key-openai")).toBeNull();
+  });
+
+  it("retires a response body before it can install rows or request history", async () => {
+    const body = deferred<object>();
+    const json = rs.fn(() => body.promise);
+    const calls = installGateway(
+      MANAGED,
+      undefined,
+      undefined,
+      undefined,
+      async () => ({ ok: true, json }) as unknown as Response,
+    );
+    const { unmount } = renderPage();
+    await waitFor(() => expect(json).toHaveBeenCalledTimes(1));
+    unmount();
+    await act(async () => body.resolve(MANAGED));
+    expect(
+      calls.some((call) => call.url.includes("/provider-keys/events")),
+    ).toBe(false);
+  });
+
+  it("times out a stalled status request and can retry", async () => {
+    rs.useFakeTimers();
+    let reads = 0;
+    const calls = installGateway(
+      MANAGED,
+      undefined,
+      undefined,
+      undefined,
+      (current, init) => {
+        if (++reads > 1) return Promise.resolve(Response.json(current));
+        return new Promise((_resolve, reject) =>
+          init?.signal?.addEventListener(
+            "abort",
+            () => reject(new DOMException("Aborted", "AbortError")),
+            { once: true },
+          ),
+        );
+      },
+    );
+    renderPage();
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(10_000);
+    });
+    expect(screen.getByText(recoveryCopy.failed)).toBeTruthy();
+    expect(
+      calls.find((call) => call.url.endsWith("/api/provider-keys"))?.init
+        ?.signal?.aborted,
+    ).toBe(true);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: recoveryCopy.retry }));
+    });
+    expect(screen.getByTestId("provider-key-openai")).toBeTruthy();
+    expect(screen.queryByText(recoveryCopy.failed)).toBeNull();
+  });
+});
+
+it("explains unsupported tool tests before editing and still allows saving without a probe", async () => {
+  const calls = installGateway(MANAGED);
+  renderPage();
+  const tavily = await screen.findByTestId("provider-key-tavily");
+  expect(tavily.textContent).toContain(copy.testNotTestable);
+  await editKey("tavily", "Tavily");
+  expect(screen.queryByRole("button", { name: copy.test })).toBeNull();
+  expect(
+    screen.getByRole<HTMLButtonElement>("button", { name: copy.save }).disabled,
+  ).toBe(false);
+  expect(calls.some((call) => call.url.endsWith("/test"))).toBe(false);
+});
+
+it.each([
+  [
+    "timeout",
+    "The provider did not answer in time. Try again or save the key anyway.",
+  ],
+  [
+    "http_429",
+    "The provider is limiting requests. Wait a little, then retry, or save the key anyway.",
+  ],
+  [KEY, copy.testInconclusive],
+])("uses only fixed probe reason hints: %s", async (reason, message) => {
+  installGateway(MANAGED, undefined, async () =>
+    Response.json({ result: "inconclusive", reason, model: KEY }),
+  );
+  renderPage();
+  await editKey();
+  fireEvent.click(screen.getByRole("button", { name: copy.test }));
+  expect(await screen.findByText(message)).toBeTruthy();
+  expect(document.body.textContent).not.toContain(KEY);
 });

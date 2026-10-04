@@ -74,9 +74,11 @@ Administrators managing provider keys in **Settings → Account** can choose
 without saving the key; it reports acceptance, rejection or an inconclusive
 result. Search and page-reading keys cannot be tested here. Testing is optional
 and may incur provider charges. Saving or removing a key refreshes the model
-list. If the selected model disappears, chat selects the agent's available
-default or the first available model; an empty list keeps the draft and prevents
-sending until a model is available.
+list. A failed status check keeps known providers visible and offers **Retry**;
+key changes pause until the check succeeds. Search and page-reading rows explain
+their unsupported test before editing. If the selected model disappears, chat
+selects the agent's available default or the first available model; an empty list
+keeps the draft and prevents sending until a model is available.
 
 Deleting a conversation from its sidebar menu asks for confirmation before
 removing its messages and workspace files. A failed deletion keeps the dialog

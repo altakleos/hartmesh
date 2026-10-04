@@ -1218,6 +1218,9 @@ export interface Translations {
     providerKeys: {
       title: string;
       description: string;
+      loading: string;
+      loadError: string;
+      retry: string;
       groupModels: string;
       groupTools: string;
       sourceProduct: string;
@@ -1246,6 +1249,8 @@ export interface Translations {
       testAccepted: string;
       testRejected: string;
       testInconclusive: string;
+      testTimeout: string;
+      testRateLimited: string;
       testNotTestable: string;
       testError: string;
       saved: string;
