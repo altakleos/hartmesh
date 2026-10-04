@@ -20,12 +20,18 @@ Keep that projection explicit and serialized through the API channel serializer;
 do not expose internal sandbox state. Empty lists are meaningful, while absent
 or null goals are omitted to preserve the frontend's local override semantics.
 
-Files and Shared must stream from one safely opened descriptor, including MIME
+Artifacts, Files and Shared must stream from one safely opened descriptor, including MIME
 sniffing, response metadata and range reads. Preflight paths only determine HTTP
 errors; they must never become permission to reopen a path through symlinked
 parents. Use `deerflow.files.store.open_regular_source` for source reads/copies,
 and retain ownership until every offloaded operation has drained on cancellation.
 Conversation keep/publish sources remain lexical paths within uploads/outputs.
+Artifact reads use `resolve_thread_read_path`; never resolve away link segments
+before no-follow opens. Small editable artifacts capture bounded immutable bytes
+for SHA-256/ranges; large artifacts stay descriptor-streamed without content hashing.
+Skill archive detection/extraction shares one source descriptor and drains off-loop.
+`SafeFileAccessUnavailable` means HTTP 501 for descriptor reads and archives;
+never turn an unsupported host into a missing/invalid/changed file.
 `files.store.copy_into` uses private hidden staging and descriptor-relative
 exclusive hard links: no placeholders or overwrites of racing names. Verify
 staging ownership/mode before writing; the worker owns cleanup. Unsupported

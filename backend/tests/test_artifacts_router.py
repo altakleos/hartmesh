@@ -37,6 +37,20 @@ def _make_request(query_string: bytes = b"") -> Request:
     return Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": query_string})
 
 
+async def _serve_artifact(endpoint, thread_id, path, request):
+    response = await call_unwrapped(endpoint, thread_id, path, request)
+    if isinstance(response, FileResponse):
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(_message):
+            pass
+
+        await response(request.scope, receive, send)
+    return response
+
+
 def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "note.txt"
     text = "Curly quotes: \u201cutf8\u201d"
@@ -670,7 +684,7 @@ def test_get_artifact_forces_download_for_active_content(tmp_path, monkeypatch, 
 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
 
-    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", f"mnt/user-data/outputs/{filename}", _make_request()))
+    response = asyncio.run(_serve_artifact(artifacts_router.get_artifact, "thread-1", f"mnt/user-data/outputs/{filename}", _make_request()))
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
@@ -712,7 +726,7 @@ def test_get_artifact_forces_download_for_any_xml_subtype(tmp_path, monkeypatch,
         path = "mnt/user-data/outputs/feed.rss"
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
 
-    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", path, _make_request()))
+    response = asyncio.run(_serve_artifact(artifacts_router.get_artifact, "thread-1", path, _make_request()))
 
     assert response.headers.get("content-disposition", "").startswith("attachment;")
 
@@ -796,7 +810,7 @@ def test_get_artifact_binary_preview_is_inline_file_response(tmp_path, monkeypat
 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path, user_id=None: artifact_path)
 
-    response = asyncio.run(call_unwrapped(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/clip.mp3", _make_request()))
+    response = asyncio.run(_serve_artifact(artifacts_router.get_artifact, "thread-1", "mnt/user-data/outputs/clip.mp3", _make_request()))
 
     assert isinstance(response, FileResponse)
     assert response.media_type == "audio/mpeg"
@@ -994,7 +1008,7 @@ def test_get_artifact_large_active_content_skips_etag(tmp_path, monkeypatch) -> 
     )
 
     response = asyncio.run(
-        call_unwrapped(
+        _serve_artifact(
             artifacts_router.get_artifact,
             "thread-1",
             "mnt/user-data/outputs/large.html",
@@ -1004,4 +1018,4 @@ def test_get_artifact_large_active_content_skips_etag(tmp_path, monkeypatch) -> 
 
     assert isinstance(response, FileResponse)
     assert response.headers.get("content-disposition", "").startswith("attachment;")
-    assert response.headers.get("etag") is None
+    assert len(response.headers["etag"].strip('"')) != 64

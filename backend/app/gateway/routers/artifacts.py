@@ -1,5 +1,4 @@
 import asyncio
-import functools
 import hashlib
 import logging
 import mimetypes
@@ -10,24 +9,27 @@ import zipfile
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
-from urllib.parse import quote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from app.gateway.authz import SandboxRequestLease, require_permission, try_acquire_sandbox_for_request
 from app.gateway.deps import get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
-from app.gateway.path_utils import normalize_outputs_virtual_path, resolve_outputs_confined_path, resolve_thread_virtual_path
+from app.gateway.path_utils import normalize_outputs_virtual_path, resolve_outputs_confined_path
+from app.gateway.path_utils import resolve_thread_read_path as resolve_thread_virtual_path
+from app.gateway.routers._file_headers import _build_content_disposition
+from app.gateway.routers._file_http import DescriptorFileResponse
 from app.gateway.routers._report_projection import report_projection
 from deerflow.authz.sandbox_authz import safe_app_config
 from deerflow.config.paths import make_safe_user_id
+from deerflow.files.store import SafeFileAccessUnavailable, StoreError, open_regular_source
 from deerflow.runtime import ConflictError, ThreadOperationKind
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.utils.file_io import await_drained
-from deerflow.utils.text_detection import _is_active_content_mime_type, is_text_file_by_content
+from deerflow.utils.text_detection import _is_active_content_mime_type
 from deerflow.utils.thread_id import ThreadId
 
 logger = logging.getLogger(__name__)
@@ -137,10 +139,6 @@ def _replace_artifact_atomically(actual_path: Path, content: bytes, file_stat: o
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temp_path, actual_path)
-        # Invalidate the SHA-256 cache after a successful edit so the next
-        # preview request computes the new digest. Edits are rare, so
-        # clearing the whole 256-entry LRU costs nothing (see PR review).
-        _sha256_of_file_cached.cache_clear()
     finally:
         if temp_fd >= 0:
             os.close(temp_fd)
@@ -180,11 +178,6 @@ async def _commit_artifact_update(
             except Exception:
                 logger.exception("Failed to roll back remote artifact after artifact update failure: %s", virtual_path)
         raise
-
-
-def _build_content_disposition(disposition_type: str, filename: str) -> str:
-    """Build an RFC 5987 encoded Content-Disposition header value."""
-    return f"{disposition_type}; filename*=UTF-8''{quote(filename)}"
 
 
 def _build_attachment_headers(filename: str, extra_headers: dict[str, str] | None = None) -> dict[str, str]:
@@ -267,27 +260,41 @@ def _extract_file_from_skill_archive(zip_path: Path, internal_path: str) -> byte
     Returns:
         The file content as bytes, or None if not found.
     """
-    if not zipfile.is_zipfile(zip_path):
-        return None
-
     try:
-        with zipfile.ZipFile(zip_path, "r") as zip_ref:
-            # List all files in the archive
-            infos_by_name = {info.filename: info for info in zip_ref.infolist()}
+        source = os.fdopen(open_regular_source(zip_path), "rb")
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail="Skill archive not found") from None
+    except SafeFileAccessUnavailable as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from None
+    except StoreError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from None
+    with source:
+        if not zipfile.is_zipfile(source):
+            return None
+        source.seek(0)
+        try:
+            with zipfile.ZipFile(source, "r") as zip_ref:
+                return _extract_open_skill_member(zip_ref, internal_path)
+        except (zipfile.BadZipFile, KeyError):
+            return None
 
-            # Try direct path first
-            if internal_path in infos_by_name:
-                return _read_skill_archive_member(zip_ref, infos_by_name[internal_path])
 
-            # Try with any top-level directory prefix (e.g., "skill-name/SKILL.md")
-            for name, info in infos_by_name.items():
-                if name.endswith("/" + internal_path) or name == internal_path:
-                    return _read_skill_archive_member(zip_ref, info)
+def _extract_open_skill_member(zip_ref: zipfile.ZipFile, internal_path: str) -> bytes | None:
+    """Extract from an already opened, descriptor-owned archive."""
+    # List all files in the archive
+    infos_by_name = {info.filename: info for info in zip_ref.infolist()}
+
+    # Try direct path first
+    if internal_path in infos_by_name:
+        return _read_skill_archive_member(zip_ref, infos_by_name[internal_path])
+
+        # Try with any top-level directory prefix (e.g., "skill-name/SKILL.md")
+    for name, info in infos_by_name.items():
+        if name.endswith("/" + internal_path) or name == internal_path:
+            return _read_skill_archive_member(zip_ref, info)
 
             # Not found
-            return None
-    except (zipfile.BadZipFile, KeyError):
-        return None
+    return None
 
 
 def _load_skill_archive_member(actual_skill_path: Path, skill_file_path: str, internal_path: str) -> tuple[bytes, str | None]:
@@ -308,56 +315,6 @@ def _load_skill_archive_member(actual_skill_path: Path, skill_file_path: str, in
         raise HTTPException(status_code=404, detail=f"File '{internal_path}' not found in skill archive")
     mime_type, _ = mimetypes.guess_type(internal_path)
     return content, mime_type
-
-
-def _read_artifact_payload(actual_path: Path, path: str, download: bool) -> tuple[str, str | None]:
-    """Worker-thread body for the regular branch of ``get_artifact``.
-
-    Stat probes and MIME sniffing (``mimetypes`` lazily stats the system MIME
-    database on first use) are blocking filesystem IO. Returns a
-    ``(kind, mime_type)`` plan the handler turns into a streamed
-    ``FileResponse``. Inline text and binary previews both use FileResponse so
-    clients can request a bounded byte range instead of buffering a whole file.
-    """
-    if not actual_path.exists():
-        raise HTTPException(status_code=404, detail=f"Artifact not found: {path}")
-    if not actual_path.is_file():
-        raise HTTPException(status_code=400, detail=f"Path is not a file: {path}")
-    mime_type, _ = mimetypes.guess_type(actual_path)
-    # Active content / explicit download is streamed by FileResponse — no read here.
-    if download or _is_active_content_mime_type(mime_type):
-        return ("file", mime_type)
-    if mime_type and mime_type.startswith("text/"):
-        return ("inline_file", mime_type)
-    if is_text_file_by_content(actual_path):
-        return ("inline_file", mime_type or "text/plain")
-    return ("inline_file", mime_type)
-
-
-def _sha256_of_file(path: Path) -> str:
-    """Return the hex SHA-256 digest of *path* without loading it whole.
-
-    Computing the digest on the Gateway lets the browser skip its own
-    crypto.subtle-based hashing, which is unavailable in non-secure contexts
-    (e.g. http://<lan-ip>:<port>) and otherwise breaks artifact preview +
-    inline editing (see issue #4864).
-
-    The digest is cached by (path, mtime_ns, size) so the many small ``Range``
-    requests a browser issues while scrubbing/paginating a preview do not each
-    re-hash a potentially huge artifact from scratch (raised in PR review).
-    """
-    stat = path.stat()
-    return _sha256_of_file_cached(str(path), stat.st_mtime_ns, stat.st_size)
-
-
-@functools.lru_cache(maxsize=256)
-def _sha256_of_file_cached(path: str, mtime_ns: int, size: int) -> str:
-    """Cached SHA-256 of *path*; the size/mtime args invalidate stale entries."""
-    digest = hashlib.sha256()
-    with open(path, "rb") as handle:
-        for chunk in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
 
 
 @router.get(
@@ -423,7 +380,7 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         actual_skill_path = await asyncio.to_thread(resolve_thread_virtual_path, thread_id, skill_file_path, user_id=owner_user_id)
 
         # Offload the stat probes + ZIP open/extract + MIME sniff (blocking filesystem IO).
-        content, mime_type = await asyncio.to_thread(_load_skill_archive_member, actual_skill_path, skill_file_path, internal_path)
+        content, mime_type = await await_drained(asyncio.to_thread(_load_skill_archive_member, actual_skill_path, skill_file_path, internal_path))
 
         # Add cache headers to avoid repeated ZIP extraction (cache for 5 minutes)
         cache_headers = {"Cache-Control": "private, max-age=300"}
@@ -465,48 +422,10 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
 
     logger.info(f"Resolving artifact path: thread_id={thread_id}, requested_path={path}, actual_path={actual_path}")
 
-    # Offload path stat + MIME sniff (blocking filesystem IO). Every regular
-    # artifact response is streamed by FileResponse; the worker only reports
-    # disposition and media type.
-    kind, mime_type = await asyncio.to_thread(_read_artifact_payload, actual_path, path, download)
-
-    if kind == "file":
-        # Always force download for active content types to prevent script
-        # execution in the application origin when users open generated artifacts.
-        headers = {**_build_attachment_headers(actual_path.name)}
-        file_size = await asyncio.to_thread(lambda: actual_path.stat().st_size)
-        if file_size <= MAX_EDITABLE_ARTIFACT_BYTES:
-            # Real SHA-256 so the browser can skip crypto.subtle (unavailable
-            # on non-secure contexts) when previewing / editing artifacts (#4864).
-            # Skipped for oversized artifacts to avoid a full-file read on every
-            # GET / Range request (raised in review as a performance P1).
-            content_sha256 = await asyncio.to_thread(_sha256_of_file, actual_path)
-            headers["ETag"] = f'"{content_sha256}"'
-        return FileResponse(
-            path=actual_path,
-            filename=actual_path.name,
-            media_type=mime_type,
-            headers=headers,
-        )
-
-    if kind == "inline_file":
-        # FileResponse honors byte-Range requests for large text previews and
-        headers = {"Content-Disposition": _build_content_disposition("inline", actual_path.name), "X-Content-Type-Options": "nosniff"}
-        file_size = await asyncio.to_thread(lambda: actual_path.stat().st_size)
-        if file_size <= MAX_EDITABLE_ARTIFACT_BYTES:
-            # Real SHA-256 so the browser can skip crypto.subtle (unavailable
-            # on non-secure contexts) when previewing / editing artifacts (#4864).
-            # Skipped for oversized artifacts to avoid a full-file read on every
-            # GET / Range request (raised in review as a performance P1).
-            content_sha256 = await asyncio.to_thread(_sha256_of_file, actual_path)
-            headers["ETag"] = f'"{content_sha256}"'
-        return FileResponse(
-            path=actual_path,
-            media_type=mime_type,
-            headers=headers,
-        )
-
-    raise AssertionError(f"Unhandled artifact response kind: {kind!r}")
+    # ASGI owns opening and cleanup, even if a response is never sent. Small
+    # editable files retain a bounded immutable capture for SHA-256 and ranges;
+    # oversized artifacts retain streaming without a full-content hash pass.
+    return DescriptorFileResponse(actual_path, download=download, hash_max_bytes=MAX_EDITABLE_ARTIFACT_BYTES)
 
 
 @router.put(

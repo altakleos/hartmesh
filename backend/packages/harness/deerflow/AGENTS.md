@@ -140,6 +140,12 @@ reclaimed sandbox means unavailable.
 
 ### Workspace Snapshot Cancellation (`workspace_changes/recorder.py`)
 
+The scanner opens the lexical root with `files.store.open_directory_source`,
+uses descriptor-relative `fwalk`, and opens each regular file once with no-follow.
+Metadata, sample, digest and text come from that file; per-file reads stay bounded
+and size/mtime changes make enumeration incomplete. Symlinks remain metadata-only
+stubs. Unsupported safe reads must not be reported as complete delivery evidence.
+
 After `_prepare_capture()` hands off roots, cancellation must drain text scans
 (`include_text=True`) before removing the cache the worker may still access.
 Metadata scans (`include_text=False`) own no cache: cancel promptly, let the worker

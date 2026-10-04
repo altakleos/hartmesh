@@ -92,13 +92,14 @@ def _parts(messages):
 
 
 @pytest.mark.parametrize("method", ["GET", "HEAD"])
+@pytest.mark.parametrize("hash_max_bytes", [None, 10])
 @pytest.mark.parametrize("range_header,status,body", [(None, 200, b"0123456789"), (b"bytes=2-5", 206, b"2345"), (b"bytes=-3", 206, b"789"), (b"bytes=0-1,5-7", 206, None), (b"bytes=99-100", 416, b""), (b"not-a-range", 400, None)])
-async def test_descriptor_response_retains_http_range_contract(tmp_path: Path, opened_descriptors, method: str, range_header, status: int, body) -> None:
+async def test_descriptor_response_retains_http_range_contract(tmp_path: Path, opened_descriptors, method: str, hash_max_bytes, range_header, status: int, body) -> None:
     from app.gateway.routers._file_http import DescriptorFileResponse
 
     target = tmp_path / "résumé.txt"
     target.write_bytes(b"0123456789")
-    response = DescriptorFileResponse(target)
+    response = DescriptorFileResponse(target, hash_max_bytes=hash_max_bytes)
     assert opened_descriptors == [], "constructing an unused response owns no descriptor"
     messages = await _run(response, method=method, headers=[] if range_header is None else [(b"range", range_header)])
     actual_status, headers, actual_body = _parts(messages)
@@ -125,13 +126,14 @@ async def test_descriptor_response_retains_http_range_contract(tmp_path: Path, o
 
 
 @pytest.mark.parametrize("matching", [True, False])
-async def test_if_range_uses_opened_file_metadata(tmp_path: Path, matching: bool) -> None:
+@pytest.mark.parametrize("hash_max_bytes", [None, 10])
+async def test_if_range_uses_opened_file_metadata(tmp_path: Path, matching: bool, hash_max_bytes) -> None:
     from app.gateway.routers._file_http import DescriptorFileResponse
 
     target = tmp_path / "report.txt"
     target.write_bytes(b"0123456789")
-    _, headers, _ = _parts(await _run(DescriptorFileResponse(target)))
-    result = await _run(DescriptorFileResponse(target), headers=[(b"range", b"bytes=2-3"), (b"if-range", headers[b"etag"] if matching else b'"old"')])
+    _, headers, _ = _parts(await _run(DescriptorFileResponse(target, hash_max_bytes=hash_max_bytes)))
+    result = await _run(DescriptorFileResponse(target, hash_max_bytes=hash_max_bytes), headers=[(b"range", b"bytes=2-3"), (b"if-range", headers[b"etag"] if matching else b'"old"')])
     status, _, body = _parts(result)
     assert (status, body) == ((206, b"23") if matching else (200, b"0123456789"))
 
@@ -259,3 +261,32 @@ async def test_missing_file_is_reported_before_headers(tmp_path: Path) -> None:
         await _run(DescriptorFileResponse(tmp_path / "missing.txt"), send=send)
     assert exc.value.status_code == 404
     assert sent == []
+
+
+async def test_mutation_during_capture_conflicts_and_closes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, opened_descriptors) -> None:
+    from app.gateway.routers import _file_http
+
+    target = tmp_path / "report.txt"
+    target.write_bytes(b"original")
+    real_stat = os.fstat
+    calls = 0
+
+    def stat_then_mutate(fd):
+        nonlocal calls
+        if opened_descriptors and fd == opened_descriptors[-1]:
+            calls += 1
+            if calls == 2:
+                target.write_bytes(b"changed contents")
+        return real_stat(fd)
+
+    monkeypatch.setattr(_file_http.os, "fstat", stat_then_mutate)
+    sent = []
+
+    async def send(message):
+        sent.append(message)
+
+    with pytest.raises(HTTPException) as exc:
+        await _run(_file_http.DescriptorFileResponse(target, hash_max_bytes=100), send=send)
+    assert exc.value.status_code == 409
+    assert sent == []
+    _assert_closed(opened_descriptors)

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from deerflow.constants import BROWSER_FRAMES_DIRNAME, TOOL_RESULTS_DIRNAME
+from deerflow.files.store import SafeFileAccessUnavailable, StoreError, open_regular_source
 
 _VIRTUAL_PREFIX = "mnt/user-data/outputs/"
 _EDIT_TEMP_PREFIX = ".artifact-edit-"
@@ -226,10 +227,11 @@ def _copy_member(
     expected_size: int | None = None,
 ) -> _CopiedArchiveMember:
     _check_deadline(deadline, cancel_event)
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(member.path, flags)
-    except OSError as exc:
+        descriptor = open_regular_source(member.path)
+    except SafeFileAccessUnavailable as exc:
+        raise ArtifactArchiveError(str(exc), status_code=501, code="artifact_read_unavailable") from exc
+    except (OSError, StoreError) as exc:
         raise _changed() from exc
 
     try:

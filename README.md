@@ -28,14 +28,21 @@ selected UI features are listed in the [frontend scope guide](docs/FRONTEND_ISOL
 the upstream website's landing pages and showcases are separate from this UI.
 
 Hartmesh clears private workspace caches when the signed-in account changes.
-My Files and Shared downloads, copies and hashes refuse symlinks throughout the
+Artifact, My Files and Shared reads, copies and hashes refuse symlinks throughout the
 source path; these operations require descriptor-relative no-follow filesystem
-APIs (Linux/macOS) and fail explicitly on unsupported hosts. Interrupted provider-key
+APIs (Linux/macOS); HTTP reads return 501 on unsupported hosts, including native
+Windows. Workspace capture raises a capability error there and cannot certify
+output completeness. Interrupted provider-key
 updates settle their database and active configuration changes before accepting
 another edit; refresh settings to see whether the interrupted update completed.
 Files saved to My Files or Shared become available only after the copy finishes;
 new copies never overwrite existing files. An interrupted Share request finishes
 recording or rolling back its copy before another publication begins.
+
+Editable artifact previews capture at most 2 MiB so their SHA-256 and byte ranges
+describe the same bytes. Larger artifacts stream from one opened file without a
+full-content hash. Workspace change scans also retain directory and file descriptors;
+unreadable or changing files make verification incomplete rather than complete.
 
 The Files page follows the selected tab in its URL, including Shared links and
 browser history. If report download availability cannot be checked, the card

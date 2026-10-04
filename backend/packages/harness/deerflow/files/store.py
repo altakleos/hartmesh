@@ -31,12 +31,14 @@ __all__ = [
     "MAX_LISTED_FILES",
     "MAX_PATH_DEPTH",
     "StoreError",
+    "SafeFileAccessUnavailable",
     "StoredFile",
     "copy_into",
     "delete_under",
     "digest_and_stat",
     "list_under",
     "normalize_relative_path",
+    "open_directory_source",
     "open_regular_source",
     "resolve_under",
     "sha256_of",
@@ -60,6 +62,10 @@ logger = logging.getLogger(__name__)
 
 class StoreError(ValueError):
     """A path that cannot name a file in this area."""
+
+
+class SafeFileAccessUnavailable(StoreError):
+    """The host cannot provide the descriptor semantics required for safe reads."""
 
 
 @dataclass(frozen=True)
@@ -234,6 +240,22 @@ def delete_under(root: Path, path: str) -> None:
         walk.close()
 
 
+def open_directory_source(source: Path) -> int:
+    """Open a lexical directory through no-follow ancestors; caller owns it."""
+    if not _DIR_FD or not _O_NOFOLLOW:
+        raise SafeFileAccessUnavailable("Safe file access requires directory descriptors and no-follow opens")
+    absolute = source.absolute()
+    if ".." in absolute.parts:
+        raise StoreError("Path traversal detected")
+    walk = _DirWalk(Path(absolute.anchor))
+    try:
+        for folder in absolute.parts[1:]:
+            walk.descend(folder, create=False, mode=0o777)
+        return os.dup(walk.fd)
+    finally:
+        walk.close()
+
+
 def open_regular_source(source: Path) -> int:
     """Open a regular file without following a link in any path component.
 
@@ -243,7 +265,7 @@ def open_regular_source(source: Path) -> int:
     opens fail closed rather than reverting to a check-then-open sequence.
     """
     if not _DIR_FD or not _O_NOFOLLOW:
-        raise StoreError("Safe file access requires directory descriptors and no-follow opens")
+        raise SafeFileAccessUnavailable("Safe file access requires directory descriptors and no-follow opens")
     absolute = source.absolute()
     if ".." in absolute.parts:
         raise StoreError("Path traversal detected")

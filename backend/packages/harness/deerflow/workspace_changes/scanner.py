@@ -3,10 +3,12 @@ from __future__ import annotations
 import fnmatch
 import hashlib
 import os
+import stat
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
 from pathlib import Path
 
 from deerflow.constants import BROWSER_FRAMES_DIRNAME, MCP_INTERNAL_DIRNAME, TOOL_RESULTS_DIRNAME
+from deerflow.files.store import SafeFileAccessUnavailable, StoreError, open_directory_source
 
 from .types import (
     DiffUnavailableReason,
@@ -116,6 +118,8 @@ def scan_workspace_roots(
     text_cache_dir: Path | None = None,
     extra_excluded_dir_names: frozenset[str] | None = None,
 ) -> WorkspaceSnapshot:
+    if not callable(getattr(os, "fwalk", None)):
+        raise SafeFileAccessUnavailable("Safe workspace capture requires descriptor-relative directory walking")
     resolved_limits = limits or WorkspaceChangeLimits()
     cache_dir = Path(text_cache_dir) if text_cache_dir is not None else None
     if cache_dir is not None:
@@ -137,57 +141,53 @@ def scan_workspace_roots(
         truncated = True
 
     for root in roots:
-        if root.host_path.is_symlink():
+        try:
+            root_fd = open_directory_source(root.host_path)
+        except FileNotFoundError:
+            continue
+        except SafeFileAccessUnavailable:
+            raise
+        except (OSError, StoreError):
             truncated = True
             continue
-        if not root.host_path.exists():
-            continue
-
-        for dirpath, dirnames, filenames in os.walk(root.host_path, followlinks=False, onerror=scan_error):
-            directories += 1
-            # A file budget alone does not bound trees of empty directories.
-            if directories > max(1, resolved_limits.max_scanned_files):
-                return WorkspaceSnapshot(files=files, truncated=True, text_cache_dir=str(cache_dir) if cache_dir is not None else None)
-            dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dir_names and not (Path(dirpath) / dirname).is_symlink()]
-            for filename in sorted(filenames):
-                if scanned >= resolved_limits.max_scanned_files:
-                    truncated = True
-                    return WorkspaceSnapshot(
-                        files=files,
-                        truncated=truncated,
-                        text_cache_dir=str(cache_dir) if cache_dir is not None else None,
-                    )
-
-                host_file = Path(dirpath) / filename
-                if host_file.is_symlink():
-                    # A symlink must never be followed for stat/content purposes: its
-                    # target can point anywhere on the host (including outside the
-                    # scanned root), so it is recorded as a metadata-only stub -
-                    # mirroring how binary/large/sensitive-looking files are handled
-                    # below - instead of being silently omitted from the snapshot.
-                    symlink_snapshot = _snapshot_symlink(root, host_file)
-                    if symlink_snapshot is not None:
-                        files[symlink_snapshot.path] = symlink_snapshot
-                        scanned += 1
+        try:
+            # fwalk pins each directory beneath the admitted root and refuses
+            # symlink descent. File opens/stat/readlink use its directory fd.
+            for dirpath, dirnames, filenames, directory_fd in os.fwalk(".", dir_fd=root_fd, follow_symlinks=False, onerror=scan_error):
+                directories += 1
+                if directories > max(1, resolved_limits.max_scanned_files):
+                    return WorkspaceSnapshot(files=files, truncated=True, text_cache_dir=str(cache_dir) if cache_dir is not None else None)
+                dirnames[:] = [dirname for dirname in dirnames if dirname not in excluded_dir_names]
+                for filename in sorted(filenames):
+                    if scanned >= resolved_limits.max_scanned_files:
+                        return WorkspaceSnapshot(files=files, truncated=True, text_cache_dir=str(cache_dir) if cache_dir is not None else None)
+                    scanned += 1
+                    host_file = root.host_path / dirpath / filename
+                    try:
+                        metadata = os.stat(filename, dir_fd=directory_fd, follow_symlinks=False)
+                    except OSError:
+                        truncated = True
+                        continue
+                    if stat.S_ISLNK(metadata.st_mode):
+                        snapshot = _snapshot_symlink(root, host_file, directory_fd=directory_fd, metadata=metadata)
+                    elif stat.S_ISREG(metadata.st_mode):
+                        snapshot = _snapshot_file(
+                            root,
+                            host_file,
+                            directory_fd=directory_fd,
+                            limits=resolved_limits,
+                            include_text=include_text,
+                            text_paths=text_paths,
+                            text_cache_dir=cache_dir,
+                        )
+                    else:
+                        continue
+                    if snapshot is not None:
+                        files[snapshot.path] = snapshot
                     else:
                         truncated = True
-                    continue
-                if not host_file.is_file():
-                    continue
-
-                snapshot = _snapshot_file(
-                    root,
-                    host_file,
-                    limits=resolved_limits,
-                    include_text=include_text,
-                    text_paths=text_paths,
-                    text_cache_dir=cache_dir,
-                )
-                if snapshot is not None:
-                    files[snapshot.path] = snapshot
-                    scanned += 1
-                else:
-                    truncated = True
+        finally:
+            os.close(root_fd)
 
     return WorkspaceSnapshot(
         files=files,
@@ -200,79 +200,74 @@ def _snapshot_file(
     root: WorkspaceRoot,
     host_file: Path,
     *,
+    directory_fd: int,
     limits: WorkspaceChangeLimits,
     include_text: bool,
     text_paths: set[str] | None,
     text_cache_dir: Path | None,
 ) -> FileSnapshot | None:
     try:
-        stat = host_file.stat()
-        size = stat.st_size
-        mtime_ns = stat.st_mtime_ns
+        fd = os.open(host_file.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
+    except OSError:
+        return None
+    try:
+        metadata = os.fstat(fd)
+        if not stat.S_ISREG(metadata.st_mode):
+            return None
+        size, mtime_ns = metadata.st_size, metadata.st_mtime_ns
         relative = host_file.relative_to(root.host_path).as_posix()
         virtual_path = f"{root.virtual_prefix}/{relative}"
         sensitive = is_sensitive_workspace_path(virtual_path)
-    except OSError:
-        return None
-
-    if sensitive:
+        sha256 = None
+        text = text_path = None
+        binary = False
+        reason: DiffUnavailableReason | None = None
+        if sensitive:
+            reason = "sensitive"
+        else:
+            sample = _read_sample(fd)
+            raw = None
+            if size <= limits.max_file_bytes_for_diff:
+                os.lseek(fd, 0, os.SEEK_SET)
+                with os.fdopen(fd, "rb", closefd=False) as source:
+                    raw = source.read(limits.max_file_bytes_for_diff + 1)
+                if len(raw) != size:
+                    return None
+                sha256 = hashlib.sha256(raw).hexdigest()
+                sample = raw[:SAMPLE_BYTES]
+            binary = host_file.suffix.lower() in BINARY_EXTENSIONS or _looks_binary(sample)
+            should_include_text = include_text and (text_paths is None or virtual_path in text_paths)
+            if binary:
+                reason = "binary"
+            elif raw is None:
+                reason = "large"
+            elif should_include_text:
+                decoded = _decode_text_bytes(raw)
+                if decoded is None:
+                    binary, reason = True, "binary"
+                elif text_cache_dir is not None:
+                    text_path = str(_cache_text_file(decoded, virtual_path, text_cache_dir))
+                else:
+                    text = decoded
+        after = os.fstat(fd)
+        if (after.st_size, after.st_mtime_ns) != (size, mtime_ns):
+            return None
         return FileSnapshot(
             path=virtual_path,
             root=root.name,
             size=size,
             mtime_ns=mtime_ns,
-            sha256=None,
-            binary=False,
-            sensitive=True,
-            text=None,
-            content_unavailable_reason="sensitive",
+            sha256=sha256,
+            binary=binary,
+            sensitive=sensitive,
+            text=text,
+            text_path=text_path,
+            content_unavailable_reason=reason,
         )
-
-    try:
-        sample = host_file.read_bytes()[:SAMPLE_BYTES] if size <= SAMPLE_BYTES else _read_sample(host_file)
     except OSError:
         return None
-
-    binary = host_file.suffix.lower() in BINARY_EXTENSIONS or _looks_binary(sample)
-    sha256 = _sha256_file(host_file) if size <= limits.max_file_bytes_for_diff else None
-    text: str | None = None
-    text_path: str | None = None
-    reason: DiffUnavailableReason | None = None
-
-    should_include_text = include_text and (text_paths is None or virtual_path in text_paths)
-
-    if binary:
-        reason = "binary"
-    elif size > limits.max_file_bytes_for_diff:
-        reason = "large"
-    elif not should_include_text:
-        text = None
-    else:
-        try:
-            raw = host_file.read_bytes()
-        except OSError:
-            return None
-        decoded = _decode_text_bytes(raw)
-        if decoded is None:
-            binary = True
-            reason = "binary"
-        elif text_cache_dir is not None:
-            text_path = str(_cache_text_file(decoded, virtual_path, text_cache_dir))
-        else:
-            text = decoded
-
-    return FileSnapshot(
-        path=virtual_path,
-        root=root.name,
-        size=size,
-        mtime_ns=mtime_ns,
-        sha256=sha256,
-        binary=binary,
-        sensitive=sensitive,
-        text=text,
-        text_path=text_path,
-        content_unavailable_reason=reason,
-    )
+    finally:
+        os.close(fd)
 
 
 def _normalize_symlink_target(target: str) -> str:
@@ -302,15 +297,14 @@ def _normalize_symlink_target(target: str) -> str:
     return target
 
 
-def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | None:
+def _snapshot_symlink(root: WorkspaceRoot, host_file: Path, *, directory_fd: int, metadata: os.stat_result) -> FileSnapshot | None:
     # Deliberately never follows the link (no read_bytes()/open() on the target):
     # the target may point anywhere on the host, including outside the scanned
     # root, so stat'ing or reading through it here would risk exposing arbitrary
     # host file content/metadata as if it belonged to the workspace.
     try:
-        stat = host_file.lstat()
-        size = stat.st_size
-        mtime_ns = stat.st_mtime_ns
+        size = metadata.st_size
+        mtime_ns = metadata.st_mtime_ns
         relative = host_file.relative_to(root.host_path).as_posix()
         virtual_path = f"{root.virtual_prefix}/{relative}"
         sensitive = is_sensitive_workspace_path(virtual_path)
@@ -318,7 +312,7 @@ def _snapshot_symlink(root: WorkspaceRoot, host_file: Path) -> FileSnapshot | No
         return None
 
     try:
-        target = os.readlink(host_file)
+        target = os.readlink(host_file.name, dir_fd=directory_fd)
     except OSError:
         target = None
     else:
@@ -346,17 +340,9 @@ def _cache_text_file(text: str, virtual_path: str, cache_dir: Path) -> Path:
     return target
 
 
-def _read_sample(path: Path) -> bytes:
-    with path.open("rb") as file:
-        return file.read(SAMPLE_BYTES)
-
-
-def _sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _read_sample(fd: int) -> bytes:
+    os.lseek(fd, 0, os.SEEK_SET)
+    return os.read(fd, SAMPLE_BYTES)
 
 
 def _decode_text_bytes(data: bytes) -> str | None:
