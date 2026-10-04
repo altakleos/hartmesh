@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Schema changes
+
+No database schema changes since `v2.2.0+hartmesh.41`.
+
+## [2.2.0+hartmesh.41] - 2026-10-04
+
 ### Fixes
 
 - Artifact downloads, skill archives and workspace capture retain the opened
@@ -66,6 +72,13 @@ bundle manifests use version 2.
   adoption and publication; operators commit the verified run/artifact record before
   tagging. Acceptance results use schema 2 and the record schema 1; the release
   manifest remains schema 4 and gains a separate acceptance record asset.
+
+Included changes: [#193](https://github.com/altakleos/hartmesh/pull/193),
+[#194](https://github.com/altakleos/hartmesh/pull/194),
+[#195](https://github.com/altakleos/hartmesh/pull/195),
+[#196](https://github.com/altakleos/hartmesh/pull/196),
+[#197](https://github.com/altakleos/hartmesh/pull/197),
+[#198](https://github.com/altakleos/hartmesh/pull/198).
 
 ## [2.2.0+hartmesh.40] - 2026-10-03
 
