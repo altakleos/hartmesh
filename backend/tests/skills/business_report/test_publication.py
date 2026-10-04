@@ -373,3 +373,28 @@ def test_concurrent_publishers_compare_the_exact_source_and_only_one_advances(re
             if process.is_alive():
                 process.kill()
             process.join(10)
+
+
+@pytest.mark.parametrize("profile", ["restricted", "slim"])
+def test_sandbox_smoke_command_checks_the_pdf_that_its_build_publishes(report, tmp_path, profile):
+    import re
+    import shlex
+
+    pytest.importorskip("weasyprint")
+    workflow = (ROOT / ".github/workflows/sandbox-image-smoke.yml").read_text(encoding="utf-8")
+    payloads = [json.loads(match) for match in re.findall(r"--data '(\{[^\n]+\})'", workflow) if "R=/mnt/smoke/business-report/scripts/report.py;" in match]
+    output = "/tmp/smoke-report" if profile == "restricted" else "/tmp/slim-report"
+    command = next(payload["command"] for payload in payloads if "report.py;" in payload["command"] and f"--out {output} " in payload["command"])
+    parts = command.split(";")
+    build = next(shlex.split(part) for part in parts if " $R build " in part)[2:]
+    fixture = Path(__file__).parent / "fixtures/example_services_export_small.xls"
+    destination = tmp_path / Path(output).name
+    build[build.index("build") + 1] = str(fixture)
+    build[build.index("--out") + 1] = str(destination)
+    assert report.main(build) == 0
+    check = next(shlex.split(part) for part in parts if "check_pdf_on_image.py " in part)
+    checked_pdf = Path(check[-1].replace(output, str(destination), 1))
+    assert checked_pdf.is_file(), f"smoke checks {checked_pdf}, but build published {list(destination.rglob('*.pdf'))}"
+    from pypdf import PdfReader
+
+    assert "Business Review" in PdfReader(checked_pdf).pages[0].extract_text()
