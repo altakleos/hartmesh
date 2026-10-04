@@ -15,11 +15,11 @@ The first call for a report is the `build` in Step 1. It reads the export itself
 **Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Assign it in every command that runs one of these scripts, as a statement of its own ahead of the script, the way each example below does (`SKILL_DIR="<Directory>"; python …`). Written in front of the script without the `;`, it is not set yet when bash expands that command's own words: the guard stops the command, and without the guard the path is `/scripts/…`. Where a skill is mounted differs between deployments, so no absolute path can be written here.
 
 ```
-SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" build   <files…> [--period 2026-08] --out REPORTDIR [--render pdf,docx,xlsx]
-SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" show    REPORTDIR/<dirname>.report.json
-SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" prose   REPORTDIR/<dirname>.report.json --from prose.json [--render pdf,docx,xlsx]
-SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" render  REPORTDIR/<dirname>.report.json --to pdf,docx,xlsx
-SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" checks  REPORTDIR/<dirname>.report.json <files…>
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" build   <files…> [--period 2026-08] --out REPORTDIR --bundle-id draft-1 [--render pdf,docx,xlsx]
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" show    REPORTFILE
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" prose   REPORTFILE --from prose.json --bundle-id draft-2 [--render pdf,docx,xlsx]
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" render  REPORTFILE --to pdf,docx,xlsx --bundle-id formats-1
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" checks  REPORTFILE <files…>
 ```
 
 **A whole report is one run** — `build … --render pdf,docx,xlsx` — and a
@@ -34,9 +34,13 @@ user should have — `build` or `prose` with `--render`, and `render` — is one
 `bash` call whose `present` argument lists those files: the report first, then
 each render. The names are known before the run, because the report takes its
 name from the last segment of `--out`: `--out …/2026-08-business-review`
-writes `2026-08-business-review.report.json` inside that directory, and
-`--render pdf,docx,xlsx` writes `2026-08-business-review.pdf`, `.docx` and
-`.xlsx` beside it. The tool attaches each listed file the run wrote and
+with `--bundle-id draft-1` writes
+`drafts/draft-1/2026-08-business-review.report.json` inside that directory,
+and `--render pdf,docx,xlsx` writes `2026-08-business-review.pdf`, `.docx`
+and `.xlsx` beside it. Choose a unique `--bundle-id` in every writing run:
+1 to 80 lowercase letters, digits or hyphens. An existing name is refused.
+Without that option the CLI generates an ID and prints the actual paths;
+use the explicit option for same-call `present` paths. The tool attaches each listed file the run wrote and
 tells you so ("Presented to the user: …"); do not call `present_files` for
 those files, and do not list the directory to see that they exist. Name only
 the report and its renders: never `checks.json`, `renders.json` or anything
@@ -75,22 +79,22 @@ inside the command line (`report.py` refuses `--present`, runs nothing, and
 says so):
 
 ```json
-{"command": "SKILL_DIR=\"<Directory>\"; python \"${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py\" build /mnt/user-data/uploads/export.xlsx --period 2026-08 --out /mnt/user-data/outputs/reports/2026-08-business-review --render pdf,docx,xlsx",
+{"command": "SKILL_DIR=\"<Directory>\"; python \"${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py\" build /mnt/user-data/uploads/export.xlsx --period 2026-08 --out /mnt/user-data/outputs/reports/2026-08-business-review --bundle-id draft-1 --render pdf,docx,xlsx",
  "present": [
-  "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json",
-  "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.pdf",
-  "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.docx",
-  "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.xlsx"
+  "/mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.report.json",
+  "/mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.pdf",
+  "/mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.docx",
+  "/mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.xlsx"
 ]}
 ```
 
-Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `charts/*.png`, `checks.json` and `renders.json` (which renders belong to this draft) in `--out`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the directory, one directory per report; a second build into the same directory becomes the next draft, removes its own renders of the previous draft (they no longer match) and says so. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`; leave `--period` off when the user named none. A period with no rows is an error that names the dates the files cover and the rows in each of the latest months, for the user to hear; build another period only when the user picks one.
+Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `charts/*.png`, `checks.json` and `renders.json` (the bundle identity and hashes of its members) in a new draft directory, `--out/drafts/<bundle-id>/`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the report root. Every requested format must finish before the complete directory becomes visible. A renderer failure or interruption preserves the preceding complete draft. Old bundles are retained unchanged by these commands; removing old directories is an explicit storage cleanup decision that also removes their historical download links. A second build becomes the next draft. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`; leave `--period` off when the user named none. A period with no rows is an error that names the dates the files cover and the rows in each of the latest months, for the user to hear; build another period only when the user picks one.
 
 Options: `--exclude category=Warranty` (repeatable; a role or an exact column name, matched case-insensitively), `--company "Name"`, `--title "..."`, `--currency EUR`, `--short` for a one-sentence summary, `--prefs preferences.json`, `--profile <name>` (a tenant profile from `/mnt/tenant/report-profiles/` wins over the skill's `profiles/`).
 
 The output then prints the report itself — the KPIs, every table, the `Checks:` line, a `Not included:` line and the `Inputs:` line — which is what `show` prints, so Step 2 needs no second run. Repeat the checks to the user in plain words, and the not-included items when there are any (the line says "nothing" when every section is there; do not read that out). Never claim a check the line does not show. If the build exits `1` with "Report withheld", the totals did not reconcile: say so, show the check text, and do not render anything.
 
-`--render pdf,docx,xlsx` renders in the same run and is the normal first report: the build already carries a factual summary and actions computed from the data, so the user has all three files after one run. Leave it off only when you are going to write your own summary in Step 2 in the same turn, because the prose step replaces the text and every render made before it; a build without `--render` still names the report alone under `present`, because the workspace draws the report from it.
+`--render pdf,docx,xlsx` renders in the same run and is the normal first report: the build already carries a factual summary and actions computed from the data, so the user has all three files after one run. Leave it off only when you are going to write your own summary in Step 2 in the same turn, because the prose step publishes new text and formats in a separate bundle; a build without `--render` still names the report alone under `present`, because the workspace draws the report from it.
 
 ### Step 2: Write the summary and the actions, then verify them
 
@@ -101,23 +105,23 @@ cat > /tmp/prose.json <<'JSON'
 {"summary": ["August was the strongest month since March: $52,310.40 across 178 jobs, 6.4% above July."],
  "actions": ["Collect the $4,120.00 still unpaid across 21 jobs.", "Book the two technicians below 20 jobs onto the September installs."]}
 JSON
-SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" prose /mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json --from /tmp/prose.json --render pdf,docx,xlsx
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" prose /mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.report.json --from /tmp/prose.json --render pdf,docx,xlsx --bundle-id draft-2
 ```
 
-again with `present` naming the report and the three renders. That one run makes the next draft without recomputing anything, renders all three formats and prints the same figures-checks-inputs digest the build printed — summary and actions included, as the report now carries them. So there is nothing to look up afterwards and Step 3 is already done. Run `show` only for a report built in an earlier turn, whose figures are no longer in front of you. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
+again with `present` naming the report and the three renders under `drafts/draft-2/`, the new paths for this run. That one run makes the next draft without recomputing anything, renders all three formats and prints the same figures-checks-inputs digest the build printed — summary and actions included, as the report now carries them. So there is nothing to look up afterwards and Step 3 is already done. Run `show` only for a report built in an earlier turn, whose figures are no longer in front of you. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
 
 ### Step 3: Render
 
 Only for a report whose last run did not render — a `build` or `prose` run
 without `--render`, or a draft from an earlier turn. One run makes every
-format, and re-saves the report beside them, so in a later turn the report
+format in a new draft directory and copies the report beside them, so in a later turn the report
 and its new renders are named together under `present`.
 
 ```bash
-SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" render <report.json> --to pdf,docx,xlsx
+SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" render <report.json> --to pdf,docx,xlsx --bundle-id formats-1
 ```
 
-Renders land next to the report as `<name>.pdf`, `.docx` and `.xlsx`; `--to html` also works but HTML is the sheet the PDF is printed from, not a format the user is offered. Rendering reads only `report.json` and the pictures inside the report directory (and the tenant bundle); it never rebuilds. The DOCX has real headings and tables so the user can edit it; the XLSX has a Summary sheet whose revenue, count and average are live formulas over the Rows sheet, one sheet per table with live `SUM` totals and a live ratio for average columns, and the cleaned rows.
+The new JSON and renders land together in `drafts/formats-1/` under the report root; name all those new paths under `present`. The renders are `<name>.pdf`, `.docx` and `.xlsx`; `--to html` also works but HTML is the sheet the PDF is printed from, not a format the user is offered. Rendering reads only `report.json` and the pictures inside the report directory (and the tenant bundle); it never rebuilds. The DOCX has real headings and tables so the user can edit it; the XLSX has a Summary sheet whose revenue, count and average are live formulas over the Rows sheet, one sheet per table with live `SUM` totals and a live ratio for average columns, and the cleaned rows.
 
 ### Step 4: Answer
 
@@ -125,8 +129,8 @@ The files you named under `present` are already with the user: the tool result n
 
 ## Changing a report
 
-- A change to the data (exclude rows, another period, another mapping) is a new `build` into the same `--out` directory with `--render pdf,docx,xlsx`; it becomes the next draft and replaces the renders of the previous one. Written text from `prose` is replaced by the computed text; run `prose` again if it still applies.
-- A change to the words (shorter summary, different actions) is one run: `prose … --render pdf,docx,xlsx` with `present` naming the report and the three renders again — the same paths as last time are presented again because their contents changed. Nothing is recomputed and the three formats are rewritten. A `prose` run without `--render` deletes the renders it made earlier, because they still say what the previous draft said; name the report alone under `present`, because the workspace draws the report from it. A file it did not write is left alone and reported on a `Note:` line instead.
+- A change to the data (exclude rows, another period, another mapping) is a new `build` into the same `--out` directory with `--render pdf,docx,xlsx`; it becomes the next draft with its own renders. Written text from `prose` is replaced by the computed text; run `prose` again if it still applies.
+- A change to the words (shorter summary, different actions) is one run: `prose … --render pdf,docx,xlsx --bundle-id <new-id>` with `present` naming the new report and renders in that bundle. Nothing is recomputed. A run without `--render` publishes the new JSON without formats; the previous bundle and its formats remain together. Neighboring files the script did not write stay untouched. Use the current report path printed by the previous successful run: stale sources and outside edits are refused, rather than silently overwriting a newer draft.
 - Say what changed and the draft number, for example "Done. Two warranty jobs removed (2 jobs, $0.00). Draft 2."
 - Never modify the uploaded file. Never edit `report.json` by hand; the script owns it.
 
@@ -134,8 +138,8 @@ The files you named under `present` are already with the user: the tool result n
 input hashes and independently recomputed figures, including tables and cleaned
 rows. It also rechecks the numbers in the saved prose. Changed or missing inputs,
 altered figures, or unverifiable build choices return exit `1` and a failed
-`checks.json`; repeat the printed failure to the user. The command never rewrites
-the report or its renders. Use an explicit `build` to incorporate new inputs.
+diagnostic `checks.json` at the report root; repeat the printed failure to the user. The command never rewrites
+the published bundle, report or renders. Keep the root's `.cache/business-report/` state with its draft directories when moving a report; abandoned private staging directories can be removed when no report command is running. Use an explicit `build` to incorporate new inputs.
 New reports retain their effective profile, per-file mappings, comparisons and
 customer limit for this check. Older reports without those choices use the
 available profile and default preferences; if they cannot be reproduced, rebuild
@@ -193,6 +197,7 @@ Per file and sheet it gives the columns with their type and samples, the suggest
 
 ## Package layout
 
+- [scripts/business_report_publish.py](scripts/business_report_publish.py): stages complete directories, verifies member hashes and serializes current-draft publication with a filesystem lock. Atomic rename protects readers and process interruption; files and directories are flushed before committing the current pointer. A failure after rename may leave a complete unadopted bundle, never a partially published one. Platforms without filesystem locking refuse publication.
 - [scripts/report.py](scripts/report.py): the command surface, reading, mapping, metrics, checks and prose; it imports [scripts/business_report_common.py](scripts/business_report_common.py) (constants, formatting, brand) and [scripts/business_report_render.py](scripts/business_report_render.py) (HTML, PDF, DOCX, XLSX, charts) from its own directory.
 - [profiles/services-generic.json](profiles/services-generic.json): the default profile (column aliases, vocabulary, status groups, section order). A tenant profile of the same name in `/mnt/tenant/report-profiles/` replaces it.
 - [templates/report.html.j2](templates/report.html.j2) and [templates/report.css](templates/report.css): the HTML the PDF is printed from; brand colours arrive as CSS variables.

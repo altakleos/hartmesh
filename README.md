@@ -89,6 +89,12 @@ Date interpretation uses every input row; ambiguous sources and unusable dates
 remain visible as warnings. Rechecking a saved report verifies its recorded input
 hashes and saved figures, and requires an explicit rebuild when they differ.
 See the [business-report guide](skills/public/business-report/SKILL.md).
+
+Each business-report draft publishes as a complete directory under
+`<report-root>/drafts/<bundle-id>/`, with its JSON, charts and requested formats.
+Failed rendering preserves the preceding draft. Old bundles remain available;
+removing them also removes their historical download links. Consumers should use
+the new paths printed by the command. Report JSON and database schemas are unchanged.
 Missing chart images are omitted from the report card; a new report revision
 retries them without disrupting the rest of the report.
 

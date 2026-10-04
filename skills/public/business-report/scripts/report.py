@@ -84,7 +84,8 @@ try:
         utc_now,
         vocab,
     )
-    from business_report_render import draw_charts, fetch_inline_only, render
+    from business_report_publish import STATE_DIR, bundle_manifest, current_identity, current_report, publication_lock, publication_root, publish_bundle, require_current, sync_directory, write_json
+    from business_report_render import chart_path, draw_charts, fetch_inline_only, render
     from business_report_sections import SECTION_BUILDERS, TABLE_ROW_LIMIT, build_report
 except ImportError as error:
     from business_report_common import MISSING_LIBRARY_MESSAGE  # importable without the libraries
@@ -1362,9 +1363,7 @@ def _existing_report(path: Path) -> dict | None:
 
 
 def _write_json(path: Path, data) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp.replace(path)
+    write_json(path, data)
 
 
 def _load_json_file(path: str, what: str) -> dict:
@@ -1438,11 +1437,6 @@ def read_render_manifest(report_path: Path) -> list[str]:
     return [name for name in known if name in names]
 
 
-def write_render_manifest(report_path: Path, names: list[str]) -> None:
-    directory, base = _render_base(report_path)
-    _write_json(directory / RENDERS_MANIFEST, {"version": 1, "base": base, "files": [name for name in (f"{base}.{target}" for target in TARGET_ORDER) if name in set(names)]})
-
-
 def unowned_renders(report_path: Path) -> list[str]:
     """Files named like renders of this report that this skill did not write."""
 
@@ -1451,54 +1445,16 @@ def unowned_renders(report_path: Path) -> list[str]:
     return [f"{base}.{target}" for target in TARGET_ORDER if f"{base}.{target}" not in owned and (directory / f"{base}.{target}").is_file()]
 
 
-def remove_stale_renders(report_path: Path, keep: list[str]) -> list[str]:
-    """Drop this skill's renders of the draft just replaced, except the ones rewritten."""
-
-    directory, _ = _render_base(report_path)
-    kept = {_render_name(report_path, target) for target in keep}
-    removed = []
-    for name in read_render_manifest(report_path):
-        if name in kept:
-            continue
-        path = directory / name
-        if path.is_file():
-            path.unlink()
-        removed.append(name)
-    return removed
-
-
-def render_targets(report: dict, report_path: Path, targets: list[str], tenant_dir: str | None) -> list[Path]:
-    """Every named format from one already-loaded report, in one process."""
-
-    written = []
-    for target in targets:
-        path = render(report, report_path, target, None, tenant_dir)
-        print(f"Rendered {target}: {path}")
-        written.append(path)
-    return written
-
-
-def publish_renders(report: dict, report_path: Path, targets: list[str], tenant_dir: str | None) -> None:
-    """Write this draft's renders, then drop the ones it did not replace.
-
-    In that order: a render that fails leaves the previous draft's files where
-    they are rather than deleting them first and then raising, and the removal
-    notice is printed the moment the removal happens rather than after work
-    that might not finish.
-    """
-
-    written = render_targets(report, report_path, targets, tenant_dir)
-    removed = remove_stale_renders(report_path, targets)
-    write_render_manifest(report_path, [path.name for path in written])
-    if removed:
-        print("Removed stale renders from the previous draft: " + ", ".join(removed) + ". Render again.")
-
-
 def print_unowned_renders(report_path: Path) -> None:
     """Warn about a file named like one of this report's renders that this skill did not write."""
 
     for name in unowned_renders(report_path):
         print(f"Note: {name} sits beside this report but was not written by it; it may show a different draft.")
+
+
+def print_rendered(report_path: Path, targets: list[str]) -> None:
+    for target in targets:
+        print(f"Rendered {target}: {report_path.parent / _render_name(report_path, target)}")
 
 
 def command_inspect(args) -> int:
@@ -1531,23 +1487,21 @@ def command_build(args) -> int:
     targets = parse_targets(args.render, "--render")
     ctx = prepare(args.files, args.period, options, mapping_override, profile)
     out_dir = Path(args.out)
-    out_dir.mkdir(parents=True, exist_ok=True)
     base = _report_base_name(out_dir, options.name)
-    report_path = out_dir / f"{base}{REPORT_SUFFIX}"
-    previous = _existing_report(report_path)
-    if previous and previous["meta"]["period"]["key"] != ctx.period.key:
-        # The report is named after its directory, so a second period built
-        # here would silently replace the first and call itself its next draft.
-        raise InputError(f"{out_dir} holds the {previous['meta']['period']['label']} report; build {ctx.period.label} into its own --out directory.")
+    with publication_lock(out_dir, base):
+        previous_path = current_report(out_dir, base, verify=False)
+        previous = _existing_report(previous_path) if previous_path else None
+        if previous and previous["meta"]["period"]["key"] != ctx.period.key:
+            raise InputError(f"{out_dir} holds the {previous['meta']['period']['label']} report; build {ctx.period.label} into its own --out directory.")
+        expected = current_identity(out_dir, base, verify=False)
     report, charts = build_report(ctx, int(previous["meta"]["draft"]) if previous else 0, compute_checks)
     report["meta"]["preferences_applied"] = applied
-    _write_json(out_dir / "checks.json", report["checks"])
     if any(check["status"] == "fail" for check in report["checks"]):
+        _write_json(out_dir / "checks.json", report["checks"])
         failed = next(check for check in report["checks"] if check["status"] == "fail")
         sys.stderr.write(f"Report withheld: {failed['text']}\n")
         return EXIT_WITHHELD
-    draw_charts(charts, out_dir, options.brand, ctx.currency)
-    _write_json(report_path, report)
+    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, render, lambda stage: draw_charts(charts, stage, options.brand, ctx.currency), bundle_id=args.bundle_id, expected_current=expected, verify_current=False)
     print(f"Built draft {report['meta']['draft']}: {report['meta']['title']} -> {report_path}")
     if previous and any(check["id"] == "prose_numbers" for check in previous.get("checks", [])):
         print("The previous draft carried written text (summary or actions); this rebuild replaced it with the computed text. Run prose again if it still applies.")
@@ -1557,8 +1511,9 @@ def command_build(args) -> int:
     print(show_report(report))
     if report["charts"]:
         print("Charts: " + ", ".join(chart["png"] for chart in report["charts"]))
-    publish_renders(report, report_path, targets, tenant_dir)
-    print_unowned_renders(report_path)
+    print_rendered(report_path, targets)
+    if previous_path:
+        print_unowned_renders(previous_path)
     return EXIT_OK
 
 
@@ -1567,9 +1522,38 @@ def command_show(args) -> int:
     return EXIT_OK
 
 
+def _stage_report_charts(report: dict, source: Path, stage: Path) -> None:
+    manifest = bundle_manifest(source) if source.parent.parent.name == "drafts" else None
+    for chart in report["charts"]:
+        png = chart_path(source, chart["png"])
+        if png is None:
+            raise InputError(f"Report chart {chart['png']} is missing. Restore it before publishing a new bundle.")
+        content = png.read_bytes()
+        if manifest and hashlib.sha256(content).hexdigest() != manifest["sha256"].get(chart["png"]):
+            raise InputError("A report chart changed while copying. Retry from a verified draft.")
+        destination = stage / chart["png"]
+        destination.parent.mkdir(exist_ok=True)
+        destination.write_bytes(content)
+
+
+def _source_report(path: Path):
+    root = publication_root(path)
+    base = _render_base(path)[1]
+    with publication_lock(root, base):
+        require_current(root, base, path)
+        manifest = bundle_manifest(path) if path.parent.parent.name == "drafts" else None
+        content = path.read_bytes()
+        if manifest and hashlib.sha256(content).hexdigest() != manifest["sha256"][path.name]:
+            raise InputError("The report changed while reading. Retry from a verified draft.")
+        report = json.loads(content)
+        if not isinstance(report, dict) or report.get("version") != 1 or not isinstance(report.get("meta"), dict):
+            raise InputError("This is not a version 1 report produced by this skill.")
+        expected = (str(path.resolve()), hashlib.sha256(content).hexdigest()) if current_report(root, base) else None
+        return report, root, base, expected
+
+
 def command_prose(args) -> int:
     report_path = Path(args.report)
-    report = _load_report(report_path)
     summary: list[str] | None = None
     actions: list[str] | None = None
     if args.source:
@@ -1585,10 +1569,10 @@ def command_prose(args) -> int:
     if summary is None and actions is None:
         raise InputError("Give --from prose.json, --summary text or --action text.")
     targets = parse_targets(args.render, "--render")
+    report, root, base, expected = _source_report(report_path)
     updated, removed, notes = apply_prose(report, summary, actions)
-    _write_json(report_path, updated)
-    _write_json(report_path.parent / "checks.json", updated["checks"])
-    print(f"Draft {updated['meta']['draft']}: {report_path}")
+    published = publish_bundle(root, base, updated, targets, resolve_tenant_dir(args.tenant), render, lambda stage: _stage_report_charts(updated, report_path, stage), bundle_id=args.bundle_id, expected_current=expected)
+    print(f"Draft {updated['meta']['draft']}: {published}")
     if removed:
         print(f"Removed {len(removed)} {plural(len(removed), 'number')} not in the report: {', '.join(removed)}. Sentences with them were dropped; say so to the user.")
     else:
@@ -1601,35 +1585,54 @@ def command_prose(args) -> int:
     # not-included items are what the user has to be told about this draft.
     print()
     print(show_report(updated))
-    publish_renders(updated, report_path, targets, resolve_tenant_dir(args.tenant))
+    print_rendered(published, targets)
     print_unowned_renders(report_path)
     return EXIT_OK
 
 
 def command_render(args) -> int:
-    tenant_dir = resolve_tenant_dir(args.tenant)
-    report_path = Path(args.report)
     targets = parse_targets(args.to, "--to")
     if not targets:
-        raise InputError("--to needs at least one of html, pdf, docx, xlsx, or all.")
-    if args.out and len(targets) > 1:
-        raise InputError("--out names one file, so it goes with one --to target.")
-    report = _load_report(report_path)
+        raise InputError("--to must name at least one format: pdf, docx, xlsx or html.")
+    if args.out and (len(targets) != 1 or args.bundle_id):
+        raise InputError("--out names one export; use one --to target without --bundle-id.")
+    report_path = Path(args.report)
+    tenant_dir = resolve_tenant_dir(args.tenant)
+    report, root, base, expected = _source_report(report_path)
     if args.out:
-        # A name the caller chose: this skill did not place it beside the
-        # report, so it is not recorded as one of the report's own renders.
-        path = render(report, report_path, targets[0], Path(args.out), tenant_dir)
-        print(f"Rendered {targets[0]}: {path}")
-        os.utime(report_path, None)
+        # A chosen export is one atomically replaced file, outside bundle ownership.
+        import tempfile
+
+        destination = Path(args.out)
+        resolved = destination.resolve()
+        if resolved == report_path.resolve() or resolved.is_relative_to((root / "drafts").resolve()) or any(parent.parent.name == "drafts" and (parent / RENDERS_MANIFEST).exists() for parent in resolved.parents):
+            raise InputError("Choose an export path outside the published report bundle.")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        private = destination.parent / STATE_DIR
+        private.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with tempfile.TemporaryDirectory(prefix="export-", dir=private) as temporary:
+            stage = Path(temporary)
+            _stage_report_charts(report, report_path, stage)
+            staged_report = stage / report_path.name
+            _write_json(staged_report, report)
+            staged = render(report, staged_report, targets[0], stage / destination.name, tenant_dir)
+            staged.chmod(0o644)
+            with staged.open("rb") as stream:
+                os.fsync(stream.fileno())
+            with publication_lock(root, base):
+                if current_identity(root, base) != expected:
+                    raise InputError("The current report changed while the export was prepared. Retry from the current draft.")
+                os.replace(staged, destination)
+                sync_directory(destination.parent)
+        print(f"Rendered {targets[0]}: {destination}")
         return EXIT_OK
-    written = render_targets(report, report_path, targets, tenant_dir)
-    write_render_manifest(report_path, read_render_manifest(report_path) + [path.name for path in written])
-    # The report is handed over with its renders, and the bash tool attaches
-    # only files the call wrote: a render in a later turn touches the report
-    # so it can be named under `present` beside the new renders. A touch, not
-    # a rewrite: the renders are already on disk, and nothing that can fail
-    # should follow them.
-    os.utime(report_path, None)
+    # Only hash-verified bundle members may be carried. Legacy filename-only
+    # manifests do not establish which report supplied a format's numbers.
+    carry = read_render_manifest(report_path) if report_path.parent.parent.name == "drafts" else []
+    carry = [name for name in carry if name not in {_render_name(report_path, target) for target in targets}]
+    published = publish_bundle(root, base, report, targets, tenant_dir, render, lambda stage: _stage_report_charts(report, report_path, stage), bundle_id=args.bundle_id, expected_current=expected, source=report_path, carry=carry)
+    print(f"Report: {published}")
+    print_rendered(published, targets)
     print_unowned_renders(report_path)
     return EXIT_OK
 
@@ -1677,7 +1680,7 @@ def command_checks(args) -> int:
                 )
     except (InputError, DecisionNeeded, KeyError, TypeError, ValueError, OSError) as error:
         checks = [{"id": "saved_figures", "status": "fail", "text": f"Could not verify this saved draft: {error}. Restore its inputs and build choices or rebuild explicitly."}]
-    _write_json(report_path.parent / "checks.json", checks)
+    _write_json(publication_root(report_path) / "checks.json", checks)
     print(checks_line({"checks": checks}))
     return EXIT_WITHHELD if any(check["status"] == "fail" for check in checks) else EXIT_OK
 
@@ -1725,6 +1728,7 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser_.add_argument("--draft", type=int, help="Draft number (default: previous draft in --out plus one)")
     build_parser_.add_argument("--short", action="store_true", help="One-sentence summary")
     build_parser_.add_argument("--render", action="append", help="Render in the same run: pdf,docx,xlsx or all; repeatable")
+    build_parser_.add_argument("--bundle-id", help="New immutable draft directory name; choose a unique name to know presented paths in advance")
     build_parser_.set_defaults(handler=command_build)
 
     show_parser = commands.add_parser("show", help="Print the figures, tables, checks and notes of a report (not its rows).")
@@ -1738,6 +1742,7 @@ def build_parser() -> argparse.ArgumentParser:
     prose_parser.add_argument("--action", action="append", help="An action bullet; repeatable")
     prose_parser.add_argument("--render", action="append", help="Render the new draft in the same run: pdf,docx,xlsx or all; repeatable")
     prose_parser.add_argument("--tenant", help="Tenant bundle directory for the logo and colours (default: /mnt/tenant when present)")
+    prose_parser.add_argument("--bundle-id", help="New immutable draft directory name; choose a unique name to know presented paths in advance")
     prose_parser.set_defaults(handler=command_prose)
 
     render_parser = commands.add_parser("render", help="Render report.json to html, pdf, docx or xlsx; several formats in one run.")
@@ -1745,6 +1750,7 @@ def build_parser() -> argparse.ArgumentParser:
     render_parser.add_argument("--to", required=True, action="append", help="html, pdf, docx, xlsx, a comma-separated list of them, or all (pdf, docx and xlsx); repeatable")
     render_parser.add_argument("--out", help="Output path (default: next to the report)")
     render_parser.add_argument("--tenant", help="Tenant bundle directory for the logo and colours (default: /mnt/tenant when present)")
+    render_parser.add_argument("--bundle-id", help="New immutable draft directory name; choose a unique name to know presented paths in advance")
     render_parser.set_defaults(handler=command_render)
 
     checks_parser = commands.add_parser("checks", help="Re-run the checks against the inputs and write checks.json.")
