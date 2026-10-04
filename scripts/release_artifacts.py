@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Check release admission and bind candidate images to their build inputs.
 
-This command only reads Git, GitHub and the registry. Retagging belongs to the
-workflow, after every component has passed the release preflight.
+Verification reads Git, GitHub and the registry. Record creation writes the
+verified acceptance pointer; retagging belongs to the admitted workflow.
 """
 
 from __future__ import annotations
@@ -15,9 +15,17 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import urllib.error
 import urllib.request
 from pathlib import Path
+
+from release_acceptance import (
+    RECORD,
+    AcceptanceError,
+    record_acceptance,
+    verify_acceptance,
+)
 
 COMPONENT_INPUTS = {
     "backend": ("backend", "skills/public", ".dockerignore"),
@@ -41,6 +49,7 @@ COMMON_INPUTS = (
     ".github/workflows/container.yaml",
     ".github/workflows/verify-versions.yml",
     "scripts/release_artifacts.py",
+    "scripts/release_acceptance.py",
     "scripts/verify_versions.sh",
     "scripts/release_tag_spellings.sh",
 )
@@ -225,10 +234,11 @@ def verify_candidate(repository: str, component: str, version: str, image: str, 
         raise ReleaseError(f"{component} build inputs changed after the candidate; rebuild and repin before tagging")
 
 
-def verify_release(repository: str, version: str, revision: str) -> dict[str, str]:
-    """Resolve and verify every candidate before the matrix can publish aliases."""
+def _verified_candidates(repository: str, version: str, revision: str) -> dict[str, str]:
+    """Shared candidate proof for record creation and release admission."""
     validate_identity(repository, version)
-    pins = Path("deploy/compose/images.txt").read_text(encoding="utf-8").splitlines()
+    revision = resolve_revision(revision)
+    pins = run("git", "show", f"{revision}:deploy/compose/images.txt").splitlines()
     candidates = {}
     for component in COMPONENT_INPUTS:
         image_repository = f"ghcr.io/{repository.lower()}-{component}"
@@ -246,6 +256,32 @@ def verify_release(repository: str, version: str, revision: str) -> dict[str, st
     return candidates
 
 
+def verify_release(repository: str, version: str, revision: str) -> dict[str, str]:
+    """Verify every candidate and its image acceptance before any publication."""
+    candidates = _verified_candidates(repository, version, revision)
+    try:
+        verify_acceptance(repository, version, resolve_revision(revision), candidates)
+    except AcceptanceError as error:
+        raise ReleaseError(str(error)) from error
+    return candidates
+
+
+def write_acceptance_record(repository: str, version: str, revision: str, run_id: int) -> None:
+    candidates = _verified_candidates(repository, version, revision)
+    accepted = record_acceptance(repository, version, resolve_revision(revision), candidates, run_id)
+    destination = Path(RECORD)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=destination.parent, delete=False) as output:
+            temporary = Path(output.name)
+            output.write(json.dumps(accepted, indent=2) + "\n")
+        temporary.replace(destination)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -253,12 +289,14 @@ def main() -> int:
     inputs = commands.add_parser("inputs")
     candidate = commands.add_parser("verify-candidate")
     release = commands.add_parser("verify-release")
-    for command in (unpublished, candidate, release):
+    record = commands.add_parser("record-acceptance")
+    record.add_argument("--run-id", type=int, required=True)
+    for command in (unpublished, candidate, release, record):
         command.add_argument("--repository", required=True)
         command.add_argument("--version", required=True)
     for command in (inputs, candidate):
         command.add_argument("--component", choices=COMPONENT_INPUTS, required=True)
-    for command in (inputs, candidate, release):
+    for command in (inputs, candidate, release, record):
         command.add_argument("--revision", default="HEAD")
     candidate.add_argument("--image", required=True)
     args = parser.parse_args()
@@ -269,6 +307,8 @@ def main() -> int:
             print(input_fingerprint(args.component, args.revision))
         elif args.command == "verify-candidate":
             verify_candidate(args.repository, args.component, args.version, args.image, args.revision)
+        elif args.command == "record-acceptance":
+            write_acceptance_record(args.repository, args.version, args.revision, args.run_id)
         else:
             print(
                 json.dumps(
@@ -276,7 +316,7 @@ def main() -> int:
                     sort_keys=True,
                 )
             )
-    except (ReleaseError, OSError) as error:
+    except (ReleaseError, AcceptanceError, OSError) as error:
         print(f"Release verification failed: {error}", file=sys.stderr)
         return 1
     return 0

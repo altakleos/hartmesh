@@ -16,6 +16,7 @@ permissions:
   contents: write
   packages: read
   attestations: read
+  actions: read
 
 jobs:
   release-manifest:
@@ -57,7 +58,7 @@ jobs:
           set -euo pipefail
           printf '%s' "$GH_TOKEN" | crane auth login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
 
-      - name: Verify all candidate provenance and final build inputs
+      - name: Verify candidate provenance, final build inputs and image acceptance
         id: candidates
         env:
           GH_TOKEN: ${{ github.token }}
@@ -66,6 +67,7 @@ jobs:
           set -euo pipefail
           CANDIDATES="$(python3 scripts/release_artifacts.py verify-release --repository "$GITHUB_REPOSITORY" --version "$VERSION" --revision HEAD)"
           printf 'candidates=%s\n' "$CANDIDATES" >> "$GITHUB_OUTPUT"
+          cp deploy/compose/acceptance.json release-acceptance.json
 
       - name: Resolve and cross-check published artifacts
         id: resolve
@@ -222,7 +224,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-manifest-${{ inputs.version }}
-          path: release-manifest.json
+          path: |
+            release-manifest.json
+            release-acceptance.json
           if-no-files-found: error
 
       - name: Create or update the GitHub Release
@@ -237,7 +241,7 @@ jobs:
           else
             gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
-          gh release upload "$TAG" release-manifest.json --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$TAG" release-manifest.json release-acceptance.json --repo "$GITHUB_REPOSITORY" --clobber
 
       - name: Summarize resolved digests
         run: |

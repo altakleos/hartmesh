@@ -70,6 +70,7 @@ def checkout(tmp_path: Path) -> Path:
     }
     if SCRIPT.exists():
         changes["scripts/release_artifacts.py"] = SCRIPT.read_text(encoding="utf-8")
+        changes["scripts/release_acceptance.py"] = (SCRIPT.parent / "release_acceptance.py").read_text(encoding="utf-8")
     commit(root, changes)
     return root
 
@@ -300,8 +301,8 @@ def test_shared_preflight_verifies_every_image_and_emits_no_partial_candidates(c
     if bad_component:
         assert result.returncode != 0 and result.stdout == ""
     else:
-        assert result.returncode == 0, result.stderr
-        assert set(json.loads(result.stdout).values()) == set(candidates)
+        assert result.returncode != 0 and result.stdout == ""
+        assert "acceptance" in result.stderr
         assert len([call for call in recorded(calls) if call[:3] == ["gh", "attestation", "verify"]]) == 5
 
 
@@ -354,8 +355,114 @@ def load_guard():
     spec = importlib.util.spec_from_file_location("release_artifacts", SCRIPT)
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(SCRIPT.parent))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.pop(0)
     return module
+
+
+def test_verified_candidates_cannot_be_released_without_acceptance(checkout: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    guard = load_guard()
+    original_run = guard.run
+    monkeypatch.chdir(checkout)
+    monkeypatch.setattr(guard, "run", lambda *args: DIGEST if args[:2] == ("crane", "digest") else original_run(*args))
+    monkeypatch.setattr(guard, "verify_candidate", lambda *_args: None)
+
+    with pytest.raises(guard.ReleaseError, match="acceptance"):
+        guard.verify_release(REPOSITORY, VERSION, "HEAD")
+
+
+def test_shared_release_gate_checks_acceptance_after_all_five_candidate_proofs(checkout, monkeypatch):
+    guard = load_guard()
+    original_run = guard.run
+    verified = []
+    monkeypatch.chdir(checkout)
+    monkeypatch.setattr(guard, "run", lambda *args: DIGEST if args[:2] == ("crane", "digest") else original_run(*args))
+    monkeypatch.setattr(guard, "verify_candidate", lambda _repo, component, *_args: verified.append(component))
+
+    def acceptance(repository, version, revision, candidates):
+        assert repository == REPOSITORY and version == VERSION
+        assert revision == git(checkout, "rev-parse", "HEAD")
+        assert set(verified) == set(guard.COMPONENT_INPUTS) == set(candidates)
+        return {"verified": True}
+
+    monkeypatch.setattr(guard, "verify_acceptance", acceptance)
+    # An unstaged pin change is outside the requested committed release tree.
+    (checkout / "deploy/compose/images.txt").write_text("invalid local pin\n", encoding="utf-8")
+    assert len(guard.verify_release(REPOSITORY, VERSION, "HEAD")) == 5
+
+
+@pytest.mark.parametrize("failure", ["candidate", "acceptance", "replace", None])
+def test_record_creation_preserves_previous_record_until_all_proofs_and_write_succeed(checkout, monkeypatch, failure):
+    guard = load_guard()
+    monkeypatch.chdir(checkout)
+    destination = checkout / "deploy/compose/acceptance.json"
+    destination.write_text("previous record\n", encoding="utf-8")
+    candidates = {"backend": "immutable candidate"}
+    calls = []
+
+    def verified(*_args):
+        calls.append("candidates")
+        if failure == "candidate":
+            raise guard.ReleaseError("candidate failed")
+        return candidates
+
+    def accepted(_repo, _version, _revision, images, run_id):
+        calls.append("acceptance")
+        assert images is candidates and run_id == 1234
+        if failure == "acceptance":
+            raise guard.AcceptanceError("acceptance failed")
+        return {"schema": 1, "run_id": run_id}
+
+    monkeypatch.setattr(guard, "_verified_candidates", verified)
+    monkeypatch.setattr(guard, "record_acceptance", accepted)
+    if failure == "replace":
+
+        def failed_replace(*_args):
+            raise OSError("write failed")
+
+        monkeypatch.setattr(Path, "replace", failed_replace)
+    if failure:
+        with pytest.raises((guard.ReleaseError, guard.AcceptanceError, OSError)):
+            guard.write_acceptance_record(REPOSITORY, VERSION, "HEAD", 1234)
+        assert destination.read_text(encoding="utf-8") == "previous record\n"
+    else:
+        guard.write_acceptance_record(REPOSITORY, VERSION, "HEAD", 1234)
+        assert json.loads(destination.read_text(encoding="utf-8")) == {"schema": 1, "run_id": 1234}
+    assert calls == (["candidates"] if failure == "candidate" else ["candidates", "acceptance"])
+    assert sorted(path.name for path in destination.parent.iterdir()) == ["acceptance.json", "images.txt"]
+
+
+@pytest.mark.parametrize("workflow_path", ["container.yaml", "release-manifest.yaml"])
+def test_actual_publishing_preflight_refuses_missing_acceptance_without_outputs(checkout, registry, workflow_path):
+    env, calls = registry
+    candidates = {f"ghcr.io/{REPOSITORY}-{name}@{DIGEST}": labels(checkout, name) for name in load_guard().COMPONENT_INPUTS}
+    workflow = yaml.safe_load((REPO / ".github/workflows" / workflow_path).read_text(encoding="utf-8"))
+    job = workflow["jobs"]["release-policy" if workflow_path == "container.yaml" else "release-manifest"]
+    assert (job.get("permissions") or workflow["permissions"])["actions"] == "read"
+    step = next(step for step in job["steps"] if step.get("id") == "candidates")
+    output = checkout / "preflight-output"
+    result = subprocess.run(
+        ["bash", "-c", step["run"]],
+        cwd=checkout,
+        env={
+            **env,
+            "TEST_LABELS": json.dumps(candidates),
+            "GH_TOKEN": "offline-fixture",
+            "GITHUB_REPOSITORY": REPOSITORY,
+            "GITHUB_REF_NAME": f"v{VERSION}",
+            "GITHUB_SHA": git(checkout, "rev-parse", "HEAD"),
+            "VERSION": VERSION,
+            "GITHUB_OUTPUT": str(output),
+        },
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode != 0 and "acceptance" in result.stderr
+    assert not output.exists()
+    assert not any(call[:2] == ["crane", "tag"] or call[:2] == ["gh", "release"] for call in recorded(calls))
 
 
 @pytest.mark.parametrize(

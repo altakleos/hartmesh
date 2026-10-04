@@ -348,6 +348,12 @@ stores; SQLite is the default, and CI covers both. Record running image IDs,
 digests and declared OCI revisions separately from the harness commit/fingerprint.
 Do not imply source-label attestation or full deployment qualification.
 Each run owns a unique Compose project and disposable data volumes.
+Result schema 2 binds workflow/run/attempt context and configured fixture refs
+to inspected/running IDs. Keep image source and harness identities distinct.
+The runner and release guard hash the same regular harness files, modes, whole
+browser-test directory, workflow and dependency controls; new executable tests
+must affect that fingerprint. Candidate result artifacts contain only
+`result.json`, use store-plus-attempt names and request 90-day retention.
 Keep process-group deadlines, interruption cleanup and result/source-fingerprint
 evidence intact. Tests may initialize synthetic users and exercise actual APIs;
 never add bypass routers or browser API mocks to this acceptance profile.
@@ -365,3 +371,16 @@ release build configuration. Keep `BUILD_CONTEXTS` and `COMPONENT_INPUTS` aligne
 with the matrix and Dockerfiles; new COPY/ADD sources outside that coverage fail.
 Public skill Markdown is a build input. Root release notes, docs and Compose
 pins may change after the candidate; a source change requires rebuilding it.
+`release_acceptance.py` additionally requires one completed successful
+same-repository image-mode workflow dispatch, both stores from one attempt,
+exact candidate refs/running IDs, unchanged committed harness and authenticated
+artifact SHA-256s. Read the fixed schema-1 record from the requested commit;
+uncommitted/local success claims cannot qualify. Bound API/ZIP/JSON reads, never
+extract archives or forward GitHub credentials to signed download URLs.
+`record-acceptance` proves all candidates before atomically replacing the record;
+there is no verification bypass. Both publication workflows need Actions read
+permission and must run the shared gate before retagging images or publishing
+a GitHub Release. Keep release
+manifest schema 4 intact and attach the record as a separate asset. Before a
+tag, rerun all acceptance jobs and refresh its record when needed; an incomplete
+immutable tag with expired evidence needs a new version.

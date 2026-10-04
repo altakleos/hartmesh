@@ -20,6 +20,22 @@ import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+HARNESS_PATHS = (
+    ".github/workflows/docker-acceptance.yml",
+    "scripts/docker_acceptance.py",
+    "scripts/pnpm.py",
+    "docker/nginx/nginx.conf",
+    "docker/acceptance/compose.yaml",
+    "docker/acceptance/compose.postgres-redis.yaml",
+    "docker/acceptance/provider.py",
+    "docker/acceptance/acceptance-config.yaml",
+    "frontend-hm/playwright.docker-acceptance.config.ts",
+    "frontend-hm/tests/e2e-docker-acceptance",
+    "frontend-hm/package.json",
+    "frontend-hm/pnpm-lock.yaml",
+    "frontend-hm/.npmrc",
+    "frontend-hm/pnpm-workspace.yaml",
+)
 
 
 def snapshot_tracked(source: Path, target: Path) -> str:
@@ -168,23 +184,42 @@ def inspect_image(image: str, *, env: dict[str, str]) -> dict[str, object]:
 
 
 def harness_fingerprint() -> str:
-    digest = hashlib.sha256()
-    files = [
-        "scripts/docker_acceptance.py",
-        "scripts/pnpm.py",
-        "docker/nginx/nginx.conf",
-        "docker/acceptance/compose.yaml",
-        "docker/acceptance/compose.postgres-redis.yaml",
-        "docker/acceptance/provider.py",
-        "docker/acceptance/acceptance-config.yaml",
-        "frontend-hm/playwright.docker-acceptance.config.ts",
-        "frontend-hm/tests/e2e-docker-acceptance/journey.spec.ts",
-        "frontend-hm/package.json",
-        "frontend-hm/pnpm-lock.yaml",
-    ]
-    for name in sorted(files):
-        digest.update(name.encode() + b"\0" + (ROOT / name).read_bytes() + b"\0")
+    digest = hashlib.sha256(b"hartmesh-docker-acceptance-v2\0")
+    files = []
+    for relative in HARNESS_PATHS:
+        path = ROOT / relative
+        if path.is_symlink() or not path.exists():
+            raise ValueError(f"Acceptance harness requires a regular input: {relative}")
+        for file in [path] if path.is_file() else path.rglob("*"):
+            if file.is_symlink():
+                raise ValueError("Acceptance harness does not support symlink inputs")
+            if file.is_file():
+                files.append(file)
+    for file in sorted(files, key=lambda item: item.relative_to(ROOT).as_posix()):
+        name = file.relative_to(ROOT).as_posix()
+        mode = "100755" if file.stat().st_mode & 0o111 else "100644"
+        digest.update(
+            mode.encode() + b"\0" + name.encode() + b"\0" + file.read_bytes() + b"\0"
+        )
     return digest.hexdigest()
+
+
+def workflow_identity() -> dict[str, object] | None:
+    try:
+        run_id = int(os.environ["GITHUB_RUN_ID"])
+        attempt = int(os.environ["GITHUB_RUN_ATTEMPT"])
+        repository = os.environ["GITHUB_REPOSITORY"]
+        event = os.environ["GITHUB_EVENT_NAME"]
+        head = os.environ["GITHUB_SHA"]
+    except (KeyError, ValueError):
+        return None
+    return {
+        "repository": repository,
+        "run_id": run_id,
+        "run_attempt": attempt,
+        "event": event,
+        "head_sha": head,
+    }
 
 
 def build_source_images(
@@ -262,6 +297,7 @@ def main() -> int:
         ["git", "rev-parse", "HEAD"], cwd=ROOT, text=True
     ).strip()
     summary: dict[str, object] = {
+        "schema": 2,
         "project": project,
         "status": "failed",
         "mode": "images" if supplied else "source",
@@ -269,6 +305,7 @@ def main() -> int:
         "harness_commit": commit,
         "harness_sha256": harness_fingerprint(),
         "source_commit": None if supplied else commit,
+        "workflow": workflow_identity(),
     }
     print(f"Docker acceptance evidence: {artifacts}", flush=True)
     started = False
@@ -344,6 +381,7 @@ def main() -> int:
                 raise RuntimeError(
                     f"Running {name} image does not match the recorded image"
                 )
+            identity["running_image_id"] = actual
         fixture_images = {}
         for service in [
             "provider",
@@ -364,7 +402,18 @@ def main() -> int:
                 text=True,
                 timeout=30,
             ).strip()
-            fixture_images[service] = inspect_image(image_id, env=env)
+            configured = subprocess.check_output(
+                ["docker", "inspect", "--format", "{{.Config.Image}}", container],
+                cwd=ROOT,
+                env=env,
+                text=True,
+                timeout=30,
+            ).strip()
+            fixture_images[service] = {
+                **inspect_image(image_id, env=env),
+                "configured": configured,
+                "running_image_id": image_id,
+            }
         summary["fixture_images"] = fixture_images
         binding = subprocess.check_output(
             [*compose, "port", "nginx", "2026"],
