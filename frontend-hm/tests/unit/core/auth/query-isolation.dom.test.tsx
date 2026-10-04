@@ -1,6 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { type QueryClient, useQueryClient } from "@tanstack/react-query";
-import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { StrictMode, useState } from "react";
 
 const router = rs.hoisted(() => ({ push: rs.fn() }));
@@ -65,6 +72,7 @@ function Files() {
   client = useQueryClient();
   clients.add(client);
   const [initialOwner] = useState(auth.user?.id);
+  const [draft, setDraft] = useState("");
   const files = useMyFiles();
   const names =
     files.data?.files.map((file) => file.name).join(",") ?? "loading";
@@ -72,6 +80,11 @@ function Files() {
   return (
     <div data-testid="files" data-owner={initialOwner}>
       {names}
+      <input
+        aria-label="Unsaved draft"
+        value={draft}
+        onChange={(event) => setDraft(event.target.value)}
+      />
     </div>
   );
 }
@@ -97,10 +110,187 @@ afterEach(() => {
   cleanup();
   clients.forEach((queryClient) => queryClient.clear());
   clients.clear();
+  rs.useRealTimers();
   rs.restoreAllMocks();
 });
 
 describe("authenticated query cache isolation", () => {
+  it("bounds an unresponsive check without discarding the draft", async () => {
+    rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    rs.mocked(listMyFiles).mockResolvedValue(listing("account.pdf"));
+    let signal: AbortSignal | undefined;
+    rs.spyOn(globalThis, "fetch").mockImplementation(
+      (_url, options) =>
+        new Promise((_resolve, reject) => {
+          signal = options?.signal ?? undefined;
+          signal?.addEventListener("abort", () =>
+            reject(new DOMException("owned fixture timeout", "AbortError")),
+          );
+        }),
+    );
+    const view = render(<App />);
+    fireEvent.change(screen.getByLabelText("Unsaved draft"), {
+      target: { value: "unfinished edits" },
+    });
+    let refresh: Promise<void>;
+    act(() => {
+      refresh = auth.refreshUser();
+    });
+    await act(async () => {
+      await rs.advanceTimersByTimeAsync(10_000);
+      await refresh;
+    });
+    expect(signal?.aborted).toBe(true);
+    expect(auth.user?.id).toBe("alice");
+    expect(auth.isLoading).toBe(false);
+    expect(screen.getByLabelText<HTMLInputElement>("Unsaved draft").value).toBe(
+      "unfinished edits",
+    );
+    view.unmount();
+  });
+
+  it("can recover on visibility after an uncertain check", async () => {
+    rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    rs.mocked(listMyFiles).mockResolvedValue(listing("account.pdf"));
+    const fetch = rs
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("owned fixture offline"))
+      .mockResolvedValue(Response.json(alice));
+    rs.spyOn(document, "visibilityState", "get").mockReturnValue("visible");
+    render(<App />);
+    const previousClient = client;
+    await act(async () => auth.refreshUser());
+    await act(async () => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(client).toBe(previousClient);
+    await act(async () => rs.advanceTimersByTimeAsync(60_000));
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+  it.each(["network", "unavailable", "invalid-json", "invalid-user"])(
+    "keeps the draft and cache after an uncertain %s refresh",
+    async (failure) => {
+      rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      rs.mocked(listMyFiles).mockResolvedValue(listing("alice-private.pdf"));
+      const fetch = rs.spyOn(globalThis, "fetch");
+      if (failure === "network")
+        fetch.mockRejectedValue(new Error("owned fixture offline"));
+      else if (failure === "unavailable")
+        fetch.mockResolvedValue(new Response(null, { status: 503 }));
+      else if (failure === "invalid-json")
+        fetch.mockResolvedValue(new Response("invalid JSON"));
+      else fetch.mockResolvedValue(Response.json({ id: "unverified" }));
+      render(<App />);
+      const previousClient = client;
+      fireEvent.change(screen.getByLabelText("Unsaved draft"), {
+        target: { value: "unfinished edits" },
+      });
+
+      await act(async () => auth.refreshUser());
+
+      expect(auth.user?.id).toBe("alice");
+      expect(auth.isLoading).toBe(false);
+      expect(client).toBe(previousClient);
+      expect(
+        screen.getByLabelText<HTMLInputElement>("Unsaved draft").value,
+      ).toBe("unfinished edits");
+    },
+  );
+
+  it("retries a bounded number of times and a later manual refresh can recover", async () => {
+    rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    rs.mocked(listMyFiles).mockResolvedValue(listing("alice-private.pdf"));
+    const fetch = rs
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValue(new Error("owned fixture offline"));
+    render(<App />);
+    await act(async () => auth.refreshUser());
+    for (const delay of [2_000, 5_000, 15_000]) {
+      await act(async () => rs.advanceTimersByTimeAsync(delay));
+    }
+    expect(fetch).toHaveBeenCalledTimes(4);
+    await act(async () => rs.advanceTimersByTimeAsync(60_000));
+    expect(fetch).toHaveBeenCalledTimes(4);
+    fetch.mockResolvedValue(Response.json(alice));
+    await act(async () => auth.refreshUser());
+    expect(auth.user?.id).toBe("alice");
+    expect(fetch).toHaveBeenCalledTimes(5);
+  });
+
+  it("recovers on a retry without replacing unsaved state", async () => {
+    rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    rs.mocked(listMyFiles).mockResolvedValue(listing("alice-private.pdf"));
+    const fetch = rs
+      .spyOn(globalThis, "fetch")
+      .mockRejectedValueOnce(new Error("owned fixture offline"))
+      .mockResolvedValue(Response.json(alice));
+    render(<App />);
+    const previousClient = client;
+    fireEvent.change(screen.getByLabelText("Unsaved draft"), {
+      target: { value: "unfinished edits" },
+    });
+    await act(async () => auth.refreshUser());
+    await act(async () => rs.advanceTimersByTimeAsync(2_000));
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(client).toBe(previousClient);
+    expect(screen.getByLabelText<HTMLInputElement>("Unsaved draft").value).toBe(
+      "unfinished edits",
+    );
+    await act(async () => rs.advanceTimersByTimeAsync(60_000));
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["unauthorized", "permissions", "account"])(
+    "retires drafts and queries on a confirmed %s change",
+    async (change) => {
+      rs.mocked(listMyFiles).mockResolvedValue(listing("account.pdf"));
+      const response =
+        change === "unauthorized"
+          ? new Response(null, { status: 401 })
+          : Response.json(
+              change === "account"
+                ? bob
+                : { ...alice, permissions: ["files:read"] },
+            );
+      rs.spyOn(globalThis, "fetch").mockResolvedValue(response);
+      render(<App />);
+      const previousClient = client;
+      fireEvent.change(screen.getByLabelText("Unsaved draft"), {
+        target: { value: "unfinished edits" },
+      });
+      await act(async () => auth.refreshUser());
+      expect(client).not.toBe(previousClient);
+      expect(
+        screen.getByLabelText<HTMLInputElement>("Unsaved draft").value,
+      ).toBe("");
+      expect(previousClient.getQueryCache().getAll()).toHaveLength(0);
+      if (change === "unauthorized")
+        expect(router.push).toHaveBeenCalledWith(
+          "/login?next=%2Fworkspace%2Ffiles",
+        );
+    },
+  );
+
+  it.each(["account", "logout", "unmount"])(
+    "cancels queued recovery on %s retirement",
+    async (retirement) => {
+      rs.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+      rs.mocked(listMyFiles).mockResolvedValue(listing("account.pdf"));
+      const fetch = rs
+        .spyOn(globalThis, "fetch")
+        .mockRejectedValueOnce(new Error("owned fixture offline"))
+        .mockResolvedValue(new Response(null, { status: 204 }));
+      const view = render(<App />);
+      await act(async () => auth.refreshUser());
+      if (retirement === "account") act(() => auth.applyUser(bob));
+      else if (retirement === "logout") await act(async () => auth.logout());
+      else view.unmount();
+      await act(async () => rs.advanceTimersByTimeAsync(60_000));
+      expect(fetch).toHaveBeenCalledTimes(retirement === "logout" ? 2 : 1);
+      if (retirement === "account") expect(auth.user?.id).toBe("bob");
+    },
+  );
   it("starts a fresh cache when the workspace remounts after SPA sign-in", async () => {
     rs.mocked(listMyFiles).mockResolvedValueOnce(listing("alice-private.pdf"));
     const first = render(<App />);
