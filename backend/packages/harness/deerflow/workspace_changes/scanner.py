@@ -5,6 +5,7 @@ import hashlib
 import os
 import stat
 from codecs import BOM_UTF16_BE, BOM_UTF16_LE, getincrementaldecoder
+from dataclasses import dataclass
 from pathlib import Path
 
 from deerflow.constants import BROWSER_FRAMES_DIRNAME, MCP_INTERNAL_DIRNAME, TOOL_RESULTS_DIRNAME
@@ -109,6 +110,24 @@ def is_sensitive_workspace_path(path: str) -> bool:
     return False
 
 
+@dataclass
+class _TextBudget:
+    remaining: int
+
+    def decode(self, raw: bytes) -> tuple[str | None, DiffUnavailableReason | None]:
+        # Reserve before decoding: UTF-16 can expand to three UTF-8 bytes per
+        # code unit. A surrogate pair needs four, within this conservative cap.
+        upper_bound = ((len(raw) - 2) // 2) * 3 if raw.startswith(_UTF16_BOMS) else len(raw)
+        if upper_bound > self.remaining:
+            return None, "truncated"
+        self.remaining -= upper_bound
+        decoded = _decode_text_bytes(raw)
+        if decoded is None:
+            return None, "binary"
+        self.remaining += upper_bound - len(decoded.encode("utf-8"))
+        return decoded, None
+
+
 def scan_workspace_roots(
     roots: list[WorkspaceRoot],
     *,
@@ -135,6 +154,7 @@ def scan_workspace_roots(
     scanned = 0
     directories = 0
     truncated = False
+    text_budget = _TextBudget(max(0, resolved_limits.max_total_text_bytes))
 
     def scan_error(_error: OSError) -> None:
         nonlocal truncated
@@ -179,6 +199,7 @@ def scan_workspace_roots(
                             include_text=include_text,
                             text_paths=text_paths,
                             text_cache_dir=cache_dir,
+                            text_budget=text_budget,
                         )
                     else:
                         continue
@@ -205,6 +226,7 @@ def _snapshot_file(
     include_text: bool,
     text_paths: set[str] | None,
     text_cache_dir: Path | None,
+    text_budget: _TextBudget,
 ) -> FileSnapshot | None:
     try:
         fd = os.open(host_file.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory_fd)
@@ -242,12 +264,12 @@ def _snapshot_file(
             elif raw is None:
                 reason = "large"
             elif should_include_text:
-                decoded = _decode_text_bytes(raw)
-                if decoded is None:
-                    binary, reason = True, "binary"
-                elif text_cache_dir is not None:
+                decoded, reason = text_budget.decode(raw)
+                if reason == "binary":
+                    binary = True
+                elif decoded is not None and text_cache_dir is not None:
                     text_path = str(_cache_text_file(decoded, virtual_path, text_cache_dir))
-                else:
+                elif decoded is not None:
                     text = decoded
         after = os.fstat(fd)
         if (after.st_size, after.st_mtime_ns) != (size, mtime_ns):

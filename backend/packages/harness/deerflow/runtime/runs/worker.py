@@ -98,6 +98,7 @@ from deerflow.tracing import inject_langfuse_metadata
 from deerflow.utils.assembly_io import run_assembly
 from deerflow.utils.messages import message_to_text
 from deerflow.workspace_changes import capture_output_snapshot, capture_workspace_snapshot, get_changed_output_paths, record_workspace_changes
+from deerflow.workspace_changes.handoff import bind_output_snapshot
 from deerflow.workspace_changes.types import WorkspaceSnapshot
 
 from .delivery import DELIVERY_INCOMPLETE_STOP_REASON, DELIVERY_SCAN_INCOMPLETE_ERROR, output_scan_incomplete, publish_delivery_failure
@@ -1551,7 +1552,14 @@ async def _run_agent(
         # turns complete cleanly afterward (#4176 review).
         if isinstance(runtime.context, dict):
             runtime.context.pop("stop_reason", None)
-        await _stream_once(graph_input, initial_runnable_config)
+        with bind_output_snapshot(
+            pre_run_output_snapshot,
+            thread_id=thread_id,
+            run_id=run_id,
+            user_id=workspace_changes_user_id,
+            extra_excluded_dir_names=workspace_excluded_dir_names,
+        ):
+            await _stream_once(graph_input, initial_runnable_config)
         while not record.abort_event.is_set() and not llm_error_fallback_message and (journal is None or not journal.had_llm_error_fallback):
             continuation_input = await _prepare_goal_continuation_input(
                 bridge=bridge,

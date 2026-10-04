@@ -512,6 +512,7 @@ async def test_workspace_changes_response_returns_summary_only_and_full_payload(
             "max_files": 200,
             "max_file_bytes_for_diff": 262144,
             "max_total_diff_bytes": 1048576,
+            "max_total_text_bytes": 1048576,
         },
     }
     await store.put(
@@ -789,3 +790,111 @@ def test_normalize_symlink_target_is_identity_off_windows(monkeypatch):
     # "\\?\" there must be recorded verbatim.
     monkeypatch.setattr(os, "name", "posix")
     assert _normalize_symlink_target(r"\\?\C:\Users\u1\target.txt") == r"\\?\C:\Users\u1\target.txt"
+
+
+def test_default_text_capture_is_bounded_before_decoding_without_losing_metadata(tmp_path, monkeypatch):
+    import tracemalloc
+
+    from deerflow.workspace_changes import scanner
+
+    roots = _roots(tmp_path)
+    body = "x" * (128 * 1024)
+    for i in range(300):
+        (roots[i % 2].host_path / f"file-{i:03d}.txt").write_text(body, encoding="utf-8")
+    decoded = []
+    real_decode = scanner._decode_text_bytes
+
+    def count_decode(data):
+        decoded.append(len(data))
+        return real_decode(data)
+
+    monkeypatch.setattr(scanner, "_decode_text_bytes", count_decode)
+    tracemalloc.start()
+    try:
+        after = scan_workspace_roots(roots)
+        _, peak = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert len(after.files) == 300
+    assert not after.truncated  # Complete enumeration remains delivery evidence.
+    assert sum(len((file.text or "").encode("utf-8")) for file in after.files.values()) <= 1024 * 1024
+    assert sum(decoded) <= 1024 * 1024
+    assert peak < 5 * 1024 * 1024
+    assert all(file.sha256 is not None for file in after.files.values())
+    from deerflow.workspace_changes.types import WorkspaceSnapshot
+
+    result = compare_snapshots(WorkspaceSnapshot(), after)
+    assert result.summary.created == 300
+    assert result.summary.truncated
+    assert any(file.diff_unavailable_reason == "truncated" for file in result.files)
+
+
+@pytest.mark.parametrize("cached", [False, True])
+@pytest.mark.parametrize("encoding", ["utf-8", "utf-16"])
+def test_text_budget_is_shared_across_roots_and_measures_utf8_cache_bytes(tmp_path, cached, encoding):
+    roots = _roots(tmp_path)
+    for root in roots:
+        for i in range(4):
+            (root.host_path / f"file-{i}.txt").write_text("中" * 100, encoding=encoding)
+    limit = WorkspaceChangeLimits(max_total_text_bytes=600)
+    cache = tmp_path / "capture-cache" if cached else None
+    snapshot = scan_workspace_roots(roots, limits=limit, text_cache_dir=cache)
+    assert len(snapshot.files) == 8 and not snapshot.truncated
+    retained = sum(Path(file.text_path).stat().st_size if file.text_path else len((file.text or "").encode("utf-8")) for file in snapshot.files.values())
+    assert retained == 600
+    assert sum(file.content_unavailable_reason == "truncated" for file in snapshot.files.values()) == 6
+
+
+def test_content_omission_does_not_hide_a_same_size_same_mtime_change(tmp_path):
+    roots = _roots(tmp_path)
+    path = roots[1].host_path / "result.txt"
+    path.write_text("before", encoding="utf-8")
+    limit = WorkspaceChangeLimits(max_total_text_bytes=0)
+    before = scan_workspace_roots(roots, limits=limit)
+    timestamp = path.stat().st_mtime_ns
+    path.write_text("after!", encoding="utf-8")
+    os.utime(path, ns=(timestamp, timestamp))
+    after = scan_workspace_roots(roots, limits=limit)
+    assert get_changed_output_paths(before, after) == ["/mnt/user-data/outputs/result.txt"]
+    result = compare_snapshots(before, after, limits=limit)
+    assert result.summary.modified == 1 and result.summary.truncated
+    assert result.files[0].diff_unavailable_reason == "truncated"
+    assert result.files[0].diff_truncated
+
+
+def test_binary_sensitive_and_unselected_files_do_not_consume_text_budget(tmp_path):
+    roots = _roots(tmp_path)
+    workspace = roots[0].host_path
+    (workspace / "a.png").write_bytes(b"image")
+    (workspace / "b-secret.txt").write_text("private fixture", encoding="utf-8")
+    (workspace / "c-other.txt").write_text("unselected", encoding="utf-8")
+    (workspace / "d-result.txt").write_text("selected", encoding="utf-8")
+    selected = "/mnt/user-data/workspace/d-result.txt"
+    snapshot = scan_workspace_roots(roots, limits=WorkspaceChangeLimits(max_total_text_bytes=8), text_paths={selected})
+    assert snapshot.files[selected].text == "selected"
+    assert snapshot.files["/mnt/user-data/workspace/a.png"].content_unavailable_reason == "binary"
+    assert snapshot.files["/mnt/user-data/workspace/b-secret.txt"].content_unavailable_reason == "sensitive"
+    assert snapshot.files["/mnt/user-data/workspace/c-other.txt"].text is None
+
+
+def test_late_invalid_text_uses_the_decode_budget(tmp_path, monkeypatch):
+    from deerflow.workspace_changes import scanner
+
+    roots = _roots(tmp_path)
+    invalid = b"x" * 8191 + b"\xff"
+    for i in range(6):
+        (roots[0].host_path / f"invalid-{i}.txt").write_bytes(invalid)
+    (roots[1].host_path / "valid.txt").write_text("valid", encoding="utf-8")
+    decoded_bytes = []
+    real_decode = scanner._decode_text_bytes
+
+    def count_decode(data):
+        decoded_bytes.append(len(data))
+        return real_decode(data)
+
+    monkeypatch.setattr(scanner, "_decode_text_bytes", count_decode)
+    snapshot = scan_workspace_roots(roots, limits=WorkspaceChangeLimits(max_total_text_bytes=16384))
+    assert sum(decoded_bytes) <= 16384
+    assert snapshot.files["/mnt/user-data/outputs/valid.txt"].content_unavailable_reason == "truncated"
+    assert len(snapshot.files) == 7 and not snapshot.truncated
+    assert all(file.sha256 for file in snapshot.files.values())

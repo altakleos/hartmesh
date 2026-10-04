@@ -101,6 +101,7 @@ from deerflow.runtime.presented_files import (
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.lease import sandbox_command_scope
 from deerflow.workspace_changes.diff import get_changed_output_paths
+from deerflow.workspace_changes.handoff import take_output_snapshot
 from deerflow.workspace_changes.recorder import capture_output_snapshot
 
 logger = logging.getLogger(__name__)
@@ -179,7 +180,7 @@ class RuntimeDeliveryMiddleware(AgentMiddleware[AgentState]):
     def release_policy_parameters(self) -> dict[str, object]:
         return {"scope": "thread outputs root", "source": "filesystem diff", "curation": "model selection wins"}
 
-    async def _snapshot(self, runtime: Runtime | None) -> Any:
+    async def _snapshot(self, runtime: Runtime | None, *, reuse_baseline: bool = False) -> Any:
         thread_id = _thread_id(runtime)
         if not thread_id:
             return None
@@ -190,7 +191,12 @@ class RuntimeDeliveryMiddleware(AgentMiddleware[AgentState]):
             # that ignored it would be a second, quieter way around the same
             # rule.
             return None
-        return await capture_output_snapshot(thread_id, user_id=get_effective_user_id(), extra_excluded_dir_names=self._excluded_dir_names)
+        user_id = get_effective_user_id()
+        if reuse_baseline:
+            snapshot = take_output_snapshot(thread_id=thread_id, run_id=_run_key(runtime)[1], user_id=user_id, extra_excluded_dir_names=self._excluded_dir_names)
+            if snapshot is not None:
+                return snapshot
+        return await capture_output_snapshot(thread_id, user_id=user_id, extra_excluded_dir_names=self._excluded_dir_names)
 
     @override
     def before_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
@@ -205,8 +211,12 @@ class RuntimeDeliveryMiddleware(AgentMiddleware[AgentState]):
 
     @override
     async def abefore_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        if sandbox_command_scope(getattr(runtime, "context", None)) is not None:
+            return None
+        with self._lock:
+            self._snapshots.pop(_run_key(runtime), None)
         try:
-            snapshot = await self._snapshot(runtime)
+            snapshot = await self._snapshot(runtime, reuse_baseline=True)
         except Exception:
             # Best effort by contract: without a snapshot this middleware
             # presents nothing and the fence behaves exactly as before.
@@ -219,6 +229,8 @@ class RuntimeDeliveryMiddleware(AgentMiddleware[AgentState]):
 
     @override
     async def aafter_agent(self, state: AgentState, runtime: Runtime) -> dict | None:
+        if sandbox_command_scope(getattr(runtime, "context", None)) is not None:
+            return None
         with self._lock:
             before = self._snapshots.pop(_run_key(runtime), None)
         if before is None:
