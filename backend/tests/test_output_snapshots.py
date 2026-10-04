@@ -127,5 +127,5 @@ async def test_output_scan_errors_are_incomplete_not_empty(paths, monkeypatch, f
             onerror(PermissionError("read refused"))
             return iter(())
 
-        monkeypatch.setattr(scanner.os, "walk", denied_walk)
+        monkeypatch.setattr(scanner.os, "fwalk", denied_walk)
     assert await _produced_output_paths(WorkspaceSnapshot(), thread_id="thread", user_id=get_effective_user_id()) is None

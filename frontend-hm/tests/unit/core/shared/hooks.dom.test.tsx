@@ -67,6 +67,7 @@ function published(name: string, alreadyShared = false) {
       published_at: "2026-09-19T10:00:00+00:00",
       from_thread_id: null,
       can_remove: true,
+      publication_id: `publication-${name}`,
     },
   };
 }
@@ -220,8 +221,16 @@ describe("useShareWithEveryone", () => {
     await act(async () => {
       (options as ToastOptions).action.onClick();
     });
-    expect(mockedRemove).toHaveBeenNthCalledWith(1, "a.pdf");
-    expect(mockedRemove).toHaveBeenNthCalledWith(2, "a.xlsx");
+    expect(mockedRemove).toHaveBeenNthCalledWith(
+      1,
+      "a.pdf",
+      "publication-a.pdf",
+    );
+    expect(mockedRemove).toHaveBeenNthCalledWith(
+      2,
+      "a.xlsx",
+      "publication-a.xlsx",
+    );
   });
 
   it("says which folder it went into, because the person did not choose it", async () => {
@@ -328,7 +337,7 @@ describe("useShareWithEveryone", () => {
       (options as ToastOptions).action.onClick();
     });
     expect(mockedRemove).toHaveBeenCalledTimes(1);
-    expect(mockedRemove).toHaveBeenCalledWith("b.xlsx");
+    expect(mockedRemove).toHaveBeenCalledWith("b.xlsx", "publication-b.xlsx");
   });
 
   it("reports a failure in the person's words and keeps what landed", async () => {

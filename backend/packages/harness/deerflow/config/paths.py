@@ -568,7 +568,7 @@ class Paths:
         if thread_dir.exists():
             shutil.rmtree(thread_dir)
 
-    def resolve_virtual_path(self, thread_id: str, virtual_path: str, *, user_id: str | None = None) -> Path:
+    def resolve_virtual_path(self, thread_id: str, virtual_path: str, *, user_id: str | None = None, follow_symlinks: bool = True) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.
 
         Args:
@@ -580,6 +580,8 @@ class Paths:
                           ``/mnt/user-data/shared`` the company's Shared area.
                           Leading slashes are stripped before matching.
             user_id: Optional user ID for user-scoped path resolution.
+            follow_symlinks: Resolve filesystem links for legacy callers. Safe
+                descriptor readers use False to retain every lexical segment.
 
         Returns:
             The resolved absolute host filesystem path.
@@ -600,7 +602,7 @@ class Paths:
         if relative == _SHARED_SEGMENT or relative.startswith(_SHARED_SEGMENT + "/"):
             # The company's Shared area is nobody's thread and nobody's user
             # bucket: it resolves the same for everyone.
-            base = self.shared_dir().resolve()
+            base = self.shared_dir()
             relative = relative[len(_SHARED_SEGMENT) :].lstrip("/")
         elif relative == _USER_FILES_SEGMENT or relative.startswith(_USER_FILES_SEGMENT + "/"):
             # The person's files are not under the thread: they resolve to the
@@ -608,11 +610,12 @@ class Paths:
             # else's. The legacy thread layout has no owner and so no files.
             if user_id is None:
                 raise ValueError(f"{USER_FILES_VIRTUAL_PREFIX} needs a user")
-            base = self.user_files_dir(user_id).resolve()
+            base = self.user_files_dir(user_id)
             relative = relative[len(_USER_FILES_SEGMENT) :].lstrip("/")
         else:
-            base = self.sandbox_user_data_dir(thread_id, user_id=user_id).resolve()
-        actual = (base / relative).resolve()
+            base = self.sandbox_user_data_dir(thread_id, user_id=user_id)
+        base = base.resolve() if follow_symlinks else base.absolute()
+        actual = (base / relative).resolve() if follow_symlinks else Path(os.path.abspath(base / relative))
 
         try:
             actual.relative_to(base)

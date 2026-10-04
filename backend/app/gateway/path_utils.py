@@ -13,7 +13,7 @@ _OUTPUTS_PREFIX = OUTPUTS_VIRTUAL_ROOT.lstrip("/") + "/"
 _OUTPUTS_ONLY_DETAIL = f"Only files under {OUTPUTS_VIRTUAL_ROOT} are allowed"
 
 
-def resolve_thread_virtual_path(thread_id: str, virtual_path: str, user_id: str | None = None) -> Path:
+def resolve_thread_virtual_path(thread_id: str, virtual_path: str, user_id: str | None = None, *, follow_symlinks: bool = True) -> Path:
     """Resolve a virtual path to the actual filesystem path under thread user-data.
 
     Args:
@@ -31,10 +31,15 @@ def resolve_thread_virtual_path(thread_id: str, virtual_path: str, user_id: str 
         HTTPException: If the path is invalid or outside allowed directories.
     """
     try:
-        return get_paths().resolve_virtual_path(thread_id, virtual_path, user_id=user_id or get_effective_user_id())
+        return get_paths().resolve_virtual_path(thread_id, virtual_path, user_id=user_id or get_effective_user_id(), follow_symlinks=follow_symlinks)
     except ValueError as e:
         status = 403 if "traversal" in str(e) else 400
         raise HTTPException(status_code=status, detail=str(e))
+
+
+def resolve_thread_read_path(thread_id: str, virtual_path: str, user_id: str | None = None) -> Path:
+    """Confine a lexical read path; its descriptor reader refuses every link."""
+    return resolve_thread_virtual_path(thread_id, virtual_path, user_id=user_id, follow_symlinks=False)
 
 
 def normalize_outputs_virtual_path(virtual_path: str) -> str:

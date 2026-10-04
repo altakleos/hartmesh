@@ -28,14 +28,29 @@ selected UI features are listed in the [frontend scope guide](docs/FRONTEND_ISOL
 the upstream website's landing pages and showcases are separate from this UI.
 
 Hartmesh clears private workspace caches when the signed-in account changes.
-My Files and Shared downloads, copies and hashes refuse symlinks throughout the
+Artifact, My Files and Shared reads, copies and hashes refuse symlinks throughout the
 source path; these operations require descriptor-relative no-follow filesystem
-APIs (Linux/macOS) and fail explicitly on unsupported hosts. Interrupted provider-key
+APIs (Linux/macOS); HTTP reads return 501 on unsupported hosts, including native
+Windows. Workspace capture raises a capability error there and cannot certify
+output completeness. Interrupted provider-key
 updates settle their database and active configuration changes before accepting
 another edit; refresh settings to see whether the interrupted update completed.
 Files saved to My Files or Shared become available only after the copy finishes;
 new copies never overwrite existing files. An interrupted Share request finishes
 recording or rolling back its copy before another publication begins.
+
+Shared Remove and Undo carry the publication ID they displayed, so a stale action
+cannot remove a newer publication at the same path. Publishing and removing share
+a filesystem mutation lock. Removals retain bytes in private `.shared-state`
+staging until the publication record settles; the next Shared access recovers an
+interrupted removal from its recorded outcome. An unavailable or inconsistent
+record keeps the bytes staged and returns a retryable error. Preserve this hidden
+directory with Shared storage and its publication database when backing up or restoring.
+
+Editable artifact previews capture at most 2 MiB so their SHA-256 and byte ranges
+describe the same bytes. Larger artifacts stream from one opened file without a
+full-content hash. Workspace change scans also retain directory and file descriptors;
+unreadable or changing files make verification incomplete rather than complete.
 
 The Files page follows the selected tab in its URL, including Shared links and
 browser history. If report download availability cannot be checked, the card
@@ -484,6 +499,8 @@ The unified nginx endpoint is same-origin by default and does not emit browser C
 When fine-grained authorization is enabled, Live Browser connections require `threads:write` as well as ownership of the thread, even when only viewing frames: the same connection can control the browser. Permission checks run when connecting. Restart Gateway after upgrading to disconnect sessions admitted by older code.
 
 Browser login uses `HttpOnly` session cookies. The login page offers a "keep me signed in" option that extends the browser session when the request is HTTPS (including trusted `X-Forwarded-Proto: https`) or localhost HTTP. The localhost exception uses the direct request `Host` and ignores forwarded host headers. Public HTTP deployments, including many temporary sandbox URLs, fall back to session cookies by default. DeerFlow never stores the password in browser storage; the UI may remember only the email address.
+
+Local password changes invalidate prior browser sessions using an atomic database version increment. If credentials change during a password request, it returns a conflict and asks the user to sign in again. Login hash upgrades preserve concurrent account changes and session revocations.
 
 DeerFlow still uses `Forwarded` / `X-Forwarded-*` headers to recover the browser-facing scheme and origin behind a proxy. The bundled nginx sets `X-Forwarded-Proto`, but preserves an upstream HTTPS value and does not overwrite every forwarded header. Configure the outer trusted proxy to replace or strip client-supplied forwarding headers before traffic reaches DeerFlow.
 

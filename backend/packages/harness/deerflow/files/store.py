@@ -25,18 +25,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from uuid import uuid4
 
-from deerflow.uploads.manager import claim_unique_filename, normalize_filename
-
 __all__ = [
     "MAX_LISTED_FILES",
     "MAX_PATH_DEPTH",
     "StoreError",
+    "SafeFileAccessUnavailable",
     "StoredFile",
     "copy_into",
     "delete_under",
     "digest_and_stat",
     "list_under",
     "normalize_relative_path",
+    "open_directory_source",
     "open_regular_source",
     "resolve_under",
     "sha256_of",
@@ -62,6 +62,10 @@ class StoreError(ValueError):
     """A path that cannot name a file in this area."""
 
 
+class SafeFileAccessUnavailable(StoreError):
+    """The host cannot provide the descriptor semantics required for safe reads."""
+
+
 @dataclass(frozen=True)
 class StoredFile:
     """One file, addressed by its path relative to the area's root."""
@@ -83,6 +87,10 @@ def normalize_relative_path(path: str, *, allow_empty: bool = False) -> str:
     listing never shows them, so nothing addressable is invisible. With
     *allow_empty* the empty path names the root, for a folder argument.
     """
+    # The upload package imports the runtime, whose workspace scanner uses
+    # this primitive. Delay filename helpers until this module is complete.
+    from deerflow.uploads.manager import normalize_filename
+
     if "\x00" in path:
         raise StoreError("Path contains a null byte")
     segments = [segment for segment in path.split("/") if segment != ""]
@@ -234,6 +242,22 @@ def delete_under(root: Path, path: str) -> None:
         walk.close()
 
 
+def open_directory_source(source: Path) -> int:
+    """Open a lexical directory through no-follow ancestors; caller owns it."""
+    if not _DIR_FD or not _O_NOFOLLOW:
+        raise SafeFileAccessUnavailable("Safe file access requires directory descriptors and no-follow opens")
+    absolute = source.absolute()
+    if ".." in absolute.parts:
+        raise StoreError("Path traversal detected")
+    walk = _DirWalk(Path(absolute.anchor))
+    try:
+        for folder in absolute.parts[1:]:
+            walk.descend(folder, create=False, mode=0o777)
+        return os.dup(walk.fd)
+    finally:
+        walk.close()
+
+
 def open_regular_source(source: Path) -> int:
     """Open a regular file without following a link in any path component.
 
@@ -243,7 +267,7 @@ def open_regular_source(source: Path) -> int:
     opens fail closed rather than reverting to a check-then-open sequence.
     """
     if not _DIR_FD or not _O_NOFOLLOW:
-        raise StoreError("Safe file access requires directory descriptors and no-follow opens")
+        raise SafeFileAccessUnavailable("Safe file access requires directory descriptors and no-follow opens")
     absolute = source.absolute()
     if ".." in absolute.parts:
         raise StoreError("Path traversal detected")
@@ -341,6 +365,8 @@ def _staged_copy(parent_fd: int) -> Iterator[tuple[int, int]]:
 
 def _publish_exclusive(stage_fd: int, parent_fd: int, safe_name: str) -> str:
     """Atomically give a finished copy its next free name, without overwriting."""
+    from deerflow.uploads.manager import claim_unique_filename
+
     seen = set(os.listdir(parent_fd))
     while True:
         candidate = claim_unique_filename(safe_name, seen)
@@ -368,6 +394,8 @@ def copy_into(root: Path, source: Path, *, name: str, folder: str | None, folder
     need: the person's files are written by the sandbox too, the Shared area
     only by the Gateway.
     """
+    from deerflow.uploads.manager import normalize_filename
+
     relative_folder = normalize_relative_path(folder or "", allow_empty=True)
     try:
         safe_name = normalize_filename(name)

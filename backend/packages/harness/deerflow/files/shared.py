@@ -22,6 +22,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from deerflow.config.paths import SHARED_VIRTUAL_PREFIX, get_paths
+from deerflow.files.shared_removals import SharedMutationState
 from deerflow.files.store import StoredFile, StoreError, copy_into, delete_under, digest_and_stat, list_under, resolve_under, sha256_of
 
 __all__ = [
@@ -71,6 +72,11 @@ class SharedFile:
 
 def _shared_root() -> Path:
     return get_paths().shared_dir()
+
+
+def shared_mutation_state() -> SharedMutationState:
+    """Create an unopened mutation owner; acquisition/close belong to the caller."""
+    return SharedMutationState(get_paths().ensure_shared_dir())
 
 
 def list_shared_files() -> tuple[list[SharedFile], bool]:

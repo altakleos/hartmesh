@@ -80,6 +80,7 @@ const shared = rs.hoisted(() => ({
           virtual_path: string;
           url: string;
           published_by: string | null;
+          publication_id?: string | null;
           published_at: string | null;
           from_thread_id: string | null;
           can_remove: boolean;
@@ -169,6 +170,7 @@ const PUBLISHED = {
   virtual_path: "/mnt/user-data/shared/Reports/august.pdf",
   url: "/api/shared/Reports/august.pdf",
   published_by: "owner-1",
+  publication_id: "publication-owned-1",
   published_at: new Date(Date.now() - 3600_000).toISOString(),
   from_thread_id: "11111111-1111-1111-1111-111111111111",
   can_remove: true,
@@ -298,7 +300,10 @@ describe("FilesPage", () => {
     fireEvent.click(screen.getByRole("button", { name: /^Remove$/ }));
 
     expect(shared.removeMutate).toHaveBeenCalledWith(
-      "Reports/august.pdf",
+      expect.objectContaining({
+        path: "Reports/august.pdf",
+        publication_id: "publication-owned-1",
+      }),
       expect.anything(),
     );
   });

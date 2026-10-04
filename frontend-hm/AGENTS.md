@@ -279,6 +279,12 @@ roles: _Remove_ is offered exactly where it would succeed. Both tabs live under
 one heading, _Files_, so the sidebar entry and the page agree whichever tab is
 open.
 
+Remove and Undo pass the displayed file's `publication_id` to DELETE as
+`expected_publication_id`; a 409 requires refreshing and choosing the current
+publication. Null explicitly identifies an operator-placed file. Only older
+Gateways omit the field; that compatibility path retains server-side locking and
+authorization but cannot fence an action against its earlier displayed identity.
+
 The deployment owns two presentation settings, both read from
 `GET /api/features` (`core/features`): `ui.starters` is Home's starter grid —
 choosing one fills the composer through the prompt-input controller, focuses it

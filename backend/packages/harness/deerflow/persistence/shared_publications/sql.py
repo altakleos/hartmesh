@@ -70,6 +70,12 @@ class SharedPublicationRepository:
             row = (await session.execute(stmt)).scalars().first()
             return None if row is None else self._row_to_dict(row)
 
+    async def publication(self, publication_id: str) -> dict | None:
+        """Read one identity including its removal outcome for staging recovery."""
+        async with self._sf() as session:
+            row = await session.get(SharedPublicationRow, publication_id)
+            return None if row is None else self._row_to_dict(row)
+
     async def live_publications_holding(self, sha256: str, *, folder: str) -> list[dict]:
         """Every live publication of exactly these bytes in *folder* (``""`` for the root), earliest first.
 

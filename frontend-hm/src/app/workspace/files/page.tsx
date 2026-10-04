@@ -502,8 +502,8 @@ function SharedFiles({ onChanged }: { onChanged: () => void }) {
               disabled={removeFile.isPending}
               onClick={() => {
                 if (!pendingRemove) return;
-                const { name, path } = pendingRemove;
-                removeFile.mutate(path, {
+                const { name } = pendingRemove;
+                removeFile.mutate(pendingRemove, {
                   onSuccess: () => {
                     setPendingRemove(null);
                     toast.success(t.shared.removed(name));

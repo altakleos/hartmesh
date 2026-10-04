@@ -20,15 +20,31 @@ Keep that projection explicit and serialized through the API channel serializer;
 do not expose internal sandbox state. Empty lists are meaningful, while absent
 or null goals are omitted to preserve the frontend's local override semantics.
 
-Files and Shared must stream from one safely opened descriptor, including MIME
+Artifacts, Files and Shared must stream from one safely opened descriptor, including MIME
 sniffing, response metadata and range reads. Preflight paths only determine HTTP
 errors; they must never become permission to reopen a path through symlinked
 parents. Use `deerflow.files.store.open_regular_source` for source reads/copies,
 and retain ownership until every offloaded operation has drained on cancellation.
 Conversation keep/publish sources remain lexical paths within uploads/outputs.
+Artifact reads use `resolve_thread_read_path`; never resolve away link segments
+before no-follow opens. Small editable artifacts capture bounded immutable bytes
+for SHA-256/ranges; large artifacts stay descriptor-streamed without content hashing.
+Skill archive detection/extraction shares one source descriptor and drains off-loop.
+`SafeFileAccessUnavailable` means HTTP 501 for descriptor reads and archives;
+never turn an unsupported host into a missing/invalid/changed file.
 `files.store.copy_into` uses private hidden staging and descriptor-relative
 exclusive hard links: no placeholders or overwrites of racing names. Verify
 staging ownership/mode before writing; the worker owns cleanup. Unsupported
 atomic publication fails closed.
 Shared publication drains copying, its database record and failure rollback as
 one operation under the deduplication lock before propagating cancellation.
+Every Shared access enters `_shared_mutation`: the process mutex and private
+filesystem advisory lock retain ownership through recovery and settlement.
+Delete authorizes the current publication under that lock; optional
+`expected_publication_id` adds stale-client intent fencing (empty means no record).
+Lists and publication responses carry nullable `publication_id`; Files and Undo
+pass it back. Removal journals stage bytes on the same filesystem before updating
+the immutable publication ID. Recovery must match both record ID and path before
+using the persisted removal outcome; ambiguity refuses access and preserves bytes.
+Drain every removal/recovery worker before releasing either lock. Filesystem lock
+semantics on multi-Gateway shared storage still require deployment qualification.

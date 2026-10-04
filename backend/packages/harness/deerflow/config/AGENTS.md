@@ -1,5 +1,9 @@
 ### Configuration System
 
+`Paths.resolve_virtual_path(follow_symlinks=False)` confines paths lexically for
+descriptor readers. Keep that path until the no-follow open; the default retains
+legacy resolved-path behavior for other callers.
+
 Operator prompt overlays: `lead_prompt_overlay` on AppConfig and
 `subagents.agents.<name>.prompt_overlay` accept literal `prepend`/`append` strings.
 The per-assembly snapshot owns these settings; no run-context override exists.

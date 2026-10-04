@@ -20,6 +20,7 @@ from sqlalchemy import select
 
 from app.gateway.auth.credential_file import write_initial_credentials
 from app.gateway.auth.password import hash_password
+from app.gateway.auth.repositories.base import UserNotFoundError
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from deerflow.persistence.user.model import UserRow
 
@@ -73,10 +74,10 @@ async def _run(email: str | None) -> int:
             return 1
 
         new_password = secrets.token_urlsafe(16)
-        user.password_hash = hash_password(new_password)
-        user.token_version += 1
-        user.needs_setup = True
-        await repo.update_user(user)
+        updated = await repo.replace_password(str(user.id), hash_password(new_password), needs_setup=True)
+        if updated is None:
+            raise UserNotFoundError(f"User {user.id} no longer exists")
+        user = updated
 
         cred_path = write_initial_credentials(user.email, new_password, label="reset")
         print(f"Password reset for: {user.email}")

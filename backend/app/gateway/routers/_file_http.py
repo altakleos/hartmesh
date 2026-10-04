@@ -11,6 +11,7 @@ import them. The filesystem layer underneath is shared the same way, in
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import mimetypes
 import os
 import stat
@@ -24,9 +25,9 @@ from starlette.responses import FileResponse
 from starlette.types import Receive, Scope, Send
 
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
-from app.gateway.routers.artifacts import _build_content_disposition
+from app.gateway.routers._file_headers import _build_content_disposition
 from deerflow.config.paths import make_safe_user_id
-from deerflow.files.store import StoreError, open_regular_source
+from deerflow.files.store import SafeFileAccessUnavailable, StoreError, open_regular_source
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.utils.file_io import await_drained
 from deerflow.utils.text_detection import _is_active_content_mime_type
@@ -77,25 +78,40 @@ class DescriptorFileResponse(FileResponse):
     from using a descriptor number that another request has since acquired.
     """
 
-    def __init__(self, path: Path, *, download: bool = False) -> None:
+    def __init__(self, path: Path, *, download: bool = False, hash_max_bytes: int | None = None) -> None:
         super().__init__(path, media_type="application/octet-stream", headers={"X-Content-Type-Options": "nosniff"})
         self._download = download
         self._fd: int | None = None
+        self._hash_max_bytes = hash_max_bytes
+        self._content: bytes | None = None
 
     def _prepare(self) -> None:
         try:
             self._fd = open_regular_source(Path(self.path))
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail=f"File not found: {Path(self.path).name}") from None
+        except SafeFileAccessUnavailable as exc:
+            raise HTTPException(status_code=501, detail=str(exc)) from None
         except StoreError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from None
         # Publish ownership before any subsequent operation can fail. The
         # enclosing ASGI finally also closes after preparation failure.
         self.stat_result = os.fstat(self._fd)
         self.set_stat_headers(self.stat_result)
+        if self._hash_max_bytes is not None and self.stat_result.st_size <= self._hash_max_bytes:
+            # An editable artifact's digest and ranges must describe the same
+            # captured bytes even if its open inode is subsequently rewritten.
+            with os.fdopen(self._fd, "rb", closefd=False) as source:
+                self._content = source.read(self._hash_max_bytes + 1)
+            after = os.fstat(self._fd)
+            if len(self._content) > self._hash_max_bytes or (after.st_size, after.st_mtime_ns) != (self.stat_result.st_size, self.stat_result.st_mtime_ns) or len(self._content) != after.st_size:
+                raise HTTPException(status_code=409, detail="Artifact changed while it was being opened; retry")
+            self.headers["etag"] = f'"{hashlib.sha256(self._content).hexdigest()}"'
         mime_type, _ = mimetypes.guess_type(self.path)
         force_download = self._download or _is_active_content_mime_type(mime_type)
-        if mime_type is None and not force_download and b"\x00" not in os.read(self._fd, 8192):
+        os.lseek(self._fd, 0, os.SEEK_SET)
+        sample = self._content[:8192] if self._content is not None else os.read(self._fd, 8192)
+        if mime_type is None and not force_download and b"\x00" not in sample:
             mime_type = "text/plain"
         self.media_type = mime_type or "application/octet-stream"
         self.headers["content-type"] = self.media_type + (f"; charset={self.charset}" if self.media_type.startswith("text/") else "")
@@ -108,11 +124,14 @@ class DescriptorFileResponse(FileResponse):
             await await_drained(asyncio.to_thread(self._prepare))
             await super().__call__(scope, receive, send)
         finally:
+            self._content = None
             if self._fd is not None:
                 fd, self._fd = self._fd, None
                 await await_drained(asyncio.to_thread(os.close, fd))
 
     def _read(self, offset: int, size: int) -> bytes:
+        if self._content is not None:
+            return self._content[offset : offset + size]
         assert self._fd is not None
         os.lseek(self._fd, offset, os.SEEK_SET)
         return os.read(self._fd, size)

@@ -134,6 +134,20 @@ def test_archive_download_contains_only_presented_files(tmp_path, monkeypatch) -
         assert "not-presented.txt" not in archive.namelist()
 
 
+def test_archive_reports_unavailable_host_capability(tmp_path, monkeypatch) -> None:
+    from deerflow.files import store
+
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "summary.txt").write_text("owned fixture", encoding="utf-8")
+    client, _, _ = _archive_app(monkeypatch, outputs, paths=["/mnt/user-data/outputs/summary.txt"])
+    monkeypatch.setattr(store, "_DIR_FD", False)
+    with client:
+        response = client.post(ARCHIVE_URL)
+    assert response.status_code == 501
+    assert "directory descriptors" in response.json()["detail"]
+
+
 def test_archive_manifest_counts_only_verified_delivery_paths(tmp_path, monkeypatch) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

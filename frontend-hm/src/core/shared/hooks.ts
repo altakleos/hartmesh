@@ -13,6 +13,7 @@ import {
   removeSharedFile,
   type PublishOutcome,
   type PublishToSharedRequest,
+  type SharedFileInfo,
 } from "./api";
 
 export const SHARED_FILES_QUERY_KEY = ["files", "shared"] as const;
@@ -29,7 +30,12 @@ export function useSharedFiles() {
 export function useRemoveSharedFile() {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: (path: string) => removeSharedFile(path),
+    mutationFn: (
+      file: string | Pick<SharedFileInfo, "path" | "publication_id">,
+    ) =>
+      typeof file === "string"
+        ? removeSharedFile(file)
+        : removeSharedFile(file.path, file.publication_id),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: SHARED_FILES_QUERY_KEY });
     },
@@ -150,7 +156,7 @@ export function useShareWithEveryone(threadId?: string) {
                   try {
                     for (const file of fresh) {
                       if (!lifetime.active) return;
-                      await remove.mutateAsync(file.path);
+                      await remove.mutateAsync(file);
                     }
                     if (!lifetime.active) return;
                     lifetime.toasts.add(

@@ -8,6 +8,7 @@ import { fetch as fetcher } from "@/core/api/fetcher";
 import {
   canPublishToShared,
   publishToShared,
+  removeSharedFile,
   sharedFolderFor,
   SharedRequestError,
   urlOfSharedFile,
@@ -66,6 +67,30 @@ describe("publishToShared", () => {
         thread_id: "t",
       }),
     ).rejects.toBeInstanceOf(SharedRequestError);
+  });
+});
+
+describe("removeSharedFile", () => {
+  beforeEach(() => {
+    mockedFetch.mockReset();
+  });
+
+  it("binds deletion to the publication the caller saw", async () => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, { success: true }));
+    await removeSharedFile("Reports/august.pdf", "publication-1");
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/api/shared/Reports/august.pdf?expected_publication_id=publication-1",
+      { method: "DELETE" },
+    );
+  });
+
+  it("distinguishes an unrecorded file from an omitted precondition", async () => {
+    mockedFetch.mockResolvedValueOnce(jsonResponse(200, { success: true }));
+    await removeSharedFile("manual.txt", null);
+    expect(mockedFetch).toHaveBeenCalledWith(
+      "/api/shared/manual.txt?expected_publication_id=",
+      { method: "DELETE" },
+    );
   });
 });
 
