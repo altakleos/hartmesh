@@ -154,7 +154,7 @@ def _build_diff(
 ) -> tuple[str, int, int, bool, DiffUnavailableReason | None]:
     reason = _diff_unavailable_reason(before_file, after_file)
     if reason is not None:
-        return "", 0, 0, False, reason
+        return "", 0, 0, reason == "truncated", reason
 
     before_text = _snapshot_text(before_file) if before_file else ""
     after_text = _snapshot_text(after_file) if after_file else ""
@@ -185,7 +185,7 @@ def _diff_unavailable_reason(
     after_file: FileSnapshot | None,
 ) -> DiffUnavailableReason | None:
     files = [file for file in (before_file, after_file) if file is not None]
-    for preferred in ("symlink", "sensitive", "binary", "large"):
+    for preferred in ("symlink", "sensitive", "binary", "large", "truncated"):
         if any(file.content_unavailable_reason == preferred for file in files):
             return preferred  # type: ignore[return-value]
     return None

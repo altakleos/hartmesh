@@ -21,6 +21,7 @@ class WorkspaceChangeLimits:
     max_scanned_files: int = 2000
     max_file_bytes_for_diff: int = 256 * 1024
     max_total_diff_bytes: int = 1024 * 1024
+    max_total_text_bytes: int = 1024 * 1024
 
     def to_dict(self) -> dict:
         return asdict(self)
