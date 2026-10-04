@@ -375,6 +375,16 @@ export function createEnUS(product: string): Translations {
 
     files: {
       title: "My files",
+      filterLabel: "Find loaded files",
+      filterPlaceholder: "Name or folder",
+      clearFilter: "Clear filter",
+      sortLabel: "Sort files",
+      sortName: "Name",
+      sortNewest: "Newest",
+      foundCount: (found, loaded) =>
+        `Showing ${found.toLocaleString()} of ${loaded.toLocaleString()} loaded files`,
+      noMatches: "No loaded files match",
+      noMatchesHint: "Try another name or folder, or clear the filter.",
       description:
         "What you kept, from every conversation. Your assistant can open these in any chat.",
       empty: "Nothing kept yet",

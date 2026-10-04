@@ -350,6 +350,16 @@ export function createZhCN(product: string): Translations {
 
     files: {
       title: "我的文件",
+      filterLabel: "查找已加载的文件",
+      filterPlaceholder: "名称或文件夹",
+      clearFilter: "清除筛选",
+      sortLabel: "文件排序",
+      sortName: "名称",
+      sortNewest: "最新",
+      foundCount: (found, loaded) =>
+        `在已加载的 ${loaded.toLocaleString()} 个文件中显示 ${found.toLocaleString()} 个`,
+      noMatches: "已加载的文件中没有匹配项",
+      noMatchesHint: "尝试其他名称或文件夹，或清除筛选。",
       description:
         "你在各个对话中保存下来的文件。在任何对话里，助手都能打开它们。",
       empty: "还没有保存任何文件",

@@ -53,8 +53,11 @@ full-content hash. Workspace change scans also retain directory and file descrip
 unreadable or changing files make verification incomplete rather than complete.
 
 The Files page follows the selected tab in its URL, including Shared links and
-browser history. If report download availability cannot be checked, the card
-offers **Retry check**; it checks the files again without regenerating them.
+browser history. Each tab can filter loaded files by name or folder and sort by
+Name or Newest. Counts and truncation notices describe the loaded entries;
+folders remain visible on mobile. If report download availability cannot be
+checked, the card offers **Retry check**; it checks the files again without
+regenerating them.
 Operators can add a **Contact support** link to the workspace's **Settings and
 more** menu through the tenant bundle's optional `provider.json`. Customer
 branding and provider support remain separate; see the

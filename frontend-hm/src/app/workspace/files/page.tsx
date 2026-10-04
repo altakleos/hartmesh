@@ -2,7 +2,7 @@
 
 import { DownloadIcon, FolderIcon, Trash2Icon, UsersIcon } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useRef, useState } from "react";
+import { useId, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -21,6 +21,7 @@ import {
   EmptyMedia,
   EmptyTitle,
 } from "@/components/ui/empty";
+import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { formatArtifactBytes } from "@/components/workspace/artifacts/artifact-file-preview";
 import {
@@ -30,6 +31,10 @@ import {
 } from "@/components/workspace/workspace-container";
 import { useDocumentTitle } from "@/core/features";
 import { messageForFileAreaError } from "@/core/file-areas";
+import {
+  selectLoadedFiles,
+  type FileListOrder,
+} from "@/core/file-areas/selection";
 import {
   MY_FILES_VIRTUAL_PREFIX,
   urlOfMyFile,
@@ -49,6 +54,7 @@ import {
 import { formatTimeAgo } from "@/core/utils/datetime";
 
 type FilesTab = "mine" | "shared";
+const EMPTY_FILES: readonly never[] = [];
 
 /** The folder a file sits in, or nothing for the root. */
 function folderOf(file: { path: string }) {
@@ -125,6 +131,70 @@ export default function FilesPage() {
   );
 }
 
+function FileListControls({
+  query,
+  onQuery,
+  order,
+  onOrder,
+  found,
+  loaded,
+}: {
+  query: string;
+  onQuery: (value: string) => void;
+  order: FileListOrder;
+  onOrder: (value: FileListOrder) => void;
+  found: number;
+  loaded: number;
+}) {
+  const { t } = useI18n();
+  const searchId = useId();
+  const sortId = useId();
+  const input = useRef<HTMLInputElement>(null);
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap gap-2">
+        <label className="sr-only" htmlFor={searchId}>
+          {t.files.filterLabel}
+        </label>
+        <Input
+          className="min-w-40 flex-1"
+          id={searchId}
+          onChange={(event) => onQuery(event.target.value)}
+          placeholder={t.files.filterPlaceholder}
+          ref={input}
+          type="search"
+          value={query}
+        />
+        <Button
+          disabled={!query}
+          onClick={() => {
+            onQuery("");
+            input.current?.focus();
+          }}
+          variant="outline"
+        >
+          {t.files.clearFilter}
+        </Button>
+        <label className="sr-only" htmlFor={sortId}>
+          {t.files.sortLabel}
+        </label>
+        <select
+          className="border-input bg-background h-9 rounded-md border px-3 text-sm"
+          id={sortId}
+          onChange={(event) => onOrder(event.target.value as FileListOrder)}
+          value={order}
+        >
+          <option value="name">{t.files.sortName}</option>
+          <option value="newest">{t.files.sortNewest}</option>
+        </select>
+      </div>
+      <p className="text-muted-foreground text-xs" role="status">
+        {t.files.foundCount(found, loaded)}
+      </p>
+    </div>
+  );
+}
+
 function MyFiles({ onChanged }: { onChanged: () => void }) {
   const { t, locale } = useI18n();
   const { data, error, isPending, refetch } = useMyFiles();
@@ -133,10 +203,26 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
   // is where they do it. No conversation is involved, so no thread.
   const everyone = useShareWithEveryone();
   const [pendingDelete, setPendingDelete] = useState<MyFileInfo | null>(null);
-  const files = data?.files ?? [];
+  const loadedFiles = data?.files ?? EMPTY_FILES;
+  const [query, setQuery] = useState("");
+  const [order, setOrder] = useState<FileListOrder>("name");
+  const files = useMemo(
+    () => selectLoadedFiles(loadedFiles, { query, order, locale }),
+    [loadedFiles, query, order, locale],
+  );
 
   return (
     <>
+      {!error && !isPending && loadedFiles.length > 0 && (
+        <FileListControls
+          query={query}
+          onQuery={setQuery}
+          order={order}
+          onOrder={setOrder}
+          found={files.length}
+          loaded={loadedFiles.length}
+        />
+      )}
       {error ? (
         <div
           className="flex items-center justify-between gap-3 rounded-lg border p-4"
@@ -149,7 +235,7 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
         </div>
       ) : isPending ? (
         <div className="text-muted-foreground text-sm">{t.common.loading}</div>
-      ) : files.length === 0 ? (
+      ) : loadedFiles.length === 0 ? (
         <Empty className="border" data-testid="my-files-empty">
           <EmptyHeader>
             <EmptyMedia variant="icon">
@@ -157,6 +243,13 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
             </EmptyMedia>
             <EmptyTitle>{t.files.empty}</EmptyTitle>
             <EmptyDescription>{t.files.emptyHint}</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : files.length === 0 ? (
+        <Empty className="border" data-testid="my-files-no-matches">
+          <EmptyHeader>
+            <EmptyTitle>{t.files.noMatches}</EmptyTitle>
+            <EmptyDescription>{t.files.noMatchesHint}</EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (
@@ -210,10 +303,18 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
                       href={urlOfMyFile(file.path)}
                       rel="noopener noreferrer"
                       target="_blank"
-                      title={file.name}
+                      title={file.path}
                     >
                       {file.name}
                     </a>
+                    {folderOf(file) && (
+                      <span
+                        className="text-muted-foreground block truncate text-xs sm:hidden"
+                        title={folderOf(file)}
+                      >
+                        {folderOf(file)}
+                      </span>
+                    )}
                   </th>
                   <td className="text-muted-foreground hidden max-w-[25vw] truncate px-3 py-2 sm:table-cell">
                     {folderOf(file) || "—"}
@@ -273,7 +374,7 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
       )}
       {data?.truncated && (
         <p className="text-muted-foreground text-xs">
-          {t.files.truncated(files.length)}
+          {t.files.truncated(loadedFiles.length)}
         </p>
       )}
 
@@ -333,10 +434,26 @@ function SharedFiles({ onChanged }: { onChanged: () => void }) {
   const [pendingRemove, setPendingRemove] = useState<SharedFileInfo | null>(
     null,
   );
-  const files = data?.files ?? [];
+  const loadedFiles = data?.files ?? EMPTY_FILES;
+  const [query, setQuery] = useState("");
+  const [order, setOrder] = useState<FileListOrder>("name");
+  const files = useMemo(
+    () => selectLoadedFiles(loadedFiles, { query, order, locale }),
+    [loadedFiles, query, order, locale],
+  );
 
   return (
     <>
+      {!error && !isPending && loadedFiles.length > 0 && (
+        <FileListControls
+          query={query}
+          onQuery={setQuery}
+          order={order}
+          onOrder={setOrder}
+          found={files.length}
+          loaded={loadedFiles.length}
+        />
+      )}
       {error ? (
         <div
           className="flex items-center justify-between gap-3 rounded-lg border p-4"
@@ -351,7 +468,7 @@ function SharedFiles({ onChanged }: { onChanged: () => void }) {
         </div>
       ) : isPending ? (
         <div className="text-muted-foreground text-sm">{t.common.loading}</div>
-      ) : files.length === 0 ? (
+      ) : loadedFiles.length === 0 ? (
         <Empty className="border" data-testid="shared-files-empty">
           <EmptyHeader>
             <EmptyMedia variant="icon">
@@ -359,6 +476,13 @@ function SharedFiles({ onChanged }: { onChanged: () => void }) {
             </EmptyMedia>
             <EmptyTitle>{t.shared.empty}</EmptyTitle>
             <EmptyDescription>{t.shared.emptyHint}</EmptyDescription>
+          </EmptyHeader>
+        </Empty>
+      ) : files.length === 0 ? (
+        <Empty className="border" data-testid="shared-files-no-matches">
+          <EmptyHeader>
+            <EmptyTitle>{t.files.noMatches}</EmptyTitle>
+            <EmptyDescription>{t.files.noMatchesHint}</EmptyDescription>
           </EmptyHeader>
         </Empty>
       ) : (
@@ -418,10 +542,18 @@ function SharedFiles({ onChanged }: { onChanged: () => void }) {
                         href={urlOfSharedFile(file.path)}
                         rel="noopener noreferrer"
                         target="_blank"
-                        title={file.name}
+                        title={file.path}
                       >
                         {file.name}
                       </a>
+                      {folderOf(file) && (
+                        <span
+                          className="text-muted-foreground block truncate text-xs sm:hidden"
+                          title={folderOf(file)}
+                        >
+                          {folderOf(file)}
+                        </span>
+                      )}
                     </th>
                     <td className="text-muted-foreground hidden max-w-[25vw] truncate px-3 py-2 sm:table-cell">
                       {folderOf(file) || "—"}
@@ -473,7 +605,7 @@ function SharedFiles({ onChanged }: { onChanged: () => void }) {
       )}
       {data?.truncated && (
         <p className="text-muted-foreground text-xs">
-          {t.shared.truncated(files.length)}
+          {t.shared.truncated(loadedFiles.length)}
         </p>
       )}
 
