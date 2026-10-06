@@ -3,26 +3,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useThread } from "@/components/workspace/messages/context";
 import { isArtifactViewPath } from "@/core/artifact-views/contract";
-import {
-  REPORT_PREVIEW_MAX_BYTES,
-  isBusinessReportPath,
-} from "@/core/business-report";
 
 import {
   loadArtifactContent,
   loadArtifactContentFromToolCall,
   type ArtifactPresentationRequest,
 } from "./loader";
-
-/**
- * The report budget also bounds source fallback when a card projection is
- * unavailable. The canonical document can include thousands of source rows.
- */
-function previewBudgetOf(filepath: string) {
-  return isBusinessReportPath(filepath)
-    ? { previewMaxBytes: REPORT_PREVIEW_MAX_BYTES }
-    : {};
-}
 
 export function useArtifactContent({
   filepath,
@@ -69,9 +55,7 @@ export function useArtifactContent({
       fullContentRequested,
       ...(presentation && !fullContentRequested
         ? ["installed-preview", presentation, sourcePreviewRequested]
-        : isBusinessReportPath(filepath) && !fullContentRequested
-          ? ["report-preview"]
-          : []),
+        : []),
     ],
     [
       filepath,
@@ -97,12 +81,7 @@ export function useArtifactContent({
                 ? { ...presentation, marker: undefined }
                 : presentation,
             }
-          : {
-              ...previewBudgetOf(filepath),
-              ...(isBusinessReportPath(filepath)
-                ? { reportPreview: true }
-                : {}),
-            }),
+          : {}),
       });
     },
     enabled,
@@ -180,7 +159,6 @@ export function useStandaloneArtifactContent({
         isMock,
         signal,
         full: fullContentRequested,
-        ...previewBudgetOf(filepath),
       }),
     gcTime: isArtifactViewPath(filepath) ? 0 : undefined,
     staleTime: 0,

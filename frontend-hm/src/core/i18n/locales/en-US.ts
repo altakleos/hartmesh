@@ -16,6 +16,8 @@ import type { Translations } from "./types";
 export function createEnUS(product: string): Translations {
   return {
     extensions: {
+      fileDestinationsUnavailable:
+        "File destinations could not be checked. Reload to try again.",
       navigation: "Extensions",
       pageLoading: "Loading extension…",
       pageUnavailable: "Extension page unavailable",
@@ -221,31 +223,6 @@ export function createEnUS(product: string): Translations {
       shownOfTotal: (shown, total) => `Showing the first ${shown} of ${total}.`,
       receiptToast:
         "Your files were created, but we couldn't confirm they were saved to this chat. Reload to check.",
-    },
-
-    businessReport: {
-      draft: (draft) => `Draft ${draft}`,
-      comparedWith: (period) => `vs ${period}`,
-      downloadPdf: "PDF",
-      downloadWord: "Word",
-      downloadExcel: "Excel",
-      checksHeading: "Checks",
-      notIncludedHeading: "Not included",
-      checkFailed: "Couldn't check some downloads. Try again.",
-      retryCheck: "Retry check",
-      checkingRenders: "Checking…",
-      noRenders:
-        "No file to download yet — ask for the PDF, Word or Excel version.",
-      downloadRender: (format) => `Download the ${format}`,
-      checkStatus: {
-        pass: "ok",
-        warn: "heads up",
-        fail: "problem",
-        not_checked: "not checked",
-      },
-      uploadedOn: (name, uploaded) => `${name} (uploaded ${uploaded})`,
-      builtFrom: (inputs) =>
-        `Built from ${inputs.join(", ")}. Checked by the report script.`,
     },
 
     // Input Box

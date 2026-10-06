@@ -7,8 +7,7 @@ import {
   toText,
   type ReportCell,
   type ReportFormat,
-} from "@/core/business-report";
-
+} from "../../../../../backend/extensions/sources/hartmesh-legacy-report/browser/index";
 import parity from "../../../fixtures/business-report/format-parity.json";
 
 type ParityCase = {

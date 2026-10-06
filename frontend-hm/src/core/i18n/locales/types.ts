@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
   extensions: {
+    fileDestinationsUnavailable: string;
     navigation: string;
     pageLoading: string;
     pageUnavailable: string;
@@ -180,29 +181,6 @@ export interface Translations {
     description: (count: number) => string;
     shownOfTotal: (shown: number, total: number) => string;
     receiptToast: string;
-  };
-
-  businessReport: {
-    draft: (draft: number) => string;
-    comparedWith: (period: string) => string;
-    downloadPdf: string;
-    downloadWord: string;
-    downloadExcel: string;
-    checksHeading: string;
-    notIncludedHeading: string;
-    noRenders: string;
-    checkFailed: string;
-    retryCheck: string;
-    checkingRenders: string;
-    downloadRender: (format: string) => string;
-    checkStatus: {
-      pass: string;
-      warn: string;
-      fail: string;
-      not_checked: string;
-    };
-    uploadedOn: (name: string, uploaded: string) => string;
-    builtFrom: (inputs: string[]) => string;
   };
 
   // Input Box

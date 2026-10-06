@@ -16,6 +16,7 @@ import type { Translations } from "./types";
 export function createZhCN(product: string): Translations {
   return {
     extensions: {
+      fileDestinationsUnavailable: "无法确认文件保存位置，请刷新后重试。",
       navigation: "扩展",
       pageLoading: "正在加载扩展…",
       pageUnavailable: "扩展页面不可用",
@@ -204,30 +205,6 @@ export function createZhCN(product: string): Translations {
       shownOfTotal: (shown, total) => `共 ${total} 个，显示前 ${shown} 个。`,
       receiptToast:
         "文件已生成，但我们无法确认它们已保存到这条对话。请刷新页面确认。",
-    },
-
-    businessReport: {
-      draft: (draft) => `第 ${draft} 稿`,
-      comparedWith: (period) => `相比 ${period}`,
-      downloadPdf: "PDF",
-      downloadWord: "Word",
-      downloadExcel: "Excel",
-      checksHeading: "核对",
-      notIncludedHeading: "未包含",
-      checkFailed: "部分下载文件暂时无法检查，请重试。",
-      retryCheck: "重新检查",
-      checkingRenders: "检查中…",
-      noRenders: "暂无可下载的文件 —— 可以让助手生成 PDF、Word 或 Excel 版本。",
-      downloadRender: (format) => `下载 ${format}`,
-      checkStatus: {
-        pass: "没问题",
-        warn: "请注意",
-        fail: "有问题",
-        not_checked: "未核对",
-      },
-      uploadedOn: (name, uploaded) => `${name}（上传于 ${uploaded}）`,
-      builtFrom: (inputs) =>
-        `根据 ${inputs.join("、")} 生成，已由报告脚本核对。`,
     },
 
     // Input Box

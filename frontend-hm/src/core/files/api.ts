@@ -18,7 +18,7 @@ import {
 export const MY_FILES_VIRTUAL_PREFIX = "/mnt/user-data/files";
 
 export interface MyFileInfo {
-  /** Relative to the person's files root, e.g. `Reports/august.pdf`. */
+  /** Relative to the person's files root, e.g. `Documents/summary.pdf`. */
   path: string;
   name: string;
   size: number;

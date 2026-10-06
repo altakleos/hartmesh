@@ -7,7 +7,7 @@ import {
   reportOfRender,
   reportRenderPath,
   reportSiblingPath,
-} from "@/core/business-report";
+} from "../../../../../backend/extensions/sources/hartmesh-legacy-report/browser/index";
 
 const report =
   "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json";

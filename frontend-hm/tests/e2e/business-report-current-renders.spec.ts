@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test, type Page } from "@playwright/test";
 
+import { installLegacyReportPlugin } from "./utils/legacy-report-plugin";
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 /**
@@ -40,7 +41,7 @@ const REPORT_JSON = readFileSync(
 );
 
 const PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
   "base64",
 );
 
@@ -63,6 +64,16 @@ function presentedEverything() {
           args: { filepaths: [REPORT_PATH, PDF_PATH, DOCX_PATH, XLSX_PATH] },
         },
       ],
+    },
+    {
+      type: "tool",
+      id: "tool-present-report",
+      name: "present_files",
+      tool_call_id: "present-report",
+      content: "Files presented.",
+      additional_kwargs: {
+        presented_files: [REPORT_PATH, PDF_PATH, DOCX_PATH, XLSX_PATH],
+      },
     },
   ];
 }
@@ -87,6 +98,7 @@ async function openTheReport(
       },
     ],
   });
+  await installLegacyReportPlugin(page);
   await page.route(
     `**/api/threads/${THREAD_ID}/artifacts${REPORT_PATH}*`,
     (route) =>
@@ -129,7 +141,7 @@ async function openTheReport(
     timeout: 15_000,
   });
   await page.getByText(`${NAME}.report.json`).first().click();
-  return { card: page.getByTestId("business-report-card"), probed };
+  return { card: page.getByTestId("plugin-artifact-presentation"), probed };
 }
 
 test.describe("report card current renders", () => {
@@ -144,15 +156,13 @@ test.describe("report card current renders", () => {
       card.getByRole("heading", { name: "August 2026 Business Review" }),
     ).toBeVisible();
     // The defect: three links, all dead. None of them may appear.
-    for (const label of [
-      "Download the PDF",
-      "Download the Word",
-      "Download the Excel",
-    ]) {
+    for (const label of ["Download PDF", "Download Word", "Download Excel"]) {
       await expect(card.getByRole("link", { name: label })).toHaveCount(0);
     }
     // ...and the person is told plainly, once the answer is known.
-    await expect(card.getByText("No file to download yet")).toBeVisible();
+    await expect(
+      card.getByText("No presented download is currently available."),
+    ).toBeVisible();
   });
 
   test("offers only the render that survived the revision", async ({
@@ -162,15 +172,17 @@ test.describe("report card current renders", () => {
 
     await expect(card).toBeVisible({ timeout: 15_000 });
     await expect(
-      card.getByRole("link", { name: "Download the PDF" }),
+      card.getByRole("link", { name: "Download PDF" }),
     ).toBeVisible();
+    await expect(card.getByRole("link", { name: "Download Word" })).toHaveCount(
+      0,
+    );
     await expect(
-      card.getByRole("link", { name: "Download the Word" }),
+      card.getByRole("link", { name: "Download Excel" }),
     ).toHaveCount(0);
     await expect(
-      card.getByRole("link", { name: "Download the Excel" }),
+      card.getByText("No presented download is currently available."),
     ).toHaveCount(0);
-    await expect(card.getByText("No file to download yet")).toHaveCount(0);
 
     // The probe is bounded and goes to the authenticated artifact route.
     expect(probed.length).toBeGreaterThan(0);
@@ -180,7 +192,7 @@ test.describe("report card current renders", () => {
 
     // The visible link is the ordinary download URL, unchanged.
     await expect(
-      card.getByRole("link", { name: "Download the PDF" }),
+      card.getByRole("link", { name: "Download PDF" }),
     ).toHaveAttribute("href", new RegExp(`${NAME}\\.pdf\\?download=true$`));
   });
 
@@ -188,7 +200,7 @@ test.describe("report card current renders", () => {
     const first = await openTheReport(page, { live: [XLSX_PATH] });
     await expect(first.card).toBeVisible({ timeout: 15_000 });
     await expect(
-      first.card.getByRole("link", { name: "Download the Excel" }),
+      first.card.getByRole("link", { name: "Download Excel" }),
     ).toBeVisible();
 
     // A fresh browser rehydrates the same cumulative list through /history.
@@ -200,14 +212,14 @@ test.describe("report card current renders", () => {
       timeout: 15_000,
     });
     await page.getByText(`${NAME}.report.json`).first().click();
-    const card = page.getByTestId("business-report-card");
+    const card = page.getByTestId("plugin-artifact-presentation");
     await expect(card).toBeVisible({ timeout: 15_000 });
     await expect(
-      card.getByRole("link", { name: "Download the Excel" }),
+      card.getByRole("link", { name: "Download Excel" }),
     ).toBeVisible({ timeout: 15_000 });
-    await expect(
-      card.getByRole("link", { name: "Download the PDF" }),
-    ).toHaveCount(0);
+    await expect(card.getByRole("link", { name: "Download PDF" })).toHaveCount(
+      0,
+    );
   });
 });
 
@@ -219,19 +231,17 @@ test("a temporary availability failure offers a check retry", async ({
     unavailable: [PDF_PATH],
   });
   await expect(card.getByRole("button", { name: "Retry check" })).toBeVisible();
-  await expect(card.getByText("No file to download yet")).toHaveCount(0);
   await expect(
-    card.getByRole("link", { name: "Download the PDF" }),
+    card.getByText("No presented download is currently available."),
   ).toHaveCount(0);
+  await expect(card.getByRole("link", { name: "Download PDF" })).toHaveCount(0);
   await page.screenshot({ path: test.info().outputPath("report-retry.png") });
   await page.route(
     `**/api/threads/${THREAD_ID}/artifacts${PDF_PATH}*`,
     (route) => route.fulfill({ status: 206, body: "x" }),
   );
   await card.getByRole("button", { name: "Retry check" }).click();
-  await expect(
-    card.getByRole("link", { name: "Download the PDF" }),
-  ).toBeVisible();
+  await expect(card.getByRole("link", { name: "Download PDF" })).toBeVisible();
   await expect(card.getByRole("button", { name: "Retry check" })).toHaveCount(
     0,
   );

@@ -41,12 +41,12 @@ rs.mock("@/core/shared/hooks", () => ({
 const fetchWithAuth = rs.hoisted(() => rs.fn());
 rs.mock("@/core/api/fetcher", () => ({ fetch: fetchWithAuth }));
 
-import { ReportCard } from "@/components/workspace/artifacts/report-card";
-import { parseBusinessReport } from "@/core/business-report";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 
+import { parseBusinessReport } from "../../../../../../backend/extensions/sources/hartmesh-legacy-report/browser/index";
 import fixture from "../../../../fixtures/business-report/2026-08-business-review.report.json";
+import { ReportCard } from "../../../../helpers/legacy-report-card";
 
 const DIRECTORY = "/mnt/user-data/outputs/reports/2026-08-business-review";
 const NAME = "2026-08-business-review";
@@ -156,7 +156,9 @@ describe("ReportCard current renders", () => {
     renderCard();
 
     await waitFor(() =>
-      expect(screen.getByText(enUS.businessReport.noRenders)).toBeTruthy(),
+      expect(
+        screen.getByText(enUS.artifactViews.noAvailableFiles),
+      ).toBeTruthy(),
     );
     expect(downloadLinks()).toHaveLength(0);
   });
@@ -168,7 +170,7 @@ describe("ReportCard current renders", () => {
 
     await waitFor(() => expect(downloadLinks()).toHaveLength(1));
     expect(downloadLinks()[0]).toContain(`${NAME}.pdf`);
-    expect(screen.queryByText(enUS.businessReport.noRenders)).toBeNull();
+    expect(screen.queryByText(enUS.artifactViews.noAvailableFiles)).toBeNull();
   });
 
   it("is unchanged by a later unrelated presented file", async () => {
@@ -197,7 +199,7 @@ describe("ReportCard current renders", () => {
       expect(screen.getByRole("heading", { level: 2 })).toBeTruthy(),
     );
     expect(downloadLinks()).toHaveLength(0);
-    expect(screen.queryByText(enUS.businessReport.noRenders)).toBeNull();
+    expect(screen.queryByText(enUS.artifactViews.noAvailableFiles)).toBeNull();
   });
 
   it("does not let an older draft's late probe restore a deleted link", async () => {
@@ -240,7 +242,9 @@ describe("ReportCard current renders", () => {
     );
 
     await waitFor(() =>
-      expect(screen.getByText(enUS.businessReport.noRenders)).toBeTruthy(),
+      expect(
+        screen.getByText(enUS.artifactViews.noAvailableFiles),
+      ).toBeTruthy(),
     );
 
     // Draft 2's probe finally succeeds, for files that no longer exist.
@@ -248,7 +252,7 @@ describe("ReportCard current renders", () => {
     await new Promise((resolve) => setTimeout(resolve, 10));
 
     expect(downloadLinks()).toHaveLength(0);
-    expect(screen.getByText(enUS.businessReport.noRenders)).toBeTruthy();
+    expect(screen.getByText(enUS.artifactViews.noAvailableFiles)).toBeTruthy();
   });
 
   it("keeps confirmed links on screen when an unrelated run settles, then re-asks", async () => {
@@ -286,7 +290,7 @@ describe("ReportCard current renders", () => {
 
     // No blink: the confirmed links are still there while the re-probe runs.
     expect(downloadLinks()).toHaveLength(3);
-    expect(screen.queryByText(enUS.businessReport.noRenders)).toBeNull();
+    expect(screen.queryByText(enUS.artifactViews.noAvailableFiles)).toBeNull();
 
     // ...and the settle really did re-ask, arriving at the new answer.
     await waitFor(() => expect(downloadLinks()).toHaveLength(1));
@@ -316,7 +320,9 @@ describe("ReportCard current renders", () => {
     renderCard({ artifacts: [REPORT] });
 
     await waitFor(() =>
-      expect(screen.getByText(enUS.businessReport.noRenders)).toBeTruthy(),
+      expect(
+        screen.getByText(enUS.artifactViews.noAvailableFiles),
+      ).toBeTruthy(),
     );
     expect(fetchWithAuth).not.toHaveBeenCalled();
   });
@@ -328,7 +334,7 @@ describe("report availability recovery", () => {
     renderCard({ artifacts: [REPORT, PDF] });
     const retry = await screen.findByRole("button", { name: "Retry check" });
     expect(downloadLinks()).toHaveLength(0);
-    expect(screen.queryByText(enUS.businessReport.noRenders)).toBeNull();
+    expect(screen.queryByText(enUS.artifactViews.noAvailableFiles)).toBeNull();
     serveByPath({ [PDF]: 206 });
     fireEvent.click(retry);
     await waitFor(() => expect(downloadLinks()).toHaveLength(1));
@@ -344,7 +350,7 @@ describe("report availability recovery", () => {
     await screen.findByRole("button", { name: "Retry check" });
     expect(downloadLinks()).toHaveLength(1);
     expect(downloadLinks()[0]).toContain(`${NAME}.pdf`);
-    expect(screen.queryByText(enUS.businessReport.noRenders)).toBeNull();
+    expect(screen.queryByText(enUS.artifactViews.noAvailableFiles)).toBeNull();
   });
 
   it("does not confuse offline probes with missing files", async () => {
@@ -352,6 +358,6 @@ describe("report availability recovery", () => {
     renderCard({ artifacts: [REPORT, PDF] });
     await screen.findByRole("button", { name: "Retry check" });
     expect(downloadLinks()).toHaveLength(0);
-    expect(screen.queryByText(enUS.businessReport.noRenders)).toBeNull();
+    expect(screen.queryByText(enUS.artifactViews.noAvailableFiles)).toBeNull();
   });
 });

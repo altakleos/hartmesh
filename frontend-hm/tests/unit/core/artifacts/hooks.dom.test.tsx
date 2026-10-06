@@ -15,7 +15,8 @@ rs.mock("@/core/artifacts/loader", () => ({
 import { useThread } from "@/components/workspace/messages/context";
 import { useArtifactContent } from "@/core/artifacts/hooks";
 import { loadArtifactContent } from "@/core/artifacts/loader";
-import { REPORT_PREVIEW_MAX_BYTES } from "@/core/business-report";
+
+import { REPORT_PREVIEW_MAX_BYTES } from "../../../../../backend/extensions/sources/hartmesh-legacy-report/browser/index";
 
 const mockedUseThread = rs.mocked(useThread);
 const mockedLoadArtifactContent = rs.mocked(loadArtifactContent);
@@ -155,6 +156,13 @@ describe("useArtifactContent", () => {
           filepath: reportPath,
           threadId: "thread-a",
           enabled: true,
+          presentation: {
+            namespace: "hartmesh.legacy-report",
+            id: "report",
+            sourceMaxBytes: 16 * 1024 * 1024,
+            previewMaxBytes: 1024 * 1024,
+            marker: "business-report-v1",
+          },
         }),
       { wrapper: createWrapper() },
     );
@@ -166,8 +174,13 @@ describe("useArtifactContent", () => {
         isMock: false,
         signal: expect.any(AbortSignal),
         full: false,
-        previewMaxBytes: REPORT_PREVIEW_MAX_BYTES,
-        reportPreview: true,
+        presentation: {
+          namespace: "hartmesh.legacy-report",
+          id: "report",
+          sourceMaxBytes: 16 * 1024 * 1024,
+          previewMaxBytes: 1024 * 1024,
+          marker: "business-report-v1",
+        },
       });
     });
     expect(REPORT_PREVIEW_MAX_BYTES).toBeGreaterThan(1024 * 1024);

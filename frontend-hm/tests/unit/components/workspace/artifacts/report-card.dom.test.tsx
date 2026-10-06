@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -42,13 +43,13 @@ rs.mock("@/core/shared/hooks", () => ({
 const fetchWithAuth = rs.hoisted(() => rs.fn());
 rs.mock("@/core/api/fetcher", () => ({ fetch: fetchWithAuth }));
 
-import { ReportCard } from "@/components/workspace/artifacts/report-card";
-import { parseBusinessReport } from "@/core/business-report";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 import { zhCN } from "@/core/i18n/locales/zh-CN";
 
+import { parseBusinessReport } from "../../../../../../backend/extensions/sources/hartmesh-legacy-report/browser/index";
 import fixture from "../../../../fixtures/business-report/2026-08-business-review.report.json";
+import { ReportCard } from "../../../../helpers/legacy-report-card";
 
 const DIRECTORY = "/mnt/user-data/outputs/reports/2026-08-business-review";
 const REPORT = `${DIRECTORY}/2026-08-business-review.report.json`;
@@ -107,16 +108,28 @@ describe("ReportCard", () => {
     // report kept and a report shared are found in the same place in each.
     const rendered = [REPORT, `${DIRECTORY}/2026-08-business-review.pdf`];
     renderCard(rendered);
-    await screen.findByRole("button", { name: "Share with everyone" });
+    await waitFor(() =>
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", {
+          name: "Share with everyone",
+        }).disabled,
+      ).toBe(false),
+    );
 
-    fireEvent.click(screen.getByRole("button", { name: "Save to My files" }));
+    fireEvent.click(
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: "Save to My files",
+      }),
+    );
     expect(myFiles.save).toHaveBeenCalledWith(
       [`${DIRECTORY}/2026-08-business-review.pdf`],
       "Reports",
     );
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Share with everyone" }),
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: "Share with everyone",
+      }),
     );
     expect(shareWithEveryone).toHaveBeenCalledWith(
       [`${DIRECTORY}/2026-08-business-review.pdf`],
@@ -130,17 +143,33 @@ describe("ReportCard", () => {
     // language must land in the same place, not beside it.
     const rendered = [REPORT, `${DIRECTORY}/2026-08-business-review.pdf`];
     renderCard(rendered);
-    await screen.findByRole("button", { name: "Share with everyone" });
+    await waitFor(() =>
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", {
+          name: "Share with everyone",
+        }).disabled,
+      ).toBe(false),
+    );
     fireEvent.click(
-      screen.getByRole("button", { name: "Share with everyone" }),
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: "Share with everyone",
+      }),
     );
     const [, englishFolder] = shareWithEveryone.mock.calls[0]!;
 
     cleanup();
     renderCard(rendered, {}, { locale: "zh-CN", t: zhCN });
-    await screen.findByRole("button", { name: zhCN.shared.shareWithEveryone });
+    await waitFor(() =>
+      expect(
+        screen.getByRole<HTMLButtonElement>("button", {
+          name: zhCN.shared.shareWithEveryone,
+        }).disabled,
+      ).toBe(false),
+    );
     fireEvent.click(
-      screen.getByRole("button", { name: zhCN.shared.shareWithEveryone }),
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: zhCN.shared.shareWithEveryone,
+      }),
     );
     const [, chineseFolder] = shareWithEveryone.mock.calls[1]!;
 
@@ -186,8 +215,14 @@ describe("ReportCard", () => {
     renderCard();
 
     const kpis = screen.getByTestId("business-report-kpis");
-    expect(kpis.className).toContain("auto-fit");
-    expect(kpis.className).toContain("minmax(");
+    expect(
+      kpis.parentElement?.parentElement?.parentElement?.querySelector("style")
+        ?.textContent,
+    ).toContain("auto-fit");
+    expect(
+      kpis.parentElement?.parentElement?.parentElement?.querySelector("style")
+        ?.textContent,
+    ).toContain("minmax(");
     expect(kpis.className).not.toMatch(
       /(^|[\s:])(sm:|md:|lg:|xl:)?grid-cols-\d/,
     );
@@ -203,7 +238,11 @@ describe("ReportCard", () => {
     const value = screen
       .getByTestId("business-report-kpis")
       .querySelector("[data-testid='business-report-kpi-value']")!;
-    expect(value.className).toContain("break-words");
+    expect(
+      value
+        .closest("article")
+        ?.parentElement?.parentElement?.querySelector("style")?.textContent,
+    ).toContain("overflow-wrap:break-word");
   });
 
   it("reads a comparison row in its own units", () => {
@@ -243,9 +282,10 @@ describe("ReportCard", () => {
     ).toBeTruthy();
   });
 
-  it("addresses each picture inside the report's own directory", () => {
+  it("addresses each picture inside the report's own directory", async () => {
     renderCard();
 
+    await act(async () => undefined);
     const chart = screen.getByAltText("Revenue by week");
     expect(chart.getAttribute("src")).toBe(
       `/api/threads/${THREAD}/artifacts${DIRECTORY}/charts/revenue_by_period.png?revision=sha-fixture`,
@@ -261,26 +301,24 @@ describe("ReportCard", () => {
 
     // Presented *and* proven to still be there: the link appears once the
     // probe has answered, not on the strength of the list alone.
-    const pdf = await screen.findByRole("link", { name: "Download the PDF" });
+    const pdf = await screen.findByRole("link", { name: "Download PDF" });
     expect(pdf.getAttribute("href")).toBe(
       `/api/threads/${THREAD}/artifacts${DIRECTORY}/2026-08-business-review.pdf?download=true`,
     );
-    expect(
-      screen.getByRole("link", { name: "Download the Excel" }),
-    ).toBeTruthy();
-    expect(
-      screen.queryByRole("link", { name: "Download the Word" }),
-    ).toBeNull();
+    expect(screen.getByRole("link", { name: "Download Excel" })).toBeTruthy();
+    expect(screen.queryByRole("link", { name: "Download Word" })).toBeNull();
   });
 
   it("offers no download when nothing was rendered", () => {
     renderCard();
 
-    expect(screen.queryByRole("link", { name: "Download the PDF" })).toBeNull();
+    expect(screen.queryByRole("link", { name: "Download PDF" })).toBeNull();
     // Nothing to keep either: the button belongs to the downloads.
     expect(
-      screen.queryByRole("button", { name: "Save to My files" }),
-    ).toBeNull();
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: "Save to My files",
+      }).disabled,
+    ).toBe(true);
   });
 
   it("keeps the documents the thread has rendered, and only those", async () => {
@@ -293,10 +331,16 @@ describe("ReportCard", () => {
 
     await waitFor(() =>
       expect(
-        screen.getByRole("button", { name: "Save to My files" }),
-      ).toBeTruthy(),
+        screen.getByRole<HTMLButtonElement>("button", {
+          name: "Save to My files",
+        }).disabled,
+      ).toBe(false),
     );
-    fireEvent.click(screen.getByRole("button", { name: "Save to My files" }));
+    fireEvent.click(
+      screen.getByRole<HTMLButtonElement>("button", {
+        name: "Save to My files",
+      }),
+    );
 
     // The documents, not the JSON the card is drawn from.
     expect(myFiles.save).toHaveBeenCalledWith(
@@ -315,7 +359,7 @@ describe("ReportCard", () => {
       { isMock: true },
     );
 
-    expect(screen.getByRole("link", { name: "Download the PDF" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Download PDF" })).toBeTruthy();
     expect(
       screen.queryByRole("button", { name: "Save to My files" }),
     ).toBeNull();
@@ -371,11 +415,7 @@ describe("ReportCard", () => {
   it("says why there is nothing to download", () => {
     renderCard();
 
-    expect(
-      screen.getByText(
-        "No file to download yet — ask for the PDF, Word or Excel version.",
-      ),
-    ).toBeTruthy();
+    expect(screen.getByText(enUS.artifactViews.noAvailableFiles)).toBeTruthy();
   });
 
   it("leaves out a checks section it has nothing to put in", () => {

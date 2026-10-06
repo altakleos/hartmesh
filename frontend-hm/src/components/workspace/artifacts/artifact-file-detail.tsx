@@ -61,22 +61,17 @@ import {
   resolveStoredArtifactLanguage,
 } from "@/core/artifacts/viewer";
 import { useAuth } from "@/core/auth/AuthProvider";
-import {
-  filingFolderFor,
-  isBusinessReportPath,
-  parseBusinessReport,
-} from "@/core/business-report";
 import { writeTextToClipboard } from "@/core/clipboard";
 import { artifactPresentationFor } from "@/core/extensions/artifacts";
+import {
+  installedFileCollection,
+  isFileFilingReady,
+} from "@/core/extensions/filing";
 import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { canKeepInMyFiles, useSaveToMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
-import {
-  canPublishToShared,
-  sharedFolderFor,
-  useShareWithEveryone,
-} from "@/core/shared";
+import { canPublishToShared, useShareWithEveryone } from "@/core/shared";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
 import {
   canBrowserPreviewFile,
@@ -98,7 +93,6 @@ import {
 import { ArtifactView } from "./artifact-view";
 import { useArtifacts } from "./context";
 import { PluginArtifactPresentation } from "./plugin-artifact-presentation";
-import { ReportCard } from "./report-card";
 
 const WRITE_FILE_PREVIEW_REFRESH_INTERVAL_MS = 3000;
 
@@ -216,8 +210,6 @@ export function ArtifactFileDetail({
         : undefined,
     [installation],
   );
-  const isReportFile =
-    !isWriteFile && !installation && isBusinessReportPath(filepath);
   const isViewFile = !isWriteFile && isArtifactViewPath(filepath);
   const presentedPaths = useMemo(
     () => recordedPresentedPaths(thread.messages ?? []),
@@ -262,23 +254,6 @@ export function ArtifactFileDetail({
     enabled: (isCodeFile || Boolean(installation)) && !isWriteFile,
     ...(presentation ? { presentation } : {}),
   });
-  // A built report is previewed as the card the downloads were rendered from.
-  // Parsing decides it: a `.report.json` this app cannot draw stays a JSON
-  // file, and a truncated body is not a document at all.
-  const report = useMemo(() => {
-    if (sourceView || !isReportFile || truncated || content === undefined) {
-      return null;
-    }
-    return parseBusinessReport(content);
-  }, [content, isReportFile, truncated, sourceView]);
-  // Previewable from the first render, before the body has arrived: treating a
-  // report as JSON until it parses shows the card's own moment as a flash of
-  // raw JSON. Once the body is here, only a report the app can draw keeps it.
-  const isReportPreview =
-    !sourceView &&
-    isReportFile &&
-    !truncated &&
-    (content === undefined || report !== null);
   const view = useMemo(
     () =>
       isViewFile &&
@@ -310,7 +285,6 @@ export function ArtifactFileDetail({
   const isSupportPreview =
     language === "html" ||
     language === "markdown" ||
-    isReportPreview ||
     isViewPreview ||
     isPluginPreview ||
     Boolean(sourceView);
@@ -338,20 +312,9 @@ export function ArtifactFileDetail({
   useEffect(() => {
     // The side panel can unmount while its draft/editing state survives.
     // Resuming that edit must restore canonical source without another click.
-    if (
-      (isReportFile || installation) &&
-      (isEditing || isDirty) &&
-      !fullContentRequested
-    )
+    if (installation && (isEditing || isDirty) && !fullContentRequested)
       loadFullContent();
-  }, [
-    isReportFile,
-    installation,
-    isEditing,
-    isDirty,
-    fullContentRequested,
-    loadFullContent,
-  ]);
+  }, [installation, isEditing, isDirty, fullContentRequested, loadFullContent]);
   const canEdit = canEditOpenedArtifact({
     filepath,
     isCodeFile,
@@ -541,16 +504,13 @@ export function ArtifactFileDetail({
   ]);
 
   // Keeping is for what the conversation was given and what it made; the
-  // demo thread has nowhere to keep them. A report is kept from its card, which
-  // offers the documents rather than the JSON they were rendered from.
+  // demo thread has nowhere to keep them.
   const myFiles = useSaveToMyFiles(threadId);
-  const canKeep =
-    !isWriteFile && !isMock && !isReportFile && canKeepInMyFiles(filepath);
+  const canKeep = !isWriteFile && !isMock && canKeepInMyFiles(filepath);
   // Sharing reaches one place further than keeping: a file already in the
   // person's own files can be handed to everyone from here too.
   const everyone = useShareWithEveryone(threadId);
-  const canShare =
-    !isWriteFile && !isMock && !isReportFile && canPublishToShared(filepath);
+  const canShare = !isWriteFile && !isMock && canPublishToShared(filepath);
 
   const handleInstallSkill = useCallback(async () => {
     if (isInstalling) return;
@@ -784,11 +744,15 @@ export function ArtifactFileDetail({
                 icon={myFiles.isPending ? LoaderIcon : FolderPlusIcon}
                 label={t.files.saveToMyFiles}
                 tooltip={t.files.saveToMyFiles}
-                disabled={myFiles.isPending}
+                disabled={myFiles.isPending || !isFileFilingReady(pluginQuery)}
                 onClick={() =>
                   void myFiles.save(
                     [filepath],
-                    filingFolderFor(filepath, { artifacts }),
+                    installedFileCollection(pluginQuery.data ?? [], {
+                      filepath,
+                      destination: "my-files",
+                      presented: presentedPaths,
+                    }),
                   )
                 }
               />
@@ -799,11 +763,15 @@ export function ArtifactFileDetail({
                 label={t.shared.shareWithEveryone}
                 // The tooltip answers what the label cannot: who "everyone" is.
                 tooltip={t.shared.description}
-                disabled={everyone.isPending}
+                disabled={everyone.isPending || !isFileFilingReady(pluginQuery)}
                 onClick={() =>
                   void everyone.share(
                     [filepath],
-                    sharedFolderFor(filepath, { artifacts }),
+                    installedFileCollection(pluginQuery.data ?? [], {
+                      filepath,
+                      destination: "shared",
+                      presented: presentedPaths,
+                    }),
                   )
                 }
               />
@@ -867,6 +835,16 @@ export function ArtifactFileDetail({
           </div>
         )}
         <div className="min-h-0 flex-1">
+          {!isMock &&
+            !pluginQuery.isPending &&
+            !isFileFilingReady(pluginQuery) && (
+              <p
+                role="status"
+                className="text-muted-foreground px-4 py-2 text-sm"
+              >
+                {t.extensions.fileDestinationsUnavailable}
+              </p>
+            )}
           {sourceView && (
             <div className="border-border flex items-center justify-end border-b px-4 py-2">
               {isCodeFile ? (
@@ -914,24 +892,6 @@ export function ArtifactFileDetail({
               downloadLabel={t.common.download}
             />
           )}
-          {report !== null &&
-            !error &&
-            effectiveViewMode === "preview" &&
-            !isLoading && (
-              <ReportCard
-                artifacts={artifacts}
-                filepath={filepath}
-                isMock={isMock}
-                presentedKnown={!thread.isThreadLoading}
-                report={report}
-                // The body's own digest: what separates this draft's download
-                // verdict from the previous draft's, since a rebuild reuses
-                // every filename.
-                reportRevision={sha256}
-                runSettled={!thread.isLoading}
-                threadId={threadId}
-              />
-            )}
           {view !== null &&
             !error &&
             effectiveViewMode === "preview" &&

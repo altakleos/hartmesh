@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Historical report rendering and filing now use a provider-installed compatibility plugin. Existing configurations must enable its plugin entry; original files remain unchanged. No database schema change.
+
 ### Product
 
 - Already-presented sibling views can provide the preferred rich presentation

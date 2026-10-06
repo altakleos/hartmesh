@@ -40,12 +40,12 @@ rs.mock("@/core/static-mode", () => ({
   isStaticWebsiteOnly: () => true,
 }));
 
-import { ReportCard } from "@/components/workspace/artifacts/report-card";
-import { parseBusinessReport } from "@/core/business-report";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 
+import { parseBusinessReport } from "../../../../../../backend/extensions/sources/hartmesh-legacy-report/browser/index";
 import fixture from "../../../../fixtures/business-report/2026-08-business-review.report.json";
+import { ReportCard } from "../../../../helpers/legacy-report-card";
 
 const DIRECTORY = "/mnt/user-data/outputs/reports/2026-08-business-review";
 const NAME = "2026-08-business-review";
@@ -87,12 +87,12 @@ it("shows the presented renders without probing in a static build", async () => 
   );
 
   await waitFor(() =>
-    expect(screen.getByRole("link", { name: "Download the PDF" })).toBeTruthy(),
+    expect(screen.getByRole("link", { name: "Download PDF" })).toBeTruthy(),
   );
-  expect(screen.getByRole("link", { name: "Download the Excel" })).toBeTruthy();
-  expect(screen.queryByRole("link", { name: "Download the Word" })).toBeNull();
+  expect(screen.getByRole("link", { name: "Download Excel" })).toBeTruthy();
+  expect(screen.queryByRole("link", { name: "Download Word" })).toBeNull();
   // The verdict is settled from the fixtures alone: no request is made, and
   // the false-empty notice never appears on the way.
   expect(fetchWithAuth).not.toHaveBeenCalled();
-  expect(screen.queryByText(enUS.businessReport.noRenders)).toBeNull();
+  expect(screen.queryByText(enUS.artifactViews.noAvailableFiles)).toBeNull();
 });

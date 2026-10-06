@@ -259,12 +259,12 @@ function PresentationSession(props: Props) {
       aria-label={installation.surface.title}
       data-testid="plugin-artifact-presentation"
     >
-      <div ref={root} />
       {files && files.exports.length > 0 && (
         <div className="p-4">
           <ArtifactFileControls {...fileProps} view={files} />
         </div>
       )}
+      <div ref={root} />
     </section>
   );
 }

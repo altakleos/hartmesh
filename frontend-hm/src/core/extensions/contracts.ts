@@ -86,6 +86,11 @@ export type PluginArtifactSurface = {
       ) => ArtifactViewDocument | Promise<ArtifactViewDocument>;
     }
 );
+export type FileCollectionContext = Readonly<{
+  filepath: string;
+  destination: "my-files" | "shared";
+  presented: readonly string[];
+}>;
 export type ConversationActionContext = {
   thread: AgentThread;
   messages?: Message[];
@@ -127,6 +132,11 @@ export interface FrontendExtension {
   /** Additive capability; the page-only v1 array stays unchanged. */
   artifactApiVersion?: 1;
   artifacts?: PluginArtifactSurface[];
+  /** Optional filing policy from installed code; passive files cannot register it. */
+  fileFilingApiVersion?: 1;
+  fileCollection?: (
+    context: FileCollectionContext,
+  ) => { collection: string } | null;
   conversationActions?: (
     t: Translations,
     locale?: string,

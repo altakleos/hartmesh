@@ -93,6 +93,8 @@ import type { LoadedContribution } from "@/core/extensions/registry";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
 
+import { legacyReportContribution } from "../../../../helpers/legacy-report";
+
 const DIRECTORY = "/mnt/user-data/outputs/reports/2026-08-business-review";
 const REPORT = `${DIRECTORY}/2026-08-business-review.report.json`;
 const RENDER = `${DIRECTORY}/2026-08-business-review.pdf`;
@@ -138,6 +140,8 @@ describe("ArtifactFileDetail filing", () => {
   it("files a report's download with the reports, as the report card does", () => {
     // Same file, another way in: the panel must not put a second copy of one
     // report at the root while the card files it under Reports.
+    extensionState.entries = [legacyReportContribution()];
+    artifacts.recorded = [REPORT, RENDER];
     renderPanel(RENDER);
 
     fireEvent.click(screen.getByRole("button", { name: "Save to My files" }));
