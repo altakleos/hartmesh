@@ -45,6 +45,7 @@ describe("useArtifactContent", () => {
       content: full ? "complete report" : "preview",
       url: filepath,
       sha256: undefined,
+      projected: false,
       truncated: !full,
       previewBytes: full ? 15 : 7,
       totalBytes: 15,
@@ -72,6 +73,7 @@ describe("useArtifactContent", () => {
         filepath,
         threadId: "thread-a",
         isMock: false,
+        signal: expect.any(AbortSignal),
         full: false,
       });
     });
@@ -85,6 +87,7 @@ describe("useArtifactContent", () => {
         filepath,
         threadId: "thread-a",
         isMock: false,
+        signal: expect.any(AbortSignal),
         full: true,
       });
     });
@@ -96,6 +99,7 @@ describe("useArtifactContent", () => {
         filepath,
         threadId: "thread-b",
         isMock: false,
+        signal: expect.any(AbortSignal),
         full: false,
       });
     });
@@ -119,6 +123,7 @@ describe("useArtifactContent", () => {
         filepath: reportPath,
         threadId: "thread-a",
         isMock: false,
+        signal: expect.any(AbortSignal),
         full: false,
         previewMaxBytes: REPORT_PREVIEW_MAX_BYTES,
         reportPreview: true,

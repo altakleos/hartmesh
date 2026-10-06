@@ -9,6 +9,115 @@ import { parseBusinessReport } from "@/core/business-report";
 import reportFixture from "../../../fixtures/business-report/2026-08-business-review.report.json";
 
 describe("loadArtifactContent", () => {
+  it("rejects a view range larger than its declared total", async () => {
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-1/1" },
+      }),
+    );
+    await expect(
+      loadArtifactContent({
+        filepath: "/mnt/user-data/outputs/summary.view.json",
+        threadId: "thread-1",
+      }),
+    ).rejects.toThrow();
+  });
+  it("rejects a view whose range declares bytes missing from the response", async () => {
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", {
+        status: 206,
+        headers: { "Content-Range": "bytes 0-2/3" },
+      }),
+    );
+    await expect(
+      loadArtifactContent({
+        filepath: "/mnt/user-data/outputs/summary.view.json",
+        threadId: "thread-1",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("rejects an identity-encoded view with a truncated declared body", async () => {
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", { headers: { "Content-Length": "3" } }),
+    );
+    await expect(
+      loadArtifactContent({
+        filepath: "/mnt/user-data/outputs/summary.view.json",
+        threadId: "thread-1",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("does not compare compressed transfer lengths with decoded view bytes", async () => {
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response("{}", {
+        headers: { "Content-Encoding": "gzip", "Content-Length": "40" },
+      }),
+    );
+    expect(
+      (
+        await loadArtifactContent({
+          filepath: "/mnt/user-data/outputs/summary.view.json",
+          threadId: "thread-1",
+        })
+      ).content,
+    ).toBe("{}");
+  });
+  it("bounds a passive view when a proxy ignores Range", async () => {
+    const cancel = rs.fn();
+    const response = new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(
+            new Uint8Array(ARTIFACT_PREVIEW_MAX_BYTES + 1).fill(32),
+          );
+        },
+        cancel,
+      }),
+    );
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(response);
+    const result = await loadArtifactContent({
+      filepath: "/mnt/user-data/outputs/summary.view.json",
+      threadId: "thread-1",
+    });
+    expect(result.truncated).toBe(true);
+    expect(result.previewBytes).toBe(ARTIFACT_PREVIEW_MAX_BYTES);
+    expect(cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses invalid UTF-8 in a passive view without lossy replacement", async () => {
+    rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response(new Uint8Array([123, 34, 0xff, 34, 125])),
+    );
+    await expect(
+      loadArtifactContent({
+        filepath: "/mnt/user-data/outputs/summary.view.json",
+        threadId: "thread-1",
+      }),
+    ).rejects.toThrow();
+  });
+
+  it("fences a passive view body after viewer retirement", async () => {
+    const controller = new AbortController();
+    let resolve: ((response: Response) => void) | undefined;
+    rs.spyOn(globalThis, "fetch").mockImplementation(
+      () =>
+        new Promise<Response>((finish) => {
+          resolve = finish;
+        }),
+    );
+    const pending = loadArtifactContent({
+      filepath: "/mnt/user-data/outputs/summary.view.json",
+      threadId: "thread-1",
+      signal: controller.signal,
+    });
+    controller.abort();
+    resolve!(new Response("{}"));
+    await expect(pending).rejects.toThrow();
+  });
+
   it("refetches canonical source when CORS hides the projection marker", async () => {
     const fetchMock = rs
       .spyOn(globalThis, "fetch")

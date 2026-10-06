@@ -37,6 +37,12 @@ import {
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { CodeEditor } from "@/components/workspace/code-editor";
 import {
+  isArtifactViewPath,
+  isArtifactViewRevision,
+  parseArtifactView,
+  recordedPresentedPaths,
+} from "@/core/artifact-views/contract";
+import {
   ArtifactRequestError,
   updateArtifactContent,
 } from "@/core/artifacts/api";
@@ -86,6 +92,7 @@ import {
   ArtifactPreviewError,
   formatArtifactBytes,
 } from "./artifact-file-preview";
+import { ArtifactView } from "./artifact-view";
 import { useArtifacts } from "./context";
 import { ReportCard } from "./report-card";
 
@@ -187,6 +194,11 @@ export function ArtifactFileDetail({
   const isReportFile = useMemo(() => {
     return !isWriteFile && isBusinessReportPath(filepath);
   }, [filepath, isWriteFile]);
+  const isViewFile = !isWriteFile && isArtifactViewPath(filepath);
+  const presentedPaths = useMemo(
+    () => (isViewFile ? recordedPresentedPaths(thread.messages ?? []) : []),
+    [isViewFile, thread.messages],
+  );
   const toolResult = (() => {
     if (!isWriteFile) {
       return undefined;
@@ -230,8 +242,23 @@ export function ArtifactFileDetail({
   // raw JSON. Once the body is here, only a report the app can draw keeps it.
   const isReportPreview =
     isReportFile && !truncated && (content === undefined || report !== null);
+  const view = useMemo(
+    () =>
+      isViewFile &&
+      !truncated &&
+      content !== undefined &&
+      isArtifactViewRevision(sha256)
+        ? parseArtifactView(content)
+        : null,
+    [isViewFile, truncated, content, sha256],
+  );
+  const isViewPreview =
+    isViewFile && !truncated && (content === undefined || view !== null);
   const isSupportPreview =
-    language === "html" || language === "markdown" || isReportPreview;
+    language === "html" ||
+    language === "markdown" ||
+    isReportPreview ||
+    isViewPreview;
   const artifactViewState = getArtifactViewState({
     filepath: filepathFromProps,
     isSupportPreview,
@@ -279,6 +306,8 @@ export function ArtifactFileDetail({
     ) {
       return;
     }
+    // Inactive view documents are query data, not an accumulating draft cache.
+    if (isViewFile && !isEditing && !isDirty) return;
     setDrafts((current) => {
       const existing = current[filepath] ?? createArtifactDraft(filepath);
       const next = reconcileArtifactDraft(existing, { content, sha256 });
@@ -287,7 +316,17 @@ export function ArtifactFileDetail({
       }
       return { ...current, [filepath]: next };
     });
-  }, [content, filepath, isWriteFile, projected, setDrafts, sha256]);
+  }, [
+    content,
+    filepath,
+    isWriteFile,
+    projected,
+    setDrafts,
+    sha256,
+    isViewFile,
+    isEditing,
+    isDirty,
+  ]);
 
   const [viewMode, setViewMode] = useState<"code" | "preview">(
     isEditing ? "code" : artifactViewState.initialViewMode,
@@ -743,6 +782,17 @@ export function ArtifactFileDetail({
           </div>
         )}
         <div className="min-h-0 flex-1">
+          {isViewFile &&
+            !error &&
+            !isLoading &&
+            (truncated || view === null) && (
+              <p
+                role="status"
+                className="border-border text-muted-foreground border-b px-4 py-2 text-sm"
+              >
+                {t.artifactViews.unsupported}
+              </p>
+            )}
           {error && (
             <ArtifactPreviewError
               filepath={filepath}
@@ -768,6 +818,22 @@ export function ArtifactFileDetail({
                 reportRevision={sha256}
                 runSettled={!thread.isLoading}
                 threadId={threadId}
+              />
+            )}
+          {view !== null &&
+            !error &&
+            effectiveViewMode === "preview" &&
+            !isLoading && (
+              <ArtifactView
+                view={view}
+                filepath={filepath}
+                threadId={threadId}
+                revision={sha256}
+                viewerId={user?.id}
+                artifacts={presentedPaths}
+                presentedKnown={!thread.isThreadLoading}
+                runSettled={!thread.isLoading}
+                isMock={isMock}
               />
             )}
           {artifactViewState.canPreview &&

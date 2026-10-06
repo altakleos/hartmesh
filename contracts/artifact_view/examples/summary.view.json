@@ -1,0 +1,43 @@
+{
+  "format": "hartmesh.artifact-view",
+  "version": 1,
+  "title": "Document summary",
+  "accent": "#0a6b3d",
+  "primary_source": {
+    "path": "summary.json"
+  },
+  "blocks": [
+    {
+      "type": "facts",
+      "items": [
+        {
+          "label": "Total",
+          "value": "$52,310.40",
+          "detail": "Authored display value"
+        },
+        {
+          "label": "Items",
+          "value": "178"
+        }
+      ]
+    },
+    {
+      "type": "image",
+      "path": "images/overview.png",
+      "alt": "Local overview",
+      "caption": "Generated from the supplied files."
+    },
+    {
+      "type": "notice",
+      "tone": "warning",
+      "text": "Review the source caveats before acting.",
+      "attribution": "Summary skill"
+    }
+  ],
+  "exports": [
+    {
+      "path": "summary.pdf",
+      "label": "Printable summary"
+    }
+  ]
+}

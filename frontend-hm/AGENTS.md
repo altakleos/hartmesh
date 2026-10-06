@@ -9,6 +9,28 @@ backend boundary. See [the isolation guide](../docs/FRONTEND_ISOLATION.md).
 
 ## Project Overview
 
+`core/artifact-views/` owns the passive `*.view.json` v1 contract and the generic
+`ArtifactView` renderer. It accepts only six flat primitives, authored strings
+and explicit local exports. Unknown structure rejects rich rendering; original
+file access remains. View responses use fatal UTF-8 decoding and a bounded
+stream reader even when Range is ignored. Metadata and body completeness are
+checked before rendering. Source and projection reads remain separate.
+
+View export eligibility comes from server-owned `presented_files` tags, not
+incidental discovery or an unanswered `present_files` request. Live probes are
+keyed by thread, view path, observed revision and exact paths, use four readers
+with ten-second deadlines, and discard unused data. Card actions reuse the
+existing lifetime-aware per-file save/share/Undo services with explicit selected
+paths and an inline collection hint. There is no recursive copy or implicit
+source/image export.
+
+An effect-owned `ArtifactImageSession` belongs to account/thread/path/revision,
+including StrictMode replay. It validates complete PNG/JPEG framing before a
+browser decode, limits per-image and aggregate bytes/pixels and concurrent loads,
+and owns cancellation and URL revocation. Image failures remain placeholders.
+See [the contract and budgets](../contracts/artifact_view/README.md); no business
+schema, calculation, interpreter or module registration belongs to this host.
+
 Report cards request the bounded `report_preview=true` artifact projection and
 validate it with `parseBusinessReport`. Its revision is the full source SHA-256.
 Projection cache keys differ from source keys; code view, edit, copy and download

@@ -134,6 +134,20 @@ export function createZhCN(product: string): Translations {
       missingTarget: "该链接没有指明要展示哪个文件。",
     },
 
+    artifactViews: {
+      unsupported: "此文件不是受支持的结果视图，仍可访问原始文件。",
+      imageUnavailable: "图像不可用或超出显示限制。",
+      table: "结果表格",
+      exports: "文件",
+      exportsHint: "仅保存或共享所选文件，不会自动包含源文件和图像。",
+      checkingFiles: "正在检查文件是否可用...",
+      filesUncertain: "部分文件暂时无法检查，请重试。",
+      noAvailableFiles: "当前没有可用的已展示下载文件。",
+      retry: "重新检查",
+      collection: (name) => `保存和共享位置：${name}`,
+      ignoredCollection: "建议的文件夹不可用，将使用默认位置。",
+    },
+
     artifactArchive: {
       downloadCurrent: (count) => `下载当前版本（${count} 个文件）`,
       currentVersionNotice:

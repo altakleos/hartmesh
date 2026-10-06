@@ -52,6 +52,15 @@ describe the same bytes. Larger artifacts stream from one opened file without a
 full-content hash. Workspace change scans also retain directory and file descriptors;
 unreadable or changing files make verification incomplete rather than complete.
 
+Skills can publish `*.view.json` results with preformatted facts, plain text,
+lists, tables, PNG/JPEG images and attributed notices. Valid views render in the
+artifact panel with theme-aware layout and selected-file Download, Save to My
+Files and Share controls. Only recorded presentations and live authenticated
+reads offer export controls. Unsafe folder suggestions are visibly ignored;
+unavailable images remain local failures. Invalid, oversized or unsupported
+views retain original-file access. See the
+[passive view contract](contracts/artifact_view/README.md).
+
 The Files page follows the selected tab in its URL, including Shared links and
 browser history. Each tab can filter loaded files by name or folder and sort by
 Name or Newest. Counts and truncation notices describe the loaded entries;

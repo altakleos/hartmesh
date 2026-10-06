@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useThread } from "@/components/workspace/messages/context";
+import { isArtifactViewPath } from "@/core/artifact-views/contract";
 import {
   REPORT_PREVIEW_MAX_BYTES,
   isBusinessReportPath,
@@ -61,17 +62,19 @@ export function useArtifactContent({
   );
   const { data, isLoading, error, refetch } = useQuery({
     queryKey,
-    queryFn: () => {
+    queryFn: ({ signal }) => {
       return loadArtifactContent({
         filepath,
         threadId,
         isMock,
+        signal,
         full: fullContentRequested,
         ...previewBudgetOf(filepath),
         ...(isBusinessReportPath(filepath) ? { reportPreview: true } : {}),
       });
     },
     enabled,
+    gcTime: isArtifactViewPath(filepath) ? 0 : undefined,
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
@@ -134,14 +137,16 @@ export function useStandaloneArtifactContent({
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["artifact", filepath, threadId, isMock, fullContentRequested],
-    queryFn: () =>
+    queryFn: ({ signal }) =>
       loadArtifactContent({
         filepath,
         threadId,
         isMock,
+        signal,
         full: fullContentRequested,
         ...previewBudgetOf(filepath),
       }),
+    gcTime: isArtifactViewPath(filepath) ? 0 : undefined,
     staleTime: 0,
     refetchOnWindowFocus: true,
   });

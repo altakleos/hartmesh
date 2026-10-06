@@ -1,0 +1,43 @@
+{
+  "format": "hartmesh.artifact-view",
+  "version": 1,
+  "title": "Opening procedure",
+  "primary_source": {
+    "path": "procedure.json"
+  },
+  "blocks": [
+    {
+      "type": "text",
+      "heading": "Scope",
+      "paragraphs": [
+        "Summary of the supplied handbook. Consult the full instructions before operation."
+      ]
+    },
+    {
+      "type": "list",
+      "ordered": true,
+      "heading": "Sequence",
+      "items": [
+        "Inspect the work area.",
+        "Complete the documented checks.",
+        "Record the inspection."
+      ]
+    },
+    {
+      "type": "notice",
+      "tone": "neutral",
+      "text": "One inspection interval is not specified in the supplied source.",
+      "attribution": "Document summary skill"
+    }
+  ],
+  "exports": [
+    {
+      "path": "procedure.pdf",
+      "label": "Printable handout"
+    },
+    {
+      "path": "procedure.docx",
+      "label": "Editable handout"
+    }
+  ]
+}

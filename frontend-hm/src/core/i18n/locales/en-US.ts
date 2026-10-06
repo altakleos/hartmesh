@@ -138,6 +138,24 @@ export function createEnUS(product: string): Translations {
       missingTarget: "This link does not say which artifact to display.",
     },
 
+    artifactViews: {
+      unsupported:
+        "This file is not a supported result view. The original file remains available.",
+      imageUnavailable: "Image unavailable or outside the display limits.",
+      table: "Result table",
+      exports: "Files",
+      exportsHint:
+        "Only selected files are saved or shared. Source files and images are not included automatically.",
+      checkingFiles: "Checking file availability...",
+      filesUncertain:
+        "Some files could not be checked. Retry to check them again.",
+      noAvailableFiles: "No presented download is currently available.",
+      retry: "Retry check",
+      collection: (name) => `Save and share destination: ${name}`,
+      ignoredCollection:
+        "The suggested folder is unavailable. Files will use the default destination.",
+    },
+
     artifactArchive: {
       downloadCurrent: (count) =>
         `Download current versions (${count} ${count === 1 ? "file" : "files"})`,
