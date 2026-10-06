@@ -9,13 +9,11 @@ backend boundary. See [the isolation guide](../docs/FRONTEND_ISOLATION.md).
 
 ## Project Overview
 
-`ArtifactFileControls` is shared by passive and installed native presentations.
-It accepts explicit relative exports and an optional collection suggestion;
-eligibility, bounded live probes, selected paths and existing storage/Undo
-lifetimes remain independent of a renderer. Legacy probes delegate to the same
-generic authenticated reader. `core/api/abort.ts` retires host waiting and
-observes late results; the fetcher cancels an unread retired response before
-rejecting, preserving the late-401 navigation fence.
+`ArtifactFileControls` serves passive and native renderers through explicit
+exports, collection suggestions, bounded live probes and existing storage/Undo
+lifetimes. Legacy probes share that reader. `core/api/abort.ts` observes late
+work; retired fetch responses cancel unread bodies before rejection without
+allowing late 401 navigation.
 
 `core/artifact-views/associations.ts` and `source-view.ts` resolve one-hop source
 relations from already-presented same-directory view candidates only. Never
