@@ -14,16 +14,21 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import threading
 import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
+from deerflow_extension_api import ArtifactPresentation, PluginContribution
+from starlette.requests import Request
 from starlette.responses import FileResponse
 
 import app.gateway.routers.artifacts as artifacts_router
 from app.gateway.path_utils import resolve_thread_virtual_path
 from app.gateway.routers.artifacts import ArtifactUpdateRequest, get_artifact, update_artifact
+from deerflow.extensions.registry import ExtensionRegistry
 
 pytestmark = pytest.mark.asyncio
 
@@ -102,6 +107,62 @@ async def test_get_artifact_skill_archive_member_does_not_block_event_loop(tmp_p
 
     assert resp.status_code == 200
     assert b"# demo skill" in resp.body
+
+
+def _projection_request(project) -> Request:
+    registry = ExtensionRegistry()
+    with registry.attributed_to("test:install"):
+        registry.plugin(
+            PluginContribution(namespace="example.summary", title="Summary", enabled=True, api_version=2, artifacts=(ArtifactPresentation(id="summary", suffixes=(".summary.json",), project=project, projection_marker="example-summary-v1"),))
+        )
+    app = SimpleNamespace(state=SimpleNamespace(extensions=registry.build()))
+    return Request({"type": "http", "app": app, "headers": [], "query_string": b"preview=example.summary%2Fsummary", "method": "GET"})
+
+
+async def test_installed_projection_reads_and_runs_package_code_off_loop(tmp_path: Path, monkeypatch) -> None:
+    vpath = "mnt/user-data/outputs/a.summary.json"
+    target = await _seed(tmp_path, monkeypatch, "t1", vpath)
+    await asyncio.to_thread(target.write_bytes, b'{"original":true}')
+    called = []
+    loop_thread = threading.get_ident()
+
+    def project(raw):
+        assert threading.get_ident() != loop_thread
+        assert target.read_bytes() == raw
+        called.append(raw)
+        return b'{"summary":"ready"}'
+
+    request = await asyncio.to_thread(_projection_request, project)
+    response = await _get_artifact("t1", vpath, request=request, download=False)
+    assert response.body == b'{"summary":"ready"}'
+    assert called == [b'{"original":true}']
+
+
+async def test_cancelled_projection_drains_the_owned_worker(tmp_path: Path, monkeypatch) -> None:
+    vpath = "mnt/user-data/outputs/a.summary.json"
+    target = await _seed(tmp_path, monkeypatch, "t1", vpath)
+    await asyncio.to_thread(target.write_bytes, b"{}")
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+
+    def project(raw):
+        started.set()
+        assert release.wait(5)
+        assert raw == b"{}"
+        finished.set()
+        return b"{}"
+
+    request = await asyncio.to_thread(_projection_request, project)
+    task = asyncio.create_task(_get_artifact("t1", vpath, request=request, download=False))
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert finished.is_set()
 
 
 async def test_update_artifact_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:

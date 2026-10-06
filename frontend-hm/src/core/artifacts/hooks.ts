@@ -8,7 +8,11 @@ import {
   isBusinessReportPath,
 } from "@/core/business-report";
 
-import { loadArtifactContent, loadArtifactContentFromToolCall } from "./loader";
+import {
+  loadArtifactContent,
+  loadArtifactContentFromToolCall,
+  type ArtifactPresentationRequest,
+} from "./loader";
 
 /**
  * The report budget also bounds source fallback when a card projection is
@@ -24,10 +28,12 @@ export function useArtifactContent({
   filepath,
   threadId,
   enabled,
+  presentation,
 }: {
   filepath: string;
   threadId: string;
   enabled?: boolean;
+  presentation?: ArtifactPresentationRequest;
 }) {
   const isWriteFile = useMemo(() => {
     return filepath.startsWith("write-file:");
@@ -40,6 +46,13 @@ export function useArtifactContent({
   const fullContentRequested =
     fullContentSelection?.filepath === filepath &&
     fullContentSelection.threadId === threadId;
+  const [sourcePreviewSelection, setSourcePreviewSelection] = useState<{
+    filepath: string;
+    threadId: string;
+  } | null>(null);
+  const sourcePreviewRequested =
+    sourcePreviewSelection?.filepath === filepath &&
+    sourcePreviewSelection.threadId === threadId;
   const content = useMemo(() => {
     if (isWriteFile) {
       return loadArtifactContentFromToolCall({ url: filepath, thread });
@@ -54,11 +67,20 @@ export function useArtifactContent({
       threadId,
       isMock,
       fullContentRequested,
-      ...(isBusinessReportPath(filepath) && !fullContentRequested
-        ? ["report-preview"]
-        : []),
+      ...(presentation && !fullContentRequested
+        ? ["installed-preview", presentation, sourcePreviewRequested]
+        : isBusinessReportPath(filepath) && !fullContentRequested
+          ? ["report-preview"]
+          : []),
     ],
-    [filepath, threadId, isMock, fullContentRequested],
+    [
+      filepath,
+      threadId,
+      isMock,
+      fullContentRequested,
+      presentation,
+      sourcePreviewRequested,
+    ],
   );
   const { data, isLoading, error, refetch } = useQuery({
     queryKey,
@@ -69,12 +91,22 @@ export function useArtifactContent({
         isMock,
         signal,
         full: fullContentRequested,
-        ...previewBudgetOf(filepath),
-        ...(isBusinessReportPath(filepath) ? { reportPreview: true } : {}),
+        ...(presentation
+          ? {
+              presentation: sourcePreviewRequested
+                ? { ...presentation, marker: undefined }
+                : presentation,
+            }
+          : {
+              ...previewBudgetOf(filepath),
+              ...(isBusinessReportPath(filepath)
+                ? { reportPreview: true }
+                : {}),
+            }),
       });
     },
     enabled,
-    gcTime: isArtifactViewPath(filepath) ? 0 : undefined,
+    gcTime: isArtifactViewPath(filepath) || presentation ? 0 : undefined,
     staleTime: 0,
     refetchOnWindowFocus: true,
   });
@@ -93,6 +125,9 @@ export function useArtifactContent({
   const loadFullContent = useCallback(() => {
     setFullContentSelection({ filepath, threadId });
   }, [filepath, threadId]);
+  const loadSourcePreview = useCallback(() => {
+    setSourcePreviewSelection({ filepath, threadId });
+  }, [filepath, threadId]);
 
   return {
     queryKey,
@@ -105,6 +140,7 @@ export function useArtifactContent({
     totalBytes: isWriteFile ? undefined : data?.totalBytes,
     fullContentRequested,
     loadFullContent,
+    loadSourcePreview,
     isLoading,
     error,
   };

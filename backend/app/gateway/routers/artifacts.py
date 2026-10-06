@@ -19,6 +19,7 @@ from app.gateway.deps import get_run_manager
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.path_utils import normalize_outputs_virtual_path, resolve_outputs_confined_path
 from app.gateway.path_utils import resolve_thread_read_path as resolve_thread_virtual_path
+from app.gateway.routers._artifact_projection import installed_projection, project_artifact
 from app.gateway.routers._file_headers import _build_content_disposition
 from app.gateway.routers._file_http import DescriptorFileResponse
 from app.gateway.routers._report_projection import report_projection
@@ -365,6 +366,12 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
     # effective user.
     raw_owner_user_id = get_trusted_internal_owner_user_id(request)
     owner_user_id = make_safe_user_id(raw_owner_user_id) if raw_owner_user_id else None
+
+    if not download and request is not None:
+        app_state = getattr(getattr(request, "scope", {}).get("app"), "state", None)
+        installed = installed_projection(getattr(app_state, "extensions", None), getattr(request, "query_params", {}))
+        if installed is not None:
+            return await await_drained(asyncio.to_thread(project_artifact, installed, thread_id, path, user_id=owner_user_id))
 
     if report_preview and not download:
         return await await_drained(asyncio.to_thread(report_projection, thread_id, path, user_id=owner_user_id))

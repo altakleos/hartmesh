@@ -51,6 +51,9 @@ async def list_plugins(request: Request, response: Response):
                 "transport": transport,
                 "settings": {key: settings[key] for key in public},
                 "backend_actions": [action.name for action in plugin.backend],
+                "artifact_presentations": [
+                    {"id": item.id, "suffixes": list(item.suffixes), "source_max_bytes": item.source_max_bytes, "preview_max_bytes": item.preview_max_bytes, "projection_marker": item.projection_marker} for item in plugin.artifacts
+                ],
             }
         )
     return entries

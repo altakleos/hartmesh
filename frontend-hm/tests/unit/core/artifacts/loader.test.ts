@@ -9,6 +9,132 @@ import { parseBusinessReport } from "@/core/business-report";
 import reportFixture from "../../../fixtures/business-report/2026-08-business-review.report.json";
 
 describe("loadArtifactContent", () => {
+  const presentation = {
+    namespace: "example.summary",
+    id: "summary",
+    sourceMaxBytes: 4096,
+    previewMaxBytes: 256,
+    marker: "example-summary-v1",
+  };
+
+  it("loads an installed generic projection with the full source revision", async () => {
+    const fetch = rs.spyOn(globalThis, "fetch").mockResolvedValue(
+      new Response('{"summary":"ready"}', {
+        headers: {
+          "X-Artifact-Projection": presentation.marker,
+          "X-Artifact-Source-Bytes": "4000",
+          ETag: `"${"a".repeat(64)}"`,
+        },
+      }),
+    );
+    const loaded = await loadArtifactContent({
+      filepath: "/mnt/user-data/outputs/a.summary.json",
+      threadId: "thread-1",
+      presentation,
+    });
+    expect(fetch.mock.calls[0]?.[0] as string).toContain(
+      "?preview=example.summary%2Fsummary",
+    );
+    expect(new Headers(fetch.mock.calls[0]?.[1]?.headers).get("Range")).toBe(
+      "bytes=0-255",
+    );
+    expect(loaded.projected).toBe(true);
+    expect(loaded.sha256).toBe("a".repeat(64));
+    expect(loaded.totalBytes).toBe(4000);
+  });
+
+  it.each(["missing-marker", "oversized", "unsupported"])(
+    "keeps a bounded canonical source fallback for a %s generic projection",
+    async (failure) => {
+      const initial =
+        failure === "unsupported"
+          ? new Response(null, { status: 422 })
+          : new Response(failure === "oversized" ? "x".repeat(257) : "{}", {
+              headers:
+                failure === "oversized"
+                  ? {
+                      "X-Artifact-Projection": presentation.marker,
+                      ETag: `"${"a".repeat(64)}"`,
+                    }
+                  : {},
+            });
+      const fetch = rs
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValueOnce(
+          new Response('{"source":"original"}', {
+            headers: { ETag: `"${"b".repeat(64)}"` },
+          }),
+        );
+      const loaded = await loadArtifactContent({
+        filepath: "/mnt/user-data/outputs/a.summary.json",
+        threadId: "thread-1",
+        presentation,
+      });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(fetch.mock.calls[1]?.[0] as string).not.toContain("preview=");
+      expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get("Range")).toBe(
+        "bytes=0-4095",
+      );
+      expect(loaded.content).toBe('{"source":"original"}');
+      expect(loaded.projected).toBe(false);
+      expect(loaded.sha256).toBe("b".repeat(64));
+    },
+  );
+
+  it("keeps generic projection authorization and path denial terminal", async () => {
+    const fetch = rs
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValue(new Response(null, { status: 403 }));
+    await expect(
+      loadArtifactContent({
+        filepath: "/mnt/user-data/outputs/a.summary.json",
+        threadId: "thread-1",
+        presentation,
+      }),
+    ).rejects.toThrow("403");
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+  it.each(["range", "length", "source-length", "stream"])(
+    "falls back to bounded canonical source after malformed projection %s",
+    async (failure) => {
+      const headers = {
+        "X-Artifact-Projection": presentation.marker,
+        "X-Artifact-Source-Bytes": "4000",
+        ETag: `"${"a".repeat(64)}"`,
+        ...(failure === "range" ? { "Content-Range": "bytes 0-1/1" } : {}),
+        ...(failure === "length" ? { "Content-Length": "3" } : {}),
+        ...(failure === "source-length"
+          ? { "X-Artifact-Source-Bytes": "-1" }
+          : {}),
+      };
+      const initial = new Response(
+        failure === "stream"
+          ? new ReadableStream({
+              start(controller) {
+                controller.error(new Error("Broken display stream"));
+              },
+            })
+          : "{}",
+        { headers, status: failure === "range" ? 206 : 200 },
+      );
+      const fetch = rs
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValueOnce(initial)
+        .mockResolvedValueOnce(new Response('{"original":true}'));
+      const loaded = await loadArtifactContent({
+        filepath: "/mnt/user-data/outputs/a.summary.json",
+        threadId: "thread-1",
+        presentation,
+      });
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(new Headers(fetch.mock.calls[1]?.[1]?.headers).get("Range")).toBe(
+        "bytes=0-4095",
+      );
+      expect(loaded.content).toBe('{"original":true}');
+      expect(loaded.projected).toBe(false);
+    },
+  );
   it("rejects a view range larger than its declared total", async () => {
     rs.spyOn(globalThis, "fetch").mockResolvedValue(
       new Response("{}", {

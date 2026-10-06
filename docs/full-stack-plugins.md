@@ -26,7 +26,7 @@ tool results. It requires deployment opt-in and a separate Jev API key.
 `registry.plugin(...)` returns `True` when accepted. Its default public protocol
 implementation returns `False` on a host without support, so packages must check the
 result. A declaration needs a unique namespace and at least one browser module,
-backend action or tool. Validation happens before registration; install failures use
+backend action, tool or artifact presentation. Validation happens before registration; install failures use
 the existing positional rollback and source attribution.
 
 - `BrowserModule(module, code, public_fields=())` contains a self-contained ES module,
@@ -42,6 +42,15 @@ the existing positional rollback and source attribution.
 - `SettingsField` describes a non-secret deployment value. There is no online override
   store or settings write API. Browser clients see only `enabled` and explicitly
   listed public fields. Plugin code remains responsible for business authorization.
+
+- `ArtifactPresentation(id, suffixes, source_max_bytes=16777216,
+  preview_max_bytes=1048576, project=None, projection_marker=None,
+  compat_queries=())` adds a specialized artifact capability. Artifact-bearing
+  contributions negotiate `PluginContribution(api_version=2)` with extension
+  API `0.2.5`; page-only v1 remains compatible. Optional sync projectors receive
+  captured canonical bytes and retain source identity. Backend metadata and an
+  independent browser `artifactApiVersion: 1` / `artifacts` array negotiate the
+  native mount or passive return. See the [full artifact contract](../contracts/artifact_view/plugins.md).
 
 Tool names are namespace-derived and collision-checked. Tool inputs are bounded to
 256 KiB, outputs to 64 KiB and execution to 30 seconds. Backend actions accept object
@@ -103,6 +112,11 @@ Conversation actions receive a conversation context and host services. The
 `latestVisibleAnswer` and `conversationText` services reuse the existing export
 sanitizer; sidebar reads go through the authenticated conversation API. Plugin code
 must still escape user/model text when rendering it.
+HartMesh reads the Gateway's visible-only JSON export rather than raw SDK state.
+Host service calls carry the action/mount lifetime; retirement rejects late
+reads/backend requests and suppresses stale messages. Transcript reads are
+bounded to 4 MiB with a 30-second deadline. Invalid async mount results are
+rejected immediately, with eventual controllers/rejections still disposed/observed.
 Factories and availability callbacks must be synchronous; invalid Promise returns
 are rejected and their rejections consumed. The host validates each locale-dependent action group and evaluates availability
 inside a per-plugin error boundary. A malformed or throwing contribution is omitted

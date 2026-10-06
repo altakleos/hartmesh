@@ -66,6 +66,8 @@ import {
   parseBusinessReport,
 } from "@/core/business-report";
 import { writeTextToClipboard } from "@/core/clipboard";
+import { artifactPresentationFor } from "@/core/extensions/artifacts";
+import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { canKeepInMyFiles, useSaveToMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
@@ -94,6 +96,7 @@ import {
 } from "./artifact-file-preview";
 import { ArtifactView } from "./artifact-view";
 import { useArtifacts } from "./context";
+import { PluginArtifactPresentation } from "./plugin-artifact-presentation";
 import { ReportCard } from "./report-card";
 
 const WRITE_FILE_PREVIEW_REFRESH_INTERVAL_MS = 3000;
@@ -191,13 +194,36 @@ export function ArtifactFileDetail({
   const canPreviewInBrowser = useMemo(() => {
     return canBrowserPreviewFile(filepath);
   }, [filepath]);
-  const isReportFile = useMemo(() => {
-    return !isWriteFile && isBusinessReportPath(filepath);
-  }, [filepath, isWriteFile]);
+  const pluginQuery = useFrontendExtensions();
+  const installation = useMemo(
+    () =>
+      isWriteFile || isMock
+        ? undefined
+        : artifactPresentationFor(pluginQuery.data ?? [], filepath),
+    [isWriteFile, isMock, pluginQuery.data, filepath],
+  );
+  const presentation = useMemo(
+    () =>
+      installation
+        ? {
+            namespace: installation.contribution.namespace,
+            id: installation.descriptor.id,
+            sourceMaxBytes: installation.descriptor.source_max_bytes,
+            previewMaxBytes: installation.descriptor.preview_max_bytes,
+            marker: installation.descriptor.projection_marker ?? undefined,
+          }
+        : undefined,
+    [installation],
+  );
+  const isReportFile =
+    !isWriteFile && !installation && isBusinessReportPath(filepath);
   const isViewFile = !isWriteFile && isArtifactViewPath(filepath);
   const presentedPaths = useMemo(
-    () => (isViewFile ? recordedPresentedPaths(thread.messages ?? []) : []),
-    [isViewFile, thread.messages],
+    () =>
+      isViewFile || installation
+        ? recordedPresentedPaths(thread.messages ?? [])
+        : [],
+    [isViewFile, installation, thread.messages],
   );
   const toolResult = (() => {
     if (!isWriteFile) {
@@ -221,12 +247,14 @@ export function ArtifactFileDetail({
     totalBytes,
     fullContentRequested,
     loadFullContent,
+    loadSourcePreview,
     isLoading,
     error,
   } = useArtifactContent({
     threadId,
     filepath: filepathFromProps,
-    enabled: isCodeFile && !isWriteFile,
+    enabled: (isCodeFile || Boolean(installation)) && !isWriteFile,
+    ...(presentation ? { presentation } : {}),
   });
   // A built report is previewed as the card the downloads were rendered from.
   // Parsing decides it: a `.report.json` this app cannot draw stays a JSON
@@ -254,11 +282,27 @@ export function ArtifactFileDetail({
   );
   const isViewPreview =
     isViewFile && !truncated && (content === undefined || view !== null);
+  const nativeIdentity = JSON.stringify([
+    installation?.contribution.entry,
+    filepath,
+    threadId,
+    sha256,
+  ]);
+  const [failedPresentation, setFailedPresentation] = useState<string | null>(
+    null,
+  );
+  const isPluginPreview = Boolean(
+    installation &&
+    !truncated &&
+    failedPresentation !== nativeIdentity &&
+    (content === undefined || isArtifactViewRevision(sha256)),
+  );
   const isSupportPreview =
     language === "html" ||
     language === "markdown" ||
     isReportPreview ||
-    isViewPreview;
+    isViewPreview ||
+    isPluginPreview;
   const artifactViewState = getArtifactViewState({
     filepath: filepathFromProps,
     isSupportPreview,
@@ -283,9 +327,20 @@ export function ArtifactFileDetail({
   useEffect(() => {
     // The side panel can unmount while its draft/editing state survives.
     // Resuming that edit must restore canonical source without another click.
-    if (isReportFile && (isEditing || isDirty) && !fullContentRequested)
+    if (
+      (isReportFile || installation) &&
+      (isEditing || isDirty) &&
+      !fullContentRequested
+    )
       loadFullContent();
-  }, [isReportFile, isEditing, isDirty, fullContentRequested, loadFullContent]);
+  }, [
+    isReportFile,
+    installation,
+    isEditing,
+    isDirty,
+    fullContentRequested,
+    loadFullContent,
+  ]);
   const canEdit = canEditOpenedArtifact({
     filepath,
     isCodeFile,
@@ -307,7 +362,7 @@ export function ArtifactFileDetail({
       return;
     }
     // Inactive view documents are query data, not an accumulating draft cache.
-    if (isViewFile && !isEditing && !isDirty) return;
+    if ((isViewFile || installation) && !isEditing && !isDirty) return;
     setDrafts((current) => {
       const existing = current[filepath] ?? createArtifactDraft(filepath);
       const next = reconcileArtifactDraft(existing, { content, sha256 });
@@ -324,6 +379,7 @@ export function ArtifactFileDetail({
     setDrafts,
     sha256,
     isViewFile,
+    installation,
     isEditing,
     isDirty,
   ]);
@@ -535,7 +591,7 @@ export function ArtifactFileDetail({
           </ArtifactTitle>
         </div>
         <div className="flex min-w-0 grow items-center justify-center gap-2">
-          {artifactViewState.canPreview && !truncated && (
+          {isCodeFile && artifactViewState.canPreview && !truncated && (
             <ToggleGroup
               className="mx-auto"
               type="single"
@@ -836,7 +892,34 @@ export function ArtifactFileDetail({
                 isMock={isMock}
               />
             )}
+          {installation &&
+            isPluginPreview &&
+            !error &&
+            effectiveViewMode === "preview" &&
+            !isLoading &&
+            content !== undefined &&
+            sha256 && (
+              <PluginArtifactPresentation
+                installation={installation}
+                filepath={filepath}
+                threadId={threadId}
+                content={content}
+                revision={sha256}
+                viewerId={user?.id ?? ""}
+                projected={projected}
+                artifacts={presentedPaths}
+                presentedKnown={!thread.isThreadLoading}
+                runSettled={!thread.isLoading}
+                isMock={isMock}
+                onUnavailable={() => {
+                  setFailedPresentation(nativeIdentity);
+                  loadSourcePreview();
+                  setViewMode("code");
+                }}
+              />
+            )}
           {artifactViewState.canPreview &&
+            !isPluginPreview &&
             !error &&
             effectiveViewMode === "preview" &&
             !isLoading &&
@@ -882,14 +965,14 @@ export function ArtifactFileDetail({
                 {visibleContent}
               </pre>
             )}
-          {!isCodeFile && canPreviewInBrowser && (
+          {!isCodeFile && !isPluginPreview && canPreviewInBrowser && (
             <iframe
               className="size-full"
               sandbox=""
               src={urlOfArtifact({ filepath, threadId, isMock })}
             />
           )}
-          {!isCodeFile && !canPreviewInBrowser && (
+          {!isCodeFile && !isPluginPreview && !canPreviewInBrowser && (
             <ArtifactDownloadFallback
               filepath={filepath}
               threadId={threadId}

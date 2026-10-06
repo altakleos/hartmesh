@@ -52,6 +52,14 @@ function parseContentRange(value: string | null) {
   };
 }
 
+export type ArtifactPresentationRequest = {
+  namespace: string;
+  id: string;
+  sourceMaxBytes: number;
+  previewMaxBytes: number;
+  marker?: string;
+};
+
 type ArtifactLoadOptions = {
   filepath: string;
   threadId: string;
@@ -60,6 +68,7 @@ type ArtifactLoadOptions = {
   reportPreview?: boolean;
   previewMaxBytes?: number;
   signal?: AbortSignal;
+  presentation?: ArtifactPresentationRequest;
 };
 
 type LoadedArtifactContent = {
@@ -75,7 +84,7 @@ type LoadedArtifactContent = {
 export async function loadArtifactContent(
   options: ArtifactLoadOptions,
 ): Promise<LoadedArtifactContent> {
-  if (!isArtifactViewPath(options.filepath))
+  if (!isArtifactViewPath(options.filepath) && !options.presentation)
     return readArtifactContent(options);
   const controller = new AbortController();
   const abort = () => controller.abort(options.signal?.reason);
@@ -104,6 +113,7 @@ async function readArtifactContent({
   previewMaxBytes = ARTIFACT_PREVIEW_MAX_BYTES,
   reportPreview = false,
   signal,
+  presentation,
 }: ArtifactLoadOptions): Promise<LoadedArtifactContent> {
   signal?.throwIfAborted();
   let enhancedFilepath = filepath;
@@ -111,16 +121,28 @@ async function readArtifactContent({
     enhancedFilepath = filepath + "/SKILL.md";
   }
   const url = urlOfArtifact({ filepath: enhancedFilepath, threadId, isMock });
-  const requestProjection =
-    reportPreview && !full && !isMock && !isStaticWebsiteOnly();
-  const response = await fetch(
-    requestProjection ? `${url}?report_preview=true` : url,
-    {
-      cache: "no-store",
-      signal,
-      headers: full ? undefined : { Range: `bytes=0-${previewMaxBytes - 1}` },
-    },
+  const nativeProjection = Boolean(
+    presentation?.marker && !full && !isMock && !isStaticWebsiteOnly(),
   );
+  const requestProjection =
+    nativeProjection ||
+    (reportPreview && !full && !isMock && !isStaticWebsiteOnly());
+  const projectionMarker = nativeProjection
+    ? presentation!.marker
+    : "business-report-v1";
+  const readBudget = presentation
+    ? nativeProjection
+      ? presentation.previewMaxBytes
+      : presentation.sourceMaxBytes
+    : previewMaxBytes;
+  const projectionURL = nativeProjection
+    ? `${url}?preview=${encodeURIComponent(`${presentation!.namespace}/${presentation!.id}`)}`
+    : `${url}?report_preview=true`;
+  const response = await fetch(requestProjection ? projectionURL : url, {
+    cache: "no-store",
+    signal,
+    headers: full ? undefined : { Range: `bytes=0-${readBudget - 1}` },
+  });
   const loadSourcePreview = () =>
     loadArtifactContent({
       filepath,
@@ -129,6 +151,9 @@ async function readArtifactContent({
       full,
       previewMaxBytes,
       signal,
+      ...(presentation
+        ? { presentation: { ...presentation, marker: undefined } }
+        : {}),
     });
   if (requestProjection && [413, 415, 422, 501].includes(response.status)) {
     await response.body?.cancel();
@@ -137,7 +162,7 @@ async function readArtifactContent({
   if (
     requestProjection &&
     response.ok &&
-    response.headers.get("X-Artifact-Projection") !== "business-report-v1"
+    response.headers.get("X-Artifact-Projection") !== projectionMarker
   ) {
     // An old Gateway or proxy/CORS policy may omit the marker. Its body
     // cannot safely be treated as canonical source merely because it is JSON.
@@ -161,83 +186,109 @@ async function readArtifactContent({
     throw new Error(`Failed to load artifact: ${response.status}`);
   }
 
-  const read = full
-    ? { bytes: new Uint8Array(await response.arrayBuffer()), truncated: false }
-    : await readBoundedArtifactBytes(response, previewMaxBytes, signal);
-  signal?.throwIfAborted();
-  const bytes = read.bytes;
-  if (isArtifactViewPath(filepath) && !read.truncated) {
-    if (
-      response.status === 206 &&
-      (contentRange?.start !== 0 ||
-        contentRange.end !== bytes.byteLength - 1 ||
-        !Number.isSafeInteger(contentRange.total) ||
-        contentRange.total < bytes.byteLength ||
-        (full && contentRange.total !== bytes.byteLength))
-    ) {
-      throw new Error("Incomplete artifact view response.");
+  try {
+    const read = full
+      ? {
+          bytes: new Uint8Array(await response.arrayBuffer()),
+          truncated: false,
+        }
+      : await readBoundedArtifactBytes(response, readBudget, signal);
+    signal?.throwIfAborted();
+    const bytes = read.bytes;
+    if ((isArtifactViewPath(filepath) || presentation) && !read.truncated) {
+      if (
+        response.status === 206 &&
+        (contentRange?.start !== 0 ||
+          contentRange.end !== bytes.byteLength - 1 ||
+          !Number.isSafeInteger(contentRange.total) ||
+          contentRange.total < bytes.byteLength ||
+          (full && contentRange.total !== bytes.byteLength))
+      ) {
+        throw new Error("Incomplete artifact view response.");
+      }
+      const encoding = response.headers.get("Content-Encoding");
+      const declared = response.headers.get("Content-Length");
+      if (
+        (!encoding || encoding.toLowerCase() === "identity") &&
+        declared !== null &&
+        /^\d+$/.test(declared) &&
+        Number(declared) !== bytes.byteLength
+      ) {
+        throw new Error("Incomplete artifact view response.");
+      }
     }
-    const encoding = response.headers.get("Content-Encoding");
-    const declared = response.headers.get("Content-Length");
-    if (
-      (!encoding || encoding.toLowerCase() === "identity") &&
-      declared !== null &&
-      /^\d+$/.test(declared) &&
-      Number(declared) !== bytes.byteLength
-    ) {
-      throw new Error("Incomplete artifact view response.");
+    const truncated =
+      !full &&
+      (read.truncated ||
+        (response.status === 206 &&
+          (contentRange?.end === undefined ||
+            contentRange.total > contentRange.end + 1)));
+    // Streaming decode intentionally holds an incomplete trailing UTF-8 code
+    // point instead of fabricating U+FFFD at the range boundary.
+    let content: string;
+    try {
+      content = new TextDecoder("utf-8", {
+        fatal: isArtifactViewPath(filepath) || presentation !== undefined,
+      }).decode(bytes, { stream: truncated });
+    } catch (error) {
+      if (nativeProjection) return loadSourcePreview();
+      throw error;
     }
+    const etag = response.headers.get("etag");
+    const sourceRevision = etag
+      ?.match(/^(?:W\/)?"([0-9a-fA-F]{64})"$/)?.[1]
+      ?.toLowerCase();
+    const projected =
+      requestProjection &&
+      response.headers.get("X-Artifact-Projection") === projectionMarker;
+    // The existing parser remains authoritative. Never display or edit a
+    // partial projection as though it were the original JSON file.
+    if (
+      projected &&
+      (read.truncated ||
+        bytes.byteLength >
+          (nativeProjection ? readBudget : ARTIFACT_PREVIEW_MAX_BYTES) ||
+        !sourceRevision ||
+        (!nativeProjection && parseBusinessReport(content) === null))
+    ) {
+      return loadSourcePreview();
+    }
+    const sha256 =
+      sourceRevision ?? (!truncated ? await sha256OfText(content) : undefined);
+    signal?.throwIfAborted();
+    const contentLengthHeader = response.headers.get(
+      projected ? "X-Artifact-Source-Bytes" : "Content-Length",
+    );
+    const contentLength =
+      contentLengthHeader === null ? undefined : Number(contentLengthHeader);
+    if (
+      nativeProjection &&
+      projected &&
+      (contentLengthHeader === null ||
+        !/^\d+$/.test(contentLengthHeader) ||
+        !Number.isSafeInteger(contentLength) ||
+        contentLength! > presentation!.sourceMaxBytes)
+    ) {
+      return loadSourcePreview();
+    }
+    return {
+      content,
+      url,
+      sha256,
+      projected,
+      truncated,
+      previewBytes: bytes.byteLength,
+      totalBytes:
+        (projected ? undefined : contentRange?.total) ??
+        (contentLength !== undefined && Number.isFinite(contentLength)
+          ? contentLength
+          : undefined),
+    };
+  } catch (error) {
+    signal?.throwIfAborted();
+    if (nativeProjection) return loadSourcePreview();
+    throw error;
   }
-  const truncated =
-    !full &&
-    (read.truncated ||
-      (response.status === 206 &&
-        (contentRange?.end === undefined ||
-          contentRange.total > contentRange.end + 1)));
-  // Streaming decode intentionally holds an incomplete trailing UTF-8 code
-  // point instead of fabricating U+FFFD at the range boundary.
-  const content = new TextDecoder("utf-8", {
-    fatal: isArtifactViewPath(filepath),
-  }).decode(bytes, { stream: truncated });
-  const etag = response.headers.get("etag");
-  const sourceRevision = etag
-    ?.match(/^(?:W\/)?"([0-9a-fA-F]{64})"$/)?.[1]
-    ?.toLowerCase();
-  const projected =
-    requestProjection &&
-    response.headers.get("X-Artifact-Projection") === "business-report-v1";
-  // The existing parser remains authoritative. Never display or edit a
-  // partial projection as though it were the original JSON file.
-  if (
-    projected &&
-    (read.truncated ||
-      bytes.byteLength > ARTIFACT_PREVIEW_MAX_BYTES ||
-      !sourceRevision ||
-      parseBusinessReport(content) === null)
-  ) {
-    return loadSourcePreview();
-  }
-  const sha256 =
-    sourceRevision ?? (!truncated ? await sha256OfText(content) : undefined);
-  signal?.throwIfAborted();
-  const contentLengthHeader = response.headers.get(
-    projected ? "X-Artifact-Source-Bytes" : "Content-Length",
-  );
-  const contentLength =
-    contentLengthHeader === null ? undefined : Number(contentLengthHeader);
-  return {
-    content,
-    url,
-    sha256,
-    projected,
-    truncated,
-    previewBytes: bytes.byteLength,
-    totalBytes:
-      contentRange?.total ??
-      (contentLength !== undefined && Number.isFinite(contentLength)
-        ? contentLength
-        : undefined),
-  };
 }
 
 export function loadArtifactContentFromToolCall({

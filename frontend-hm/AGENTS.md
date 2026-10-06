@@ -9,6 +9,25 @@ backend boundary. See [the isolation guide](../docs/FRONTEND_ISOLATION.md).
 
 ## Project Overview
 
+`core/extensions/` captures the authenticated startup plugin snapshot through
+the existing `/api/plugins` discovery and module transports. Page-only browser
+API v1 stays supported. Artifact capability v1 is additive in `artifacts`,
+separate from `surfaces`; the host never registers an artifact in the page array.
+`PluginArtifactPresentation` mounts independent DOM through the existing
+Shadow DOM lifecycle or validates a passive return with the strict view decoder.
+Shadow DOM isolates styles, not plugin privileges. Operator-installed modules
+remain trusted code and do not receive a shared React runtime.
+
+Handler selection comes only from installed suffix declarations; an ambiguous
+match uses ordinary file access. Mounts belong to account, thread, path, module
+entry, source SHA-256, locale and theme. Cancellation retires supported host
+services, observes late results, disposes native controllers and raster URLs,
+and prevents late action toasts. Module/discovery/transcript reads have byte
+bounds and finite deadlines. Generic projections use `preview=namespace/id`,
+separate query keys and declared source/preview budgets. Malformed display data
+falls back to bounded canonical source; permission/path failures remain terminal.
+See [the public capability](../contracts/artifact_view/plugins.md).
+
 `core/artifact-views/` owns the passive `*.view.json` v1 contract and the generic
 `ArtifactView` renderer. It accepts only six flat primitives, authored strings
 and explicit local exports. Unknown structure rejects rich rendering; original

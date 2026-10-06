@@ -21,6 +21,7 @@ for that feature.
 | `/login`, `/setup`, `/auth/callback` | Account sign-in, initial setup and configured SSO callback. |
 | `/workspace/chats`, `/workspace/chats/[thread_id]` | Conversation list, new chat (`new`), streaming, history, artifacts, reports and transcript export. |
 | `/workspace/files` | Personal files and the Shared tab. |
+| `/workspace/extensions/[namespace]/[surface_id]` | Pages declared by installed, enabled trusted plugins. Navigation and conversation actions use the same authenticated plugin snapshot; no browser installer is included. |
 | `/workspace/agents`, `/workspace/agents/new`, `/workspace/agents/[agent_name]/chats/[thread_id]` | Custom-agent selection, creation and conversations, subject to configuration and permissions. |
 | `/workspace/scheduled-tasks` | Scheduled-task management. |
 | `/artifacts/view` | Standalone artifact rendering. |

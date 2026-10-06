@@ -15,6 +15,15 @@ import type { Translations } from "./types";
 
 export function createZhCN(product: string): Translations {
   return {
+    extensions: {
+      navigation: "扩展",
+      pageLoading: "正在加载扩展…",
+      pageUnavailable: "扩展页面不可用",
+      pageUnavailableHint: "此页面未注册，或插件已停用、未能加载。",
+      reload: "重新加载",
+      viewFailed: "扩展界面加载失败，请刷新重试。",
+      actionFailed: "暂时无法执行扩展操作，请重试。",
+    },
     // Locale meta
     locale: {
       localName: "中文",
