@@ -4,8 +4,8 @@ import {
   ARTIFACT_PREVIEW_MAX_BYTES,
   loadArtifactContent,
 } from "@/core/artifacts/loader";
-import { parseBusinessReport } from "@/core/business-report";
 
+import { parseBusinessReport } from "../../../../../backend/extensions/sources/hartmesh-legacy-report/browser/index";
 import reportFixture from "../../../fixtures/business-report/2026-08-business-review.report.json";
 
 describe("loadArtifactContent", () => {
@@ -256,7 +256,13 @@ describe("loadArtifactContent", () => {
     const loaded = await loadArtifactContent({
       filepath: "/mnt/user-data/outputs/month.report.json",
       threadId: "thread-1",
-      reportPreview: true,
+      presentation: {
+        namespace: "hartmesh.legacy-report",
+        id: "report",
+        sourceMaxBytes: 16 * 1024 * 1024,
+        previewMaxBytes: 1024 * 1024,
+        marker: "business-report-v1",
+      },
     });
     expect(loaded.projected).toBe(false);
     expect(loaded.content).toBe('{"raw_rows":[1]}');
@@ -298,23 +304,26 @@ describe("loadArtifactContent", () => {
             ? input.href
             : input.url;
       requests.push(url);
-      return new Response(
-        url.includes("report_preview=true") ? projection : source,
-        {
-          headers: url.includes("report_preview=true")
-            ? {
-                ETag: `"${"a".repeat(64)}"`,
-                "X-Artifact-Projection": "business-report-v1",
-                "X-Artifact-Source-Bytes": String(source.length),
-              }
-            : {},
-        },
-      );
+      return new Response(url.includes("preview=") ? projection : source, {
+        headers: url.includes("preview=")
+          ? {
+              ETag: `"${"a".repeat(64)}"`,
+              "X-Artifact-Projection": "business-report-v1",
+              "X-Artifact-Source-Bytes": String(source.length),
+            }
+          : {},
+      });
     });
     const args = {
       filepath: "/mnt/user-data/outputs/month.report.json",
       threadId: "thread-1",
-      reportPreview: true,
+      presentation: {
+        namespace: "hartmesh.legacy-report",
+        id: "report",
+        sourceMaxBytes: 16 * 1024 * 1024,
+        previewMaxBytes: 1024 * 1024,
+        marker: "business-report-v1",
+      },
     };
     const preview = await loadArtifactContent(args);
     expect(preview.projected).toBe(true);
@@ -341,14 +350,20 @@ describe("loadArtifactContent", () => {
       const loaded = await loadArtifactContent({
         filepath: "/mnt/user-data/outputs/month.report.json",
         threadId: "thread-1",
-        reportPreview: true,
+        presentation: {
+          namespace: "hartmesh.legacy-report",
+          id: "report",
+          sourceMaxBytes: 16 * 1024 * 1024,
+          previewMaxBytes: 1024 * 1024,
+          marker: "business-report-v1",
+        },
       });
       expect(loaded.content).toBe("{malformed source");
       expect(loaded.projected).toBe(false);
       expect(fetchMock).toHaveBeenCalledTimes(2);
       expect(
         new Headers(fetchMock.mock.calls[1]?.[1]?.headers).get("Range"),
-      ).toBe(`bytes=0-${ARTIFACT_PREVIEW_MAX_BYTES - 1}`);
+      ).toBe(`bytes=0-${16 * 1024 * 1024 - 1}`);
     },
   );
 
@@ -360,7 +375,13 @@ describe("loadArtifactContent", () => {
       loadArtifactContent({
         filepath: "/mnt/user-data/outputs/month.report.json",
         threadId: "thread-1",
-        reportPreview: true,
+        presentation: {
+          namespace: "hartmesh.legacy-report",
+          id: "report",
+          sourceMaxBytes: 16 * 1024 * 1024,
+          previewMaxBytes: 1024 * 1024,
+          marker: "business-report-v1",
+        },
       }),
     ).rejects.toThrow("403");
     expect(fetchMock).toHaveBeenCalledTimes(1);

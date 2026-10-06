@@ -3,7 +3,6 @@ import type { BaseStream } from "@langchain/langgraph-sdk/react";
 import { awaitAbortable } from "@/core/api/abort";
 import { fetch } from "@/core/api/fetcher";
 import { isArtifactViewPath } from "@/core/artifact-views/contract";
-import { parseBusinessReport } from "@/core/business-report";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import type { AgentThreadState } from "../threads";
@@ -66,7 +65,6 @@ type ArtifactLoadOptions = {
   threadId: string;
   isMock?: boolean;
   full?: boolean;
-  reportPreview?: boolean;
   previewMaxBytes?: number;
   signal?: AbortSignal;
   presentation?: ArtifactPresentationRequest;
@@ -112,7 +110,6 @@ async function readArtifactContent({
   isMock,
   full = false,
   previewMaxBytes = ARTIFACT_PREVIEW_MAX_BYTES,
-  reportPreview = false,
   signal,
   presentation,
 }: ArtifactLoadOptions): Promise<LoadedArtifactContent> {
@@ -125,12 +122,8 @@ async function readArtifactContent({
   const nativeProjection = Boolean(
     presentation?.marker && !full && !isMock && !isStaticWebsiteOnly(),
   );
-  const requestProjection =
-    nativeProjection ||
-    (reportPreview && !full && !isMock && !isStaticWebsiteOnly());
-  const projectionMarker = nativeProjection
-    ? presentation!.marker
-    : "business-report-v1";
+  const requestProjection = nativeProjection;
+  const projectionMarker = presentation?.marker;
   const readBudget = presentation
     ? nativeProjection
       ? presentation.previewMaxBytes
@@ -138,7 +131,7 @@ async function readArtifactContent({
     : previewMaxBytes;
   const projectionURL = nativeProjection
     ? `${url}?preview=${encodeURIComponent(`${presentation!.namespace}/${presentation!.id}`)}`
-    : `${url}?report_preview=true`;
+    : url;
   const pending = fetch(requestProjection ? projectionURL : url, {
     cache: "no-store",
     signal,
@@ -247,15 +240,13 @@ async function readArtifactContent({
     const projected =
       requestProjection &&
       response.headers.get("X-Artifact-Projection") === projectionMarker;
-    // The existing parser remains authoritative. Never display or edit a
-    // partial projection as though it were the original JSON file.
+    // Never display or edit a partial projection as canonical source.
     if (
       projected &&
       (read.truncated ||
         bytes.byteLength >
           (nativeProjection ? readBudget : ARTIFACT_PREVIEW_MAX_BYTES) ||
-        !sourceRevision ||
-        (!nativeProjection && parseBusinessReport(content) === null))
+        !sourceRevision)
     ) {
       return loadSourcePreview();
     }

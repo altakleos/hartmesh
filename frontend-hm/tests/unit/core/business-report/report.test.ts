@@ -3,8 +3,7 @@ import { describe, expect, it } from "@rstest/core";
 import {
   isBusinessReportPath,
   parseBusinessReport,
-} from "@/core/business-report";
-
+} from "../../../../../backend/extensions/sources/hartmesh-legacy-report/browser/index";
 import fixture from "../../../fixtures/business-report/2026-08-business-review.report.json";
 
 const report = JSON.stringify(fixture);

@@ -76,6 +76,9 @@ code. Plugin pages and conversation actions appear only for installed, enabled
 contributions. Preview failure preserves bounded source access, while editing
 and downloading use the canonical file. See the
 [artifact plugin contract](contracts/artifact_view/plugins.md).
+The root example and production Compose template explicitly enable the installed
+historical-report compatibility package. Existing custom configurations need the
+same `plugins:` entry and a restart to retain historical cards.
 
 The Files page follows the selected tab in its URL, including Shared links and
 browser history. Each tab can filter loaded files by name or folder and sort by
@@ -121,6 +124,14 @@ hashes and saved figures, and requires an explicit rebuild when they differ.
 Default actions prioritize review of any computed warnings before acting on
 the figures; clean reports still offer business suggestions.
 See the [business-report guide](skills/public/business-report/SKILL.md).
+
+Historical report cards and their filing policy are supplied by the provider-installed
+[compatibility package](backend/extensions/sources/hartmesh-legacy-report/README.md). The
+distribution includes it in the locked extensions group; the example configuration
+explicitly enables it. Existing operator configurations must add its `plugins:` entry
+and restart to retain rich cards. Disable or remove it through the normal extension
+lifecycle; the original report and downloads remain usable.
+
 
 Each business-report draft publishes as a complete directory under
 `<report-root>/drafts/<bundle-id>/`, with its JSON, charts and requested formats.
@@ -2024,7 +2035,7 @@ a duplicate filesystem scan. Later invocations and final delivery checks scan
 again. Files created in the run's outputs directory during agent setup can also
 be handed over when the model omits them.
 
-Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership includes tagged tool presentations and explicit runtime handover from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Report cards load a compact display projection while source view, editing, copying and downloads retain the complete report. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names.
+Files presented through `present_files` remain part of the thread's artifact state, and the Web UI restores the artifact panel and selected document after a page refresh. When a completed response successfully presents between 2 and 50 files, its final file card also offers one ZIP download. Archive membership includes tagged tool presentations and explicit runtime handover from the terminal delivery receipt rather than browser-supplied paths, and the ZIP contains the current file versions, which may have changed since the response. The currently selected formal artifact is refreshed once when the run finishes so edits become visible without a manual reload. Installed artifact plugins can supply compact display projections while source view, editing, copying and downloads retain complete canonical bytes. Existing UTF-8 text artifacts under `/mnt/user-data/outputs` can also be edited and explicitly saved from the panel on Unix and Windows while the thread is idle; saves use content revisions to prevent overwriting agent changes. Source previews also recognize extensionless `Dockerfile` and `Makefile` artifacts by their file names.
 
 CSV and TSV artifacts open as tables in the artifact panel and in a separate window. The preview preserves text values (including leading zeros), supports an optional header row, and pages through up to 200 rows and 50 columns from the initial sample. Long or multiline cells can be opened and copied in full. Switch to source to inspect or edit the file; downloads and separate windows use the saved version.
 

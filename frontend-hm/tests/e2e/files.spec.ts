@@ -1,5 +1,6 @@
 import { expect, test } from "@playwright/test";
 
+import { installLegacyReportPlugin } from "./utils/legacy-report-plugin";
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 const AUGUST = {
@@ -16,6 +17,7 @@ test.describe("My files", () => {
     page,
   }) => {
     mockLangGraphAPI(page, { threads: [], files: [AUGUST] });
+    await installLegacyReportPlugin(page);
 
     await page.goto("/workspace/chats/new");
     await page
@@ -35,6 +37,7 @@ test.describe("My files", () => {
 
   test("asks before removing a file, then removes it", async ({ page }) => {
     mockLangGraphAPI(page, { threads: [], files: [AUGUST] });
+    await installLegacyReportPlugin(page);
 
     await page.goto("/workspace/files");
     const row = page.getByTestId(`my-file-${AUGUST.path}`);
@@ -55,6 +58,7 @@ test("same-page Shared navigation and browser history follow the URL", async ({
   page,
 }) => {
   mockLangGraphAPI(page, { threads: [], files: [AUGUST] });
+  await installLegacyReportPlugin(page);
   await page.route("**/api/shared", (route) =>
     route.fulfill({
       status: 200,

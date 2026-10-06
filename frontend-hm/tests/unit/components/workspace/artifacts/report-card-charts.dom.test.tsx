@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, rs } from "@rstest/core";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+} from "@testing-library/react";
 
 rs.mock("@/core/files/hooks", () => ({
   useSaveToMyFiles: () => ({ save: rs.fn(), isPending: false }),
@@ -13,10 +19,11 @@ rs.mock("@/core/shared/hooks", () => ({
   }),
 }));
 
-import { ReportCard } from "@/components/workspace/artifacts/report-card";
-import type { BusinessReport } from "@/core/business-report";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+
+import type { BusinessReport } from "../../../../../../backend/extensions/sources/hartmesh-legacy-report/browser/index";
+import { ReportCard } from "../../../../helpers/legacy-report-card";
 
 const REPORT = "/mnt/user-data/outputs/review/review.report.json";
 const report: BusinessReport = {
@@ -83,25 +90,46 @@ function renderCard() {
 afterEach(() => cleanup());
 
 describe("ReportCard chart lifecycle", () => {
-  it("keeps loaded charts and omits only the failed figure for this revision", () => {
+  it("retries charts when changed source bytes receive a new revision", async () => {
     const view = renderCard();
+    await act(async () => undefined);
+    fireEvent.error(screen.getByRole("img", { name: "Revenue by week" }));
+    expect(screen.queryByRole("img", { name: "Revenue by week" })).toBeNull();
+    view.update({
+      body: { ...report, title: "Updated title" },
+      revision: "changed-source",
+    });
+    await act(async () => undefined);
+    expect(screen.getByRole("img", { name: "Revenue by week" })).not.toBeNull();
+    expect(
+      screen.getByRole("heading", { name: "Updated title" }),
+    ).not.toBeNull();
+  });
+  it("keeps loaded charts and omits only the failed figure for this revision", async () => {
+    const view = renderCard();
+    await act(async () => undefined);
     const weekly = screen.getByRole("img", { name: "Revenue by week" });
     const monthly = screen.getByRole("img", { name: "Revenue by month" });
 
     fireEvent.load(monthly);
+    expect(screen.getByRole("img", { name: "Revenue by week" })).toBe(weekly);
+    expect(weekly.isConnected).toBe(true);
     fireEvent.error(weekly);
 
     expect(screen.queryByRole("img", { name: "Revenue by week" })).toBeNull();
     expect(screen.getByRole("img", { name: "Revenue by month" })).toBe(monthly);
     expect(view.container.querySelectorAll("figure")).toHaveLength(1);
-    view.update({ body: { ...report, title: "Updated title" } });
-    expect(screen.getByRole("heading", { name: "Updated title" })).toBeTruthy();
+    view.update();
+    expect(
+      screen.getByRole("heading", { name: "Business review" }),
+    ).toBeTruthy();
     expect(screen.queryByRole("img", { name: "Revenue by week" })).toBeNull();
     expect(screen.getByRole("img", { name: "Revenue by month" })).toBe(monthly);
   });
 
-  it("can remove a failed chart from a later report without a DOM ownership error", () => {
+  it("can remove a failed chart from a later report without a DOM ownership error", async () => {
     const view = renderCard();
+    await act(async () => undefined);
     fireEvent.error(screen.getByRole("img", { name: "Revenue by week" }));
 
     expect(() =>
@@ -122,8 +150,9 @@ describe("ReportCard chart lifecycle", () => {
     expect(screen.getByRole("img", { name: "Revenue by month" })).toBeTruthy();
   });
 
-  it("retries a failed chart at the same filename when the report revision changes", () => {
+  it("retries a failed chart at the same filename when the report revision changes", async () => {
     const view = renderCard();
+    await act(async () => undefined);
     const failedImage = screen.getByRole("img", { name: "Revenue by week" });
     fireEvent.error(failedImage);
 
@@ -135,6 +164,7 @@ describe("ReportCard chart lifecycle", () => {
       failedImage.getAttribute("src")!,
       window.location.href,
     );
+    await act(async () => undefined);
     const newURL = new URL(
       retriedImage.getAttribute("src")!,
       window.location.href,
@@ -146,14 +176,16 @@ describe("ReportCard chart lifecycle", () => {
     expect(view.container.querySelectorAll("figure")).toHaveLength(2);
   });
 
-  it("uses the report draft to retry when no content digest is available", () => {
+  it("uses the report draft to retry when no content digest is available", async () => {
     const view = renderCard();
+    await act(async () => undefined);
     view.update({ revision: null });
     const failedImage = screen.getByRole("img", { name: "Revenue by week" });
     fireEvent.error(failedImage);
 
     view.update({ revision: null, body: { ...report, draft: 2 } });
 
+    await act(async () => undefined);
     const newURL = new URL(
       screen.getByRole("img", { name: "Revenue by week" }).getAttribute("src")!,
       window.location.href,
@@ -161,11 +193,13 @@ describe("ReportCard chart lifecycle", () => {
     expect(newURL.searchParams.get("revision")).toBe("2");
   });
 
-  it("encodes a revision as one query parameter", () => {
+  it("encodes a revision as one query parameter", async () => {
     const view = renderCard();
+    await act(async () => undefined);
     const revision = "sha?draft=2&other#section";
     view.update({ revision });
 
+    await act(async () => undefined);
     const url = new URL(
       screen.getByRole("img", { name: "Revenue by week" }).getAttribute("src")!,
       window.location.href,
@@ -174,8 +208,9 @@ describe("ReportCard chart lifecycle", () => {
     expect(url.hash).toBe("");
   });
 
-  it("ignores an old image error after a newer report revision mounts", () => {
+  it("ignores an old image error after a newer report revision mounts", async () => {
     const view = renderCard();
+    await act(async () => undefined);
     const oldImage = screen.getByRole("img", { name: "Revenue by week" });
 
     view.update({ revision: "draft-2" });

@@ -3,7 +3,7 @@
 A deployment-installed Python extension can register a `PluginContribution` with
 optional browser code, authenticated backend actions and model tools. This extends
 the existing `install(registry, config)` workflow. MCP and Skills keep their existing
-APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.4).
+APIs and lifecycles. Public contracts live in `deerflow_extension_api` (0.2.5).
 
 The browser contribution API is experimental. `BrowserModule(code=...)` remains the
 self-contained transport; `BrowserAssets(root=...)` adds manifest-listed resources
@@ -373,3 +373,19 @@ To exercise the actual Turbopack development build, start the frontend with
 `DEER_FLOW_DEV_BUNDLER=turbo pnpm dev`, then run
 `PLAYWRIGHT_SKIP_WEB_SERVER=1 pnpm exec playwright test tests/e2e/bookmark-plugin.spec.ts`.
 Set `PLAYWRIGHT_BASE_URL` if the development server uses a port other than 3000.
+## Installed file collections
+
+Browser modules may add `fileFilingApiVersion: 1` and synchronous
+`fileCollection(context)`, returning `{ collection: "Documents" }` or `null`.
+The same installed-module loader validates and snapshots this capability.
+`context` is a frozen `{ filepath, destination, presented }` snapshot; destination
+is `my-files` or `shared`, and presented contains only recorded canonical paths.
+The host validates the result as one collection component and refuses invalid,
+throwing or conflicting decisions. It never expands a directory or grants copy
+eligibility. Filing mutations wait while discovery is pending or failed, including
+a broken enabled module whose filing policy cannot be determined. API clients still
+receive only the caller's explicit folder; they import no plugin or domain policy.
+
+The first-party historical report adapter uses this boundary and the existing
+artifact contribution/lifecycle. See its
+[package guide](../backend/extensions/sources/hartmesh-legacy-report/README.md).

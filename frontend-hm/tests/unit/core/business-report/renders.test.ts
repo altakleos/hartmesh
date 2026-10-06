@@ -31,10 +31,14 @@ test("asks the authenticated artifact route for a single byte", async () => {
   const { response, cancel } = respond(206);
   fetchWithAuth.mockResolvedValue(response);
 
-  const { probeReportRenderLive } = await import("@/core/business-report");
+  const { probeArtifactExport } = await import("@/core/artifact-views/exports");
 
   await expect(
-    probeReportRenderLive({ threadId: THREAD, path: PDF }),
+    probeArtifactExport({
+      threadId: THREAD,
+      path: PDF,
+      signal: new AbortController().signal,
+    }),
   ).resolves.toBe("present");
 
   expect(fetchWithAuth).toHaveBeenCalledTimes(1);
@@ -53,10 +57,14 @@ test("a 200 counts as live: the range was ignored, the file is still there", asy
   const { response, cancel } = respond(200);
   fetchWithAuth.mockResolvedValue(response);
 
-  const { probeReportRenderLive } = await import("@/core/business-report");
+  const { probeArtifactExport } = await import("@/core/artifact-views/exports");
 
   await expect(
-    probeReportRenderLive({ threadId: THREAD, path: PDF }),
+    probeArtifactExport({
+      threadId: THREAD,
+      path: PDF,
+      signal: new AbortController().signal,
+    }),
   ).resolves.toBe("present");
   expect(cancel).toHaveBeenCalledTimes(1);
 });
@@ -67,10 +75,15 @@ test.each([[400], [403], [404]])(
     const { response } = respond(status);
     fetchWithAuth.mockResolvedValue(response);
 
-    const { probeReportRenderLive } = await import("@/core/business-report");
+    const { probeArtifactExport } =
+      await import("@/core/artifact-views/exports");
 
     await expect(
-      probeReportRenderLive({ threadId: THREAD, path: PDF }),
+      probeArtifactExport({
+        threadId: THREAD,
+        path: PDF,
+        signal: new AbortController().signal,
+      }),
     ).resolves.toBe("absent");
   },
 );
@@ -78,10 +91,14 @@ test.each([[400], [403], [404]])(
 test("a network failure is not a download link", async () => {
   fetchWithAuth.mockRejectedValue(new Error("offline"));
 
-  const { probeReportRenderLive } = await import("@/core/business-report");
+  const { probeArtifactExport } = await import("@/core/artifact-views/exports");
 
   await expect(
-    probeReportRenderLive({ threadId: THREAD, path: PDF }),
+    probeArtifactExport({
+      threadId: THREAD,
+      path: PDF,
+      signal: new AbortController().signal,
+    }),
   ).resolves.toBe("error");
 });
 
@@ -95,34 +112,29 @@ test("a body that refuses to cancel does not turn a live file dead", async () =>
     },
   });
 
-  const { probeReportRenderLive } = await import("@/core/business-report");
+  const { probeArtifactExport } = await import("@/core/artifact-views/exports");
 
   await expect(
-    probeReportRenderLive({ threadId: THREAD, path: PDF }),
+    probeArtifactExport({
+      threadId: THREAD,
+      path: PDF,
+      signal: new AbortController().signal,
+    }),
   ).resolves.toBe("present");
-});
-
-test("the query identity separates two drafts that share every filename", async () => {
-  const { reportRendersQueryKey } = await import("@/core/business-report");
-
-  const shared = {
-    threadId: THREAD,
-    filepath: "/mnt/user-data/outputs/reports/august/august.report.json",
-    kinds: ["pdf", "docx"] as const,
-  };
-  const draft2 = reportRendersQueryKey({ ...shared, revision: "sha-draft-2" });
-  const draft3 = reportRendersQueryKey({ ...shared, revision: "sha-draft-3" });
-
-  expect(draft2).not.toEqual(draft3);
 });
 
 test.each([429, 500, 503])(
   "a %d means the file could not be checked",
   async (status) => {
     fetchWithAuth.mockResolvedValue(respond(status).response);
-    const { probeReportRenderLive } = await import("@/core/business-report");
+    const { probeArtifactExport } =
+      await import("@/core/artifact-views/exports");
     await expect(
-      probeReportRenderLive({ threadId: THREAD, path: PDF }),
+      probeArtifactExport({
+        threadId: THREAD,
+        path: PDF,
+        signal: new AbortController().signal,
+      }),
     ).resolves.toBe("error");
   },
 );

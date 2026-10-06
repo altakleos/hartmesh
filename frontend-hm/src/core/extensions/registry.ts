@@ -178,6 +178,25 @@ export async function loadFrontendExtensions(
             seen.add(surface.id);
           }
         }
+        const { fileCollection, fileFilingApiVersion } = loadedModule;
+        if (
+          fileCollection !== undefined ||
+          fileFilingApiVersion !== undefined
+        ) {
+          if (
+            fileFilingApiVersion !== 1 ||
+            typeof fileCollection !== "function"
+          )
+            throw new Error("Unsupported file filing capability");
+          loadedModule = Object.create(Object.getPrototypeOf(loadedModule), {
+            ...Object.getOwnPropertyDescriptors(loadedModule),
+            fileCollection: {
+              value: fileCollection,
+              enumerable: true,
+            },
+            fileFilingApiVersion: { value: 1, enumerable: true },
+          }) as FrontendExtension;
+        }
         const artifactSurfaces = loadedModule.artifacts;
         if (artifactSurfaces !== undefined) {
           if (

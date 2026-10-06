@@ -67,13 +67,12 @@ and owns cancellation and URL revocation. Image failures remain placeholders.
 See [the contract and budgets](../contracts/artifact_view/README.md); no business
 schema, calculation, interpreter or module registration belongs to this host.
 
-Report cards request the bounded `report_preview=true` artifact projection and
-validate it with `parseBusinessReport`. Its revision is the full source SHA-256.
-Projection cache keys differ from source keys; code view, edit, copy and download
-load the canonical source. Never reconcile an editor draft from projection bytes
-or save them. Static/mock/standalone views retain source reads; malformed or
-unsupported projections use the bounded source fallback. Full-file selection is
-scoped to both thread and path, and run completion refreshes the active query.
+Installed artifact contributions request their declared bounded projection. Its
+revision is the canonical source SHA-256. Projection and source queries remain
+separate; code view, editing, copying and downloading use canonical bytes.
+Malformed or unsupported projections fall back to a bounded source read; never
+reconcile an editor draft or save from projection bytes. Full-file selection is
+scoped to thread/path and run completion refreshes the active query.
 
 HartMesh is a Next.js 16 interface to the Gateway's LangGraph-compatible runtime,
 with authenticated conversations, streaming, artifacts, Files/Shared and settings.
@@ -109,6 +108,9 @@ Route layouts use Next.js metadata directly; the product has no Nuxt image modul
 The production Docker image resolves the `packageManager`-pinned pnpm release
 at build time into the shared `/opt/corepack` cache. Keep that cache readable by
 the chart's non-root uid 1000 so `pnpm start` never downloads its toolchain.
+Next builds type-check product sources with `tsconfig.build.json`; provider-dependent
+test fixtures remain in the default `tsconfig.json` checked by `pnpm check`.
+The frontend image must build without sibling backend source files.
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
@@ -144,7 +146,7 @@ The frontend is a stateful chat application. Users create **threads** (conversat
   - `ui/` — Shadcn UI primitives (auto-generated, ESLint-ignored)
   - `ai-elements/` — Vercel AI SDK elements (auto-generated, ESLint-ignored)
   - `workspace/` — Chat page components (messages, artifacts, settings)
-- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `artifact-delivery/` (run-scoped undelivered-file verdicts, from the stream while the page that heard them is open and from `GET .../runs/{run_id}/delivery` afterwards, so the correction survives a reload), `business-report/` (the `report.json` contract, its formatting and its companion paths), `files/` (the person's own files: list, open, remove, and keeping a conversation's file there), `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `turn-progress/` (the stage a running turn reports, and the activity row's label from it; a client-made upload placeholder never counts as model output), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `product/` (the deployment's product name), plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
+- **`core/`** — Business logic, the heart of the app. Domains include `threads/` (creation, streaming, state), `api/` (LangGraph client singleton), `agents/` (custom agents), `subagents/` (runtime worker catalog and administrator mutations), `auth/` (authentication), `artifacts/`, `artifact-delivery/` (run-scoped undelivered-file verdicts, from the stream while the page that heard them is open and from `GET .../runs/{run_id}/delivery` afterwards, so the correction survives a reload), `files/` (the person's own files: list, open, remove, and keeping a conversation's file there), `channels/` (IM connections), `integrations/` (managed third-party integration status/install clients such as Lark CLI), `turn-progress/` (the stage a running turn reports, and the activity row's label from it; a client-made upload placeholder never counts as model output), `i18n/` (en-US, zh-CN), `settings/`, `memory/`, `skills/`, `messages/`, `mcp/`, `models/`, `input-polish/` (pre-send draft rewrite API), `voice-input/` (browser speech-recognition helpers), `suggestions/`, `tasks/`, `todos/`, `tools/`, `workspace-changes/` (run-scoped changed-file summaries and diff fetching), `config/`, `notification/`, `product/` (the deployment's product name), plus rendering helpers (`rehype/`, `streamdown/`) and `utils/`.
 
 A presentation — the chips and archive action under an answer — is drawn from
 `additional_kwargs.presented_files` on whichever message carries it, or from a
@@ -206,99 +208,39 @@ behind both are in the module comment. The unit test pins the table row by
 row. The Pro and Ultra descriptions in both locales say what each mode does;
 that is a convention, not a check, so change them with the table.
 
-A `*.report.json` artifact is previewed as a report card rather than as JSON.
-`core/business-report/` parses
-[the contract](../contracts/business_report/report.schema.json) and decides it:
-a file the app cannot draw stays a JSON file, and the panel's existing
-code/preview toggle switches between the two. `formatValue` there is a port of
-the skill's own `format_value`, down to rounding the decimal spelling of a
-number rather than the binary double, so a figure reads the same on the card as
-in the PDF, Word and Excel renders; `tests/unit/core/business-report/` checks
-that against cases generated from the Python. Download buttons appear for each
-render the thread has presented and the live probe confirms; a render deleted
-by a later rebuild stays hidden until it is made again. Each chart is addressed inside the report's own
-directory, and the brand colour is spent on rules and borders only, because the
-card renders on whichever ground the viewer's theme paints.
+Historical report parsing, formatting, companion naming, native DOM/CSS and
+translations belong to the provider package at
+`backend/extensions/sources/hartmesh-legacy-report/`. The installed module mounts without
+host React or UI imports, using shared host file controls and bounded raster
+loading. Its bytes projector uses the existing extension lifecycle and generic
+artifact route; the compatibility query is an installed declaration. Missing or
+disabled adapters leave ordinary source access. Provider packaging/configuration
+must explicitly install and activate it; the core has no special activation path.
 
-Chart failures are component state: React omits the failed figure, and its
-image URL includes the report's content revision (draft number when no digest
-is available). The chart component is keyed by that URL and chart id, so a new
-revision retries reused filenames and bypasses the previous image's cache;
-an old image error cannot hide the new revision. Never remove React-owned DOM
-nodes directly from image callbacks. The chart lifecycle DOM tests cover
-failure, a later report dropping the chart, and retries after revision changes.
+The package preserves the 10rem container-based KPI floor. Keep the monetary
+one-line, own-tile and overflow assertions in
+`tests/e2e/business-report-card.spec.ts`; box width alone and zero overflow do not
+prove that figures remain readable. Domain unit tests use the real independent
+mount and actual host controls; production browser tests load its real assets.
 
-**KPI tiles.** They are sized by the space they have, never by the window: the
-card's widest home is a full page and its narrowest is the artifact side panel,
-and a viewport breakpoint cannot tell those apart. It put five tiles in the
-panel of a 1440px screen and `$74,702.61` printed 53px of itself across the
-number beside it. `grid-cols-[repeat(auto-fit,minmax(min(100%,10rem),1fr))]`
-asks the container instead, and the 10rem floor is set by the figures rather
-than by how many tiles would fit — a track narrow enough for three in the panel
-is narrow enough to break a seven-figure revenue across two lines mid-digit,
-which is the same unreadability one layer down. So the panel takes two per row,
-a `max-w-3xl` page takes four, and a phone takes one at full width. That last
-one is a deliberate trade: five monetary figures cannot be two-up and legible
-at 320px, and a figure that reads beats a denser grid. `break-words` on the
-value is the floor under all of it — a figure that still does not fit breaks
-inside its own tile rather than across its neighbour.
-
-Layout is the only thing that can catch this, so the regression is an
-end-to-end measurement (`tests/e2e/business-report-card.spec.ts`), and it has
-to measure the right thing twice over: the value's box is clamped to its grid
-track whether or not the text fits, so the box is not the evidence; and
-`break-words` alone drives `scrollWidth - clientWidth` to zero at any track
-width, so overflow is not the evidence either. What pins the sizing is that
-each figure still renders on **one line** at panel width.
-
-The card offers a render only when two things hold: the exact sibling path is
-eligible under the presentation contract (`availableReportRenders`), **and**
-that path currently resolves as a regular file through the same authenticated
-artifact route the download link uses (`useLiveReportRenders`,
-`core/business-report/renders.ts`). The cumulative presented-files list is
-history and never shrinks — a rebuild deletes the previous draft's renders
-while their paths stay in the list — so eligibility alone offered downloads
-that 404 after a revision that rendered nothing. The probe is a
-`Range: bytes=0-0` GET whose body is cancelled unread, so proving a large PDF
-is there costs one byte; 200 and 206 are live. Missing/refused files are
-absent; server/rate-limit/network failures are uncertain, with a Retry check
-action that refetches only the probes. Unverified links stay hidden; an
-uncertain answer never shows the regenerate notice. It never asks about a path presentation did not
-produce: the delivery fence still decides what may be offered at all, and a
-file existing is not permission to offer a format nobody presented, so nothing
-globs the directory or infers the three conventional names. The query key
-carries the report body's own digest, because
-every draft rewrites the same filenames while the cumulative list stays
-byte-for-byte identical — keyed on the pathname alone, one draft reads
-another's verdict and a slow probe from the previous draft restores a deleted
-link. While the verdict is unknown the card shows neither links nor the "No
-file to download yet" notice, because a false empty is worse than the stale
-link it replaced. A run settling refetches the same key without blinking confirmed links. Mock
-and static mode skip the probe and stay deterministic.
-
-Three things decide whether a card appears at all: the `.report.json` suffix, a
-body that parses as `version: 1`, and — for each picture — the contract's
-`charts/<id>.png` shape. Card projection reads source up to
-`REPORT_PREVIEW_MAX_BYTES` (16 MiB) and returns at most 1 MiB of display fields.
-The same 16 MiB bound applies to raw-preview fallback; past it, _Load full file_
-remains. Source rows and build provenance stay in the complete report. The
-card's own chrome follows the UI locale while the report body follows
-`meta.lang`, which the skill only ever writes as `en-US`.
+`core/extensions/filing.ts` resolves an optional versioned, synchronous installed
+file-collection callback. Its input is an immutable path/destination/presented
+snapshot and its output is a validated single collection component. Invalid,
+throwing or conflicting decisions use no collection. No callback grants file
+eligibility or expands directories. Filing mutations wait while plugin discovery
+is pending or failed, so uncertainty cannot silently change a destination.
 
 _My files_ (`/workspace/files`, `core/files/`) is what the person kept, from
 every conversation: the Gateway keeps it per user and every sandbox of theirs
 mounts it at `/mnt/user-data/files`, so a report kept in one chat is on the
 next one's disk. Keeping copies exact bytes and never overwrites (a taken name
-gets the next `_N`). Two places offer it: the report card's _Save to my files_
-keeps the renders it is offering — the documents, not the JSON — and the
-artifact panel's action keeps the open file, for anything under uploads or
-outputs (`canKeepInMyFiles`); neither is offered on a static demo thread, which
-has no files to keep them in. Both go through `useSaveToMyFiles`, which keeps each
-path and then says so once, naming the folder when there is one, with a way to
-the page; a failure part-way names the failure and leaves what already landed.
-Where a file lands is asked of the file (`filingFolderFor`): a report's renders
-are kept under _Reports_, everything else at the root, the same question the
-Shared actions ask, so one report is in one place in each area. Presentation
+gets the next `_N`). Shared host card controls keep explicit, eligible, currently available exports;
+the artifact panel keeps the open file under uploads or outputs
+(`canKeepInMyFiles`). Neither mutates storage in static/mock mode. Both use
+`useSaveToMyFiles`, which keeps each path, names its destination once and reports
+partial failures without undoing earlier copies. Installed filing contributions
+provide collection hints for ordinary file actions; Files/Shared API clients know
+only the explicit folder supplied by their caller. Presentation
 stays an outputs contract: a file from _My files_ is handed over by copying it
 into outputs.
 
@@ -306,22 +248,12 @@ _Shared_ is the second tab of the same page (`?tab=shared` opens it;
 `core/shared/`): what anyone at the company published, readable by everyone.
 The Gateway keeps one directory for the tenant and every sandbox mounts it
 read-only at `/mnt/user-data/shared`, so only publishing puts anything there.
-The report card's _Share with everyone_ publishes the renders it is offering,
-the artifact panel's action publishes the open file, and a _My files_ row
-shares that file directly — anything under uploads, outputs or the person's own
-files (`canPublishToShared`). Where any of them lands is one question asked of
-the file, never of the button: `sharedFolderFor` files a report's download
-under _Reports_ (`REPORTS_FOLDER`, and `filingFolderFor` files it there in the
-person's own files too), carries a file they keep in that same folder, and
-leaves everything else at the root. The rest of how someone keeps their own
-files never crosses: a folder named for a customer would otherwise become a
-company folder on one click, and two people who file one report differently
-would put two copies in Shared, which is what the rule prevents. A folder name
-is data, so it is never a translated string: Shared is one directory for the
-company, and two colleagues reading different languages must file a report in
-the same place. A render is recognised by the report it belongs to, either the
-one its reader holds or one among the thread's artifacts, never by its name
-alone. Both toasts name the folder, because the person did not choose it. All
+Shared card controls publish their selected exports, the artifact panel publishes
+the open file, and a My Files row publishes that file directly
+(`canPublishToShared`). Collection policy belongs to installed contributions;
+the compatibility package alone recognizes its historical flat personal folder.
+Arbitrary personal folders and nested legacy folders do not become company
+folders. Collection names are data and never translated. Both toasts name the folder, because the person did not choose it. All
 three go through `useShareWithEveryone`, the same shape as saving: it publishes
 each path, says so once, and carries **Undo** in that toast, because handing a
 file to the whole company is one click and taking it back must be too. Whether

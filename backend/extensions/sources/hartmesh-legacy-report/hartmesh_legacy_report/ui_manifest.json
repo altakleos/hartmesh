@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "entry": "static/index.mjs",
+  "files": [
+    "static/index.mjs",
+    "static/report.mjs",
+    "static/format.mjs",
+    "static/paths.mjs"
+  ]
+}

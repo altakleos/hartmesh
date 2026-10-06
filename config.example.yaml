@@ -3452,6 +3452,18 @@ authorization:
 # system-model observers, Gateway-lifetime services, and eager FastAPI HTTP routers.
 # See examples/deerflow-extension-example for a package that exercises all five.
 #
+# The product distribution installs this compatibility package through the normal
+# extensions dependency group. Operators can disable/remove it and restart.
+plugins:
+  - name: legacy-report
+    package: hartmesh-legacy-report
+    use: hartmesh_legacy_report:install
+    enabled: true
+    required: false
+    config:
+      enabled: true
+
+# Additional operator-installed packages:
 # plugins:
 #   - name: example                       # PEP 621 entry-point name
 #     package: deerflow-extension-example # Python distribution managed by uv

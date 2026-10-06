@@ -100,7 +100,7 @@ async function installFixture(
     }),
   );
   await page.goto(`/workspace/chats/${THREAD}`);
-  await page.getByText("sample.summary.json").first().click();
+  await page.getByRole("log").getByText("sample.summary.json").first().click();
 }
 
 for (const kind of ["native", "passive"] as const) {
@@ -164,7 +164,7 @@ test("a reloaded installed revision replaces the old browser contribution", asyn
   revision = "c".repeat(64);
   label = "Updated summary";
   await page.reload();
-  await page.getByText("sample.summary.json").first().click();
+  await page.getByRole("log").getByText("sample.summary.json").first().click();
   await expect(
     page.getByRole("heading", { name: "Updated summary" }),
   ).toBeVisible();

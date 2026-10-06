@@ -29,6 +29,17 @@ log_level: info
 
 models: []
 
+# Historical report presentation uses the normally installed compatibility package.
+# This provider template explicitly selects it; core does not activate adapters.
+plugins:
+  - name: legacy-report
+    package: hartmesh-legacy-report
+    use: hartmesh_legacy_report:install
+    enabled: true
+    required: false
+    config:
+      enabled: true
+
 # ── Local login throttling ──────────────────────────────────────────────────
 # The lockout is keyed on the account, not the client address: one tenant is
 # one company, five to twenty staff behind one office NAT address, so an

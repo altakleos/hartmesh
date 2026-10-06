@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test, type Page } from "@playwright/test";
 
+import { installLegacyReportPlugin } from "./utils/legacy-report-plugin";
 import { mockLangGraphAPI } from "./utils/mock-api";
 
 const THREAD_ID = "00000000-0000-0000-0000-000000003140";
@@ -25,7 +26,7 @@ const REPORT_JSON = readFileSync(
 
 // A one-pixel PNG, so the chart request resolves without a binary fixture.
 const PNG = Buffer.from(
-  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==",
   "base64",
 );
 
@@ -48,6 +49,16 @@ function presentReportMessages() {
         },
       ],
     },
+    {
+      type: "tool",
+      id: "tool-present-report",
+      name: "present_files",
+      tool_call_id: "present-report",
+      content: "Files presented.",
+      additional_kwargs: {
+        presented_files: [REPORT_PATH, PDF_PATH, XLSX_PATH],
+      },
+    },
   ];
 }
 
@@ -56,6 +67,7 @@ async function openTheReport(
   reportRequests: string[] = [],
   reportSaves: string[] = [],
   projectionAvailable = true,
+  chartsAvailable = true,
 ) {
   mockLangGraphAPI(page, {
     threads: [
@@ -69,6 +81,7 @@ async function openTheReport(
       },
     ],
   });
+  await installLegacyReportPlugin(page);
   await page.route(
     `**/api/threads/${THREAD_ID}/artifacts${REPORT_PATH}*`,
     (route) => {
@@ -85,7 +98,7 @@ async function openTheReport(
       }
       const url = route.request().url();
       reportRequests.push(url);
-      const projected = new URL(url).searchParams.has("report_preview");
+      const projected = new URL(url).searchParams.has("preview");
       if (projected && !projectionAvailable)
         return route.fulfill({ status: 422, body: "Projection unavailable" });
       const source = JSON.parse(REPORT_JSON) as Record<string, unknown>;
@@ -95,7 +108,17 @@ async function openTheReport(
         headers: {
           ETag: `"${"a".repeat(64)}"`,
           ...(projected
-            ? { "X-Artifact-Projection": "business-report-v1" }
+            ? {
+                "X-Artifact-Projection": "business-report-v1",
+                "X-Artifact-Source-Bytes": String(
+                  Buffer.byteLength(
+                    JSON.stringify({
+                      ...source,
+                      raw_rows: [{ canonical_row: "KEEP_SOURCE_ROWS" }],
+                    }),
+                  ),
+                ),
+              }
             : {}),
         },
         body: JSON.stringify({
@@ -114,7 +137,11 @@ async function openTheReport(
   await page.route(
     `**/api/threads/${THREAD_ID}/artifacts${DIRECTORY}/charts/*.png*`,
     (route) =>
-      route.fulfill({ status: 200, contentType: "image/png", body: PNG }),
+      route.fulfill(
+        chartsAvailable
+          ? { status: 200, contentType: "image/png", body: PNG }
+          : { status: 404, body: "Missing chart" },
+      ),
   );
   // The card proves a render is still there before it offers it, so the two
   // presented renders have to answer the bounded probe as live files.
@@ -138,7 +165,7 @@ async function openTheReport(
   await page.getByText("2026-08-business-review.report.json").first().click();
   // The panel is a side panel on a wide screen and a dialog on a phone, so
   // the card is addressed by its own handle rather than through either.
-  return page.getByTestId("business-report-card");
+  return page.getByTestId("plugin-artifact-presentation");
 }
 
 test.describe("business report card", () => {
@@ -160,7 +187,9 @@ test.describe("business report card", () => {
       expect(requests.length).toBeGreaterThan(0);
       if (mode !== "fallback")
         expect(
-          requests.every((url) => url.includes("report_preview=true")),
+          requests.some((url) =>
+            url.includes("preview=hartmesh.legacy-report%2Freport"),
+          ),
         ).toBe(true);
       const fullResponse =
         mode !== "fallback"
@@ -223,14 +252,14 @@ test.describe("business report card", () => {
       "Totals match your file: $74,702.61 across 164 jobs.",
     );
     await expect(
-      card.getByRole("link", { name: "Download the PDF" }),
+      card.getByRole("link", { name: "Download PDF" }),
     ).toBeVisible();
     await expect(
-      card.getByRole("link", { name: "Download the Excel" }),
+      card.getByRole("link", { name: "Download Excel" }),
     ).toBeVisible();
-    await expect(
-      card.getByRole("link", { name: "Download the Word" }),
-    ).toHaveCount(0);
+    await expect(card.getByRole("link", { name: "Download Word" })).toHaveCount(
+      0,
+    );
 
     // The charts are the report's own pictures, addressed inside its directory.
     const chart = card.getByAltText("Revenue by week");
@@ -255,7 +284,7 @@ test.describe("business report card", () => {
     // The downloads are the point of the card on a phone, so they must be
     // reachable without scrolling sideways; only the tables scroll.
     await expect(
-      card.getByRole("link", { name: "Download the PDF" }),
+      card.getByRole("link", { name: "Download PDF" }),
     ).toBeInViewport();
 
     const overflow = await page.evaluate(() => {
@@ -263,6 +292,57 @@ test.describe("business report card", () => {
       return root.scrollWidth - root.clientWidth;
     });
     expect(overflow).toBeLessThanOrEqual(0);
+  });
+
+  test("keeps historical figures and downloads readable at 360px in dark theme", async ({
+    page,
+  }) => {
+    await page.setViewportSize({ width: 360, height: 780 });
+    await page.addInitScript(() => localStorage.setItem("theme", "dark"));
+    const card = await openTheReport(page);
+    await expect(card.locator(".dark")).toBeVisible();
+    await expect(
+      card.getByRole("link", { name: "Download PDF" }),
+    ).toBeInViewport();
+    const geometry = await card
+      .getByTestId("business-report-kpis")
+      .evaluate((grid) =>
+        Array.from(grid.children).map((tile) => {
+          const value = tile.querySelector<HTMLElement>(
+            "[data-testid='business-report-kpi-value']",
+          )!;
+          const range = document.createRange();
+          range.selectNodeContents(value);
+          return {
+            lines: range.getClientRects().length,
+            overflow: value.scrollWidth - value.clientWidth,
+          };
+        }),
+      );
+    expect(geometry.length).toBeGreaterThan(1);
+    expect(
+      geometry.every((item) => item.lines === 1 && item.overflow <= 0),
+    ).toBe(true);
+    expect(
+      await page.evaluate(
+        () =>
+          document.documentElement.scrollWidth -
+          document.documentElement.clientWidth,
+      ),
+    ).toBeLessThanOrEqual(0);
+  });
+
+  test("omits missing charts while preserving the report and downloads", async ({
+    page,
+  }) => {
+    const card = await openTheReport(page, [], [], true, false);
+    await expect(
+      card.getByRole("heading", { name: "August 2026 Business Review" }),
+    ).toBeVisible();
+    await expect(
+      card.getByRole("link", { name: "Download PDF" }),
+    ).toBeVisible();
+    await expect(card.getByAltText("Revenue by week")).toHaveCount(0);
   });
 
   test("keeps every figure on one line inside its own tile in the side panel", async ({

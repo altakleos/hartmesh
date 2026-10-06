@@ -19,6 +19,50 @@ const entry = {
 const extension = { apiVersion: 1, module: entry.module };
 const code = "export default {apiVersion: 1, module: 'bookmarks.v1'};";
 
+test("filing registration captures a callable once and leaves page-only modules compatible", async () => {
+  rs.spyOn(globalThis, "fetch").mockImplementation(
+    async () => new Response(code),
+  );
+  let reads = 0;
+  const callback = rs.fn(() => ({ collection: "Documents" }));
+  const filingModule = Object.defineProperty(
+    { ...extension, fileFilingApiVersion: 1 },
+    "fileCollection",
+    {
+      get() {
+        reads++;
+        if (reads > 1) throw new Error("Repeated getter");
+        return callback;
+      },
+    },
+  );
+  const result = await loadFrontendExtensions([entry], async () => ({
+    default: filingModule,
+  }));
+  expect(result[0]?.error).toBeUndefined();
+  expect(result[0]?.extension?.fileCollection).toBe(callback);
+  expect(reads).toBe(1);
+});
+
+test.each([
+  { fileFilingApiVersion: 2, fileCollection: () => null },
+  { fileFilingApiVersion: 1 },
+  { fileCollection: () => null },
+  { fileFilingApiVersion: 1, fileCollection: "not callable" },
+])(
+  "rejects unsupported or incomplete filing capability %j",
+  async (capability) => {
+    rs.spyOn(globalThis, "fetch").mockImplementation(
+      async () => new Response(code),
+    );
+    const result = await loadFrontendExtensions([entry], async () => ({
+      default: { ...extension, ...capability },
+    }));
+    expect(result[0]?.extension).toBeUndefined();
+    expect(result[0]?.error).toBeTruthy();
+  },
+);
+
 test("artifact registration captures callable and label snapshots instead of retaining live getters", async () => {
   rs.spyOn(globalThis, "fetch").mockResolvedValue(new Response(code));
   const reads = new Map<string, number>();

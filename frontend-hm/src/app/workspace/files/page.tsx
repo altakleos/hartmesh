@@ -29,6 +29,11 @@ import {
   WorkspaceContainer,
   WorkspaceHeader,
 } from "@/components/workspace/workspace-container";
+import {
+  installedFileCollection,
+  isFileFilingReady,
+} from "@/core/extensions/filing";
+import { useFrontendExtensions } from "@/core/extensions/hooks";
 import { useDocumentTitle } from "@/core/features";
 import { messageForFileAreaError } from "@/core/file-areas";
 import {
@@ -44,7 +49,6 @@ import {
 } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import {
-  sharedFolderFor,
   urlOfSharedFile,
   useRemoveSharedFile,
   useShareWithEveryone,
@@ -196,6 +200,7 @@ function FileListControls({
 }
 
 function MyFiles({ onChanged }: { onChanged: () => void }) {
+  const pluginQuery = useFrontendExtensions();
   const { t, locale } = useI18n();
   const { data, error, isPending, refetch } = useMyFiles();
   const deleteFile = useDeleteMyFile();
@@ -213,6 +218,11 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
 
   return (
     <>
+      {!pluginQuery.isPending && !isFileFilingReady(pluginQuery) && (
+        <p role="status" className="text-muted-foreground text-sm">
+          {t.extensions.fileDestinationsUnavailable}
+        </p>
+      )}
       {!error && !isPending && loadedFiles.length > 0 && (
         <FileListControls
           query={query}
@@ -341,14 +351,20 @@ function MyFiles({ onChanged }: { onChanged: () => void }) {
                     </Button>
                     <Button
                       aria-label={`${t.shared.shareWithEveryone} ${file.name}`}
-                      disabled={everyone.isPending}
+                      disabled={
+                        everyone.isPending || !isFileFilingReady(pluginQuery)
+                      }
                       onClick={() => {
                         const path = `${MY_FILES_VIRTUAL_PREFIX}/${file.path}`;
                         // No conversation is involved, so the file itself is
                         // all there is to go on.
                         void everyone.share(
                           [path],
-                          sharedFolderFor(path, { artifacts: [] }),
+                          installedFileCollection(pluginQuery.data ?? [], {
+                            filepath: path,
+                            destination: "shared",
+                            presented: [],
+                          }),
                         );
                       }}
                       size="icon-sm"

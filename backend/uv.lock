@@ -867,6 +867,9 @@ dev = [
     { name = "ruff" },
     { name = "textual" },
 ]
+extensions = [
+    { name = "hartmesh-legacy-report" },
+]
 
 [package.metadata]
 requires-dist = [
@@ -914,7 +917,7 @@ dev = [
     { name = "ruff", specifier = ">=0.14.11" },
     { name = "textual", specifier = ">=0.80" },
 ]
-extensions = []
+extensions = [{ name = "hartmesh-legacy-report", directory = "extensions/sources/hartmesh-legacy-report" }]
 
 [[package]]
 name = "deerflow-extension-api"
@@ -1629,6 +1632,17 @@ sdist = { url = "https://files.pythonhosted.org/packages/e7/85/7c366e69d84c17bb7
 wheels = [
     { url = "https://files.pythonhosted.org/packages/7e/22/e85faf23bd72a92d1921e37d674ca56eb298a3c8be31fdecef0ff2b3aaac/h2-4.4.1-py3-none-any.whl", hash = "sha256:0e25f1462b23c9cb82d9eb02e28bc706dac2a68cb457c6a0d74d63c8a2a5d0e6", size = 62636, upload-time = "2026-08-03T11:44:59.164Z" },
 ]
+
+[[package]]
+name = "hartmesh-legacy-report"
+version = "0.1.0"
+source = { directory = "extensions/sources/hartmesh-legacy-report" }
+dependencies = [
+    { name = "deerflow-extension-api" },
+]
+
+[package.metadata]
+requires-dist = [{ name = "deerflow-extension-api", specifier = ">=0.2.5,<0.3" }]
 
 [[package]]
 name = "hpack"
@@ -4568,8 +4582,8 @@ name = "standard-aifc"
 version = "3.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "audioop-lts" },
-    { name = "standard-chunk" },
+    { name = "audioop-lts", marker = "python_full_version >= '3.13'" },
+    { name = "standard-chunk", marker = "python_full_version >= '3.13'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/c4/53/6050dc3dde1671eb3db592c13b55a8005e5040131f7509cef0215212cb84/standard_aifc-3.13.0.tar.gz", hash = "sha256:64e249c7cb4b3daf2fdba4e95721f811bde8bdfc43ad9f936589b7bb2fae2e43", size = 15240, upload-time = "2024-10-30T16:01:31.772Z" }
 wheels = [

@@ -9,6 +9,15 @@ import {
 } from "@testing-library/react";
 import { useSyncExternalStore } from "react";
 
+const pluginState = rs.hoisted(() => ({
+  data: [] as LoadedContribution[],
+  isPending: false,
+  isError: false,
+}));
+rs.mock("@/core/extensions/hooks", () => ({
+  useFrontendExtensions: () => pluginState,
+}));
+
 /**
  * The Files page: what the person kept, from every conversation.
  *
@@ -132,8 +141,11 @@ rs.mock("@/core/files/hooks", () => ({
 }));
 
 import FilesPage from "@/app/workspace/files/page";
+import type { LoadedContribution } from "@/core/extensions/registry";
 import { I18nContext } from "@/core/i18n/context";
 import { enUS } from "@/core/i18n/locales/en-US";
+
+import { legacyReportContribution } from "../../../helpers/legacy-report";
 
 function renderPage() {
   return render(
@@ -195,6 +207,9 @@ function openSharedTab() {
 
 describe("FilesPage", () => {
   beforeEach(() => {
+    pluginState.data = [legacyReportContribution()];
+    pluginState.isPending = false;
+    pluginState.isError = false;
     routerReplace.mockImplementation((url: string) => {
       window.history.replaceState(null, "", url);
       window.dispatchEvent(new PopStateEvent("popstate"));
@@ -305,6 +320,45 @@ describe("FilesPage", () => {
         publication_id: "publication-owned-1",
       }),
       expect.anything(),
+    );
+  });
+
+  it.each(["pending", "discovery failure", "module failure"])(
+    "holds sharing during %s",
+    (failure) => {
+      if (failure === "pending") pluginState.isPending = true;
+      else if (failure === "discovery failure") pluginState.isError = true;
+      else
+        pluginState.data = [
+          {
+            ...legacyReportContribution(),
+            extension: undefined,
+            error: "Unavailable",
+          },
+        ];
+      renderPage();
+      const button = screen.getByRole<HTMLButtonElement>("button", {
+        name: "Share with everyone august.pdf",
+      });
+      expect(button.disabled).toBe(true);
+      fireEvent.click(button);
+      expect(shareWithEveryone).not.toHaveBeenCalled();
+      if (failure !== "pending")
+        expect(
+          screen.getByText(enUS.extensions.fileDestinationsUnavailable),
+        ).toBeTruthy();
+    },
+  );
+
+  it("keeps ordinary sharing available when no filing plugin is installed", () => {
+    pluginState.data = [];
+    renderPage();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Share with everyone august.pdf" }),
+    );
+    expect(shareWithEveryone).toHaveBeenCalledWith(
+      ["/mnt/user-data/files/Reports/august.pdf"],
+      undefined,
     );
   });
 

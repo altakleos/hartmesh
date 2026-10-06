@@ -5,14 +5,27 @@ rs.mock("@/core/api/fetcher", () => ({
 }));
 
 import { fetch as fetcher } from "@/core/api/fetcher";
+import { installedFileCollection } from "@/core/extensions/filing";
 import {
   canPublishToShared,
   publishToShared,
   removeSharedFile,
-  sharedFolderFor,
   SharedRequestError,
   urlOfSharedFile,
 } from "@/core/shared";
+
+import { legacyReportContribution } from "../../../helpers/legacy-report";
+
+function sharedFolderFor(
+  filepath: string,
+  input: { artifacts: readonly string[]; report?: string },
+) {
+  return installedFileCollection([legacyReportContribution()], {
+    filepath,
+    destination: "shared",
+    presented: [...input.artifacts, ...(input.report ? [input.report] : [])],
+  });
+}
 
 const mockedFetch = rs.mocked(fetcher);
 
@@ -131,7 +144,7 @@ describe("canPublishToShared", () => {
   });
 });
 
-describe("sharedFolderFor", () => {
+describe("installed legacy filing", () => {
   const report =
     "/mnt/user-data/outputs/reports/2026-08-business-review/2026-08-business-review.report.json";
   const render =

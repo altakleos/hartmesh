@@ -11,10 +11,16 @@ from fastapi.testclient import TestClient
 
 from app.gateway.routers import artifacts
 from deerflow.config import paths as paths_module
+from deerflow.extensions.loader import ExtensionSpec, load_extensions
 from deerflow.runtime.user_context import get_effective_user_id
 
 URL = "/api/threads/report-thread/artifacts/mnt/user-data/outputs/month.report.json"
 FIXTURE = Path(__file__).resolve().parents[2] / "frontend-hm/tests/fixtures/business-report/2026-08-business-review.report.json"
+
+
+@pytest.fixture(autouse=True)
+def package_source(monkeypatch):
+    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "extensions/sources/hartmesh-legacy-report"))
 
 
 @pytest.fixture
@@ -31,8 +37,11 @@ def report_file(tmp_path, monkeypatch):
     return path
 
 
-def client_for(*, owner=True):
+def client_for(*, owner=True, installed=True, enabled=True):
     app = make_authed_test_app(owner_check_passes=owner)
+    specs = [ExtensionSpec(use="hartmesh_legacy_report:install", required=True, config={"enabled": enabled})] if installed else []
+    app.state.extensions, diagnostics = load_extensions(specs)
+    assert not diagnostics
     app.include_router(artifacts.router)
     return TestClient(app)
 
@@ -69,7 +78,7 @@ def test_projection_keeps_the_thread_owner_gate(report_file, monkeypatch):
     def forbidden_read(*args, **kwargs):
         pytest.fail("must authorize before reading")
 
-    monkeypatch.setattr(artifacts, "report_projection", forbidden_read)
+    monkeypatch.setattr(artifacts, "project_artifact", forbidden_read)
     with client_for(owner=False) as client:
         assert client.get(URL, params={"report_preview": True}).status_code in (403, 404)
 
@@ -99,3 +108,16 @@ def test_projection_has_its_own_response_budget(report_file):
     report_file.write_text(json.dumps(report), encoding="utf-8")
     with client_for() as client:
         assert client.get(URL, params={"report_preview": True}).status_code == 413
+
+
+def test_removed_adapter_leaves_old_query_as_an_ordinary_source_read(report_file):
+    with client_for(installed=False) as client:
+        response = client.get(URL, params={"report_preview": True})
+    assert response.content == report_file.read_bytes()
+    assert "x-artifact-projection" not in response.headers
+
+
+def test_disabled_adapter_retains_source_but_refuses_projection(report_file):
+    with client_for(enabled=False) as client:
+        assert client.get(URL, params={"report_preview": True}).status_code == 501
+        assert client.get(URL).content == report_file.read_bytes()
