@@ -307,7 +307,9 @@ class AppConfig(BaseModel):
     safety_finish_reason: SafetyFinishReasonConfig = Field(default_factory=SafetyFinishReasonConfig, description="Provider safety-filter finish_reason interception middleware configuration")
     auth: AuthAppConfig = Field(default_factory=AuthAppConfig, description="Authentication configuration (local + OIDC SSO)")
     ui: UiConfig = Field(default_factory=UiConfig, description="Workspace presentation: the Home starters and which screens non-administrators are offered.")
-    tenant_bundle: TenantBundleConfig = Field(default_factory=TenantBundleConfig, description="Where the deployment's brand, starter list and report profiles are read from; the same directory sandboxes mount at /mnt/tenant.")
+    tenant_bundle: TenantBundleConfig = Field(
+        default_factory=TenantBundleConfig, description="Where the deployment's generic branding, provider support and starter list are read from; sandboxes can mount the same directory at /mnt/tenant."
+    )
     account_export: AccountExportConfig = Field(
         default_factory=AccountExportConfig,
         description="Limits for a person's download of all their own data: part size, free space kept, expiry and how many are prepared at once.",

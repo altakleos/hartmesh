@@ -24,6 +24,16 @@ current state with the drafts when moving a report. A crash after rename may
 leave a complete unadopted bundle; never claim a multi-file replacement is atomic.
 Report JSON and database schemas are unchanged by this directory layout.
 
+The skill owns `schemas/report.schema.json` and passive view serialization in
+`scripts/business_report_view.py`. Reuse `format_value` and `cell_format`, including
+row overrides and footer formats; never calculate new facts in presentation.
+Emit the view after successful renders/carry and before hashing the staged bundle.
+Keep it in member hashes, outside the genuine-format carry list. Only actual staged
+formats become explicit exports. View limits produce a truthful concise omission
+or ordinary-file fallback; successful formats survive view failures. Interruption
+still preserves the previous current draft. Present the view once with exports;
+retain the canonical report and charts without duplicate rich handovers.
+
 Compute quality checks before finalizing default action wording. A warning puts
 review of Checks first, ahead of business suggestions, within the three-bullet
 limit; no fallback may claim the checks need no action. Keep clean reports

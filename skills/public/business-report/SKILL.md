@@ -8,7 +8,7 @@ first-command: scripts/report.py build
 
 ## Overview
 
-One script turns an export into a report draft: `report.json` plus PNG charts, then renders that one document to HTML, PDF, DOCX and XLSX. Every number in every render comes from `report.json`, so the formats agree by construction. The script runs on the libraries the sandbox image ships, installs nothing, calls no network service (the PDF printer refuses every URL that is not inline data) and never modifies an input file.
+One script turns an export into a report draft: `report.json` plus PNG charts, renders that one document to HTML, PDF, DOCX and XLSX, then adds a bounded passive `*.view.json` presentation. Every number in every render comes from `report.json`, so the formats agree by construction. The script runs on the libraries the sandbox image ships, installs nothing, calls no network service (the PDF printer refuses every URL that is not inline data) and never modifies an input file.
 
 The first call for a report is the `build` in Step 1. It reads the export itself and prints what it found, so neither the upload, its sheets nor this directory needs looking at first: the scripts it runs are the ones named below. The runtime holds to that order (the `first-command` line above): the first time this file is read in a conversation, nothing else runs in the sandbox until a build has run, whatever its outcome, or until you answer without a tool.
 
@@ -31,11 +31,13 @@ one run.
 
 **The `present` argument is the handover.** Every run that writes files the
 user should have — `build` or `prose` with `--render`, and `render` — is one
-`bash` call whose `present` argument lists those files: the report first, then
-each render. The names are known before the run, because the report takes its
+`bash` call whose `present` argument lists those files: the passive view first, then
+each render. The raw report remains beside the view as supporting data; do not
+present both rich entries for the same draft. The names are known before the run, because the report takes its
 name from the last segment of `--out`: `--out …/2026-08-business-review`
 with `--bundle-id draft-1` writes
-`drafts/draft-1/2026-08-business-review.report.json` inside that directory,
+`drafts/draft-1/2026-08-business-review.view.json` inside that directory,
+with `2026-08-business-review.report.json` retained as the canonical source,
 and `--render pdf,docx,xlsx` writes `2026-08-business-review.pdf`, `.docx`
 and `.xlsx` beside it. Choose a unique `--bundle-id` in every writing run:
 1 to 80 lowercase letters, digits or hyphens. An existing name is refused.
@@ -43,12 +45,14 @@ Without that option the CLI generates an ID and prints the actual paths;
 use the explicit option for same-call `present` paths. The tool attaches each listed file the run wrote and
 tells you so ("Presented to the user: …"); do not call `present_files` for
 those files, and do not list the directory to see that they exist. Name only
-the report and its renders: never `checks.json`, `renders.json` or anything
+the view and its renders: never `checks.json`, `renders.json` or anything
 under `charts/` — the report carries what matters in them, and a file named
 under `present` is delivered whether or not the user wants it. Never call
 `render` once per format, never put renders in the background (`&` returns before the
 files exist, and its output never reaches you), and never write your own Python to
 find out what a run did — the run that made the draft already printed it.
+
+The view is created after successful formats inside the staged bundle and included in its member hashes. Oversized content becomes a concise preview with an explicit omission notice and complete exports. If view creation fails, valid formats are still published and the script says the preview is unavailable. Keep already-presented exports; do not present them twice. If no file was delivered, use the canonical report and formats printed by the successful run in one `present_files` call. Never claim that a failed publication delivered files. Supporting source, checks and charts remain in the bundle, and automatic runtime delivery is unchanged.
 
 Exit codes: `0` done; `1` a problem the user must hear about (stderr says what), including a withheld report or a period with no rows; `2` a command line the script refused, when stderr names the mistake (correct it and run again; there is nothing to tell the user), otherwise this sandbox is not the image the skill is built for (do not install anything; tell the user); `3` one decision is needed before building (stderr carries the question and the candidates).
 
@@ -81,20 +85,20 @@ says so):
 ```json
 {"command": "SKILL_DIR=\"<Directory>\"; python \"${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py\" build /mnt/user-data/uploads/export.xlsx --period 2026-08 --out /mnt/user-data/outputs/reports/2026-08-business-review --bundle-id draft-1 --render pdf,docx,xlsx",
  "present": [
-  "/mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.report.json",
+  "/mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.view.json",
   "/mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.pdf",
   "/mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.docx",
   "/mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.xlsx"
 ]}
 ```
 
-Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `charts/*.png`, `checks.json` and `renders.json` (the bundle identity and hashes of its members) in a new draft directory, `--out/drafts/<bundle-id>/`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the report root. Every requested format must finish before the complete directory becomes visible. A renderer failure or interruption preserves the preceding complete draft. Old bundles are retained unchanged by these commands; removing old directories is an explicit storage cleanup decision that also removes their historical download links. A second build becomes the next draft. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`; leave `--period` off when the user named none. A period with no rows is an error that names the dates the files cover and the rows in each of the latest months, for the user to hear; build another period only when the user picks one.
+Builds `<name>.report.json` (named after the `--out` directory; `--name` overrides), `<name>.view.json`, `charts/*.png`, `checks.json` and `renders.json` (the bundle identity and hashes of its members) in a new draft directory, `--out/drafts/<bundle-id>/`. Use `/mnt/user-data/outputs/reports/<period>-<slug>/` as the report root. Every requested format must finish before the complete directory becomes visible. A renderer failure or interruption preserves the preceding complete draft. Old bundles are retained unchanged by these commands; removing old directories is an explicit storage cleanup decision that also removes their historical download links. A second build becomes the next draft. Earlier months in the same file, or in extra files passed alongside, feed the comparison with the previous period and the same period last year. Periods: `2026-08`, `2026-Q3`, `2026`, or `2026-08-01..2026-08-15`; leave `--period` off when the user named none. A period with no rows is an error that names the dates the files cover and the rows in each of the latest months, for the user to hear; build another period only when the user picks one.
 
 Options: `--exclude category=Warranty` (repeatable; a role or an exact column name, matched case-insensitively), `--company "Name"`, `--title "..."`, `--currency EUR`, `--short` for a one-sentence summary, `--prefs preferences.json`, `--profile <name>` (a tenant profile from `/mnt/tenant/report-profiles/` wins over the skill's `profiles/`).
 
 The output then prints the report itself — the KPIs, every table, the `Checks:` line, a `Not included:` line and the `Inputs:` line — which is what `show` prints, so Step 2 needs no second run. Repeat the checks to the user in plain words, and the not-included items when there are any (the line says "nothing" when every section is there; do not read that out). Never claim a check the line does not show. If the build exits `1` with "Report withheld", the totals did not reconcile: say so, show the check text, and do not render anything.
 
-`--render pdf,docx,xlsx` renders in the same run and is the normal first report: the build already carries a factual summary and actions computed from the data, so the user has all three files after one run. Leave it off only when you are going to write your own summary in Step 2 in the same turn, because the prose step publishes new text and formats in a separate bundle; a build without `--render` still names the report alone under `present`, because the workspace draws the report from it.
+`--render pdf,docx,xlsx` renders in the same run and is the normal first report: the build already carries a factual summary and actions computed from the data, so the user has all three files after one run. Leave it off only when you are going to write your own summary in Step 2 in the same turn, because the prose step publishes new text and formats in a separate bundle; a build without `--render` still names the view alone under `present`, with no invented exports.
 
 ### Step 2: Write the summary and the actions, then verify them
 
@@ -108,29 +112,29 @@ JSON
 SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" prose /mnt/user-data/outputs/reports/2026-08-business-review/drafts/draft-1/2026-08-business-review.report.json --from /tmp/prose.json --render pdf,docx,xlsx --bundle-id draft-2
 ```
 
-again with `present` naming the report and the three renders under `drafts/draft-2/`, the new paths for this run. That one run makes the next draft without recomputing anything, renders all three formats and prints the same figures-checks-inputs digest the build printed — summary and actions included, as the report now carries them. So there is nothing to look up afterwards and Step 3 is already done. Run `show` only for a report built in an earlier turn, whose figures are no longer in front of you. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
+again with `present` naming the view and the three renders under `drafts/draft-2/`, the new paths for this run. That one run makes the next draft without recomputing anything, renders all three formats and prints the same figures-checks-inputs digest the build printed — summary and actions included, as the report now carries them. So there is nothing to look up afterwards and Step 3 is already done. Run `show` only for a report built in an earlier turn, whose figures are no longer in front of you. The script compares every number in your text with the figures in the report (KPIs, tables, checks, the periods named); a sentence with a number that matches none is dropped and the checks line says so. It does not judge the claim around a number, so get the direction words (above, below, up, down) right yourself, and do not cite a figure from a single row, because the check will drop it. If nothing survives, the built text stays and the output says so. Skipping this step is fine: the build already carries a factual summary and actions computed from the data. A rebuild replaces any written text with the computed text; run `prose` again after a rebuild if the text still applies.
 
 ### Step 3: Render
 
 Only for a report whose last run did not render — a `build` or `prose` run
 without `--render`, or a draft from an earlier turn. One run makes every
 format in a new draft directory and copies the report beside them, so in a later turn the report
-and its new renders are named together under `present`.
+preview and its new renders are named together under `present`.
 
 ```bash
 SKILL_DIR="<Directory>"; python "${SKILL_DIR:?assign SKILL_DIR first, as its own statement}/scripts/report.py" render <report.json> --to pdf,docx,xlsx --bundle-id formats-1
 ```
 
-The new JSON and renders land together in `drafts/formats-1/` under the report root; name all those new paths under `present`. The renders are `<name>.pdf`, `.docx` and `.xlsx`; `--to html` also works but HTML is the sheet the PDF is printed from, not a format the user is offered. Rendering reads only `report.json` and the pictures inside the report directory (and the tenant bundle); it never rebuilds. The DOCX has real headings and tables so the user can edit it; the XLSX has a Summary sheet whose revenue, count and average are live formulas over the Rows sheet, one sheet per table with live `SUM` totals and a live ratio for average columns, and the cleaned rows.
+The new source JSON, view and renders land together in `drafts/formats-1/` under the report root; name the view and the rendered formats under `present`, leaving the source as supporting data. The renders are `<name>.pdf`, `.docx` and `.xlsx`; `--to html` also works but HTML is the sheet the PDF is printed from, not a format the user is offered. Rendering reads only `report.json` and the pictures inside the report directory (and the tenant bundle); it never rebuilds. The DOCX has real headings and tables so the user can edit it; the XLSX has a Summary sheet whose revenue, count and average are live formulas over the Rows sheet, one sheet per table with live `SUM` totals and a live ratio for average columns, and the cleaned rows.
 
 ### Step 4: Answer
 
-The files you named under `present` are already with the user: the tool result names them under "Presented to the user". Do not call `present_files` for those and do not run `ls` to check they exist. A `Not attached:` line from the tool names a file it did not deliver and why (it does not exist, or this run did not write it) — if the run printed an error, say what it printed and do not claim a delivery; a `Note:` line from the script names a file that sits beside the report but was not written by it. A result with no "Presented to the user" line handed nothing over: hand over the report and the renders the run printed in one `present_files` call, without listing the directory first. In the web workspace the `<name>.report.json` is drawn as the report itself — the figures, the charts, the checks line and a download button for the PDF, Word and Excel renders listed with it; on a chat platform it is simply one more file. Show the KPI strip, the checks line and any `Not included` items in your reply. Say which file the report used and when it was uploaded (the `Inputs:` line of the digest `build`, `prose` and `show` print). Then ask one short question about what to change, for example whether any rows should be excluded or a note added.
+The files you named under `present` are already with the user: the tool result names them under "Presented to the user". Do not call `present_files` for those and do not run `ls` to check they exist. A `Not attached:` line from the tool names a file it did not deliver and why (it does not exist, or this run did not write it) — if the run printed an error, say what it printed and do not claim a delivery; a `Note:` line from the script names a file that sits beside the report but was not written by it. A result with no "Presented to the user" line handed nothing over: hand over the view (or the canonical report when the preview is unavailable) and the renders the run printed in one `present_files` call, without listing the directory first. In the web workspace `<name>.view.json` shows the skill-formatted figures, charts, checks and explicitly listed downloads. The supporting `<name>.report.json` remains the canonical source. Historical source-only reports use the installed compatibility plugin; on a chat platform the view is an ordinary file. Show the KPI strip, the checks line and any `Not included` items in your reply. Say which file the report used and when it was uploaded (the `Inputs:` line of the digest `build`, `prose` and `show` print). Then ask one short question about what to change, for example whether any rows should be excluded or a note added.
 
 ## Changing a report
 
 - A change to the data (exclude rows, another period, another mapping) is a new `build` into the same `--out` directory with `--render pdf,docx,xlsx`; it becomes the next draft with its own renders. Written text from `prose` is replaced by the computed text; run `prose` again if it still applies.
-- A change to the words (shorter summary, different actions) is one run: `prose … --render pdf,docx,xlsx --bundle-id <new-id>` with `present` naming the new report and renders in that bundle. Nothing is recomputed. A run without `--render` publishes the new JSON without formats; the previous bundle and its formats remain together. Neighboring files the script did not write stay untouched. Use the current report path printed by the previous successful run: stale sources and outside edits are refused, rather than silently overwriting a newer draft.
+- A change to the words (shorter summary, different actions) is one run: `prose … --render pdf,docx,xlsx --bundle-id <new-id>` with `present` naming the new view and renders in that bundle. Nothing is recomputed. A run without `--render` publishes the new JSON without formats; the previous bundle and its formats remain together. Neighboring files the script did not write stay untouched. Use the current report path printed by the previous successful run: stale sources and outside edits are refused, rather than silently overwriting a newer draft.
 - Say what changed and the draft number, for example "Done. Two warranty jobs removed (2 jobs, $0.00). Draft 2."
 - Never modify the uploaded file. Never edit `report.json` by hand; the script owns it.
 
@@ -198,6 +202,8 @@ Per file and sheet it gives the columns with their type and samples, the suggest
 ## Package layout
 
 - [scripts/business_report_publish.py](scripts/business_report_publish.py): stages complete directories, verifies member hashes and serializes current-draft publication with a filesystem lock. Atomic rename protects readers and process interruption; files and directories are flushed before committing the current pointer. A failure after rename may leave a complete unadopted bundle, never a partially published one. Platforms without filesystem locking refuse publication.
+- [schemas/report.schema.json](schemas/report.schema.json): the skill-owned version 1 report model; its logical schema identifier and data shape are unchanged.
+- [scripts/business_report_view.py](scripts/business_report_view.py): formats passive view v1 from the same Python formatting helpers and authored checks. It calculates no new facts.
 - [scripts/report.py](scripts/report.py): the command surface, reading, mapping, metrics, checks and prose; it imports [scripts/business_report_common.py](scripts/business_report_common.py) (constants, formatting, brand) and [scripts/business_report_render.py](scripts/business_report_render.py) (HTML, PDF, DOCX, XLSX, charts) from its own directory.
 - [profiles/services-generic.json](profiles/services-generic.json): the default profile (column aliases, vocabulary, status groups, section order). A tenant profile of the same name in `/mnt/tenant/report-profiles/` replaces it.
 - [templates/report.html.j2](templates/report.html.j2) and [templates/report.css](templates/report.css): the HTML the PDF is printed from; brand colours arrive as CSS variables.

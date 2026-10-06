@@ -1,7 +1,7 @@
 /**
  * `report.json`, the one document the business-report skill's renders read.
  *
- * The shape is `contracts/business_report/report.schema.json`; this module
+ * The shape is `skills/public/business-report/schemas/report.schema.json`; this module
  * carries only what the card draws, and `parseBusinessReport` is the gate that
  * decides a file is one of these at all. It is deliberately strict about the
  * parts it will render and silent about the parts it will not: a report whose

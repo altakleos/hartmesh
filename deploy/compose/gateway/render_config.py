@@ -54,9 +54,9 @@ section: fragment models are no longer appended, whichever provider keys the
 tenant carries.
 
 The rendered ``tenant_bundle.path`` names the directory the operator writes
-the company's brand, starter list and report profiles into. The render reads
+the company's brand, provider support and starter list into. The render reads
 it through the Gateway's own loader and reports one summary line -- whether a
-company name and a logo are set, how many starters and report profiles there
+company name and a logo are set, how many starters there
 are -- plus one ``warning:`` line per problem the loader names. A problem
 never refuses the render: a brand typo is not a reason to deny the tenant a
 Gateway, and the summary is how an operator sees it first.
@@ -896,7 +896,7 @@ def bundle_report(document: Mapping[str, Any]) -> tuple[str, tuple[str, ...]]:
     if not bundle.present:
         return f"tenant bundle at {path}: unusable", bundle.problems
     starters = "none" if bundle.starters is None else str(len(bundle.starters))
-    summary = f"tenant bundle at {path}: company_name {'set' if bundle.company_name else 'unset'}; logo {'present' if bundle.logo else 'absent'}; starters {starters}; report profiles {len(bundle.report_profiles)}"
+    summary = f"tenant bundle at {path}: company_name {'set' if bundle.company_name else 'unset'}; logo {'present' if bundle.logo else 'absent'}; starters {starters}"
     return summary, bundle.problems
 
 

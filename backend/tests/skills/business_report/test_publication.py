@@ -97,6 +97,79 @@ def assert_complete(path):
     assert path.parent.stat().st_mode & 0o777 == 0o755
 
 
+@pytest.mark.parametrize("command", ["build", "prose", "render"])
+def test_passive_view_is_a_hashed_bundle_member_with_only_successful_current_exports(report, tmp_path, command):
+    root = tmp_path / "out"
+    assert build(report, root, formats="docx") == 0
+    source = current(root)
+    if command == "prose":
+        assert report.main(["prose", str(source), "--summary", "Updated words.", "--bundle-id", "updated", "--render", "xlsx"]) == 0
+    elif command == "render":
+        assert report.main(["render", str(source), "--bundle-id", "updated", "--to", "xlsx"]) == 0
+    path = current(root)
+    view_path = path.parent / "out.view.json"
+    view = json.loads(view_path.read_text(encoding="utf-8"))
+    manifest = json.loads((path.parent / "renders.json").read_text(encoding="utf-8"))
+    assert manifest["sha256"][view_path.name] == hashlib.sha256(view_path.read_bytes()).hexdigest()
+    assert view_path.name not in manifest["files"], "the render carry list remains genuine formats only"
+    assert view["primary_source"] == {"path": path.name}
+    expected = {"out.docx", "out.xlsx"} if command == "render" else {"out.xlsx"} if command == "prose" else {"out.docx"}
+    assert {item["path"] for item in view["exports"]} == expected
+    assert_complete(path)
+
+
+@pytest.mark.parametrize("failure", ["serialization", "size", "encoding", "write"])
+def test_a_failed_view_does_not_withhold_successful_formats_or_replace_old_bundles(report, tmp_path, monkeypatch, failure, capsys):
+    root = tmp_path / "out"
+    assert build(report, root) == 0
+    before = public_bytes(current(root).parent)
+    publisher = sys.modules["business_report_publish"]
+    real_write = Path.write_bytes
+
+    def fail_view(*args):
+        if failure == "encoding":
+            raise UnicodeEncodeError("utf-8", "\ud800", 0, 1, "unsupported")
+        if failure == "size":
+            return b"x" * (1024 * 1024 + 1)
+        raise ValueError("controlled view serialization failure")
+
+    def fail_write(path, content):
+        if path.name.endswith(".view.json"):
+            real_write(path, b"partial view")
+            raise OSError("controlled view write failure")
+        return real_write(path, content)
+
+    if failure == "write":
+        monkeypatch.setattr(Path, "write_bytes", fail_write)
+    else:
+        monkeypatch.setattr(publisher, "serialize_view", fail_view)
+    assert build(report, root, "newer") == 0
+    path = current(root)
+    assert path.parent != root / "drafts/initial"
+    assert not (path.parent / "out.view.json").exists()
+    assert (path.parent / "out.docx").is_file() and (path.parent / "out.xlsx").is_file()
+    assert public_bytes(root / "drafts/initial") == before
+    assert "preview unavailable" in capsys.readouterr().err.lower()
+    assert_complete(path)
+
+
+def test_view_interruption_retains_the_old_current_draft_and_has_no_success_paths(report, tmp_path, monkeypatch, capsys):
+    root = tmp_path / "out"
+    assert build(report, root) == 0
+    previous = current(root)
+    before = public_bytes(root)
+    capsys.readouterr()
+
+    def interrupt(*args):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(sys.modules["business_report_publish"], "serialize_view", interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        build(report, root, "interrupted")
+    assert current(root) == previous and public_bytes(root) == before
+    assert "Built" not in capsys.readouterr().out
+
+
 def test_new_draft_is_complete_and_old_bundle_and_unowned_neighbors_are_retained(report, tmp_path, capsys):
     root = tmp_path / "out"
     assert build(report, root) == 0

@@ -179,11 +179,30 @@ skills:
 # Home shows a starter grid. Presentation only; `system_role` limits a person.
 ui:
   profile: business
+  # This report-enabled provider selects its capability content explicitly.
+  # A tenant starters.json still overrides this list, including an empty list.
+  starters:
+    - id: business-review
+      title: Monthly business review
+      prompt: >-
+        Build a monthly business review from the spreadsheet I am about to
+        attach, and give me the PDF, Word and Excel versions.
+    - id: summarize-document
+      title: Summarize a document
+      prompt: >-
+        Read the document I am about to attach and summarize it: what it says,
+        what it asks of me, and anything I should check.
+    - id: ask-a-spreadsheet
+      title: Ask about a spreadsheet
+      prompt: >-
+        Look at the spreadsheet I am about to attach and answer questions about
+        it. Start by telling me what is in it.
 
-# Where the Gateway reads the company's brand, starter list and report
-# profiles: brand.json, an optional PNG or JPEG logo, starters.json and
-# report-profiles/ under /srv/hartmesh/operator/tenant, the operator's own
-# directory on the tenant data disk. Sandboxes mount the same directory
+# Where the Gateway reads the company's brand, provider support and starters:
+# brand.json, an optional PNG or JPEG logo, provider.json and starters.json
+# under /srv/hartmesh/operator/tenant, the operator's own directory on the
+# tenant data disk. Skills read their own report-profiles/ there.
+# Sandboxes mount the same directory
 # read-only at /mnt/tenant (sandbox.mounts above), so the workspace header
 # and the report carry the one name the operator wrote. Every file is
 # optional; a malformed one degrades its own field and is named in the log

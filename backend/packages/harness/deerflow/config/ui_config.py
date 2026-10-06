@@ -89,11 +89,6 @@ class StarterConfig(BaseModel):
 #: using it. A `developer` deployment resolves to no grid at all.
 DEFAULT_STARTERS = (
     StarterConfig(
-        id="business-review",
-        title="Monthly business review",
-        prompt="Build a monthly business review from the spreadsheet I am about to attach, and give me the PDF, Word and Excel versions.",
-    ),
-    StarterConfig(
         id="summarize-document",
         title="Summarize a document",
         prompt="Read the document I am about to attach and summarize it: what it says, what it asks of me, and anything I should check.",
