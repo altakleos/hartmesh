@@ -1,12 +1,14 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
 import { fetch } from "@/core/api/fetcher";
+import { isArtifactViewPath } from "@/core/artifact-views/contract";
 import { parseBusinessReport } from "@/core/business-report";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
 
 import type { AgentThreadState } from "../threads";
 
 import { buildWriteFileDraftContent } from "./preview";
+import { readBoundedArtifactBytes } from "./response";
 import { urlOfArtifact } from "./utils";
 
 function fnv1aHash(value: string): string {
@@ -44,31 +46,66 @@ function parseContentRange(value: string | null) {
   const match = value?.match(/^bytes (?:(\d+)-(\d+)|\*)\/(\d+)$/);
   if (!match) return undefined;
   return {
+    start: match[1] === undefined ? undefined : Number(match[1]),
     end: match[2] === undefined ? undefined : Number(match[2]),
     total: Number(match[3]),
   };
 }
 
-export async function loadArtifactContent({
+type ArtifactLoadOptions = {
+  filepath: string;
+  threadId: string;
+  isMock?: boolean;
+  full?: boolean;
+  reportPreview?: boolean;
+  previewMaxBytes?: number;
+  signal?: AbortSignal;
+};
+
+type LoadedArtifactContent = {
+  content: string;
+  url: string;
+  sha256: string | undefined;
+  projected: boolean;
+  truncated: boolean;
+  previewBytes: number;
+  totalBytes: number | undefined;
+};
+
+export async function loadArtifactContent(
+  options: ArtifactLoadOptions,
+): Promise<LoadedArtifactContent> {
+  if (!isArtifactViewPath(options.filepath))
+    return readArtifactContent(options);
+  const controller = new AbortController();
+  const abort = () => controller.abort(options.signal?.reason);
+  if (options.signal?.aborted) abort();
+  else options.signal?.addEventListener("abort", abort, { once: true });
+  const timeout = setTimeout(
+    () =>
+      controller.abort(
+        new DOMException("Artifact read timed out.", "TimeoutError"),
+      ),
+    20_000,
+  );
+  try {
+    return await readArtifactContent({ ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timeout);
+    options.signal?.removeEventListener("abort", abort);
+  }
+}
+
+async function readArtifactContent({
   filepath,
   threadId,
   isMock,
   full = false,
   previewMaxBytes = ARTIFACT_PREVIEW_MAX_BYTES,
   reportPreview = false,
-}: {
-  filepath: string;
-  threadId: string;
-  isMock?: boolean;
-  full?: boolean;
-  reportPreview?: boolean;
-  /**
-   * How much of the file the preview fetches before calling it truncated.
-   * A file whose preview is drawn from the whole body (a report card) asks
-   * for more than a text preview does.
-   */
-  previewMaxBytes?: number;
-}) {
+  signal,
+}: ArtifactLoadOptions): Promise<LoadedArtifactContent> {
+  signal?.throwIfAborted();
   let enhancedFilepath = filepath;
   if (filepath.endsWith(".skill")) {
     enhancedFilepath = filepath + "/SKILL.md";
@@ -80,11 +117,19 @@ export async function loadArtifactContent({
     requestProjection ? `${url}?report_preview=true` : url,
     {
       cache: "no-store",
+      signal,
       headers: full ? undefined : { Range: `bytes=0-${previewMaxBytes - 1}` },
     },
   );
   const loadSourcePreview = () =>
-    loadArtifactContent({ filepath, threadId, isMock, full, previewMaxBytes });
+    loadArtifactContent({
+      filepath,
+      threadId,
+      isMock,
+      full,
+      previewMaxBytes,
+      signal,
+    });
   if (requestProjection && [413, 415, 422, 501].includes(response.status)) {
     await response.body?.cancel();
     return loadSourcePreview();
@@ -116,15 +161,44 @@ export async function loadArtifactContent({
     throw new Error(`Failed to load artifact: ${response.status}`);
   }
 
-  const bytes = await response.arrayBuffer();
+  const read = full
+    ? { bytes: new Uint8Array(await response.arrayBuffer()), truncated: false }
+    : await readBoundedArtifactBytes(response, previewMaxBytes, signal);
+  signal?.throwIfAborted();
+  const bytes = read.bytes;
+  if (isArtifactViewPath(filepath) && !read.truncated) {
+    if (
+      response.status === 206 &&
+      (contentRange?.start !== 0 ||
+        contentRange.end !== bytes.byteLength - 1 ||
+        !Number.isSafeInteger(contentRange.total) ||
+        contentRange.total < bytes.byteLength ||
+        (full && contentRange.total !== bytes.byteLength))
+    ) {
+      throw new Error("Incomplete artifact view response.");
+    }
+    const encoding = response.headers.get("Content-Encoding");
+    const declared = response.headers.get("Content-Length");
+    if (
+      (!encoding || encoding.toLowerCase() === "identity") &&
+      declared !== null &&
+      /^\d+$/.test(declared) &&
+      Number(declared) !== bytes.byteLength
+    ) {
+      throw new Error("Incomplete artifact view response.");
+    }
+  }
   const truncated =
     !full &&
-    response.status === 206 &&
-    (contentRange?.end === undefined ||
-      contentRange.total > contentRange.end + 1);
+    (read.truncated ||
+      (response.status === 206 &&
+        (contentRange?.end === undefined ||
+          contentRange.total > contentRange.end + 1)));
   // Streaming decode intentionally holds an incomplete trailing UTF-8 code
   // point instead of fabricating U+FFFD at the range boundary.
-  const content = new TextDecoder().decode(bytes, { stream: truncated });
+  const content = new TextDecoder("utf-8", {
+    fatal: isArtifactViewPath(filepath),
+  }).decode(bytes, { stream: truncated });
   const etag = response.headers.get("etag");
   const sourceRevision = etag
     ?.match(/^(?:W\/)?"([0-9a-fA-F]{64})"$/)?.[1]
@@ -136,7 +210,8 @@ export async function loadArtifactContent({
   // partial projection as though it were the original JSON file.
   if (
     projected &&
-    (bytes.byteLength > ARTIFACT_PREVIEW_MAX_BYTES ||
+    (read.truncated ||
+      bytes.byteLength > ARTIFACT_PREVIEW_MAX_BYTES ||
       !sourceRevision ||
       parseBusinessReport(content) === null)
   ) {
@@ -144,6 +219,7 @@ export async function loadArtifactContent({
   }
   const sha256 =
     sourceRevision ?? (!truncated ? await sha256OfText(content) : undefined);
+  signal?.throwIfAborted();
   const contentLengthHeader = response.headers.get(
     projected ? "X-Artifact-Source-Bytes" : "Content-Length",
   );

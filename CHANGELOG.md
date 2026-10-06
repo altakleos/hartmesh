@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Product
+
+- Passive `*.view.json` results render common facts, text, lists, tables,
+  raster images and authored notices without per-skill frontend code. Strict
+  structure, streamed byte bounds and local resource budgets preserve ordinary
+  file access when a view is unavailable. Selected export controls use recorded
+  presentations, authenticated availability checks and existing per-file storage
+  operations, with visible folder suggestions and publication Undo.
+
 ### Schema changes
 
 No database schema changes since `v2.2.0+hartmesh.41`.

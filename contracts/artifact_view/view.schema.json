@@ -1,0 +1,309 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:hartmesh:artifact-view:1",
+  "title": "Passive artifact view v1",
+  "description": "Structural contract for passive artifact views. The host also enforces reference, byte, image, matrix and aggregate resource budgets.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "format": {
+      "const": "hartmesh.artifact-view"
+    },
+    "version": {
+      "const": 1
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "subtitle": {
+      "type": "string",
+      "maxLength": 512
+    },
+    "accent": {
+      "type": "string",
+      "pattern": "^#[0-9a-fA-F]{6}$",
+      "minLength": 7,
+      "maxLength": 7
+    },
+    "primary_source": {
+      "$ref": "#/$defs/resource"
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "collection": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "required": ["collection"]
+    },
+    "blocks": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "$ref": "#/$defs/facts"
+          },
+          {
+            "$ref": "#/$defs/text"
+          },
+          {
+            "$ref": "#/$defs/list"
+          },
+          {
+            "$ref": "#/$defs/table"
+          },
+          {
+            "$ref": "#/$defs/image"
+          },
+          {
+            "$ref": "#/$defs/notice"
+          }
+        ]
+      },
+      "maxItems": 64,
+      "minItems": 0
+    },
+    "exports": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "path": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 1024
+          },
+          "label": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          }
+        },
+        "required": ["path", "label"]
+      },
+      "maxItems": 16,
+      "minItems": 0
+    }
+  },
+  "required": ["format", "version", "title", "blocks", "exports"],
+  "$defs": {
+    "resource": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024,
+          "pattern": "^(?!\\.)(?!.*\\.view\\.json$)[^/\\\\:%?#\\u0000-\\u001f\\u007f]+$"
+        }
+      },
+      "required": ["path"]
+    },
+    "facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "facts"
+        },
+        "heading": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 4096
+              },
+              "detail": {
+                "type": "string",
+                "maxLength": 4096
+              }
+            },
+            "required": ["label", "value"]
+          },
+          "maxItems": 32,
+          "minItems": 1
+        }
+      },
+      "required": ["type", "items"]
+    },
+    "text": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "text"
+        },
+        "heading": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "paragraphs": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 16,
+          "minItems": 1
+        }
+      },
+      "required": ["type", "paragraphs"]
+    },
+    "list": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "list"
+        },
+        "heading": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "ordered": {
+          "type": "boolean"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 32,
+          "minItems": 1
+        }
+      },
+      "required": ["type", "items"]
+    },
+    "table": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "table"
+        },
+        "heading": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "columns": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "label": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 256
+              },
+              "align": {
+                "enum": ["start", "end"]
+              }
+            },
+            "required": ["label"]
+          },
+          "maxItems": 12,
+          "minItems": 1
+        },
+        "rows": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "maxLength": 4096
+            },
+            "maxItems": 12,
+            "minItems": 1
+          },
+          "maxItems": 200,
+          "minItems": 0
+        },
+        "footer": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "maxLength": 4096
+          },
+          "maxItems": 12,
+          "minItems": 1
+        }
+      },
+      "required": ["type", "columns", "rows"]
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "image"
+        },
+        "heading": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        },
+        "alt": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "caption": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      },
+      "required": ["type", "path", "alt"]
+    },
+    "notice": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "const": "notice"
+        },
+        "heading": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "tone": {
+          "enum": ["neutral", "positive", "warning", "negative"]
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "attribution": {
+          "type": "string",
+          "maxLength": 256
+        }
+      },
+      "required": ["type", "tone", "text"]
+    }
+  }
+}

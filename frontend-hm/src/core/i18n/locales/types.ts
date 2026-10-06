@@ -114,6 +114,20 @@ export interface Translations {
     missingTarget: string;
   };
 
+  artifactViews: {
+    unsupported: string;
+    imageUnavailable: string;
+    table: string;
+    exports: string;
+    exportsHint: string;
+    checkingFiles: string;
+    filesUncertain: string;
+    noAvailableFiles: string;
+    retry: string;
+    collection: (name: string) => string;
+    ignoredCollection: string;
+  };
+
   artifactArchive: {
     downloadCurrent: (count: number) => string;
     currentVersionNotice: string;

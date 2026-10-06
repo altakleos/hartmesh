@@ -1,0 +1,56 @@
+{
+  "format": "hartmesh.artifact-view",
+  "version": 1,
+  "title": "Supplier comparison",
+  "primary_source": {
+    "path": "comparison.json"
+  },
+  "destination": {
+    "collection": "Comparisons"
+  },
+  "blocks": [
+    {
+      "type": "text",
+      "heading": "Summary",
+      "paragraphs": [
+        "Supplier B quotes the shorter delivery interval. Confirm exclusions before deciding."
+      ]
+    },
+    {
+      "type": "table",
+      "heading": "Quoted terms",
+      "columns": [
+        {
+          "label": "Supplier"
+        },
+        {
+          "label": "Quoted total",
+          "align": "end"
+        },
+        {
+          "label": "Delivery"
+        }
+      ],
+      "rows": [
+        ["Supplier A", "$4,800", "14 days"],
+        ["Supplier B", "$5,050", "7 days"]
+      ]
+    },
+    {
+      "type": "notice",
+      "tone": "warning",
+      "text": "Installation is excluded. These quoted amounts do not establish the total project cost.",
+      "attribution": "Comparison skill"
+    }
+  ],
+  "exports": [
+    {
+      "path": "comparison.pdf",
+      "label": "Decision brief"
+    },
+    {
+      "path": "comparison.xlsx",
+      "label": "Quoted terms workbook"
+    }
+  ]
+}

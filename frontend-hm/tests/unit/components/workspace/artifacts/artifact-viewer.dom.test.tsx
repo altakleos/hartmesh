@@ -42,6 +42,7 @@ describe("ArtifactViewer", () => {
       content: "# Quarterly report\n\nRevenue is up.",
       url: urlOfArtifact({ filepath, threadId }),
       sha256: undefined,
+      projected: false,
       truncated: false,
       previewBytes: 36,
       totalBytes: 36,
@@ -66,6 +67,7 @@ describe("ArtifactViewer", () => {
       filepath,
       threadId,
       isMock: false,
+      signal: expect.any(AbortSignal),
       full: false,
     });
   });
@@ -78,6 +80,7 @@ describe("ArtifactViewer", () => {
         filepath,
         threadId,
         isMock: true,
+        signal: expect.any(AbortSignal),
         full: false,
       });
     });
@@ -88,6 +91,7 @@ describe("ArtifactViewer", () => {
       content: full ? "# Full report\n\nEverything." : "# Full rep",
       url: urlOfArtifact({ filepath, threadId }),
       sha256: undefined,
+      projected: false,
       truncated: !full,
       previewBytes: full ? 27 : 10,
       totalBytes: 27,
@@ -106,6 +110,7 @@ describe("ArtifactViewer", () => {
       filepath,
       threadId,
       isMock: false,
+      signal: expect.any(AbortSignal),
       full: true,
     });
     expect(screen.queryByRole("button", { name: "Load full file" })).toBe(null);
