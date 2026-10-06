@@ -108,6 +108,9 @@ Route layouts use Next.js metadata directly; the product has no Nuxt image modul
 The production Docker image resolves the `packageManager`-pinned pnpm release
 at build time into the shared `/opt/corepack` cache. Keep that cache readable by
 the chart's non-root uid 1000 so `pnpm start` never downloads its toolchain.
+Next builds type-check product sources with `tsconfig.build.json`; provider-dependent
+test fixtures remain in the default `tsconfig.json` checked by `pnpm check`.
+The frontend image must build without sibling backend source files.
 
 Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
 
