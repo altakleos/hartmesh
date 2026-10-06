@@ -79,6 +79,12 @@ and downloading use the canonical file. See the
 The root example and production Compose template explicitly enable the installed
 historical-report compatibility package. Existing custom configurations need the
 same `plugins:` entry and a restart to retain historical cards.
+The report skill now publishes a passive view with explicitly generated downloads
+inside each immutable draft. Its existing Python formatters own the displayed
+values and checks. Oversized views explain omissions; failed views retain ordinary
+formats. The report model schema ships with the skill. Generic business starters
+cover documents and spreadsheets; the report-enabled Compose provider explicitly
+selects the monthly-review starter, and tenant starter overrides still take priority.
 
 The Files page follows the selected tab in its URL, including Shared links and
 browser history. Each tab can filter loaded files by name or folder and sort by

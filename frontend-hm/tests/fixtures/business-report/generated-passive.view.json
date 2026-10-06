@@ -1,0 +1,266 @@
+{
+  "format": "hartmesh.artifact-view",
+  "version": 1,
+  "title": "August 2026 Business Review",
+  "subtitle": "Example Services Co. · August 2026 · USD · Draft 1",
+  "primary_source": { "path": "source.json" },
+  "destination": { "collection": "Reports" },
+  "blocks": [
+    {
+      "type": "facts",
+      "items": [
+        {
+          "label": "Revenue",
+          "value": "$74,702.61",
+          "detail": "+38.7% vs July 2026"
+        },
+        { "label": "Jobs", "value": "164", "detail": "+20.6% vs July 2026" },
+        { "label": "Avg ticket", "value": "$455.50" },
+        { "label": "Unpaid", "value": "$14,213.15" },
+        { "label": "New customer share", "value": "28.6%" }
+      ]
+    },
+    {
+      "type": "notice",
+      "heading": "Checks",
+      "tone": "warning",
+      "text": "Totals match your file: $74,702.61 across 164 jobs. 2 jobs had no technician and are listed as Unassigned. 12 cancelled jobs and 16 jobs at $0.00 are included in the job count and the average ticket.",
+      "attribution": "Report script"
+    },
+    {
+      "type": "notice",
+      "tone": "positive",
+      "text": "Used 164 of 300 rows: 136 are outside August 2026, 0 had no usable date.",
+      "attribution": "Report script"
+    },
+    {
+      "type": "notice",
+      "tone": "positive",
+      "text": "Totals match your file: $74,702.61 across 164 jobs.",
+      "attribution": "Report script"
+    },
+    {
+      "type": "notice",
+      "tone": "positive",
+      "text": "No job ID appears more than once.",
+      "attribution": "Report script"
+    },
+    {
+      "type": "notice",
+      "tone": "warning",
+      "text": "2 jobs had no technician and are listed as Unassigned.",
+      "attribution": "Report script"
+    },
+    {
+      "type": "notice",
+      "tone": "positive",
+      "text": "Every row has a usable amount.",
+      "attribution": "Report script"
+    },
+    {
+      "type": "notice",
+      "tone": "positive",
+      "text": "Amounts are in USD (from the column header).",
+      "attribution": "Report script"
+    },
+    {
+      "type": "notice",
+      "tone": "warning",
+      "text": "12 cancelled jobs and 16 jobs at $0.00 are included in the job count and the average ticket.",
+      "attribution": "Report script"
+    },
+    {
+      "type": "text",
+      "heading": "Summary",
+      "paragraphs": [
+        "August 2026: $74,702.61 in revenue across 164 jobs, an average of $455.50 per job. That is 38.7% above July 2026 ($53,864.48). Installation was the largest service at 51.6% of revenue. F. Haddad led with $16,490.17 across 30 jobs. $14,213.15 across 23 jobs is unpaid."
+      ]
+    },
+    {
+      "type": "table",
+      "heading": "Compared with earlier periods",
+      "columns": [
+        { "label": "Metric", "align": "start" },
+        { "label": "August 2026", "align": "end" },
+        { "label": "July 2026", "align": "end" },
+        { "label": "Change", "align": "end" }
+      ],
+      "rows": [
+        ["Revenue", "$74,702.61", "$53,864.48", "38.7%"],
+        ["Jobs", "164", "136", "20.6%"],
+        ["Average ticket", "$455.50", "$396.06", "15.0%"]
+      ]
+    },
+    {
+      "type": "table",
+      "heading": "By week",
+      "columns": [
+        { "label": "Week", "align": "start" },
+        { "label": "Jobs", "align": "end" },
+        { "label": "Revenue", "align": "end" },
+        { "label": "Avg ticket", "align": "end" }
+      ],
+      "rows": [
+        ["1–2 Aug", "3", "$595.44", "$198.48"],
+        ["3–9 Aug", "32", "$10,003.14", "$312.60"],
+        ["10–16 Aug", "43", "$20,782.22", "$483.31"],
+        ["17–23 Aug", "41", "$19,285.19", "$470.37"],
+        ["24–30 Aug", "39", "$21,436.16", "$549.65"],
+        ["31 Aug", "6", "$2,600.46", "$433.41"]
+      ],
+      "footer": ["Total", "164", "$74,702.61", "$455.50"]
+    },
+    {
+      "type": "table",
+      "heading": "By service",
+      "columns": [
+        { "label": "Service", "align": "start" },
+        { "label": "Jobs", "align": "end" },
+        { "label": "Revenue", "align": "end" },
+        { "label": "Avg ticket", "align": "end" },
+        { "label": "Share", "align": "end" }
+      ],
+      "rows": [
+        ["Installation", "42", "$38,521.86", "$917.19", "51.6%"],
+        ["Repair", "59", "$24,469.62", "$414.74", "32.8%"],
+        ["Maintenance", "33", "$7,620.42", "$230.92", "10.2%"],
+        ["Consultation", "12", "$2,232.86", "$186.07", "3.0%"],
+        ["Inspection", "14", "$1,857.85", "$132.70", "2.5%"],
+        ["Warranty", "4", "$0.00", "$0.00", "0.0%"]
+      ],
+      "footer": ["Total", "164", "$74,702.61", "$455.50", "100.0%"]
+    },
+    {
+      "type": "table",
+      "heading": "By technician",
+      "columns": [
+        { "label": "Technician", "align": "start" },
+        { "label": "Jobs", "align": "end" },
+        { "label": "Revenue", "align": "end" },
+        { "label": "Avg ticket", "align": "end" },
+        { "label": "Unpaid", "align": "end" }
+      ],
+      "rows": [
+        ["F. Haddad", "30", "$16,490.17", "$549.67", "$4,806.61"],
+        ["B. Chen", "37", "$14,820.26", "$400.55", "$1,634.90"],
+        ["E. Schmidt", "19", "$14,278.37", "$751.49", "$2,106.52"],
+        ["D. Novak", "28", "$12,910.69", "$461.10", "$1,951.03"],
+        ["C. Okafor", "24", "$8,499.60", "$354.15", "$3,465.57"],
+        ["A. Rivera", "24", "$6,539.76", "$272.49", "$0.00"],
+        ["Unassigned", "2", "$1,163.76", "$581.88", "$248.52"]
+      ],
+      "footer": ["Total", "164", "$74,702.61", "$455.50", "$14,213.15"]
+    },
+    {
+      "type": "text",
+      "heading": "Top 10 customers",
+      "paragraphs": [
+        "8 of 28 customers were new in August 2026 (28.6%), based on the files given."
+      ]
+    },
+    {
+      "type": "table",
+      "heading": "Top 10 customers",
+      "columns": [
+        { "label": "Customer", "align": "start" },
+        { "label": "Jobs", "align": "end" },
+        { "label": "Revenue", "align": "end" },
+        { "label": "Avg ticket", "align": "end" }
+      ],
+      "rows": [
+        ["Elm Point Hotel", "12", "$7,338.31", "$611.53"],
+        ["Stone Ridge Apartments", "11", "$5,227.40", "$475.22"],
+        ["Maple Crossing Offices", "7", "$5,205.74", "$743.68"],
+        ["Cedar Ridge Hotel", "10", "$5,046.13", "$504.61"],
+        ["Hillcrest Crossing Library", "10", "$4,698.41", "$469.84"],
+        ["Cedar Creek Cafe", "8", "$4,117.26", "$514.66"],
+        ["Oak Street Studio", "7", "$3,919.99", "$560.00"],
+        ["Elm View Bakery", "11", "$3,791.32", "$344.67"],
+        ["Lakeside Ridge Library", "6", "$3,568.60", "$594.77"],
+        ["Willow Heights Cafe", "6", "$3,516.98", "$586.16"]
+      ]
+    },
+    {
+      "type": "table",
+      "heading": "By status",
+      "columns": [
+        { "label": "Status", "align": "start" },
+        { "label": "Jobs", "align": "end" },
+        { "label": "Revenue", "align": "end" },
+        { "label": "Avg ticket", "align": "end" },
+        { "label": "Share", "align": "end" }
+      ],
+      "rows": [
+        ["Paid", "129", "$60,489.46", "$468.91", "81.0%"],
+        ["Unpaid", "23", "$14,213.15", "$617.96", "19.0%"],
+        ["Cancelled", "12", "$0.00", "$0.00", "0.0%"]
+      ],
+      "footer": ["Total", "164", "$74,702.61", "$455.50", "100.0%"]
+    },
+    {
+      "type": "table",
+      "heading": "By lead source",
+      "columns": [
+        { "label": "Lead source", "align": "start" },
+        { "label": "Jobs", "align": "end" },
+        { "label": "Revenue", "align": "end" },
+        { "label": "Avg ticket", "align": "end" },
+        { "label": "Share", "align": "end" }
+      ],
+      "rows": [
+        ["Referral", "59", "$30,106.23", "$510.28", "40.3%"],
+        ["Website", "55", "$27,273.85", "$495.89", "36.5%"],
+        ["Repeat", "30", "$10,253.07", "$341.77", "13.7%"],
+        ["Phone", "13", "$4,799.77", "$369.21", "6.4%"],
+        ["Social", "7", "$2,269.69", "$324.24", "3.0%"]
+      ],
+      "footer": ["Total", "164", "$74,702.61", "$455.50", "100.0%"]
+    },
+    {
+      "type": "list",
+      "heading": "What to act on",
+      "items": [
+        "Collect the $14,213.15 still unpaid across 23 jobs.",
+        "Installation is 51.6% of revenue; a slow month there moves the whole business.",
+        "Assign the 2 jobs with no technician so the by-technician figures are complete."
+      ]
+    },
+    {
+      "type": "image",
+      "path": "charts/revenue_by_period.png",
+      "alt": "Revenue by week",
+      "heading": "Revenue by week"
+    },
+    {
+      "type": "image",
+      "path": "charts/revenue_by_category.png",
+      "alt": "Revenue by service",
+      "heading": "Revenue by service"
+    },
+    {
+      "type": "image",
+      "path": "charts/jobs_by_person.png",
+      "alt": "Jobs by technician",
+      "heading": "Jobs by technician"
+    },
+    {
+      "type": "list",
+      "heading": "Not included",
+      "items": [
+        "Comparison with August 2025: not included, the files have no rows for that period."
+      ]
+    },
+    {
+      "type": "list",
+      "heading": "Inputs",
+      "items": [
+        "example_services_export_small.csv (uploaded 2026-09-15, 300 rows)"
+      ]
+    }
+  ],
+  "exports": [
+    { "path": "summary.pdf", "label": "PDF report" },
+    { "path": "summary.docx", "label": "Editable Word report" }
+  ],
+  "accent": "#1F4E79"
+}

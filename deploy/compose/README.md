@@ -1014,15 +1014,19 @@ never with the value. `gateway/render_config.py --check` (§ "Operator-managed
 models" gives the invocation: an `exec` into the running Gateway, which reads
 the bundle through its own read-only mount, so what it sees is what the
 workspace sees) prints the same problems and one summary line -- whether a
-name and a logo are set, how many starters and report profiles there are --
-and still renders. Report profiles are listed, not validated: the skill
-validates a profile when it loads one and says what is missing.
+name and a logo are set, and how many starters there are -- and still renders.
+Report profiles remain owned by the skill, which loads and validates them itself;
+generic Gateway diagnostics do not enumerate that directory.
 
 The profile runs the business profile (`ui.profile: business` in
 `config.yaml`) and explicitly enables the installed `hartmesh-legacy-report`
 compatibility plugin through `plugins:`. Historical cards, projection and filing
 use that package; disabling its entry and restarting leaves ordinary file access.
 The provider template owns this selection.
+It also explicitly selects the existing monthly review, document summary and
+spreadsheet starters in `ui.starters`. Generic business defaults contain only the
+two document/spreadsheet tasks. Tenant `starters.json` takes precedence, including
+an intentionally empty list.
 
 With the business profile, the screens for building the deployment -- skills, tools,
 subagents, integrations, and the scheduled-task recipes -- are offered to

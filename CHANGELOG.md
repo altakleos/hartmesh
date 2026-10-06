@@ -11,6 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Product
 
+- Report drafts include a skill-generated passive view with explicit exports and
+  bounded, truthful fallback. The unchanged report model schema now belongs to
+  skill packaging. Generic tenant diagnostics no longer enumerate report profiles;
+  the reporting deployment explicitly selects its existing starter grid. No database
+  schema change.
 - Already-presented sibling views can provide the preferred rich presentation
   for an ordinary source file. Bounded one-hop resolution preserves canonical
   source controls and falls back on invalid or ambiguous candidates. Passive

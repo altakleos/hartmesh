@@ -48,7 +48,7 @@ def test_no_path_is_an_empty_bundle_with_nothing_to_report() -> None:
     assert bundle.path is None
     assert bundle.company_name is None and bundle.logo is None
     assert bundle.primary is None and bundle.secondary is None
-    assert bundle.starters is None and bundle.report_profiles == ()
+    assert bundle.starters is None
     assert bundle.problems == ()
 
 
@@ -70,7 +70,7 @@ def test_a_directory_the_gateway_cannot_traverse_is_one_named_problem_not_a_trac
     finally:
         root.chmod(0o750)
     assert bundle.present is False
-    assert bundle.company_name is None and bundle.starters is None and bundle.report_profiles == ()
+    assert bundle.company_name is None and bundle.starters is None
     assert bundle.problems == ("tenant bundle directory cannot be read",)
 
 
@@ -212,7 +212,7 @@ def test_a_starter_list_that_breaks_the_rules_is_a_named_problem_and_no_list(tmp
     assert bundle.problems == (rule,)
 
 
-def test_report_profiles_are_listed_by_name_and_left_to_the_skill(tmp_path: Path) -> None:
+def test_skill_profiles_remain_skill_owned_and_are_not_enumerated_by_the_gateway(tmp_path: Path) -> None:
     root = _bundle(tmp_path, FULL_BRAND)
     profiles = root / "report-profiles"
     profiles.mkdir()
@@ -220,8 +220,26 @@ def test_report_profiles_are_listed_by_name_and_left_to_the_skill(tmp_path: Path
     (profiles / "example.json").write_text("not even json", encoding="utf-8")
     (profiles / "notes.txt").write_text("", encoding="utf-8")
     bundle = load_tenant_bundle(root)
-    assert bundle.report_profiles == ("example", "services-generic"), "names only, sorted; the skill validates a profile when it loads one"
+    assert not hasattr(bundle, "report_profiles"), "the skill alone reads and validates its own profiles"
     assert bundle.problems == ()
+
+
+def test_unreadable_skill_profile_directory_does_not_degrade_generic_branding(tmp_path, monkeypatch):
+    root = _bundle(tmp_path, FULL_BRAND)
+    profiles = root / "report-profiles"
+    profiles.mkdir()
+    actual_is_dir = Path.is_dir
+
+    def guarded_is_dir(path):
+        if path == profiles:
+            raise PermissionError("skill-owned directory is unreadable")
+        return actual_is_dir(path)
+
+    monkeypatch.setattr(Path, "is_dir", guarded_is_dir)
+    bundle = load_tenant_bundle(root)
+    assert bundle.present and bundle.company_name == FULL_BRAND["company_name"]
+    assert bundle.problems == ()
+    assert not hasattr(bundle, "report_profiles")
 
 
 def test_the_config_key_is_one_optional_path() -> None:

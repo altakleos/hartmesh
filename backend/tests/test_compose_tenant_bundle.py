@@ -92,7 +92,17 @@ def test_compose_creates_the_directory_before_any_sandbox_binds_it() -> None:
 
 def test_the_tenant_profile_is_the_business_profile(template: dict) -> None:
     """Someone who is not an administrator is not offered the developer screens; the bundle's starters land on a Home that shows a grid."""
-    assert template["ui"] == {"profile": "business"}
+    assert template["ui"]["profile"] == "business"
+
+
+def test_report_enabled_provider_selects_the_existing_three_starters(template: dict) -> None:
+    from deerflow.config.ui_config import UiConfig
+
+    selected = UiConfig.model_validate(template["ui"]).starters
+    assert [starter.id for starter in selected] == ["business-review", "summarize-document", "ask-a-spreadsheet"]
+    assert selected[0].title == "Monthly business review"
+    assert "PDF, Word and Excel" in selected[0].prompt
+    assert template["ui"]["starters"], "the provider selects capability content explicitly"
 
 
 def test_the_rendered_profile_validates_both_sections(render_config: ModuleType) -> None:
@@ -134,7 +144,7 @@ def test_check_tells_the_operator_what_the_bundle_holds(render_config: ModuleTyp
     code, out, err = _check(render_config, _template_pointing_at(tmp_path, bundle), capsys, monkeypatch)
 
     assert code == 0
-    assert f"tenant bundle at {bundle}: company_name set; logo present; starters 1; report profiles 1" in out
+    assert f"tenant bundle at {bundle}: company_name set; logo present; starters 1" in out
     assert "warning" not in err
     assert "Example Services Co." not in out + err, "the summary counts and states; it never prints what the operator wrote"
 
@@ -149,7 +159,7 @@ def test_check_names_what_is_wrong_and_still_renders(render_config: ModuleType, 
     code, out, err = _check(render_config, _template_pointing_at(tmp_path, bundle), capsys, monkeypatch)
 
     assert code == 0
-    assert f"tenant bundle at {bundle}: company_name unset; logo absent; starters none; report profiles 0" in out
+    assert f"tenant bundle at {bundle}: company_name unset; logo absent; starters none" in out
     assert "render_config: warning: tenant bundle: brand.json: not a JSON object" in err
     assert "render_config: warning: tenant bundle: starters.json: value_error" in err
 

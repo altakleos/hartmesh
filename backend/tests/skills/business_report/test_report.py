@@ -39,7 +39,7 @@ SKILL_DIR = REPO_ROOT / "skills" / "public" / "business-report"
 SCRIPT = SKILL_DIR / "scripts" / "report.py"
 SKILL_DOC = SKILL_DIR / "SKILL.md"
 PROFILE = SKILL_DIR / "profiles" / "services-generic.json"
-SCHEMA = REPO_ROOT / "contracts" / "business_report" / "report.schema.json"
+SCHEMA = SKILL_DIR / "schemas" / "report.schema.json"
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 LARGE_CSV = FIXTURES / "example_services_export.csv"
 LARGE_XLSX = FIXTURES / "example_services_export.xlsx"
@@ -202,7 +202,7 @@ def test_warning_action_preserves_business_actions_and_authored_prose_rules(repo
 
 def test_script_installs_nothing_never_shells_out_and_runs_on_the_image_python() -> None:
     modules = sorted((SKILL_DIR / "scripts").glob("*.py"))
-    assert [module.name for module in modules] == ["business_report_common.py", "business_report_publish.py", "business_report_render.py", "business_report_sections.py", "report.py"]
+    assert [module.name for module in modules] == ["business_report_common.py", "business_report_publish.py", "business_report_render.py", "business_report_sections.py", "business_report_view.py", "report.py"]
     for module in modules:
         source = module.read_text(encoding="utf-8")
         ast.parse(source, feature_version=(3, 10))
@@ -1710,7 +1710,7 @@ def test_every_path_a_run_writes_is_known_before_the_run(report, tmp_path, capsy
     call that makes them, so their names must follow from what it chose: the
     report is named after its `--out` directory, the renders after the report."""
     out_dir = tmp_path / "2026-08-business-review"
-    expected = [out_dir / "drafts/initial" / f"2026-08-business-review.{ext}" for ext in ("report.json", "pdf", "docx", "xlsx")]
+    expected = [out_dir / "drafts/initial" / f"2026-08-business-review.{ext}" for ext in ("view.json", "pdf", "docx", "xlsx")]
 
     code, _out, err = _build(report, capsys, out_dir, str(SMALL_CSV), "--period", "2026-08", "--render", "pdf,docx,xlsx", "--bundle-id", "initial")
 
@@ -2113,7 +2113,7 @@ def test_the_doc_shows_present_beside_command_in_one_call(report) -> None:
     assert words[words.index("--render") + 1] == "pdf,docx,xlsx"
     out_dir = Path(words[words.index("--out") + 1])
     assert [Path(p).parent for p in call["present"]] == [out_dir / "drafts" / words[words.index("--bundle-id") + 1]] * 4, "present names the new complete bundle"
-    assert [Path(p).name for p in call["present"]] == [f"{out_dir.name}.{ext}" for ext in ("report.json", "pdf", "docx", "xlsx")]
+    assert [Path(p).name for p in call["present"]] == [f"{out_dir.name}.{ext}" for ext in ("view.json", "pdf", "docx", "xlsx")]
     assert not re.search(r"```bash\n[^`]*report\.py\" build", doc), "the build example is shown once, as the call"
     assert "`--present`" in doc, "the doc names the mistake the script refuses"
 

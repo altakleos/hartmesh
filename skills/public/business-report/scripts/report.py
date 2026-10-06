@@ -1453,6 +1453,11 @@ def print_unowned_renders(report_path: Path) -> None:
 
 
 def print_rendered(report_path: Path, targets: list[str]) -> None:
+    view_path = report_path.parent / f"{report_path.name.removesuffix(REPORT_SUFFIX)}.view.json"
+    if view_path.is_file():
+        print(f"Preview: {view_path}")
+    else:
+        print(f"Preview unavailable; ordinary report: {report_path}")
     for target in targets:
         print(f"Rendered {target}: {report_path.parent / _render_name(report_path, target)}")
 

@@ -12,11 +12,13 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import uuid
 from pathlib import Path
 
 from business_report_common import REPORT_SUFFIX, InputError
+from business_report_view import MAX_BYTES, VIEW_SUFFIX, serialize_view
 
 STATE_DIR = Path(".cache/business-report")
 BUNDLE_ID = re.compile(r"^[a-z0-9][a-z0-9-]{0,79}$")
@@ -166,6 +168,17 @@ def publish_bundle(root: Path, base: str, report: dict, targets: list[str], tena
         for target in targets:
             generated = render(report, path, target, None, tenant_dir)
             names.append(generated.name)
+        # Presentation is a supporting member, never a carried render format.
+        # Only files successfully staged for this exact draft become exports.
+        view_path = stage / f"{base}{VIEW_SUFFIX}"
+        try:
+            content = serialize_view(report, path.name, sorted(set(names)))
+            if not isinstance(content, bytes) or len(content) > MAX_BYTES:
+                raise ValueError("Preview bytes exceed the supported presentation limit.")
+            view_path.write_bytes(content)
+        except Exception:
+            view_path.unlink(missing_ok=True)
+            sys.stderr.write("Report preview unavailable; continuing with ordinary formats.\n")
         members = {member.relative_to(stage).as_posix(): hashlib.sha256(member.read_bytes()).hexdigest() for member in sorted(stage.rglob("*")) if member.is_file()}
         write_json(stage / "renders.json", {"version": 2, "base": base, "bundle": identity, "draft": report["meta"]["draft"], "files": sorted(set(names)), "sha256": members})
         # Flush every member and child directory before the one visibility boundary.

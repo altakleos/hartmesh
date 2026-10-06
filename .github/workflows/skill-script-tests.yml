@@ -12,7 +12,7 @@ on:
       - 'skills/public/**'
       - 'backend/tests/skills/**'
       - 'backend/tests/test_skill_load_first_batch_e2e.py'
-      - 'contracts/business_report/**'
+      - 'contracts/artifact_view/**'
       - 'docker/sandbox/Dockerfile'
       - '.github/workflows/skill-script-tests.yml'
   pull_request:
@@ -21,7 +21,7 @@ on:
       - 'skills/public/**'
       - 'backend/tests/skills/**'
       - 'backend/tests/test_skill_load_first_batch_e2e.py'
-      - 'contracts/business_report/**'
+      - 'contracts/artifact_view/**'
       - 'docker/sandbox/Dockerfile'
       - '.github/workflows/skill-script-tests.yml'
 

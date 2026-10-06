@@ -1,6 +1,27 @@
+import { readFileSync } from "node:fs";
+
 import { expect, test, type Page } from "@playwright/test";
 
 import { mockLangGraphAPI } from "./utils/mock-api";
+
+const sourceReport = JSON.parse(
+  readFileSync(
+    new URL(
+      "../fixtures/business-report/2026-08-business-review.report.json",
+      import.meta.url,
+    ),
+    "utf-8",
+  ),
+) as { meta: { title: string } };
+const generatedReportView = JSON.parse(
+  readFileSync(
+    new URL(
+      "../fixtures/business-report/generated-passive.view.json",
+      import.meta.url,
+    ),
+    "utf-8",
+  ),
+) as { title: string };
 
 const THREAD = "00000000-0000-0000-0000-000000004200";
 const DIR = "/mnt/user-data/outputs/summary";
@@ -70,6 +91,7 @@ async function openView(
   page: Page,
   options: {
     body?: string;
+    sourceBody?: string;
     image?: Buffer | string;
     available?: () => boolean;
     saved?: Record<string, unknown>[];
@@ -78,16 +100,22 @@ async function openView(
     omitRevision?: boolean;
     openSource?: boolean;
     ambiguous?: boolean;
+    producerHandover?: boolean;
   } = {},
 ) {
-  const presented = [VIEW, PDF, WORD, SOURCE, `${DIR}/pixel.png`];
+  const presented = options.producerHandover
+    ? [VIEW, PDF, WORD]
+    : [VIEW, PDF, WORD, SOURCE, `${DIR}/pixel.png`];
   if (options.ambiguous) presented.push(`${DIR}/other.view.json`);
   mockLangGraphAPI(page, {
     threads: [
       {
         thread_id: THREAD,
         title: "Summary",
-        artifacts: [...presented, `${DIR}/unpresented.xlsx`],
+        artifacts: [
+          ...new Set([...presented, SOURCE, `${DIR}/pixel.png`]),
+          `${DIR}/unpresented.xlsx`,
+        ],
         messages: [
           {
             type: "human",
@@ -131,7 +159,7 @@ async function openView(
     route.fulfill({
       contentType: "application/json",
       headers: { ETag: `"${"b".repeat(64)}"` },
-      body: '{"source":"Raw source content"}',
+      body: options.sourceBody ?? '{"source":"Raw source content"}',
     }),
   );
   if (options.ambiguous)
@@ -227,6 +255,53 @@ test("a unique presented sibling view is preferred while canonical source stays 
   ).toBeVisible();
   await page.getByRole("button", { name: "View source", exact: true }).click();
   await expect(page.locator(".cm-content")).toContainText("Raw source content");
+  await expect(card).toHaveCount(0);
+});
+
+test("actual skill output uses one passive presentation and explicit report exports", async ({
+  page,
+}) => {
+  const saved: Record<string, unknown>[] = [];
+  const shared: Record<string, unknown>[] = [];
+  const card = await openView(page, {
+    body: JSON.stringify(generatedReportView),
+    sourceBody: JSON.stringify(sourceReport),
+    saved,
+    shared,
+    producerHandover: true,
+  });
+  await expect(
+    card.getByRole("heading", { name: generatedReportView.title }),
+  ).toBeVisible();
+  await expect(page.getByTestId("artifact-view")).toHaveCount(1);
+  await expect(page.getByTestId("plugin-artifact-presentation")).toHaveCount(0);
+  await expect(
+    page.getByRole("log").getByText("source.json", { exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    card.getByText("$74,702.61", { exact: true }).first(),
+  ).toBeVisible();
+  await expect(
+    card.getByText("+38.7% vs July 2026", { exact: true }),
+  ).toBeVisible();
+  await expect(
+    card.getByRole("link", { name: "Download PDF report" }),
+  ).toBeVisible();
+  await card.getByRole("checkbox", { name: "Editable Word report" }).uncheck();
+  await card.getByRole("button", { name: "Save to My files" }).click();
+  await expect.poll(() => saved).toEqual([{ path: PDF, folder: "Reports" }]);
+  await card.getByRole("button", { name: "Share with everyone" }).click();
+  await expect
+    .poll(() => shared)
+    .toEqual([{ path: PDF, thread_id: THREAD, folder: "Reports" }]);
+  await page
+    .getByRole("combobox")
+    .filter({ hasText: "summary.view.json" })
+    .click();
+  await page.getByRole("option", { name: "source.json", exact: true }).click();
+  await expect(page.locator(".cm-content")).toContainText(
+    sourceReport.meta.title,
+  );
   await expect(card).toHaveCount(0);
 });
 

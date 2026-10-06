@@ -1,14 +1,13 @@
 """The tenant bundle: what a deployment says about the company it serves.
 
 One directory on the deployment's own disk, written by the operator and read
-by two consumers that never talk to each other: every sandbox mounts it
-read-only at ``/mnt/tenant`` so the report skill picks up the company name,
-logo and colours by itself, and the Gateway reads the same files so the
+by independent consumers: sandboxes can mount it read-only for skills,
+and the Gateway reads its generic branding and starter files so the
 workspace header, the About page and Home's starter grid show the same
 company. There is no second place a brand is written and nothing that copies
 one into the other; the config carries one optional path and nothing else.
 
-Its layout is the skill's contract (``skills/public/business-report``):
+The generic layout is:
 
 * ``brand.json`` -- ``company_name``, ``logo`` (a PNG or JPEG next to it),
   ``colors.primary`` and ``colors.secondary`` as ``#rrggbb``;
@@ -17,8 +16,8 @@ Its layout is the skill's contract (``skills/public/business-report``):
 * ``starters.json`` -- Home's starter list, the same shape ``ui.starters``
   takes in ``config.yaml`` and validated by the same rules, because it is the
   same list arriving from a different file;
-* ``report-profiles/*.json`` -- report profiles the skill loads by name ahead
-  of its own; listed here, validated there.
+
+Skills own additional resources and validation; this loader never enumerates them.
 
 Every file is optional and a missing one is not a problem. A malformed one is
 a *named* problem -- the file, the field and the rule, never the value, since
@@ -44,9 +43,7 @@ from deerflow.config.ui_config import StarterConfig, UiConfig, first_control_or_
 
 logger = logging.getLogger(__name__)
 
-#: The suffixes the report skill accepts for a logo, and so the only ones the
-#: header shows: an SVG can carry a stylesheet or an image reference that
-#: reaches out, which is why the skill refuses it.
+#: The header accepts local raster logos only.
 LOGO_SUFFIXES = frozenset({".png", ".jpg", ".jpeg"})
 
 MAX_COMPANY_NAME_CHARS = 80
@@ -61,9 +58,7 @@ class TenantBundleConfig(BaseModel):
     path: str | None = Field(
         default=None,
         description=(
-            "Directory holding brand.json, an optional logo, starters.json and report-profiles/. "
-            "Sandboxes mount the same directory read-only at /mnt/tenant (a sandbox.mounts entry); "
-            "the Gateway reads it from this path. Unset means no bundle."
+            "Directory holding brand.json, an optional logo, provider.json and starters.json. Sandboxes mount the same directory read-only at /mnt/tenant (a sandbox.mounts entry); the Gateway reads it from this path. Unset means no bundle."
         ),
     )
 
@@ -82,17 +77,16 @@ class TenantBundle:
     logo: Path | None
     #: None when there is no usable starters.json; an empty tuple is a deliberate empty grid.
     starters: tuple[StarterConfig, ...] | None
-    report_profiles: tuple[str, ...]
     problems: tuple[str, ...]
     provider_name: str | None = None
     support_url: str | None = None
 
 
-EMPTY_BUNDLE = TenantBundle(path=None, present=False, company_name=None, primary=None, secondary=None, logo=None, starters=None, report_profiles=(), problems=())
+EMPTY_BUNDLE = TenantBundle(path=None, present=False, company_name=None, primary=None, secondary=None, logo=None, starters=None, problems=())
 
 
 def _unusable(root: Path, problem: str) -> TenantBundle:
-    return TenantBundle(path=root, present=False, company_name=None, primary=None, secondary=None, logo=None, starters=None, report_profiles=(), problems=(problem,))
+    return TenantBundle(path=root, present=False, company_name=None, primary=None, secondary=None, logo=None, starters=None, problems=(problem,))
 
 
 def load_tenant_bundle(path: str | Path | None) -> TenantBundle:
@@ -111,8 +105,6 @@ def load_tenant_bundle(path: str | Path | None) -> TenantBundle:
         company_name, primary, secondary, logo = _read_brand(root, problems)
         provider_name, support_url = _read_provider(root, problems)
         starters = _read_starters(root, problems)
-        profiles_dir = root / "report-profiles"
-        report_profiles = tuple(sorted(entry.stem for entry in profiles_dir.glob("*.json") if entry.is_file())) if profiles_dir.is_dir() else ()
     except OSError:
         return _unusable(root, "tenant bundle directory cannot be read")
     return TenantBundle(
@@ -123,7 +115,6 @@ def load_tenant_bundle(path: str | Path | None) -> TenantBundle:
         secondary=secondary,
         logo=logo,
         starters=starters,
-        report_profiles=report_profiles,
         problems=tuple(problems),
         provider_name=provider_name,
         support_url=support_url,

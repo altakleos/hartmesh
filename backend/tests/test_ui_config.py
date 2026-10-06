@@ -41,6 +41,10 @@ def test_business_opens_on_something_without_being_asked_twice() -> None:
         assert starter.prompt.strip()
 
 
+def test_generic_business_defaults_do_not_select_a_report_capability() -> None:
+    assert [starter.id for starter in UiConfig(profile="business").starters] == ["summarize-document", "ask-a-spreadsheet"]
+
+
 def test_only_the_two_profiles_are_profiles() -> None:
     with pytest.raises(ValidationError):
         UiConfig(profile="kiosk")

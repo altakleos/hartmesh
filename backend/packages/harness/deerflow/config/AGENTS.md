@@ -1,5 +1,10 @@
 ### Configuration System
 
+Tenant branding/provider/starters are generic. Skills own additional resources;
+never enumerate report profiles in the Gateway or Compose diagnostics. Business
+starter defaults cover documents/spreadsheets; providers select domain starters
+explicitly through `ui.starters` or tenant `starters.json`, including empty overrides.
+
 `Paths.resolve_virtual_path(follow_symlinks=False)` confines paths lexically for
 descriptor readers. Keep that path until the no-follow open; the default retains
 legacy resolved-path behavior for other callers.
