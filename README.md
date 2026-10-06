@@ -76,6 +76,9 @@ code. Plugin pages and conversation actions appear only for installed, enabled
 contributions. Preview failure preserves bounded source access, while editing
 and downloading use the canonical file. See the
 [artifact plugin contract](contracts/artifact_view/plugins.md).
+The root example and production Compose template explicitly enable the installed
+historical-report compatibility package. Existing custom configurations need the
+same `plugins:` entry and a restart to retain historical cards.
 
 The Files page follows the selected tab in its URL, including Shared links and
 browser history. Each tab can filter loaded files by name or folder and sort by

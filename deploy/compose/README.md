@@ -1019,7 +1019,12 @@ and still renders. Report profiles are listed, not validated: the skill
 validates a profile when it loads one and says what is missing.
 
 The profile runs the business profile (`ui.profile: business` in
-`config.yaml`): the screens for building the deployment -- skills, tools,
+`config.yaml`) and explicitly enables the installed `hartmesh-legacy-report`
+compatibility plugin through `plugins:`. Historical cards, projection and filing
+use that package; disabling its entry and restarting leaves ordinary file access.
+The provider template owns this selection.
+
+With the business profile, the screens for building the deployment -- skills, tools,
 subagents, integrations, and the scheduled-task recipes -- are offered to
 administrators only. It is presentation, not authorization; `system_role` is
 what limits a person.

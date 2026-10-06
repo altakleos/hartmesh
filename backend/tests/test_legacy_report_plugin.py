@@ -19,6 +19,20 @@ FIXTURE = ROOT / "frontend-hm/tests/fixtures/business-report/2026-08-business-re
 ENTRY = "hartmesh_legacy_report:install"
 
 
+@pytest.mark.parametrize("provider_config", ["config.example.yaml", "deploy/compose/config.yaml"])
+def test_provider_configurations_activate_the_packaged_historical_adapter(monkeypatch, provider_config):
+    document = yaml.safe_load((ROOT / provider_config).read_text(encoding="utf-8"))
+    declarations = [entry for entry in document.get("plugins", []) if entry.get("use") == ENTRY]
+    assert len(declarations) == 1
+    declaration = declarations[0]
+    assert declaration["package"] == "hartmesh-legacy-report"
+    assert declaration["enabled"] is True
+    monkeypatch.syspath_prepend(str(PACKAGE))
+    loaded, diagnostics = load_extensions([ExtensionSpec(use=declaration["use"], enabled=declaration["enabled"], required=True, config=declaration["config"])])
+    assert not diagnostics
+    assert loaded.plugins[0][1].artifacts[0].compat_queries == ("report_preview",)
+
+
 def load_report(monkeypatch, **config):
     monkeypatch.syspath_prepend(str(PACKAGE))
     return load_extensions([ExtensionSpec(use=ENTRY, required=True, config={"enabled": True, **config})])
