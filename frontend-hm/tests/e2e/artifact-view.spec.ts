@@ -76,9 +76,12 @@ async function openView(
     shared?: Record<string, unknown>[];
     read?: () => void;
     omitRevision?: boolean;
+    openSource?: boolean;
+    ambiguous?: boolean;
   } = {},
 ) {
   const presented = [VIEW, PDF, WORD, SOURCE, `${DIR}/pixel.png`];
+  if (options.ambiguous) presented.push(`${DIR}/other.view.json`);
   mockLangGraphAPI(page, {
     threads: [
       {
@@ -124,6 +127,23 @@ async function openView(
       body: options.body ?? JSON.stringify(fixture),
     });
   });
+  await page.route(`**/api/threads/${THREAD}/artifacts${SOURCE}*`, (route) =>
+    route.fulfill({
+      contentType: "application/json",
+      headers: { ETag: `"${"b".repeat(64)}"` },
+      body: '{"source":"Raw source content"}',
+    }),
+  );
+  if (options.ambiguous)
+    await page.route(
+      `**/api/threads/${THREAD}/artifacts${DIR}/other.view.json*`,
+      (route) =>
+        route.fulfill({
+          contentType: "application/json",
+          headers: { ETag: `"${"c".repeat(64)}"` },
+          body: JSON.stringify(fixture),
+        }),
+    );
   await page.route(
     `**/api/threads/${THREAD}/artifacts${DIR}/pixel.png*`,
     (route) =>
@@ -191,9 +211,32 @@ async function openView(
   await expect(page.getByText("summary.view.json").first()).toBeVisible({
     timeout: 15_000,
   });
-  await page.getByText("summary.view.json").first().click();
+  await page
+    .getByText(options.openSource ? "source.json" : "summary.view.json")
+    .first()
+    .click();
   return page.getByTestId("artifact-view");
 }
+
+test("a unique presented sibling view is preferred while canonical source stays accessible", async ({
+  page,
+}) => {
+  const card = await openView(page, { openSource: true });
+  await expect(
+    card.getByRole("heading", { name: "Document summary" }),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "View source", exact: true }).click();
+  await expect(page.locator(".cm-content")).toContainText("Raw source content");
+  await expect(card).toHaveCount(0);
+});
+
+test("ambiguous sibling views preserve the ordinary canonical source", async ({
+  page,
+}) => {
+  const card = await openView(page, { openSource: true, ambiguous: true });
+  await expect(page.locator(".cm-content")).toContainText("Raw source content");
+  await expect(card).toHaveCount(0);
+});
 
 test("renders all passive primitives and offers only recorded exports", async ({
   page,

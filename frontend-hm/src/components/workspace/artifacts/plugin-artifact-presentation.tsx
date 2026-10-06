@@ -18,6 +18,7 @@ import { bindFrontendServices } from "@/core/extensions/services";
 import { mountSurface } from "@/core/extensions/surfaces";
 import { useI18n } from "@/core/i18n/hooks";
 
+import { ArtifactFileControls } from "./artifact-file-controls";
 import { ArtifactView } from "./artifact-view";
 
 type Props = {
@@ -260,7 +261,9 @@ function PresentationSession(props: Props) {
     >
       <div ref={root} />
       {files && files.exports.length > 0 && (
-        <ArtifactView {...fileProps} view={files} />
+        <div className="p-4">
+          <ArtifactFileControls {...fileProps} view={files} />
+        </div>
       )}
     </section>
   );

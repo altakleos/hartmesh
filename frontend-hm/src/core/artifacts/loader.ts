@@ -1,5 +1,6 @@
 import type { BaseStream } from "@langchain/langgraph-sdk/react";
 
+import { awaitAbortable } from "@/core/api/abort";
 import { fetch } from "@/core/api/fetcher";
 import { isArtifactViewPath } from "@/core/artifact-views/contract";
 import { parseBusinessReport } from "@/core/business-report";
@@ -138,11 +139,16 @@ async function readArtifactContent({
   const projectionURL = nativeProjection
     ? `${url}?preview=${encodeURIComponent(`${presentation!.namespace}/${presentation!.id}`)}`
     : `${url}?report_preview=true`;
-  const response = await fetch(requestProjection ? projectionURL : url, {
+  const pending = fetch(requestProjection ? projectionURL : url, {
     cache: "no-store",
     signal,
     headers: full ? undefined : { Range: `bytes=0-${readBudget - 1}` },
   });
+  const response = signal
+    ? await awaitAbortable(pending, signal, (late) => {
+        void late.body?.cancel().catch(() => undefined);
+      })
+    : await pending;
   const loadSourcePreview = () =>
     loadArtifactContent({
       filepath,

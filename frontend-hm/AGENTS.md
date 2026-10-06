@@ -9,6 +9,23 @@ backend boundary. See [the isolation guide](../docs/FRONTEND_ISOLATION.md).
 
 ## Project Overview
 
+`ArtifactFileControls` serves passive and native renderers through explicit
+exports, collection suggestions, bounded live probes and existing storage/Undo
+lifetimes. Legacy probes share that reader. `core/api/abort.ts` observes late
+work; retired fetch responses cancel unread bodies before rejection without
+allowing late 401 navigation.
+
+`core/artifact-views/associations.ts` and `source-view.ts` resolve one-hop source
+relations from already-presented same-directory view candidates only. Never
+glob, expand directories or prefetch historical views. Cap candidates at eight,
+readers at two and each view at 1 MiB/20 seconds; refuse partial candidate sets,
+malformed/unreadable documents and ambiguous or weak matching revisions.
+Cache only the active source under its viewer/thread/path/candidate identity,
+with zero inactive retention. Ordinary/legacy rendering remains available during
+resolution; a unique valid view takes preference without hiding the source entry.
+Its own completeness/revision governs display, independently of a truncated
+canonical source. Preserve explicit Code selection and canonical editing/copy.
+
 `core/extensions/` captures the authenticated startup plugin snapshot through
 the existing `/api/plugins` discovery and module transports. Page-only browser
 API v1 stays supported. Artifact capability v1 is additive in `artifacts`,
