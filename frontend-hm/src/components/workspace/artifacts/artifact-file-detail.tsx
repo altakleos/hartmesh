@@ -42,6 +42,7 @@ import {
   parseArtifactView,
   recordedPresentedPaths,
 } from "@/core/artifact-views/contract";
+import { useSourceView } from "@/core/artifact-views/source-view";
 import {
   ArtifactRequestError,
   updateArtifactContent,
@@ -219,12 +220,17 @@ export function ArtifactFileDetail({
     !isWriteFile && !installation && isBusinessReportPath(filepath);
   const isViewFile = !isWriteFile && isArtifactViewPath(filepath);
   const presentedPaths = useMemo(
-    () =>
-      isViewFile || installation
-        ? recordedPresentedPaths(thread.messages ?? [])
-        : [],
-    [isViewFile, installation, thread.messages],
+    () => recordedPresentedPaths(thread.messages ?? []),
+    [thread.messages],
   );
+  const { sourceView } = useSourceView({
+    filepath,
+    presented: presentedPaths,
+    threadId,
+    enabled: !isWriteFile && !isViewFile && !thread.isThreadLoading,
+    isMock,
+    runSettled: !thread.isLoading,
+  });
   const toolResult = (() => {
     if (!isWriteFile) {
       return undefined;
@@ -260,16 +266,19 @@ export function ArtifactFileDetail({
   // Parsing decides it: a `.report.json` this app cannot draw stays a JSON
   // file, and a truncated body is not a document at all.
   const report = useMemo(() => {
-    if (!isReportFile || truncated || content === undefined) {
+    if (sourceView || !isReportFile || truncated || content === undefined) {
       return null;
     }
     return parseBusinessReport(content);
-  }, [content, isReportFile, truncated]);
+  }, [content, isReportFile, truncated, sourceView]);
   // Previewable from the first render, before the body has arrived: treating a
   // report as JSON until it parses shows the card's own moment as a flash of
   // raw JSON. Once the body is here, only a report the app can draw keeps it.
   const isReportPreview =
-    isReportFile && !truncated && (content === undefined || report !== null);
+    !sourceView &&
+    isReportFile &&
+    !truncated &&
+    (content === undefined || report !== null);
   const view = useMemo(
     () =>
       isViewFile &&
@@ -293,6 +302,7 @@ export function ArtifactFileDetail({
   );
   const isPluginPreview = Boolean(
     installation &&
+    !sourceView &&
     !truncated &&
     failedPresentation !== nativeIdentity &&
     (content === undefined || isArtifactViewRevision(sha256)),
@@ -302,7 +312,8 @@ export function ArtifactFileDetail({
     language === "markdown" ||
     isReportPreview ||
     isViewPreview ||
-    isPluginPreview;
+    isPluginPreview ||
+    Boolean(sourceView);
   const artifactViewState = getArtifactViewState({
     filepath: filepathFromProps,
     isSupportPreview,
@@ -384,17 +395,28 @@ export function ArtifactFileDetail({
     isDirty,
   ]);
 
+  const [manualViewMode, setManualViewMode] = useState<{
+    filepath: string;
+    threadId: string;
+    mode: "code" | "preview";
+  } | null>(null);
   const [viewMode, setViewMode] = useState<"code" | "preview">(
     isEditing ? "code" : artifactViewState.initialViewMode,
   );
   const [isInstalling, setIsInstalling] = useState(false);
   const isLoadingFullContent = fullContentRequested && isLoading;
   const effectiveViewMode =
-    truncated && language === "html" ? "code" : viewMode;
+    truncated && language === "html" && !sourceView ? "code" : viewMode;
   // Whether this file is previewable now depends on its content, so saving a
   // repair to a broken report would otherwise eject its editor mid-edit.
   const restoredViewMode =
-    editingPath === filepath ? null : artifactViewState.initialViewMode;
+    editingPath === filepath
+      ? null
+      : isSupportPreview &&
+          manualViewMode?.filepath === filepath &&
+          manualViewMode.threadId === threadId
+        ? manualViewMode.mode
+        : artifactViewState.initialViewMode;
   useEffect(() => {
     if (restoredViewMode) {
       setViewMode(restoredViewMode);
@@ -591,28 +613,35 @@ export function ArtifactFileDetail({
           </ArtifactTitle>
         </div>
         <div className="flex min-w-0 grow items-center justify-center gap-2">
-          {isCodeFile && artifactViewState.canPreview && !truncated && (
-            <ToggleGroup
-              className="mx-auto"
-              type="single"
-              variant="outline"
-              size="sm"
-              value={viewMode}
-              onValueChange={(value) => {
-                if (value) {
-                  if (value === "code" && projected) loadFullContent();
-                  setViewMode(value as "code" | "preview");
-                }
-              }}
-            >
-              <ToggleGroupItem value="code">
-                <Code2Icon />
-              </ToggleGroupItem>
-              <ToggleGroupItem value="preview">
-                <EyeIcon />
-              </ToggleGroupItem>
-            </ToggleGroup>
-          )}
+          {isCodeFile &&
+            artifactViewState.canPreview &&
+            (!truncated || sourceView) && (
+              <ToggleGroup
+                className="mx-auto"
+                type="single"
+                variant="outline"
+                size="sm"
+                value={viewMode}
+                onValueChange={(value) => {
+                  if (value) {
+                    if (value === "code" && projected) loadFullContent();
+                    setViewMode(value as "code" | "preview");
+                    setManualViewMode({
+                      filepath,
+                      threadId,
+                      mode: value as "code" | "preview",
+                    });
+                  }
+                }}
+              >
+                <ToggleGroupItem value="code">
+                  <Code2Icon />
+                </ToggleGroupItem>
+                <ToggleGroupItem value="preview">
+                  <EyeIcon />
+                </ToggleGroupItem>
+              </ToggleGroup>
+            )}
           {(isSaving || isDirty || activeDraft.conflict) && (
             <span
               className={cn(
@@ -818,7 +847,7 @@ export function ArtifactFileDetail({
         </div>
       </ArtifactHeader>
       <ArtifactContent className="flex flex-col p-0">
-        {truncated && (
+        {truncated && !(sourceView && effectiveViewMode === "preview") && (
           <div className="border-border bg-muted/40 flex shrink-0 items-center justify-between gap-3 border-b px-4 py-2 text-sm">
             <span className="text-muted-foreground">
               {t.artifactPreview.limited(
@@ -838,6 +867,33 @@ export function ArtifactFileDetail({
           </div>
         )}
         <div className="min-h-0 flex-1">
+          {sourceView && (
+            <div className="border-border flex items-center justify-end border-b px-4 py-2">
+              {isCodeFile ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => {
+                    loadFullContent();
+                    setViewMode("code");
+                    setManualViewMode({ filepath, threadId, mode: "code" });
+                  }}
+                >
+                  {t.artifactPreview.viewSource}
+                </Button>
+              ) : (
+                <Button size="sm" variant="outline" asChild>
+                  <a
+                    href={urlOfArtifact({ filepath, threadId, isMock })}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    {t.artifactPreview.viewSource}
+                  </a>
+                </Button>
+              )}
+            </div>
+          )}
           {isViewFile &&
             !error &&
             !isLoading &&
@@ -892,6 +948,19 @@ export function ArtifactFileDetail({
                 isMock={isMock}
               />
             )}
+          {sourceView && !error && effectiveViewMode === "preview" && (
+            <ArtifactView
+              view={sourceView.view}
+              filepath={sourceView.filepath}
+              threadId={threadId}
+              revision={sourceView.revision}
+              viewerId={user?.id}
+              artifacts={presentedPaths}
+              presentedKnown={!thread.isThreadLoading}
+              runSettled={!thread.isLoading}
+              isMock={isMock}
+            />
+          )}
           {installation &&
             isPluginPreview &&
             !error &&
@@ -920,6 +989,7 @@ export function ArtifactFileDetail({
             )}
           {artifactViewState.canPreview &&
             !isPluginPreview &&
+            !sourceView &&
             !error &&
             effectiveViewMode === "preview" &&
             !isLoading &&
@@ -965,20 +1035,26 @@ export function ArtifactFileDetail({
                 {visibleContent}
               </pre>
             )}
-          {!isCodeFile && !isPluginPreview && canPreviewInBrowser && (
-            <iframe
-              className="size-full"
-              sandbox=""
-              src={urlOfArtifact({ filepath, threadId, isMock })}
-            />
-          )}
-          {!isCodeFile && !isPluginPreview && !canPreviewInBrowser && (
-            <ArtifactDownloadFallback
-              filepath={filepath}
-              threadId={threadId}
-              isMock={isMock}
-            />
-          )}
+          {!isCodeFile &&
+            !isPluginPreview &&
+            !sourceView &&
+            canPreviewInBrowser && (
+              <iframe
+                className="size-full"
+                sandbox=""
+                src={urlOfArtifact({ filepath, threadId, isMock })}
+              />
+            )}
+          {!isCodeFile &&
+            !isPluginPreview &&
+            !sourceView &&
+            !canPreviewInBrowser && (
+              <ArtifactDownloadFallback
+                filepath={filepath}
+                threadId={threadId}
+                isMock={isMock}
+              />
+            )}
         </div>
       </ArtifactContent>
     </Artifact>

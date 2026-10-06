@@ -58,4 +58,28 @@ describe("api fetcher unauthorized redirect", () => {
       "/artifacts/view?path=%2Fmnt%2Fuser-data%2Foutputs%2Freport.md&thread_id=t-1",
     );
   });
+
+  it.each([200, 401])(
+    "cancels an unread late %s response without returning data or navigating",
+    async (status) => {
+      const controller = new AbortController();
+      let respond!: (response: Response) => void;
+      globalThis.fetch = rs.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            respond = resolve;
+          }),
+      );
+      window.history.replaceState({}, "", "/workspace/chats/current-owner");
+      const request = apiFetch("/api/threads/old-owner/export", {
+        signal: controller.signal,
+      });
+      controller.abort();
+      const cancel = rs.fn();
+      respond(new Response(new ReadableStream({ cancel }), { status }));
+      await expect(request).rejects.toThrow();
+      expect(cancel).toHaveBeenCalledTimes(1);
+      expect(window.location.pathname).toBe("/workspace/chats/current-owner");
+    },
+  );
 });

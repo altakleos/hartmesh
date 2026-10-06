@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
+import { awaitAbortable } from "@/core/api/abort";
 import { UnauthorizedError } from "@/core/api/errors";
 import { fetch } from "@/core/api/fetcher";
 import { urlOfArtifact } from "@/core/artifacts/utils";
@@ -26,18 +27,22 @@ export async function probeArtifactExport({
   const timeout = setTimeout(abort, 10_000);
   try {
     signal.throwIfAborted();
-    const response = await fetch(
-      urlOfArtifact({ filepath: path, threadId, isMock }),
-      {
+    const response = await awaitAbortable(
+      fetch(urlOfArtifact({ filepath: path, threadId, isMock }), {
+        method: "GET",
         headers: { Range: "bytes=0-0" },
         cache: "no-store",
         signal: controller.signal,
+      }),
+      controller.signal,
+      (late) => {
+        void late.body?.cancel().catch(() => undefined);
       },
     );
     void response.body?.cancel().catch(() => undefined);
     signal.throwIfAborted();
     if (response.status === 200 || response.status === 206) return "present";
-    if ([400, 403, 404, 410, 415, 416, 422].includes(response.status))
+    if ([400, 401, 403, 404, 410, 415, 416, 422].includes(response.status))
       return "absent";
     return "error";
   } catch (error) {

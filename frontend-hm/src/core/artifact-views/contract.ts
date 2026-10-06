@@ -241,7 +241,7 @@ export function resolveViewReference(
 }
 
 export function eligibleViewExports(
-  view: ArtifactViewDocument,
+  view: Pick<ArtifactViewDocument, "exports">,
   viewPath: string,
   presented: readonly string[],
 ): ArtifactViewExport[] {
@@ -259,7 +259,9 @@ export function eligibleViewExports(
   });
 }
 
-export function viewCollection(view: ArtifactViewDocument): {
+export function viewCollection(
+  view: Pick<ArtifactViewDocument, "destination">,
+): {
   collection: string | undefined;
   ignored: boolean;
 } {

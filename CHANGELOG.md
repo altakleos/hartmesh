@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Product
 
+- Already-presented sibling views can provide the preferred rich presentation
+  for an ordinary source file. Bounded one-hop resolution preserves canonical
+  source controls and falls back on invalid or ambiguous candidates. Passive
+  and native presentations share selected-file controls and availability probes.
 - Trusted plugins can declare specialized artifact presentations, optional pages
   and conversation actions through the existing install/restart lifecycle.
   Artifact handlers return strict passive views or mount independent DOM.

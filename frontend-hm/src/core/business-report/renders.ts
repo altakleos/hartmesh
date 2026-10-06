@@ -29,27 +29,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
 
-import { fetch as fetchWithAuth } from "../api/fetcher";
-import { urlOfArtifact } from "../artifacts/utils";
+import { probeArtifactExport } from "../artifact-views/exports";
 import { isStaticWebsiteOnly } from "../static-mode";
 
 import { reportRenderPath, type ReportRenderKind } from "./paths";
-
-/**
- * One byte is enough to prove a regular file resolves.
- *
- * The artifact route serves regular files through `FileResponse`, which
- * honours RFC 9110 byte ranges, so a live render answers `206` with a
- * one-byte body. A `200` means the range was ignored somewhere in front of
- * us and the whole file is on its way — still proof the file is there, and
- * the body is cancelled either way so those bytes are never pulled.
- */
-const PROBE_RANGE = "bytes=0-0";
-
-/** Statuses that prove the exact path is a regular file we may serve. */
-function isLiveStatus(status: number) {
-  return status === 200 || status === 206;
-}
 
 /**
  * Whether `path` resolves as a regular file for this thread, right now.
@@ -71,28 +54,12 @@ export async function probeReportRenderLive({
   signal?: AbortSignal;
 }): Promise<ReportRenderAvailability> {
   try {
-    // Inside the guard with everything else: this function promises never to
-    // throw, and a promise kept only for the part after URL construction
-    // would fail the whole batch and drop renders that are genuinely live.
-    const url = urlOfArtifact({ filepath: path, threadId, isMock });
-    const response = await fetchWithAuth(url, {
-      method: "GET",
-      headers: { Range: PROBE_RANGE },
-      cache: "no-store",
-      signal,
+    return await probeArtifactExport({
+      path,
+      threadId,
+      isMock,
+      signal: signal ?? new AbortController().signal,
     });
-    // Drop the body without reading it. Cancelling can itself throw on a
-    // already-settled stream in some engines, which must not turn a live
-    // file into a dead one.
-    try {
-      await response.body?.cancel();
-    } catch {
-      // Nothing to do: the verdict is the status, not the body.
-    }
-    if (isLiveStatus(response.status)) return "present";
-    return [400, 401, 403, 404, 410, 416].includes(response.status)
-      ? "absent"
-      : "error";
   } catch {
     return "error";
   }
