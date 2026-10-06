@@ -1,6 +1,15 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
+  extensions: {
+    navigation: string;
+    pageLoading: string;
+    pageUnavailable: string;
+    pageUnavailableHint: string;
+    reload: string;
+    viewFailed: string;
+    actionFailed: string;
+  };
   // Locale meta
   locale: {
     localName: string;

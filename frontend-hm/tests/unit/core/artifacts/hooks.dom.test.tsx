@@ -36,6 +36,47 @@ function createWrapper() {
 }
 
 describe("useArtifactContent", () => {
+  it("keeps renderer fallback bounded and scoped separately from a full-file request", async () => {
+    const presentation = {
+      namespace: "example.summary",
+      id: "summary",
+      sourceMaxBytes: 4096,
+      previewMaxBytes: 256,
+      marker: "example-summary-v1",
+    };
+    const { result, rerender } = renderHook(
+      ({ threadId }) =>
+        useArtifactContent({ filepath, threadId, enabled: true, presentation }),
+      { initialProps: { threadId: "thread-a" }, wrapper: createWrapper() },
+    );
+    await waitFor(() =>
+      expect(mockedLoadArtifactContent).toHaveBeenLastCalledWith(
+        expect.objectContaining({ presentation, full: false }),
+      ),
+    );
+    act(() => {
+      result.current.loadSourcePreview();
+    });
+    await waitFor(() =>
+      expect(mockedLoadArtifactContent).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          presentation: { ...presentation, marker: undefined },
+          full: false,
+        }),
+      ),
+    );
+    expect(result.current.fullContentRequested).toBe(false);
+    rerender({ threadId: "thread-b" });
+    await waitFor(() =>
+      expect(mockedLoadArtifactContent).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          presentation,
+          threadId: "thread-b",
+          full: false,
+        }),
+      ),
+    );
+  });
   beforeEach(() => {
     mockedUseThread.mockReturnValue({
       thread: { isLoading: false, messages: [] },

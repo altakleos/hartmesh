@@ -15,6 +15,16 @@ import type { Translations } from "./types";
 
 export function createEnUS(product: string): Translations {
   return {
+    extensions: {
+      navigation: "Extensions",
+      pageLoading: "Loading extension…",
+      pageUnavailable: "Extension page unavailable",
+      pageUnavailableHint:
+        "This page is not registered, or its plugin is disabled or unavailable.",
+      reload: "Reload",
+      viewFailed: "Plugin view unavailable. Reload to retry.",
+      actionFailed: "Extension action unavailable. Try again.",
+    },
     // Locale meta
     locale: {
       localName: "English",

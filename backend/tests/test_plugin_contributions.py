@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 from deerflow_extension_api.auth import EXTENSION_PRINCIPAL_RESOLVER_KEY, ExtensionPrincipal
-from deerflow_extension_api.plugins import BackendAction, BrowserModule, PluginContribution
+from deerflow_extension_api.plugins import ArtifactPresentation, BackendAction, BrowserModule, PluginContribution
 from deerflow_extension_api.settings import SettingsField
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -73,6 +73,20 @@ def test_one_card_and_deployment_owned_switch(plugin_client):
     assert http.post(url + "/actions/check", json={"text": "old-account"}, headers={"x-deerflow-plugin-viewer": "other-account"}).status_code == 409
     with pytest.raises(TypeError):
         calls[0][1].settings["enabled"] = False
+
+
+def test_artifact_discovery_exposes_only_installed_public_capabilities(plugin_client):
+    http, role, _, plugin = plugin_client
+    declaration = ArtifactPresentation(id="summary", suffixes=(".summary.json",), source_max_bytes=4096, preview_max_bytes=1024, project=lambda raw: b"{}", projection_marker="example-summary-v1", compat_queries=("legacy_preview",))
+    registry = ExtensionRegistry()
+    with registry.attributed_to("private:installed-source"):
+        registry.plugin(replace(plugin, enabled=True, api_version=2, artifacts=(declaration,)))
+    http.app.state.extensions = registry.build()
+    role["value"] = "member"
+    (page,) = http.get("/api/plugins").json()
+    assert page["viewer_id"] == "user-1"
+    assert page["artifact_presentations"] == [{"id": "summary", "suffixes": [".summary.json"], "source_max_bytes": 4096, "preview_max_bytes": 1024, "projection_marker": "example-summary-v1"}]
+    assert "private:installed-source" not in str(page)
 
 
 def test_backend_only_and_frontend_only_share_registration_and_rollback(plugin_client):

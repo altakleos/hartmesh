@@ -24,7 +24,7 @@ from deerflow_extension_api import (
     TaskLifecycleContributor,
 )
 from deerflow_extension_api import ExtensionRegistry as ExtensionRegistryContract
-from deerflow_extension_api.plugins import BrowserAssets, BrowserModule, PluginContribution
+from deerflow_extension_api.plugins import ArtifactPresentation, BrowserAssets, BrowserModule, PluginContribution
 
 from deerflow.extensions.model_access import ModelInvocationScope, ModelInvocationService
 
@@ -106,10 +106,13 @@ class ExtensionRegistry(ExtensionRegistryContract):
         return self._current_source
 
     def plugin(self, contribution: PluginContribution) -> bool:
-        if not isinstance(contribution, PluginContribution) or contribution.api_version != 1:
+        if not isinstance(contribution, PluginContribution) or contribution.api_version not in (1, 2):
             raise ValueError("Unsupported plugin contract")
-        if not contribution.frontend and not contribution.backend and not contribution.tools:
+        if contribution.artifacts and contribution.api_version != 2:
+            raise ValueError("Artifact presentations require plugin contract v2")
+        if not contribution.frontend and not contribution.backend and not contribution.tools and not contribution.artifacts:
             raise ValueError("A plugin must contribute a browser module, backend action or tool")
+        self._validate_artifact_presentations(contribution)
         from deerflow.extensions.plugin_tools import validate_schema
 
         tool_names = set()
@@ -143,6 +146,32 @@ class ExtensionRegistry(ExtensionRegistryContract):
             raise ValueError("Duplicate browser module")
         self._plugins.append((self._source(), contribution))
         return True
+
+    def _validate_artifact_presentations(self, contribution: PluginContribution) -> None:
+        if len(contribution.artifacts) > 16:
+            raise ValueError("Artifact presentation count exceeds 16")
+        ids: set[str] = set()
+        aliases = {query for _, installed in self._plugins for item in installed.artifacts for query in item.compat_queries}
+        for item in contribution.artifacts:
+            if not isinstance(item, ArtifactPresentation) or not isinstance(item.id, str) or not re.fullmatch(r"[a-z][a-z0-9-]{0,63}", item.id) or item.id in ids:
+                raise ValueError("Artifact presentations require unique valid ids")
+            ids.add(item.id)
+            if not 1 <= len(item.suffixes) <= 16 or len(set(item.suffixes)) != len(item.suffixes) or any(not isinstance(suffix, str) or not re.fullmatch(r"\.[a-z0-9][a-z0-9._-]{0,63}", suffix) for suffix in item.suffixes):
+                raise ValueError("Artifact suffixes must be literal local filename suffixes")
+            for value, maximum in ((item.source_max_bytes, 16 * 1024 * 1024), (item.preview_max_bytes, 1024 * 1024)):
+                if type(value) is not int or not 1 <= value <= maximum:
+                    raise ValueError("Invalid artifact byte budget")
+            if item.project is not None:
+                if not callable(item.project) or inspect.iscoroutinefunction(item.project) or not isinstance(item.projection_marker, str) or not re.fullmatch(r"[a-z][a-z0-9.-]{0,95}", item.projection_marker):
+                    raise ValueError("Artifact projections require a sync callback and valid marker")
+            elif item.projection_marker is not None or item.compat_queries:
+                raise ValueError("Artifact projection metadata requires a projector")
+            if len(item.compat_queries) > 4:
+                raise ValueError("Artifact compatibility query count exceeds four")
+            for query in item.compat_queries:
+                if not isinstance(query, str) or not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", query) or query in {"download", "preview", "revision", "full"} or query in aliases:
+                    raise ValueError("Artifact compatibility query is invalid or ambiguous")
+                aliases.add(query)
 
     def middlewares(self, contributor: MiddlewareContributor) -> None:
         self._middlewares.append((self._source(), contributor))

@@ -9,6 +9,7 @@ import { SidebarTrigger } from "@/components/ui/sidebar";
 import { ArtifactTrigger } from "@/components/workspace/artifacts";
 import { BrowserTrigger } from "@/components/workspace/browser-view";
 import { ContextUsageBadge } from "@/components/workspace/context-usage-badge";
+import { ConversationExtensionActions } from "@/components/workspace/conversation-extension-actions";
 import { ExportTrigger } from "@/components/workspace/export-trigger";
 import { GoalStatus } from "@/components/workspace/goal-status";
 import {
@@ -331,6 +332,14 @@ export default function ChatPage() {
                 <SidecarTrigger />
                 {browserEnabled && <BrowserTrigger />}
                 <ExportTrigger threadId={threadId} />
+                {!isMock && threadMetadata.data && (
+                  <ConversationExtensionActions
+                    context={{
+                      thread: threadMetadata.data,
+                      messages: thread.messages,
+                    }}
+                  />
+                )}
                 <ArtifactTrigger />
               </div>
             </header>

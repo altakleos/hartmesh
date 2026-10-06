@@ -68,6 +68,7 @@ import {
 import { env } from "@/env";
 import { isIMEComposing } from "@/lib/ime";
 
+import { ConversationExtensionActions } from "./conversation-extension-actions";
 import { ThreadChannelIcon } from "./thread-channel-source";
 import { useThreadDeleteDialog } from "./thread-delete-dialog";
 import { VirtualThreadList } from "./thread-list-virtualizer";
@@ -387,6 +388,10 @@ export function RecentChatList() {
                                 </DropdownMenuItem>
                               </DropdownMenuSubContent>
                             </DropdownMenuSub>
+                            <ConversationExtensionActions
+                              context={{ thread }}
+                              placement="menu"
+                            />
                             <DropdownMenuSeparator />
                             <DropdownMenuItem
                               onSelect={() =>

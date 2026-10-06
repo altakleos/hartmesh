@@ -77,6 +77,29 @@ class BrowserAssets:
 
 
 @dataclass(frozen=True)
+class ArtifactPresentation:
+    """One generic preview capability owned by an installed trusted plugin.
+
+    The host authorizes and snapshots the source before invoking ``project``
+    off-loop. The callback receives immutable bytes, never a caller path or
+    filesystem handle. Browser handlers use the same id in the plugin module.
+    Compatibility query names are installed declarations, never code selectors.
+    """
+
+    id: str
+    suffixes: tuple[str, ...]
+    source_max_bytes: int = 16 * 1024 * 1024
+    preview_max_bytes: int = 1024 * 1024
+    project: Callable[[bytes], bytes] | None = None
+    projection_marker: str | None = None
+    compat_queries: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "suffixes", tuple(self.suffixes))
+        object.__setattr__(self, "compat_queries", tuple(self.compat_queries))
+
+
+@dataclass(frozen=True)
 class PluginContribution:
     """One identity, one enabled switch, optional settings and implementations.
 
@@ -95,11 +118,13 @@ class PluginContribution:
     backend: tuple[BackendAction, ...] = ()
     api_version: int = 1
     tools: tuple[ModelTool, ...] = ()
+    artifacts: tuple[ArtifactPresentation, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", tuple(self.fields))
         object.__setattr__(self, "backend", tuple(self.backend))
         object.__setattr__(self, "tools", tuple(self.tools))
+        object.__setattr__(self, "artifacts", tuple(self.artifacts))
 
     def settings_contribution(self) -> SettingsContribution:
         return SettingsContribution(

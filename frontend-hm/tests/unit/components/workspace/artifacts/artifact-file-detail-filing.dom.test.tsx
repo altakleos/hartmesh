@@ -9,10 +9,21 @@ const shareWithEveryone = rs.hoisted(() =>
   rs.fn<(paths: readonly string[], folder?: string) => Promise<unknown[]>>(),
 );
 const artifacts = rs.hoisted(() => ({ list: [] as string[] }));
+const extensionState = rs.hoisted(() => ({
+  entries: [] as import("@/core/extensions/registry").LoadedContribution[],
+  content: undefined as string | undefined,
+}));
 
 rs.mock("sonner", () => ({ toast: { success: rs.fn(), error: rs.fn() } }));
+rs.mock("@/core/extensions/hooks", () => ({
+  useFrontendExtensions: () => ({ data: extensionState.entries }),
+  useFrontendServices: () => ({
+    conversationText: rs.fn(),
+    showMessage: rs.fn(),
+  }),
+}));
 rs.mock("@/core/auth/AuthProvider", () => ({
-  useAuth: () => ({ user: { system_role: "user" } }),
+  useAuth: () => ({ user: { id: "viewer-1", system_role: "user" } }),
 }));
 // The hooks are stood in for; the filing rules stay real, so what the panel
 // passes is what the product would pass.
@@ -28,6 +39,10 @@ rs.mock("@/core/shared/hooks", () => ({
 }));
 rs.mock("@/core/artifacts/hooks", () => ({
   useArtifactContent: () => ({
+    content: extensionState.content,
+    sha256: "a".repeat(64),
+    projected: extensionState.content !== undefined,
+    isLoading: false,
     data: { content: "", size: 12, is_binary: true },
     isPending: false,
     error: null,
@@ -81,6 +96,8 @@ describe("ArtifactFileDetail filing", () => {
     shareWithEveryone.mockReset();
     shareWithEveryone.mockResolvedValue([]);
     artifacts.list = [REPORT, RENDER];
+    extensionState.entries = [];
+    extensionState.content = undefined;
   });
 
   afterEach(cleanup);
@@ -109,4 +126,67 @@ describe("ArtifactFileDetail filing", () => {
     );
     expect(shareWithEveryone).toHaveBeenCalledWith([notes], undefined);
   });
+
+  it.each([".pdf", ".opaque"])(
+    "lets an installed renderer own a non-code %s preview",
+    (suffix) => {
+      const source = `/mnt/user-data/outputs/sample${suffix}`;
+      artifacts.list = [source];
+      extensionState.content = '{"summary":"Projected binary summary"}';
+      extensionState.entries = [
+        {
+          namespace: "example.summary",
+          viewer_id: "viewer-1",
+          module: "summary.v1",
+          entry: "installed-entry",
+          title: "Summary",
+          description: "",
+          settings: { enabled: true },
+          artifact_presentations: [
+            {
+              id: "summary",
+              suffixes: [suffix],
+              source_max_bytes: 4096,
+              preview_max_bytes: 1024,
+              projection_marker: "example-summary-v1",
+            },
+          ],
+          extension: {
+            apiVersion: 1,
+            module: "summary.v1",
+            artifactApiVersion: 1,
+            artifacts: [
+              {
+                id: "summary",
+                title: "Summary",
+                kind: "native",
+                mount(root, context) {
+                  root.textContent = (
+                    JSON.parse(context.artifact.content) as { summary: string }
+                  ).summary;
+                  return {
+                    dispose() {
+                      root.replaceChildren();
+                    },
+                  };
+                },
+              },
+            ],
+          },
+        },
+      ];
+      const { container } = renderPanel(source);
+      expect(
+        screen.getByTestId("plugin-artifact-presentation").firstElementChild
+          ?.shadowRoot?.textContent,
+      ).toBe("Projected binary summary");
+      expect(container.querySelectorAll("iframe")).toHaveLength(0);
+      expect(screen.queryAllByRole("radio")).toHaveLength(0);
+      expect(
+        screen.queryByText(
+          "This file type cannot be previewed in the browser.",
+        ),
+      ).toBeNull();
+    },
+  );
 });

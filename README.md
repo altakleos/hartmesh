@@ -61,6 +61,14 @@ unavailable images remain local failures. Invalid, oversized or unsupported
 views retain original-file access. See the
 [passive view contract](contracts/artifact_view/README.md).
 
+Trusted deployment plugins can also present specialized artifacts through the
+existing plugin installation and restart lifecycle. Installed handlers can
+return a passive view or mount their own DOM; producer files cannot register
+code. Plugin pages and conversation actions appear only for installed, enabled
+contributions. Preview failure preserves bounded source access, while editing
+and downloading use the canonical file. See the
+[artifact plugin contract](contracts/artifact_view/plugins.md).
+
 The Files page follows the selected tab in its URL, including Shared links and
 browser history. Each tab can filter loaded files by name or folder and sort by
 Name or Newest. Counts and truncation notices describe the loaded entries;

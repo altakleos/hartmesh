@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Product
 
+- Trusted plugins can declare specialized artifact presentations, optional pages
+  and conversation actions through the existing install/restart lifecycle.
+  Artifact handlers return strict passive views or mount independent DOM.
+  Bounded previews preserve canonical file access; account changes retire
+  supported services, callbacks and resources. Existing page-only plugins remain
+  compatible. The extension API advances to `0.2.5` with an additive, explicitly
+  negotiated artifact contribution.
 - Passive `*.view.json` results render common facts, text, lists, tables,
   raster images and authored notices without per-skill frontend code. Strict
   structure, streamed byte bounds and local resource budgets preserve ordinary
