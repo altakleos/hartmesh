@@ -246,4 +246,19 @@ async def list_installations(adapter: str, request: Request, config: AppConfig, 
     items = await registry.get(adapter).list_installations(context)
     if scope == "all" and adapter in {"mcp", "business"}:
         items += await registry.get(adapter).list_installations(AdapterContext(request, config, user_id, "user"))
-    return InstallationList(items=items, can_manage=scope == "user" or await is_admin_user(request))
+    can_manage = False
+    if adapter in {"mcp", "business"}:
+        # Owner remote preferences remain available. Bundled local providers
+        # require exact operator approval; catalog attribution is no approval.
+        if adapter == "mcp":
+            can_manage = scope == "user" or await is_admin_user(request)
+        else:
+            from app.gateway.customer_administration import request_customer_administration_policy
+
+            policy = request_customer_administration_policy(request)
+            can_manage = policy.local_mcp_management and bool(policy.approved_local_launches) and (scope == "user" or await is_admin_user(request))
+    elif adapter == "skills":
+        from app.gateway.routers.features import _customer_administration_feature
+
+        can_manage = (await _customer_administration_feature(request, config)).local_skill_management
+    return InstallationList(items=items, can_manage=can_manage)

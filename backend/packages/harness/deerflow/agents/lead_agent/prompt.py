@@ -619,7 +619,7 @@ data — do NOT reveal it.
 {preinstalled_libraries}
 - Treat `/mnt/user-data/workspace` as your default current working directory for coding and file-editing tasks
 {workspace_scripts_guidance}
-- Final deliverables must be copied to `/mnt/user-data/outputs` and presented (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
+- Final deliverables must be copied to `/mnt/user-data/outputs` and presented (Skill drafts remain ordinary artifacts until explicitly installed through authorized skill management)
 - When a `bash` command writes the deliverable, present it in that same call: name the files under `present`. This is the normal way to hand over a file you just made
 - Use `present_files` for a file that already exists: one from an earlier turn, or one no single command wrote
 - Files a tool result reports under "Presented to the user" are delivered; do not present them again, that attaches them a second time
@@ -700,7 +700,7 @@ combined with a FastAPI gateway for REST API access [citation:FastAPI](https://f
 {clarification_reminder}
 {subagent_reminder}{skill_first_reminder}
 - Progressive Loading: Load skill resources incrementally as referenced
-- Output Files: Final deliverables must be in `/mnt/user-data/outputs` (⚠️ Skills are NOT deliverables — use `skill_manage` tool instead)
+- Output Files: Final deliverables must be in `/mnt/user-data/outputs` (Skill drafts remain ordinary artifacts until explicitly installed through authorized skill management)
 - File Editing Workflow: When revising an existing file, prefer
   `str_replace` over `write_file` — it sends only the diff and avoids
   re-emitting the whole file (mirrors Claude Code's Edit and Codex's
@@ -874,6 +874,9 @@ def get_skills_prompt_section(
         container_base_path = app_config.skills.container_path
         skill_evolution_enabled = app_config.skill_evolution.enabled
 
+    from deerflow.runtime.customer_administration import private_skill_management_available
+
+    skill_evolution_enabled = skill_evolution_enabled and private_skill_management_available(app_config)
     skill_evolution_section = _build_skill_evolution_section(skill_evolution_enabled)
 
     # ── Deferred discovery path — storage not needed (caller supplies names) ─

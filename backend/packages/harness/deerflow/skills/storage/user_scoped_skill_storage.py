@@ -111,6 +111,48 @@ class UserScopedSkillStorage(LocalSkillStorage):
             logger.warning("Failed to read skill states file %s", self._skill_states_file)
         return {}
 
+    def _require_private_writable_path(self, target: Path) -> None:
+        """Linked operator packages remain readable, never customer writable."""
+        base = self._paths.base_dir
+        try:
+            relative = target.relative_to(base)
+            target.relative_to(self._user_skills_root)
+        except ValueError:
+            raise ValueError("Private skill mutation requires an owner path; linked packages are read-only.") from None
+        current = base
+        for part in relative.parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError("Linked private skill paths are read-only.")
+
+    def remove_custom_skill_file(self, name: str, relative_path: str) -> str | None:
+        self._require_private_writable_path(self.get_skill_history_file(name))
+        self._require_private_writable_path(self.get_custom_skill_dir(name) / relative_path)
+        return super().remove_custom_skill_file(name, relative_path)
+
+    def delete_custom_skill(self, name: str, *, history_meta: dict | None = None) -> None:
+        target = self.get_custom_skill_dir(name)
+        if not target.is_symlink():
+            return super().delete_custom_skill(name, history_meta=history_meta)
+        # An owner's alias may be removed without modifying its operator tree.
+        self._require_private_writable_path(target.parent)
+        self._require_private_writable_path(self.get_skill_history_file(name))
+        with self._skill_projection_mutation(remove=((SkillCategory.CUSTOM, Path(name)),)):
+            if history_meta is not None:
+                self.append_history(name, {**history_meta, "prev_content": self.read_custom_skill(name)})
+            if not target.is_symlink():
+                raise ValueError("Linked package changed during alias deletion.")
+            target.unlink()
+
+    def append_history(self, name: str, record: dict) -> None:
+        self._require_private_writable_path(self.get_skill_history_file(name))
+        super().append_history(name, record)
+
+    def _commit_skill_install(self, skill_dir: Path, skill_name: str, custom_dir: Path, target: Path) -> None:
+        self._require_private_writable_path(self.get_skill_history_file(skill_name))
+        self._require_private_writable_path(target)
+        super()._commit_skill_install(skill_dir, skill_name, custom_dir, target)
+
     def _write_skill_states(self, states: dict[str, dict[str, bool]]) -> None:
         """Persist per-user skill enabled states to ``_skill_states.json``.
 
@@ -122,6 +164,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         the user had disabled. Mirrors the pattern used by
         ``LocalSkillStorage.write_custom_skill`` in this same module.
         """
+        self._require_private_writable_path(self._skill_states_file)
         self._user_skills_root.mkdir(parents=True, exist_ok=True)
         fd, tmp_path_str = tempfile.mkstemp(
             dir=str(self._user_skills_root),
@@ -255,6 +298,8 @@ class UserScopedSkillStorage(LocalSkillStorage):
         them to create their own version rather than raising a confusing
         ``FileNotFoundError``.
         """
+        self._require_private_writable_path(self.get_skill_history_file(name))
+        self._require_private_writable_path(self.get_custom_skill_dir(name))
         if self.custom_skill_exists(name):
             return
         # Check both public and global-custom fallback
@@ -333,6 +378,7 @@ class UserScopedSkillStorage(LocalSkillStorage):
         # Ensure user custom directory exists. This is filesystem work too, so
         # it goes through the same worker-thread discipline as the phases below
         # — the install route awaits this coroutine on the Gateway event loop.
+        await asyncio.to_thread(self._require_private_writable_path, custom_dir)
         await asyncio.to_thread(custom_dir.mkdir, parents=True, exist_ok=True)
 
         # The per-file security scan is an async LLM call and must stay on the
@@ -366,6 +412,8 @@ class UserScopedSkillStorage(LocalSkillStorage):
 
     def write_custom_skill(self, name: str, relative_path: str, content: str) -> None:
         with self._skill_projection_mutation():
+            self._require_private_writable_path(self.get_skill_history_file(name))
+            self._require_private_writable_path(self.get_custom_skill_dir(name) / relative_path)
             target = self.validate_relative_path(relative_path, self.get_custom_skill_dir(name))
             target.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = None

@@ -43,6 +43,9 @@ def _make_app(*, system_role: str) -> FastAPI:
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
     )
     app = make_authed_test_app(user_factory=lambda: _make_user(system_role))
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    app.state.customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=True)
     app.state.config = config
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
@@ -141,10 +144,8 @@ def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch):
         assert client.get("/api/skills/demo").status_code == 200
 
 
-def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
-    """`PUT /api/skills/{name}` writes the shared extensions_config.json, so it
-    is admin-only. This confirms the guard does not block a legitimate admin.
-    """
+def test_customer_admin_cannot_toggle_a_public_baseline(monkeypatch, tmp_path):
+    """Private delegation does not grant deployment-wide baseline writes."""
     from pathlib import Path
 
     from deerflow.skills.types import Skill
@@ -188,9 +189,11 @@ def test_enable_toggle_allowed_for_admin(monkeypatch, tmp_path):
         return None
 
     monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", _refresh)
+    before = config_path.read_bytes()
     with TestClient(app) as client:
         resp = client.put("/api/skills/demo", json={"enabled": False})
-        assert resp.status_code == 200, f"admin toggle should succeed, got {resp.status_code}"
+        assert resp.status_code == 403, f"public baseline toggle must be denied, got {resp.status_code}"
+    assert config_path.read_bytes() == before
     written = json.loads(config_path.read_text(encoding="utf-8"))
     assert written["middlewares"] == ["pkg:Middleware"]
     assert written["mcpInterceptors"] == ["pkg.interceptor:build"]

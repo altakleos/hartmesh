@@ -18,6 +18,7 @@ import os
 import uuid
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from dotenv import load_dotenv
@@ -153,7 +154,26 @@ def e2e_env(tmp_path, monkeypatch):
 
     monkeypatch.setattr("deerflow.client.build_middlewares", _sync_safe_build_middlewares)
 
-    return {"tmp_path": tmp_path}
+    return {"tmp_path": tmp_path, "config": config}
+
+
+@pytest.fixture
+def delegated_management(e2e_env):
+    """Admit only these management scenarios for a real private owner."""
+    from deerflow.config.customer_administration_config import ApprovedLocalMcpDefinition, CustomerAdministrationConfig
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+    from deerflow.skills.storage import reset_user_skill_storage
+
+    config = e2e_env["config"]
+    config.customer_administration = CustomerAdministrationConfig(local_skill_management=True, local_mcp_management=True)
+    config.approved_local_mcp_definitions = [ApprovedLocalMcpDefinition(command="echo")]
+    reset_user_skill_storage()
+    token = set_current_user(SimpleNamespace(id="e2e-owner", system_role="admin"))
+    try:
+        yield config
+    finally:
+        reset_current_user(token)
+        reset_user_skill_storage()
 
 
 @pytest.fixture()
@@ -543,6 +563,7 @@ class TestArtifactAccess:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("delegated_management")
 class TestSkillInstallation:
     """install_skill() with real ZIP handling and filesystem."""
 
@@ -556,30 +577,27 @@ class TestSkillInstallation:
         monkeypatch.setattr("deerflow.skills.installer.scan_skill_content", _scan)
 
     @pytest.fixture(autouse=True)
-    def _isolate_skills_dir(self, tmp_path, monkeypatch):
+    def _isolate_skills_dir(self, tmp_path, monkeypatch, delegated_management):
         """Redirect skill installation to a temp directory."""
         skills_root = tmp_path / "skills"
         (skills_root / "public").mkdir(parents=True)
         (skills_root / "custom").mkdir(parents=True)
-        from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+        from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-        local_storage = LocalSkillStorage(host_path=str(skills_root))
-        monkeypatch.setattr(
-            "deerflow.skills.storage._default_skill_storage",
-            local_storage,
-        )
+        local_storage = UserScopedSkillStorage("e2e-owner", host_path=str(skills_root), app_config=delegated_management)
         monkeypatch.setattr(
             "deerflow.client.get_or_new_user_skill_storage",
             lambda user_id, **kwargs: local_storage,
         )
-        self._skills_root = skills_root
+        self._skill_storage = local_storage
+        self._baseline_root = skills_root
 
     @staticmethod
     def _make_skill_zip(tmp_path, skill_name="test-e2e-skill"):
         """Create a minimal valid .skill archive."""
         skill_dir = tmp_path / "build" / skill_name
         skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\ndescription: E2E test skill\n---\n\nTest content.\n")
+        (skill_dir / "SKILL.md").write_text(f"---\nname: {skill_name}\ndescription: E2E test skill\n---\n\nTest content.\n", encoding="utf-8")
         archive_path = tmp_path / f"{skill_name}.skill"
         with zipfile.ZipFile(archive_path, "w") as zf:
             for file in skill_dir.rglob("*"):
@@ -594,7 +612,8 @@ class TestSkillInstallation:
         result = c.install_skill(archive)
         assert result["success"] is True
         assert result["skill_name"] == "test-e2e-skill"
-        assert (self._skills_root / "custom" / "test-e2e-skill" / "SKILL.md").exists()
+        assert self._skill_storage.get_custom_skill_file("test-e2e-skill").exists()
+        assert not (self._baseline_root / "custom" / "test-e2e-skill").exists()
 
     def test_install_skill_duplicate_rejected(self, e2e_env, tmp_path):
         """Installing the same skill twice raises ValueError."""
@@ -617,7 +636,7 @@ class TestSkillInstallation:
         """A .skill archive without valid SKILL.md frontmatter is rejected."""
         skill_dir = tmp_path / "build" / "bad-skill"
         skill_dir.mkdir(parents=True)
-        (skill_dir / "SKILL.md").write_text("No frontmatter here.")
+        (skill_dir / "SKILL.md").write_text("No frontmatter here.", encoding="utf-8")
 
         archive = tmp_path / "bad-skill.skill"
         with zipfile.ZipFile(archive, "w") as zf:
@@ -640,6 +659,7 @@ class TestSkillInstallation:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("delegated_management")
 class TestConfigManagement:
     """Config queries and updates through real code paths."""
 
@@ -728,7 +748,7 @@ class TestConfigManagement:
         assert written["middlewares"] == ["pkg:Middleware"]
 
     def test_update_skill_writes_and_invalidates(self, e2e_env, tmp_path, monkeypatch):
-        """update_skill() writes extensions_config.json and invalidates the agent."""
+        """Private enablement persists owner state and invalidates the agent."""
         config_file = tmp_path / "extensions_config.json"
         config_file.write_text(json.dumps({"mcpServers": {}, "skills": {}, "middlewares": ["pkg:Middleware"]}))
         monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
@@ -741,17 +761,17 @@ class TestConfigManagement:
         c._agent = "fake-agent-placeholder"
         c._agent_config_key = ("a", "b", "c", "d")
 
-        # Use a real skill name from the public skills directory
-        skills = c.list_skills()
-        if not skills["skills"]:
-            pytest.skip("No skills available for testing")
-        skill_name = skills["skills"][0]["name"]
+        skill_name = "e2e-private-skill"
+        storage = c._owned_private_skill_storage()
+        storage.write_custom_skill(skill_name, "SKILL.md", f"---\nname: {skill_name}\ndescription: Private toggle fixture\n---\nOwner content.\n")
 
         result = c.update_skill(skill_name, enabled=False)
         assert result["name"] == skill_name
         assert result["enabled"] is False
         written = json.loads(config_file.read_text())
         assert written["middlewares"] == ["pkg:Middleware"]
+        assert written["skills"] == {}
+        assert storage.get_skill_enabled_state(skill_name) is False
 
         # Agent should be invalidated
         assert c._agent is None

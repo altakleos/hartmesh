@@ -1,5 +1,6 @@
 import asyncio
 import logging
+import sys
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 
@@ -111,8 +112,8 @@ def _resolve_extension_plugin_management(request: Request, namespace: str, scope
 
     ``None`` means the host cannot answer — an unknown plugin or an anonymous
     caller — and the public helper turns that into a denial. ``True``/``False``
-    are decisions: ``True`` when authorization is disabled, so a deployment that
-    turns authorization off does not start 403-ing enterprise routes, and
+    are decisions: ``True`` when active delegation and caller authority allow
+    the operation and optional authorization permits it, and
     ``False`` for a policy denial or a configuration that cannot be read (that
     resolution layer is fail-closed).
 
@@ -120,11 +121,18 @@ def _resolve_extension_plugin_management(request: Request, namespace: str, scope
     thread pool, which is where a synchronous caller legitimately lives. An
     async endpoint must use :func:`_resolve_extension_plugin_management_async`.
     """
+    from deerflow_extension_api.auth import resolve_principal
+
     from app.gateway.authz import _PluginAuthorizationUnavailable, resolve_plugin_authorization
+    from app.gateway.customer_administration import plugin_management_admitted
     from deerflow.authz.plugin_authz import PluginAuthorizationError, enforce_plugin_management
 
     if not _installed_plugin_namespace(request, namespace):
         return None
+    if resolve_principal(request) is None:
+        return None
+    if not plugin_management_admitted(request):
+        return False
     try:
         provider, principal, app_config = resolve_plugin_authorization(request)
     except _PluginAuthorizationUnavailable as unavailable:
@@ -148,11 +156,18 @@ def _resolve_extension_plugin_management(request: Request, namespace: str, scope
 
 async def _resolve_extension_plugin_management_async(request: Request, namespace: str, scope: str = "read") -> bool | None:
     """Async counterpart of :func:`_resolve_extension_plugin_management`."""
+    from deerflow_extension_api.auth import resolve_principal
+
     from app.gateway.authz import _PluginAuthorizationUnavailable, aresolve_plugin_authorization
+    from app.gateway.customer_administration import plugin_management_admitted
     from deerflow.authz.plugin_authz import PluginAuthorizationError, aenforce_plugin_management
 
     if not _installed_plugin_namespace(request, namespace):
         return None
+    if resolve_principal(request) is None:
+        return None
+    if not plugin_management_admitted(request):
+        return False
     try:
         provider, principal, app_config = await aresolve_plugin_authorization(request)
     except _PluginAuthorizationUnavailable as unavailable:
@@ -448,6 +463,30 @@ async def _runtime_with_mcp_pool_shutdown(app: FastAPI, startup_config: AppConfi
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """Bind host policy to lifecycle work without carrying tokens across yield."""
+    from app.gateway.customer_administration import customer_administration_host_scope
+    from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+    if getattr(app.state, "customer_administration_policy", None) is None:
+        config = await asyncio.to_thread(get_app_config)
+        app.state.customer_administration_policy = capture_customer_administration_policy(config)
+    manager = _lifespan_resources(app)
+    async with customer_administration_host_scope(app):
+        await manager.__aenter__()
+    try:
+        yield
+    except BaseException:
+        async with customer_administration_host_scope(app):
+            suppressed = await manager.__aexit__(*sys.exc_info())
+        if not suppressed:
+            raise
+    else:
+        async with customer_administration_host_scope(app):
+            await manager.__aexit__(None, None, None)
+
+
+@asynccontextmanager
+async def _lifespan_resources(app: FastAPI) -> AsyncGenerator[None, None]:
     """Application lifespan handler."""
 
     # Load config and check necessary environment variables at startup.
@@ -459,6 +498,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # snapshot on `app.state` to keep that contract enforceable.
     try:
         startup_config = get_app_config()
+        from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+        if getattr(app.state, "customer_administration_policy", None) is None:
+            app.state.customer_administration_policy = capture_customer_administration_policy(startup_config)
         from deerflow.config.subagent_batches_config import SubagentBatchesConfig
         from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
         from deerflow.subagents.capacity import configure_subagent_execution_capacity
@@ -971,6 +1014,16 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     )
 
     # Auth: reject unauthenticated requests to non-public paths (fail-closed safety net)
+    @app.middleware("http")
+    async def bind_customer_policy(request: Request, call_next):
+        from app.gateway.customer_administration import request_customer_administration_policy, resolve_customer_management_actor
+        from deerflow.runtime.customer_administration import bind_customer_administration_policy, bind_customer_management_actor, bind_customer_management_actor_role, customer_management_actor_role
+
+        actor = await resolve_customer_management_actor(request)
+        role = customer_management_actor_role(actor)
+        with bind_customer_administration_policy(request_customer_administration_policy(request)), bind_customer_management_actor(actor), bind_customer_management_actor_role(role):
+            return await call_next(request)
+
     app.add_middleware(AuthMiddleware)
 
     # Give contributed routers a neutral way to ask "is this caller an admin"
@@ -1081,10 +1134,15 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # runs at import time, and lifespan still performs strict config loading
     # before serving.
     try:
-        configured_plugins = get_app_config().plugins
+        configured_app_config = get_app_config()
+        from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+        app.state.customer_administration_policy = capture_customer_administration_policy(configured_app_config)
+        configured_plugins = configured_app_config.plugins
     except FileNotFoundError:
         logger.debug("config.yaml not found while constructing Gateway app; loading no extensions for this app instance")
         configured_plugins = []
+        app.state.customer_administration_policy = None
 
     try:
         loaded_extensions, extension_diagnostics = load_extensions(configured_plugins)

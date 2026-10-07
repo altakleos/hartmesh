@@ -113,6 +113,36 @@ def _stream_with_sandbox_lease_cleanup(items: Iterator[Any], context: dict[str, 
             logger.warning("Failed to release embedded sandbox execution lease", exc_info=True)
 
 
+def _stream_with_customer_administration_scope(items: Iterator[Any], context: dict[str, Any]) -> Iterator[Any]:
+    """Bind each execution step without leaking host authority across yields."""
+    from deerflow.runtime.customer_administration import (
+        bind_customer_administration_policy,
+        bind_customer_management_actor,
+        bind_customer_management_actor_role,
+        customer_management_actor_role,
+        resolve_customer_administration_policy,
+        resolve_customer_management_actor,
+    )
+
+    policy = resolve_customer_administration_policy(context)
+    actor = resolve_customer_management_actor(context)
+    role = customer_management_actor_role(actor)
+    iterator = iter(items)
+    try:
+        while True:
+            with bind_customer_administration_policy(policy), bind_customer_management_actor(actor), bind_customer_management_actor_role(role):
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    return
+            yield item
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            with bind_customer_administration_policy(policy), bind_customer_management_actor(actor), bind_customer_management_actor_role(role):
+                close()
+
+
 def _run_async_from_sync(coro):
     """Run an async helper from this synchronous client API."""
     try:
@@ -245,6 +275,10 @@ class DeerFlowClient:
         if config_path is not None:
             reload_app_config(config_path)
         self._app_config = get_app_config()
+        from deerflow.runtime.customer_administration import bound_customer_administration_policy, capture_customer_administration_policy
+
+        inherited_policy = bound_customer_administration_policy()
+        self._customer_administration_policy = inherited_policy if inherited_policy is not None else capture_customer_administration_policy(self._app_config)
         runtime_config = getattr(self._app_config, "subagent_runtime", None)
         if not isinstance(runtime_config, SubagentRuntimeConfig):
             # Preserve compatibility with lightweight embedded/test configs
@@ -289,6 +323,31 @@ class DeerFlowClient:
         self._loaded_agent_config_key = None
         self._loaded_agent_config = None
 
+    def _customer_management_actor_allowed(self) -> bool:
+        from deerflow.runtime.customer_administration import customer_management_actor_is_admin
+
+        return customer_management_actor_is_admin()
+
+    def _require_customer_management(self, permission):
+        from deerflow.runtime.customer_administration import CustomerManagementDenied, require_customer_management
+
+        require_customer_management(getattr(self, "_customer_administration_policy", None), permission)
+        if not self._customer_management_actor_allowed():
+            raise CustomerManagementDenied("Admin privileges required for this customization.")
+
+    def _owned_private_skill_storage(self):
+        from deerflow.config.paths import make_safe_user_id
+        from deerflow.runtime.customer_administration import CustomerManagementDenied, current_customer_management_actor
+        from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+        owner = current_customer_management_actor().owner_id
+        if not owner:
+            raise CustomerManagementDenied("Private skill management requires an attributed owner.")
+        storage = get_or_new_user_skill_storage(owner, app_config=self._app_config)
+        if not isinstance(storage, UserScopedSkillStorage) or storage.user_id != make_safe_user_id(owner):
+            raise CustomerManagementDenied("Private skill management requires owner-scoped storage.")
+        return storage
+
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
@@ -326,6 +385,12 @@ class DeerFlowClient:
         )
 
     def _ensure_agent(self, config: RunnableConfig, *, context: Mapping[str, Any] | None = None):
+        from deerflow.runtime.customer_administration import DENIED_CUSTOMER_ADMINISTRATION, bind_customer_administration_policy
+
+        with bind_customer_administration_policy(getattr(self, "_customer_administration_policy", DENIED_CUSTOMER_ADMINISTRATION)):
+            return self._ensure_agent_with_policy(config, context=context)
+
+    def _ensure_agent_with_policy(self, config: RunnableConfig, *, context: Mapping[str, Any] | None = None):
         """Create (or recreate) the agent when config-dependent params change."""
         cfg = dict(config.get("configurable", {}) or {})
         if context is not None:
@@ -388,6 +453,7 @@ class DeerFlowClient:
             self._checkpoint_snapshot_frequency,
             effective_user_id,
             authorization_identity,
+            self._customer_management_actor_allowed(),
         )
 
         if self._agent is not None and self._agent_config_key == key:
@@ -1045,6 +1111,16 @@ class DeerFlowClient:
         # survives worker/isolated-loop boundaries and matches the identity
         # used by prompt assembly and the agent cache.
         context["user_id"] = effective_user_id
+        context["app_config"] = self._app_config
+        from deerflow.runtime.customer_administration import CUSTOMER_ADMINISTRATION_CONTEXT_KEY, CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY, DENIED_CUSTOMER_ADMINISTRATION, current_customer_management_actor
+
+        for section in (config.get("configurable"), config.get("context")):
+            if isinstance(section, dict):
+                section.pop("app_config", None)
+                section.pop(CUSTOMER_ADMINISTRATION_CONTEXT_KEY, None)
+                section.pop(CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY, None)
+        context[CUSTOMER_ADMINISTRATION_CONTEXT_KEY] = getattr(self, "_customer_administration_policy", DENIED_CUSTOMER_ADMINISTRATION)
+        context[CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY] = current_customer_management_actor()
         self._ensure_agent(config, context=context)
         configurable = config.get("configurable") or {}
         effective_model_name = getattr(self, "_effective_model_name", None)
@@ -1134,7 +1210,7 @@ class DeerFlowClient:
             context=context,
             stream_mode=["values", "messages", "custom"],
         )
-        for item in _stream_with_sandbox_lease_cleanup(agent_items, context):
+        for item in _stream_with_sandbox_lease_cleanup(_stream_with_customer_administration_scope(agent_items, context), context):
             if isinstance(item, tuple) and len(item) == 2:
                 mode, chunk = item
                 mode = str(mode)
@@ -1450,6 +1526,10 @@ class DeerFlowClient:
             ValueError: If the resulting config would not load; nothing is written.
             OSError: If the config file cannot be written.
         """
+        if not self._customer_management_actor_allowed():
+            from deerflow.runtime.customer_administration import CustomerManagementDenied
+
+            raise CustomerManagementDenied("Admin privileges required to manage MCP configuration.")
         config_path = ExtensionsConfig.resolve_config_path()
         if config_path is None:
             raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
@@ -1459,9 +1539,14 @@ class DeerFlowClient:
             # the cross-process lock before merging the replacement MCP map.
             # Read it raw so sibling keys keep their $VAR placeholders.
             config_data = read_raw_extensions_config(config_path)
+            previous_servers = config_data.get("mcpServers", {})
             config_data["mcpServers"] = mcp_servers
-
             validate_raw_extensions_config(config_data)
+
+            from deerflow.runtime.customer_administration import require_mcp_management_transition
+
+            for name in previous_servers.keys() | mcp_servers.keys():
+                require_mcp_management_transition(getattr(self, "_customer_administration_policy", None), previous_servers.get(name), mcp_servers.get(name), resolve_environment=True)
             self._atomic_write_json(config_path, config_data)
             reloaded = reload_extensions_config()
 
@@ -1508,56 +1593,29 @@ class DeerFlowClient:
                 is invalid (nothing is written).
             OSError: If the config file cannot be written.
         """
-        storage = get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config)
+        self._require_customer_management("local_skill_management")
+        storage = self._owned_private_skill_storage()
         skills = storage.load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == name), None)
         if skill is None:
             raise ValueError(f"Skill '{name}' not found")
 
-        # PUBLIC skills → global extensions_config.json (shared state).
-        # CUSTOM / LEGACY skills → per-user _skill_states.json (isolated state).
+        from deerflow.runtime.customer_administration import CustomerManagementDenied
+        from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
         from deerflow.skills.types import SkillCategory
 
         if skill.category == SkillCategory.PUBLIC:
-            config_path = ExtensionsConfig.resolve_config_path()
-            if config_path is None:
-                raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
+            raise CustomerManagementDenied("Global skill state requires provider operator tools.")
+        if not isinstance(storage, UserScopedSkillStorage):
+            raise CustomerManagementDenied("Private skill management requires owner-scoped storage.")
+        storage.set_skill_enabled_state(name, enabled)
 
-            from deerflow.skills.projection import skill_projection_mutation
-
-            removal_names = (name,) if not enabled else ()
-            with skill_projection_mutation(storage, "public", remove_names=removal_names):
-                with extensions_config_write_lock, extensions_config_file_lock(config_path):
-                    # The projection lock is cross-process, but the singleton
-                    # cache is not. Reload raw from disk under the config lock.
-                    self._write_skill_enabled_state(config_path, name, enabled)
-        else:
-            # CUSTOM / LEGACY: write per-user state
-            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
-
-            if isinstance(storage, UserScopedSkillStorage):
-                storage.set_skill_enabled_state(name, enabled)
-            else:
-                # Fallback for non-user-scoped storage (unlikely in practice)
-                config_path = ExtensionsConfig.resolve_config_path()
-                if config_path is None:
-                    raise FileNotFoundError("Cannot locate extensions_config.json. Set DEER_FLOW_EXTENSIONS_CONFIG_PATH or ensure it exists in the project root.")
-                with extensions_config_write_lock, extensions_config_file_lock(config_path):
-                    self._write_skill_enabled_state(config_path, name, enabled)
-
-        # Invalidate the prompt cache for this caller (and for all users if
-        # the changed skill is PUBLIC, since PUBLIC state is shared). Mirrors
-        # what ``routers/skills.py::update_skill`` does — without this the
-        # cached enabled-state would stay stale until process restart. See
-        # review feedback on PR #3889.
+        # Only this owner's private enabled state changed.
         try:
-            from deerflow.agents.lead_agent.prompt import clear_skills_system_prompt_cache, invalidate_user_skill_cache
+            from deerflow.agents.lead_agent.prompt import invalidate_user_skill_cache
+            from deerflow.runtime.customer_administration import current_customer_management_actor
 
-            skill_category_value = skill.category.value if hasattr(skill.category, "value") else skill.category
-            if skill_category_value == SkillCategory.PUBLIC.value:
-                clear_skills_system_prompt_cache()
-            else:
-                invalidate_user_skill_cache(get_effective_user_id())
+            invalidate_user_skill_cache(current_customer_management_actor().owner_id)
         except Exception as exc:
             # Don't let cache-invalidation failures mask the actual write
             # success — log and continue. The stale-cache window is bounded
@@ -1592,7 +1650,8 @@ class DeerFlowClient:
             FileNotFoundError: If the file does not exist.
             ValueError: If the file is invalid.
         """
-        return get_or_new_user_skill_storage(get_effective_user_id(), app_config=self._app_config).install_skill_from_archive(skill_path)
+        self._require_customer_management("local_skill_management")
+        return self._owned_private_skill_storage().install_skill_from_archive(skill_path)
 
     # ------------------------------------------------------------------
     # Public API — memory management

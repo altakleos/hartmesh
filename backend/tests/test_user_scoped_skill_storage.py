@@ -858,3 +858,46 @@ class TestInstallScanConfigParity:
 
         assert seen, "the LLM scan should have run for the installed SKILL.md"
         assert all(entry is config for entry in seen), "every LLM scan must receive the storage's own app_config"
+
+
+@pytest.mark.parametrize("operation", ["write", "remove", "history", "root"])
+def test_private_mutation_rejects_linked_canonical_targets(paths, skills_root, tmp_path, monkeypatch, operation):
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    storage = UserScopedSkillStorage("owner", host_path=str(skills_root))
+    external = tmp_path / "operator-package"
+    external.mkdir()
+    (external / "SKILL.md").write_text(_skill_content("linked"), encoding="utf-8")
+    (external / "support.txt").write_text("provider baseline", encoding="utf-8")
+    root = storage.get_user_custom_root()
+    root.mkdir(parents=True)
+    if operation == "root":
+        root.rmdir()
+        root.symlink_to(external, target_is_directory=True)
+    elif operation == "history":
+        (root / ".history").symlink_to(external, target_is_directory=True)
+    else:
+        (root / "linked").symlink_to(external, target_is_directory=True)
+    before = {item.name: item.read_bytes() for item in external.iterdir()}
+    with pytest.raises(ValueError, match="read-only|linked"):
+        if operation in {"write", "root"}:
+            storage.write_custom_skill("linked", "SKILL.md", "replacement")
+        elif operation == "remove":
+            storage.remove_custom_skill_file("linked", "support.txt")
+        else:
+            storage.append_history("linked", {"action": "edit"})
+    assert {item.name: item.read_bytes() for item in external.iterdir()} == before
+
+
+def test_linked_history_denial_precedes_private_package_write(paths, skills_root, tmp_path, monkeypatch):
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
+    storage = UserScopedSkillStorage("owner", host_path=str(skills_root))
+    storage.write_custom_skill("private-skill", "SKILL.md", _skill_content("private-skill"))
+    package = storage.get_custom_skill_file("private-skill")
+    before = package.read_bytes()
+    external = tmp_path / "operator-history"
+    external.mkdir()
+    (storage.get_user_custom_root() / ".history").symlink_to(external, target_is_directory=True)
+    with pytest.raises(ValueError, match="linked|read-only"):
+        storage.write_custom_skill("private-skill", "SKILL.md", "replacement")
+    assert package.read_bytes() == before
+    assert list(external.iterdir()) == []

@@ -5,6 +5,7 @@ from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from app.gateway.customer_administration import require_provider_operation
 from app.gateway.deps import get_config, require_admin_user
 from deerflow.agents.lead_agent.prompt import refresh_skills_system_prompt_cache_async
 from deerflow.config.app_config import AppConfig
@@ -270,7 +271,7 @@ async def get_lark_status(request: Request, config: AppConfig = Depends(get_conf
 
 @router.post("/lark/install", response_model=LarkInstallResponse, summary="Install Lark/Feishu Skill Pack")
 async def install_lark(request: Request, config: AppConfig = Depends(get_config)) -> LarkInstallResponse:
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    require_provider_operation()
     try:
         result = await asyncio.to_thread(install_lark_integration, get_effective_user_id(), config)
         await refresh_skills_system_prompt_cache_async()

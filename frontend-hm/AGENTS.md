@@ -7,6 +7,13 @@ the pinned upstream `../frontend/`; port changes deliberately. The Gateway
 HTTP/SSE/WebSocket protocols and shared `../contracts/` fixtures define the
 backend boundary. See [the isolation guide](../docs/FRONTEND_ISOLATION.md).
 
+Management UI uses `useCustomerAdministration()` from `/api/features`, keyed by
+account ID and role, with missing flags denied. Never derive mutation authority
+from admin role alone. Public skills stay read-only; skill drafts can still be
+created as artifacts. Local MCP controls require effective delegation, remote
+preferences retain their existing behavior, and managed integration installation
+is provider-only. The bilingual notice uses only configured provider support links.
+
 ## Project Overview
 
 `ArtifactFileControls` serves passive and native renderers through explicit

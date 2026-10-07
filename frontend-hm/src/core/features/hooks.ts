@@ -7,6 +7,7 @@ import {
   type FeaturesResponse,
   fetchFeatures,
   selectBranding,
+  selectCustomerAdministration,
   selectBrowserControlEnabled,
   selectMcpTasksEnabled,
   selectSubagentBatchesCapability,
@@ -15,8 +16,9 @@ import {
 
 /** All feature observers share transport, retries and the identity's cache. */
 export function useFeatures<T>(select: (features: FeaturesResponse) => T) {
+  const { user } = useAuth();
   return useQuery({
-    queryKey: ["features"],
+    queryKey: ["features", user?.id ?? null, user?.system_role ?? null],
     queryFn: fetchFeatures,
     select,
     // Re-check when a consumer mounts or the window regains focus, preserving
@@ -117,4 +119,18 @@ export function useDeveloperSurfacesVisible() {
     return true;
   }
   return profile !== "business" || user?.system_role === "admin";
+}
+
+export function useCustomerAdministration() {
+  const { data, isPending, isError } = useFeatures(
+    selectCustomerAdministration,
+  );
+  const effective = isError ? undefined : data;
+  return {
+    pluginManagement: effective?.pluginManagement ?? false,
+    localSkillManagement: effective?.localSkillManagement ?? false,
+    localMcpManagement: effective?.localMcpManagement ?? false,
+    providerOperations: effective?.providerOperations ?? false,
+    isLoading: isPending,
+  };
 }

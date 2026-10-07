@@ -68,6 +68,7 @@ import {
   isFileFilingReady,
 } from "@/core/extensions/filing";
 import { useFrontendExtensions } from "@/core/extensions/hooks";
+import { useCustomerAdministration } from "@/core/features/hooks";
 import { canKeepInMyFiles, useSaveToMyFiles } from "@/core/files";
 import { useI18n } from "@/core/i18n/hooks";
 import { findToolCallResult } from "@/core/messages/utils";
@@ -108,7 +109,7 @@ export function ArtifactFileDetail({
   const { t } = useI18n();
   const queryClient = useQueryClient();
   const { user } = useAuth();
-  const isAdmin = user?.system_role === "admin";
+  const { localSkillManagement: canInstallSkill } = useCustomerAdministration();
   const {
     artifacts,
     setOpen,
@@ -679,7 +680,7 @@ export function ArtifactFileDetail({
             {!isEditing &&
               !isWriteFile &&
               filepath.endsWith(".skill") &&
-              isAdmin && (
+              canInstallSkill && (
                 <Tooltip content={t.toolCalls.skillInstallTooltip}>
                   <ArtifactAction
                     icon={isInstalling ? LoaderIcon : PackageIcon}

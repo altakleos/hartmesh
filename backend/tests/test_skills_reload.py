@@ -37,6 +37,9 @@ def _make_app(*, system_role: str) -> FastAPI:
             id=uuid4(),
         )
     )
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    app.state.customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=True)
     app.state.config = config
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
@@ -63,7 +66,7 @@ def _reset_prompt_cache_state() -> None:
         prompt_module._enabled_skills_refresh_waiters.clear()
 
 
-def test_admin_can_reload_skills(monkeypatch) -> None:
+def test_customer_admin_cannot_reload_global_skills(monkeypatch) -> None:
     calls = 0
 
     async def _refresh() -> None:
@@ -76,12 +79,11 @@ def test_admin_can_reload_skills(monkeypatch) -> None:
     with TestClient(app) as client:
         response = client.post("/api/skills/reload")
 
-    assert response.status_code == 200
-    assert response.json() == _SUCCESS_RESPONSE
-    assert calls == 1
+    assert response.status_code == 403
+    assert calls == 0
 
 
-def test_reload_failure_returns_generic_error(monkeypatch) -> None:
+def test_denied_reload_does_not_run_a_failing_worker(monkeypatch) -> None:
     async def _refresh() -> None:
         raise RuntimeError("private mount failed at /srv/company/minio")
 
@@ -91,12 +93,12 @@ def test_reload_failure_returns_generic_error(monkeypatch) -> None:
     with TestClient(app) as client:
         response = client.post("/api/skills/reload")
 
-    assert response.status_code == 500
-    assert response.json() == {"detail": "Failed to invalidate skills cache."}
+    assert response.status_code == 403
+    assert "provider" in response.json()["detail"]
     assert "/srv/company/minio" not in response.text
 
 
-def test_reload_worker_failure_returns_500_preserves_last_good_cache_and_can_retry(monkeypatch, tmp_path: Path) -> None:
+def test_operator_reload_failure_preserves_last_good_cache_and_can_retry(monkeypatch, tmp_path: Path) -> None:
     _write_skill(tmp_path, "cached-skill", "last known good description")
     storage = LocalSkillStorage(host_path=str(tmp_path))
     last_good_skills = storage.load_skills(enabled_only=True)
@@ -118,23 +120,15 @@ def test_reload_worker_failure_returns_500_preserves_last_good_cache_and_can_ret
         prompt_module._enabled_skills_cache = last_good_skills
 
     try:
-        app = _make_app(system_role="admin")
-        with TestClient(app) as client:
-            failed_response = client.post("/api/skills/reload")
+        with pytest.raises(RuntimeError, match="Enabled skills cache refresh failed") as failed:
+            anyio.run(prompt_module.refresh_skills_system_prompt_cache_async)
+        assert isinstance(failed.value.__cause__, PermissionError)
 
-            assert failed_response.status_code == 500
-            assert failed_response.json() == {"detail": "Failed to invalidate skills cache."}
-            assert "mounted skills unavailable" not in failed_response.text
-            assert "/srv/company/minio" not in failed_response.text
+        with prompt_module._enabled_skills_lock:
+            assert prompt_module._enabled_skills_cache == last_good_skills
+            assert prompt_module._enabled_skills_refresh_active is False
 
-            with prompt_module._enabled_skills_lock:
-                assert prompt_module._enabled_skills_cache == last_good_skills
-                assert prompt_module._enabled_skills_refresh_active is False
-
-            recovered_response = client.post("/api/skills/reload")
-
-        assert recovered_response.status_code == 200
-        assert recovered_response.json() == _SUCCESS_RESPONSE
+        anyio.run(prompt_module.refresh_skills_system_prompt_cache_async)
         with prompt_module._enabled_skills_lock:
             assert prompt_module._enabled_skills_cache == recovered_skills
     finally:

@@ -7,6 +7,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import ValidationError
 
+from app.gateway.customer_administration import request_customer_administration_policy
 from app.gateway.deps import get_current_user_from_request, is_admin_user
 from app.gateway.routers import mcp
 from deerflow.capabilities.runtime import ambiguous_installation_ids
@@ -49,7 +50,7 @@ def _validate_personal_server(server: mcp.McpServerConfigResponse, *, admin: boo
     mcp._validate_mcp_update_request(mcp.McpConfigUpdateRequest(mcp_servers={"personal": server}))
 
 
-def _mutate(user_id: str, operation: Literal["create", "update", "delete", "state"], body, *, admin: bool) -> dict:
+def _mutate(user_id: str, operation: Literal["create", "update", "delete", "state"], body, *, admin: bool, policy=None) -> dict:
     path = user_mcp_config_path(user_id)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with extensions_config_write_lock, extensions_config_file_lock(path):
@@ -62,6 +63,7 @@ def _mutate(user_id: str, operation: Literal["create", "update", "delete", "stat
                 mcp._ensure_no_masked_secrets(incoming)
                 _validate_personal_server(incoming, admin=admin)
                 definition = incoming.model_dump()
+                mcp._admit_mcp_definition(policy, definition, resolve_environment=False)
                 metadata = definition.get("capability")
                 definition["capability"] = {**(metadata if isinstance(metadata, dict) else {}), "id": str(uuid4())}
                 definition["personal_public_network"] = not admin
@@ -71,12 +73,15 @@ def _mutate(user_id: str, operation: Literal["create", "update", "delete", "stat
             if name not in servers:
                 raise HTTPException(404, "MCP server not found")
             if operation == "delete":
+                mcp._admit_mcp_transition(policy, servers[name], None, resolve_environment=False)
                 del servers[name]
             elif operation == "update":
                 merged = mcp._merge_preserving_secrets(body.server, mcp._mcp_server_response_from_raw(name, servers[name]), preserve_omitted_fields=False)
                 _validate_personal_server(merged, admin=admin)
+                mcp._admit_mcp_transition(policy, servers[name], merged.model_dump(), resolve_environment=False)
                 servers[name] = {**merged.model_dump(), "personal_public_network": not admin}
             else:
+                mcp._admit_mcp_transition(policy, servers[name], {**servers[name], "enabled": body.enabled}, resolve_environment=False)
                 if body.enabled:
                     _validate_personal_server(mcp._mcp_server_response_from_raw(name, servers[name]), admin=admin)
                     servers[name]["personal_public_network"] = not admin
@@ -101,9 +106,10 @@ async def get_configuration(request: Request):
 
 
 async def _write(request: Request, operation: str, body):
+    policy = request_customer_administration_policy(request)
     owner = await _owner(request)
     admin = await is_admin_user(request)
-    raw = await await_drained(asyncio.to_thread(_mutate, owner, operation, body, admin=admin))
+    raw = await await_drained(asyncio.to_thread(_mutate, owner, operation, body, admin=admin, policy=policy))
     return _response(raw)
 
 

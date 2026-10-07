@@ -159,7 +159,12 @@ async def test_async_management_resolver_offloads_the_same_resolution(tmp_path: 
     monkeypatch.setattr(gateway_authz, "_plugin_app_config", blocking_config_load)
     monkeypatch.setattr(gateway_authz, "resolve_authorization_provider_spec", blocking_discovery)
 
-    answer = await _resolve_extension_plugin_management_async(_unknown_request(extensions=_plugin_extensions()), NAMESPACE, "read")
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    request = _unknown_request(extensions=_plugin_extensions())
+    request.app.state.customer_administration_policy = CustomerAdministrationPolicy(plugin_management=True)
+    setattr(request.app.state, EXTENSION_PRINCIPAL_RESOLVER_KEY, lambda incoming: ExtensionPrincipal("user-1", is_admin=True))
+    answer = await _resolve_extension_plugin_management_async(request, NAMESPACE, "read")
 
     assert answer is False  # denied by policy, decided without blocking the loop
     assert config_loads  # reached inside a worker, or the gate would have raised

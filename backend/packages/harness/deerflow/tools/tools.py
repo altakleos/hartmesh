@@ -178,7 +178,9 @@ def get_available_tools(
     if include_upload_tool:
         builtin_tools.append(list_uploaded_files)
     skill_evolution_config = getattr(config, "skill_evolution", None)
-    if getattr(skill_evolution_config, "enabled", False):
+    from deerflow.runtime.customer_administration import private_skill_management_available
+
+    if getattr(skill_evolution_config, "enabled", False) and private_skill_management_available(config):
         from deerflow.tools.skill_manage_tool import skill_manage_tool
 
         builtin_tools.append(skill_manage_tool)

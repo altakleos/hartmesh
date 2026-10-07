@@ -106,34 +106,17 @@ async def _config(tmp_path: Path) -> SimpleNamespace:
     )
 
 
-async def test_lark_install_route_does_not_block_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _reset_paths(tmp_path, monkeypatch)
-    config = await _config(tmp_path)
-    archive = tmp_path / "fixtures" / "lark-cli.zip"
-    await asyncio.to_thread(_build_lark_archive, archive)
+async def test_lark_install_route_denies_before_blocking_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from unittest.mock import Mock
 
-    async def _allow_admin(*_args, **_kwargs) -> None:
-        return None
+    from fastapi import HTTPException
 
-    refresh_calls = 0
-
-    async def _refresh_cache() -> None:
-        nonlocal refresh_calls
-        refresh_calls += 1
-
-    monkeypatch.setenv(lark_cli.LARK_CLI_SOURCE_ARCHIVE_ENV, str(archive))
-    monkeypatch.setattr(lark_cli, "probe_lark_cli", lambda: lark_cli.LarkCliProbe(available=True, path="/usr/bin/lark-cli", version="v1.0.65"))
-    monkeypatch.setattr(lark_cli, "probe_lark_auth", lambda _user_id, **_kwargs: lark_cli.LarkAuthProbe(status="not_configured", message="not configured"))
-    monkeypatch.setattr(integrations, "get_effective_user_id", lambda: "loop-user")
-    monkeypatch.setattr(integrations, "require_admin_user", _allow_admin)
-    monkeypatch.setattr(integrations, "refresh_skills_system_prompt_cache_async", _refresh_cache, raising=False)
-
-    response = await integrations.install_lark(request=None, config=config)
-
-    assert response.success is True
-    assert refresh_calls == 1
-    install_root = await asyncio.to_thread(lark_cli.lark_integration_root, "loop-user")
-    assert await asyncio.to_thread((install_root / "lark-doc" / "SKILL.md").exists)
+    install = Mock(side_effect=AssertionError("Provider-only route reached install"))
+    monkeypatch.setattr(integrations, "install_lark_integration", install)
+    with pytest.raises(HTTPException) as denied:
+        await integrations.install_lark(request=None, config=SimpleNamespace())
+    assert denied.value.status_code == 403
+    install.assert_not_called()
 
 
 async def test_lark_auth_complete_route_does_not_block_event_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

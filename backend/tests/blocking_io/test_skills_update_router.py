@@ -1,27 +1,9 @@
-"""Regression anchors for ``update_skill``: no event-loop blocking + serialized writes.
+"""Operator global skill writes retain off-loop atomicity and shared MCP locks.
 
-``app.gateway.routers.skills.update_skill`` toggles a skill's enabled state. For a
-PUBLIC skill that rewrites the shared ``extensions_config.json``; the skill
-enumeration, the config read-modify-write, and the reload are blocking filesystem
-IO, so they are offloaded via ``asyncio.to_thread``. Offloading removes the
-implicit serialization the single-threaded event loop provided, so the RMW is
-guarded by ``extensions_config_write_lock`` — shared with the MCP router, which
-performs the same RMW on the same file.
-
-- ``test_update_skill_does_not_block_event_loop``: the strict Blockbuster gate
-  fails if the config write regresses back onto the loop (teeth: red pre-fix).
-- ``test_update_skill_writes_from_snapshot_without_mutating_singleton``: the write
-  payload is built from a snapshot, so the cached ``extensions_config`` singleton
-  is never mutated in place while the write is still in flight.
-- ``test_update_skill_serializes_concurrent_writes``: two concurrent calls observe
-  a max in-flight RMW count of 1 — red if the lock is removed.
-- ``test_skill_and_mcp_config_writes_are_serialized``: a skill toggle and an MCP
-  config update never overlap inside the shared-file RMW — red if the two routers
-  go back to separate module-local locks.
-
-Only the config-infra boundaries (storage / ``get_extensions_config`` / reload /
-path resolution) are stubbed; the real same-directory temporary write and atomic
-replacement are exercised.
+Customer public toggles are denied. These anchors exercise the retained operator
+writer directly, including real file replacement, singleton isolation, concurrent
+RMW and cancellation-drained workers. Owner-private HTTP lifecycle is covered in
+custom-router and owner-storage anchors.
 """
 
 from __future__ import annotations
@@ -39,9 +21,10 @@ import pytest
 from app.gateway.routers import mcp as mcp_router
 from app.gateway.routers import skills as skills_router
 from app.gateway.routers.mcp import McpConfigUpdateRequest
-from app.gateway.routers.skills import SkillUpdateRequest, update_skill
+from app.gateway.routers.skills import SkillUpdateRequest
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig
 from deerflow.skills import Skill
+from deerflow.utils.file_io import await_drained
 
 pytestmark = pytest.mark.asyncio
 
@@ -51,6 +34,12 @@ def _admin_request() -> SimpleNamespace:
     # stamps it. A SimpleNamespace is enough for the direct-call tests.
     user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"), system_role="admin")
     return SimpleNamespace(state=SimpleNamespace(user=user))
+
+
+async def _operator_write_state(name, body, _request, config):
+    storage = skills_router._get_user_skill_storage(config)
+    await await_drained(asyncio.to_thread(skills_router._write_extensions_skill_state, storage, name, body.enabled, rebuild_public_projection=False))
+    return SimpleNamespace(name=name)
 
 
 def _make_skill(name: str, *, enabled: bool) -> Skill:
@@ -76,22 +65,21 @@ def _patch_config_infra(monkeypatch, config_path: Path, *, reload_hook=None) -> 
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda _path=None: config_path))
     # PUBLIC toggles drop every user's prompt cache; the handler offloads this
     # sync call, so a no-op keeps the test focused on the config write.
-    monkeypatch.setattr("app.gateway.routers.skills.clear_skills_system_prompt_cache", lambda: None)
     return shared_config
 
 
-async def test_update_skill_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
+async def test_operator_skill_does_not_block_event_loop(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "extensions_config.json"
     _patch_config_infra(monkeypatch, config_path)
 
-    result = await update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
+    result = await _operator_write_state("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
 
     assert result.name == "demo-skill"
     # the real config write ran off the loop
     assert await asyncio.to_thread(config_path.exists)
 
 
-async def test_update_skill_writes_from_snapshot_without_mutating_singleton(tmp_path: Path, monkeypatch) -> None:
+async def test_operator_skill_writes_from_snapshot_without_mutating_singleton(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "extensions_config.json"
     mock_storage = SimpleNamespace(load_skills=lambda *, enabled_only: [_make_skill("demo-skill", enabled=True)])
     shared_config = ExtensionsConfig(skills={"existing-skill": SkillStateConfig(enabled=True)})
@@ -100,9 +88,8 @@ async def test_update_skill_writes_from_snapshot_without_mutating_singleton(tmp_
     monkeypatch.setattr("app.gateway.routers.skills.get_extensions_config", lambda: shared_config)
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(lambda _path=None: config_path))
-    monkeypatch.setattr("app.gateway.routers.skills.clear_skills_system_prompt_cache", lambda: None)
 
-    result = await update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
+    result = await _operator_write_state("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
 
     assert result.name == "demo-skill"
     # The cached singleton must not have been mutated: the new skill only exists
@@ -120,7 +107,7 @@ async def test_update_skill_writes_from_snapshot_without_mutating_singleton(tmp_
     }
 
 
-async def test_update_skill_persists_state_when_source_omits_skills(tmp_path: Path, monkeypatch) -> None:
+async def test_operator_skill_persists_state_when_source_omits_skills(tmp_path: Path, monkeypatch) -> None:
     config_path = tmp_path / "extensions_config.json"
     await asyncio.to_thread(
         config_path.write_text,
@@ -129,7 +116,7 @@ async def test_update_skill_persists_state_when_source_omits_skills(tmp_path: Pa
     )
     _patch_config_infra(monkeypatch, config_path)
 
-    await update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
+    await _operator_write_state("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace())
 
     written = json.loads(await asyncio.to_thread(config_path.read_text, encoding="utf-8"))
     assert written["skills"] == {"demo-skill": {"enabled": False}}
@@ -137,7 +124,7 @@ async def test_update_skill_persists_state_when_source_omits_skills(tmp_path: Pa
 
 
 @pytest.mark.allow_blocking_io  # gate-exempt: needs real worker-thread overlap to observe serialization
-async def test_update_skill_serializes_concurrent_writes(tmp_path: Path, monkeypatch) -> None:
+async def test_operator_skill_serializes_concurrent_writes(tmp_path: Path, monkeypatch) -> None:
     state_lock = threading.Lock()
     counters = {"active": 0, "max": 0}
 
@@ -154,8 +141,8 @@ async def test_update_skill_serializes_concurrent_writes(tmp_path: Path, monkeyp
     _patch_config_infra(monkeypatch, tmp_path / "extensions_config.json", reload_hook=_tracking_reload)
 
     await asyncio.gather(
-        update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace()),
-        update_skill("demo-skill", SkillUpdateRequest(enabled=True), _admin_request(), SimpleNamespace()),
+        _operator_write_state("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace()),
+        _operator_write_state("demo-skill", SkillUpdateRequest(enabled=True), _admin_request(), SimpleNamespace()),
     )
 
     # The shared threading.Lock must serialize the offloaded read-modify-write.
@@ -163,7 +150,7 @@ async def test_update_skill_serializes_concurrent_writes(tmp_path: Path, monkeyp
 
 
 @pytest.mark.allow_blocking_io  # gate-exempt: needs real worker-thread overlap to observe serialization
-async def test_skill_and_mcp_config_writes_are_serialized(tmp_path: Path, monkeypatch) -> None:
+async def test_operator_skill_and_mcp_config_writes_are_serialized(tmp_path: Path, monkeypatch) -> None:
     """A skill toggle and an MCP update must not interleave on extensions_config.json.
 
     Both routers read-modify-write the same file from a worker thread. With
@@ -209,7 +196,7 @@ async def test_skill_and_mcp_config_writes_are_serialized(tmp_path: Path, monkey
     monkeypatch.setattr(mcp_router, "reload_extensions_config", _tracking_reload)
 
     await asyncio.gather(
-        update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace()),
+        _operator_write_state("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace()),
         mcp_router.update_mcp_configuration(_admin_request(), McpConfigUpdateRequest(mcp_servers={})),
     )
 
@@ -266,7 +253,7 @@ async def test_cancelled_writer_keeps_the_lock_until_its_worker_finishes(tmp_pat
     monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", mcp_cache_reset.set)
     monkeypatch.setattr(mcp_router, "reload_extensions_config", _mcp_reload)
 
-    skills_task = asyncio.create_task(update_skill("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace()))
+    skills_task = asyncio.create_task(_operator_write_state("demo-skill", SkillUpdateRequest(enabled=False), _admin_request(), SimpleNamespace()))
     assert await asyncio.to_thread(skills_inside.wait, 5), "skills worker never entered the critical section"
 
     # Cancel the awaiting task while its worker thread is still inside the RMW.

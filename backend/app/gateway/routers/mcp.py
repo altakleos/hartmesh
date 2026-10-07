@@ -10,6 +10,7 @@ from typing import Any, Literal, NamedTuple, NoReturn
 from fastapi import APIRouter, HTTPException, Request, status
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from app.gateway.customer_administration import request_customer_administration_policy, require_provider_operation
 from app.gateway.deps import require_admin_user
 from deerflow.config.extensions_config import (
     ExtensionsConfig,
@@ -28,11 +29,30 @@ from deerflow.config.extensions_config import (
 from deerflow.config.runtime_paths import project_root
 from deerflow.constants import DEFAULT_MCP_SESSION_INIT_TIMEOUT
 from deerflow.mcp.cache import publish_mcp_tools_cache_reset, reset_mcp_tools_cache
+from deerflow.runtime.customer_administration import CustomerManagementDenied, require_customer_management, require_mcp_management_transition
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["mcp"])
 
 _ADMIN_REQUIRED_DETAIL = "Admin privileges required to manage MCP configuration."
+
+
+def _require_mcp_mutation_policy(policy) -> None:
+    try:
+        require_customer_management(policy, "local_mcp_management")
+    except CustomerManagementDenied as exc:
+        raise HTTPException(403, str(exc)) from None
+
+
+def _admit_mcp_definition(policy, definition: dict, *, resolve_environment: bool = True) -> None:
+    _admit_mcp_transition(policy, None, definition, resolve_environment=resolve_environment)
+
+
+def _admit_mcp_transition(policy, previous, candidate, *, resolve_environment: bool = True) -> None:
+    try:
+        require_mcp_management_transition(policy, previous, candidate, resolve_environment=resolve_environment)
+    except CustomerManagementDenied as exc:
+        raise HTTPException(403, str(exc)) from None
 
 
 _MCP_STDIO_COMMAND_ALLOWLIST_ENV = "DEER_FLOW_MCP_STDIO_COMMAND_ALLOWLIST"
@@ -1199,7 +1219,7 @@ def _validate_extensions_config_candidate(raw_data: dict, *, check_installation_
         _raise_invalid_mcp_configuration("Duplicate MCP installation IDs; remove conflicting entries or assign unique capability IDs in the deployment configuration")
 
 
-def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
+def _apply_mcp_config_update(body: McpConfigUpdateRequest, *, policy=None) -> dict:
     """Worker-thread body for :func:`update_mcp_configuration`.
 
     Resolving the config path, the existence probe, reading the raw JSON,
@@ -1253,6 +1273,8 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
         config_data["skills"] = raw_skills
 
         _validate_extensions_config_candidate(config_data)
+        for name in raw_servers.keys() | config_data["mcpServers"].keys():
+            _admit_mcp_transition(policy, raw_servers.get(name), config_data["mcpServers"].get(name))
         atomic_write_extensions_config(config_path, config_data)
 
         logger.info(f"MCP configuration updated and saved to: {config_path}")
@@ -1264,7 +1286,7 @@ def _apply_mcp_config_update(body: McpConfigUpdateRequest) -> dict:
         return _mcp_server_responses_from_raw(config_data)
 
 
-def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
+def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest, *, policy=None) -> dict:
     """Update one server state while preserving the raw extensions config."""
     config_path = ExtensionsConfig.resolve_config_path()
     if config_path is None:
@@ -1289,6 +1311,7 @@ def _apply_mcp_server_state_update(body: McpServerStateUpdateRequest) -> dict:
             )
         raw_server = raw_servers[body.server_name]
         target_server = _mcp_server_response_from_raw(body.server_name, raw_server)
+        _admit_mcp_transition(policy, raw_server, {**raw_server, "enabled": body.enabled})
 
         if body.enabled:
             _validate_mcp_update_request(
@@ -1365,7 +1388,7 @@ def _ensure_skills_key(raw_data: dict) -> None:
     raw_data["skills"] = {name: {"enabled": skill.enabled} for name, skill in current_config.skills.items()}
 
 
-def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> dict:
+def _apply_mcp_servers_create(body: McpConfigUpdateRequest, *, policy=None) -> dict:
     """Atomically add servers without replacing entries already on disk."""
     config_path = _mcp_config_path(create=True)
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
@@ -1380,6 +1403,7 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> dict:
 
         for name, incoming in body.mcp_servers.items():
             _ensure_no_masked_secrets(incoming)
+            _admit_mcp_definition(policy, incoming.model_dump())
             raw_servers[name] = incoming.model_dump()
         raw_data["mcpServers"] = raw_servers
         _ensure_skills_key(raw_data)
@@ -1391,7 +1415,7 @@ def _apply_mcp_servers_create(body: McpConfigUpdateRequest) -> dict:
         return _mcp_server_responses_from_raw(raw_data)
 
 
-def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
+def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest, *, policy=None) -> dict:
     """Atomically replace one server while preserving concurrent sibling edits."""
     config_path = _mcp_config_path(create=False)
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
@@ -1410,6 +1434,7 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
             preserve_omitted_fields=False,
         )
         _ensure_no_masked_secrets(merged)
+        _admit_mcp_transition(policy, raw_servers[body.server_name], merged.model_dump())
         raw_servers[body.server_name] = merged.model_dump()
         raw_data["mcpServers"] = raw_servers
         _validate_extensions_config_candidate(raw_data)
@@ -1420,7 +1445,7 @@ def _apply_mcp_server_config_update(body: McpServerConfigUpdateRequest) -> dict:
         return _mcp_server_responses_from_raw(raw_data)
 
 
-def _apply_mcp_server_delete(server_name: str) -> dict:
+def _apply_mcp_server_delete(server_name: str, *, policy=None) -> dict:
     """Atomically remove one server while preserving every sibling entry."""
     config_path = _mcp_config_path(create=False)
     with extensions_config_write_lock, extensions_config_file_lock(config_path):
@@ -1432,6 +1457,7 @@ def _apply_mcp_server_delete(server_name: str) -> dict:
                 detail=f"MCP server '{server_name}' not found",
             )
 
+        _admit_mcp_transition(policy, raw_servers[server_name], None)
         del raw_servers[server_name]
         raw_data["mcpServers"] = raw_servers
         # Removal cannot introduce an ID collision; permit incremental recovery
@@ -1458,7 +1484,7 @@ async def reset_mcp_tools_cache_endpoint(request: Request) -> McpCacheResetRespo
     carries the invalidation to peer workers even when the config itself did
     not change (for example, a remote server changed ``tools/list``).
     """
-    await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
+    require_provider_operation()
     generation = await asyncio.to_thread(publish_mcp_tools_cache_reset)
     if generation is None:
         return McpCacheResetResponse(
@@ -1511,6 +1537,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         }
         ```
     """
+    policy = request_customer_administration_policy(request)
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
         _validate_mcp_update_request(body)
@@ -1520,7 +1547,7 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
         # worker takes extensions_config_write_lock for the whole RMW, so it stays
         # atomic and serialized against the skills router (the other writer of
         # this file) even if this request is cancelled mid-write.
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_config_update, body)
+        reloaded_servers = await asyncio.to_thread(_apply_mcp_config_update, body, policy=policy)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
         reset_mcp_tools_cache()
@@ -1541,10 +1568,11 @@ async def update_mcp_configuration(request: Request, body: McpConfigUpdateReques
 )
 async def create_mcp_servers(request: Request, body: McpConfigUpdateRequest) -> McpConfigResponse:
     """Add servers atomically and reject names that already exist."""
+    policy = request_customer_administration_policy(request)
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
         _validate_mcp_update_request(body)
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_servers_create, body)
+        reloaded_servers = await asyncio.to_thread(_apply_mcp_servers_create, body, policy=policy)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
         reset_mcp_tools_cache()
@@ -1564,13 +1592,14 @@ async def create_mcp_servers(request: Request, body: McpConfigUpdateRequest) -> 
 )
 async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest) -> McpConfigResponse:
     """Update one existing server and reload the MCP tool cache."""
+    policy = request_customer_administration_policy(request)
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
         _validate_mcp_update_request(
             McpConfigUpdateRequest(mcp_servers={body.server_name: body.server}),
             enforce_execution_policy=body.server.enabled,
         )
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_config_update, body)
+        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_config_update, body, policy=policy)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
         reset_mcp_tools_cache()
@@ -1590,9 +1619,10 @@ async def update_mcp_server(request: Request, body: McpServerConfigUpdateRequest
 )
 async def delete_mcp_server(request: Request, server_name: str) -> McpConfigResponse:
     """Delete one existing server and reload the MCP tool cache."""
+    policy = request_customer_administration_policy(request)
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_delete, server_name)
+        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_delete, server_name, policy=policy)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
         reset_mcp_tools_cache()
@@ -1612,9 +1642,10 @@ async def delete_mcp_server(request: Request, server_name: str) -> McpConfigResp
 )
 async def update_mcp_server_state(request: Request, body: McpServerStateUpdateRequest) -> McpConfigResponse:
     """Enable or disable one MCP server and reload the MCP tool cache."""
+    policy = request_customer_administration_policy(request)
     try:
         await require_admin_user(request, detail=_ADMIN_REQUIRED_DETAIL)
-        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_state_update, body)
+        reloaded_servers = await asyncio.to_thread(_apply_mcp_server_state_update, body, policy=policy)
 
         servers = {name: _mask_server_config(McpServerConfigResponse(**server.model_dump())) for name, server in reloaded_servers.items()}
         reset_mcp_tools_cache()

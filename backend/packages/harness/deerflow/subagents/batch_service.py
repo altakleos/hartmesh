@@ -194,6 +194,16 @@ class SubagentBatchService:
         return batch
 
     async def _execute_item(self, item: dict[str, Any]) -> None:
+        from deerflow.runtime.customer_administration import DENIED_CUSTOMER_ADMINISTRATION, CustomerManagementActor, bind_customer_administration_policy, bind_customer_management_actor, bind_customer_management_actor_role
+
+        # Durable rows retain no trusted originating management grant. Do not
+        # recover one from serialized user_role or an ambient request context.
+        with bind_customer_administration_policy(DENIED_CUSTOMER_ADMINISTRATION), bind_customer_management_actor(CustomerManagementActor()), bind_customer_management_actor_role("user"):
+            await self._execute_item_admitted(item)
+
+    async def _execute_item_admitted(self, item: dict[str, Any]) -> None:
+        from deerflow.runtime.customer_administration import DENIED_CUSTOMER_ADMINISTRATION, CustomerManagementActor
+
         item_id = item["id"]
         execution_id: str | None = None
         try:
@@ -250,6 +260,8 @@ class SubagentBatchService:
                 execution_capacity=self._execution_capacity,
                 extensions=self._extensions,
                 acceptance_criteria=item.get("acceptance_criteria"),
+                customer_administration_policy=DENIED_CUSTOMER_ADMINISTRATION,
+                customer_management_actor=CustomerManagementActor(),
                 **executor_kwargs,
             )
             prompt = f"Durable batch item key: {item['item_key']}\nThis item may be retried after a worker crash. Keep side effects idempotent and use the item key as the idempotency identity.\n\n{item['prompt']}"

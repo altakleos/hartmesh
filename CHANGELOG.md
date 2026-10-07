@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Customer plugin, private skill and local MCP administration now requires explicit
+  operator delegation, captured at startup and denied by default even for admins.
+  Local launches additionally require exact operator approval. Effective UI controls
+  retain ordinary approved tool use and remote owner preferences. Global managed
+  installation/reload stays with operator tools. Config schema: 51 → 52; database
+  schema: unchanged. Extension API 0.2.6 adds explicit management purpose negotiation.
+
 - Historical report rendering and filing now use a provider-installed compatibility plugin. Existing configurations must enable its plugin entry; original files remain unchanged. No database schema change.
 
 ### Product

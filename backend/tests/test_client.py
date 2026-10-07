@@ -86,6 +86,29 @@ def allow_skill_security_scan():
         yield
 
 
+@pytest.fixture
+def management_actor():
+    """An explicit host-authorized actor for SDK management functional tests."""
+    from deerflow.runtime.customer_administration import bind_customer_management_actor_role
+
+    with bind_customer_management_actor_role("admin"):
+        yield
+
+
+@pytest.fixture
+def private_skill_management(client, management_actor, monkeypatch, tmp_path):
+    """Delegate private operations to an isolated owner storage, never shared storage."""
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+    from deerflow.runtime.user_context import get_effective_user_id
+    from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+    client._customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=True)
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    storage = UserScopedSkillStorage(get_effective_user_id(), host_path=str(tmp_path / "skills"))
+    monkeypatch.setattr("deerflow.client.get_or_new_user_skill_storage", lambda user_id, **kwargs: storage)
+    yield storage
+
+
 # ---------------------------------------------------------------------------
 # __init__
 # ---------------------------------------------------------------------------
@@ -1934,6 +1957,7 @@ class TestEnsureAgent:
             10,
             get_effective_user_id(),
             None,
+            False,
         )
 
         config = client._get_runnable_config("t1")
@@ -2408,6 +2432,7 @@ class TestGoalManagement:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("management_actor")
 class TestMcpConfig:
     def test_get_mcp_config(self, client):
         server = MagicMock()
@@ -2457,6 +2482,11 @@ class TestMcpConfig:
     def test_update_mcp_config_preserves_raw_sibling_keys(self, client, tmp_path, monkeypatch):
         """Only ``mcpServers`` is replaced; every other key keeps its on-disk ``$VAR`` form."""
         monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
+        from deerflow.config.app_config import AppConfig
+        from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+        startup = AppConfig.model_validate({"sandbox": {"use": "test"}, "customer_administration": {"local_mcp_management": True}, "approved_local_mcp_definitions": [{"command": "uvx", "env": {"TOKEN": "ghp_live_secret_value"}}]})
+        client._customer_administration_policy = capture_customer_administration_policy(startup)
         config_file = tmp_path / "extensions_config.json"
         config_file.write_text(
             json.dumps(
@@ -2505,6 +2535,7 @@ class TestMcpConfig:
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.usefixtures("private_skill_management")
 class TestSkillsManagement:
     def _make_skill(self, name="test-skill", enabled=True):
         s = MagicMock()
@@ -2527,61 +2558,43 @@ class TestSkillsManagement:
             result = client.get_skill("nonexistent")
         assert result is None
 
-    def test_update_skill(self, client):
+    def test_public_update_denied_even_when_private_management_is_enabled(self, client, tmp_path):
+        from deerflow.runtime.customer_administration import CustomerManagementDenied
+
         skill = self._make_skill(enabled=True)
-        updated_skill = self._make_skill(enabled=False)
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text('{"mcpServers": {}, "skills": {"untouched-skill": {"enabled": false}}}', encoding="utf-8")
+        before = config_file.read_bytes()
+        marker = object()
+        client._agent = marker
+        with (
+            patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", return_value=[skill]),
+            patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
+            pytest.raises(CustomerManagementDenied, match="Global skill state"),
+        ):
+            client.update_skill("test-skill", enabled=False)
+        assert config_file.read_bytes() == before
+        assert client._agent is marker
 
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"mcpServers": {}, "skills": {"untouched-skill": {"enabled": False}}}, f)
-            tmp_path = Path(f.name)
+    def test_private_toggle_persists_owner_state_without_global_skill_state(self, client, private_skill_management, tmp_path, monkeypatch):
+        from deerflow.config.extensions_config import reset_extensions_config
 
+        storage = private_skill_management
+        config_file = tmp_path / "extensions_config.json"
+        config_file.write_text('{"mcpServers": {}}', encoding="utf-8")
+        before = config_file.read_bytes()
+        monkeypatch.setenv("DEER_FLOW_EXTENSIONS_CONFIG_PATH", str(config_file))
+        reset_extensions_config()
         try:
-            # Pre-set agent to verify it gets invalidated
-            client._agent = MagicMock()
-
-            # ``update_skill`` reads the skill list twice (find + reload) and
-            # ``UserScopedSkillStorage.load_skills`` internally calls
-            # ``super().load_skills()`` once per outer call, so the patched
-            # method is invoked 4 times: provide 4 return values.
-            with (
-                patch(
-                    "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
-                    side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
-                ),
-                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
-                patch("deerflow.client.reload_extensions_config"),
-            ):
-                result = client.update_skill("test-skill", enabled=False)
+            storage.write_custom_skill("test-skill", "SKILL.md", "---\nname: test-skill\ndescription: Owner variant\n---\nContent\n")
+            client._agent = object()
+            result = client.update_skill("test-skill", enabled=False)
             assert result["enabled"] is False
-            assert client._agent is None  # M2: agent invalidated
-            persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
-            assert persisted["skills"]["untouched-skill"] == {"enabled": False}
+            assert client._agent is None
+            assert storage.get_skill_enabled_state("test-skill") is False
+            assert config_file.read_bytes() == before
         finally:
-            tmp_path.unlink()
-
-    def test_update_skill_persists_state_when_source_omits_skills(self, client):
-        skill = self._make_skill(enabled=True)
-        updated_skill = self._make_skill(enabled=False)
-
-        with tempfile.NamedTemporaryFile(mode="w", suffix=".json", delete=False) as f:
-            json.dump({"mcpServers": {}}, f)
-            tmp_path = Path(f.name)
-
-        try:
-            with (
-                patch(
-                    "deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills",
-                    side_effect=[[skill], [skill], [updated_skill], [updated_skill]],
-                ),
-                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=tmp_path),
-                patch("deerflow.client.reload_extensions_config"),
-            ):
-                client.update_skill("test-skill", enabled=False)
-
-            persisted = json.loads(tmp_path.read_text(encoding="utf-8"))
-            assert persisted["skills"] == {"test-skill": {"enabled": False}}
-        finally:
-            tmp_path.unlink()
+            reset_extensions_config()
 
     @staticmethod
     def _config_with_placeholders() -> dict:
@@ -2592,16 +2605,18 @@ class TestSkillsManagement:
         }
 
     @pytest.mark.parametrize("category", ["public", "custom"])
-    def test_update_skill_preserves_env_placeholders(self, client, tmp_path, monkeypatch, category):
+    def test_denied_public_or_shared_toggles_preserve_env_placeholders(self, client, tmp_path, monkeypatch, category):
         """Toggling a skill must not persist resolved ``$VAR`` values or blank unset ones.
 
-        ``public`` covers the shared-state path; ``custom`` with non-user-scoped
-        storage covers the fallback that also writes ``extensions_config.json``.
+        Public baseline and unsupported shared-storage writes both fail closed.
+        Neither may rewrite the deployment configuration or its placeholders.
         """
         monkeypatch.setenv("DEERFLOW_TEST_GH_TOKEN", "ghp_live_secret_value")
         monkeypatch.delenv("DEERFLOW_TEST_UNSET_VAR", raising=False)
         config_file = tmp_path / "extensions_config.json"
         config_file.write_text(json.dumps(self._config_with_placeholders()), encoding="utf-8")
+
+        from deerflow.runtime.customer_administration import CustomerManagementDenied
 
         skill = self._make_skill(enabled=True)
         skill.category = category
@@ -2613,10 +2628,10 @@ class TestSkillsManagement:
             patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
             patch("deerflow.client.reload_extensions_config"),
         ):
-            client.update_skill("test-skill", enabled=False)
+            with pytest.raises(CustomerManagementDenied):
+                client.update_skill("test-skill", enabled=False)
 
         expected = self._config_with_placeholders()
-        expected["skills"]["test-skill"] = {"enabled": False}
         written_text = config_file.read_text(encoding="utf-8")
         assert json.loads(written_text) == expected
         assert "ghp_live_secret_value" not in written_text
@@ -2642,9 +2657,10 @@ class TestSkillsManagement:
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+            from deerflow.runtime.user_context import get_effective_user_id
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-            local_storage = LocalSkillStorage(host_path=str(skills_root))
+            local_storage = UserScopedSkillStorage(get_effective_user_id(), host_path=str(skills_root))
             with (
                 patch("deerflow.skills.storage._default_skill_storage", local_storage),
                 patch("deerflow.client.get_or_new_user_skill_storage", lambda user_id, **kwargs: local_storage),
@@ -2653,7 +2669,8 @@ class TestSkillsManagement:
 
             assert result["success"] is True
             assert result["skill_name"] == "my-skill"
-            assert (skills_root / "custom" / "my-skill").exists()
+            assert local_storage.get_custom_skill_dir("my-skill").exists()
+            assert not (skills_root / "custom" / "my-skill").exists()
 
     def test_install_skill_not_found(self, client):
         with pytest.raises(FileNotFoundError):
@@ -3473,7 +3490,7 @@ class TestScenarioConfigManagement:
         assert detail is not None
         assert detail["enabled"] is True
 
-    def test_mcp_update_then_skill_toggle(self, client):
+    def test_mcp_update_then_skill_toggle(self, client, private_skill_management):
         """Update MCP config → toggle skill → verify both invalidate agent."""
         with tempfile.TemporaryDirectory() as tmp:
             config_file = Path(tmp) / "extensions_config.json"
@@ -3490,36 +3507,16 @@ class TestScenarioConfigManagement:
                 patch("deerflow.client.get_extensions_config", return_value=current_config),
                 patch("deerflow.client.reload_extensions_config", return_value=reloaded_config),
             ):
-                mcp_result = client.update_mcp_config({"my-mcp": {"enabled": True}})
+                mcp_result = client.update_mcp_config({"my-mcp": {"enabled": True, "type": "sse"}})
             assert "my-mcp" in mcp_result["mcp_servers"]
             assert client._agent is None  # Agent invalidated
 
-            # --- Skill toggle ---
-            skill = MagicMock()
-            skill.name = "code-gen"
-            skill.description = "Generate code"
-            skill.license = "MIT"
-            skill.category = "custom"
-            skill.enabled = True
-
-            toggled = MagicMock()
-            toggled.name = "code-gen"
-            toggled.description = "Generate code"
-            toggled.license = "MIT"
-            toggled.category = "custom"
-            toggled.enabled = False
-
-            ext_config = ExtensionsConfig()
-
+            # --- Owner-private skill toggle ---
+            private_skill_management.write_custom_skill("code-gen", "SKILL.md", "---\nname: code-gen\ndescription: Generate code\n---\nContent\n")
             client._agent = MagicMock()  # Simulate re-created agent
-            with (
-                patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", side_effect=[[skill], [toggled]]),
-                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
-                patch("deerflow.client.get_extensions_config", return_value=ext_config),
-                patch("deerflow.client.reload_extensions_config"),
-            ):
-                skill_result = client.update_skill("code-gen", enabled=False)
+            skill_result = client.update_skill("code-gen", enabled=False)
             assert skill_result["enabled"] is False
+            assert private_skill_management.get_skill_enabled_state("code-gen") is False
             assert client._agent is None  # Agent invalidated again
 
 
@@ -3781,71 +3778,19 @@ class TestScenarioMemoryWorkflow:
 
 
 class TestScenarioSkillInstallAndUse:
-    """Scenario: Install a skill → verify it appears → toggle it."""
+    """Install and toggle an explicitly delegated owner-private skill."""
 
-    def test_install_then_toggle(self, client, allow_skill_security_scan):
-        """Install .skill archive → list to verify → disable → verify disabled."""
-        with tempfile.TemporaryDirectory() as tmp:
-            tmp_path = Path(tmp)
-
-            # Create .skill archive
-            skill_src = tmp_path / "my-analyzer"
-            skill_src.mkdir()
-            (skill_src / "SKILL.md").write_text("---\nname: my-analyzer\ndescription: Analyze code\nlicense: MIT\n---\nAnalysis skill")
-            archive = tmp_path / "my-analyzer.skill"
-            with zipfile.ZipFile(archive, "w") as zf:
-                zf.write(skill_src / "SKILL.md", "my-analyzer/SKILL.md")
-
-            skills_root = tmp_path / "skills"
-            (skills_root / "custom").mkdir(parents=True)
-
-            # Step 1: Install
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
-
-            local_storage = LocalSkillStorage(host_path=str(skills_root))
-            with (
-                patch("deerflow.skills.storage._default_skill_storage", local_storage),
-                patch("deerflow.client.get_or_new_user_skill_storage", lambda user_id, **kwargs: local_storage),
-            ):
-                result = client.install_skill(archive)
-            assert result["success"] is True
-            assert (skills_root / "custom" / "my-analyzer" / "SKILL.md").exists()
-
-            # Step 2: List and find it
-            installed_skill = MagicMock()
-            installed_skill.name = "my-analyzer"
-            installed_skill.description = "Analyze code"
-            installed_skill.license = "MIT"
-            installed_skill.category = "custom"
-            installed_skill.enabled = True
-
-            with patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", return_value=[installed_skill]):
-                skills_result = client.list_skills()
-            assert any(s["name"] == "my-analyzer" for s in skills_result["skills"])
-
-            # Step 3: Disable it
-            disabled_skill = MagicMock()
-            disabled_skill.name = "my-analyzer"
-            disabled_skill.description = "Analyze code"
-            disabled_skill.license = "MIT"
-            disabled_skill.category = "custom"
-            disabled_skill.enabled = False
-
-            ext_config = MagicMock()
-            ext_config.mcp_servers = {}
-            ext_config.skills = {}
-
-            config_file = tmp_path / "extensions_config.json"
-            config_file.write_text("{}")
-
-            with (
-                patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", side_effect=[[installed_skill], [disabled_skill]]),
-                patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
-                patch("deerflow.client.get_extensions_config", return_value=ext_config),
-                patch("deerflow.client.reload_extensions_config"),
-            ):
-                toggled = client.update_skill("my-analyzer", enabled=False)
-            assert toggled["enabled"] is False
+    def test_install_then_toggle(self, client, private_skill_management, allow_skill_security_scan, tmp_path):
+        archive = tmp_path / "my-analyzer.skill"
+        with zipfile.ZipFile(archive, "w") as zf:
+            zf.writestr("my-analyzer/SKILL.md", "---\nname: my-analyzer\ndescription: Analyze code\nlicense: MIT\n---\nAnalysis skill")
+        result = client.install_skill(archive)
+        assert result["success"] is True
+        assert (private_skill_management.get_custom_skill_dir("my-analyzer") / "SKILL.md").exists()
+        assert any(skill["name"] == "my-analyzer" for skill in client.list_skills()["skills"])
+        toggled = client.update_skill("my-analyzer", enabled=False)
+        assert toggled["enabled"] is False
+        assert private_skill_management.get_skill_enabled_state("my-analyzer") is False
 
 
 class TestScenarioEdgeCases:
@@ -4035,7 +3980,7 @@ class TestGatewayConformance:
         parsed = SkillResponse(**result)
         assert parsed.name == "web-search"
 
-    def test_install_skill(self, client, tmp_path, allow_skill_security_scan):
+    def test_install_skill(self, client, tmp_path, allow_skill_security_scan, private_skill_management):
         skill_dir = tmp_path / "my-skill"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text("---\nname: my-skill\ndescription: A test skill\n---\nBody\n")
@@ -4044,9 +3989,10 @@ class TestGatewayConformance:
         with zipfile.ZipFile(archive, "w") as zf:
             zf.write(skill_dir / "SKILL.md", "my-skill/SKILL.md")
 
-        from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+        from deerflow.runtime.user_context import get_effective_user_id
+        from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-        local_storage = LocalSkillStorage(host_path=str(tmp_path))
+        local_storage = UserScopedSkillStorage(get_effective_user_id(), host_path=str(tmp_path))
         with (
             patch("deerflow.skills.storage._default_skill_storage", local_storage),
             patch("deerflow.client.get_or_new_user_skill_storage", lambda user_id, **kwargs: local_storage),
@@ -4078,7 +4024,13 @@ class TestGatewayConformance:
         parsed = McpConfigResponse(**result)
         assert "test" in parsed.mcp_servers
 
-    def test_update_mcp_config(self, client, tmp_path):
+    def test_update_mcp_config(self, client, tmp_path, management_actor):
+        from deerflow.config.app_config import AppConfig
+        from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+        client._customer_administration_policy = capture_customer_administration_policy(
+            AppConfig.model_validate({"sandbox": {"use": "test"}, "customer_administration": {"local_mcp_management": True}, "approved_local_mcp_definitions": [{"command": "npx"}]})
+        )
         server = McpServerConfig(
             enabled=True,
             type="stdio",
@@ -4189,6 +4141,7 @@ class TestGatewayConformance:
 # ===========================================================================
 
 
+@pytest.mark.usefixtures("private_skill_management")
 class TestInstallSkillSecurity:
     """Every security gate in install_skill() must have a red-line test."""
 
@@ -4213,10 +4166,11 @@ class TestInstallSkillSecurity:
             def patched_extract(zf, dest, max_total_size=100):
                 return orig(zf, dest, max_total_size=100)
 
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+            from deerflow.runtime.user_context import get_effective_user_id
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
             with (
-                patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))),
+                patch("deerflow.skills.storage._default_skill_storage", UserScopedSkillStorage(get_effective_user_id(), host_path=str(skills_root))),
                 patch("deerflow.skills.installer.safe_extract_skill_archive", side_effect=patched_extract),
             ):
                 with pytest.raises(ValueError, match="too large"):
@@ -4232,9 +4186,10 @@ class TestInstallSkillSecurity:
             skills_root = Path(tmp) / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+            from deerflow.runtime.user_context import get_effective_user_id
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
+            with patch("deerflow.skills.storage._default_skill_storage", UserScopedSkillStorage(get_effective_user_id(), host_path=str(skills_root))):
                 with pytest.raises(ValueError, match="unsafe"):
                     client.install_skill(archive)
 
@@ -4248,9 +4203,10 @@ class TestInstallSkillSecurity:
             skills_root = Path(tmp) / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+            from deerflow.runtime.user_context import get_effective_user_id
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
+            with patch("deerflow.skills.storage._default_skill_storage", UserScopedSkillStorage(get_effective_user_id(), host_path=str(skills_root))):
                 with pytest.raises(ValueError, match="unsafe"):
                     client.install_skill(archive)
 
@@ -4272,9 +4228,10 @@ class TestInstallSkillSecurity:
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+            from deerflow.runtime.user_context import get_effective_user_id
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-            local_storage = LocalSkillStorage(host_path=str(skills_root))
+            local_storage = UserScopedSkillStorage(get_effective_user_id(), host_path=str(skills_root))
             with (
                 patch("deerflow.skills.storage._default_skill_storage", local_storage),
                 patch("deerflow.client.get_or_new_user_skill_storage", lambda user_id, **kwargs: local_storage),
@@ -4282,7 +4239,7 @@ class TestInstallSkillSecurity:
                 result = client.install_skill(archive)
 
             assert result["success"] is True
-            installed = skills_root / "custom" / "sym-skill"
+            installed = local_storage.get_custom_skill_dir("sym-skill")
             assert (installed / "SKILL.md").exists()
             assert not (installed / "sneaky_link").exists()
 
@@ -4302,16 +4259,18 @@ class TestInstallSkillSecurity:
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+            from deerflow.runtime.user_context import get_effective_user_id
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
             with (
-                patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))),
+                patch("deerflow.skills.storage._default_skill_storage", UserScopedSkillStorage(get_effective_user_id(), host_path=str(skills_root))),
                 patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(True, "OK", "../evil")),
             ):
                 with pytest.raises(ValueError, match="Invalid skill name"):
                     client.install_skill(archive)
 
-    def test_existing_skill_rejected(self, client, allow_skill_security_scan):
+    def test_existing_skill_rejected(self, client, allow_skill_security_scan, private_skill_management):
+        private_skill_management.get_custom_skill_dir("dupe-skill").mkdir(parents=True)
         """Installing a skill that already exists is rejected."""
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -4327,12 +4286,13 @@ class TestInstallSkillSecurity:
             skills_root = tmp_path / "skills"
             (skills_root / "custom" / "dupe-skill").mkdir(parents=True)
 
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+            from deerflow.runtime.user_context import get_effective_user_id
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
             with (
-                patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))),
+                patch("deerflow.skills.storage._default_skill_storage", UserScopedSkillStorage(get_effective_user_id(), host_path=str(skills_root))),
                 patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(True, "OK", "dupe-skill")),
-                patch("deerflow.client.get_or_new_user_skill_storage", return_value=LocalSkillStorage(host_path=str(skills_root))),
+                patch("deerflow.client.get_or_new_user_skill_storage", return_value=UserScopedSkillStorage(get_effective_user_id(), host_path=str(skills_root))),
             ):
                 with pytest.raises(ValueError, match="already exists"):
                     client.install_skill(archive)
@@ -4347,9 +4307,10 @@ class TestInstallSkillSecurity:
             skills_root = Path(tmp) / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+            from deerflow.runtime.user_context import get_effective_user_id
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-            with patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))):
+            with patch("deerflow.skills.storage._default_skill_storage", UserScopedSkillStorage(get_effective_user_id(), host_path=str(skills_root))):
                 with pytest.raises(ValueError, match="empty"):
                     client.install_skill(archive)
 
@@ -4368,10 +4329,11 @@ class TestInstallSkillSecurity:
             skills_root = tmp_path / "skills"
             (skills_root / "custom").mkdir(parents=True)
 
-            from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+            from deerflow.runtime.user_context import get_effective_user_id
+            from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
             with (
-                patch("deerflow.skills.storage._default_skill_storage", LocalSkillStorage(host_path=str(skills_root))),
+                patch("deerflow.skills.storage._default_skill_storage", UserScopedSkillStorage(get_effective_user_id(), host_path=str(skills_root))),
                 patch("deerflow.skills.validation._validate_skill_frontmatter", return_value=(False, "Missing name field", "")),
             ):
                 with pytest.raises(ValueError, match="Invalid skill"):
@@ -4451,6 +4413,7 @@ class TestAtomicWriteJson:
 # ===========================================================================
 
 
+@pytest.mark.usefixtures("private_skill_management")
 class TestConfigUpdateErrors:
     def test_update_mcp_config_no_config_file(self, client):
         """FileNotFoundError when extensions_config.json cannot be located."""
@@ -4458,23 +4421,24 @@ class TestConfigUpdateErrors:
             with pytest.raises(FileNotFoundError, match="Cannot locate"):
                 client.update_mcp_config({"server": {}})
 
-    def test_update_skill_no_config_file(self, client):
-        """FileNotFoundError when extensions_config.json cannot be located."""
-        skill = MagicMock()
-        skill.name = "some-skill"
-        skill.category = SkillCategory.PUBLIC  # Only PUBLIC skills need extensions_config.json
+    def test_public_toggle_denied_without_global_config(self, client):
+        from deerflow.runtime.customer_administration import CustomerManagementDenied
 
+        skill = MagicMock(name="public-skill")
+        skill.name = "some-skill"
+        skill.category = SkillCategory.PUBLIC
         with (
             patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", return_value=[skill]),
             patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=None),
+            pytest.raises(CustomerManagementDenied, match="Global skill state"),
         ):
-            with pytest.raises(FileNotFoundError, match="Cannot locate"):
-                client.update_skill("some-skill", enabled=False)
+            client.update_skill("some-skill", enabled=False)
 
-    def test_update_skill_disappears_after_write(self, client):
+    def test_update_skill_disappears_after_write(self, client, private_skill_management):
         """RuntimeError when skill vanishes between write and re-read."""
         skill = MagicMock()
         skill.name = "ghost-skill"
+        skill.category = SkillCategory.CUSTOM
 
         ext_config = MagicMock()
         ext_config.mcp_servers = {}
@@ -4485,6 +4449,7 @@ class TestConfigUpdateErrors:
             config_file.write_text("{}")
 
             with (
+                patch.object(private_skill_management, "set_skill_enabled_state"),
                 patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", side_effect=[[skill], []]),
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
                 patch("deerflow.client.get_extensions_config", return_value=ext_config),
@@ -5054,6 +5019,7 @@ class TestBugListUploadsDeadCode:
             assert result == {"files": [], "count": 0}
 
 
+@pytest.mark.usefixtures("private_skill_management")
 class TestBugAgentInvalidationInconsistency:
     """Regression: update_skill and update_mcp_config must reset both
     _agent and _agent_config_key, just like reset_agent() does.
@@ -5081,13 +5047,14 @@ class TestBugAgentInvalidationInconsistency:
         assert client._agent is None
         assert client._agent_config_key is None
 
-    def test_update_skill_resets_config_key(self, client):
+    def test_update_skill_resets_config_key(self, client, private_skill_management):
         """After update_skill, both _agent and _agent_config_key are None."""
         client._agent = MagicMock()
         client._agent_config_key = ("model", True, False, False)
 
         skill = MagicMock()
         skill.name = "s1"
+        skill.category = SkillCategory.CUSTOM
         updated = MagicMock()
         updated.name = "s1"
         updated.description = "d"
@@ -5104,6 +5071,7 @@ class TestBugAgentInvalidationInconsistency:
             config_file.write_text("{}")
 
             with (
+                patch.object(private_skill_management, "set_skill_enabled_state"),
                 patch("deerflow.skills.storage.local_skill_storage.LocalSkillStorage.load_skills", side_effect=[[skill], [updated]]),
                 patch("deerflow.client.ExtensionsConfig.resolve_config_path", return_value=config_file),
                 patch("deerflow.client.get_extensions_config", return_value=ext_config),
@@ -5113,3 +5081,20 @@ class TestBugAgentInvalidationInconsistency:
 
         assert client._agent is None
         assert client._agent_config_key is None
+
+
+def test_stream_cannot_transfer_admin_management_grant_to_requested_owner(client, management_actor, monkeypatch):
+    from deerflow.runtime.customer_administration import CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY, customer_management_actor_is_admin
+    from deerflow.runtime.user_context import get_effective_user_id
+
+    host_owner = get_effective_user_id()
+    other_owner = "different-requested-owner"
+    assert host_owner != other_owner
+    contexts = []
+    monkeypatch.setattr(client, "_ensure_agent", lambda config, *, context: contexts.append(context.copy()))
+    monkeypatch.setattr(client, "_agent", _make_agent_mock([{"messages": []}]))
+    list(client.stream("hello", thread_id="owner-attribution-test", user_id=other_owner))
+    assert contexts[0]["user_id"] == other_owner
+    actor = contexts[0][CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY]
+    assert actor.owner_id == host_owner
+    assert not customer_management_actor_is_admin(contexts[0])

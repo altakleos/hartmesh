@@ -1342,3 +1342,76 @@ task.
 ## Examples
 
 See `config.example.yaml` for complete examples of all configuration options.
+
+
+## Customer administration
+
+`customer_administration` contains three strict Boolean fields, each defaulting
+to `false`: `plugin_management`, `local_skill_management`, and
+`local_mcp_management`. The runtime captures a detached policy at initialization.
+Changing delegation or approved definitions requires restarting every hosting
+runtime. An admitted mutation settles its existing drained write and cache tail;
+policy edits do not retroactively cancel it. No HTTP permission setter is provided.
+
+Delegation is a prerequisite alongside existing administrator, ownership and
+optional authorization checks. It never enables arbitrary plugin installation.
+Plugin management is supported only by installed, explicitly declared management
+contributions or contributed routes using the common host guard; unknown host
+support remains denied. Plugins execute trusted operator-installed code, outside
+any code isolation boundary. Business tools and enabled skill execution do not
+require administration delegation.
+
+Private skill writes require an actual owner-scoped store and reject linked
+writable roots, packages, history and state files. Linked operator packages can
+still be read. Public/global toggles, global skill reload, global MCP cache reset,
+and managed integration installation use operator tools instead of customer HTTP
+credentials. Skill drafts and Shared archives remain inert until explicit,
+authorized installation.
+
+Local MCP admission validates the final merged definition under its existing
+configuration lock. Creation, launch changes, and activation require both
+`local_mcp_management: true` and a complete matching entry in
+`approved_local_mcp_definitions`:
+
+```yaml
+customer_administration:
+  plugin_management: false
+  local_skill_management: false
+  local_mcp_management: true
+approved_local_mcp_definitions:
+  - type: stdio
+    command: /opt/provider/bin/approved-mcp
+    args: [--mode, readonly]
+    env: {}
+    cwd: null
+```
+
+Approval matches command, arguments, environment and working directory exactly;
+launcher validation still applies. Deployment environment placeholders are
+resolved before comparison; personal definitions remain literal. Transport aliases
+and omitted/empty transport use the same effective classification as the runtime.
+Unknown local launch fields cannot acquire approval. An unchanged existing launch
+is preserved while a remote sibling changes. Disabling/removing it requires
+delegation; activating it again requires exact approval. Bundled metadata and
+caller-supplied markers never confer source approval. Remote HTTP/SSE owner
+preferences retain their existing authentication and network rules.
+
+Policy and attributed management authority travel only in typed, ephemeral host
+context, never caller mappings or persisted role metadata. Personal access tokens
+do not regain admin privileges through workers or nested SDK calls. Background
+MCP notification runs and durable subagent batches remain non-administrative
+because their durable records retain no trusted originating management grant.
+Batch assembly and execution bind denied management explicitly, including after
+recovery; stored `user_role` or an ambient request cannot restore a grant. Owner-attributed scheduled/channel/internal runs still require active delegation
+and their existing trusted admission with a freshly resolved owner account; persisted
+role metadata grants no authority. PAT route admission excludes scheduling APIs.
+
+AIO/provisioner skill projections are copied into read-only sandbox mounts;
+canonical provider roots stay outside writable sandbox storage. The host-backed
+`LocalSandbox` runs commands with host privileges and cannot enforce that same
+filesystem isolation. Use an isolated sandbox when claiming provider-only
+canonical filesystem protection. Operators still control configuration, package
+sources, startup/bootstrap accounts and role assignment through deployment tools.
+
+This configuration addition advances `config_version` to 52. There is no database
+schema change or customer data migration.

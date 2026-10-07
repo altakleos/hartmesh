@@ -14,6 +14,12 @@ export interface WorkspacePresentation {
 }
 
 export interface FeaturesResponse {
+  customer_administration?: {
+    plugin_management?: boolean;
+    local_skill_management?: boolean;
+    local_mcp_management?: boolean;
+    provider_operations?: boolean;
+  };
   agents_api: { enabled: boolean };
   browser_control?: { enabled: boolean };
   mcp_tasks?: { enabled: boolean };
@@ -207,5 +213,15 @@ export function selectWorkspacePresentation(
       // The config enforces this too; holding it here as well keeps the grid
       // a grid if the block ever arrives from somewhere that has not.
       .slice(0, MAX_STARTERS),
+  };
+}
+
+export function selectCustomerAdministration(features: FeaturesResponse) {
+  const effective = features.customer_administration;
+  return {
+    pluginManagement: effective?.plugin_management === true,
+    localSkillManagement: effective?.local_skill_management === true,
+    localMcpManagement: effective?.local_mcp_management === true,
+    providerOperations: effective?.provider_operations === true,
   };
 }

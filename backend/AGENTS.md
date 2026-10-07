@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-The backend runs a LangGraph-based super agent with sandbox execution, persistent memory, subagent delegation, and extensible tools in isolated per-thread environments.
+LangGraph agents use sandbox execution, persistent memory, delegation and extensible tools in isolated threads.
 
 **Architecture**:
 - **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime
@@ -81,6 +81,8 @@ deer-flow/
 ATX outline closing markers use a linear suffix scan; do not use unanchored
 whitespace regex searches on unbounded uploaded headings. The long-heading
 regression exercises the production extractor under a generous process deadline.
+
+Customer management: [admission rules](docs/CONFIGURATION.md#customer-administration).
 
 ## Important Development Guidelines
 

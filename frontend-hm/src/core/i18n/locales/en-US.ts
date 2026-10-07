@@ -1063,6 +1063,7 @@ export function createEnUS(product: string): Translations {
 
     // Settings
     settings: {
+      providerEnablement: "Customization requires provider enablement.",
       title: "Settings",
       description: `Adjust how ${product} looks and behaves for you.`,
       descriptionForCompany:

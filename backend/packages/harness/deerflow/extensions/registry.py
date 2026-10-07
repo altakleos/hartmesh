@@ -106,9 +106,9 @@ class ExtensionRegistry(ExtensionRegistryContract):
         return self._current_source
 
     def plugin(self, contribution: PluginContribution) -> bool:
-        if not isinstance(contribution, PluginContribution) or contribution.api_version not in (1, 2):
+        if not isinstance(contribution, PluginContribution) or contribution.api_version not in (1, 2, 3):
             raise ValueError("Unsupported plugin contract")
-        if contribution.artifacts and contribution.api_version != 2:
+        if contribution.artifacts and contribution.api_version not in (2, 3):
             raise ValueError("Artifact presentations require plugin contract v2")
         if not contribution.frontend and not contribution.backend and not contribution.tools and not contribution.artifacts:
             raise ValueError("A plugin must contribute a browser module, backend action or tool")
@@ -117,12 +117,20 @@ class ExtensionRegistry(ExtensionRegistryContract):
 
         tool_names = set()
         for tool in contribution.tools:
+            if not isinstance(tool.purpose, str) or tool.purpose not in {"business", "management"}:
+                raise ValueError("Unsupported model tool purpose")
+            if tool.purpose == "management" and contribution.api_version != 3:
+                raise ValueError("Management declarations require plugin contract v3")
             if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", tool.name) or tool.name in tool_names or not tool.description or not inspect.iscoroutinefunction(tool.handler):
                 raise ValueError("Model tools require unique names, descriptions and async handlers")
             validate_schema(tool.input_schema, tool=True)
             tool_names.add(tool.name)
         names = set()
         for action in contribution.backend:
+            if not isinstance(action.purpose, str) or action.purpose not in {"business", "management"}:
+                raise ValueError("Unsupported backend action purpose")
+            if action.purpose == "management" and contribution.api_version != 3:
+                raise ValueError("Management declarations require plugin contract v3")
             if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", action.name) or action.name in names or not inspect.iscoroutinefunction(action.handler):
                 raise ValueError("Backend actions require unique names and async handlers")
             names.add(action.name)

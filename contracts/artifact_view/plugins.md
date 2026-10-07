@@ -4,7 +4,7 @@ Use the existing operator-managed `plugins:` installation and restart lifecycle.
 Artifact files never select packages, module URLs or executable code. Ordinary
 skills should emit passive `*.view.json` results using [the v1 contract](README.md).
 
-The dependency-free `deerflow-extension-api` 0.2.5 adds `ArtifactPresentation` to
+The dependency-free `deerflow-extension-api` 0.2.6 adds `ArtifactPresentation` to
 `PluginContribution.artifacts`. Artifact-bearing contributions require
 `api_version=2`; page-only contribution v1 remains supported. Older hosts reject
 the unsupported contribution version explicitly. Each declaration has a unique
@@ -47,3 +47,12 @@ late rejections and cleanup errors are contained per plugin. Duplicate suffix
 matches refuse a hidden winner. Projection/render failures use a bounded source
 fallback; authentication/path failures stay terminal. Code view, copy, editing
 and download load canonical bytes and never save projection bytes.
+
+
+Management backend actions/model tools declare `purpose="management"` and
+negotiate `PluginContribution(api_version=3)`. Business contributions keep their
+default purpose; existing v1/v2 declarations remain compatible. Management needs
+active operator delegation plus attributed caller authority and optional namespace
+write authorization at execution. Raw contributed management routes use the common
+host guard. Discovery offers only admitted management actions. Enabling delegation
+does not add an installer or permit arbitrary package/module sources.

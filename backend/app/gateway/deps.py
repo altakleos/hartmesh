@@ -860,6 +860,8 @@ def get_run_context(request: Request) -> RunContext:
     captured in :func:`langgraph_runtime` so callers never see a store bound to
     one backend paired with a config pointing at another.
     """
+    from app.gateway.customer_administration import request_customer_administration_policy
+
     return RunContext(
         checkpointer=get_checkpointer(request),
         store=get_store(request),
@@ -871,6 +873,7 @@ def get_run_context(request: Request) -> RunContext:
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
+        customer_administration_policy=request_customer_administration_policy(request),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
     )
 

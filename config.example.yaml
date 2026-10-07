@@ -20,7 +20,20 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 51
+config_version: 52
+
+# Operator-owned management delegation. All permissions default to false;
+# administrator role and optional authorization settings do not override them.
+# Restart the Gateway/hosting runtime after changes.
+customer_administration:
+  plugin_management: false
+  local_skill_management: false
+  local_mcp_management: false
+
+# Local launch approval is separate from permission. List exact provider-owned
+# command/args/env/cwd definitions; customer configuration never approves code.
+# Existing launcher/role checks still apply. This list defaults to empty.
+approved_local_mcp_definitions: []
 
 # Optional operator-owned literal prompt extensions (see CONFIGURATION.md):
 # lead_prompt_overlay:

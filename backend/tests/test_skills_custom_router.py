@@ -60,6 +60,9 @@ def _make_test_app(config) -> FastAPI:
     if not hasattr(config, "authorization"):
         config.authorization = AuthorizationConfig(enabled=False)
     app = make_authed_test_app(user_factory=_make_admin_user)
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    app.state.customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=True)
     app.state.config = config  # kept for any startup-style reads
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
@@ -149,7 +152,12 @@ def test_upload_skill_archive_installs_without_thread_workspace(monkeypatch, tmp
     installed_paths: list[Path] = []
     refresh_calls: list[str] = []
 
-    class _Storage:
+    from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+    class _Storage(UserScopedSkillStorage):
+        def __init__(self):
+            self._user_id = "default"
+
         async def ainstall_skill_from_archive(self, archive_path: Path) -> dict:
             installed_paths.append(archive_path)
             assert archive_path.name.endswith(".skill")
@@ -334,6 +342,9 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
 
     app = make_authed_test_app(user_factory=_make_admin_user)
     app.state.config = config
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    app.state.customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=True)
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(uploads_router.router)
     app.include_router(skills_router.router)
@@ -426,9 +437,12 @@ def test_install_skill_archive_static_scan_block_returns_findings(monkeypatch, t
     async def _refresh(user_id: str):
         refresh_calls.append(("refresh", user_id))
 
-    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+    from deerflow.config.paths import Paths
+    from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
-    storage = LocalSkillStorage(host_path=str(skills_root))
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+
+    storage = UserScopedSkillStorage("default", host_path=str(skills_root))
     config = SimpleNamespace(
         skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
@@ -886,6 +900,8 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     from deerflow.skills.storage import user_scoped_skill_storage as uss_module
 
     class _FakeUserScopedStorage:
+        user_id = "default"
+
         def __init__(self, *args, **kwargs) -> None:
             self._load = _load_skills
             self._write = _set_skill_enabled_state
@@ -921,12 +937,8 @@ def test_update_skill_refreshes_prompt_cache_before_return(monkeypatch, tmp_path
     assert not config_path.exists() or json.loads(config_path.read_text(encoding="utf-8")) == {"mcpServers": {}, "skills": {}}
 
 
-def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
-    """P2-5: toggling a PUBLIC skill must invalidate the prompt cache for
-    every user, because PUBLIC state lives in the global
-    ``extensions_config.json`` and a per-user ``refresh_*`` call would
-    leave the other users' cached enabled state stale.
-    """
+def test_denied_public_toggle_preserves_global_state_and_all_users_cache(monkeypatch, tmp_path):
+    """Private management must not mutate a baseline or shared caches."""
     config_path = tmp_path / "extensions_config.json"
     config_path.write_text(json.dumps({"mcpServers": {}, "skills": {"public-skill": {"enabled": True}}}), encoding="utf-8")
     clear_calls = []
@@ -981,7 +993,7 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
 
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(_resolve))
     monkeypatch.setattr("app.gateway.routers.skills.reload_extensions_config", lambda: None)
-    monkeypatch.setattr("app.gateway.routers.skills.clear_skills_system_prompt_cache", _clear)
+    monkeypatch.setattr("deerflow.agents.lead_agent.prompt.clear_skills_system_prompt_cache", _clear)
     monkeypatch.setattr("app.gateway.routers.skills.refresh_user_skills_system_prompt_cache_async", _refresh)
 
     app = _make_test_app(SimpleNamespace())
@@ -989,17 +1001,15 @@ def test_public_skill_toggle_clears_all_users_cache(monkeypatch, tmp_path):
     with TestClient(app) as client:
         response = client.put("/api/skills/public-skill", json={"enabled": False})
 
-    assert response.status_code == 200, response.text
-    assert response.json()["enabled"] is False
-    # PUBLIC skills must hit the global cache-clear branch, not per-user refresh.
-    assert clear_calls == ["clear"]
+    assert response.status_code == 403, response.text
+    assert clear_calls == []
     assert refresh_calls == []
-    # The global state file must reflect the toggle.
+    # The deployment-wide enabled state remains intact.
     persisted = json.loads(config_path.read_text(encoding="utf-8"))
-    assert persisted["skills"]["public-skill"]["enabled"] is False
+    assert persisted["skills"]["public-skill"]["enabled"] is True
 
 
-def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_path):
+def test_denied_public_toggle_does_not_create_extensions_config(monkeypatch, tmp_path):
     from deerflow.config.extensions_config import ExtensionsConfig
 
     backend_dir = tmp_path / "backend"
@@ -1028,21 +1038,15 @@ def test_public_skill_toggle_creates_missing_extensions_config(monkeypatch, tmp_
 
     monkeypatch.setattr(skills_router.ExtensionsConfig, "resolve_config_path", staticmethod(_resolve_config_path))
     monkeypatch.setattr(skills_router, "reload_extensions_config", lambda: None)
-    monkeypatch.setattr(skills_router, "clear_skills_system_prompt_cache", lambda: None)
 
     with TestClient(_make_test_app(SimpleNamespace())) as client:
         response = client.put("/api/skills/public-skill", json={"enabled": False})
 
-    assert response.status_code == 200, response.text
-    assert response.json()["enabled"] is False
-    # Only skill states are seeded; the cached model is never serialized because
-    # its $VAR values are already resolved.
-    assert json.loads(config_path.read_text(encoding="utf-8")) == {
-        "skills": {"public-skill": {"enabled": False}},
-    }
+    assert response.status_code == 403, response.text
+    assert not config_path.exists()
 
 
-def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tmp_path):
+def test_private_delegation_cannot_toggle_public_baseline_or_projection(monkeypatch, tmp_path):
     from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, reset_extensions_config, set_extensions_config
     from deerflow.config.paths import Paths
     from deerflow.skills.projection import rebuild_skill_projections
@@ -1079,24 +1083,22 @@ def test_public_skill_toggle_rebuilds_projection_before_response(monkeypatch, tm
     monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: paths)
     monkeypatch.setattr("deerflow.config.paths._paths", None)
     monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
-    monkeypatch.setattr(skills_router, "clear_skills_system_prompt_cache", lambda: None)
-    # Simulate another worker having updated the file after this worker cached
-    # an older snapshot. The public toggle must reload from disk under the
-    # cross-process projection lock before its read-modify-write.
+    # Even explicit private delegation cannot mutate deployment-wide state.
     set_extensions_config(ExtensionsConfig(skills={"public-skill": SkillStateConfig(enabled=True)}))
 
     storage = UserScopedSkillStorage("default", host_path=str(skills_root), app_config=config)
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda _config: storage)
     projected = rebuild_skill_projections(storage)
     assert (projected.public / "public-skill" / "SKILL.md").is_file()
+    before = config_path.read_bytes()
 
     try:
         with TestClient(_make_test_app(config)) as client:
             response = client.put("/api/skills/public-skill", json={"enabled": False})
 
-        assert response.status_code == 200, response.text
-        assert response.json()["enabled"] is False
-        assert not (projected.public / "public-skill").exists()
+        assert response.status_code == 403, response.text
+        assert (projected.public / "public-skill" / "SKILL.md").is_file()
+        assert config_path.read_bytes() == before
         persisted = json.loads(config_path.read_text(encoding="utf-8"))
         assert persisted["skills"]["untouched-skill"] == {"enabled": False}
     finally:
@@ -1460,7 +1462,9 @@ async def test_update_custom_skill_drains_mutation_tail_across_cancellation(monk
 
     monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _blocked_write)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")), app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))))
     body = skills_router.CustomSkillUpdateRequest(content=_skill_content("demo-skill", "Edited skill"))
 
     task = asyncio.create_task(skills_router.update_custom_skill("demo-skill", body, request, config))
@@ -1530,7 +1534,9 @@ async def test_delete_custom_skill_drains_mutation_tail_across_cancellation(monk
 
     monkeypatch.setattr(UserScopedSkillStorage, "delete_custom_skill", _blocked_delete)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")), app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))))
 
     task = asyncio.create_task(skills_router.delete_custom_skill("demo-skill", request, config))
     try:
@@ -1599,7 +1605,9 @@ async def test_update_custom_skill_logs_failed_drained_mutation_after_cancellati
 
     monkeypatch.setattr(UserScopedSkillStorage, "write_custom_skill", _failing_write)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")), app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))))
     body = skills_router.CustomSkillUpdateRequest(content=_skill_content("demo-skill", "Edited skill"))
 
     task = asyncio.create_task(skills_router.update_custom_skill("demo-skill", body, request, config))
@@ -1663,6 +1671,8 @@ async def test_update_skill_drains_state_write_and_cache_refresh_across_cancella
     from deerflow.skills.storage import user_scoped_skill_storage as uss_module
 
     class _FakeUserScopedStorage:
+        user_id = "default"
+
         def load_skills(self, *, enabled_only: bool = False):
             return _load_skills(enabled_only=enabled_only)
 
@@ -1675,7 +1685,9 @@ async def test_update_skill_drains_state_write_and_cache_refresh_across_cancella
     monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
     monkeypatch.setattr(skills_router, "refresh_user_skills_system_prompt_cache_async", _refresh)
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")))
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")), app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))))
     body = skills_router.SkillUpdateRequest(enabled=False)
 
     task = asyncio.create_task(skills_router.update_skill("demo-skill", body, request, SimpleNamespace()))

@@ -4,14 +4,16 @@ import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 
 rs.mock("@/core/api/fetcher", () => ({ fetch: rs.fn() }));
 rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "" }));
-rs.mock("@/core/auth/AuthProvider", () => ({
-  useAuth: () => ({ user: { system_role: "user" } }),
+const authState = rs.hoisted(() => ({
+  user: { id: "owner-a", system_role: "user" },
 }));
+rs.mock("@/core/auth/AuthProvider", () => ({ useAuth: () => authState }));
 
 import { useAgentsApiEnabled } from "@/core/agents/hooks";
 import { fetch } from "@/core/api/fetcher";
 import {
   useBranding,
+  useCustomerAdministration,
   useBrowserControlEnabled,
   useDeveloperSurfacesVisible,
   useMcpTasksEnabled,
@@ -99,6 +101,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  authState.user = { id: "owner-a", system_role: "user" };
   clients.forEach((client) => client.clear());
   clients.clear();
   localStorage.clear();
@@ -236,4 +239,80 @@ describe("shared feature discovery", () => {
     expect(state().agents).toEqual({ enabled: false, isLoading: false });
     expect(state().developer).toBe(true);
   });
+});
+
+it("does not reuse another account's effective management permissions", async () => {
+  let resolveSecond!: (response: Response) => void;
+  mockedFetch.mockResolvedValueOnce(
+    Response.json({
+      agents_api: { enabled: false },
+      customer_administration: { local_skill_management: true },
+    }),
+  );
+  mockedFetch.mockImplementationOnce(
+    () =>
+      new Promise<Response>((resolve) => {
+        resolveSecond = resolve;
+      }),
+  );
+  const client = newClient();
+  function Management() {
+    return (
+      <output data-testid="management">
+        {String(useCustomerAdministration().localSkillManagement)}
+      </output>
+    );
+  }
+  const tree = () => (
+    <QueryClientProvider client={client}>
+      <Management />
+    </QueryClientProvider>
+  );
+  const view = render(tree());
+  await waitFor(() =>
+    expect(screen.getByTestId("management").textContent).toBe("true"),
+  );
+  authState.user = { id: "owner-b", system_role: "admin" };
+  view.rerender(tree());
+  expect(screen.getByTestId("management").textContent).toBe("false");
+  await act(async () =>
+    resolveSecond(
+      Response.json({
+        agents_api: { enabled: false },
+        customer_administration: { local_skill_management: false },
+      }),
+    ),
+  );
+  expect(screen.getByTestId("management").textContent).toBe("false");
+  expect(mockedFetch).toHaveBeenCalledTimes(2);
+});
+
+it("closes management controls after a successful discovery is followed by a refetch error", async () => {
+  mockedFetch.mockResolvedValueOnce(
+    Response.json({
+      agents_api: { enabled: false },
+      customer_administration: { local_skill_management: true },
+    }),
+  );
+  mockedFetch.mockRejectedValue(new Error("Discovery unavailable"));
+  const client = newClient();
+  function Management() {
+    return (
+      <output data-testid="management">
+        {String(useCustomerAdministration().localSkillManagement)}
+      </output>
+    );
+  }
+  render(
+    <QueryClientProvider client={client}>
+      <Management />
+    </QueryClientProvider>,
+  );
+  await waitFor(() =>
+    expect(screen.getByTestId("management").textContent).toBe("true"),
+  );
+  await act(async () => client.invalidateQueries({ queryKey: ["features"] }));
+  await waitFor(() =>
+    expect(screen.getByTestId("management").textContent).toBe("false"),
+  );
 });
