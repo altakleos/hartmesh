@@ -18,7 +18,7 @@ import {
   MAX_ARTIFACT_ARCHIVE_FILES,
 } from "@/core/artifacts/api";
 import { urlOfArtifact } from "@/core/artifacts/utils";
-import { useAuth } from "@/core/auth/AuthProvider";
+import { useCustomerAdministration } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { installSkill, SkillRequestError } from "@/core/skills/api";
 import { isStaticWebsiteOnly } from "@/core/static-mode";
@@ -50,8 +50,7 @@ export function ArtifactFileList({
   threadId: string;
 }) {
   const { t } = useI18n();
-  const { user } = useAuth();
-  const isAdmin = user?.system_role === "admin";
+  const { localSkillManagement: canInstallSkill } = useCustomerAdministration();
   const { select: selectArtifact, setOpen } = useArtifacts();
   const [downloadingArchive, setDownloadingArchive] = useState(false);
   const [installingFile, setInstallingFile] = useState<string | null>(null);
@@ -182,20 +181,22 @@ export function ArtifactFileList({
                 {getFileExtensionDisplayName(file)} file
               </CardDescription>
               <CardAction className="row-span-1 self-center">
-                {skillInstallEnabled && file.endsWith(".skill") && isAdmin && (
-                  <Button
-                    variant="ghost"
-                    disabled={installingFile === file}
-                    onClick={(e) => handleInstallSkill(e, file)}
-                  >
-                    {installingFile === file ? (
-                      <LoaderIcon className="size-4 animate-spin" />
-                    ) : (
-                      <PackageIcon className="size-4" />
-                    )}
-                    {t.common.install}
-                  </Button>
-                )}
+                {skillInstallEnabled &&
+                  file.endsWith(".skill") &&
+                  canInstallSkill && (
+                    <Button
+                      variant="ghost"
+                      disabled={installingFile === file || staticWebsiteOnly}
+                      onClick={(e) => handleInstallSkill(e, file)}
+                    >
+                      {installingFile === file ? (
+                        <LoaderIcon className="size-4 animate-spin" />
+                      ) : (
+                        <PackageIcon className="size-4" />
+                      )}
+                      {t.common.install}
+                    </Button>
+                  )}
                 <Button variant="ghost" asChild>
                   <a
                     href={urlOfArtifact({

@@ -64,6 +64,17 @@ from deerflow.runtime.context_keys import (
     PROJECT_CONTEXT_KEY,
     checkpoint_agent_binding_metadata,
 )
+from deerflow.runtime.customer_administration import (
+    CUSTOMER_ADMINISTRATION_CONTEXT_KEY,
+    CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY,
+    DENIED_CUSTOMER_ADMINISTRATION,
+    CustomerAdministrationPolicy,
+    CustomerManagementActor,
+    bind_customer_administration_policy,
+    bind_customer_management_actor,
+    bind_customer_management_actor_role,
+    customer_management_actor_role,
+)
 from deerflow.runtime.events.message_identity import attach_message_seq, message_identity
 from deerflow.runtime.goal import (
     DEFAULT_MAX_GOAL_CONTINUATIONS,
@@ -219,6 +230,8 @@ def _release_run_scoped_references(
 ) -> None:
     """Remove worker-owned graph references once durable finalization is done."""
     internal_context_keys = {
+        CUSTOMER_ADMINISTRATION_CONTEXT_KEY,
+        CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY,
         "__run_journal",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
@@ -575,6 +588,7 @@ class _LargeFileToolChunkBatcher:
 _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
     frozenset(
         {
+            "app_config",
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
             RUNTIME_PRESENTED_FILES_CONTEXT_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
@@ -591,6 +605,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             # ``config['context']`` must never be merged (§12).
             PROJECT_CONTEXT_KEY,
             KNOWLEDGE_SCOPE_RUNTIME_KEY,
+            CUSTOMER_ADMINISTRATION_CONTEXT_KEY,
+            CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY,
         }
     )
     | SANDBOX_SERVER_OWNED_CONTEXT_KEYS
@@ -607,6 +623,8 @@ def _build_runtime_context(
     conversation_reader: Any | None = None,
     *,
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
+    customer_administration_policy: CustomerAdministrationPolicy | None = None,
+    customer_management_actor: CustomerManagementActor | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -647,6 +665,12 @@ def _build_runtime_context(
         runtime_ctx[EXTENSION_SNAPSHOT_CONTEXT_KEY] = extensions
     else:
         runtime_ctx.pop(EXTENSION_SNAPSHOT_CONTEXT_KEY, None)
+    if isinstance(customer_administration_policy, CustomerAdministrationPolicy):
+        runtime_ctx[CUSTOMER_ADMINISTRATION_CONTEXT_KEY] = customer_administration_policy
+    else:
+        runtime_ctx.pop(CUSTOMER_ADMINISTRATION_CONTEXT_KEY, None)
+    if isinstance(customer_management_actor, CustomerManagementActor):
+        runtime_ctx[CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY] = customer_management_actor
     return runtime_ctx
 
 
@@ -684,6 +708,8 @@ class RunContext:
     mcp_task_repo: Any | None = field(default=None)
     app_config: AppConfig | None = field(default=None)
     extensions: Any | None = field(default=None)
+    customer_administration_policy: CustomerAdministrationPolicy | None = None
+    customer_management_actor: CustomerManagementActor | None = None
     checkpoint_channel_mode: CheckpointChannelMode = "full"
     # Delta snapshot cadence frozen at startup; ``None`` means "not frozen in
     # this process" (embedded/tests) and resolves to the config default.
@@ -699,6 +725,8 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
+        configurable.pop(CUSTOMER_ADMINISTRATION_CONTEXT_KEY, None)
+        configurable.pop(CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY, None)
     existing_context = config.get("context")
     if isinstance(existing_context, dict):
         existing_context.setdefault("thread_id", runtime_context["thread_id"])
@@ -920,7 +948,12 @@ async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRe
     from deerflow.runtime.turn_phases import turn_phases
     from deerflow.runtime.turn_progress import TurnProgressPublisher
 
-    with turn_phases(correlation_id=resolve_trace_id(), run_id=record.run_id) as journal:
+    host_policy = getattr(kwargs.get("ctx"), "customer_administration_policy", None)
+    if not isinstance(host_policy, CustomerAdministrationPolicy):
+        host_policy = DENIED_CUSTOMER_ADMINISTRATION
+    actor = getattr(kwargs.get("ctx"), "customer_management_actor", None)
+    owner_role = customer_management_actor_role(actor)
+    with bind_customer_administration_policy(host_policy), bind_customer_management_actor(actor), bind_customer_management_actor_role(owner_role), turn_phases(correlation_id=resolve_trace_id(), run_id=record.run_id) as journal:
         # The person waiting hears the phases they can act on as they begin,
         # before any model token, as one advisory ``custom`` frame per stage
         # (``turn_progress.py``). Registered before the first mark so
@@ -1245,6 +1278,8 @@ async def _run_agent(
             extensions,
             ctx.conversation_reader,
             thread_incarnation=thread_incarnation,
+            customer_administration_policy=ctx.customer_administration_policy,
+            customer_management_actor=ctx.customer_management_actor,
         )
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
@@ -1310,7 +1345,7 @@ async def _run_agent(
             agent_factory_kwargs["app_config"] = ctx.app_config
         from deerflow.extensions import bind_agent_build_extensions
 
-        with bind_agent_build_extensions(extensions):
+        with bind_agent_build_extensions(extensions), bind_customer_administration_policy(ctx.customer_administration_policy or DENIED_CUSTOMER_ADMINISTRATION):
             # Assemble off-loop: agent construction re-enters
             # get_available_tools(), which may block on MCP cache
             # initialization — it must not stall the calling event loop

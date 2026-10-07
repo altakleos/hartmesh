@@ -705,14 +705,19 @@ def test_roundtrip_mask_then_merge_preserves_original_secrets():
 # ---------------------------------------------------------------------------
 
 
-def _request_with_role(system_role: str):
+def _request_with_role(system_role: str, *, local_management=False, approved_launches=()):
+    from deerflow.config.app_config import AppConfig
+    from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+    startup = AppConfig.model_validate({"sandbox": {"use": "test"}, "customer_administration": {"local_mcp_management": local_management or bool(approved_launches)}, "approved_local_mcp_definitions": list(approved_launches)})
     return SimpleNamespace(
+        app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=capture_customer_administration_policy(startup))),
         state=SimpleNamespace(
             user=SimpleNamespace(
                 id="user-1",
                 system_role=system_role,
             )
-        )
+        ),
     )
 
 
@@ -728,38 +733,16 @@ async def test_mcp_config_requires_admin_user():
 
 
 @pytest.mark.asyncio
-async def test_reset_mcp_tools_cache_endpoint_requires_admin_user(monkeypatch):
-    called = False
+@pytest.mark.parametrize("role", ["admin", "user"])
+async def test_global_mcp_cache_reset_is_provider_only(role, monkeypatch):
+    from unittest.mock import Mock
 
-    def fake_publish_mcp_tools_cache_reset():
-        nonlocal called
-        called = True
-        return "shared-generation"
-
-    monkeypatch.setattr(mcp_router, "publish_mcp_tools_cache_reset", fake_publish_mcp_tools_cache_reset)
-
-    response = await reset_mcp_tools_cache_endpoint(_request_with_role("admin"))
-
-    assert called is True
-    assert response.success is True
-    assert response.scope == "shared_config"
-    assert "next use" in response.message
-
-    with pytest.raises(HTTPException) as exc_info:
-        await reset_mcp_tools_cache_endpoint(_request_with_role("user"))
-
-    assert exc_info.value.status_code == 403
-
-
-@pytest.mark.asyncio
-async def test_reset_mcp_tools_cache_endpoint_reports_process_scope_without_shared_config(monkeypatch):
-    monkeypatch.setattr(mcp_router, "publish_mcp_tools_cache_reset", lambda: None)
-
-    response = await reset_mcp_tools_cache_endpoint(_request_with_role("admin"))
-
-    assert response.success is True
-    assert response.scope == "process"
-    assert "current Gateway process" in response.message
+    publish = Mock(side_effect=AssertionError("Customer reset reached global cache"))
+    monkeypatch.setattr(mcp_router, "publish_mcp_tools_cache_reset", publish)
+    with pytest.raises(HTTPException) as denied:
+        await reset_mcp_tools_cache_endpoint(_request_with_role(role, local_management=True))
+    assert denied.value.status_code == 403
+    publish.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -789,7 +772,7 @@ async def test_update_mcp_configuration_resets_tools_cache(monkeypatch, tmp_path
     monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
 
     response = await update_mcp_configuration(
-        _request_with_role("admin"),
+        _request_with_role("admin", approved_launches=[{"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]}]),
         McpConfigUpdateRequest(
             mcp_servers={
                 "github": McpServerConfigResponse(
@@ -850,7 +833,7 @@ async def test_update_mcp_configuration_preserves_omitted_routing_and_tools(monk
     monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
 
     response = await update_mcp_configuration(
-        _request_with_role("admin"),
+        _request_with_role("admin", local_management=True),
         McpConfigUpdateRequest(
             mcp_servers={
                 "postgres": McpServerConfigResponse(
@@ -906,7 +889,7 @@ async def test_update_mcp_configuration_preserves_server_extra_fields(monkeypatc
     monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
 
     response = await update_mcp_configuration(
-        _request_with_role("admin"),
+        _request_with_role("admin", local_management=True),
         McpConfigUpdateRequest(
             mcp_servers={
                 "playwright": McpServerConfigResponse(
@@ -958,7 +941,7 @@ async def test_create_mcp_servers_preserves_concurrent_siblings_and_rejects_dupl
     monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", fake_reset_mcp_tools_cache)
 
     response = await create_mcp_servers(
-        _request_with_role("admin"),
+        _request_with_role("admin", approved_launches=[{"command": "npx", "args": ["-y", "@example/mcp"]}]),
         McpConfigUpdateRequest(
             mcp_servers={
                 "added": McpServerConfigResponse(
@@ -978,7 +961,7 @@ async def test_create_mcp_servers_preserves_concurrent_siblings_and_rejects_dupl
     before_duplicate = config_path.read_text(encoding="utf-8")
     with pytest.raises(HTTPException) as exc_info:
         await create_mcp_servers(
-            _request_with_role("admin"),
+            _request_with_role("admin", approved_launches=[{"command": "npx", "args": ["-y", "@example/mcp"]}]),
             McpConfigUpdateRequest(
                 mcp_servers={
                     "added": McpServerConfigResponse(command="npx"),
@@ -1812,7 +1795,7 @@ async def test_delete_mcp_server_accepts_empty_name_and_preserves_siblings(monke
     monkeypatch.setattr(mcp_router, "reset_mcp_tools_cache", lambda: None)
 
     response = await delete_mcp_server(
-        _request_with_role("admin"),
+        _request_with_role("admin", local_management=True),
         "",
     )
 
@@ -1842,9 +1825,9 @@ async def test_mcp_create_without_existing_config_uses_resolvable_project_root(o
 
     body = McpConfigUpdateRequest(mcp_servers={"added": McpServerConfigResponse(command="npx")})
     if operation == "create":
-        response = await create_mcp_servers(_request_with_role("admin"), body)
+        response = await create_mcp_servers(_request_with_role("admin", approved_launches=[{"command": "npx"}]), body)
     else:
-        response = await update_mcp_configuration(_request_with_role("admin"), body)
+        response = await update_mcp_configuration(_request_with_role("admin", approved_launches=[{"command": "npx"}]), body)
 
     assert expected_path.is_file()
     assert resolve_created_config() == expected_path
@@ -1951,7 +1934,10 @@ def test_delete_mcp_server_route_uses_bodyless_path_parameter(server_name, reque
     async def allow_admin(_request, *, detail):
         assert detail == _ADMIN_REQUIRED_DETAIL
 
-    def fake_delete(name: str):
+    def fake_delete(name: str, *, policy):
+        from deerflow.runtime.customer_administration import DENIED_CUSTOMER_ADMINISTRATION
+
+        assert policy is DENIED_CUSTOMER_ADMINISTRATION
         deleted_names.append(name)
         return {}
 
@@ -2031,7 +2017,7 @@ async def test_update_mcp_server_allows_editing_disabled_disallowed_stdio_server
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     response = await update_mcp_server(
-        _request_with_role("admin"),
+        _request_with_role("admin", approved_launches=[{"command": "s2-mcp-server", "args": ["--new"]}]),
         McpServerConfigUpdateRequest(
             server_name="semantic-scholar",
             server=McpServerConfigResponse(
@@ -2052,7 +2038,7 @@ async def test_update_mcp_server_allows_editing_disabled_disallowed_stdio_server
     before_enable = config_path.read_text(encoding="utf-8")
     with pytest.raises(HTTPException) as exc_info:
         await update_mcp_server(
-            _request_with_role("admin"),
+            _request_with_role("admin", approved_launches=[{"command": "s2-mcp-server", "args": ["--new"]}]),
             McpServerConfigUpdateRequest(
                 server_name="semantic-scholar",
                 server=McpServerConfigResponse(
@@ -2167,7 +2153,7 @@ async def test_update_mcp_server_state_updates_valid_target_despite_unrelated_di
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     response = await update_mcp_server_state(
-        _request_with_role("admin"),
+        _request_with_role("admin", approved_launches=[{"command": "npx", "args": ["-y", "@modelcontextprotocol/server-github"]}]),
         McpServerStateUpdateRequest(server_name="github", enabled=enabled),
     )
 
@@ -2215,14 +2201,14 @@ async def test_update_mcp_server_state_allows_disabling_but_rejects_enabling_dis
     monkeypatch.delenv(_MCP_STDIO_COMMAND_ALLOWLIST_ENV, raising=False)
 
     response = await update_mcp_server_state(
-        _request_with_role("admin"),
+        _request_with_role("admin", approved_launches=[{"command": "s2-mcp-server"}]),
         McpServerStateUpdateRequest(server_name="semantic-scholar", enabled=False),
     )
     assert response.mcp_servers["semantic-scholar"].enabled is False
 
     with pytest.raises(HTTPException) as exc_info:
         await update_mcp_server_state(
-            _request_with_role("admin"),
+            _request_with_role("admin", approved_launches=[{"command": "s2-mcp-server"}]),
             McpServerStateUpdateRequest(server_name="semantic-scholar", enabled=True),
         )
 
@@ -2268,7 +2254,7 @@ async def test_update_mcp_server_state_rejects_enabling_arbitrary_exec_args(monk
 
     with pytest.raises(HTTPException) as exc_info:
         await update_mcp_server_state(
-            _request_with_role("admin"),
+            _request_with_role("admin", approved_launches=[{"command": "npx", "args": json.loads(config_path.read_text(encoding="utf-8"))["mcpServers"]["npx-shell"]["args"]}]),
             McpServerStateUpdateRequest(server_name="npx-shell", enabled=True),
         )
 

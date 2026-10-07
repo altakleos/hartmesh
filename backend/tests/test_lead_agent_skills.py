@@ -1,9 +1,26 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from deerflow.agents.lead_agent.prompt import get_skills_prompt_section
 from deerflow.config.agents_config import AgentConfig
 from deerflow.skills.types import Skill
+
+
+@pytest.fixture
+def delegated_skill_evolution(monkeypatch, tmp_path):
+    from deerflow.config.paths import Paths
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy, CustomerManagementActor, bind_customer_administration_policy, bind_customer_management_actor
+    from deerflow.runtime.user_context import get_effective_user_id
+    from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+    owner = get_effective_user_id()
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    storage = UserScopedSkillStorage(owner, host_path=str(tmp_path / "skills"))
+    monkeypatch.setattr("deerflow.skills.storage.get_or_new_user_skill_storage", lambda *args, **kwargs: storage)
+    with bind_customer_administration_policy(CustomerAdministrationPolicy(local_skill_management=True)), bind_customer_management_actor(CustomerManagementActor(owner_id=owner, administrator=True)):
+        yield
 
 
 class NamedTool:
@@ -122,6 +139,7 @@ def test_get_skills_prompt_section_includes_slash_activation_guidance(monkeypatc
     assert "do not call `read_file` for that SKILL.md again" in result
 
 
+@pytest.mark.usefixtures("delegated_skill_evolution")
 def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
     skills = [_make_skill("skill1")]
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
@@ -139,6 +157,7 @@ def test_get_skills_prompt_section_includes_self_evolution_rules(monkeypatch):
     assert "Skill Self-Evolution" in result
 
 
+@pytest.mark.usefixtures("delegated_skill_evolution")
 def test_get_skills_prompt_section_includes_self_evolution_rules_without_skills(monkeypatch):
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: [])
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt.get_or_new_skill_storage", lambda **kwargs: __import__("types").SimpleNamespace(load_skills=lambda *, enabled_only: []))
@@ -155,6 +174,7 @@ def test_get_skills_prompt_section_includes_self_evolution_rules_without_skills(
     assert "Skill Self-Evolution" in result
 
 
+@pytest.mark.usefixtures("delegated_skill_evolution")
 def test_get_skills_prompt_section_cache_respects_skill_evolution_toggle(monkeypatch):
     skills = [_make_skill("skill1")]
     monkeypatch.setattr("deerflow.agents.lead_agent.prompt._get_enabled_skills", lambda: skills)
@@ -600,3 +620,9 @@ def test_make_lead_agent_keeps_update_agent_on_non_webhook_channels(monkeypatch)
     # Explicit non-webhook channel — telegram is interactive/trusted-by-operator.
     kwargs_tg = lead_agent_module.make_lead_agent({"configurable": {"agent_name": "test"}, "context": {"channel_name": "telegram"}})
     assert "update_agent" in [t.name for t in kwargs_tg["tools"]]
+
+
+def test_skill_evolution_prompt_is_absent_without_provider_delegation(monkeypatch):
+    _mock_skill_storages(monkeypatch, [])
+    config = SimpleNamespace(skills=SimpleNamespace(container_path="/mnt/skills"), skill_evolution=SimpleNamespace(enabled=True))
+    assert "Skill Self-Evolution" not in get_skills_prompt_section(app_config=config)

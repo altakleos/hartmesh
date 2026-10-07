@@ -18,6 +18,7 @@ from deerflow.config.authorization_config import AuthorizationConfig, load_autho
 from deerflow.config.blob_storage_config import BlobStorageConfig, load_blob_storage_config_from_dict
 from deerflow.config.channel_connections_config import ChannelConnectionsConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict
+from deerflow.config.customer_administration_config import ApprovedLocalMcpDefinition, CustomerAdministrationConfig
 from deerflow.config.database_config import DatabaseConfig
 from deerflow.config.dedupe_storage_config import DedupeStorageConfig
 from deerflow.config.extensions_config import ExtensionsConfig
@@ -213,6 +214,9 @@ class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
     lead_prompt_overlay: PromptOverlay = Field(default_factory=PromptOverlay, description="Operator-owned literal prepend/append around the assembled lead-agent system prompt")
+
+    customer_administration: CustomerAdministrationConfig = Field(default_factory=CustomerAdministrationConfig, description=format_field_description("customer_administration"))
+    approved_local_mcp_definitions: list[ApprovedLocalMcpDefinition] = Field(default_factory=list, description=format_field_description("approved_local_mcp_definitions"))
 
     log_level: str = Field(
         default="info",
@@ -424,6 +428,8 @@ class AppConfig(BaseModel):
         error when null — there is nothing to fall back to.
         """
         if isinstance(data, dict):
+            if any(key in data and data[key] is None for key in ("customer_administration", "approved_local_mcp_definitions")):
+                raise ValueError("Customer administration policy and local MCP approvals cannot be null.")
             return {key: value for key, value in data.items() if value is not None}
         return data
 

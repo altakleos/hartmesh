@@ -81,6 +81,7 @@ from deerflow.runtime.checkpoint_mode import (
 )
 from deerflow.runtime.checkpoint_state import graph_state_schema
 from deerflow.runtime.context_keys import PROJECT_CONTEXT_KEY
+from deerflow.runtime.customer_administration import CUSTOMER_ADMINISTRATION_CONTEXT_KEY, CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY
 from deerflow.runtime.events.message_identity import MESSAGE_SEQ_KEY
 from deerflow.runtime.goal import goal_thread_lock
 from deerflow.runtime.journal import build_checkpoint_history_seed_events
@@ -624,6 +625,7 @@ _CONTEXT_INTERNAL_CALLER_KEYS: frozenset[str] = frozenset({"interaction_mode", "
 _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
     frozenset(
         {
+            "app_config",
             "is_internal",
             "authz_attributes",
             "channel_user_id",
@@ -635,6 +637,8 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
             "langgraph_auth_user",
             "langgraph_auth_user_id",
             RUNTIME_PRESENTED_FILES_CONTEXT_KEY,
+            CUSTOMER_ADMINISTRATION_CONTEXT_KEY,
+            CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             # Server-owned pinned project snapshot (spec §7.1): resolved once
             # at admission from threads_meta; a client-supplied value must
@@ -1913,6 +1917,9 @@ async def start_run(
         run_record_input = _canonical_run_record_input(body.input, graph_input)
 
         internal_owner_user = await resolve_trusted_internal_owner_for_attribution(request, owner_user_id)
+        from app.gateway.customer_administration import resolve_customer_management_actor
+
+        run_ctx = replace(run_ctx, customer_management_actor=await resolve_customer_management_actor(request, internal_owner_user=internal_owner_user))
         inject_authenticated_user_context(
             config,
             request,
@@ -2268,7 +2275,7 @@ async def launch_mcp_task_notification_run(
     request = SimpleNamespace(
         app=app,
         headers={INTERNAL_OWNER_USER_ID_HEADER_NAME: owner_user_id},
-        state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL),
+        state=SimpleNamespace(user=get_internal_user(), auth_source=AUTH_SOURCE_INTERNAL, customer_management_notification=True),
         cookies={},
     )
     body = RunCreateRequest(

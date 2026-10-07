@@ -23,7 +23,7 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { useAuth } from "@/core/auth/AuthProvider";
+import { useCustomerAdministration } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   formatSkillSecurityFindings,
@@ -38,6 +38,7 @@ import {
 import type { Skill } from "@/core/skills/type";
 import { env } from "@/env";
 
+import { ProviderEnablementNotice } from "./provider-enablement-notice";
 import { SettingsSection } from "./settings-section";
 
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
@@ -74,15 +75,15 @@ function SkillSettingsList({
 }) {
   const { t } = useI18n();
   const router = useRouter();
-  const { user } = useAuth();
-  const isAdmin = user?.system_role === "admin";
+  const { localSkillManagement: canManageSkills } = useCustomerAdministration();
   const [filter, setFilter] = useState<string>("public");
   const { mutate: enableSkill } = useEnableSkill();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { mutateAsync: uploadSkillArchive, isPending: isUploading } =
     useUploadSkillArchive();
   const staticReadOnly = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
-  const isArchiveUploadDisabled = isUploading || !isAdmin || staticReadOnly;
+  const isArchiveUploadDisabled =
+    isUploading || !canManageSkills || staticReadOnly;
   const isCreateSkillDisabled = staticReadOnly;
   const filteredSkills = useMemo(
     () => skills.filter((skill) => skill.category === filter),
@@ -144,6 +145,7 @@ function SkillSettingsList({
   };
   return (
     <div className="flex w-full flex-col gap-4">
+      {!canManageSkills && <ProviderEnablementNotice />}
       <header className="flex justify-between">
         <div className="flex gap-2">
           <Tabs value={filter} onValueChange={setFilter}>
@@ -162,7 +164,7 @@ function SkillSettingsList({
             className="sr-only"
             onChange={handleSkillArchive}
           />
-          {isAdmin && (
+          {canManageSkills && (
             <Button
               size="sm"
               variant="outline"
@@ -209,7 +211,11 @@ function SkillSettingsList({
             <ItemActions>
               <Switch
                 checked={skill.enabled}
-                disabled={staticReadOnly || !isAdmin}
+                disabled={
+                  staticReadOnly ||
+                  !canManageSkills ||
+                  skill.category === "public"
+                }
                 onCheckedChange={(checked) =>
                   enableSkill({ skillName: skill.name, enabled: checked })
                 }

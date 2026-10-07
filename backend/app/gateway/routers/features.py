@@ -7,6 +7,7 @@ request, while startup-scoped capabilities report the runtime that actually
 started.
 """
 
+import asyncio
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Request
@@ -14,6 +15,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.browser_capability import browser_capability
 from app.gateway.conversation_access import conversation_references_enabled
+from app.gateway.customer_administration import request_customer_administration_policy, resolve_customer_management_actor
 from app.gateway.deps import get_config
 from app.gateway.knowledge_scope_admission import RAGFLOW_KNOWLEDGE_SEARCH_PROVIDER
 from app.gateway.run_models import MAX_CONVERSATION_REFERENCES
@@ -106,9 +108,55 @@ class BrandingFeature(BaseModel):
     provider: ProviderSupport = Field(default_factory=ProviderSupport)
 
 
+class CustomerAdministrationFeature(BaseModel):
+    """Effective operations available to this caller in the active host."""
+
+    plugin_management: bool = False
+    local_skill_management: bool = False
+    local_mcp_management: bool = False
+    provider_operations: bool = False
+
+
+async def _customer_administration_feature(request: Request, config: AppConfig) -> CustomerAdministrationFeature:
+    policy = request_customer_administration_policy(request)
+    actor = await resolve_customer_management_actor(request)
+    if actor.administrator is not True:
+        return CustomerAdministrationFeature()
+    private_supported = False
+    if policy.local_skill_management:
+        from app.gateway.routers.skills import _get_owned_private_skill_storage
+
+        try:
+            storage = await asyncio.to_thread(_get_owned_private_skill_storage, config)
+            await asyncio.to_thread(storage._require_private_writable_path, storage.get_user_custom_root())
+            private_supported = True
+        except Exception:
+            pass
+    plugin_supported = False
+    if policy.plugin_management:
+        from app.gateway.app import _resolve_extension_plugin_management_async
+
+        loaded = getattr(request.app.state, "extensions", None)
+        for source, plugin in getattr(loaded, "plugins", ()):
+            from deerflow.extensions.plugin_tools import plugin_settings
+
+            if plugin_settings(source, plugin)["enabled"] is not True:
+                continue
+            if any(item.purpose == "management" for item in (*plugin.backend, *plugin.tools)):
+                if await _resolve_extension_plugin_management_async(request, plugin.namespace, "write") is True:
+                    plugin_supported = True
+                    break
+    return CustomerAdministrationFeature(
+        plugin_management=plugin_supported,
+        local_skill_management=private_supported,
+        local_mcp_management=policy.local_mcp_management and bool(policy.approved_local_launches),
+    )
+
+
 class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
+    customer_administration: CustomerAdministrationFeature = Field(default_factory=CustomerAdministrationFeature)
     agents_api: AgentsApiFeature
     browser_control: BrowserControlFeature
     mcp_tasks: McpTasksFeature
@@ -131,6 +179,7 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
     bundle = configured_tenant_bundle(config.tenant_bundle.path)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     return FeaturesResponse(
+        customer_administration=await _customer_administration_feature(request, config),
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),
         # MCP task bindings and the submitter are startup-scoped. Report the

@@ -9,7 +9,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from deerflow_extension_api.auth import ExtensionPrincipal
 from deerflow_extension_api.settings import FrontendBinding, SettingsContribution, SettingsField, SettingValue
@@ -25,6 +25,7 @@ class ActionContext:
 class BackendAction:
     name: str
     handler: Callable[[Mapping[str, Any], ActionContext], Awaitable[Any]]
+    purpose: Literal["business", "management"] = "business"
 
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class ModelTool:
     input_schema: Mapping[str, Any]
     handler: Callable[[Mapping[str, Any], ToolContext], Awaitable[Any]]
     group: str = "extensions"
+    purpose: Literal["business", "management"] = "business"
 
 
 @dataclass(frozen=True)

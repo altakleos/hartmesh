@@ -1,7 +1,7 @@
 ### Python Extension System (Runtime and Distribution)
 
 Artifact presentations use the existing trusted plugin contribution and startup
-lifecycle. The dependency-free extension API `0.2.5` exports `ArtifactPresentation`;
+lifecycle. The dependency-free extension API `0.2.6` exports `ArtifactPresentation`;
 artifact-bearing `PluginContribution` explicitly negotiates `api_version=2`, while
 page-only v1 contributions remain compatible. Registration validates literal
 suffixes, IDs, strict byte budgets and unique compatibility queries atomically.
@@ -10,6 +10,13 @@ existing read/owner gate. It reads one no-follow source descriptor and runs the
 sync projector in a drained worker, returning the full captured source SHA-256.
 Canonical downloads bypass projection. Public metadata exposes no callback or
 source configuration. See [the capability contract](../../../../../contracts/artifact_view/plugins.md).
+
+Management actions and model tools declare `purpose="management"` and require
+`PluginContribution(api_version=3)` so older hosts reject unsupported policy.
+Business contributions retain their default purpose and v1/v2 compatibility.
+Management execution checks active delegation, attributed admin authority and
+`plugin_management` namespace write authorization. Contributed raw management
+routes must use the existing common host guard. No flag enables a package installer.
 
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in

@@ -1002,6 +1002,7 @@ export function createZhCN(product: string): Translations {
 
     // Settings
     settings: {
+      providerEnablement: "自定义功能需要服务提供方启用。",
       title: "设置",
       description: `根据你的偏好调整 ${product} 的界面和行为。`,
       descriptionForCompany: "根据你的偏好调整工作区的界面和行为。",

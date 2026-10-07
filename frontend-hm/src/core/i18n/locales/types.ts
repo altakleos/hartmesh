@@ -879,6 +879,7 @@ export interface Translations {
 
   // Settings
   settings: {
+    providerEnablement: string;
     title: string;
     description: string;
     /** The same line in a company's workspace, which is not the product's to describe. */

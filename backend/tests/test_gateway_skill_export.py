@@ -4,7 +4,7 @@ import asyncio
 import threading
 from io import BytesIO
 from types import SimpleNamespace
-from uuid import uuid4
+from uuid import UUID
 from zipfile import ZipFile
 
 import pytest
@@ -17,6 +17,8 @@ from app.gateway import skill_export as service
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import skills
+from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.skills.export import SkillExportArchive
 from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
@@ -26,19 +28,27 @@ def app(tmp_path, monkeypatch):
     from deerflow.config import paths
 
     monkeypatch.setattr(paths, "_paths", paths.Paths(base_dir=tmp_path / "home"))
-    stores = {u: UserScopedSkillStorage(u, host_path=str(tmp_path / "skills")) for u in ("alice", "bob")}
+    users = {"alice": UUID(int=1), "bob": UUID(int=2)}
+    stores = {u: UserScopedSkillStorage(str(users[u]), host_path=str(tmp_path / "skills")) for u in users}
     for u, store in stores.items():
         root = store.get_custom_skill_dir("demo")
         root.mkdir(parents=True)
         (root / "SKILL.md").write_text(f"---\nname: demo\ndescription: {u}\n---\n{u}", encoding="utf-8")
     app = FastAPI()
+    app.state.current_owner = "alice"
 
     @app.middleware("http")
     async def identity(request, call_next):
+        token = None
         if request.headers.get("x-role") != "anonymous":
-            request.state.user = User(id=uuid4(), email="test@example.com", password_hash="x", system_role=request.headers.get("x-role", "admin"))
+            request.state.user = User(id=users[app.state.current_owner], email="test@example.com", password_hash="x", system_role=request.headers.get("x-role", "admin"))
+            token = set_current_user(request.state.user)
         request.state.auth_source = request.headers.get("x-auth-source")
-        return await call_next(request)
+        try:
+            return await call_next(request)
+        finally:
+            if token is not None:
+                reset_current_user(token)
 
     app.dependency_overrides[get_config] = lambda: SimpleNamespace()
     monkeypatch.setattr(skills, "_get_user_skill_storage", lambda _: stores["alice"])
@@ -230,6 +240,11 @@ def test_export_upload_roundtrip_uses_existing_scanner_and_rejects_conflict(app,
         manifest = client.get("/api/skills/custom/data-analysis/export-manifest").json()
         archive = client.get("/api/skills/custom/data-analysis/export?expected_revision=" + manifest["revision"])
         assert archive.status_code == 200
+        denied = client.post("/api/skills/install/upload", files={"archive": ("data-analysis.skill", archive.content, "application/zip")})
+        assert denied.status_code == 403
+        assert not scanned
+        app.state.customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=True)
+        app.state.current_owner = "bob"
         monkeypatch.setattr(skills, "_get_user_skill_storage", lambda _: bob)
         response = client.post("/api/skills/install/upload", files={"archive": ("data-analysis.skill", archive.content, "application/zip")})
         assert response.status_code == 200, response.text

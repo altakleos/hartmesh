@@ -21,6 +21,7 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { Textarea } from "@/components/ui/textarea";
+import { useCustomerAdministration } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { MCPConfigRequestError } from "@/core/mcp/api";
 import {
@@ -36,7 +37,13 @@ import {
 import type { MCPServerConfig } from "@/core/mcp/types";
 import { env } from "@/env";
 
+import { ProviderEnablementNotice } from "./provider-enablement-notice";
 import { SettingsSection } from "./settings-section";
+
+function isLocalDefinition(server: MCPServerConfig) {
+  const transport = server.type ?? server.transport;
+  return !transport || transport === "stdio";
+}
 
 export function ToolSettingsPage() {
   const { t } = useI18n();
@@ -83,6 +90,7 @@ function MCPServerList({
   const [pendingRemoval, setPendingRemoval] = useState<string | null>(null);
 
   const readOnly = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
+  const { localMcpManagement } = useCustomerAdministration();
   const current = servers ?? {};
   const entries = Object.entries(current);
   const isMutating = isPending || isWriting;
@@ -139,6 +147,11 @@ function MCPServerList({
       return;
     }
 
+    if (!localMcpManagement && Object.values(parsed).some(isLocalDefinition)) {
+      setDefinitionError(t.settings.providerEnablement);
+      return;
+    }
+
     if (editor.mode === "add") {
       const duplicate = Object.keys(parsed).find((name) =>
         Object.hasOwn(current, name),
@@ -191,6 +204,7 @@ function MCPServerList({
 
   return (
     <div className="flex w-full flex-col gap-4">
+      {!localMcpManagement && <ProviderEnablementNotice />}
       <div className="flex justify-end">
         <Button
           size="sm"
@@ -209,6 +223,8 @@ function MCPServerList({
       ) : (
         entries.map(([name, config]) => {
           const displayName = displayServerName(name);
+          const localReadOnly =
+            isLocalDefinition(config) && !localMcpManagement;
           return (
             <Item className="w-full" variant="outline" key={name}>
               <ItemContent>
@@ -224,7 +240,7 @@ function MCPServerList({
               <ItemActions className="gap-1">
                 <Switch
                   checked={config.enabled}
-                  disabled={readOnly || isMutating}
+                  disabled={readOnly || localReadOnly || isMutating}
                   onCheckedChange={(checked) =>
                     enableMCPServer({ serverName: name, enabled: checked })
                   }
@@ -233,7 +249,7 @@ function MCPServerList({
                   size="icon"
                   variant="ghost"
                   aria-label={`${t.common.edit} ${displayName}`}
-                  disabled={readOnly || isMutating}
+                  disabled={readOnly || localReadOnly || isMutating}
                   onClick={() => openEditEditor(name, config)}
                 >
                   <PencilIcon className="size-4" />
@@ -242,7 +258,7 @@ function MCPServerList({
                   size="icon"
                   variant="ghost"
                   aria-label={`${t.common.delete} ${displayName}`}
-                  disabled={readOnly || isMutating}
+                  disabled={readOnly || localReadOnly || isMutating}
                   onClick={() => setPendingRemoval(name)}
                 >
                   <Trash2 className="size-4" />

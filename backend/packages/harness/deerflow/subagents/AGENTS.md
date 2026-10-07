@@ -1,5 +1,10 @@
 ### Subagent System (`packages/harness/deerflow/subagents/`)
 
+Native delegation carries the parent typed management actor/policy. Durable batches
+retain no originating management grant: assembly/execution explicitly deny management
+and never restore it from stored roles or ambient ContextVars. Ordinary approved
+tool use continues.
+
 Batch `owner_access` is host-owned: check before assembly/launch, lease renewals
 and acceptance. On deny, cancel and drain.
 

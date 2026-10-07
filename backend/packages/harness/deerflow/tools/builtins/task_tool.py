@@ -888,6 +888,10 @@ async def task_tool(
     # None outside that path (embedded client, standalone LangGraph Server), where
     # the executor keeps its process-singleton fallback.
     run_extensions = resolve_run_extensions(parent_context)
+    from deerflow.runtime.customer_administration import resolve_customer_administration_policy, resolve_customer_management_actor
+
+    customer_policy = resolve_customer_administration_policy(parent_context)
+    customer_actor = resolve_customer_management_actor(parent_context)
     # Request-level correlation id, distinct from the short ``trace_id`` above
     # that labels this one subagent execution in log prefixes. The parent
     # runtime context is authoritative (worker._bind_trace_id always fills it);
@@ -948,6 +952,8 @@ async def task_tool(
         "trace_id": trace_id,
         "user_id": user_id,
         "user_role": user_role,
+        "customer_administration_policy": customer_policy,
+        "customer_management_actor": customer_actor,
         "oauth_provider": oauth_provider,
         "oauth_id": oauth_id,
         "run_id": run_id,

@@ -49,7 +49,10 @@ def _isolate_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
 def _admin_request() -> Request:
     # AuthMiddleware normally supplies this state; keep the real admin check.
     user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"), system_role="admin")
-    return Request({"type": "http", "headers": [], "state": {"user": user}})
+    from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
+
+    app = SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True)))
+    return Request({"type": "http", "app": app, "headers": [], "state": {"user": user}})
 
 
 def _install_skill() -> None:

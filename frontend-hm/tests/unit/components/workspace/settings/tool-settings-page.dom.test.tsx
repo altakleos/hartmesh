@@ -4,6 +4,7 @@ import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { ToolSettingsPage } from "@/components/workspace/settings/tool-settings-page";
 
 const mcpMockState = rs.hoisted(() => ({
+  localMcpManagement: true,
   isPending: false,
   mutate: rs.fn(),
   updateIsPending: false,
@@ -33,6 +34,7 @@ rs.mock("@/core/i18n/hooks", () => ({
         edit: "Edit",
       },
       settings: {
+        providerEnablement: "Customization requires provider enablement.",
         tools: {
           title: "Tools",
           description: "Manage MCP tools",
@@ -60,6 +62,13 @@ rs.mock("@/core/i18n/hooks", () => ({
       },
     },
   }),
+}));
+
+rs.mock("@/core/features/hooks", () => ({
+  useCustomerAdministration: () => ({
+    localMcpManagement: mcpMockState.localMcpManagement,
+  }),
+  useBranding: () => ({ providerName: null, supportURL: null }),
 }));
 
 rs.mock("@/core/mcp/hooks", () => ({
@@ -116,6 +125,7 @@ function definitionTextbox(): HTMLTextAreaElement {
 }
 
 afterEach(() => {
+  mcpMockState.localMcpManagement = true;
   mcpMockState.isPending = false;
   mcpMockState.updateIsPending = false;
   mcpMockState.mutate.mockReset();
@@ -356,4 +366,42 @@ describe("ToolSettingsPage remove server", () => {
       serverName: "",
     });
   });
+});
+
+it("denies local controls without delegation while retaining remote owner preferences", () => {
+  twoServers();
+  mcpMockState.localMcpManagement = false;
+  render(<ToolSettingsPage />);
+  function disabled(element: HTMLElement) {
+    if (!(element instanceof HTMLButtonElement))
+      throw new TypeError("Expected a button");
+    return element.disabled;
+  }
+  const switches = screen.getAllByRole("switch");
+  expect(disabled(switches[0]!)).toBe(true);
+  expect(disabled(switches[1]!)).toBe(false);
+  expect(
+    screen.getByText("Customization requires provider enablement."),
+  ).toBeTruthy();
+  expect(disabled(screen.getByRole("button", { name: "Edit github" }))).toBe(
+    true,
+  );
+  expect(disabled(screen.getByRole("button", { name: "Edit remote" }))).toBe(
+    false,
+  );
+});
+
+it("retains remote transport-alias definitions without local delegation", () => {
+  mcpMockState.localMcpManagement = false;
+  render(<ToolSettingsPage />);
+  openAddDialog();
+  fireEvent.change(definitionTextbox(), {
+    target: {
+      value: JSON.stringify({
+        remote: { transport: "http", url: "https://example.test/mcp" },
+      }),
+    },
+  });
+  fireEvent.click(screen.getByRole("button", { name: "Save" }));
+  expect(lastMutation()?.operation).toBe("create");
 });

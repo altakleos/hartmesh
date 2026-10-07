@@ -18,6 +18,7 @@ from langchain.tools import ToolRuntime
 from langchain_core.tools import StructuredTool, ToolException
 
 from deerflow.config.plugin_settings import defaults
+from deerflow.runtime.customer_administration import current_customer_administration_policy, customer_management_actor_is_admin, require_customer_management, resolve_customer_administration_policy
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.tools.tool_provenance import tag_plugin_tool
 
@@ -65,6 +66,19 @@ def _build_tool(source, plugin, declaration):
 
     async def invoke(runtime: ToolRuntime, **payload):
         try:
+            if declaration.purpose == "management":
+                require_customer_management(resolve_customer_administration_policy(runtime.context), "plugin_management")
+                if not customer_management_actor_is_admin(runtime.context):
+                    raise ToolException("Administrator permission required for plugin management.")
+                from deerflow.authz.plugin_authz import aenforce_plugin_management
+                from deerflow.authz.principal import build_principal_from_context
+                from deerflow.config.app_config import AppConfig
+
+                app_config = runtime.context.get("app_config")
+                if not isinstance(app_config, AppConfig):
+                    raise ToolException("Plugin management host configuration unavailable.")
+                principal = build_principal_from_context(runtime.context, default_role=app_config.authorization.default_role)
+                await aenforce_plugin_management(principal=principal, app_config=app_config, namespace=plugin.namespace, write=True)
             settings = await asyncio.to_thread(plugin_settings, source, plugin)
             if settings["enabled"] is not True:
                 raise ToolException("Plugin disabled by administrator.")
@@ -106,6 +120,8 @@ def build_plugin_tools(loaded, *, groups=None, reserved_names=()):
             logger.warning("Plugin policy unavailable: %s (%s)", plugin.namespace, type(exc).__name__)
             continue
         for declaration in plugin.tools:
+            if declaration.purpose == "management" and (not current_customer_administration_policy().plugin_management or not customer_management_actor_is_admin()):
+                continue
             if groups is not None and declaration.group not in groups:
                 continue
             tool = _build_tool(source, plugin, declaration)

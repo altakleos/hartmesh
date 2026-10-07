@@ -35,6 +35,17 @@ def capability_client(tmp_path, monkeypatch):
         yield client, path
 
 
+def _approve_local_launches(client, *definitions):
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.customer_administration_config import ApprovedLocalMcpDefinition
+    from deerflow.runtime.customer_administration import capture_customer_administration_policy
+
+    launches = [{key: definition[key] for key in ApprovedLocalMcpDefinition.model_fields if key in definition} for definition in definitions]
+    client.app.state.customer_administration_policy = capture_customer_administration_policy(
+        AppConfig.model_validate({"sandbox": {"use": "test"}, "customer_administration": {"local_mcp_management": True}, "approved_local_mcp_definitions": launches})
+    )
+
+
 def test_discovery_never_exposes_connection_secrets_and_tolerates_legacy_extras(capability_client):
     client, _ = capability_client
     result = client.get("/api/capabilities/installations/mcp", headers={"test-role": "user"})
@@ -105,6 +116,9 @@ def test_adapter_failure_is_isolated_and_lark_configured_is_not_verified(capabil
 )
 def test_business_install_uses_existing_mcp_lifecycle(capability_client, provider, credentials):
     client, path = capability_client
+    from deerflow.capabilities.business import connection_config
+
+    _approve_local_launches(client, connection_config(provider, credentials))
     payload = {"plugin_id": provider, "name": "team-" + provider, "configuration": credentials}
     assert client.post("/api/capabilities/installations", json=payload, headers={"test-role": "user"}).status_code == 403
     response = client.post("/api/capabilities/installations", json=payload)
@@ -209,6 +223,7 @@ def test_stale_bundled_interpreter_can_be_repaired_without_reinstall(capability_
     raw = json.loads(path.read_text())
     raw["mcpServers"]["team"] = configuration
     path.write_text(json.dumps(raw))
+    _approve_local_launches(client, configuration, {**configuration, "command": sys.executable})
     before = path.read_bytes()
     response = client.patch("/api/mcp/config", json={"server_name": "team", "enabled": True})
     assert response.status_code == 400
@@ -255,3 +270,14 @@ def test_delete_recovers_multiple_legacy_identity_collisions(capability_client):
         assert len(ambiguous) == {"unrelated": 4, "legacy-peer": 2, "pair-two-b": 0}[removed]
     assert client.patch("/api/mcp/config", json={"server_name": "legacy", "enabled": False}).status_code == 200
     assert client.post("/api/mcp/config/servers", json={"mcp_servers": {"recovered": {"type": "http", "url": "https://example.test"}}}).status_code == 200
+
+
+@pytest.mark.parametrize("provider", ["dingtalk", "wecom", "hubspot"])
+def test_bundled_local_source_is_not_implicitly_approved(capability_client, provider):
+    from deerflow.capabilities.business import CREDENTIALS
+
+    client, path = capability_client
+    before = path.read_bytes()
+    response = client.post("/api/capabilities/installations", json={"plugin_id": provider, "name": "unapproved", "configuration": {field: "synthetic-token" for field in CREDENTIALS[provider]}})
+    assert response.status_code == 403
+    assert path.read_bytes() == before

@@ -182,10 +182,32 @@ test.describe("Integrations settings", () => {
     await expect(page.getByRole("dialog", { name: "Settings" })).toHaveCount(1);
   });
 
-  test("can install the Lark integration skill pack from settings", async ({
+  test("requires provider installation before connecting Lark", async ({
     page,
   }) => {
     mockLangGraphAPI(page);
+    await page.goto("/workspace/chats/new?settings=integrations");
+    const dialog = page.getByRole("dialog", { name: "Settings" });
+    await expect(
+      dialog.getByRole("button", { name: "Install", exact: true }),
+    ).toBeDisabled();
+    await expect(
+      dialog.getByText("Customization requires provider enablement."),
+    ).toBeVisible();
+    await expect(
+      dialog.getByRole("button", { name: "Connect Lark" }),
+    ).toBeDisabled();
+  });
+
+  test("connects owner credentials for a provider-installed Lark pack", async ({
+    page,
+  }) => {
+    mockLangGraphAPI(page, { larkInstalled: true });
+    let installRequests = 0;
+    await page.route("**/api/integrations/lark/install", async (route) => {
+      installRequests += 1;
+      await route.fallback();
+    });
     let authStartRequest: unknown;
     const authCompleteRequests: unknown[] = [];
     let authCompleteCount = 0;
@@ -249,12 +271,10 @@ test.describe("Integrations settings", () => {
 
     await expect(dialog.getByText("Lark / Feishu CLI")).toBeVisible();
     await expect(
-      dialog.getByText("Install the official skill pack first"),
-    ).toBeVisible();
-
-    await dialog.getByRole("button", { name: "Install" }).click();
+      dialog.getByRole("button", { name: "Reinstall" }),
+    ).toBeDisabled();
     await expect(
-      page.getByText("Installed 3 Lark/Feishu skills."),
+      dialog.getByText("Customization requires provider enablement."),
     ).toBeVisible();
 
     // Sandbox-runtime readiness row surfaces once the init-container runtime is
@@ -306,6 +326,7 @@ test.describe("Integrations settings", () => {
     await expect(
       dialog.getByText("https://open.feishu.cn/auth/mock-device"),
     ).toBeVisible();
+    expect(installRequests).toBe(0);
   });
 
   test("can switch the Lark app by entering new credentials", async ({

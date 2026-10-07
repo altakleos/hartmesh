@@ -32,8 +32,17 @@ def _make_config(skills_root: Path):
 
 
 def _make_runtime(*, thread_id: str = "thread-1", user_id: str = "default"):
+    # These functional tests exercise an explicitly delegated owner operation.
+    # Default-deny and forged-context cases live in the policy admission suite.
+    from deerflow.runtime.customer_administration import CUSTOMER_ADMINISTRATION_CONTEXT_KEY, CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY, CustomerAdministrationPolicy, CustomerManagementActor
+
     return SimpleNamespace(
-        context={"thread_id": thread_id, "user_id": user_id},
+        context={
+            "thread_id": thread_id,
+            "user_id": user_id,
+            CUSTOMER_ADMINISTRATION_CONTEXT_KEY: CustomerAdministrationPolicy(local_skill_management=True),
+            CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY: CustomerManagementActor(owner_id=user_id, administrator=True),
+        },
         config={"configurable": {"thread_id": thread_id, "user_id": user_id}},
     )
 

@@ -40,6 +40,11 @@ async def list_plugins(request: Request, response: Response):
             entry = f"/api/plugins/modules/{module.module}/{revision}.mjs" if module else None
             transport = "inline-v1" if module else None
         public = ("enabled", *module.public_fields) if module else ("enabled",)
+        management_allowed = False
+        if settings["enabled"] is True and any(action.purpose == "management" for action in plugin.backend):
+            from app.gateway.app import _resolve_extension_plugin_management_async
+
+            management_allowed = await _resolve_extension_plugin_management_async(request, plugin.namespace, "write") is True
         entries.append(
             {
                 "namespace": plugin.namespace,
@@ -50,7 +55,7 @@ async def list_plugins(request: Request, response: Response):
                 "entry": entry,
                 "transport": transport,
                 "settings": {key: settings[key] for key in public},
-                "backend_actions": [action.name for action in plugin.backend],
+                "backend_actions": [action.name for action in plugin.backend if action.purpose != "management" or management_allowed],
                 "artifact_presentations": [
                     {"id": item.id, "suffixes": list(item.suffixes), "source_max_bytes": item.source_max_bytes, "preview_max_bytes": item.preview_max_bytes, "projection_marker": item.projection_marker} for item in plugin.artifacts
                 ],
@@ -113,6 +118,11 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
     action = next((item for item in plugin.backend if item.name == action_name), None)
     if action is None:
         raise HTTPException(404, "Plugin action is not installed.")
+    if action.purpose == "management":
+        from app.gateway.app import _resolve_extension_plugin_management_async
+
+        if await _resolve_extension_plugin_management_async(request, namespace, "write") is not True:
+            raise HTTPException(403, "This customization requires provider enablement and administrator permission.")
     try:
         settings = await asyncio.to_thread(plugin_settings, source, plugin)
     except (ValueError, OSError) as exc:

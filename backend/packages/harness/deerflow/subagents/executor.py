@@ -830,6 +830,8 @@ class SubagentExecutor:
         tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
+        customer_administration_policy=None,
+        customer_management_actor=None,
     ):
         """Initialize the executor.
 
@@ -911,6 +913,10 @@ class SubagentExecutor:
         self.user_id = user_id
         # Guardrail attribution propagated from the parent runtime context.
         self.user_role = user_role
+        from deerflow.runtime.customer_administration import DENIED_CUSTOMER_ADMINISTRATION, CustomerAdministrationPolicy, CustomerManagementActor
+
+        self.customer_administration_policy = customer_administration_policy if isinstance(customer_administration_policy, CustomerAdministrationPolicy) else DENIED_CUSTOMER_ADMINISTRATION
+        self.customer_management_actor = customer_management_actor if isinstance(customer_management_actor, CustomerManagementActor) else CustomerManagementActor()
         self.oauth_provider = oauth_provider
         self.oauth_id = oauth_id
         self.run_id = run_id
@@ -1486,7 +1492,14 @@ class SubagentExecutor:
                 trace_id=self.trace_id,
                 status=SubagentStatus.PENDING,
             )
-        with ensure_trace_context(self.deerflow_trace_id):
+        from deerflow.runtime.customer_administration import bind_customer_administration_policy, bind_customer_management_actor, bind_customer_management_actor_role, customer_management_actor_role
+
+        with (
+            ensure_trace_context(self.deerflow_trace_id),
+            bind_customer_administration_policy(self.customer_administration_policy),
+            bind_customer_management_actor(self.customer_management_actor),
+            bind_customer_management_actor_role(customer_management_actor_role(self.customer_management_actor)),
+        ):
             try:
                 capacity = self.execution_capacity or get_subagent_execution_capacity()
                 async with capacity.slot():
@@ -1674,6 +1687,10 @@ class SubagentExecutor:
             # authenticated/IM path this equals the parent context value.
             context["user_id"] = self.user_id
             context["user_role"] = self.user_role
+            from deerflow.runtime.customer_administration import CUSTOMER_ADMINISTRATION_CONTEXT_KEY, CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY
+
+            context[CUSTOMER_ADMINISTRATION_CONTEXT_KEY] = self.customer_administration_policy
+            context[CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY] = self.customer_management_actor
             context["oauth_provider"] = self.oauth_provider
             context["oauth_id"] = self.oauth_id
             context["run_id"] = self.run_id

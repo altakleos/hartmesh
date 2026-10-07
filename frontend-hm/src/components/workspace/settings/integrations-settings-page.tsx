@@ -26,6 +26,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { useAuth } from "@/core/auth/AuthProvider";
 import { writeTextToClipboard } from "@/core/clipboard";
+import { useCustomerAdministration } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   larkIntegrationQueryKey,
@@ -45,6 +46,7 @@ import {
 import { env } from "@/env";
 import { cn } from "@/lib/utils";
 
+import { ProviderEnablementNotice } from "./provider-enablement-notice";
 import { SettingsSection } from "./settings-section";
 
 type PendingLarkFlow =
@@ -131,6 +133,7 @@ function LarkIntegrationCard() {
   const queryClient = useQueryClient();
   const { user } = useAuth();
   const isAdmin = user?.system_role === "admin";
+  const { providerOperations } = useCustomerAdministration();
   const { data, isLoading, error, refetch, isFetching } =
     useLarkIntegrationStatus();
   const install = useInstallLarkIntegration();
@@ -605,7 +608,7 @@ function LarkIntegrationCard() {
 
   const installDisabled =
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
-    !isAdmin ||
+    !providerOperations ||
     integrationBusy;
   const authDisabled =
     env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true" ||
@@ -809,6 +812,7 @@ function LarkIntegrationCard() {
               </div>
             )}
             <div className="flex flex-wrap items-center gap-2">
+              {!providerOperations && <ProviderEnablementNotice />}
               <Button onClick={handleInstall} disabled={installDisabled}>
                 {install.isPending ? (
                   <RefreshCwIcon className="size-4 animate-spin" />

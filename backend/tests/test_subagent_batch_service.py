@@ -140,7 +140,7 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(
         token_usage_records=None,
     )
 
-    execution_spec = dict(_request().execution_spec)
+    execution_spec = {**_request().execution_spec, "user_role": "admin", "is_internal": True}
     if thread_incarnation is not _MISSING:
         execution_spec[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
 
@@ -196,7 +196,22 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(
     monkeypatch.setattr(service_module, "SubagentStatus", FakeStatus)
     monkeypatch.setattr(service_module, "get_background_task_result", lambda _execution_id: result)
     monkeypatch.setattr(service_module, "cleanup_background_task", lambda _execution_id: None)
-    monkeypatch.setattr("deerflow.tools.get_available_tools", lambda **_kwargs: [])
+    from deerflow.runtime.customer_administration import (
+        DENIED_CUSTOMER_ADMINISTRATION,
+        CustomerAdministrationPolicy,
+        CustomerManagementActor,
+        bind_customer_administration_policy,
+        bind_customer_management_actor,
+        current_customer_administration_policy,
+    )
+
+    assembly_policies = []
+
+    def tools(**_kwargs):
+        assembly_policies.append(current_customer_administration_policy())
+        return []
+
+    monkeypatch.setattr("deerflow.tools.get_available_tools", tools)
     service = SubagentBatchService(
         repository=repository,
         config=SubagentBatchesConfig(),
@@ -204,8 +219,12 @@ async def test_execute_item_marks_real_running_then_persists_terminal_result(
         execution_capacity=execution_capacity,
     )
 
-    await service.run_once(now=service_module.datetime.now(service_module.UTC))
-    await asyncio.gather(*list(service._executions.values()))
+    with bind_customer_administration_policy(CustomerAdministrationPolicy(local_skill_management=True, plugin_management=True)), bind_customer_management_actor(CustomerManagementActor(owner_id="user-1", administrator=True)):
+        await service.run_once(now=service_module.datetime.now(service_module.UTC))
+        await asyncio.gather(*list(service._executions.values()))
+    assert assembly_policies == [DENIED_CUSTOMER_ADMINISTRATION]
+    assert executor_kwargs["customer_administration_policy"] == DENIED_CUSTOMER_ADMINISTRATION
+    assert executor_kwargs["customer_management_actor"] == CustomerManagementActor()
 
     assert repository.marked_running is True
     assert repository.finalized is not None

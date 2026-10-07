@@ -14,6 +14,7 @@ from weakref import WeakValueDictionary
 from langchain.tools import tool
 
 from deerflow.agents.lead_agent.prompt import refresh_user_skills_system_prompt_cache_async
+from deerflow.runtime.customer_administration import CustomerManagementDenied, require_customer_management, resolve_customer_administration_policy
 from deerflow.runtime.user_context import resolve_runtime_user_id
 from deerflow.skills.security_scanner import scan_skill_content
 from deerflow.skills.security_static_scanner import (
@@ -133,11 +134,22 @@ async def _skill_manage_impl(
         replace: Replacement text for patch.
         expected_count: Optional expected number of replacements for patch.
     """
+    context = getattr(runtime, "context", None)
+    require_customer_management(resolve_customer_administration_policy(context), "local_skill_management")
+    from deerflow.runtime.customer_administration import customer_management_actor_is_admin
+
+    if not customer_management_actor_is_admin(context):
+        raise CustomerManagementDenied("Admin privileges required to manage skills.")
     name = SkillStorage.validate_skill_name(name)
     user_id = resolve_runtime_user_id(runtime)
     lock = _get_lock(user_id, name)
     thread_id = _get_thread_id(runtime)
     skill_storage = get_or_new_user_skill_storage(user_id)
+    from deerflow.config.paths import make_safe_user_id
+    from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+    if not isinstance(skill_storage, UserScopedSkillStorage) or skill_storage.user_id != make_safe_user_id(user_id):
+        raise CustomerManagementDenied("Private skill management requires owner-scoped storage.")
 
     async with lock:
         if action == "create":

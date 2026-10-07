@@ -580,7 +580,10 @@ def host_app(monkeypatch: pytest.MonkeyPatch):
 
     reset_app_config()
     gateway_authz._plugin_provider_cache.clear()
-    monkeypatch.setattr(app_module, "get_app_config", lambda: AppConfig(sandbox=SandboxConfig(use="test")))
+    from deerflow.config.customer_administration_config import CustomerAdministrationConfig
+
+    startup = AppConfig(sandbox=SandboxConfig(use="test"), customer_administration=CustomerAdministrationConfig(plugin_management=True))
+    monkeypatch.setattr(app_module, "get_app_config", lambda: startup)
     reset_loaded_extensions()
     reset_runtime_diagnostics()
     from app.gateway.app import create_app
@@ -601,10 +604,16 @@ def test_gateway_installs_both_plugin_management_resolvers(host_app):
     assert callable(getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_ASYNC_KEY, None))
 
 
+def _management_request(*, user=_DEFAULT_USER, **kwargs):
+    if user is _DEFAULT_USER:
+        user = SimpleNamespace(id="user-1", system_role="admin", oauth_provider=None, oauth_id=None)
+    return _plain_request(user=user, **kwargs)
+
+
 def test_installed_resolver_is_a_noop_while_authorization_is_disabled(host_app):
     set_app_config(_app_config(enabled=False))
     resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
-    request = _plain_request(app=host_app)
+    request = _management_request(app=host_app)
 
     assert resolver(request, NAMESPACE, "read") is True
     assert resolver(request, NAMESPACE, "write") is True
@@ -613,8 +622,8 @@ def test_installed_resolver_is_a_noop_while_authorization_is_disabled(host_app):
 
 
 def test_installed_resolvers_decide_read_and_write_independently(host_app):
-    set_app_config(_app_config(roles={"user": {"plugin_management": {"allow": [READ_TARGET]}}}))
-    request = _plain_request(app=host_app)
+    set_app_config(_app_config(roles={"admin": {"plugin_management": {"allow": [READ_TARGET]}}, "user": {}}))
+    request = _management_request(app=host_app)
 
     assert require_plugin_management(request, NAMESPACE, scope="read").user_id == "user-1"
     with pytest.raises(PermissionError):
@@ -622,8 +631,8 @@ def test_installed_resolvers_decide_read_and_write_independently(host_app):
 
 
 def test_installed_resolvers_cannot_answer_an_unknown_plugin(host_app):
-    set_app_config(_app_config(roles={"user": {"plugin_management": {"allow": "*"}}}))
-    request = _plain_request(app=host_app)
+    set_app_config(_app_config(roles={"admin": {"plugin_management": {"allow": "*"}}}))
+    request = _management_request(app=host_app)
     resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
 
     assert resolver(request, "community.missing", "read") is None
@@ -632,16 +641,16 @@ def test_installed_resolvers_cannot_answer_an_unknown_plugin(host_app):
 
 
 def test_installed_resolvers_cannot_answer_an_anonymous_caller(host_app):
-    set_app_config(_app_config(roles={"user": {"plugin_management": {"allow": "*"}}}))
+    set_app_config(_app_config(roles={"admin": {"plugin_management": {"allow": "*"}}}))
     resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
 
-    assert resolver(_plain_request(user=None, app=host_app), NAMESPACE, "read") is None
+    assert resolver(_management_request(user=None, app=host_app), NAMESPACE, "read") is None
 
 
 @pytest.mark.asyncio
 async def test_installed_async_resolver_matches_the_sync_answer(host_app):
-    set_app_config(_app_config(roles={"user": {"plugin_management": {"allow": [READ_TARGET]}}}))
-    request = _plain_request(app=host_app)
+    set_app_config(_app_config(roles={"admin": {"plugin_management": {"allow": [READ_TARGET]}}, "user": {}}))
+    request = _management_request(app=host_app)
 
     assert (await arequire_plugin_management(request, NAMESPACE, scope="read")).user_id == "user-1"
     with pytest.raises(PermissionError):
@@ -650,7 +659,7 @@ async def test_installed_async_resolver_matches_the_sync_answer(host_app):
 
 def test_installed_resolver_denies_when_the_config_cannot_be_read(host_app, monkeypatch):
     """Review P1: a config read failure must not resolve to 'allowed'."""
-    set_app_config(_app_config(roles={"user": {"plugin_management": {"allow": "*"}}}))
+    set_app_config(_app_config(roles={"admin": {"plugin_management": {"allow": "*"}}}))
 
     def broken_config():
         raise RuntimeError("config is being rewritten")
@@ -660,11 +669,11 @@ def test_installed_resolver_denies_when_the_config_cannot_be_read(host_app, monk
 
     resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
 
-    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is False
+    assert resolver(_management_request(app=host_app), NAMESPACE, "read") is False
 
 
 def test_installed_resolver_allows_when_no_config_exists(host_app, monkeypatch):
-    """A host that never had a config has no policy to apply: no gate.
+    """Captured provider delegation survives absence of optional authorization config.
 
     Same rule the route-scoped gates use (``_get_route_authorization_config``,
     ``deerflow.authz.sandbox_authz.safe_app_config``): authorization can only be
@@ -680,7 +689,7 @@ def test_installed_resolver_allows_when_no_config_exists(host_app, monkeypatch):
 
     resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
 
-    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is True
+    assert resolver(_management_request(app=host_app), NAMESPACE, "read") is True
 
 
 @pytest.mark.parametrize("fail_closed,expected", [(True, False), (False, True)])
@@ -691,7 +700,7 @@ def test_installed_resolver_applies_the_running_policy_when_the_config_disappear
     follows its own ``fail_closed`` (``True`` by default) instead of the read
     failure being read as "authorization was never configured".
     """
-    set_app_config(_app_config(fail_closed=fail_closed, roles={"user": {"plugin_management": {"allow": "*"}}}))
+    set_app_config(_app_config(fail_closed=fail_closed, roles={"admin": {"plugin_management": {"allow": "*"}}}))
 
     def absent_config():
         raise FileNotFoundError("`config.yaml` file not found")
@@ -701,13 +710,13 @@ def test_installed_resolver_applies_the_running_policy_when_the_config_disappear
 
     resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
 
-    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is expected
+    assert resolver(_management_request(app=host_app), NAMESPACE, "read") is expected
 
 
 @pytest.mark.asyncio
 async def test_installed_async_resolver_denies_when_the_config_disappears(host_app, monkeypatch):
     """The async resolver reaches the same answer through ``aresolve_plugin_authorization``."""
-    set_app_config(_app_config(roles={"user": {"plugin_management": {"allow": "*"}}}))
+    set_app_config(_app_config(roles={"admin": {"plugin_management": {"allow": "*"}}}))
 
     def absent_config():
         raise FileNotFoundError("`config.yaml` file not found")
@@ -716,7 +725,7 @@ async def test_installed_async_resolver_denies_when_the_config_disappears(host_a
     monkeypatch.setattr("deerflow.config.get_app_config", absent_config)
 
     with pytest.raises(PermissionError):
-        await arequire_plugin_management(_plain_request(app=host_app), NAMESPACE, scope="read")
+        await arequire_plugin_management(_management_request(app=host_app), NAMESPACE, scope="read")
 
 
 def test_installed_resolver_stays_noop_when_the_lost_config_had_authorization_off(host_app, monkeypatch):
@@ -731,7 +740,7 @@ def test_installed_resolver_stays_noop_when_the_lost_config_had_authorization_of
 
     resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
 
-    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is True
+    assert resolver(_management_request(app=host_app), NAMESPACE, "read") is True
 
 
 @pytest.mark.parametrize("fail_closed,expected", [(True, False), (False, True)])
@@ -739,7 +748,7 @@ def test_installed_resolver_applies_the_failure_policy(host_app, fail_closed: bo
     set_app_config(_app_config(fail_closed=fail_closed, provider_use="nonexistent.module:FakeProvider"))
     resolver = getattr(host_app.state, EXTENSION_PLUGIN_AUTHZ_RESOLVER_KEY)
 
-    assert resolver(_plain_request(app=host_app), NAMESPACE, "read") is expected
+    assert resolver(_management_request(app=host_app), NAMESPACE, "read") is expected
 
 
 # --- 4. Provider lifecycle -----------------------------------------------------

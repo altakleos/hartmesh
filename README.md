@@ -814,6 +814,18 @@ already received by the browser, without an additional secret-redaction layer.
 Tool-produced paths and URLs can be retained as short artifact handles across context compaction (`tool_artifacts` in `config.yaml`). Handles distinguish separate tool-result occurrences, even when a provider reuses call IDs. Detected file URLs preserve their query strings and fragments. When PII redaction is enabled, model-visible artifact labels follow that policy; internal references stay intact for tool argument resolution. The configured registry limit retains the newest artifacts, while checkpointed processing identities prevent evicted results from being recaptured after restart. Resolution runs before authorization and write-safety checks; unknown or expired handles return an error without executing the tool. Small unknown structured results may be retained as complete JSON up to 4096 UTF-8 bytes; empty or oversized payloads are skipped. Handles are agent-local: task arguments resolve parent handles to concrete references, and delegated reports must return concrete references rather than child-local handles. A truncated model projection reports how many handles are omitted.
 
 DeerFlow supports configurable MCP servers and skills to extend its capabilities.
+
+Customer administration is denied by default, including for administrators.
+The deployment operator may delegate plugin management, owner-private skill
+management, and local MCP management independently through `customer_administration`
+in `config.yaml`, then restart the hosting runtime. Local MCP creation,
+reconfiguration, and activation additionally need an exact launch definition in
+`approved_local_mcp_definitions`; bundled capability names grant no approval.
+Ordinary use of enabled tools and personal remote MCP connections remains available.
+The UI reports effective operations, including ownership and host support. Global
+skill changes, managed integration installation, and global cache reloads remain
+operator operations. See [customer administration](backend/docs/CONFIGURATION.md#customer-administration).
+
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 Durable HTTP/SSE task status and cancellation calls select configured `user_auth` credentials using the persisted task owner, including after restart; per-request secrets are not retained for background calls. If a request-scoped credential overrides submit authentication, both credentials must authorize access to the same remote task.
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.

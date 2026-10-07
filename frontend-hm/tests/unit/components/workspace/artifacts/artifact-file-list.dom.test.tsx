@@ -9,6 +9,7 @@ import {
 } from "@testing-library/react";
 
 const artifactState = rs.hoisted(() => ({
+  canInstall: false,
   select: rs.fn(),
   setOpen: rs.fn(),
 }));
@@ -31,7 +32,12 @@ const archiveState = rs.hoisted(() => {
 });
 
 rs.mock("@/core/auth/AuthProvider", () => ({
-  useAuth: () => ({ user: null }),
+  useAuth: () => ({ user: { system_role: "admin" } }),
+}));
+rs.mock("@/core/features/hooks", () => ({
+  useCustomerAdministration: () => ({
+    localSkillManagement: artifactState.canInstall,
+  }),
 }));
 rs.mock("@/components/workspace/artifacts/context", () => ({
   useArtifacts: () => artifactState,
@@ -85,6 +91,7 @@ function renderList(
 
 afterEach(cleanup);
 afterEach(() => {
+  artifactState.canInstall = false;
   rs.restoreAllMocks();
 });
 
@@ -296,4 +303,16 @@ describe("ArtifactFileList archive download", () => {
       );
     });
   });
+});
+
+it("does not offer attachment installation to an admin without effective delegation", () => {
+  renderList({ files: ["/mnt/user-data/outputs/example.skill"] });
+  expect(screen.queryByRole("button", { name: "Install" })).toBeNull();
+  expect(screen.getByRole("link", { name: "Download" })).toBeTruthy();
+});
+
+it("offers attachment installation when the host admits private skill management", () => {
+  artifactState.canInstall = true;
+  renderList({ files: ["/mnt/user-data/outputs/example.skill"] });
+  expect(screen.getByRole("button", { name: "Install" })).toBeTruthy();
 });
