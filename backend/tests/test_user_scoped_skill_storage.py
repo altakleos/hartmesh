@@ -831,7 +831,10 @@ class TestInstallScanConfigParity:
         config = _storage_config(skills_root, scan_enabled=False)
 
         assert _install_outcome(self._local_storage(skills_root, config), archive) == "installed"
-        assert _install_outcome(self._user_storage(tmp_path, skills_root, config), archive) == "installed"
+        from deerflow.skills.installer import _run_async_install
+
+        result = _run_async_install(self._user_storage(tmp_path, skills_root, config).ainstall_skill_from_archive(archive, allow_baseline_override=True))
+        assert result["success"]
 
     def test_llm_scan_receives_the_storages_own_config(self, tmp_path: Path, monkeypatch) -> None:
         """The per-file LLM scan resolves its config the same way.
@@ -854,7 +857,9 @@ class TestInstallScanConfigParity:
         config = _storage_config(skills_root, scan_enabled=True)
 
         self._local_storage(skills_root, config).install_skill_from_archive(archive)
-        self._user_storage(tmp_path, skills_root, config).install_skill_from_archive(archive)
+        from deerflow.skills.installer import _run_async_install
+
+        _run_async_install(self._user_storage(tmp_path, skills_root, config).ainstall_skill_from_archive(archive, allow_baseline_override=True))
 
         assert seen, "the LLM scan should have run for the installed SKILL.md"
         assert all(entry is config for entry in seen), "every LLM scan must receive the storage's own app_config"

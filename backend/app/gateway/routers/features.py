@@ -120,7 +120,8 @@ class CustomerAdministrationFeature(BaseModel):
 async def _customer_administration_feature(request: Request, config: AppConfig) -> CustomerAdministrationFeature:
     policy = request_customer_administration_policy(request)
     actor = await resolve_customer_management_actor(request)
-    if actor.administrator is not True:
+    administrator = actor.administrator is True
+    if not administrator and getattr(actor, "private_skill_owner", False) is not True:
         return CustomerAdministrationFeature()
     private_supported = False
     if policy.local_skill_management:
@@ -133,7 +134,7 @@ async def _customer_administration_feature(request: Request, config: AppConfig) 
         except Exception:
             pass
     plugin_supported = False
-    if policy.plugin_management:
+    if policy.plugin_management and administrator:
         from app.gateway.app import _resolve_extension_plugin_management_async
 
         loaded = getattr(request.app.state, "extensions", None)
@@ -149,7 +150,7 @@ async def _customer_administration_feature(request: Request, config: AppConfig) 
     return CustomerAdministrationFeature(
         plugin_management=plugin_supported,
         local_skill_management=private_supported,
-        local_mcp_management=policy.local_mcp_management and bool(policy.approved_local_launches),
+        local_mcp_management=administrator and policy.local_mcp_management and bool(policy.approved_local_launches),
     )
 
 

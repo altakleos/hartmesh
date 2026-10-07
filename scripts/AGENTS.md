@@ -384,3 +384,19 @@ a GitHub Release. Keep release
 manifest schema 4 intact and attach the record as a separate asset. Before a
 tag, rerun all acceptance jobs and refresh its record when needed; an incomplete
 immutable tag with expired evidence needs a new version.
+
+## Provider skill packs
+
+`provider_skill_pack.py SOURCE PACK [--home ROOT] [--replace]` is an operator-only
+snapshot command using the installed harness, bounded export capture, static
+scanning and existing global integration/projection locks. It neither installs
+Python code nor exposes a customer HTTP mutation. Reject linked sources/state
+roots and duplicate names across explicit packs. Replacement is explicit and
+must retain private variants/history/state; restart Gateway workers after a pack
+change. Stable snapshots live in `integrations/skills/provider/PACK`, independently
+of the legacy global-custom fallback and release public-skill seeding.
+
+Provider pack replacement uses Linux atomic directory exchange; unsupported
+hosts/filesystems refuse replacement before changing the existing pack. First
+publication uses an atomic rename. Interrupted cleanup can leave hidden staging
+files, but cannot retire the published baseline.

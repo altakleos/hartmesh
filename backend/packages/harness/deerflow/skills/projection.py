@@ -370,6 +370,7 @@ def _source_signature(storage: SkillStorage, scope: str) -> str:
         state = {
             "extensions": _extensions_state(),
             "user": storage._read_skill_states(),
+            "origins": storage._read_skill_origins() if hasattr(type(storage), "_read_skill_origins") else {},
         }
     else:  # pragma: no cover - internal invariant
         raise ValueError(f"Unknown skill projection scope: {scope}")

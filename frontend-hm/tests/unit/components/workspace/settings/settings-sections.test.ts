@@ -37,6 +37,22 @@ describe("visibleSettingsSections", () => {
       "about",
     ]);
   });
+
+  it("offers delegated private skills without exposing other deployment screens", () => {
+    expect(
+      visibleSettingsSections(SECTIONS, false, true).map(
+        (section) => section.id,
+      ),
+    ).toEqual([
+      "account",
+      "appearance",
+      "notification",
+      "channels",
+      "memory",
+      "skills",
+      "about",
+    ]);
+  });
 });
 
 describe("resolveActiveSection", () => {

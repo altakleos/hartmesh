@@ -27,6 +27,7 @@ import {
   useWorkspacePresentation,
 } from "@/core/features";
 import { useBranding } from "@/core/features";
+import { useCustomerAdministration } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import { cn } from "@/lib/utils";
 
@@ -118,6 +119,7 @@ export function SettingsDialog(props: SettingsDialogProps) {
   const { t } = useI18n();
   const { companyName } = useBranding();
   const developerSurfacesVisible = useDeveloperSurfacesVisible();
+  const { localSkillManagement } = useCustomerAdministration();
   // The screens stay offered while the deployment's answer is unknown, so a
   // deep link to a hidden one would otherwise mount it — and fire its
   // fetches — for the moment before the answer lands.
@@ -188,8 +190,13 @@ export function SettingsDialog(props: SettingsDialogProps) {
     ],
   );
   const visibleSections = useMemo(
-    () => visibleSettingsSections(sections, developerSurfacesVisible),
-    [developerSurfacesVisible, sections],
+    () =>
+      visibleSettingsSections(
+        sections,
+        developerSurfacesVisible,
+        localSkillManagement,
+      ),
+    [developerSurfacesVisible, localSkillManagement, sections],
   );
   const activeVisibleSection = resolveActiveSection(
     visibleSections,

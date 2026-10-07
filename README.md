@@ -826,6 +826,31 @@ The UI reports effective operations, including ownership and host support. Globa
 skill changes, managed integration installation, and global cache reloads remain
 operator operations. See [customer administration](backend/docs/CONFIGURATION.md#customer-administration).
 
+When private skill management is delegated, authenticated owners can copy a
+Provided skill, import an archive, edit their private packages, restore history,
+and change their own enabled state. Copies default to a distinct private name
+and show their source. Reusing a provided name requires explicit consent; an
+existing private package still returns a conflict. Provider disable settings
+continue to limit private copies. Disabling management preserves owner reads,
+history and exports. Personal access tokens cannot manage private skills.
+
+Operators can publish stable read-only skill baselines from an existing source
+folder with the preinstalled backend environment:
+
+```bash
+backend/.venv/bin/python scripts/provider_skill_pack.py /path/to/skills office
+# Explicitly upgrade the same pack:
+backend/.venv/bin/python scripts/provider_skill_pack.py /path/to/skills office --replace
+```
+
+The pack is stored under `DEER_FLOW_HOME/integrations/skills/provider/office`.
+Its names must be unique across provider packs. Explicitly promoted packs take
+precedence over the legacy global-custom fallback and survive private installs;
+upgrades preserve private content, histories and owner switches. Replacement
+requires Linux atomic directory exchange; unsupported hosts leave the old pack
+unchanged. Restart the
+Gateway after promotion or upgrade to refresh every worker's catalog.
+
 For HTTP/SSE MCP servers, OAuth token flows are supported (`client_credentials`, `refresh_token`).
 Durable HTTP/SSE task status and cancellation calls select configured `user_auth` credentials using the persisted task owner, including after restart; per-request secrets are not retained for background calls. If a request-scoped credential overrides submit authentication, both credentials must authorize access to the same remote task.
 For stdio MCP servers, per-tool call timeouts can be configured with `tool_call_timeout`; durable background-task calls honor the same setting for HTTP/SSE servers as well.

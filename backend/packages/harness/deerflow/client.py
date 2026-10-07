@@ -332,8 +332,21 @@ class DeerFlowClient:
         from deerflow.runtime.customer_administration import CustomerManagementDenied, require_customer_management
 
         require_customer_management(getattr(self, "_customer_administration_policy", None), permission)
-        if not self._customer_management_actor_allowed():
-            raise CustomerManagementDenied("Admin privileges required for this customization.")
+        from deerflow.runtime.customer_administration import customer_management_actor_can_manage_private_skills
+
+        allowed = customer_management_actor_can_manage_private_skills() if permission == "local_skill_management" else self._customer_management_actor_allowed()
+        if not allowed:
+            raise CustomerManagementDenied("Attributed owner authority required for this customization.")
+
+    def _private_skill_management_for_owner(self, owner_id):
+        from deerflow.runtime.customer_administration import current_customer_management_actor, customer_management_actor_can_manage_private_skills
+
+        return bool(
+            getattr(self, "_customer_administration_policy", None)
+            and self._customer_administration_policy.local_skill_management
+            and customer_management_actor_can_manage_private_skills()
+            and current_customer_management_actor().owner_id == owner_id
+        )
 
     def _owned_private_skill_storage(self):
         from deerflow.config.paths import make_safe_user_id
@@ -347,6 +360,24 @@ class DeerFlowClient:
         if not isinstance(storage, UserScopedSkillStorage) or storage.user_id != make_safe_user_id(owner):
             raise CustomerManagementDenied("Private skill management requires owner-scoped storage.")
         return storage
+
+    def _require_private_skill_visibility(self, name):
+        from deerflow.authz.skill_filter import filter_available_skills_by_authorization
+        from deerflow.runtime.customer_administration import CustomerManagementDenied, current_customer_management_actor
+
+        actor = current_customer_management_actor()
+        context = {"user_id": actor.owner_id, "user_role": "admin" if actor.administrator is True else "user"}
+        from deerflow.runtime.user_context import get_current_user
+
+        verified = get_current_user()
+        if verified is not None and str(verified.id) == actor.owner_id:
+            for field in ("oauth_provider", "oauth_id", "channel_user_id", "authz_attributes"):
+                value = getattr(verified, field, None)
+                if value is not None:
+                    context[field] = value
+        visible = filter_available_skills_by_authorization({name}, context=context, app_config=self._app_config, user_id=actor.owner_id)
+        if visible is not None and name not in visible:
+            raise CustomerManagementDenied("Skill is not available for this owner.")
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -385,9 +416,12 @@ class DeerFlowClient:
         )
 
     def _ensure_agent(self, config: RunnableConfig, *, context: Mapping[str, Any] | None = None):
-        from deerflow.runtime.customer_administration import DENIED_CUSTOMER_ADMINISTRATION, bind_customer_administration_policy
+        from deerflow.runtime.customer_administration import DENIED_CUSTOMER_ADMINISTRATION, CustomerManagementActor, bind_customer_administration_policy, bind_customer_management_actor, current_customer_management_actor
 
-        with bind_customer_administration_policy(getattr(self, "_customer_administration_policy", DENIED_CUSTOMER_ADMINISTRATION)):
+        actor = current_customer_management_actor()
+        target_owner = (context or {}).get("user_id") or (config.get("configurable") or {}).get("user_id") or get_effective_user_id()
+        assembly_actor = actor if actor.owner_id == target_owner else CustomerManagementActor()
+        with bind_customer_administration_policy(getattr(self, "_customer_administration_policy", DENIED_CUSTOMER_ADMINISTRATION)), bind_customer_management_actor(assembly_actor):
             return self._ensure_agent_with_policy(config, context=context)
 
     def _ensure_agent_with_policy(self, config: RunnableConfig, *, context: Mapping[str, Any] | None = None):
@@ -454,6 +488,7 @@ class DeerFlowClient:
             effective_user_id,
             authorization_identity,
             self._customer_management_actor_allowed(),
+            self._private_skill_management_for_owner(effective_user_id),
         )
 
         if self._agent is not None and self._agent_config_key == key:
@@ -1594,6 +1629,7 @@ class DeerFlowClient:
             OSError: If the config file cannot be written.
         """
         self._require_customer_management("local_skill_management")
+        self._require_private_skill_visibility(name)
         storage = self._owned_private_skill_storage()
         skills = storage.load_skills(enabled_only=False)
         skill = next((s for s in skills if s.name == name), None)
@@ -1637,11 +1673,12 @@ class DeerFlowClient:
             "enabled": updated.enabled,
         }
 
-    def install_skill(self, skill_path: str | Path) -> dict:
+    def install_skill(self, skill_path: str | Path, *, allow_baseline_override: bool = False) -> dict:
         """Install a skill from a .skill archive (ZIP).
 
         Args:
             skill_path: Path to the .skill file.
+            allow_baseline_override: Explicit consent for a new same-name baseline override.
 
         Returns:
             Dict with success, skill_name, message.
@@ -1651,7 +1688,16 @@ class DeerFlowClient:
             ValueError: If the file is invalid.
         """
         self._require_customer_management("local_skill_management")
-        return self._owned_private_skill_storage().install_skill_from_archive(skill_path)
+        storage = self._owned_private_skill_storage()
+        authorization_enabled = getattr(getattr(self._app_config, "authorization", None), "enabled", None) is True
+        if allow_baseline_override is True or authorization_enabled:
+            from deerflow.skills.installer import _run_async_install
+
+            async def check_name(name):
+                await asyncio.to_thread(self._require_private_skill_visibility, name)
+
+            return _run_async_install(storage.ainstall_skill_from_archive(skill_path, allow_baseline_override=allow_baseline_override is True, name_check=check_name if authorization_enabled else None))
+        return storage.install_skill_from_archive(skill_path)
 
     # ------------------------------------------------------------------
     # Public API — memory management

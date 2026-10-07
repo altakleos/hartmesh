@@ -59,6 +59,8 @@ class Skill:
     # Frontmatter ``first-command``: what the skill's work starts with; nothing
     # else runs in the sandbox between its first load and a run of it.
     first_command: FirstCommand | None = None
+    origin: dict[str, str] | None = None
+    overrides_baseline: bool = False
 
     @property
     def skill_path(self) -> str:

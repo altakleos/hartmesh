@@ -31,13 +31,15 @@ export const DEVELOPER_SETTINGS_SECTIONS: ReadonlySet<SettingsSectionId> =
 export function visibleSettingsSections<T extends { id: string }>(
   sections: readonly T[],
   developerSurfacesVisible: boolean,
+  privateSkillsVisible = false,
 ): T[] {
   if (developerSurfacesVisible) {
     return [...sections];
   }
   return sections.filter(
     (section) =>
-      !DEVELOPER_SETTINGS_SECTIONS.has(section.id as SettingsSectionId),
+      !DEVELOPER_SETTINGS_SECTIONS.has(section.id as SettingsSectionId) ||
+      (privateSkillsVisible && section.id === "skills"),
   );
 }
 

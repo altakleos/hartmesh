@@ -13,6 +13,7 @@ import {
   formatSkillSecurityFindings,
   SkillRequestError,
   uploadSkillArchive,
+  cloneSkill,
 } from "@/core/skills/api";
 
 const mockedFetch = rs.mocked(fetcher);
@@ -30,6 +31,26 @@ beforeEach(() => {
 });
 
 describe("skills api", () => {
+  test("copies a registered source with the selected name and explicit override consent", async () => {
+    mockedFetch.mockResolvedValueOnce(
+      jsonResponse(200, {
+        success: true,
+        skill_name: "provided",
+        message: "Copied",
+      }),
+    );
+    const request = {
+      source_id: "integrations:provider/office/provided",
+      expected_revision: "a".repeat(64),
+      name: "provided",
+      allow_baseline_override: true,
+    };
+    await cloneSkill(request);
+    expect(mockedFetch.mock.calls[0]?.[0]).toBe("/backend/api/skills/clone");
+    expect(JSON.parse(mockedFetch.mock.calls[0]?.[1]?.body as string)).toEqual(
+      request,
+    );
+  });
   test("uploads a local .skill archive as multipart form data", async () => {
     mockedFetch.mockResolvedValueOnce(
       jsonResponse(200, {

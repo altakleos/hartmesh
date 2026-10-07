@@ -2,7 +2,7 @@
 
 import { LoaderIcon, SparklesIcon, UploadIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { type ChangeEvent, useMemo, useRef, useState } from "react";
+import { type ChangeEvent, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
@@ -23,6 +23,7 @@ import {
 } from "@/components/ui/item";
 import { Switch } from "@/components/ui/switch";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { useAuth } from "@/core/auth/AuthProvider";
 import { useCustomerAdministration } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import {
@@ -40,9 +41,11 @@ import { env } from "@/env";
 
 import { ProviderEnablementNotice } from "./provider-enablement-notice";
 import { SettingsSection } from "./settings-section";
+import { SkillCloneDialog } from "./skill-clone-dialog";
 
 export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
   const { t } = useI18n();
+  const { user } = useAuth();
   const { skills, isLoading, error } = useSkills();
   const adminRequired =
     error instanceof SkillRequestError && error.isAdminRequired;
@@ -60,7 +63,11 @@ export function SkillSettingsPage({ onClose }: { onClose?: () => void } = {}) {
       ) : error ? (
         <div>Error: {error.message}</div>
       ) : (
-        <SkillSettingsList skills={skills} onClose={onClose} />
+        <SkillSettingsList
+          key={`${user?.id ?? ""}:${user?.system_role ?? ""}`}
+          skills={skills}
+          onClose={onClose}
+        />
       )}
     </SettingsSection>
   );
@@ -77,16 +84,30 @@ function SkillSettingsList({
   const router = useRouter();
   const { localSkillManagement: canManageSkills } = useCustomerAdministration();
   const [filter, setFilter] = useState<string>("public");
+  const [cloneOpen, setCloneOpen] = useState(false);
+  const [archiveOverride, setArchiveOverride] = useState(false);
   const { mutate: enableSkill } = useEnableSkill();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { mutateAsync: uploadSkillArchive, isPending: isUploading } =
     useUploadSkillArchive();
   const staticReadOnly = env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY === "true";
+  const uploadLifetime = useRef(0);
+  useEffect(() => {
+    uploadLifetime.current += 1;
+    return () => {
+      uploadLifetime.current += 1;
+    };
+  }, [canManageSkills, staticReadOnly]);
   const isArchiveUploadDisabled =
     isUploading || !canManageSkills || staticReadOnly;
   const isCreateSkillDisabled = staticReadOnly;
   const filteredSkills = useMemo(
-    () => skills.filter((skill) => skill.category === filter),
+    () =>
+      skills.filter((skill) =>
+        filter === "public"
+          ? skill.category !== "custom"
+          : skill.category === "custom",
+      ),
     [skills, filter],
   );
   const handleCreateSkill = () => {
@@ -94,7 +115,7 @@ function SkillSettingsList({
     router.push("/workspace/chats/new?mode=skill");
   };
   const handleSkillArchive = async (event: ChangeEvent<HTMLInputElement>) => {
-    if (isUploading) {
+    if (isArchiveUploadDisabled) {
       event.target.value = "";
       return;
     }
@@ -110,15 +131,21 @@ function SkillSettingsList({
       return;
     }
 
+    const lifetime = uploadLifetime.current;
     try {
-      const result = await uploadSkillArchive(archive);
+      const result = await uploadSkillArchive(
+        archiveOverride ? { archive, allowBaselineOverride: true } : archive,
+      );
+      if (lifetime !== uploadLifetime.current) return;
       if (result.success) {
         toast.success(result.message);
         setFilter("custom");
+        setArchiveOverride(false);
       } else {
         toast.error(result.message || t.settings.skills.installFailed);
       }
     } catch (error) {
+      if (lifetime !== uploadLifetime.current) return;
       if (error instanceof SkillRequestError && error.isAdminRequired) {
         toast.error(t.settings.skills.installAdminRequired);
       } else if (error instanceof SkillRequestError && error.status === 413) {
@@ -146,12 +173,19 @@ function SkillSettingsList({
   return (
     <div className="flex w-full flex-col gap-4">
       {!canManageSkills && <ProviderEnablementNotice />}
-      <header className="flex justify-between">
+      {canManageSkills && !staticReadOnly && (
+        <SkillCloneDialog open={cloneOpen} onOpenChange={setCloneOpen} />
+      )}
+      <header className="flex flex-wrap justify-between gap-2">
         <div className="flex gap-2">
           <Tabs value={filter} onValueChange={setFilter}>
             <TabsList variant="line">
-              <TabsTrigger value="public">{t.common.public}</TabsTrigger>
-              <TabsTrigger value="custom">{t.common.custom}</TabsTrigger>
+              <TabsTrigger value="public">
+                {t.settings.skills.provided}
+              </TabsTrigger>
+              <TabsTrigger value="custom">
+                {t.settings.skills.privateSkills}
+              </TabsTrigger>
             </TabsList>
           </Tabs>
         </div>
@@ -164,6 +198,16 @@ function SkillSettingsList({
             className="sr-only"
             onChange={handleSkillArchive}
           />
+          {canManageSkills && (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={staticReadOnly}
+              onClick={() => setCloneOpen(true)}
+            >
+              {t.settings.skills.cloneProvided}
+            </Button>
+          )}
           {canManageSkills && (
             <Button
               size="sm"
@@ -191,6 +235,19 @@ function SkillSettingsList({
           </Button>
         </div>
       </header>
+      {canManageSkills && !staticReadOnly && (
+        <label className="flex items-start gap-2 text-sm">
+          <input
+            type="checkbox"
+            checked={archiveOverride}
+            disabled={isUploading}
+            onChange={(event) =>
+              setArchiveOverride(event.currentTarget.checked)
+            }
+          />
+          <span>{t.settings.skills.archiveOverride}</span>
+        </label>
+      )}
       {filteredSkills.length === 0 && (
         <EmptySkill
           createDisabled={isCreateSkillDisabled}
@@ -204,6 +261,23 @@ function SkillSettingsList({
               <ItemTitle>
                 <div className="flex items-center gap-2">{skill.name}</div>
               </ItemTitle>
+              {skill.origin && (
+                <p className="text-muted-foreground text-xs">
+                  {t.settings.skills.privateOrigin.replace(
+                    "{name}",
+                    skill.origin.source_name,
+                  )}
+                  <span className="ml-2" title={skill.origin.revision}>
+                    {skill.origin.source_category} ·{" "}
+                    {skill.origin.revision.slice(0, 12)}
+                  </span>
+                </p>
+              )}
+              {skill.overrides_baseline && (
+                <p className="text-muted-foreground text-xs">
+                  {t.settings.skills.baselineOverride}
+                </p>
+              )}
               <ItemDescription className="line-clamp-4">
                 {skill.description}
               </ItemDescription>

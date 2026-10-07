@@ -1,7 +1,7 @@
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
 
-import type { Skill } from "./type";
+import type { Skill, SkillCloneSource } from "./type";
 
 // Keep this in lockstep with `_MAX_SKILL_ARCHIVE_UPLOAD_BYTES` in
 // `backend/app/gateway/routers/skills.py`; nginx and Ingress allow 101 MiB so
@@ -154,6 +154,7 @@ export async function enableSkill(skillName: string, enabled: boolean) {
 export interface InstallSkillRequest {
   thread_id: string;
   path: string;
+  allow_baseline_override?: boolean;
 }
 
 export interface InstallSkillResponse {
@@ -193,9 +194,11 @@ export async function installSkill(
 
 export async function uploadSkillArchive(
   archive: File,
+  allowBaselineOverride = false,
 ): Promise<InstallSkillResponse> {
   const formData = new FormData();
   formData.append("archive", archive);
+  if (allowBaselineOverride) formData.append("allow_baseline_override", "true");
 
   const response = await fetch(
     `${getBackendBaseURL()}/api/skills/install/upload`,
@@ -221,5 +224,68 @@ export async function uploadSkillArchive(
     };
   }
 
+  return response.json();
+}
+
+export interface SkillCloneRequest {
+  source_id: string;
+  expected_revision: string;
+  name?: string;
+  allow_baseline_override?: boolean;
+}
+
+export interface SkillClonePreview extends SkillCloneSource {
+  revision: string | null;
+  can_export: boolean;
+  file_count: number;
+  total_bytes: number;
+}
+
+export async function loadSkillCloneSources(
+  signal?: AbortSignal,
+): Promise<SkillCloneSource[]> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/clone-sources`,
+    { signal },
+  );
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
+  return ((await response.json()) as { sources: SkillCloneSource[] }).sources;
+}
+
+export async function previewSkillClone(
+  sourceId: string,
+  signal?: AbortSignal,
+): Promise<SkillClonePreview> {
+  const response = await fetch(
+    `${getBackendBaseURL()}/api/skills/clone-preview`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ source_id: sourceId }),
+      signal,
+    },
+  );
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
+  return response.json();
+}
+
+export async function cloneSkill(
+  request: SkillCloneRequest,
+): Promise<InstallSkillResponse> {
+  const response = await fetch(`${getBackendBaseURL()}/api/skills/clone`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  if (!response.ok) {
+    const detail = await readErrorDetail(response);
+    throw new SkillRequestError(response.status, detail.message, detail);
+  }
   return response.json();
 }

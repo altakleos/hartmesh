@@ -22,7 +22,9 @@ from uuid import UUID
 import pytest
 from fastapi import Request
 
+from app.gateway.auth.models import User
 from app.gateway.routers.skills import _get_user_skill_storage, get_custom_skill_history
+from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 pytestmark = pytest.mark.asyncio
 
@@ -33,15 +35,16 @@ def _config(skills_root: Path) -> SimpleNamespace:
             get_skills_path=lambda: skills_root,
             container_path="/mnt/skills",
             use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage",
-        )
+        ),
+        authorization=SimpleNamespace(enabled=False, fail_closed=False),
     )
 
 
 def _admin_request() -> Request:
-    # The route is admin-only. ``AuthMiddleware`` normally stamps
+    # The route requires an authenticated owner. ``AuthMiddleware`` stamps
     # ``request.state.user``; supply it directly here, as
     # ``test_channel_runtime_config_store`` does for the same reason.
-    user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"), system_role="admin")
+    user = User(id=UUID("11111111-2222-3333-4444-555555555555"), email="owner@example.com", password_hash="unused", system_role="user")
     return Request({"type": "http", "headers": [], "state": {"user": user}})
 
 
@@ -57,9 +60,11 @@ async def test_get_custom_skill_history_does_not_block_event_loop(tmp_path: Path
         history_file.write_text(json.dumps({"action": "human_edit", "new_content": "x"}) + "\n", encoding="utf-8")
 
     request = await asyncio.to_thread(_admin_request)
-    await asyncio.to_thread(_seed)
-
-    response = await get_custom_skill_history("demo-skill", request, config)
-
-    assert len(response.history) == 1
-    assert response.history[-1]["action"] == "human_edit"
+    token = set_current_user(request.state.user)
+    try:
+        await asyncio.to_thread(_seed)
+        response = await get_custom_skill_history("demo-skill", request, config)
+        assert len(response.history) == 1
+        assert response.history[-1]["action"] == "human_edit"
+    finally:
+        reset_current_user(token)
