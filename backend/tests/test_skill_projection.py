@@ -919,3 +919,29 @@ def test_concurrent_custom_skill_toggles_do_not_lose_state(projection_env) -> No
         "skill-b": {"enabled": False},
     }
     assert list(env.paths.user_custom_skills_view_dir("alice").iterdir()) == []
+
+
+def test_standalone_packages_reach_thread_projection_as_independent_complete_copies(
+    projection_env,
+) -> None:
+    env = projection_env
+    examples = Path(__file__).resolve().parents[2] / "examples/skills"
+    baseline = env.skills_root / "public/supplier-comparison"
+    private = env.storage.get_user_custom_root() / "procedure-summary"
+    shutil.copytree(examples / "supplier-comparison", baseline)
+    shutil.copytree(examples / "procedure-summary", private)
+    projected = ensure_thread_skill_projection(env.storage, "example-thread", {"supplier-comparison", "procedure-summary"})
+    for source, target in (
+        (baseline, projected.public / baseline.name),
+        (private, projected.custom / private.name),
+    ):
+        for original in source.rglob("*"):
+            if not original.is_file():
+                continue
+            copied = target / original.relative_to(source)
+            assert copied.read_bytes() == original.read_bytes()
+            assert copied.stat().st_ino != original.stat().st_ino
+        original = source / "scripts/build.py"
+        before = original.read_bytes()
+        (target / "scripts/build.py").write_bytes(b"fixture drift")
+        assert original.read_bytes() == before

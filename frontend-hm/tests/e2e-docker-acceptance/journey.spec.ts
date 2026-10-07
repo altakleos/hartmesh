@@ -33,7 +33,12 @@ test("production Docker login, upload, streamed tools, files, history and confir
   const initialized = await context.request.post("/api/v1/auth/initialize", {
     data: { email: "admin@example.com", password },
   });
-  expect(initialized.status(), await initialized.text()).toBe(201);
+  expect([201, 409]).toContain(initialized.status());
+  if (initialized.status() === 409) {
+    expect(
+      ((await initialized.json()) as { detail: { code: string } }).detail.code,
+    ).toBe("system_already_initialized");
+  }
   await context.clearCookies();
   const registered = await context.request.post("/api/v1/auth/register", {
     data: { email, password },

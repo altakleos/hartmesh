@@ -29,6 +29,7 @@ HARNESS_PATHS = (
     "docker/acceptance/compose.postgres-redis.yaml",
     "docker/acceptance/provider.py",
     "docker/acceptance/acceptance-config.yaml",
+    "examples/skills",
     "frontend-hm/playwright.docker-acceptance.config.ts",
     "frontend-hm/tests/e2e-docker-acceptance",
     "frontend-hm/package.json",
@@ -139,13 +140,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument(
         "--stores",
-        choices=("sqlite", "postgres-redis"),
+        choices=("sqlite", "postgres-redis", "both"),
         default="sqlite",
-        help="Disposable persistence fixture (default: sqlite)",
+        help="Disposable persistence fixture; both builds one source pair for both stores",
     )
     args = parser.parse_args(argv)
     if bool(args.backend_image) != bool(args.frontend_image):
         parser.error("--backend-image and --frontend-image must be supplied together")
+    if args.stores == "both" and args.backend_image:
+        parser.error(
+            "--stores both builds source; qualify supplied digests with named stores"
+        )
     if os.name != "posix":
         parser.error(
             "Docker acceptance requires POSIX process-group cleanup (Linux/macOS)."
@@ -261,8 +266,7 @@ def build_source_images(
             )
 
 
-def main() -> int:
-    args = parse_args()
+def run_profile(args: argparse.Namespace, source_build: dict | None = None) -> int:
     artifacts = (
         args.artifacts or Path(tempfile.mkdtemp(prefix="hartmesh-acceptance-evidence-"))
     ).resolve()
@@ -270,11 +274,13 @@ def main() -> int:
     project = f"hm-acceptance-{uuid.uuid4().hex[:12]}"
     supplied = bool(args.backend_image)
     backend, frontend = (
-        (args.backend_image, args.frontend_image)
+        (source_build["backend"], source_build["frontend"])
+        if source_build
+        else (args.backend_image, args.frontend_image)
         if supplied
         else (f"{project}-backend:local", f"{project}-frontend:local")
     )
-    owned_images = [] if supplied else [backend, frontend]
+    owned_images = [] if supplied or source_build else [backend, frontend]
     env = {
         **os.environ,
         "ACCEPTANCE_BACKEND_IMAGE": backend,
@@ -347,6 +353,8 @@ def main() -> int:
                         log=artifacts / "images.log",
                         timeout=600,
                     )
+        elif source_build:
+            summary["source_tree_sha256"] = source_build["source_tree_sha256"]
         else:
             build_source_images(
                 backend, frontend, env=env, artifacts=artifacts, summary=summary
@@ -534,6 +542,137 @@ def main() -> int:
         )
     print(f"Docker acceptance {summary['status']}; evidence: {artifacts}", flush=True)
     return 0 if summary["status"] == "passed" else 1
+
+
+def run_both_source(args: argparse.Namespace) -> int:
+    """Build once, qualify the exact pair twice, and remove it after both runs."""
+    artifacts = (
+        args.artifacts or Path(tempfile.mkdtemp(prefix="hartmesh-pair-evidence-"))
+    ).resolve()
+    artifacts.mkdir(parents=True, exist_ok=True)
+    project = f"hm-acceptance-pair-{uuid.uuid4().hex[:12]}"
+    backend, frontend = f"{project}-backend:local", f"{project}-frontend:local"
+    env = {**os.environ, "COREPACK_ENABLE_NETWORK": "0"}
+    summary = {"schema": 1, "status": "failed", "harness_sha256": harness_fingerprint()}
+    previous_term = signal.signal(signal.SIGTERM, interrupted)
+    previous_int = signal.getsignal(signal.SIGINT)
+    try:
+        run(
+            ["docker", "info"], env=env, log=artifacts / "prerequisites.log", timeout=30
+        )
+        run(
+            [
+                sys.executable,
+                str(ROOT / "scripts/pnpm.py"),
+                "--project",
+                "frontend-hm",
+                "--",
+                "exec",
+                "playwright",
+                "--version",
+            ],
+            env=env,
+            log=artifacts / "prerequisites.log",
+            timeout=30,
+        )
+        build_source_images(
+            backend, frontend, env=env, artifacts=artifacts, summary=summary
+        )
+        summary["images"] = {
+            name: inspect_image(image, env=env)
+            for name, image in (("backend", backend), ("frontend", frontend))
+        }
+        source = {
+            "backend": backend,
+            "frontend": frontend,
+            "source_tree_sha256": summary["source_tree_sha256"],
+        }
+        results = {}
+        for store in ("sqlite", "postgres-redis"):
+            profile = argparse.Namespace(
+                artifacts=artifacts / store,
+                stores=store,
+                backend_image=None,
+                frontend_image=None,
+            )
+            run_profile(profile, source_build=source)
+            result = json.loads(
+                (profile.artifacts / "result.json").read_text(encoding="utf-8")
+            )
+            results[store] = result
+            if result.get("error") == "acceptance interrupted":
+                raise KeyboardInterrupt("acceptance interrupted")
+        summary["profiles"] = {
+            store: result["status"] for store, result in results.items()
+        }
+        for result in results.values():
+            if (
+                result["status"] != "passed"
+                or result["harness_sha256"] != summary["harness_sha256"]
+                or result["source_tree_sha256"] != summary["source_tree_sha256"]
+            ):
+                raise ValueError(
+                    "A profile failed or its source/harness identity changed"
+                )
+            for name, identity in summary["images"].items():
+                actual = result["images"][name]
+                if (
+                    actual["image_id"] != identity["image_id"]
+                    or actual["running_image_id"] != identity["image_id"]
+                ):
+                    raise ValueError("Profiles did not run the exact built image pair")
+        with tempfile.TemporaryDirectory(prefix="hartmesh-pair-verify-") as temporary:
+            if snapshot_tracked(ROOT, Path(temporary)) != summary["source_tree_sha256"]:
+                raise ValueError("Tracked source changed during qualification")
+        if harness_fingerprint() != summary["harness_sha256"]:
+            raise ValueError("Harness changed during qualification")
+        summary["status"] = "passed"
+    except (
+        OSError,
+        RuntimeError,
+        ValueError,
+        KeyError,
+        subprocess.SubprocessError,
+        KeyboardInterrupt,
+    ) as error:
+        summary["error"] = str(error)
+        print(f"Paired acceptance failed: {error}", file=sys.stderr, flush=True)
+    finally:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+        signal.signal(signal.SIGINT, signal.SIG_IGN)
+        for image in (backend, frontend):
+            try:
+                available = run(
+                    ["docker", "image", "inspect", "--format", "{{.Id}}", image],
+                    env=env,
+                    log=artifacts / "cleanup.log",
+                    timeout=15,
+                    check=False,
+                )
+                if available.returncode == 0:
+                    run(
+                        ["docker", "image", "rm", image],
+                        env=env,
+                        log=artifacts / "cleanup.log",
+                        timeout=60,
+                    )
+            except (OSError, RuntimeError, subprocess.SubprocessError) as error:
+                summary.update(status="failed", image_cleanup_error=str(error))
+        signal.signal(signal.SIGTERM, previous_term)
+        signal.signal(signal.SIGINT, previous_int)
+        (artifacts / "pair-result.json").write_text(
+            json.dumps(summary, indent=2) + "\n", encoding="utf-8"
+        )
+    print(
+        f"Paired Docker acceptance {summary['status']}; evidence: {artifacts}",
+        flush=True,
+    )
+    return int(summary["status"] != "passed")
+
+
+def main() -> int:
+    args = parse_args()
+    return run_both_source(args) if args.stores == "both" else run_profile(args)
 
 
 if __name__ == "__main__":

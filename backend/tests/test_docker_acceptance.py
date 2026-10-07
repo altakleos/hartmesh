@@ -142,7 +142,8 @@ def test_image_mode_requires_both_components():
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX Docker acceptance runner")
 @pytest.mark.parametrize("failure", [None, "startup", "browser", "interrupt", "inspect"])
-def test_supplied_images_are_never_built_or_deleted_and_cleanup_is_scoped(tmp_path, monkeypatch, failure):
+@pytest.mark.parametrize("shared_source", [False, True])
+def test_supplied_images_are_never_built_or_deleted_and_cleanup_is_scoped(tmp_path, monkeypatch, failure, shared_source):
     runner = load(ROOT / "scripts/docker_acceptance.py")
     backend = "registry.example/team/backend@sha256:" + "a" * 64
     frontend = "registry.example/team/frontend@sha256:" + "b" * 64
@@ -197,12 +198,20 @@ def test_supplied_images_are_never_built_or_deleted_and_cleanup_is_scoped(tmp_pa
     for name, value in {"GITHUB_REPOSITORY": "altakleos/hartmesh", "GITHUB_RUN_ID": "1234", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_EVENT_NAME": "workflow_dispatch", "GITHUB_SHA": "e" * 40}.items():
         monkeypatch.setenv(name, value)
     monkeypatch.setattr(sys, "argv", ["docker_acceptance.py", "--artifacts", str(tmp_path), "--backend-image", backend, "--frontend-image", frontend, "--stores", "postgres-redis"])
-    assert runner.main() == (0 if failure is None else 1)
+    if shared_source:
+        args = runner.parse_args()
+        args.backend_image = args.frontend_image = None
+        code = runner.run_profile(args, source_build={"backend": backend, "frontend": frontend, "source_tree_sha256": "f" * 64})
+    else:
+        code = runner.main()
+    assert code == (0 if failure is None else 1)
     summary = json.loads((tmp_path / "result.json").read_text(encoding="utf-8"))
-    assert summary["mode"] == "images"
+    assert summary["mode"] == ("source" if shared_source else "images")
     assert summary["stores"] == "postgres-redis"
     assert summary["harness_commit"] == "e" * 40
-    assert summary["source_commit"] is None
+    assert summary["source_commit"] == ("e" * 40 if shared_source else None)
+    if shared_source:
+        assert summary["source_tree_sha256"] == "f" * 64
     assert not any(command[:2] == ["docker", "build"] or command[:3] == ["docker", "image", "rm"] for command in commands)
     downs = [command for command in commands if "down" in command]
     assert len(downs) == (0 if failure == "inspect" else 1)
@@ -214,7 +223,8 @@ def test_supplied_images_are_never_built_or_deleted_and_cleanup_is_scoped(tmp_pa
         assert summary["images"]["frontend"]["requested"] == frontend
         assert summary["images"]["backend"]["source_revision"] == "d" * 40
         verifier = load(ROOT / "scripts/release_acceptance.py")
-        verifier.validate_result(summary, "postgres-redis", "altakleos/hartmesh", {"id": 1234, "run_attempt": 2, "head_sha": "e" * 40}, summary["harness_sha256"], {"backend": backend, "frontend": frontend})
+        if not shared_source:
+            verifier.validate_result(summary, "postgres-redis", "altakleos/hartmesh", {"id": 1234, "run_attempt": 2, "head_sha": "e" * 40}, summary["harness_sha256"], {"backend": backend, "frontend": frontend})
 
 
 def test_postgres_redis_fixture_is_private_and_used_by_gateway():
@@ -250,3 +260,58 @@ def test_candidate_workflow_artifacts_are_small_retained_and_bound_to_the_attemp
     assert result["with"]["path"].endswith("/result.json")
     assert result["with"]["retention-days"] == 90
     assert result["with"]["if-no-files-found"] == "error"
+
+
+def test_both_source_profiles_are_available_without_mutable_image_arguments():
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    assert runner.parse_args(["--stores", "both"]).stores == "both"
+    with pytest.raises(SystemExit):
+        runner.parse_args(["--stores", "both", "--backend-image", "repo/backend@sha256:" + "a" * 64, "--frontend-image", "repo/frontend@sha256:" + "b" * 64])
+
+
+@pytest.mark.parametrize("failure", [None, "different-image", "profile", "cleanup", "drift", "build", "interrupt"])
+def test_both_source_profiles_build_once_verify_identity_and_clean_owned_images(tmp_path, monkeypatch, failure):
+    runner = load(ROOT / "scripts/docker_acceptance.py")
+    args = runner.parse_args(["--stores", "both", "--artifacts", str(tmp_path)])
+    builds, profiles, commands = [], [], []
+
+    def build(backend, frontend, **kwargs):
+        builds.append((backend, frontend))
+        kwargs["summary"]["source_tree_sha256"] = "f" * 64
+        if failure in {"build", "interrupt"}:
+            raise KeyboardInterrupt("synthetic interrupt") if failure == "interrupt" else RuntimeError("synthetic build failure")
+
+    def inspect(image, **_kwargs):
+        return {"requested": image, "image_id": "sha256:" + ("c" if "backend" in image else "d") * 64}
+
+    def profile(arguments, source_build=None):
+        profiles.append((arguments.stores, source_build))
+        assert not arguments.backend_image and not arguments.frontend_image
+        images = {name: {**inspect(source_build[name]), "running_image_id": inspect(source_build[name])["image_id"]} for name in ("backend", "frontend")}
+        if failure == "different-image" and arguments.stores == "postgres-redis":
+            images["backend"]["image_id"] = images["backend"]["running_image_id"] = "sha256:" + "e" * 64
+        result = {"status": "failed" if failure == "profile" else "passed", "harness_sha256": "a" * 64, "source_tree_sha256": source_build["source_tree_sha256"], "images": images}
+        arguments.artifacts.mkdir(parents=True, exist_ok=True)
+        (arguments.artifacts / "result.json").write_text(json.dumps(result), encoding="utf-8")
+        return int(result["status"] != "passed")
+
+    def run(command, **_kwargs):
+        commands.append(command)
+        if failure == "cleanup" and command[:3] == ["docker", "image", "rm"]:
+            raise RuntimeError("synthetic cleanup failure")
+        return subprocess.CompletedProcess(command, 0)
+
+    monkeypatch.setattr(runner, "build_source_images", build)
+    monkeypatch.setattr(runner, "inspect_image", inspect)
+    monkeypatch.setattr(runner, "run_profile", profile)
+    monkeypatch.setattr(runner, "run", run)
+    monkeypatch.setattr(runner, "harness_fingerprint", lambda: "a" * 64)
+    monkeypatch.setattr(runner, "snapshot_tracked", lambda *_args: ("e" if failure == "drift" else "f") * 64)
+    assert runner.run_both_source(args) == int(failure is not None)
+    result = json.loads((tmp_path / "pair-result.json").read_text(encoding="utf-8"))
+    assert result["status"] == ("passed" if failure is None else "failed")
+    assert len(builds) == 1
+    assert len(profiles) == (0 if failure in {"build", "interrupt"} else 2)
+    assert len([command for command in commands if command[:3] == ["docker", "image", "rm"]]) == 2
+    if failure is None:
+        assert profiles[0][1] == profiles[1][1]

@@ -358,6 +358,18 @@ Keep process-group deadlines, interruption cleanup and result/source-fingerprint
 evidence intact. Tests may initialize synthetic users and exercise actual APIs;
 never add bypass routers or browser API mocks to this acceptance profile.
 
+Standalone packages under `examples/skills/` join both harness fingerprints.
+The skill journey installs archives after the generic images are built, through
+real JWT/CSRF owner APIs and the native scanners. Its deterministic model supplies
+fixture scanner decisions and real read/bash/present tool calls; it does not
+qualify model judgment. Local sandbox runs prove behavior, not filesystem isolation.
+Keep read-only AIO execution and provisioner mount-contract evidence separate.
+`--stores both` is source-only qualification: build one owned pair, run isolated
+SQLite and PostgreSQL/Redis profiles against it, compare built/running IDs and
+source/harness hashes, and clean images only after both runs. The final tracked
+snapshot detects source drift. `pair-result.json` supplements each schema-2
+profile receipt; it does not replace published-candidate admission evidence.
+
 ## Release artifact admission
 
 `release_artifacts.py` admits only canonical `X.Y.Z+hartmesh.N` candidates;

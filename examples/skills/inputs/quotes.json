@@ -1,0 +1,7 @@
+{
+  "title": "Supplier comparison",
+  "suppliers": [
+    {"name": "Supplier A", "quantity": "2.5", "unit_price": "10.01", "currency": "USD", "delivery": "14 days", "caveats": ["Shipping excluded"]},
+    {"name": "Supplier B", "quantity": "2.5", "unit_price": "9.99", "currency": "USD", "delivery": "7 days", "caveats": ["Tax not supplied"]}
+  ]
+}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,12 +17,36 @@ FINAL = "Acceptance complete. Your synthetic artifact is ready."
 def reply(body: dict[str, Any]) -> dict[str, Any]:
     messages = body.get("messages", [])
     if not body.get("tools"):
-        return {"content": "[]"}  # Optional suggestion calls use the same fixture.
+        system = " ".join(str(message.get("content", "")) for message in messages if message.get("role") == "system")
+        if "You are a security reviewer for AI agent skills." in system:
+            content = " ".join(str(message.get("content", "")) for message in messages if message.get("role") == "user")
+            allowed = "skill-result-acceptance-fixture" in content
+            return {
+                "content": json.dumps(
+                    {
+                        "decision": "allow" if allowed else "block",
+                        "reason": "Deterministic decision for registered synthetic fixture" if allowed else "Unregistered fixture content",
+                    }
+                )
+            }
+        if "You are generating follow-up questions" in system:
+            return {"content": "[]"}
+        raise ValueError("unrecognized optional acceptance prompt")
     latest = max(
         (i for i, message in enumerate(messages) if message.get("role") == "user"),
         default=0,
     )
     turn = messages[latest:]
+    if not turn:
+        raise ValueError("missing acceptance turn")
+    skill_match = re.search(
+        r"acceptance:skill:(supplier-comparison|procedure-summary)(?:\s|$)",
+        str(turn[0].get("content")),
+    )
+    if skill_match:
+        return skill_reply(body, turn, skill_match.group(1))
+    if "acceptance:fallback" in str(turn[0].get("content")):
+        return fallback_reply(body, turn)
     if "acceptance:file" not in str(turn[0].get("content")):
         raise ValueError("unrecognized acceptance prompt")
     results = [message for message in turn if message.get("role") == "tool"]
@@ -55,6 +80,116 @@ def reply(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def skill_reply(body, turn, package):
+    results = [message for message in turn if message.get("role") == "tool"]
+    filename = "quotes.json" if package == "supplier-comparison" else "procedure.json"
+    if not results:
+        name, arguments = (
+            "read_file",
+            {"path": f"/mnt/skills/custom/{package}/SKILL.md"},
+        )
+    elif len(results) == 1:
+        if "skill-result-acceptance-fixture" not in str(results[-1].get("content")):
+            raise ValueError("real skill instructions were not read")
+        name, arguments = "read_file", {"path": f"/mnt/user-data/uploads/{filename}"}
+    elif len(results) == 2:
+        expected = "unit_price" if package == "supplier-comparison" else "Inspection interval not supplied"
+        if expected not in str(results[-1].get("content")):
+            raise ValueError("real uploaded skill input was not read")
+        name, arguments = (
+            "bash",
+            {"command": f"python3 -B /mnt/skills/custom/{package}/scripts/build.py --input /mnt/user-data/uploads/{filename} --output /mnt/user-data/outputs/skill-results"},
+        )
+    elif len(results) == 3:
+        content = str(results[-1].get("content"))
+        decoded = None
+        for offset, character in enumerate(content):
+            if character != "{":
+                continue
+            try:
+                value, _ = json.JSONDecoder().raw_decode(content[offset:])
+                if isinstance(value, dict) and isinstance(value.get("files"), list):
+                    decoded = value
+                    break
+            except ValueError:
+                continue
+        if decoded is None or not 1 <= len(decoded["files"]) <= 4:
+            raise ValueError("real producer did not return a bounded file manifest")
+        for path in decoded["files"]:
+            if not isinstance(path, str) or not re.fullmatch(
+                r"(?:comparison|procedure)-[0-9a-f]{12}/(?:comparison|procedure)\.(?:view\.json|json|pdf|xlsx|docx)",
+                path,
+            ):
+                raise ValueError("producer returned an unexpected path")
+        name, arguments = (
+            "present_files",
+            {"filepaths": ["/mnt/user-data/outputs/skill-results/" + path for path in decoded["files"]]},
+        )
+    else:
+        return {"content": f"Skill result ready: {package}."}
+    offered = {tool.get("function", {}).get("name") for tool in body["tools"]}
+    if name not in offered:
+        raise ValueError(f"required real tool not offered: {name}")
+    return {
+        "tool_calls": [
+            {
+                "id": f"call_skill_{len(results)}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+        ]
+    }
+
+
+def fallback_reply(body, turn):
+    results = [message for message in turn if message.get("role") == "tool"]
+    if not results:
+        name, arguments = (
+            "bash",
+            {"command": "cp /mnt/user-data/files/Comparisons/comparison.pdf /mnt/user-data/outputs/plain.pdf"},
+        )
+    elif len(results) == 1:
+        name, arguments = (
+            "write_file",
+            {
+                "path": "/mnt/user-data/outputs/broken.view.json",
+                "content": json.dumps(
+                    {
+                        "format": "hartmesh.artifact-view",
+                        "version": 999,
+                        "title": "Unsupported fixture view",
+                        "blocks": [],
+                        "exports": [],
+                    }
+                ),
+            },
+        )
+    elif len(results) == 2:
+        name, arguments = (
+            "present_files",
+            {
+                "filepaths": [
+                    "/mnt/user-data/outputs/broken.view.json",
+                    "/mnt/user-data/outputs/plain.pdf",
+                ]
+            },
+        )
+    else:
+        return {"content": "Ordinary fallback files ready."}
+    offered = {tool.get("function", {}).get("name") for tool in body["tools"]}
+    if name not in offered:
+        raise ValueError(f"required real tool not offered: {name}")
+    return {
+        "tool_calls": [
+            {
+                "id": f"call_fallback_{len(results)}",
+                "type": "function",
+                "function": {"name": name, "arguments": json.dumps(arguments)},
+            }
+        ]
+    }
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *args: object) -> None:
         pass  # Never print request bodies or authentication headers.
@@ -78,7 +213,11 @@ class Handler(BaseHTTPRequestHandler):
             self.send_error(422, str(error))
             return
         finish = "tool_calls" if "tool_calls" in answer else "stop"
-        base = {"id": f"chatcmpl-{uuid.uuid4().hex}", "created": 1, "model": "acceptance-model"}
+        base = {
+            "id": f"chatcmpl-{uuid.uuid4().hex}",
+            "created": 1,
+            "model": "acceptance-model",
+        }
         if not body.get("stream"):
             result = {
                 **base,
