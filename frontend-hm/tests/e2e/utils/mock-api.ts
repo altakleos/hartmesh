@@ -74,6 +74,8 @@ export type MockAPIOptions = {
   createdThreadMessages?: unknown[];
   agents?: MockAgent[];
   skills?: MockSkill[];
+  /** Seed a provider-installed Lark pack without a customer install action. */
+  larkInstalled?: boolean;
   scheduledTasks?: Array<{
     id: string;
     thread_id: string | null;
@@ -340,6 +342,30 @@ export function mockLangGraphAPI(page: Page, options?: MockAPIOptions) {
         | string
         | null,
   };
+  if (options?.larkInstalled) {
+    larkIntegrationStatus = {
+      ...larkIntegrationStatus,
+      installed: true,
+      manifest_version: "v1.0.65",
+      skills_installed: 3,
+      installed_skills: ["lark-doc", "lark-im", "lark-shared"],
+      enabled_skills: ["lark-doc", "lark-im", "lark-shared"],
+      cli: {
+        available: true,
+        path: "/usr/bin/lark-cli",
+        version: "lark-cli version v1.0.65",
+        error: null,
+      },
+      auth: {
+        status: "not_configured",
+        message: "lark-cli auth is not configured",
+        user: null,
+        verified: false,
+      },
+      sandbox_runtime_ready: true,
+      sandbox_runtime_detail: null,
+    };
+  }
   const featureFlags = {
     agentsApiEnabled: options?.features?.agentsApiEnabled ?? true,
     browserControlEnabled: options?.features?.browserControlEnabled ?? true,
