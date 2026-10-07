@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Standalone supplier comparison and procedure summary skills generate passive
+  views with ordinary PDF/XLSX or PDF/DOCX exports. Docker qualification installs
+  them through authenticated owner APIs and executes real tools in both persistence
+  profiles. Config and database schemas are unchanged.
+
 - Delegated private skill owners can copy registered Provided skills with visible
   provenance, edit their own packages, and retain read/history/export access when
   management is disabled. Same-name baseline overrides require explicit consent;

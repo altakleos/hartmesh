@@ -9,12 +9,16 @@ models:
     max_retries: 0
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
+  # Synthetic producers run only inside this disposable Gateway container.
+  # This exercises local functionality; AIO read-only mounts qualify isolation.
+  allow_host_bash: true
 skills:
   path: /data/skills
   container_path: /mnt/skills
 tool_groups:
   - name: file:read
   - name: file:write
+  - name: bash
 tools:
   - name: read_file
     group: file:read
@@ -22,6 +26,16 @@ tools:
   - name: write_file
     group: file:write
     use: deerflow.sandbox.tools:write_file_tool
+  - name: bash
+    group: bash
+    use: deerflow.sandbox.tools:bash_tool
+customer_administration:
+  plugin_management: false
+  local_skill_management: true
+  local_mcp_management: false
+ui:
+  profile: business
+  starters: []
 memory:
   enabled: false
   injection_enabled: false

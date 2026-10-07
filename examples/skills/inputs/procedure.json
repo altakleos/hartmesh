@@ -1,0 +1,6 @@
+{
+  "title": "Opening procedure",
+  "scope": "Summary of the supplied handbook",
+  "steps": ["Inspect the work area.", "Complete documented checks.", "Record the inspection."],
+  "caveats": ["Inspection interval not supplied"]
+}

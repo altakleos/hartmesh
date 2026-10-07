@@ -32,6 +32,7 @@ HARNESS_PATHS = (
     "docker/acceptance/compose.postgres-redis.yaml",
     "docker/acceptance/provider.py",
     "docker/acceptance/acceptance-config.yaml",
+    "examples/skills",
     "frontend-hm/playwright.docker-acceptance.config.ts",
     "frontend-hm/tests/e2e-docker-acceptance",
     "frontend-hm/package.json",

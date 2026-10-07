@@ -34,3 +34,29 @@ def test_gateway_and_provisioner_extra_mount_contracts_match() -> None:
     assert "/mnt/integrations/lark-cli/runtime" in gateway_paths
     assert "/mnt/integrations/lark-cli/config/locks" in gateway_paths
     assert _literal_assignment(provisioner_path, "MAX_EXTRA_MOUNTS") == 10
+
+
+def test_provisioner_preserves_readonly_thread_skill_categories_and_writable_outputs(
+    provisioner_module,
+):
+    provisioner_module.SKILLS_PVC_NAME = ""
+    provisioner_module.USERDATA_PVC_NAME = ""
+    provisioner_module.DEER_FLOW_HOST_BASE_DIR = "/state"
+    categories = ("public", "custom", "legacy", "integrations")
+    pod = provisioner_module._build_pod(
+        "example-sandbox",
+        "example-thread",
+        user_id="alice",
+        extra_mounts=[
+            provisioner_module.ExtraMount(
+                host_path=f"/state/users/alice/threads/example-thread/skills_view/{category}",
+                container_path=f"/mnt/skills/{category}",
+                read_only=True,
+            )
+            for category in categories
+        ],
+    )
+    mounts = {mount.mount_path: mount for mount in pod.spec.containers[0].volume_mounts}
+    for category in categories:
+        assert mounts[f"/mnt/skills/{category}"].read_only is True
+    assert mounts["/mnt/user-data"].read_only is False

@@ -61,6 +61,12 @@ unavailable images remain local failures. Invalid, oversized or unsupported
 views retain original-file access. See the
 [passive view contract](contracts/artifact_view/README.md).
 
+The [standalone skill examples](examples/skills/README.md) produce supplier
+comparisons and procedure summaries through that same contract. Install their
+archives with delegated private-skill management. Source JSON and successful
+PDF, spreadsheet or Word exports remain ordinary files; unsupported PDF text
+or a failed format produces an explicit notice while preserving the other outputs.
+
 A view can identify a distinct ordinary sibling as its `primary_source`.
 When both files are already presented, opening that source prefers its unique
 valid result view while retaining canonical source controls. Association reads
