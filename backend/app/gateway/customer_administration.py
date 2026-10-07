@@ -81,6 +81,11 @@ async def require_private_skill_owner(request: Request) -> CustomerManagementAct
     actor = await resolve_customer_management_actor(request)
     if not actor.owner_id or not (actor.private_skill_owner is True or actor.administrator is True):
         raise HTTPException(403, "Authenticated private skill owner required.")
+    from deerflow.runtime.user_context import get_current_user
+
+    runtime_user = get_current_user()
+    if runtime_user is None or str(runtime_user.id) != actor.owner_id:
+        raise HTTPException(501, "Private skill management requires a matching attributed owner runtime.")
     return actor
 
 

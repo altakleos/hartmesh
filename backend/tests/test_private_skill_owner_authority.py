@@ -405,3 +405,21 @@ def test_request_owner_without_matching_runtime_identity_cannot_read_default_sto
         response = client.get("/api/skills/custom/private-default")
     assert response.status_code == 501
     assert "Private default content" not in response.text
+
+
+def test_request_owner_cannot_borrow_another_bound_runtime_owner(owner_app, monkeypatch):
+    from app.gateway.routers import skills
+
+    _, _, config, user = owner_app
+    default = UserScopedSkillStorage("default", app_config=config)
+    default.write_custom_skill("private-default", "SKILL.md", "---\nname: private-default\ndescription: Default owner notes\n---\nPrivate default content.\n")
+    app = make_authed_test_app(user_factory=lambda: user, signed_in=True)
+    app.dependency_overrides[get_config] = lambda: config
+    app.include_router(skills.router)
+    monkeypatch.setattr(skills, "_get_user_skill_storage", lambda _: default)
+    monkeypatch.setattr("deerflow.runtime.user_context.get_current_user", lambda: SimpleNamespace(id="default", system_role="user"))
+    monkeypatch.setattr(skills, "get_effective_user_id", lambda: "default")
+    with bind_customer_management_actor(CustomerManagementActor(owner_id="default", private_skill_owner=True)), TestClient(app) as client:
+        response = client.get("/api/skills/custom/private-default")
+    assert response.status_code == 501
+    assert "Private default content" not in response.text

@@ -378,31 +378,31 @@ def test_list_skills_requests_skill_resource_type(monkeypatch):
 # ── list_custom_skills / get_skill: the remaining visibility surfaces ──
 
 
-def test_list_custom_skills_rbac_filters_by_deny(monkeypatch):
-    """The custom-only listing surface applies the same visibility filter:
-    without it, a denied name hidden from GET /api/skills would remain
-    visible on GET /api/skills/custom."""
-    provider = RbacAuthorizationProvider(
-        roles={"user": {"skills": {"allow": "*", "deny": ["my-private-skill"]}}},
-    )
+def test_list_custom_skills_rbac_filters_by_deny(monkeypatch, tmp_path):
+    """The authenticated owner's private catalog retains the RBAC deny filter."""
+    from _router_auth_helpers import make_authed_test_app
+
+    from app.gateway.auth.models import User
+    from deerflow.config.paths import Paths
+    from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+    provider = RbacAuthorizationProvider(roles={"user": {"skills": {"allow": "*", "deny": ["my-private-skill"]}}})
     _enable_authorization(monkeypatch, provider)
-
-    storage = _FakeStorage(
-        [
-            _skill("pdf-export"),
-            _skill("my-private-skill", category=SkillCategory.CUSTOM),
-            _skill("team-playbook", category=SkillCategory.CUSTOM),
-        ]
-    )
-    _stub_user(monkeypatch, _user())
+    user = User(email="skill-owner@example.com", password_hash="unused", system_role="user")
+    config = _make_app_config()
+    config.skills.path = str(tmp_path / "skills")
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path / "home"))
+    storage = UserScopedSkillStorage(str(user.id), app_config=config)
+    for name in ("my-private-skill", "team-playbook"):
+        storage.write_custom_skill(name, "SKILL.md", f"---\nname: {name}\ndescription: Owner fixture\n---\nPrivate notes.\n")
     _stub_storage(monkeypatch, storage)
-
-    with TestClient(_make_skills_app(_make_app_config())) as client:
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True, signed_in=True)
+    app.include_router(skills_router.router)
+    app.dependency_overrides[skills_router.get_config] = lambda: config
+    with TestClient(app) as client:
         response = client.get("/api/skills/custom")
-
-    assert response.status_code == 200
-    names = [s["name"] for s in response.json()["skills"]]
-    assert names == ["team-playbook"]
+    assert response.status_code == 200, response.text
+    assert [skill["name"] for skill in response.json()["skills"]] == ["team-playbook"]
 
 
 def test_get_skill_denied_is_indistinguishable_from_missing(monkeypatch):
