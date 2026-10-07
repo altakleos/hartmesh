@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Storage Spaces
+
+- Add host-only stable space identity, personal/company custody, native/mediated
+  mutation modes, opaque feature bindings and explicit typed human/nonhuman grants.
+  Current My Files, Shared and Projects behavior and byte locations are preserved.
+- Serialize resource/grant changes with generation checks and typed authority
+  events. Unknown/retired actors, malformed persisted state and stale requests
+  fail closed independently of optional authorization.
+
+### Schema changes
+
+- Database migration `0030_storage_spaces` adds `storage_spaces`,
+  `storage_space_grants` and `storage_space_events` after the released
+  `0029_shared_publications` head. No existing data is moved. Downgrade refuses
+  to erase these tables after first use. Application configuration is unchanged.
+
 ## [2.2.0+hartmesh.42] - 2026-10-07
 
 ### Product

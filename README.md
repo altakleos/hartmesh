@@ -47,6 +47,12 @@ interrupted removal from its recorded outcome. An unavailable or inconsistent
 record keeps the bytes staged and returns a retryable error. Preserve this hidden
 directory with Shared storage and its publication database when backing up or restoring.
 
+The [Storage Spaces foundation](docs/STORAGE_SPACES.md) adds stable resource
+identity, personal/company custody and explicit human/nonhuman grants for host
+integrations. Company custody does not make data public. This first stage keeps
+the current Files, Shared and Projects routes and data locations; generic file
+access, qualified attachments and feature migration follow separately.
+
 Editable artifact previews capture at most 2 MiB so their SHA-256 and byte ranges
 describe the same bytes. Larger artifacts stream from one opened file without a
 full-content hash. Workspace change scans also retain directory and file descriptors;
