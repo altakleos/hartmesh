@@ -514,6 +514,7 @@ async def test_gateway_registers_driver_for_personal_only_task_toolsets(personal
     from app.gateway.app import lifespan
     from deerflow.config.extensions_config import atomic_write_extensions_config
     from deerflow.config.mcp_tasks_config import McpTasksConfig
+    from deerflow.config.storage_spaces_config import StorageSpacesConfig
     from deerflow.mcp.tasks import ORDINARY_MCP_TASK_DRIVER
     from deerflow.mcp.tools import get_mcp_tools
 
@@ -525,7 +526,7 @@ async def test_gateway_registers_driver_for_personal_only_task_toolsets(personal
     personal = load_user_mcp_config("alice")
     server_name = next(iter(personal.mcp_servers))
     deployment = ExtensionsConfig()
-    startup = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(enabled=False, token_counting="char", shutdown_flush_timeout_seconds=5.0), mcp_tasks=McpTasksConfig(enabled=True))
+    startup = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(enabled=False, token_counting="char", shutdown_flush_timeout_seconds=5.0), mcp_tasks=McpTasksConfig(enabled=True), storage_spaces=StorageSpacesConfig())
     app = FastAPI()
 
     @asynccontextmanager
