@@ -7,55 +7,98 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Standalone supplier comparison and procedure summary skills generate passive
-  views with ordinary PDF/XLSX or PDF/DOCX exports. Docker qualification installs
-  them through authenticated owner APIs and executes real tools in both persistence
-  profiles. Config and database schemas are unchanged.
-
-- Delegated private skill owners can copy registered Provided skills with visible
-  provenance, edit their own packages, and retain read/history/export access when
-  management is disabled. Same-name baseline overrides require explicit consent;
-  existing private packages remain protected by conflict checks. Operator-managed
-  baseline packs persist independently of legacy fallback and preserve private
-  content on upgrade. Config schema remains 52; database schema is unchanged.
-
-- Customer plugin, private skill and local MCP administration now requires explicit
-  operator delegation, captured at startup and denied by default even for admins.
-  Local launches additionally require exact operator approval. Effective UI controls
-  retain ordinary approved tool use and remote owner preferences. Global managed
-  installation/reload stays with operator tools. Config schema: 51 → 52; database
-  schema: unchanged. Extension API 0.2.6 adds explicit management purpose negotiation.
-
-- Historical report rendering and filing now use a provider-installed compatibility plugin. Existing configurations must enable its plugin entry; original files remain unchanged. No database schema change.
+## [2.2.0+hartmesh.42] - 2026-10-07
 
 ### Product
 
-- Report drafts include a skill-generated passive view with explicit exports and
-  bounded, truthful fallback. The unchanged report model schema now belongs to
-  skill packaging. Generic tenant diagnostics no longer enumerate report profiles;
-  the reporting deployment explicitly selects its existing starter grid. No database
-  schema change.
-- Already-presented sibling views can provide the preferred rich presentation
-  for an ordinary source file. Bounded one-hop resolution preserves canonical
-  source controls and falls back on invalid or ambiguous candidates. Passive
-  and native presentations share selected-file controls and availability probes.
-- Trusted plugins can declare specialized artifact presentations, optional pages
-  and conversation actions through the existing install/restart lifecycle.
-  Artifact handlers return strict passive views or mount independent DOM.
-  Bounded previews preserve canonical file access; account changes retire
-  supported services, callbacks and resources. Existing page-only plugins remain
-  compatible. The extension API advances to `0.2.5` with an additive, explicitly
-  negotiated artifact contribution.
-- Passive `*.view.json` results render common facts, text, lists, tables,
-  raster images and authored notices without per-skill frontend code. Strict
-  structure, streamed byte bounds and local resource budgets preserve ordinary
-  file access when a view is unavailable. Selected export controls use recorded
-  presentations, authenticated availability checks and existing per-file storage
-  operations, with visible folder suggestions and publication Undo.
+- Skills can publish passive `*.view.json` results with facts, text, lists,
+  tables, raster images and attributed notices. The artifact panel uses the same
+  generic renderer for independently produced documents; invalid, oversized or
+  unsupported views retain ordinary file access.
+- Result cards offer explicitly selected downloads, Save to My files, Share and
+  publication Undo. Custom file labels and safe collection suggestions are
+  supported. Source files and images are copied only when explicitly exported.
+- An already-presented ordinary source can open its unique valid sibling view.
+  The bounded association preserves canonical source editing and download;
+  malformed or ambiguous associations fall back to ordinary rendering.
+- Operator-installed plugins can contribute artifact presentations, pages and
+  conversation actions through the existing installation and restart lifecycle.
+  Page-only modules remain supported. Producer files cannot register code.
+- Report skills now generate passive views and explicit PDF/Word/Excel exports.
+  Historical report presentation and filing live in the installed compatibility
+  plugin; the report schema and formatters remain producer-owned.
+- Operators can delegate owner-private skill management. Owners can copy Provided
+  skills with visible provenance, import scanned archives, edit their own packages,
+  restore history and control their enabled state. Same-name baseline overrides
+  require explicit consent; existing private packages remain conflict-protected.
+  Management being disabled preserves owner reads, history and exports.
+- Operator-managed baseline packs survive private installs and upgrades. Replacement
+  preserves private variants, history and owner switches. Shared skill archives
+  remain inert until a recipient explicitly installs them.
+- Standalone supplier-comparison and procedure-summary examples demonstrate the
+  contract without report helpers or custom host branches. Exact source JSON and
+  successful editable exports remain available when a bounded PDF or another format
+  cannot represent the supplied text.
+
+### Operator upgrade actions
+
+- Application configuration advances from schema **51 to 52**. Merge the new fields
+  with `make config-upgrade` or review the current example, then restart the Gateway
+  and any other hosting runtimes, including already initialized embedded clients.
+  Customer plugin management, private skill management and local MCP management are
+  **denied by default**, including for administrators. Delegate only intended
+  operations through the startup-owned `customer_administration` block. Global
+  installation and reload remain operator operations.
+- Local MCP creation, reconfiguration and activation additionally require exact
+  operator-owned entries in `approved_local_mcp_definitions`. Permission delegation
+  alone does not approve a local launch. Ordinary use of approved enabled tools and
+  personal remote MCP connections remains available.
+- Existing custom configurations must enable the shipped historical-report plugin
+  and restart to retain historical cards and filing behavior. The root example and
+  production Compose profile already enable it:
+
+  ```yaml
+  plugins:
+    - name: legacy-report
+      package: hartmesh-legacy-report
+      use: hartmesh_legacy_report:install
+      enabled: true
+      required: false
+      config:
+        enabled: true
+  ```
+
+- The extension API advances from **0.2.4 to 0.2.6**, adding artifact capability and
+  explicit management-purpose negotiation. Existing page-only contributions remain
+  compatible; management contributions must honor the effective delegated purpose.
+- Generic business starters cover documents and spreadsheets. The reporting Compose
+  profile explicitly selects its monthly-review starter; tenant overrides retain
+  precedence.
+
+### Qualification
+
+- Authenticated production Docker journeys install and execute both standalone
+  examples through real owner APIs, native scans and tools. They verify export
+  downloads, Save/Share/Undo, mobile dark layouts, ordinary-file fallback, owner
+  isolation and explicit adoption of Shared archives under SQLite and PostgreSQL/Redis.
+- Source qualification can build one application image pair for both store profiles,
+  checking inspected/running image identities and source/harness drift. Release
+  acceptance separately tests the exact published candidate digests and binds the
+  successful GitHub run and evidence hashes in the release acceptance record.
+- Independent AIO checks execute read-only baseline/private skill mounts, refuse
+  writes with read-only filesystem errors, preserve host bytes and open produced
+  PDFs, Word documents and workbooks with independent readers. Provisioner tests
+  cover the mount contract; this does not qualify a live Kubernetes deployment.
+- Synthetic inference verifies application behavior, not real-model output quality.
+  Portable example PDFs use a bounded Courier/WinAnsi subset and at most eight pages;
+  unsupported text produces an explicit omission notice rather than substituted or
+  clipped content. These skills do not certify the supplied facts.
 
 ### Schema changes
 
-No database schema changes since `v2.2.0+hartmesh.41`.
+No database schema changes since `v2.2.0+hartmesh.41`. The migration head remains
+`0029_shared_publications`; this release adds no database migration or schema-upgrade
+step. Configuration schema and extension API changes are described separately above.
 
 ## [2.2.0+hartmesh.41] - 2026-10-04
 
