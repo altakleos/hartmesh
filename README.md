@@ -48,10 +48,14 @@ record keeps the bytes staged and returns a retryable error. Preserve this hidde
 directory with Shared storage and its publication database when backing up or restoring.
 
 The [Storage Spaces foundation](docs/STORAGE_SPACES.md) adds stable resource
-identity, personal/company custody and explicit human/nonhuman grants for host
-integrations. Company custody does not make data public. This first stage keeps
-the current Files, Shared and Projects routes and data locations; generic file
-access, qualified attachments and feature migration follow separately.
+identity, personal/company custody and explicit typed grants. Company custody
+does not make data public. With a qualified provider volume inventory and a
+persistent database, `/workspace/spaces` offers ordinary folders, dotfiles,
+uploads/downloads, text editing and explicit cross-space copies independently
+of chat. Current Files, Shared and Projects retain their routes and byte locations.
+The [backing requirements](docs/STORAGE_SPACES.md#qualified-linux-backing) describe
+the fixed filesystem byte/inode bounds and platform reserve. Native attachments,
+data recovery and feature migration remain separate delivery stages.
 
 Editable artifact previews capture at most 2 MiB so their SHA-256 and byte ranges
 describe the same bytes. Larger artifacts stream from one opened file without a

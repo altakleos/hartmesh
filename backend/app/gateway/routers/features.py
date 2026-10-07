@@ -33,6 +33,13 @@ class AgentsApiFeature(BaseModel):
     enabled: bool = Field(..., description="Whether the agents_api routes are exposed over HTTP")
 
 
+class StorageSpacesFeature(BaseModel):
+    enabled: bool = False
+    backend: str | None = None
+    native_attachments: bool = False
+    editor_concurrency: str | None = None
+
+
 class BrowserControlFeature(BaseModel):
     """Availability of live agentic browser control."""
 
@@ -158,6 +165,7 @@ class FeaturesResponse(BaseModel):
     """Frontend-facing feature availability flags."""
 
     customer_administration: CustomerAdministrationFeature = Field(default_factory=CustomerAdministrationFeature)
+    storage_spaces: StorageSpacesFeature = Field(default_factory=StorageSpacesFeature)
     agents_api: AgentsApiFeature
     browser_control: BrowserControlFeature
     mcp_tasks: McpTasksFeature
@@ -180,6 +188,11 @@ async def list_features(request: Request, config: AppConfig = Depends(get_config
     bundle = configured_tenant_bundle(config.tenant_bundle.path)
     subagent_batch_worker_running = bool(getattr(request.app.state, "subagent_batches_available", False))
     return FeaturesResponse(
+        storage_spaces=StorageSpacesFeature(
+            enabled=getattr(request.app.state, "storage_spaces", None) is not None,
+            backend="fixed-ext4" if getattr(request.app.state, "storage_spaces", None) is not None else None,
+            editor_concurrency="exclusive-host-window" if getattr(request.app.state, "storage_spaces", None) is not None else None,
+        ),
         customer_administration=await _customer_administration_feature(request, config),
         agents_api=AgentsApiFeature(enabled=config.agents_api.enabled),
         browser_control=BrowserControlFeature(enabled=browser.available),

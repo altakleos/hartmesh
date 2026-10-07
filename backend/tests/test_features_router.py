@@ -72,6 +72,7 @@ def test_features_reports_agents_api_enabled() -> None:
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json() == {
+        "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None},
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
         "agents_api": {"enabled": True},
         "browser_control": {"enabled": False},
@@ -96,6 +97,7 @@ def test_features_reports_agents_api_disabled() -> None:
         response = client.get("/api/features")
     assert response.status_code == 200
     assert response.json() == {
+        "storage_spaces": {"enabled": False, "backend": None, "native_attachments": False, "editor_concurrency": None},
         "customer_administration": {"plugin_management": False, "local_skill_management": False, "local_mcp_management": False, "provider_operations": False},
         "agents_api": {"enabled": False},
         "browser_control": {"enabled": False},

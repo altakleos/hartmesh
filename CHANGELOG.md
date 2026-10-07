@@ -15,13 +15,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Serialize resource/grant changes with generation checks and typed authority
   events. Unknown/retired actors, malformed persisted state and stale requests
   fail closed independently of optional authorization.
+- Add Linux confined-file primitives and verification of provider-prepared,
+  fixed ext4 backings, including image allocation, filesystem identity,
+  byte/inode limits, private staging and platform reserve. A dedicated native
+  Docker qualification gate rejects skips.
+- Add opt-in resource/file APIs and the Spaces browser, with folder navigation,
+  uploads/downloads, text revisions and explicit audience-checked copies. Durable
+  operation intents retain uncertain outcomes; browser saves require serialized
+  host edit admission. Native attachments and recovery are subsequent stages.
 
 ### Schema changes
 
 - Database migration `0030_storage_spaces` adds `storage_spaces`,
   `storage_space_grants` and `storage_space_events` after the released
   `0029_shared_publications` head. No existing data is moved. Downgrade refuses
-  to erase these tables after first use. Application configuration is unchanged.
+  to erase these tables after first use.
+- Migration `0031_storage_files` adds stable backing bindings and durable file
+  operation intents after `0030_storage_spaces`; used bindings/intents cannot be
+  downgraded away. Existing feature data stays in place. Config version 53 adds
+  disabled-by-default, startup-only `storage_spaces` with an explicit provider
+  inventory path; memory database mode cannot enable this durable feature.
 
 ## [2.2.0+hartmesh.42] - 2026-10-07
 

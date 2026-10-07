@@ -34,6 +34,9 @@ class SpaceRegistry:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession], resolver: PrincipalResolver) -> None:
         self._sf = session_factory
         self._resolver = resolver
+        # Installed only by the host's file/attachment service. The abstract
+        # registry can still be used before a filesystem adapter is available.
+        self.operation_guard = None
 
     async def _actor(self, actor: PrincipalRef) -> ResolvedPrincipal:
         if not isinstance(actor, PrincipalRef):
@@ -63,36 +66,58 @@ class SpaceRegistry:
         return await session.get(SpaceGrantRow, (row.id, actor.kind, actor.subject_id))
 
     @asynccontextmanager
-    async def _mutation(self, *, actor: PrincipalRef, space_id: str, expected_generation: int, action: str, details: dict):
+    async def admitted(self, *, actor: PrincipalRef, requests: dict[str, tuple[Permission, int | None]], operation_id: tuple[str, str] | None = None):
+        """Serialize current authority across resources in deterministic order.
+
+        Keep this transaction open through owned I/O and drain cancellation
+        before releasing it. Native writer containment is the adapter's guard,
+        not a property of SQL locks or a lifecycle generation.
+        """
         await self._actor(actor)
-        if type(expected_generation) is not int or expected_generation < 1:
-            raise ValueError("Expected generation must be a positive integer")
+        if not requests:
+            raise ValueError("Resource admission requires an explicit scope")
+        for permission, generation in requests.values():
+            if not isinstance(permission, Permission) or not permission or int(permission) & ~31:
+                raise ValueError("Resource admission requires valid permissions")
+            if generation is not None and (type(generation) is not int or generation < 1):
+                raise ValueError("Expected generation must be a positive integer")
         async with self._sf() as session:
             async with session.begin():
                 if session.bind.dialect.name == "sqlite":
                     await session.execute(text("BEGIN IMMEDIATE"))
-                row = (await session.execute(select(SpaceRow).where(SpaceRow.id == space_id).with_for_update())).scalar_one_or_none()
-                if row is None or row.status != "active":
-                    raise SpaceNotFound("Space is unavailable")
-                # Identity may retire while this operation waits for another
-                # writer. Check it again at the serialized admission boundary.
+                admitted = {}
+                for space_id in sorted(requests):
+                    row = (await session.execute(select(SpaceRow).where(SpaceRow.id == space_id).with_for_update())).scalar_one_or_none()
+                    if row is None or row.status not in ("active", "archived"):
+                        raise SpaceNotFound("Space is unavailable")
+                    grant = await self._grant(session, row, actor)
+                    if grant is None:
+                        raise SpaceNotFound("Space is unavailable")
+                    view = self._view(row, grant.permissions)
+                    required, generation = requests[space_id]
+                    if view.permissions & required != required or (row.status != "active" and required & Permission.ADMIN):
+                        raise SpaceDenied("Space operation is not granted")
+                    if generation is not None and row.generation != generation:
+                        raise SpaceConflict("Stale space generation")
+                    admitted[space_id] = (row, grant)
                 await self._actor(actor)
-                grant = await self._grant(session, row, actor)
-                if grant is None:
-                    raise SpaceDenied("Space administration is not granted")
-                self._view(row, grant.permissions)  # Validate before any authority/commit.
-                if not grant.permissions & Permission.ADMIN:
-                    raise SpaceDenied("Space administration is not granted")
-                if row.generation != expected_generation:
-                    raise SpaceConflict("Stale space generation")
-                if row.generation >= 2**31 - 1:
-                    raise SpaceConflict("Space generation is exhausted; preserve the resource for provider recovery")
-                yield session, row, grant
-                row.generation += 1
-                row.updated_at = datetime.now(UTC)
-                session.add(SpaceEventRow(space_id=row.id, generation=row.generation, action=action, actor_kind=actor.kind, actor_id=actor.subject_id, details=details))
+                if self.operation_guard is not None:
+                    await self.operation_guard(session, admitted, requests, operation_id)
+                yield session, admitted
 
-    async def create(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None) -> Space:
+    @asynccontextmanager
+    async def _mutation(self, *, actor: PrincipalRef, space_id: str, expected_generation: int, action: str, details: dict):
+        async with self.admitted(actor=actor, requests={space_id: (Permission.ADMIN, expected_generation)}) as (session, admitted):
+            row, grant = admitted[space_id]
+            if row.generation >= 2**31 - 1:
+                raise SpaceConflict("Space generation is exhausted; preserve the resource for provider recovery")
+            yield session, row, grant
+            row.generation += 1
+            row.updated_at = datetime.now(UTC)
+            session.add(SpaceEventRow(space_id=row.id, generation=row.generation, action=action, actor_kind=actor.kind, actor_id=actor.subject_id, details=details))
+
+    @asynccontextmanager
+    async def creating(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None):
         resolved = await self._actor(actor)
         name = validate_name(name)
         if not isinstance(custody, Custody) or not isinstance(mode, MutationMode) or (feature is not None and not isinstance(feature, FeatureBinding)):
@@ -120,11 +145,21 @@ class SpaceRegistry:
         )
         async with self._sf() as session:
             async with session.begin():
+                if session.bind.dialect.name == "sqlite":
+                    await session.execute(text("BEGIN IMMEDIATE"))
+                current = await self._actor(actor)
+                if custody.kind == "company" and not current.can_provision_company:
+                    raise SpaceDenied("Company provisioning requires current host authority")
                 session.add(row)
                 await session.flush()
                 session.add(SpaceGrantRow(space_id=row.id, principal_kind=actor.kind, subject_id=actor.subject_id, permissions=int(permissions)))
                 session.add(SpaceEventRow(space_id=row.id, generation=1, action="create", actor_kind=actor.kind, actor_id=actor.subject_id, details={"mode": mode.value, "custody": custody.kind}))
-            return self._view(row, int(permissions))
+                yield session, row, permissions
+
+    async def create(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None) -> Space:
+        async with self.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (_, row, permissions):
+            pass
+        return self._view(row, int(permissions))
 
     async def get(self, *, actor: PrincipalRef, space_id: str, permission: Permission = Permission.READ, expected_generation: int | None = None) -> Space:
         await self._actor(actor)

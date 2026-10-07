@@ -43,6 +43,7 @@ STARTUP_ONLY_PREFIX = "startup-only:"
 #: field is restart-required — so an operator changing the value knows
 #: which subsystem to restart.
 STARTUP_ONLY_FIELDS: dict[str, str] = {
+    "storage_spaces": "The provider volume inventory and durable storage service are verified and captured during Gateway startup; changing backing configuration requires a restart.",
     "customer_administration": "Customer management permissions are captured by each hosting runtime at initialization; changing delegation requires restarting that runtime.",
     "approved_local_mcp_definitions": "Operator-approved complete local MCP launch definitions are captured with the customer management policy at initialization; approval changes require a restart.",
     "plugins": ("load_extensions() runs once during create_app() and the process-wide middleware registry is not rebuilt on config.yaml edits; adding, removing or reconfiguring a plugin requires a restart."),

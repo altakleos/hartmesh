@@ -11,6 +11,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
+from deerflow.config.storage_spaces_config import StorageSpacesConfig
+
 
 @asynccontextmanager
 async def _noop_langgraph_runtime(_app, _startup_config):
@@ -33,6 +35,7 @@ def test_lifespan_cancellation_drains_memory_flush_and_close(config_outcome: str
                 shutdown_flush_timeout_seconds=5.0,
             ),
         )
+        startup_config.storage_spaces = StorageSpacesConfig()
         fake_service = MagicMock()
         fake_service.get_status.return_value = {}
         flush_started = threading.Event()

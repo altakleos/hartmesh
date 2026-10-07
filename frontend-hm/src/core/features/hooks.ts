@@ -11,6 +11,7 @@ import {
   selectBrowserControlEnabled,
   selectMcpTasksEnabled,
   selectSubagentBatchesCapability,
+  selectStorageSpacesEnabled,
   selectWorkspacePresentation,
 } from "./api";
 
@@ -78,6 +79,11 @@ export function useMcpTasksEnabled() {
     enabled: data ?? false,
     isLoading: isPending,
   };
+}
+
+export function useStorageSpacesEnabled() {
+  const { data, isPending, isError } = useFeatures(selectStorageSpacesEnabled);
+  return { enabled: !isError && data === true, isLoading: isPending };
 }
 
 export function useSubagentBatchesCapability() {

@@ -21,12 +21,14 @@ import {
   TooltipTrigger,
 } from "@/components/ui/tooltip";
 import { useAgentsApiEnabled } from "@/core/agents";
+import { useStorageSpacesEnabled } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
 
 export function WorkspaceNavChatList() {
   const { t } = useI18n();
   const pathname = usePathname();
   const { enabled: agentsEnabled } = useAgentsApiEnabled();
+  const { enabled: spacesEnabled } = useStorageSpacesEnabled();
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
@@ -38,6 +40,19 @@ export function WorkspaceNavChatList() {
             </Link>
           </SidebarMenuButton>
         </SidebarMenuItem>
+        {spacesEnabled && (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={pathname.startsWith("/workspace/spaces")}
+              asChild
+            >
+              <Link className="text-muted-foreground" href="/workspace/spaces">
+                <FolderIcon />
+                <span>{t.storageSpaces.title}</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
         <SidebarMenuItem>
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/files")}

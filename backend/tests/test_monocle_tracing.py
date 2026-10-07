@@ -19,6 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from deerflow.config.storage_spaces_config import StorageSpacesConfig
+
 # monocle_apptrace is an optional extra (pinned in the dev group); skip the whole
 # module in minimal installs instead of erroring at collection.
 pytest.importorskip("monocle_apptrace")
@@ -327,6 +329,7 @@ def test_gateway_lifespan_initializes_monocle():
         yield
 
     startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char"))
+    startup_config.storage_spaces = StorageSpacesConfig()
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
 
@@ -370,6 +373,7 @@ def test_gateway_lifespan_survives_monocle_setup_failure(caplog):
         yield
 
     startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char"))
+    startup_config.storage_spaces = StorageSpacesConfig()
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
 

@@ -1,12 +1,12 @@
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
-The distribution now ends in `0030_storage_spaces`, appended to the released
-`0029_shared_publications` head. It adds generic resource, typed grant and
-authority-event tables without moving current feature data. Cold startup
+The distribution now ends in `0031_storage_files`, appended after
+`0030_storage_spaces`. These add generic resource/grant/event tables and durable
+backing/file-operation facts without moving current feature data. Cold startup
 registration is in `persistence/models/__init__.py`. Pre-existing tables must
 match frozen columns, defaults, keys, checks and FK behavior; PostgreSQL check
 predicates are compared through server-canonicalized temporary definitions.
-Downgrade refuses to erase used resource identity, grants or events. Historical
+Downgrade refuses to erase used resource, binding or operation facts. Historical
 ancestry fixtures stay immutable. See `deerflow/spaces/AGENTS.md` for the
 mandatory resource boundary and staged qualification limits.
 

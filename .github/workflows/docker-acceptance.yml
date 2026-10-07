@@ -22,6 +22,54 @@ permissions:
   contents: read
 
 jobs:
+  managed-storage:
+    name: Managed storage hard limits (Linux Docker)
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.11.1"
+      - name: Prepare standard backend test environment
+        working-directory: backend
+        run: uv sync --group dev
+      - name: Prepare isolated native writer image
+        run: |
+          docker pull python:3.12-slim
+          writer_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' python:3.12-slim)
+          echo "HARTMESH_STORAGE_WRITER_IMAGE=$writer_ref" >> "$GITHUB_ENV"
+      - name: Qualify actual disk, inode, staging and native view limits
+        working-directory: backend
+        run: |
+          task_tmp="${RUNNER_TEMP}/hartmesh-storage-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$task_tmp"
+          sudo env PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 \
+            HARTMESH_REQUIRE_MANAGED_STORAGE=1 HARTMESH_STORAGE_WRITER_IMAGE="$HARTMESH_STORAGE_WRITER_IMAGE" \
+            TMPDIR="$task_tmp" "$PWD/.venv/bin/python" -m pytest \
+            tests/test_storage_spaces_volume_native.py --maxfail=1 -q --tb=short \
+            --basetemp="$task_tmp/fixtures" --junitxml="$task_tmp/native.xml"
+          python - "$task_tmp/native.xml" <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          tree = ET.parse(sys.argv[1])
+          cases = tree.findall(".//testcase")
+          assert len(cases) >= 10, "Required managed-storage cases were not collected"
+          assert not tree.findall(".//skipped"), "Managed-storage merge qualification cannot skip"
+          assert not tree.findall(".//failure") and not tree.findall(".//error")
+          PY
+      - name: Upload native qualification receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: managed-storage-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/hartmesh-storage-${{ github.run_id }}-${{ github.run_attempt }}/native.xml
+          if-no-files-found: error
+          retention-days: 30
   acceptance:
     name: Production Docker acceptance (${{ matrix.stores }})
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false

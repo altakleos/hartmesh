@@ -57,6 +57,7 @@ from app.gateway.routers import (
     scheduler_state,
     shared,
     skills,
+    spaces,
     subagent_batches,
     subagents,
     suggestions,
@@ -608,6 +609,11 @@ async def _lifespan_resources(app: FastAPI) -> AsyncGenerator[None, None]:
         # Check admin bootstrap state and migrate orphan threads after admin exists.
         # Must run AFTER langgraph_runtime so app.state.store is available for thread migration
         await _ensure_admin_user(app)
+
+        from app.gateway.storage_spaces import initialize_storage_spaces
+        from deerflow.persistence.engine import get_session_factory
+
+        await initialize_storage_spaces(app, startup_config.storage_spaces, session_factory=get_session_factory())
 
         # Phase-2 trash tier (§8.3): one retention sweep at startup, beside
         # the lazy trigger on the trash listing — no daemon, no scheduler.
@@ -1223,6 +1229,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
     # The person's own files: /api/files, plus /api/threads/{thread_id}/files to keep one
     app.include_router(files.router)
+    app.include_router(spaces.router)
 
     # The company's Shared area at /api/shared
     app.include_router(shared.router)
