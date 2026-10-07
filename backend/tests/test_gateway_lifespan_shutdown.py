@@ -19,6 +19,8 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import FastAPI
 
+from deerflow.config.storage_spaces_config import StorageSpacesConfig
+
 
 @asynccontextmanager
 async def _noop_langgraph_runtime(_app, _startup_config):
@@ -39,6 +41,7 @@ def test_enabled_scheduler_start_failure_aborts_gateway_lifespan():
     async def scenario():
         app = FastAPI()
         startup_config = MagicMock()
+        startup_config.storage_spaces = StorageSpacesConfig()
         startup_config.log_level = "INFO"
         startup_config.memory.enabled = False
         startup_config.memory.shutdown_flush_timeout_seconds = 5.0
@@ -89,6 +92,7 @@ async def _run_lifespan_with_hanging_stop() -> float:
 
     app = FastAPI()
     startup_config = MagicMock()
+    startup_config.storage_spaces = StorageSpacesConfig()
     startup_config.log_level = "INFO"
     # Keep this test focused on the channel-hang timing: skip the memory drain.
     startup_config.memory.enabled = False
@@ -139,6 +143,7 @@ async def _run_lifespan_with_upload_staging_cleanup():
 
     app = FastAPI()
     startup_config = SimpleNamespace(log_level="INFO", memory=SimpleNamespace(token_counting="char", enabled=False, shutdown_flush_timeout_seconds=30.0))
+    startup_config.storage_spaces = StorageSpacesConfig()
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
     cleanup_upload_staging_files = MagicMock(return_value=2)
@@ -210,6 +215,7 @@ async def _run_lifespan_with_mcp_task_config_snapshot() -> None:
             shutdown_flush_timeout_seconds=30.0,
         ),
     )
+    startup_config.storage_spaces = StorageSpacesConfig()
     startup_extensions = ExtensionsConfig()
     changed_extensions = ExtensionsConfig.model_validate(
         {
@@ -282,6 +288,7 @@ async def _run_lifespan_with_memory_flush(
             shutdown_flush_timeout_seconds=5.0,
         ),
     )
+    startup_config.storage_spaces = StorageSpacesConfig()
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
     close_oidc_service = AsyncMock()
@@ -395,6 +402,7 @@ async def _run_lifespan_with_warm_return(warm_return: bool | None) -> MagicMock:
             shutdown_flush_timeout_seconds=5.0,
         ),
     )
+    startup_config.storage_spaces = StorageSpacesConfig()
     fake_service = MagicMock()
     fake_service.get_status = MagicMock(return_value={})
     close_oidc_service = AsyncMock()
@@ -453,6 +461,7 @@ async def _run_lifespan_with_slow_retrieval_warm() -> float:
             shutdown_flush_timeout_seconds=5.0,
         ),
     )
+    startup_config.storage_spaces = StorageSpacesConfig()
     fake_service = MagicMock()
     fake_service.get_status.return_value = {}
     release_rebuild = threading.Event()
@@ -501,6 +510,7 @@ async def _run_shutdown_with_blocked_retrieval_warm() -> tuple[float, MagicMock]
             shutdown_flush_timeout_seconds=5.0,
         ),
     )
+    startup_config.storage_spaces = StorageSpacesConfig()
     fake_service = MagicMock()
     fake_service.get_status.return_value = {}
     rebuild_started = threading.Event()
@@ -565,6 +575,7 @@ async def test_lifespan_pins_batch_service_to_app_extensions(monkeypatch):
     app.state.extensions = snapshot
     monkeypatch.setattr(extensions, "_loaded", ExtensionRegistry().build())
     startup_config = MagicMock()
+    startup_config.storage_spaces = StorageSpacesConfig()
     startup_config.log_level = "INFO"
     startup_config.memory.enabled = False
     startup_config.scheduler.enabled = False
@@ -636,6 +647,7 @@ def test_lifespan_closes_pooled_mcp_sessions_on_shutdown():
     async def scenario():
         app = FastAPI()
         startup_config = MagicMock()
+        startup_config.storage_spaces = StorageSpacesConfig()
         startup_config.log_level = "INFO"
         startup_config.memory.enabled = False
         startup_config.memory.shutdown_flush_timeout_seconds = 5.0
@@ -664,6 +676,7 @@ def test_lifespan_continues_when_mcp_close_fails():
     async def scenario():
         app = FastAPI()
         startup_config = MagicMock()
+        startup_config.storage_spaces = StorageSpacesConfig()
         startup_config.log_level = "INFO"
         startup_config.memory.enabled = False
         startup_config.memory.shutdown_flush_timeout_seconds = 5.0
@@ -693,6 +706,7 @@ def test_lifespan_closes_mcp_sessions_created_during_run_drain():
     async def scenario():
         app = FastAPI()
         startup_config = MagicMock()
+        startup_config.storage_spaces = StorageSpacesConfig()
         startup_config.log_level = "INFO"
         startup_config.memory.enabled = False
         startup_config.memory.shutdown_flush_timeout_seconds = 5.0

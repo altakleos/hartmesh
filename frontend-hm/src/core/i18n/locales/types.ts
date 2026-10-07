@@ -1,6 +1,47 @@
 import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
+  storageSpaces: {
+    title: string;
+    description: string;
+    unavailable: string;
+    unavailableHint: string;
+    newSpace: string;
+    spaceName: string;
+    custody: string;
+    personal: string;
+    company: string;
+    noSpaces: string;
+    openRoot: string;
+    path: string;
+    newFolder: string;
+    newFile: string;
+    upload: string;
+    loadError: string;
+    operationError: string;
+    truncated: string;
+    readOnly: string;
+    editorNotice: string;
+    confirmRemove: string;
+    removeHint: string;
+    newName: string;
+    textContent: string;
+    quota: string;
+    copy: string;
+    copySource: string;
+    sourcePath: string;
+    destinationPath: string;
+    disclosure: string;
+    disclosureLabel: string;
+    limitText: string;
+    unsupportedEntry: string;
+    accessLabel: string;
+    utf8Notice: string;
+    back: string;
+    empty: string;
+    reload: string;
+    noEditor: string;
+  };
   extensions: {
     fileDestinationsUnavailable: string;
     navigation: string;

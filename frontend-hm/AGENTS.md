@@ -23,75 +23,66 @@ is provider-only. The bilingual notice uses only configured provider support lin
 
 ## Project Overview
 
-`ArtifactFileControls` serves passive and native renderers through explicit
-exports, collection suggestions, bounded live probes and existing storage/Undo
-lifetimes. Legacy probes share that reader. `core/api/abort.ts` observes late
-work; retired fetch responses cancel unread bodies before rejection without
-allowing late 401 navigation.
+`/workspace/spaces` uses the startup `/api/features` storage capability and
+account-scoped `core/spaces` queries. References are space ID + relative path,
+independent of threads. Host grants/mode/status govern writes and export.
+Keep editor drafts on conflicts; send their loaded generation and SHA-256.
+Combine account and component cancellation; late creates never navigate. Active text is
+rendered as text, while downloads retain host MIME/content-disposition rules.
 
-`core/artifact-views/associations.ts` and `source-view.ts` resolve one-hop source
-relations from already-presented same-directory view candidates only. Never
-glob, expand directories or prefetch historical views. Cap candidates at eight,
-readers at two and each view at 1 MiB/20 seconds; refuse partial candidate sets,
-malformed/unreadable documents and ambiguous or weak matching revisions.
-Cache only the active source under its viewer/thread/path/candidate identity,
-with zero inactive retention. Ordinary/legacy rendering remains available during
-resolution; a unique valid view takes preference without hiding the source entry.
-Its own completeness/revision governs display, independently of a truncated
-canonical source. Preserve explicit Code selection and canonical editing/copy.
+`ArtifactFileControls` serves passive/native renderers through explicit exports,
+collection suggestions, bounded live probes and existing storage/Undo lifetimes.
+Legacy probes share the reader. `core/api/abort.ts` observes late work; retired
+responses cancel unread bodies before rejection and cannot navigate on late 401.
 
-`core/extensions/` captures the authenticated startup plugin snapshot through
-the existing `/api/plugins` discovery and module transports. Page-only browser
-API v1 stays supported. Artifact capability v1 is additive in `artifacts`,
-separate from `surfaces`; the host never registers an artifact in the page array.
-`PluginArtifactPresentation` mounts independent DOM through the existing
-Shadow DOM lifecycle or validates a passive return with the strict view decoder.
-Shadow DOM isolates styles, not plugin privileges. Operator-installed modules
-remain trusted code and do not receive a shared React runtime.
+`core/artifact-views/{associations,source-view}.ts` resolves one-hop relations
+only among already-presented same-directory candidates. Never glob, expand or
+prefetch history. Limits: eight candidates, two readers, 1 MiB/20 seconds per
+view. Reject partial sets, malformed/unreadable data and ambiguous/weak revisions.
+Cache only the active source under viewer/thread/path/candidate identity with
+zero inactive retention. Ordinary/legacy readers stay available; only unique
+valid views take preference. Completeness is view-specific. Preserve explicit
+Code selection, canonical editing and copy.
 
-Handler selection comes only from installed suffix declarations; an ambiguous
-match uses ordinary file access. Mounts belong to account, thread, path, module
-entry, source SHA-256, locale and theme. Cancellation retires supported host
-services, observes late results, disposes native controllers and raster URLs,
-and prevents late action toasts. Module/discovery/transcript reads have byte
-bounds and finite deadlines. Generic projections use `preview=namespace/id`,
-separate query keys and declared source/preview budgets. Malformed display data
-falls back to bounded canonical source; permission/path failures remain terminal.
-See [the public capability](../contracts/artifact_view/plugins.md).
+`core/extensions/` reuses authenticated startup `/api/plugins` discovery/module
+transports. Page-only browser API v1 remains supported; artifact v1 is additive
+in `artifacts`, separate from `surfaces`. Never register artifacts as pages.
+`PluginArtifactPresentation` mounts through the existing Shadow DOM lifecycle
+or validates a passive return. Shadow DOM isolates styles, not privileges;
+operator-installed modules are trusted and share no React runtime.
 
-`core/artifact-views/` owns the passive `*.view.json` v1 contract and the generic
-`ArtifactView` renderer. It accepts only six flat primitives, authored strings
-and explicit local exports. Unknown structure rejects rich rendering; original
-file access remains. View responses use fatal UTF-8 decoding and a bounded
-stream reader even when Range is ignored. Metadata and body completeness are
-checked before rendering. Source and projection reads remain separate.
+Select handlers only through installed suffix declarations; ambiguity uses
+ordinary access. Mount identity includes account/thread/path/module/source
+SHA-256/locale/theme. Cancellation retires host services, observes late work,
+disposes controllers/raster URLs and prevents late toasts. Discovery/module/
+transcript reads have bounds/deadlines. Generic `preview=namespace/id`
+projections have separate query keys and declared source/preview budgets.
+Malformed display data falls back to bounded canonical reads; permission/path
+failures remain terminal. See [plugin capability](../contracts/artifact_view/plugins.md).
 
-View export eligibility comes from server-owned `presented_files` tags, not
-incidental discovery or an unanswered `present_files` request. Live probes are
-keyed by thread, view path, observed revision and exact paths, use four readers
-with ten-second deadlines, and discard unused data. Card actions reuse the
-existing lifetime-aware per-file save/share/Undo services with explicit selected
-paths and an inline collection hint. There is no recursive copy or implicit
-source/image export.
+`core/artifact-views/` owns passive `*.view.json` v1 and `ArtifactView`: six flat
+primitives, authored strings and explicit local exports. Unknown structure
+rejects rich rendering without hiding originals. Decode UTF-8 fatally; bounded
+stream reads handle ignored Range. Validate metadata/body completeness and keep
+source/projection reads separate. Export only server-owned `presented_files`,
+not incidental discovery or unanswered `present_files`. Live probes bind
+thread/view/revision/exact paths, with four readers/ten-second deadlines and
+unused-data disposal. Card actions reuse lifetime-aware save/share/Undo with
+explicit paths and inline collection hints; no recursive/implicit export.
 
-An effect-owned `ArtifactImageSession` belongs to account/thread/path/revision,
-including StrictMode replay. It validates complete PNG/JPEG framing before a
-browser decode, limits per-image and aggregate bytes/pixels and concurrent loads,
-and owns cancellation and URL revocation. Image failures remain placeholders.
-See [the contract and budgets](../contracts/artifact_view/README.md); no business
-schema, calculation, interpreter or module registration belongs to this host.
+Effect-owned `ArtifactImageSession` binds account/thread/path/revision, including
+StrictMode replay. Validate complete PNG/JPEG framing before decode; bound bytes,
+pixels and concurrency, own cancellation/URL revocation, and keep placeholders
+on failure. See [contract/budgets](../contracts/artifact_view/README.md). No
+business schema, calculation, interpreter or module registration belongs here.
 
-Installed artifact contributions request their declared bounded projection. Its
-revision is the canonical source SHA-256. Projection and source queries remain
-separate; code view, editing, copying and downloading use canonical bytes.
-Malformed or unsupported projections fall back to a bounded source read; never
-reconcile an editor draft or save from projection bytes. Full-file selection is
-scoped to thread/path and run completion refreshes the active query.
+Installed projections use canonical source SHA-256 revisions. Keep source and
+projection queries separate; Code/edit/copy/download use canonical bytes. Bad
+projections fall back to bounded source reads. Never save or reconcile drafts
+from projection bytes. Full-file selection binds thread/path; completion refreshes
+the active query.
 
-HartMesh is a Next.js 16 interface to the Gateway's LangGraph-compatible runtime,
-with authenticated conversations, streaming, artifacts, Files/Shared and settings.
-Upstream routes are selected deliberately; current scope is recorded in the
-[isolation guide](../docs/FRONTEND_ISOLATION.md#product-scope).
+Product scope: [frontend isolation guide](../docs/FRONTEND_ISOLATION.md#product-scope).
 
 **Stack**: Next.js 16, React 19, TypeScript 5.8, Tailwind CSS 4, pnpm 10.26.2. Requires Node.js 22+ and pnpm 10.26.2+.
 
@@ -126,11 +117,14 @@ Next builds type-check product sources with `tsconfig.build.json`; provider-depe
 test fixtures remain in the default `tsconfig.json` checked by `pnpm check`.
 The frontend image must build without sibling backend source files.
 
-Unit tests live under `tests/unit/` and mirror the `src/` layout (e.g., `tests/unit/core/api/stream-mode.test.ts` tests `src/core/api/stream-mode.ts`). Powered by Rstest; import source modules via the `@/` path alias.
+Rstest tests in `tests/unit/` mirror `src/`; import product modules through `@/`.
 
 Webpack is the default development bundler. Use `DEER_FLOW_DEV_BUNDLER=turbo` with `pnpm dev` to opt in to Turbopack when diagnosing a local Next.js bundler issue.
 
-Rstest runs them as two projects (`rstest.config.ts`). `*.test.ts` / `*.test.tsx` run in a plain **node** environment — that is nearly the whole suite, and it is the default for anything that is pure logic. `*.dom.test.ts` / `*.dom.test.tsx` run in **happy-dom**, for tests that need a document: hooks driven through `renderHook` from `@testing-library/react`, and components. Keep the split — a DOM environment costs roughly 3x the runtime of the node suite, so tests that do not render should not opt into it. A hook whose behavior only exists under real React (effect ordering, cleanup on unmount, re-render on store change) belongs in a `.dom.test.*` file rather than a node test that mocks `react` itself.
+Rstest has node and happy-dom projects in `rstest.config.ts`. Pure logic uses
+`*.test.ts(x)`; React hooks/components use `*.dom.test.ts(x)`. Keep effect,
+cleanup and store-order tests under real React rather than mocking React.
+Only DOM tests pay the document environment's higher runtime cost.
 
 E2E tests live under `tests/e2e/` and use Playwright with Chromium. They mock all backend APIs via `page.route()` network interception and test real page interactions (navigation, chat input, streaming responses). Config: `playwright.config.ts`.
 

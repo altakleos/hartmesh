@@ -23,6 +23,7 @@ DISTRIBUTION_REVISIONS = (
     "0028_provider_keys",
     "0029_shared_publications",
     "0030_storage_spaces",
+    "0031_storage_files",
 )
 
 
@@ -61,9 +62,9 @@ def test_future_import_is_executed_from_published_head(tmp_path, reparent_publis
     """An inserted ancestor can pass fresh/head checks but be skipped on upgrade."""
     versions = tmp_path / "versions"
     shutil.copytree(bootstrap._MIGRATIONS_DIR / "versions", versions, ignore=shutil.ignore_patterns("__pycache__"))
-    imported = "0031_synthetic_import"
+    imported = "0032_synthetic_import"
     parent = LAST_UPSTREAM_REVISION if reparent_published else DISTRIBUTION_REVISIONS[-1]
-    (versions / "0031_synthetic_import.py").write_text(f"revision = {imported!r}\ndown_revision = {parent!r}\ndef upgrade():\n    pass\ndef downgrade():\n    pass\n", encoding="utf-8")
+    (versions / "0032_synthetic_import.py").write_text(f"revision = {imported!r}\ndown_revision = {parent!r}\ndef upgrade():\n    pass\ndef downgrade():\n    pass\n", encoding="utf-8")
     if reparent_published:
         first = versions / "0027_account_access.py"
         first.write_text(first.read_text(encoding="utf-8").replace(f'"{LAST_UPSTREAM_REVISION}"', f'"{imported}"'), encoding="utf-8")

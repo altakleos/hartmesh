@@ -33,7 +33,18 @@ Retired members remain revocable; retired administrators cannot satisfy the
 last-active-administrator guard. No optional authorization setting bypasses
 these checks. Unknown or malformed persisted facts fail closed.
 
-The initial registry is not a file/mount/lifecycle implementation. It exposes no
+`SpaceFiles` binds a qualified empty inventory slot atomically to resource
+creation. Slot/UUID uniqueness prevents duplicate allocation; used bindings
+are never recycled. Root inodes persist across Gateway restarts. `admitted()`
+locks all scoped parents in sorted order and rechecks authority before I/O.
+File intents commit before filesystem work; uncertain publication/SQL outcomes
+block further operations and metadata changes. Completed IDs bind exact actor,
+generation and request. Drain the entire owned mutation before cancellation.
+Cross-space copy needs source READ/EXPORT, destination WRITE, and source ADMIN
+plus explicit acknowledgement when destination readers broaden the audience.
+
+New roots admit serialized host file operations only; no native attachment is
+advertised yet. Browser revisions run inside that host edit window. There is no
 archive/delete/restore completion or writer-stop claim. Later adapters must
 fence actual writers before completing those operations; lease expiry alone
 never proves retirement. A metadata generation is a stale-request fence, not
@@ -48,6 +59,14 @@ operator-prepared fixed ext4 images/mounts and platform reserve, rejects directo
 fallback, and compares opened root incarnations. Native disk-limit qualification
 is a separate no-skip CI tier; unsupported hosts never self-attest readiness.
 
-Tests: `tests/test_storage_spaces_contracts.py` and
-`tests/test_migration_0030_storage_spaces.py`. Append new Alembic revisions;
+Gateway actors come from authenticated request identity or an actually
+attributed trusted internal owner. PAT storage scopes remain unsupported;
+auth-disabled development uses its explicit adapter, never absent context.
+Generic mediated writes fail. HTTP ranges/MIME use owned confined descriptors
+opened under current admission. Release SQL before streaming the owned inode;
+slow clients must not reserve SQLite's global application writer. Open only
+once and drain reads before close. Active content downloads; reads never cache.
+
+Tests: `tests/test_storage_spaces_*.py`, migrations `0030`/`0031` and the
+separate mandatory native-volume Docker tier. Append new Alembic revisions;
 never change shipped ancestry or erase used custody/grant/event tables.

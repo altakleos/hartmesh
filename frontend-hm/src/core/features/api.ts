@@ -14,6 +14,7 @@ export interface WorkspacePresentation {
 }
 
 export interface FeaturesResponse {
+  storage_spaces?: { enabled?: boolean; native_attachments?: boolean };
   customer_administration?: {
     plugin_management?: boolean;
     local_skill_management?: boolean;
@@ -85,6 +86,12 @@ export function selectBrowserControlEnabled(
   features: FeaturesResponse,
 ): boolean {
   return features.browser_control?.enabled ?? false;
+}
+
+export function selectStorageSpacesEnabled(
+  features: FeaturesResponse,
+): boolean {
+  return features.storage_spaces?.enabled === true;
 }
 
 export async function fetchMcpTasksEnabled(): Promise<boolean> {

@@ -76,6 +76,17 @@ def test_relative_internal_links_are_readable_and_escaping_links_are_not(fs, roo
     assert not by_name["escape"].accessible
 
 
+def test_internal_directory_link_reports_a_navigable_target_kind(fs, roots):
+    data, _ = roots
+    (data / "notes").mkdir()
+    (data / "notes" / "page").write_bytes(b"inside")
+    (data / "alias").symlink_to("notes", target_is_directory=True)
+    entry = next(item for item in fs.list_directory()[0] if item.name == "alias")
+    assert entry.kind == "symlink" and entry.accessible
+    assert entry.target_kind == "directory"
+    assert fs.list_directory("alias")[0][0].name == "page"
+
+
 @pytest.mark.parametrize("path", ["/etc/passwd", "..", "a/../x", "a//x", "./x", "x\0y"])
 def test_resource_paths_reject_ambiguous_or_absolute_forms(fs, path):
     with pytest.raises(UnsafeSpacePath):

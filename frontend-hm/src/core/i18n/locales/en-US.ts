@@ -15,6 +15,56 @@ import type { Translations } from "./types";
 
 export function createEnUS(product: string): Translations {
   return {
+    storageSpaces: {
+      title: "Spaces",
+      description:
+        "Files and folders that belong to a space, independently of any conversation.",
+      unavailable: "Spaces are unavailable",
+      unavailableHint:
+        "This deployment has not enabled a supported storage backend.",
+      newSpace: "New space",
+      spaceName: "Space name",
+      custody: "Custody",
+      personal: "Personal",
+      company: "Company",
+      noSpaces: "No spaces available",
+      openRoot: "Root folder",
+      path: "Folder path",
+      newFolder: "New folder",
+      newFile: "New text file",
+      upload: "Upload file",
+      loadError: "Unable to load this space. Reload to check current access.",
+      operationError:
+        "The operation did not complete. Your edit is kept here; check the message and current access before retrying.",
+      truncated:
+        "This folder listing reached its limit. Additional entries may exist.",
+      readOnly: "Read only",
+      editorNotice:
+        "Saving uses the version you opened. If the file or your access changed, save fails and your draft stays here.",
+      confirmRemove: "Remove this entry?",
+      removeHint:
+        "Files and empty folders are removed permanently. Nonempty folders must be emptied first.",
+      newName: "Name or relative path",
+      textContent: "File contents",
+      quota: "Space capacity",
+      copy: "Copy from another space",
+      copySource: "Source space",
+      sourcePath: "Source file path",
+      destinationPath: "Destination file path",
+      disclosure:
+        "Copying can make existing private data available to the destination’s members.",
+      disclosureLabel: "I authorize disclosure to the destination’s members",
+      limitText:
+        "Uploads and imports support files up to 64 MiB. The text editor supports UTF-8 files up to 1 MiB.",
+      unsupportedEntry: "This entry cannot be accessed through the browser.",
+      accessLabel: "Available actions",
+      utf8Notice:
+        "Text is displayed safely; active files are downloaded when opened.",
+      back: "Parent folder",
+      empty: "This folder is empty.",
+      reload: "Reload",
+      noEditor: "Binary and unsupported text files can be downloaded.",
+    },
     extensions: {
       fileDestinationsUnavailable:
         "File destinations could not be checked. Reload to try again.",

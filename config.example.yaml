@@ -20,7 +20,13 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 52
+config_version: 53
+
+# Generic storage requires persistent SQLite/PostgreSQL and provider-prepared
+# fixed ext4 filesystems; see docs/STORAGE_SPACES.md. Restart after changes.
+storage_spaces:
+  enabled: false
+  inventory_path: null
 
 # Operator-owned management delegation. All permissions default to false;
 # administrator role and optional authorization settings do not override them.

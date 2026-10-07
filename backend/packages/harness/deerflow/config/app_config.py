@@ -46,6 +46,7 @@ from deerflow.config.scheduler_config import SchedulerConfig
 from deerflow.config.skill_evolution_config import SkillEvolutionConfig
 from deerflow.config.skill_scan_config import SkillScanConfig
 from deerflow.config.skills_config import SkillsConfig
+from deerflow.config.storage_spaces_config import StorageSpacesConfig
 from deerflow.config.stream_bridge_config import StreamBridgeConfig, load_stream_bridge_config_from_dict
 from deerflow.config.subagent_batches_config import SubagentBatchesConfig
 from deerflow.config.subagent_runtime_config import SubagentRuntimeConfig
@@ -278,6 +279,7 @@ class AppConfig(BaseModel):
     task_continuity: TaskContinuityConfig = Field(default_factory=TaskContinuityConfig, description="Thread-local notes and compacted-source recall")
     memory: MemoryConfig = Field(default_factory=MemoryConfig, description="Memory subsystem configuration")
     blob_storage: BlobStorageConfig = Field(default_factory=BlobStorageConfig, description="Content-addressed blob store configuration")
+    storage_spaces: StorageSpacesConfig = Field(default_factory=StorageSpacesConfig, description=format_field_description("storage_spaces", field_doc="Qualified general filesystem resources and provider inventory."))
     knowledge_base: KnowledgeBaseConfig = Field(
         default_factory=KnowledgeBaseConfig,
         description="Provider-agnostic knowledge capability and custom-agent scope-selection configuration",

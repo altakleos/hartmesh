@@ -220,3 +220,60 @@ def test_mounted_uuid_mismatch_is_refused_before_file_capability(backing, monkey
     monkeypatch.setattr(module, "mounted_ext4_identity", lambda fd: str(uuid.uuid4()))
     with pytest.raises(BackingUnavailable, match="Mounted filesystem UUID"):
         backing[0].verify(backing[1].spec.slot_id)
+
+
+@pytest.mark.asyncio
+async def test_resource_http_and_durable_binding_use_the_qualified_volume(backing):
+    from types import SimpleNamespace
+
+    import httpx
+    from fastapi import FastAPI
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from app.gateway.routers.spaces import router
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
+    from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
+    from deerflow.spaces.contract import Custody, MutationMode, PrincipalRef, ResolvedPrincipal
+    from deerflow.spaces.principals import HostPrincipalResolver
+    from deerflow.spaces.registry import SpaceRegistry
+    from deerflow.spaces.service import SpaceFiles
+
+    catalog, _volume, _image, _containment = backing
+    engine = create_async_engine(f"sqlite+aiosqlite:///{catalog.data_disk / 'http-fixture.db'}")
+    actor = PrincipalRef("human", "qualified-http-fixture")
+
+    async def lookup(reference):
+        return ResolvedPrincipal(actor) if reference == actor else None
+
+    try:
+        async with engine.begin() as c:
+            await c.run_sync(Base.metadata.create_all, tables=[model.__table__ for model in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, SpaceFileOperationRow)])
+        sf = async_sessionmaker(engine, expire_on_commit=False)
+        registry = SpaceRegistry(sf, HostPrincipalResolver(human=lookup))
+        service = SpaceFiles(registry, catalog)
+        space = await service.create(actor=actor, name="Qualified resource", custody=Custody.personal(actor), mode=MutationMode.NATIVE)
+        app = FastAPI()
+        app.state.storage_spaces = service
+
+        @app.middleware("http")
+        async def authenticated_fixture(request, call_next):
+            request.state.user = SimpleNamespace(id=actor.subject_id, system_role="user")
+            request.state.auth_source = "session"
+            return await call_next(request)
+
+        app.include_router(router)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://qualified-fixture") as client:
+            endpoint = f"/api/spaces/{space.id}"
+            response = await client.put(endpoint + "/content", params={"path": ".gitignore", "generation": 1, "operation_id": uuid.uuid4().hex, "create": "true"}, content=b"*.tmp\n")
+            assert response.status_code == 200, response.text
+            app.state.storage_spaces = SpaceFiles(registry, PreparedVolumeCatalog.from_manifest(catalog.data_disk / "inventory.v1.json"))
+            response = await client.get(endpoint + "/content", params={"path": ".gitignore"}, headers={"Range": "bytes=0-4"})
+            assert response.status_code == 206 and response.content == b"*.tmp"
+            quota = (await client.get(endpoint)).json()["quota"]
+            assert quota["backend"] == "fixed-ext4"
+            assert quota["max_bytes"] == backing[1].spec.max_bytes
+            assert 0 < quota["available_bytes"] < quota["max_bytes"]
+            assert quota["max_inodes"] == backing[1].spec.max_inodes
+    finally:
+        await engine.dispose()

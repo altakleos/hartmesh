@@ -87,7 +87,7 @@ class DescriptorFileResponse(FileResponse):
 
     def _prepare(self) -> None:
         try:
-            self._fd = open_regular_source(Path(self.path))
+            self._fd = self._open_descriptor()
         except FileNotFoundError:
             raise HTTPException(status_code=404, detail=f"File not found: {Path(self.path).name}") from None
         except SafeFileAccessUnavailable as exc:
@@ -117,11 +117,18 @@ class DescriptorFileResponse(FileResponse):
         self.headers["content-type"] = self.media_type + (f"; charset={self.charset}" if self.media_type.startswith("text/") else "")
         self.headers["content-disposition"] = _build_content_disposition("attachment" if force_download else "inline", Path(self.path).name)
 
+    def _open_descriptor(self) -> int:
+        """Default no-follow store; resource adapters supply confined descriptors."""
+        return open_regular_source(Path(self.path))
+
+    async def _prepare_owned(self) -> None:
+        await await_drained(asyncio.to_thread(self._prepare))
+
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         try:
             # _prepare stores the fd itself: cancellation cannot discard an
             # acquired descriptor as an unobserved worker return value.
-            await await_drained(asyncio.to_thread(self._prepare))
+            await self._prepare_owned()
             await super().__call__(scope, receive, send)
         finally:
             self._content = None

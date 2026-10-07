@@ -47,6 +47,7 @@ class FileEntry:
     size: int
     modified: float
     accessible: bool
+    target_kind: Literal["file", "directory"] | None = None
 
 
 class _OpenHow(ctypes.Structure):
@@ -163,18 +164,20 @@ class ConfinedFilesystem:
                     mode = metadata.st_mode
                     kind = "symlink" if stat.S_ISLNK(mode) else "directory" if stat.S_ISDIR(mode) else "file" if stat.S_ISREG(mode) else "unsupported"
                     accessible = kind != "unsupported"
+                    target_kind = None
                     if kind == "symlink":
                         target = None
                         try:
                             target = self._open(relative, os.O_PATH)
                             target_mode = os.fstat(target).st_mode
                             accessible = stat.S_ISREG(target_mode) or stat.S_ISDIR(target_mode)
+                            target_kind = "file" if stat.S_ISREG(target_mode) else "directory" if stat.S_ISDIR(target_mode) else None
                         except (OSError, UnsafeSpacePath):
                             accessible = False
                         finally:
                             if target is not None:
                                 os.close(target)
-                    entries.append(FileEntry(child.name, relative, kind, metadata.st_size, metadata.st_mtime, accessible))
+                    entries.append(FileEntry(child.name, relative, kind, metadata.st_size, metadata.st_mtime, accessible, target_kind))
         finally:
             os.close(fd)
         return sorted(entries, key=lambda entry: entry.name), truncated
@@ -286,7 +289,10 @@ class ConfinedFilesystem:
     def mkdir(self, path: str) -> None:
         parent, name = self._parent(path)
         try:
-            os.mkdir(name, mode=0o700, dir_fd=parent)
+            try:
+                os.mkdir(name, mode=0o700, dir_fd=parent)
+            except FileExistsError:
+                raise FileConflict("Destination already exists") from None
             owner = os.fstat(self._data_fd)
             os.chown(name, owner.st_uid, owner.st_gid, dir_fd=parent, follow_symlinks=False)
             os.fsync(parent)
@@ -311,7 +317,12 @@ class ConfinedFilesystem:
         try:
             metadata = os.stat(name, dir_fd=parent, follow_symlinks=False)
             if stat.S_ISDIR(metadata.st_mode):
-                os.rmdir(name, dir_fd=parent)
+                try:
+                    os.rmdir(name, dir_fd=parent)
+                except OSError as exc:
+                    if exc.errno in (errno.ENOTEMPTY, errno.EEXIST):
+                        raise FileConflict("Directory is not empty") from None
+                    raise
             else:
                 os.unlink(name, dir_fd=parent)
             os.fsync(parent)
