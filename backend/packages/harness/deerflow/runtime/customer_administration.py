@@ -41,6 +41,7 @@ class CustomerManagementActor:
 
     owner_id: str | None = None
     administrator: bool = False
+    private_skill_owner: bool = False
 
 
 def customer_management_actor_role(actor: Any) -> str:
@@ -196,7 +197,7 @@ def current_customer_management_actor() -> CustomerManagementActor:
         return CustomerManagementActor()
     role = _hosting_role.get()
     administrator = role == "admin" if role is not None else getattr(user, "system_role", None) == "admin"
-    return CustomerManagementActor(owner_id=str(user.id), administrator=administrator)
+    return CustomerManagementActor(owner_id=str(user.id), administrator=administrator, private_skill_owner=role is None or role == "admin")
 
 
 @contextmanager
@@ -217,15 +218,25 @@ def customer_management_actor_is_admin(context: Any = None) -> bool:
     return bool(actor.owner_id) and actor.administrator is True and (role is None or role == "admin")
 
 
-def private_skill_management_available(app_config: Any) -> bool:
+def customer_management_actor_can_manage_private_skills(context: Any = None) -> bool:
+    """A host owner grant is scoped to its exact target, independently of role."""
+    actor = resolve_customer_management_actor(context) if context is not None else current_customer_management_actor()
+    if not actor.owner_id or (context is not None and (not isinstance(context, Mapping) or actor.owner_id != context.get("user_id"))):
+        return False
+    return actor.private_skill_owner is True or customer_management_actor_is_admin(context)
+
+
+def private_skill_management_available(app_config: Any, *, owner_id: str | None = None) -> bool:
     """Assembly discovery uses the same floor, owner and supported storage."""
-    if not current_customer_administration_policy().local_skill_management or not customer_management_actor_is_admin():
+    if not current_customer_administration_policy().local_skill_management or not customer_management_actor_can_manage_private_skills():
         return False
     from deerflow.config.paths import make_safe_user_id
     from deerflow.skills.storage import get_or_new_user_skill_storage
     from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
 
     actor = current_customer_management_actor()
+    if owner_id is not None and actor.owner_id != owner_id:
+        return False
     try:
         storage = get_or_new_user_skill_storage(actor.owner_id, app_config=app_config)
         if not isinstance(storage, UserScopedSkillStorage) or storage.user_id != make_safe_user_id(actor.owner_id):

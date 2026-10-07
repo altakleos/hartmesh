@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Delegated private skill owners can copy registered Provided skills with visible
+  provenance, edit their own packages, and retain read/history/export access when
+  management is disabled. Same-name baseline overrides require explicit consent;
+  existing private packages remain protected by conflict checks. Operator-managed
+  baseline packs persist independently of legacy fallback and preserve private
+  content on upgrade. Config schema remains 52; database schema is unchanged.
+
 - Customer plugin, private skill and local MCP administration now requires explicit
   operator delegation, captured at startup and denied by default even for admins.
   Local launches additionally require exact operator approval. Effective UI controls

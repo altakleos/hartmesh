@@ -28,9 +28,10 @@ from fastapi import HTTPException, Request
 # at import time).
 import app.gateway.auth  # noqa: F401
 import app.gateway.auth.errors  # noqa: F401
+from app.gateway.auth.models import User
 from app.gateway.routers.skills import get_skill, list_custom_skills, list_skills
 from deerflow.config.paths import get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
 
 pytestmark = pytest.mark.asyncio
 
@@ -85,11 +86,15 @@ async def test_list_skills_does_not_block_event_loop(tmp_path: Path) -> None:
 
 
 async def test_list_custom_skills_does_not_block_event_loop(tmp_path: Path) -> None:
-    config, request = await _seeded(tmp_path)
-
-    response = await list_custom_skills(request, config)
-
-    assert [skill.name for skill in response.skills] == [_SKILL_NAME]
+    user = User(email="owner@example.com", password_hash="unused", system_role="user")
+    token = set_current_user(user)
+    try:
+        config, _ = await _seeded(tmp_path)
+        request = Request({"type": "http", "headers": [], "state": {"user": user, "auth_source": "session"}})
+        response = await list_custom_skills(request, config)
+        assert [skill.name for skill in response.skills] == [_SKILL_NAME]
+    finally:
+        reset_current_user(token)
 
 
 async def test_get_skill_does_not_block_event_loop(tmp_path: Path) -> None:

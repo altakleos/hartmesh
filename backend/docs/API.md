@@ -858,7 +858,9 @@ PUT /api/skills/{skill_name}
 Content-Type: application/json
 ```
 
-Requires an authenticated admin session.
+Requires an authenticated owner session and delegated private skill management.
+Non-public switches are owner-local and obey deployment disable settings. Public
+state is provider-only; hidden names return 404 and PAT credentials are denied.
 
 **Request Body:**
 ```json
@@ -873,40 +875,45 @@ Requires an authenticated admin session.
   "name": "pdf-processing",
   "description": "Handle PDF documents efficiently",
   "license": "MIT",
-  "category": "public",
+  "category": "custom",
   "enabled": false,
-  "editable": false
+  "editable": true
 }
 ```
 
-#### Install Skill
+#### Install or Copy a Private Skill
 
-Install a skill from a `.skill` file.
+Private mutations require an authenticated owner, `local_skill_management`
+delegation and supported owned storage. Scans and optional resource visibility
+apply to the extracted package name before installation. PAT credentials are denied.
 
-```http
-POST /api/skills/install
-Content-Type: multipart/form-data
-```
+- `POST /api/skills/install` takes JSON `thread_id`, `path` (a thread virtual
+  `.skill` path), and optional strict Boolean `allow_baseline_override`.
+- `POST /api/skills/install/upload` takes multipart file `archive` and optional
+  `allow_baseline_override` text `true` or `false` (default `false`).
+- `GET /api/skills/clone-sources` returns visible registered baseline `sources`
+  with `source_id`, `name`, `category`, and `enabled`, without host paths.
+- `POST /api/skills/clone-preview` takes JSON `source_id` and returns the bounded
+  export manifest with source identity. It is an owner read, independent of the
+  mutation flag.
+- `POST /api/skills/clone` takes JSON `source_id`, observed `expected_revision`
+  (64 lowercase hex characters), optional private `name`, and optional strict
+  Boolean `allow_baseline_override`. The default name is `<source>-private`,
+  truncated to the supported 64-character name limit. Changed sources return 409. Clones share the process export slots through
+  scanning, publication and cache settlement; occupied capacity returns 429.
 
-**Request Body:**
-- `file`: The `.skill` file to install
-
-**Response:**
-```json
-{
-  "success": true,
-  "message": "Skill 'my-skill' installed successfully",
-  "skill": {
-    "name": "my-skill",
-    "display_name": "My Skill",
-    "path": "custom/my-skill"
-  }
-}
-```
+New packages shadowing any baseline name require explicit override consent.
+Existing private packages always return 409, including when consent is given.
+Successful install/copy responses contain `success`, `skill_name`, and `message`.
+Private skill catalog entries include server-authored `origin` (source ID/name,
+category and captured revision) when cloned, and `overrides_baseline`. Incoming
+archive metadata cannot grant provenance or management authority. Clones remain
+subject to both source-name and target-name deployment disable settings. Their
+origin survives edits and rollback; provider upgrades preserve private bytes.
 
 #### Export a Custom Skill
 
-Admin session authentication is required for both requests. PAT credentials cannot export. Only the current user's custom skill is eligible; public, legacy and integration fallback is never used. A disabled custom skill remains eligible.
+Authenticated owner session access is required for both requests, including when private management is disabled. Optional resource visibility remains effective. PAT credentials cannot export. Only the current user's custom skill is eligible; public, legacy and integration fallback is never used. A disabled custom skill remains eligible.
 
 1. `GET /api/skills/custom/{skill_name}/export-manifest` returns `skill_name`, `revision` (SHA-256 or null), `can_export`, `file_count`, `directory_count`, `total_bytes`, `files` (`path`, `type`, `size`, `executable`), `requirements` (`compatibility`, `allowed_tools`, `required_secrets` names and optional flags), and structured `warnings`/`blockers`. Paths are relative; `.` is the package root, counted in directory/entry totals. Structural blockers return a non-downloadable manifest. Declarations are not credential values or dependency verification.
 2. `GET /api/skills/custom/{skill_name}/export?expected_revision=<64 lowercase hex characters>` recaptures content and rejects stale previews with 409 before sending ZIP headers. Successful responses carry `application/zip`, attachment `<skill_name>.skill`, accurate `Content-Length`, `Cache-Control: private, no-store`, and `X-Content-Type-Options: nosniff`.

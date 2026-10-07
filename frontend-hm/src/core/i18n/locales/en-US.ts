@@ -1472,16 +1472,37 @@ export function createEnUS(product: string): Translations {
         },
       },
       skills: {
+        provided: "Provided",
+        privateSkills: "Private",
+        cloneProvided: "Copy provided skill",
+        cloneTitle: "Create a private skill copy",
+        cloneDescription:
+          "The provided skill stays unchanged. Your copy belongs to your workspace.",
+        sourceLabel: "Provided skill",
+        nameLabel: "Private name",
+        overrideLabel: "Override the provided name in my workspace",
+        overrideDescription:
+          "This changes which version your workspace uses. The provider baseline stays unchanged.",
+        copyAction: "Create private copy",
+        copyPending: "Creating copy…",
+        sourcePlaceholder: "Choose a provided skill",
+        previewFiles: "{count} files in this copy",
+        privateOrigin: "Private copy of {name}",
+        baselineOverride: "Overrides the provided version in your workspace",
+        copySuccess: "Private copy created.",
+        archiveOverride:
+          "Allow this archive to override a provided name in my workspace",
         title: "Agent Skills",
         description:
           "Manage the configuration and enabled status of the agent skills.",
         createSkill: "Create skill",
         emptyTitle: "No agent skill yet",
-        emptyDescription: `Put your agent skill folders under the \`/skills/custom\` folder under the root folder of ${product}.`,
+        emptyDescription:
+          "Create a draft, copy a provided skill, or import a .skill archive into your workspace.",
         emptyButton: "Create Your First Skill",
-        adminRequired: "Admin privileges are required to manage agent skills.",
+        adminRequired: "Sign in to access your private skills.",
         installAdminRequired:
-          "Admin privileges are required to install agent skills.",
+          "Your provider must enable private skill management for your account.",
         installFromFile: "Install .skill",
         installingArchive: "Installing...",
         invalidArchive: "Choose a file with the .skill extension.",

@@ -28,7 +28,7 @@ from fastapi import HTTPException, Request
 from app.gateway.routers.skills import SkillRollbackRequest, rollback_custom_skill
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
-from deerflow.runtime.user_context import get_effective_user_id
+from deerflow.runtime.user_context import get_effective_user_id, reset_current_user, set_current_user
 
 pytestmark = pytest.mark.asyncio
 
@@ -41,18 +41,23 @@ def _custom_dir() -> Path:
 
 
 @pytest.fixture(autouse=True)
-def _isolate_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("DEER_FLOW_HOME", str(tmp_path))
     monkeypatch.setattr("deerflow.config.paths._paths", None)
+    token = set_current_user(_admin_request().state.user)
+    try:
+        yield
+    finally:
+        reset_current_user(token)
 
 
 def _admin_request() -> Request:
-    # AuthMiddleware normally supplies this state; keep the real admin check.
+    # AuthMiddleware supplies matching request/runtime owner identity.
     user = SimpleNamespace(id=UUID("11111111-2222-3333-4444-555555555555"), system_role="admin")
     from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 
     app = SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True)))
-    return Request({"type": "http", "app": app, "headers": [], "state": {"user": user}})
+    return Request({"type": "http", "app": app, "headers": [], "state": {"user": user, "auth_source": "session"}})
 
 
 def _install_skill() -> None:

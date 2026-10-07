@@ -9,7 +9,14 @@ backend boundary. See [the isolation guide](../docs/FRONTEND_ISOLATION.md).
 
 Management UI uses `useCustomerAdministration()` from `/api/features`, keyed by
 account ID and role, with missing flags denied. Never derive mutation authority
-from admin role alone. Public skills stay read-only; skill drafts can still be
+from admin role alone. Delegated private owners receive the Skills section in
+business profile without privileged developer sections. Skill queries and clone
+previews are keyed/fenced by account and role. Provided/Private tabs show server
+origin; copies default to distinct names and same-name overrides require a
+separate explicit choice. Archive override consent is account-local and never
+implies replacing an existing private package. Account unmount or capability
+retirement fences pending upload results/findings; the server still drains
+admitted mutations. Public skills stay read-only; skill drafts can still be
 created as artifacts. Local MCP controls require effective delegation, remote
 preferences retain their existing behavior, and managed integration installation
 is provider-only. The bilingual notice uses only configured provider support links.
@@ -306,13 +313,14 @@ The deployment owns two presentation settings, both read from
 choosing one fills the composer through the prompt-input controller, focuses it
 and sends nothing, because the first moment is "pick the thing, drop the file,
 say the month" — and `ui.profile` decides who is offered the developer screens.
-Under `business`, someone who is not an administrator is not offered skills,
-tools, subagents, integrations or the scheduled-task recipe chips, and Home
+Under `business`, someone who is not an administrator is offered Skills only
+when private management is effectively delegated. Tools, subagents, integrations
+and scheduled-task recipe chips remain hidden, and Home
 drops the product blurb. Channels and memory stay: the phone someone messages
 it from and what the agent remembers about them are theirs, not the
 deployment's. Hiding is presentation, not authorization — the routes are
-unchanged and `authorization` has no permission covering these APIs;
-`system_role` is what limits a person, and the API already checks it.
+guarded by attributed owner/admin authority, startup delegation and applicable
+resource visibility. The API remains the authority for every operation.
 The product's name is the deployment's too (`ui.product_name`, HartMesh when
 unset). Each route layout reads it from the public `GET /api/v1/auth/product`
 (`core/product/server.ts`) and hands it to `I18nProvider`, which builds the

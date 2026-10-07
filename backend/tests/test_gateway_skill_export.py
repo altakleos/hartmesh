@@ -17,6 +17,7 @@ from app.gateway import skill_export as service
 from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import skills
+from deerflow.config.app_config import AppConfig
 from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 from deerflow.runtime.user_context import reset_current_user, set_current_user
 from deerflow.skills.export import SkillExportArchive
@@ -50,7 +51,7 @@ def app(tmp_path, monkeypatch):
             if token is not None:
                 reset_current_user(token)
 
-    app.dependency_overrides[get_config] = lambda: SimpleNamespace()
+    app.dependency_overrides[get_config] = lambda: AppConfig.model_validate({"sandbox": {"use": "test"}})
     monkeypatch.setattr(skills, "_get_user_skill_storage", lambda _: stores["alice"])
     app.include_router(skills.router)
     app.state.stores = stores
@@ -83,9 +84,9 @@ def test_manifest_download_and_changed_revision(app):
         assert client.get("/api/skills/custom/demo/export?expected_revision=bad").status_code == 422
 
 
-@pytest.mark.parametrize("headers,status", [({"x-role": "user"}, 403), ({"x-auth-source": "pat"}, 403), ({"x-role": "anonymous"}, 401)])
+@pytest.mark.parametrize("headers,status", [({"x-auth-source": "internal"}, 403), ({"x-auth-source": "pat"}, 403), ({"x-role": "anonymous"}, 401)])
 def test_auth_before_storage(app, monkeypatch, headers, status):
-    monkeypatch.setattr(skills, "_get_user_skill_storage", lambda _: pytest.fail("storage reached without admin"))
+    monkeypatch.setattr(skills, "_get_user_skill_storage", lambda _: pytest.fail("storage reached without owner admission"))
     with TestClient(app) as client:
         for suffix in ("export-manifest", "export?expected_revision=" + "a" * 64):
             assert client.get("/api/skills/custom/demo/" + suffix, headers=headers).status_code == status
@@ -149,7 +150,10 @@ def test_same_name_stays_in_current_user_and_missing_does_not_fall_back(app, mon
     with TestClient(app) as client:
         alice = client.get("/api/skills/custom/demo/export-manifest").json()
         monkeypatch.setattr(skills, "_get_user_skill_storage", lambda _: app.state.stores["bob"])
-        bob = client.get("/api/skills/custom/demo/export-manifest").json()
+        foreign = client.get("/api/skills/custom/demo/export-manifest")
+        assert foreign.status_code == 501
+        app.state.current_owner = "bob"
+        bob = client.get("/api/skills/custom/demo/export-manifest", headers={"x-role": "user"}).json()
         assert bob["revision"] != alice["revision"]
         assert client.get("/api/skills/custom/demo/export?expected_revision=" + alice["revision"]).status_code == 409
         assert client.get("/api/skills/custom/missing/export-manifest").status_code == 404
@@ -274,7 +278,9 @@ async def test_disconnect_exits_router_without_asgi_error(app, monkeypatch, suff
     async def admin(*args, **kwargs):
         pass
 
-    monkeypatch.setattr(skills, "require_admin_user", admin)
+    monkeypatch.setattr(skills, "require_private_skill_owner", admin)
+    monkeypatch.setattr(skills, "_require_private_skill_visibility", admin)
+    monkeypatch.setattr(skills, "_get_owned_private_skill_storage", lambda _: app.state.stores["alice"])
     monkeypatch.setattr(skills, "export_manifest", work)
     monkeypatch.setattr(skills, "build_skill_export", work)
     plain_app = FastAPI()

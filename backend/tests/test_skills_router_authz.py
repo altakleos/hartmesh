@@ -1,21 +1,4 @@
-"""Authorization regression tests for the skills router.
-
-Custom skill SKILL.md content is injected into every user's agent system
-prompt. The mutating endpoints that write global shared state (install,
-toggle PUBLIC skills, edit/delete custom skill content, and the endpoints
-that expose raw custom-skill content/history) must be admin-only, matching
-the MCP router which guards the equivalent global extensions_config mutations
-with ``require_admin_user``.
-
-Under per-user skill isolation, ``list_custom_skills`` is open to all
-authenticated users (they see only their own custom skills), but all other
-custom-skill endpoints remain admin-only because they write global state
-(install writes to the shared archive, toggle writes extensions_config.json
-for PUBLIC skills, and edit/delete modify the on-disk skill tree).
-
-These tests pin the access-control boundary: a normal authenticated
-(non-admin) user must receive 403 on every guarded endpoint.
-"""
+"""Default-denied mutations, owned reads, and provider-only public state."""
 
 from __future__ import annotations
 
@@ -37,61 +20,51 @@ def _make_user(system_role: str) -> User:
     return User(email=f"{system_role}-test@example.com", password_hash="x", system_role=system_role, id=uuid4())
 
 
-def _make_app(*, system_role: str) -> FastAPI:
+def _make_app(*, system_role: str, delegated: bool = False) -> FastAPI:
     config = SimpleNamespace(
         skills=SimpleNamespace(get_skills_path=lambda: "/tmp/skills", container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+        authorization=AuthorizationConfig(enabled=False),
     )
-    app = make_authed_test_app(user_factory=lambda: _make_user(system_role))
+    user = _make_user(system_role)
+    app = make_authed_test_app(user_factory=lambda: user, bind_current_user=True, signed_in=True)
+    app.state.test_owner = user
     from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 
-    app.state.customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=True)
+    app.state.customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=delegated)
     app.state.config = config
     app.dependency_overrides[get_config] = lambda: config
     app.include_router(skills_router.router)
     return app
 
 
-# (method, path, json_body) for every endpoint that must require admin.
-# Under per-user skill isolation, list_custom_skills is open to normal users
-# (they see only their own skills), so it is NOT in this list.
-# All other mutating endpoints write/read global shared state and must be
-# admin-only. PUT /api/skills/{name} is included: toggling enabled writes
-# the shared extensions_config.json (for PUBLIC skills) and changes every
-# tenant's injected skill set.
+# Mutations denied before business logic when provider delegation is absent.
 _GUARDED_ENDPOINTS = [
     ("post", "/api/skills/install", {"thread_id": "t1", "path": "mnt/user-data/outputs/x.skill"}),
     ("post", "/api/skills/reload", None),
-    ("get", "/api/skills/custom/demo", None),
     ("put", "/api/skills/custom/demo", {"content": "---\nname: demo\ndescription: hijacked\n---\n"}),
     ("delete", "/api/skills/custom/demo", None),
-    ("get", "/api/skills/custom/demo/history", None),
     ("post", "/api/skills/custom/demo/rollback", {"history_index": -1}),
     ("put", "/api/skills/demo", {"enabled": False}),
 ]
 
 
-def test_non_admin_is_forbidden_on_all_mutating_skills_endpoints():
-    """A normal (non-admin) authenticated user must get 403, never 200/500.
-
-    403 proves the admin guard fired before any business logic ran. If the
-    guard were missing the request would instead reach the handler and return
-    200 or a 4xx/5xx from the storage layer.
-    """
+def test_undelegated_owner_is_forbidden_on_all_mutating_skills_endpoints():
+    """Default denial occurs before paths, scans or storage access."""
     app = _make_app(system_role="user")
     with TestClient(app) as client:
         for method, path, body in _GUARDED_ENDPOINTS:
             resp = getattr(client, method)(path, json=body) if body is not None else getattr(client, method)(path)
-            assert resp.status_code == 403, f"{method.upper()} {path} expected 403 for non-admin, got {resp.status_code}"
+            assert resp.status_code == 403, f"{method.upper()} {path} expected default-denied 403, got {resp.status_code}"
 
 
-def test_non_admin_upload_is_rejected_before_multipart_parsing(monkeypatch):
+def test_undelegated_upload_is_rejected_before_multipart_parsing(monkeypatch):
     parse_called = False
 
     async def _unexpected_parse(request):
         nonlocal parse_called
         parse_called = True
-        raise AssertionError("multipart parsing ran before the admin guard")
+        raise AssertionError("multipart parsing ran before delegation admission")
 
     monkeypatch.setattr(skills_router, "_parse_skill_archive_form", _unexpected_parse)
     app = _make_app(system_role="user")
@@ -106,7 +79,7 @@ def test_non_admin_upload_is_rejected_before_multipart_parsing(monkeypatch):
     assert parse_called is False
 
 
-def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch):
+def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch, tmp_path):
     """The basic list/detail endpoints expose only name/description and are
     needed by the normal-user UI, so they must NOT be admin-gated.
 
@@ -137,7 +110,13 @@ def test_basic_skill_listing_stays_open_to_normal_users(monkeypatch):
     # authorization is disabled (mirroring list_models); give the fake the
     # real disabled shape so the open-to-normal-users path stays exercised.
     app.dependency_overrides[get_config] = lambda: SimpleNamespace(authorization=AuthorizationConfig(enabled=False))
-    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: SimpleNamespace(load_skills=_load_skills))
+    from deerflow.config.paths import Paths
+    from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillStorage
+
+    monkeypatch.setattr("deerflow.config.paths.get_paths", lambda: Paths(base_dir=tmp_path))
+    storage = UserScopedSkillStorage(str(app.state.test_owner.id), host_path=str(tmp_path / "skills"))
+    monkeypatch.setattr(storage, "load_skills", _load_skills)
+    monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
     with TestClient(app) as client:
         assert client.get("/api/skills").status_code == 200
         assert client.get("/api/skills/custom").status_code == 200
@@ -177,7 +156,7 @@ def test_customer_admin_cannot_toggle_a_public_baseline(monkeypatch, tmp_path):
             )
         ]
 
-    app = _make_app(system_role="admin")
+    app = _make_app(system_role="admin", delegated=True)
     # Not a real LocalSkillStorage instance, so _write_extensions_skill_state's
     # projection-mutation branch is skipped (nullcontext) and it reads the
     # config_path fresh via ExtensionsConfig.from_file.

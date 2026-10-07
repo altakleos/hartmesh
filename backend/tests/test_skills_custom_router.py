@@ -11,7 +11,6 @@ from _router_auth_helpers import make_authed_test_app
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from app.gateway.auth.models import User
 from app.gateway.deps import get_config
 from app.gateway.routers import skills as skills_router
 from app.gateway.routers import uploads as uploads_router
@@ -21,10 +20,20 @@ from deerflow.skills.storage.user_scoped_skill_storage import UserScopedSkillSto
 from deerflow.skills.types import Skill
 
 
-def _make_admin_user() -> User:
-    from uuid import uuid4
+def _make_admin_user() -> SimpleNamespace:
+    # Trusted unit identities use the same storage ID as this test's accessor.
+    return SimpleNamespace(id=skills_router.get_effective_user_id(), email="admin-test@example.com", password_hash="x", system_role="admin", needs_setup=False)
 
-    return User(email="admin-test@example.com", password_hash="x", system_role="admin", id=uuid4())
+
+@pytest.fixture(autouse=True)
+def _attributed_router_owner():
+    from deerflow.runtime.user_context import reset_current_user, set_current_user
+
+    token = set_current_user(SimpleNamespace(id="default", system_role="admin"))
+    try:
+        yield
+    finally:
+        reset_current_user(token)
 
 
 def _skill_content(name: str, description: str = "Demo skill") -> str:
@@ -59,7 +68,7 @@ def _make_test_app(config) -> FastAPI:
     # crashing on a missing attribute.
     if not hasattr(config, "authorization"):
         config.authorization = AuthorizationConfig(enabled=False)
-    app = make_authed_test_app(user_factory=_make_admin_user)
+    app = make_authed_test_app(user_factory=_make_admin_user, bind_current_user=True, signed_in=True)
     from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 
     app.state.customer_administration_policy = CustomerAdministrationPolicy(local_skill_management=True)
@@ -158,7 +167,7 @@ def test_upload_skill_archive_installs_without_thread_workspace(monkeypatch, tmp
         def __init__(self):
             self._user_id = "default"
 
-        async def ainstall_skill_from_archive(self, archive_path: Path) -> dict:
+        async def ainstall_skill_from_archive(self, archive_path: Path, *, name_check=None) -> dict:
             installed_paths.append(archive_path)
             assert archive_path.name.endswith(".skill")
             assert archive_path.read_bytes() == b"skill archive bytes"
@@ -200,7 +209,7 @@ def test_upload_skill_archive_rejects_non_skill_extension(monkeypatch):
     install_called = False
 
     class _Storage:
-        async def ainstall_skill_from_archive(self, archive_path: Path) -> dict:
+        async def ainstall_skill_from_archive(self, archive_path: Path, *, name_check=None) -> dict:
             nonlocal install_called
             install_called = True
             return {}
@@ -236,7 +245,7 @@ def test_upload_skill_archive_rejects_oversized_payload(monkeypatch):
     copy_called = False
 
     class _Storage:
-        async def ainstall_skill_from_archive(self, archive_path: Path) -> dict:
+        async def ainstall_skill_from_archive(self, archive_path: Path, *, name_check=None) -> dict:
             nonlocal install_called
             install_called = True
             return {}
@@ -340,7 +349,8 @@ def test_uploaded_skill_archive_installs_sandbox_readable_tree(monkeypatch, tmp_
     monkeypatch.setattr(skills_router, "_get_user_skill_storage", lambda cfg: storage)
     monkeypatch.setattr(skills_router, "get_effective_user_id", lambda: "default")
 
-    app = make_authed_test_app(user_factory=_make_admin_user)
+    app = make_authed_test_app(user_factory=_make_admin_user, bind_current_user=True, signed_in=True)
+    config.authorization = AuthorizationConfig(enabled=False)
     app.state.config = config
     from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 
@@ -1411,6 +1421,7 @@ def _make_drain_test_config(skills_root: Path) -> SimpleNamespace:
     return SimpleNamespace(
         skills=SimpleNamespace(get_skills_path=lambda: skills_root, container_path="/mnt/skills", use="deerflow.skills.storage.local_skill_storage:LocalSkillStorage"),
         skill_evolution=SimpleNamespace(enabled=True, moderation_model_name=None),
+        authorization=AuthorizationConfig(enabled=False),
     )
 
 
@@ -1464,7 +1475,10 @@ async def test_update_custom_skill_drains_mutation_tail_across_cancellation(monk
 
     from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")), app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))))
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role="admin"), auth_source="session"),
+        app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))),
+    )
     body = skills_router.CustomSkillUpdateRequest(content=_skill_content("demo-skill", "Edited skill"))
 
     task = asyncio.create_task(skills_router.update_custom_skill("demo-skill", body, request, config))
@@ -1536,7 +1550,10 @@ async def test_delete_custom_skill_drains_mutation_tail_across_cancellation(monk
 
     from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")), app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))))
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role="admin"), auth_source="session"),
+        app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))),
+    )
 
     task = asyncio.create_task(skills_router.delete_custom_skill("demo-skill", request, config))
     try:
@@ -1607,7 +1624,10 @@ async def test_update_custom_skill_logs_failed_drained_mutation_after_cancellati
 
     from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")), app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))))
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role="admin"), auth_source="session"),
+        app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))),
+    )
     body = skills_router.CustomSkillUpdateRequest(content=_skill_content("demo-skill", "Edited skill"))
 
     task = asyncio.create_task(skills_router.update_custom_skill("demo-skill", body, request, config))
@@ -1687,10 +1707,13 @@ async def test_update_skill_drains_state_write_and_cache_refresh_across_cancella
 
     from deerflow.runtime.customer_administration import CustomerAdministrationPolicy
 
-    request = SimpleNamespace(state=SimpleNamespace(user=SimpleNamespace(system_role="admin")), app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))))
+    request = SimpleNamespace(
+        state=SimpleNamespace(user=SimpleNamespace(id="default", system_role="admin"), auth_source="session"),
+        app=SimpleNamespace(state=SimpleNamespace(customer_administration_policy=CustomerAdministrationPolicy(local_skill_management=True))),
+    )
     body = skills_router.SkillUpdateRequest(enabled=False)
 
-    task = asyncio.create_task(skills_router.update_skill("demo-skill", body, request, SimpleNamespace()))
+    task = asyncio.create_task(skills_router.update_skill("demo-skill", body, request, SimpleNamespace(authorization=AuthorizationConfig(enabled=False))))
     try:
         assert await asyncio.to_thread(started.wait, 5)
         task.cancel()

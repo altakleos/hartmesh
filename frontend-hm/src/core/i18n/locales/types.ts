@@ -1161,6 +1161,23 @@ export interface Translations {
       };
     };
     skills: {
+      provided: string;
+      privateSkills: string;
+      cloneProvided: string;
+      cloneTitle: string;
+      cloneDescription: string;
+      sourceLabel: string;
+      nameLabel: string;
+      overrideLabel: string;
+      overrideDescription: string;
+      copyAction: string;
+      copyPending: string;
+      sourcePlaceholder: string;
+      previewFiles: string;
+      privateOrigin: string;
+      baselineOverride: string;
+      copySuccess: string;
+      archiveOverride: string;
       title: string;
       description: string;
       createSkill: string;

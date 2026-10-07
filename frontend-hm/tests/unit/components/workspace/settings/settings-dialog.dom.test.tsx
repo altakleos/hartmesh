@@ -15,12 +15,19 @@ import { cleanup, render, screen } from "@testing-library/react";
 const presentation = rs.hoisted(() => ({
   developerSurfacesVisible: true,
   isLoading: false,
+  localSkillManagement: false,
 }));
 
 rs.mock("@/core/features", () => ({
   useDeveloperSurfacesVisible: () => presentation.developerSurfacesVisible,
   useWorkspacePresentation: () => ({ isLoading: presentation.isLoading }),
   useBranding: () => ({ companyName: null, isLoading: false }),
+}));
+
+rs.mock("@/core/features/hooks", () => ({
+  useCustomerAdministration: () => ({
+    localSkillManagement: presentation.localSkillManagement,
+  }),
 }));
 
 import { SettingsDialog } from "@/components/workspace/settings/settings-dialog";
@@ -50,6 +57,7 @@ afterEach(() => {
   cleanup();
   presentation.developerSurfacesVisible = true;
   presentation.isLoading = false;
+  presentation.localSkillManagement = false;
 });
 
 describe("SettingsDialog", () => {
@@ -87,6 +95,20 @@ describe("SettingsDialog", () => {
     // What is a person's own stays theirs.
     for (const kept of [sections.channels, sections.memory, sections.account]) {
       expect(names).toContain(kept);
+    }
+  });
+
+  it("offers delegated private skills in business profile without privileged screens", () => {
+    presentation.developerSurfacesVisible = false;
+    presentation.localSkillManagement = true;
+    renderDialog();
+    expect(tabNames()).toContain(sections.skills);
+    for (const hidden of [
+      sections.tools,
+      sections.subagents,
+      sections.integrations,
+    ]) {
+      expect(tabNames()).not.toContain(hidden);
     }
   });
 

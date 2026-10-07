@@ -1353,8 +1353,9 @@ Changing delegation or approved definitions requires restarting every hosting
 runtime. An admitted mutation settles its existing drained write and cache tail;
 policy edits do not retroactively cancel it. No HTTP permission setter is provided.
 
-Delegation is a prerequisite alongside existing administrator, ownership and
-optional authorization checks. It never enables arbitrary plugin installation.
+Delegation is a prerequisite alongside attributed private-owner authority for
+local skills, administrator authority for plugin/local MCP management, ownership
+and optional resource visibility checks. It never enables arbitrary plugin installation.
 Plugin management is supported only by installed, explicitly declared management
 contributions or contributed routes using the common host guard; unknown host
 support remains denied. Plugins execute trusted operator-installed code, outside
@@ -1362,7 +1363,10 @@ any code isolation boundary. Business tools and enabled skill execution do not
 require administration delegation.
 
 Private skill writes require an actual owner-scoped store and reject linked
-writable roots, packages, history and state files. Linked operator packages can
+writable roots, packages, history and state files. Private reads/history/exports
+remain available to their authenticated owners when delegation is disabled. A
+server-authored private-owner grant admits ordinary users without broad admin
+authority; PAT credentials remain denied. Linked operator packages can
 still be read. Public/global toggles, global skill reload, global MCP cache reset,
 and managed integration installation use operator tools instead of customer HTTP
 credentials. Skill drafts and Shared archives remain inert until explicit,
