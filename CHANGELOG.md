@@ -15,6 +15,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Serialize resource/grant changes with generation checks and typed authority
   events. Unknown/retired actors, malformed persisted state and stale requests
   fail closed independently of optional authorization.
+- Add Linux confined-file primitives and verification of provider-prepared,
+  fixed ext4 backings, including image allocation, filesystem identity,
+  byte/inode limits, private staging and platform reserve. A dedicated native
+  Docker qualification gate rejects skips; file APIs and attachments follow.
 
 ### Schema changes
 

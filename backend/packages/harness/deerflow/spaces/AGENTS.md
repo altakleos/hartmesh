@@ -40,6 +40,14 @@ never proves retirement. A metadata generation is a stale-request fence, not
 a filesystem fence. Files, mounts, quotas and feature migration require their
 own qualification before consumer readiness.
 
+`filesystem.py` uses Linux openat2 BENEATH/NO_MAGICLINKS/NO_XDEV and owned
+descriptors; ordinary dotfiles/internal relative links remain data. Private
+same-filesystem staging is outside the view. Browser hashes require an admitted
+edit window; this primitive grants no writer exclusion. `backings.py` verifies
+operator-prepared fixed ext4 images/mounts and platform reserve, rejects directory
+fallback, and compares opened root incarnations. Native disk-limit qualification
+is a separate no-skip CI tier; unsupported hosts never self-attest readiness.
+
 Tests: `tests/test_storage_spaces_contracts.py` and
 `tests/test_migration_0030_storage_spaces.py`. Append new Alembic revisions;
 never change shipped ancestry or erase used custody/grant/event tables.

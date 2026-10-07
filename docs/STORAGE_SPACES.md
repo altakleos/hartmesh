@@ -1,5 +1,7 @@
 # Storage Spaces
 
+## Resource registry
+
 Storage Spaces is HartMesh's persistent folder resource foundation. The first
 delivery adds host-side identity, custody and access contracts. Existing My
 Files, Shared and Projects continue through their current routes and mounts.
@@ -35,3 +37,47 @@ The additive `0030_storage_spaces` migration creates `storage_spaces`,
 reinterpreted. The migration verifies pre-existing table shape and refuses a
 downgrade after these tables hold resource identity, grants or events. Normal
 Gateway startup applies the migration through the existing bootstrap.
+
+## Linux backing development
+
+The host filesystem adapter is available for provider integration. It does not
+yet expose a product file API or writable runtime attachment. It supports
+ordinary dotfiles, relative internal links, binary files and SQLite through
+Linux `openat2` confinement. Absolute links and nested mount transitions are
+explicitly unsupported by the host browser adapter. Bounded reads can detect
+concurrent changes; revision hashes require an admitted edit window and do not
+serialize arbitrary native writers.
+
+The initial backing adapter verifies separate, fixed ext4 filesystems prepared
+by the provider on a private ext4 tenant data disk. Image extent inspection
+requires complete, exclusive allocation, including reserved unwritten extents;
+aggregate block counts alone do not qualify. Each mounted filesystem UUID must
+match its opened image, and the loop device must cover that complete image.
+Filesystem blocks and inodes bound native writes; visible data and private
+staging/recovery data consume the same capacity. Private control data stays
+outside the visible root. Displayed available capacity excludes filesystem
+overhead. Image allocation leaves the configured platform byte/inode reserve;
+ordinary resource writes cannot grow these fixed image files.
+
+The explicit operator helper uses preinstalled tools and prepares only new
+regular image files. It never installs dependencies, builds VM images or reads
+application configuration. For a new pool on a supported Linux host:
+
+```sh
+sudo python3 scripts/storage_spaces_volume.py \
+  --data-disk /mnt/tenant/storage-spaces --count 4 \
+  --bytes 1073741824 --inodes 65536 \
+  --reserve-bytes 1073741824 --reserve-inodes 1024 --data-uid 1000
+```
+
+The directory is provider-owned and private. `inventory.v1.json` is a trusted
+startup input, never a browser registration surface. Provisioning and mount
+availability are operator responsibilities; mounts must exist before the host
+loads that inventory. A late durability failure after publishing the inventory
+preserves prepared backings. Existing pools and data are not reformatted.
+
+This development environment cannot mount the disposable fixture and therefore
+does not qualify the backing. The dedicated Linux Docker merge gate requires
+all native byte/inode, staging, backup, visibility and restart checks with zero
+skips before support can be claimed. File/resource APIs, attachment fencing,
+recovery and consumer readiness remain subsequent implementation work.

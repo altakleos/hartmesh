@@ -52,6 +52,9 @@ identity, personal/company custody and explicit human/nonhuman grants for host
 integrations. Company custody does not make data public. This first stage keeps
 the current Files, Shared and Projects routes and data locations; generic file
 access, qualified attachments and feature migration follow separately.
+Provider integration now has Linux confined-file primitives and an explicit
+fixed-filesystem preparation helper; [backing requirements and qualification](docs/STORAGE_SPACES.md#linux-backing-development)
+describe its disk limits and current availability.
 
 Editable artifact previews capture at most 2 MiB so their SHA-256 and byte ranges
 describe the same bytes. Larger artifacts stream from one opened file without a
