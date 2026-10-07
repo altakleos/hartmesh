@@ -1,5 +1,15 @@
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
+The distribution now ends in `0030_storage_spaces`, appended to the released
+`0029_shared_publications` head. It adds generic resource, typed grant and
+authority-event tables without moving current feature data. Cold startup
+registration is in `persistence/models/__init__.py`. Pre-existing tables must
+match frozen columns, defaults, keys, checks and FK behavior; PostgreSQL check
+predicates are compared through server-canonicalized temporary definitions.
+Downgrade refuses to erase used resource identity, grants or events. Historical
+ancestry fixtures stay immutable. See `deerflow/spaces/AGENTS.md` for the
+mandatory resource boundary and staged qualification limits.
+
 DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run_events`, plus the four `channel_*` tables) are owned by alembic via a **hybrid bootstrap** strategy. LangGraph's checkpointer tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) live in the same database but are owned by LangGraph and excluded from alembic's view via `migrations/_env_filters.py::include_object`.
 
 **Convention**: every ORM model change (new column, new table, new index) MUST ship as an alembic revision under `migrations/versions/`. The Gateway runs `alembic upgrade head` automatically on startup; routine production upgrades do not require manual Alembic commands. The audited offline recovery below is an exception for the out-of-tree incarnation revision. A new revision must always chain onto the current head — never insert one ahead of an already-shipped revision (re-parenting it): alembic only walks forward from a database's stamped revision, so every database already stamped at or past the insertion point treats the inserted revision as an applied ancestor and never executes it. Inserting `0023_run_change_seq` ahead of the shipped `0023_user_preferences` stranded those databases without the run-change clock schema until `0025_repair_run_change_seq` re-applied it (#5516).
