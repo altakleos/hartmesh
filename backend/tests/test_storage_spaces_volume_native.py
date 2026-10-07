@@ -161,13 +161,18 @@ def test_full_filesystem_edit_leaves_the_existing_file_intact(backing):
     volume = backing[1]
     with volume.filesystem() as fs:
         fs.write_atomic("page", b"before", expected_sha256=None, create=True)
-    _native(
+    result = _native(
         backing,
         "import os,json; fd=os.open('/data/full',os.O_CREAT|os.O_WRONLY,0o600); error=None\ntry:\n while True: os.write(fd,b'x'*(1<<20))\nexcept OSError as exc: error=exc.errno\nfinally: os.close(fd)\nprint(json.dumps({'errno':error}))",
     )
+    assert result["errno"] == errno.ENOSPC
+    # Native ENOSPC need not exhaust blocks available to a privileged host
+    # writer (ext4 also reserves internal metadata clusters). The attempted
+    # replacement exceeds this filesystem's total bound, rather than assuming
+    # that a small host write must fail at the native writer's earlier limit.
     with volume.filesystem() as fs:
         with pytest.raises(OSError) as raised:
-            fs.write_atomic("page", b"after" * 100000, expected_sha256=hashlib.sha256(b"before").hexdigest())
+            fs.write_atomic("page", b"x" * volume.spec.max_bytes, expected_sha256=hashlib.sha256(b"before").hexdigest())
         assert raised.value.errno == errno.ENOSPC
         assert fs.read_bytes("page", max_bytes=100) == b"before"
     assert not list(volume.control_path.glob("stage-*"))
