@@ -106,4 +106,4 @@ def keep_file(user_id: str, source: Path, *, name: str, folder: str | None = Non
     ``_N`` suffix; nothing is overwritten.
     """
     root = get_paths().ensure_user_files_dir(user_id)
-    return UserFile.of(copy_into(root, source, name=name, folder=folder, folder_mode=_FOLDER_MODE, file_mode=_FILE_MODE))
+    return UserFile.of(copy_into(root, source, name=name, folder=folder, folder_mode=_FOLDER_MODE, file_mode=_FILE_MODE, control_root=get_paths().user_files_control_dir(user_id)))

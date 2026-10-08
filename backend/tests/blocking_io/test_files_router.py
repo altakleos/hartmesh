@@ -12,6 +12,7 @@ contextvar the production middleware sets.
 from __future__ import annotations
 
 import asyncio
+import inspect
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,11 +27,11 @@ from deerflow.runtime.user_context import reset_current_user, set_current_user
 
 pytestmark = pytest.mark.asyncio
 
-_list_files = list_files.__wrapped__
-_get_file = get_file.__wrapped__
-_delete_file = delete_file.__wrapped__
-# Two decorators: threads:write outside, the thread owner check inside.
-_keep_thread_file = keep_thread_file.__wrapped__.__wrapped__
+_list_files = inspect.unwrap(list_files)
+_get_file = inspect.unwrap(get_file)
+_delete_file = inspect.unwrap(delete_file)
+# Exercise the underlying I/O independently of HTTP admission wrappers.
+_keep_thread_file = inspect.unwrap(keep_thread_file)
 
 USER = "u-blocking"
 THREAD = "11111111-1111-1111-1111-111111111111"

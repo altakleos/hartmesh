@@ -52,7 +52,11 @@ identity, personal/company custody and explicit typed grants. Company custody
 does not make data public. With a qualified provider volume inventory and a
 persistent database, `/workspace/spaces` offers ordinary folders, dotfiles,
 uploads/downloads, text editing and explicit cross-space copies independently
-of chat. Current Files, Shared and Projects retain their routes and byte locations.
+of chat. When enabled, default My Files, Shared and Projects plugins provision
+fresh qualified resources behind their existing routes. Legacy folders are not
+adopted or moved. Shared access requires explicit resource grants; company
+custody does not grant access. Disable a convenience feature without deleting its
+resource; its generic folder remains available under current grants.
 The [backing requirements](docs/STORAGE_SPACES.md#qualified-linux-backing) describe
 the fixed filesystem byte/inode bounds and platform reserve. Administrators can
 create quiesced backups, restore with current grants, archive and delete through

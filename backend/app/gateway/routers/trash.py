@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_project_document_repo, get_project_repo
 from app.gateway.routers.project_documents import ProjectDocumentResponse, _to_response
+from app.gateway.storage_features import storage_feature
 from deerflow.config.paths import get_paths
 from deerflow.config.projects_config import ProjectsConfig
 from deerflow.projects.trash import make_purge_file_remover, purge_all_trashed, restore_document, run_trash_retention_sweep
@@ -136,6 +137,7 @@ def _to_trash_response(row: dict) -> TrashDocumentResponse:
 
 @router.get("/documents", response_model=TrashListResponse)
 @require_permission("projects", "read")
+@storage_feature("hm.projects", write=True)
 async def list_trash_documents(
     request: Request,
     limit: int = Query(default=100, ge=1, le=1000),
@@ -170,6 +172,7 @@ async def list_trash_documents(
 
 @router.post("/documents/{document_id}/restore", response_model=RestoreResponse)
 @require_permission("projects", "write")
+@storage_feature("hm.projects", write=True)
 async def restore_trash_document(document_id: str, request: Request, body: RestoreRequest | None = None) -> RestoreResponse:
     """Restore one trashed document into an active project (§8.2).
 
@@ -207,6 +210,7 @@ async def restore_trash_document(document_id: str, request: Request, body: Resto
 
 @router.post("/documents/{document_id}/purge", status_code=204)
 @require_permission("projects", "delete")
+@storage_feature("hm.projects", write=True)
 async def purge_trash_document(document_id: str, request: Request) -> None:
     """Permanently purge one trashed document: bytes first, then the row (§8.3).
 
@@ -225,6 +229,7 @@ async def purge_trash_document(document_id: str, request: Request) -> None:
 
 @router.post("/purge", response_model=PurgeResponse)
 @require_permission("projects", "delete")
+@storage_feature("hm.projects", write=True)
 async def empty_trash(request: Request) -> PurgeResponse:
     """Empty the trash: purge every trashed document of the caller (§8.3).
 

@@ -33,6 +33,7 @@ from app.gateway.authz import require_permission
 from app.gateway.deps import get_shared_publications_repo, get_thread_store, get_user_repo, is_admin_user
 from app.gateway.routers._file_http import DescriptorFileResponse, acting_user_id, existing_regular_file
 from app.gateway.routers.files import _keepable_source
+from app.gateway.storage_features import current_feature_service, storage_feature
 from deerflow.config.paths import USER_FILES_VIRTUAL_PREFIX, VIRTUAL_PATH_PREFIX
 from deerflow.files import SharedFile, SharedFileError, digest_of, list_shared_files, normalize_relative_path, publish_file, remove_shared_file, resolve_shared_file, resolve_user_file, shared_file_holding
 from deerflow.files.shared import shared_mutation_state
@@ -56,20 +57,9 @@ _publish_lock = asyncio.Lock()
 
 
 async def _recover_removals(repo, state) -> None:
-    for name in await asyncio.to_thread(state.pending_names):
-        pending = await asyncio.to_thread(state.open_removal, name)
-        try:
-            removed = pending.journal is None or pending.journal["removed"]
-            if pending.publication_id is not None:
-                record = await repo.publication(pending.publication_id)
-                if record is None:
-                    raise SharedFileError("Shared removal recovery needs its publication record")
-                if record.get("path") != pending.path:
-                    raise SharedFileError("Shared removal recovery publication does not match its staged path")
-                removed = record.get("removed_at") is not None
-            await asyncio.to_thread(pending.finish if removed else pending.restore)
-        finally:
-            await asyncio.to_thread(pending.close)
+    from deerflow.features.publications import recover_removals
+
+    await recover_removals(repo, state)
 
 
 @asynccontextmanager
@@ -198,14 +188,19 @@ def _own_file_source(user_id: str, virtual_path: str) -> Path:
 
 @router.get("/api/shared", response_model=SharedFileListResponse, summary="List Shared Files")
 @require_permission("threads", "read")
+@storage_feature("hm.shared", write=False)
 async def list_shared(request: Request) -> SharedFileListResponse:
     """Everything anyone at the company published, with who and when."""
     repo = get_shared_publications_repo(request)
     user_id = acting_user_id(request)
     admin = await is_admin_user(request)
-    async with _shared_mutation(repo):
-        entries, truncated = await asyncio.to_thread(list_shared_files)
-        records = await repo.live_publications()
+    service = current_feature_service(request, "hm.shared")
+    if service:
+        entries, truncated, records = await service.execute("list", repo=repo)
+    else:
+        async with _shared_mutation(repo):
+            entries, truncated = await asyncio.to_thread(list_shared_files)
+            records = await repo.live_publications()
     names = await _publisher_names([records.get(entry.path) for entry in entries])
     files = []
     for entry in entries:
@@ -223,6 +218,7 @@ async def list_shared(request: Request) -> SharedFileListResponse:
     summary="Publish A File To Shared",
 )
 @require_permission("threads", "write")
+@storage_feature("hm.shared", write=True)
 async def publish(body: PublishRequest, request: Request, response: Response) -> SharedFileInfo:
     """Copy one of the caller's files, or one of their conversation's, into Shared.
 
@@ -257,6 +253,18 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
         source = await asyncio.to_thread(_keepable_source, thread_id, normalized, user_id)
     else:
         raise HTTPException(status_code=400, detail=f"Only files under {USER_FILES_VIRTUAL_PREFIX}, {' or '.join(prefix.rstrip('/') for prefix in _CONVERSATION_PREFIXES)} can be published")
+    service = current_feature_service(request, "hm.shared")
+    if service:
+        from deerflow.features.publications import PublicationUnavailable
+
+        try:
+            published, record, created = await service.execute("publish", repo=repo, source=source, name=Path(normalized).name, folder=body.folder, thread_id=thread_id, source_path=normalized)
+        except SharedFileError as exc:
+            raise HTTPException(400, str(exc)) from None
+        except PublicationUnavailable as exc:
+            raise HTTPException(503, str(exc)) from None
+        response.status_code = 201 if created else 200
+        return SharedFileInfo.of(published, record, can_remove=_may_remove(record, user_id=user_id, admin=await is_admin_user(request)), publisher=(await _publisher_names([record])).get(record.get("published_by", "")))
     try:
         folder = normalize_relative_path(body.folder or "", allow_empty=True)
         # The source is preflighted above, but the sandbox writes the
@@ -283,32 +291,15 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
                 return SharedFileInfo.of(held, already, can_remove=_may_remove(already, user_id=user_id, admin=await is_admin_user(request)), publisher=names.get(already.get("published_by", "")))
 
         async def copy_and_record() -> tuple[SharedFile, dict]:
+            from deerflow.features.publications import PublicationUnavailable
+            from deerflow.features.publications import copy_and_record as controller_publish
+
             try:
-                published = await asyncio.to_thread(publish_file, source, name=Path(normalized).name, folder=folder)
+                return await controller_publish(repo, source, name=Path(normalized).name, folder=folder, user_id=user_id, thread_id=thread_id, source_path=normalized, copy=publish_file, remove=remove_shared_file)
             except SharedFileError as exc:
                 raise HTTPException(status_code=400, detail=str(exc)) from None
-            try:
-                record = await repo.record_publication(
-                    path=published.path,
-                    size=published.size,
-                    sha256=published.sha256 or "",
-                    published_by=user_id,
-                    from_thread_id=thread_id,
-                    from_path=normalized,
-                )
-            except Exception:
-                # The bytes are already in Shared. A file nobody can be shown as the
-                # publisher of is a file only an admin can remove and nobody can
-                # account for, so the copy goes back out rather than outliving its
-                # record. (A path too long for the column is one way here; so is the
-                # database being briefly unavailable.)
-                logger.exception("Could not record the publication of %s; taking the copy back out of Shared", published.path)
-                try:
-                    await asyncio.to_thread(remove_shared_file, published.path)
-                except Exception:
-                    logger.exception("Could not take %s back out of Shared; it is there with no publication record", published.path)
-                raise HTTPException(status_code=503, detail="Could not record the publication; nothing was shared") from None
-            return published, record
+            except PublicationUnavailable as exc:
+                raise HTTPException(status_code=503, detail=str(exc)) from None
 
         # A cancelled await does not stop its copy worker. Retain the lock
         # until both the copy and its record (or rollback) have settled.
@@ -319,6 +310,7 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
 
 @router.get("/api/shared/{path:path}", summary="Get One Shared File")
 @require_permission("threads", "read")
+@storage_feature("hm.shared", write=False)
 async def get_shared_file(path: str, request: Request, download: bool = False) -> Response:
     """Stream one published file, inline where the browser can show it.
 
@@ -332,10 +324,15 @@ async def get_shared_file(path: str, request: Request, download: bool = False) -
 
 @router.delete("/api/shared/{path:path}", response_model=RemoveSharedFileResponse, summary="Remove One Shared File")
 @require_permission("threads", "delete")
+@storage_feature("hm.shared", write=True)
 async def remove_shared(path: str, request: Request, expected_publication_id: Annotated[str | None, Query(max_length=128)] = None) -> RemoveSharedFileResponse:
     """Take one file out of Shared. The publisher may, and an admin may; the record stays."""
     repo = get_shared_publications_repo(request)
     user_id = acting_user_id(request)
+    service = current_feature_service(request, "hm.shared")
+    if service:
+        relative = await service.execute("remove", repo=repo, path=path, expected_publication_id=expected_publication_id, admin=await is_admin_user(request))
+        return RemoveSharedFileResponse(success=True, message=f"Removed {relative}")
     # The record is keyed by the path the store settled on, not the spelling
     # the caller sent: `/Reports//r.pdf` names the same file as `Reports/r.pdf`
     # and must find the same record, or the publisher is refused their own file

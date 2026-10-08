@@ -25,6 +25,7 @@ DISTRIBUTION_REVISIONS = (
     "0030_storage_spaces",
     "0031_storage_files",
     "0032_storage_lifecycle",
+    "0033_storage_features",
 )
 
 

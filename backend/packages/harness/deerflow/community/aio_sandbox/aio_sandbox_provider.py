@@ -1661,6 +1661,12 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Mount sources use host_base_dir so that when running inside Docker with a
         mounted Docker socket (DooD), the host Docker daemon can resolve the paths.
         """
+        from deerflow_extension_api.storage import StorageUnsupported
+
+        from deerflow.config import get_app_config
+
+        if getattr(getattr(get_app_config(), "storage_spaces", None), "enabled", False) is True:
+            raise StorageUnsupported("AIO thread mounts do not implement resource attachment admission and writer fencing")
         paths = get_paths()
         effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
         paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)

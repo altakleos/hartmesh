@@ -1964,17 +1964,25 @@ async def start_run(
                         ),
                     ],
                 }
+
         # Resolve and pin the thread's project context once per run (spec
         # §7.1): middlewares and tools read only this server-owned snapshot —
         # nothing re-resolves membership mid-run, and admission never writes
         # membership (§10.7). Resolution failure degrades to unassigned with a
         # warning inside the resolver; it never fails the run.
-        project_context = await resolve_project_context(
-            run_ctx.thread_store,
-            getattr(request.app.state, "project_repo", None),
-            thread_id,
-            getattr(request.app.state, "project_document_repo", None),
-        )
+        async def resolve_project():
+            return await resolve_project_context(run_ctx.thread_store, getattr(request.app.state, "project_repo", None), thread_id, getattr(request.app.state, "project_document_repo", None))
+
+        if getattr(request.app.state, "storage_spaces_enabled", False):
+            from deerflow.features.execution import run_project_feature
+
+            try:
+                project_context = await run_project_feature(run_ctx.extensions, resolve_project)
+            except Exception:
+                logger.warning("Resource Project context unavailable; continuing unassigned")
+                project_context = None
+        else:
+            project_context = await resolve_project()
         if project_context is not None:
             config["context"][PROJECT_CONTEXT_KEY] = project_context
 

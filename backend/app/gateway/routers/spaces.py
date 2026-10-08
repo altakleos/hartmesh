@@ -253,6 +253,7 @@ class SpaceFileResponse(DescriptorFileResponse):
         permission = Permission.READ | (Permission.EXPORT if self._download else Permission(0))
         async with self._service.registry.admitted(actor=self._actor, requests={self._space_id: (permission, None)}) as (session, rows):
             volume = await self._service._volume(session, rows[self._space_id][0])
+            await self._admit_source(session, rows)
 
             def acquire_and_prepare():
                 self._filesystem = volume.filesystem()
@@ -262,6 +263,10 @@ class SpaceFileResponse(DescriptorFileResponse):
         # Already-admitted reads own that inode. Atomic host replacement cannot
         # alter it; SQL authority locks must not follow a slow client stream.
         # This is not a coherent snapshot of a concurrently native-written DB.
+
+    async def _admit_source(self, session, rows):
+        """Specialized sources may recheck their own current record before opening."""
+        return None
 
     async def __call__(self, scope, receive, send):
         try:

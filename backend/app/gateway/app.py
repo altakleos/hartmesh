@@ -623,7 +623,7 @@ async def _lifespan_resources(app: FastAPI) -> AsyncGenerator[None, None]:
         # on it, a failure is logged by the task itself, and shutdown gives the
         # in-flight sweep a bounded graceful budget before cancelling it; any
         # already-started file worker drains before the runtime is torn down.
-        app.state.startup_trash_sweep_task = asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
+        app.state.startup_trash_sweep_task = None if startup_config.storage_spaces.enabled else asyncio.create_task(_run_startup_trash_sweep(app, startup_config))
 
         try:
             from app.gateway.services import launch_scheduled_thread_run
@@ -1145,6 +1145,10 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
 
         app.state.customer_administration_policy = capture_customer_administration_policy(configured_app_config)
         configured_plugins = configured_app_config.plugins
+        if getattr(getattr(configured_app_config, "storage_spaces", None), "enabled", False) is True:
+            from deerflow.features.plugins import with_default_features
+
+            configured_plugins = with_default_features(configured_plugins)
     except FileNotFoundError:
         logger.debug("config.yaml not found while constructing Gateway app; loading no extensions for this app instance")
         configured_plugins = []

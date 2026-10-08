@@ -63,6 +63,13 @@ def _resolve_pin_and_repo(runtime: Runtime) -> tuple[str, str, Any] | str:
     from deerflow.persistence import get_session_factory
     from deerflow.persistence.projects import ProjectDocumentRepository
 
+    paths = get_paths()
+    resource_repo = getattr(paths, "project_document_repository", None)
+    if resource_repo is not None:
+        user_id = resolve_runtime_user_id(runtime)
+        if user_id != paths._feature_user:
+            return _error("Project resource identity does not match the host caller")
+        return project_id, user_id, resource_repo
     session_factory = get_session_factory()
     if session_factory is None:
         return _error(_NO_STORE_MESSAGE)
@@ -173,7 +180,7 @@ async def list_project_documents(
     project holds. Each entry's stable "id" is what read_project_document
     takes. Live data: reflects the shelf as of this call.
     """
-    return await _list_project_documents_impl(runtime, offset=offset, limit=limit)
+    return await _with_resource_feature(runtime, lambda: _list_project_documents_impl(runtime, offset=offset, limit=limit), write=False)
 
 
 @tool
@@ -193,7 +200,32 @@ async def read_project_document(
     instead. A document trashed after this run started reports that it is no
     longer on the shelf.
     """
-    return await _read_project_document_impl(runtime, document_id=document_id, offset=offset, limit=limit)
+    return await _with_resource_feature(runtime, lambda: _read_project_document_impl(runtime, document_id=document_id, offset=offset, limit=limit), write=True)
+
+
+async def _with_resource_feature(runtime, callback, *, write):
+    from deerflow.config.app_config import get_app_config
+    from deerflow.extensions import resolve_run_extensions
+    from deerflow.features.execution import run_project_feature
+    from deerflow.runtime.context_keys import STORAGE_PROVIDER_CONTEXT_KEY
+    from deerflow.spaces.facade import HostStorageProvider
+
+    context = getattr(runtime, "context", None)
+    provider = context.get(STORAGE_PROVIDER_CONTEXT_KEY) if isinstance(context, dict) else None
+    try:
+        config = await run_file_io(get_app_config)
+        enabled = getattr(getattr(config, "storage_spaces", None), "enabled", False) is True
+    except FileNotFoundError:
+        enabled = False
+    if not enabled and not (isinstance(provider, HostStorageProvider) and provider.capabilities.available):
+        return await callback()
+    if not isinstance(provider, HostStorageProvider):
+        return _error("Project resources require a current host storage binding")
+    try:
+        await provider.current()
+        return await run_project_feature(resolve_run_extensions(context), callback, write=write, operation="read-document" if write else "list-documents")
+    except Exception:
+        return _error("The Projects feature or current resource access is unavailable")
 
 
 def get_project_document_tools() -> list:

@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from deerflow.config.paths import Paths
+from deerflow.config.paths import Paths, get_paths
 from deerflow.uploads.manager import is_upload_staging_file
 from deerflow.utils.file_conversion import CONVERTIBLE_EXTENSIONS, convert_file_to_markdown
 from deerflow.utils.file_io import run_file_io
@@ -104,7 +104,13 @@ def _content_intact(paths: Paths, *, user_id: str, row: dict) -> bool:
     """Worker-thread: resolve the original and verify it exists and matches the row's recorded size."""
     original = original_file_path(paths, user_id=user_id, row=row)
     try:
-        return original.stat().st_size == int(row.get("size_bytes") or -1)
+        if original.stat().st_size != int(row.get("size_bytes") or -1):
+            return False
+        if getattr(paths, "resource_shelf", False):
+            from deerflow.files.store import sha256_of
+
+            return sha256_of(original) == row.get("sha256")
+        return True
     except OSError:
         return False
 
@@ -137,6 +143,9 @@ class StagedDocument:
 
 def _open_staging(staging_dir: Path, staging_path: Path):
     """Worker-thread: create the staging directory and open the staging file."""
+    from deerflow.spaces.workflows import mark_effect
+
+    mark_effect()
     staging_dir.mkdir(parents=True, exist_ok=True)
     return open(staging_path, "wb")
 
@@ -159,7 +168,7 @@ async def stage_document_bytes(paths: Paths, *, user_id: str, project_id: str, c
     (the route maps it to 413, mirroring the uploads router) and leaves no
     staging file behind.
     """
-    staging_dir = paths.project_documents_dir(user_id, project_id) / ".staging"
+    staging_dir = paths.project_staging_dir(user_id, project_id)
     staging_path = staging_dir / uuid.uuid4().hex
     handle = await run_file_io(_open_staging, staging_dir, staging_path)
     digest = hashlib.sha256()
@@ -312,15 +321,20 @@ def _convert_in_thread(original: Path, output_path: Path) -> Path | None:
     return asyncio.run(convert_file_to_markdown(original, output_path=output_path))
 
 
-def _convert_and_publish(original: Path, derived: Path) -> bool:
+def _convert_and_publish(original: Path, derived: Path, control: Path | None = None) -> bool:
     """Worker-thread body: convert to a temp file, then atomically publish.
 
     The temp file lives beside the final path (same filesystem) so the
     rename is atomic: readers only ever see a complete ``converted.md`` or
     none at all. A conversion failure publishes nothing and removes the temp.
     """
+    from deerflow.spaces.workflows import mark_effect
+
+    mark_effect()
     derived.parent.mkdir(parents=True, exist_ok=True)
-    temp_path = derived.parent / f".{derived.name}.{uuid.uuid4().hex}.tmp"
+    staging = control or derived.parent
+    staging.mkdir(parents=True, exist_ok=True)
+    temp_path = staging / f".{derived.name}.{uuid.uuid4().hex}.tmp"
     try:
         produced = _convert_in_thread(original, temp_path)
         if produced is None:
@@ -364,7 +378,7 @@ async def ensure_converted_markdown(repo: ProjectDocumentRepository, paths: Path
         # lock may already have been published by the lock's previous holder.
         if await run_file_io(derived.is_file):
             return True
-        return await run_file_io(_convert_and_publish, original, derived)
+        return await run_file_io(_convert_and_publish, original, derived, paths.project_conversion_dir(user_id))
 
     locked = await repo.convert_under_live_lock(row["id"], project_id=row["project_id"], convert=_convert, user_id=user_id)
     if locked is None:
@@ -459,6 +473,9 @@ def _count_text_chars(path: Path) -> int:
 def _cached_char_count(document_id: str, sha256: str, path: Path) -> int:
     """Worker-thread: character count of an immutable document, cached by content identity."""
     key = (document_id, sha256)
+    if getattr(get_paths(), "resource_shelf", False):
+        metadata = path.stat()
+        key = (*key, metadata.st_ino, metadata.st_size, metadata.st_mtime_ns)
     cached = _CHAR_COUNT_CACHE.get(key)
     if cached is not None:
         _CHAR_COUNT_CACHE.move_to_end(key)
@@ -534,8 +551,19 @@ def _copy_original_under_lock(paths: Paths, staging_path: Path, *, user_id: str,
         raise ShelfContentMissingError("original bytes are missing")
     if expected_size is not None and source.stat().st_size != expected_size:
         raise ShelfContentMissingError("original size disagrees with the row")
+    if getattr(paths, "resource_shelf", False) and not _content_intact(paths, user_id=user_id, row=row):
+        raise ShelfContentMissingError("original bytes disagree with the recorded hash")
+    from deerflow.spaces.workflows import mark_effect
+
+    mark_effect()
     staging_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(source, staging_path)
+    if getattr(paths, "resource_shelf", False):
+        from deerflow.files.store import sha256_of
+
+        if sha256_of(staging_path) != row["sha256"]:
+            staging_path.unlink(missing_ok=True)
+            raise ShelfContentMissingError("copied bytes disagree with the recorded hash")
 
 
 async def stage_document_copy_for_attach(
@@ -557,7 +585,7 @@ async def stage_document_copy_for_attach(
     missing, foreign, trashed, or not on this project's shelf (the route
     maps it to 404); :class:`ShelfContentMissingError` maps to 409.
     """
-    staging_path = paths.project_documents_dir(user_id, project_id) / ".staging" / f"attach-{uuid.uuid4().hex}"
+    staging_path = paths.project_staging_dir(user_id, project_id) / f"attach-{uuid.uuid4().hex}"
 
     async def _copy(row: dict) -> Path:
         await run_file_io(_copy_original_under_lock, paths, staging_path, user_id=user_id, row=row)

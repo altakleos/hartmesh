@@ -27,6 +27,7 @@ from pydantic import BaseModel, Field
 
 from app.gateway.authz import require_permission
 from app.gateway.routers._file_http import DescriptorFileResponse, acting_user_id, existing_regular_file
+from app.gateway.storage_features import current_feature_service, storage_feature
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX, Paths, get_paths
 from deerflow.files import UserFile, UserFileError, delete_user_file, keep_file, list_user_files, resolve_user_file
 from deerflow.files.store import resolve_under
@@ -86,14 +87,17 @@ def _existing_regular_file(user_id: str, path: str) -> Path:
 
 @router.get("/api/files", response_model=UserFileListResponse, summary="List My Files")
 @require_permission("threads", "read")
+@storage_feature("hm.my-files", write=False)
 async def list_files(request: Request) -> UserFileListResponse:
     """Every file the caller has kept, across all their conversations."""
-    entries, truncated = await asyncio.to_thread(list_user_files, acting_user_id(request))
+    service = current_feature_service(request, "hm.my-files")
+    entries, truncated = await service.execute("list") if service else await asyncio.to_thread(list_user_files, acting_user_id(request))
     return UserFileListResponse(files=[UserFileInfo.of(entry) for entry in entries], count=len(entries), truncated=truncated)
 
 
 @router.get("/api/files/{path:path}", summary="Get One Of My Files")
 @require_permission("threads", "read")
+@storage_feature("hm.my-files", write=False)
 async def get_file(path: str, request: Request, download: bool = False) -> Response:
     """Stream one of the caller's files, inline where the browser can show it.
 
@@ -106,11 +110,16 @@ async def get_file(path: str, request: Request, download: bool = False) -> Respo
 
 @router.delete("/api/files/{path:path}", response_model=DeleteUserFileResponse, summary="Remove One Of My Files")
 @require_permission("threads", "delete")
+@storage_feature("hm.my-files", write=True)
 async def delete_file(path: str, request: Request) -> DeleteUserFileResponse:
     """Remove one of the caller's files. Folders stay."""
     user_id = acting_user_id(request)
     try:
-        await asyncio.to_thread(delete_user_file, user_id, path)
+        service = current_feature_service(request, "hm.my-files")
+        if service:
+            await service.execute("remove", path=path)
+        else:
+            await asyncio.to_thread(delete_user_file, user_id, path)
     except UserFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     except FileNotFoundError:
@@ -149,6 +158,7 @@ def _keepable_source(thread_id: str, virtual_path: str, user_id: str) -> Path:
 @router.post("/api/threads/{thread_id}/files", response_model=UserFileInfo, status_code=201, summary="Keep A Conversation's File")
 @require_permission("threads", "write")
 @require_permission("threads", "read", owner_check=True, require_existing=True)
+@storage_feature("hm.my-files", write=True)
 async def keep_thread_file(thread_id: ThreadId, body: KeepFileRequest, request: Request) -> UserFileInfo:
     """Copy one of this conversation's uploads or outputs into the caller's files.
 
@@ -159,7 +169,8 @@ async def keep_thread_file(thread_id: ThreadId, body: KeepFileRequest, request: 
     user_id = acting_user_id(request)
     source = await asyncio.to_thread(_keepable_source, thread_id, body.path, user_id)
     try:
-        kept = await asyncio.to_thread(keep_file, user_id, source, name=Path(body.path).name, folder=body.folder)
+        service = current_feature_service(request, "hm.my-files")
+        kept = await service.execute("keep", source=source, name=Path(body.path).name, folder=body.folder) if service else await asyncio.to_thread(keep_file, user_id, source, name=Path(body.path).name, folder=body.folder)
     except UserFileError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from None
     logger.info("Kept %s from thread %s as %s", body.path, thread_id, kept.path)

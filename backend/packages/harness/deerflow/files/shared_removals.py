@@ -13,7 +13,7 @@ import stat
 from pathlib import Path
 from uuid import uuid4
 
-from deerflow.files.store import SafeFileAccessUnavailable, StoreError, normalize_relative_path, open_directory_source
+from deerflow.files.store import SafeFileAccessUnavailable, StoreError, _private_control, normalize_relative_path, open_directory_source
 
 _STATE_DIR = ".shared-state"
 _MAX_JOURNAL_BYTES = 32768
@@ -35,8 +35,9 @@ def _private_directory(parent_fd: int, name: str) -> int:
 class SharedMutationState:
     """Own the filesystem mutex and all staging descriptors until settled."""
 
-    def __init__(self, root: Path):
+    def __init__(self, root: Path, *, control_root: Path | None = None):
         self.root = root
+        self.control_root = control_root
         self.root_fd: int | None = None
         self.state_fd: int | None = None
         self.lock_fd: int | None = None
@@ -47,8 +48,20 @@ class SharedMutationState:
         except ImportError:
             raise SafeFileAccessUnavailable("Shared mutations require filesystem advisory locking") from None
         self.root_fd = open_directory_source(self.root)
-        self.state_fd = _private_directory(self.root_fd, _STATE_DIR)
-        os.fsync(self.root_fd)
+        if self.control_root is None:
+            # Unadopted compatibility roots retain their existing journal.
+            # Qualified generic views must supply an outside control root.
+            self.state_fd = _private_directory(self.root_fd, _STATE_DIR)
+            os.fsync(self.root_fd)
+        else:
+            try:
+                os.stat(_STATE_DIR, dir_fd=self.root_fd, follow_symlinks=False)
+            except FileNotFoundError:
+                pass
+            else:
+                raise StoreError("Shared legacy private state cannot be used as qualified feature data")
+            self.state_fd = _private_control(self.root, self.control_root, self.root_fd)
+            os.fsync(self.state_fd)
         self.lock_fd = os.open("mutation.lock", os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=self.state_fd)
         metadata = os.fstat(self.lock_fd)
         if not stat.S_ISREG(metadata.st_mode) or metadata.st_uid != os.geteuid() or metadata.st_nlink != 1 or stat.S_IMODE(metadata.st_mode) != 0o600:
@@ -71,7 +84,13 @@ class SharedMutationState:
 
     def stage(self, path: str, publication_id: str | None) -> PendingRemoval:
         assert self.state_fd is not None
+        from deerflow.spaces.workflows import mark_effect
+
+        mark_effect()
         name = f"remove-{uuid4().hex}"
+        from deerflow.spaces.workflows import record_fact
+
+        record_fact("removal", {"journal": name, "path": normalize_relative_path(path), "publication_id": publication_id})
         stage = PendingRemoval(self, name, new={"path": normalize_relative_path(path), "publication_id": publication_id, "removed": False})
         try:
             stage.write_journal()

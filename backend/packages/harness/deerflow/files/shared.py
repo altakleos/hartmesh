@@ -76,7 +76,7 @@ def _shared_root() -> Path:
 
 def shared_mutation_state() -> SharedMutationState:
     """Create an unopened mutation owner; acquisition/close belong to the caller."""
-    return SharedMutationState(get_paths().ensure_shared_dir())
+    return SharedMutationState(get_paths().ensure_shared_dir(), control_root=get_paths().shared_control_dir())
 
 
 def list_shared_files() -> tuple[list[SharedFile], bool]:
@@ -118,7 +118,7 @@ def publish_file(source: Path, *, name: str, folder: str | None = None) -> Share
     Returns the file with the digest of what was written, for the record.
     """
     root = get_paths().ensure_shared_dir()
-    return SharedFile.of(copy_into(root, source, name=name, folder=folder, folder_mode=_FOLDER_MODE, file_mode=_FILE_MODE))
+    return SharedFile.of(copy_into(root, source, name=name, folder=folder, folder_mode=_FOLDER_MODE, file_mode=_FILE_MODE, control_root=get_paths().shared_control_dir()))
 
 
 def remove_shared_file(path: str) -> None:

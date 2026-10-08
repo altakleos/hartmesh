@@ -228,6 +228,9 @@ def delete_under(root: Path, path: str) -> None:
         metadata = os.lstat(actual)
         if not stat.S_ISREG(metadata.st_mode):
             raise StoreError(f"Not a file: {path}")
+        from deerflow.spaces.workflows import mark_effect
+
+        mark_effect()
         os.unlink(actual)
         return
     walk = _DirWalk(root)
@@ -237,6 +240,9 @@ def delete_under(root: Path, path: str) -> None:
         metadata = os.stat(name, dir_fd=walk.fd, follow_symlinks=False)
         if not stat.S_ISREG(metadata.st_mode):
             raise StoreError(f"Not a file: {path}")
+        from deerflow.spaces.workflows import mark_effect
+
+        mark_effect()
         os.unlink(name, dir_fd=walk.fd)
     finally:
         walk.close()
@@ -381,7 +387,26 @@ def _publish_exclusive(stage_fd: int, parent_fd: int, safe_name: str) -> str:
             raise
 
 
-def copy_into(root: Path, source: Path, *, name: str, folder: str | None, folder_mode: int, file_mode: int) -> StoredFile:
+def _private_control(root: Path, control_root: Path, root_fd: int) -> int:
+    """Hold a separate, same-filesystem control root; never fall back to data."""
+    fd = open_directory_source(control_root)
+    try:
+        metadata = os.fstat(fd)
+        visible = os.fstat(root_fd)
+        if metadata.st_uid != os.geteuid() or stat.S_IMODE(metadata.st_mode) != 0o700 or metadata.st_dev != visible.st_dev:
+            raise StoreError("Copy control must be private and share the resource filesystem")
+        if (metadata.st_dev, metadata.st_ino) == (visible.st_dev, visible.st_ino):
+            raise StoreError("Copy control cannot be the visible root")
+        data_path, control_path = root.resolve(), control_root.resolve()
+        if control_path.is_relative_to(data_path) or data_path.is_relative_to(control_path):
+            raise StoreError("Copy control and visible roots must not overlap")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def copy_into(root: Path, source: Path, *, name: str, folder: str | None, folder_mode: int, file_mode: int, control_root: Path | None = None) -> StoredFile:
     """Copy *source*'s exact bytes under *root* as *name* in *folder*.
 
     A name that already exists is kept: the copy takes the next free
@@ -406,21 +431,29 @@ def copy_into(root: Path, source: Path, *, name: str, folder: str | None, folder
     if not _ATOMIC_PUBLICATION:
         raise StoreError("Atomic file publication requires descriptor-relative hard links")
 
+    from deerflow.spaces.workflows import mark_effect
+
+    mark_effect()
     folders = relative_folder.split("/") if relative_folder else []
     relative_dir = relative_folder + "/" if relative_folder else ""
 
     source_fd = open_regular_source(source)
     try:
         walk = _DirWalk(root)
+        control_fd = None
         try:
+            if control_root is not None:
+                control_fd = _private_control(root, control_root, walk.fd)
             for segment in folders:
                 walk.descend(segment, create=True, mode=folder_mode)
-            with _staged_copy(walk.fd) as (stage_fd, target_fd):
+            with _staged_copy(control_fd if control_fd is not None else walk.fd) as (stage_fd, target_fd):
                 sha256 = _copy_bytes(source_fd, target_fd)
                 os.fchmod(target_fd, file_mode)
                 metadata = os.fstat(target_fd)
                 candidate = _publish_exclusive(stage_fd, walk.fd, safe_name)
         finally:
+            if control_fd is not None:
+                os.close(control_fd)
             walk.close()
     finally:
         os.close(source_fd)
