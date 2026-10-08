@@ -72,3 +72,10 @@ class AgentMemoryRow(Base):
     instance_id: Mapped[str] = mapped_column(String(32), ForeignKey("agent_instances.id"), primary_key=True)
     epoch: Mapped[int] = mapped_column(Integer)
     document: Mapped[dict] = mapped_column(JSON)
+
+
+class AgentProtectedContextRow(Base):
+    """Memory/cross-requester context needs Inspect, including after restart."""
+
+    __tablename__ = "agent_protected_contexts"
+    thread_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_conversations.thread_id"), primary_key=True)

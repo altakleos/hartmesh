@@ -141,6 +141,14 @@ disabling prevent execution reads and capture. Manual management remains availab
 under Inspect, or Manage plus Inspect for edits, and provider memory/agent ceilings.
 Conversation-derived memories are shared instance data for this explicit audience.
 
+Memory execution also requires compatible conversation and writable Home readers,
+including an original requester with Use who has no Home grant. Memory-bearing
+history requires current Inspect for reads and execution. References and branches
+check destination readers against source readers; copies across original requesters
+retain this Inspect requirement across restarts and subsequent copies. Losing
+Inspect cannot reopen protected history through the original-requester Use exception.
+Inspect admits conversation/evidence reads without an additional Home READ grant.
+
 Facts and summaries use DeerMem's existing extraction, safety filters, capacity
 policy and lexical/relevance ranking. Derived access/eviction metadata stays in
 SQL; instance data/retrieval uses no private file/index fallback. Normal
@@ -164,6 +172,7 @@ locks during model calls. Shutdown drains the bounded queues while the original
 host loop is live and retires scopes that exceed its shared flush budget.
 Documents are limited to 4 MiB, 10,000 facts and 64 KiB per fact/summary.
 
-Migration `0036_agent_instance_memory` adds only `agent_instance_memory` after
-`0035`, with an instance foreign key and epoch. No user-deletion cascade applies.
-Used memory cannot be erased by downgrade; configuration format is unchanged.
+Migration `0036_agent_instance_memory` adds `agent_instance_memory` for the
+instance document/epoch and `agent_protected_contexts` for durable Inspect-required
+conversation provenance after `0035`. No user-deletion cascade applies. Downgrade
+refuses used memory or provenance; configuration format is unchanged.

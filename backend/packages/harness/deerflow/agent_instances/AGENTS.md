@@ -40,7 +40,11 @@ injected directories/backings; these fixtures never qualify native quotas. The
 mandatory Storage Spaces Linux Docker tier owns native filesystem proof.
 `AgentConversations` owns durable bindings, retry keys and deleted-chat tombstones.
 Never infer binding from JSON metadata or requester ownership. SQL audience filters
-precede pagination; current Inspect or original requester Use admits reads. Manage
+precede pagination; current Inspect or original requester Use admits unprotected reads.
+Memory-bearing/cross-requester copies persist Inspect-required provenance; carry it
+through references/branches and honor it on all reads and atomic execution admissions.
+Compare source/destination conversation recipients as well as writable Home readers.
+Manage
 controls mutations, while Use controls execution and stopping one's own run.
 Worker bookkeeping locks thread then instance, matching repository mutations.
 

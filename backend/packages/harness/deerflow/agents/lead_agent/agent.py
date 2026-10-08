@@ -1022,6 +1022,11 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         from deerflow.agent_instances.memory import execution_memory_enabled
 
         memory_enabled = execution_memory_enabled(instance_execution, resolved_app_config.memory)
+        if memory_enabled:
+            from deerflow.agent_instances.conversations import AgentConversations
+
+            if isinstance(instance_execution.authority, AgentConversations):
+                instance_execution.authority.mark_memory_context_sync(instance_execution)
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
     allowed_subagents = getattr(agent_config, "allowed_subagents", None) if agent_config is not None else None

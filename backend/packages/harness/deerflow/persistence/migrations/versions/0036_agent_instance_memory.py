@@ -15,6 +15,7 @@ branch_labels = None
 depends_on = None
 _metadata = sa.MetaData()
 sa.Table("agent_instances", _metadata, sa.Column("id", sa.String(32), primary_key=True))
+sa.Table("agent_conversations", _metadata, sa.Column("thread_id", sa.String(64), primary_key=True))
 _table = sa.Table(
     "agent_instance_memory",
     _metadata,
@@ -23,24 +24,32 @@ _table = sa.Table(
     sa.Column("document", sa.JSON(), nullable=False),
     sa.CheckConstraint("epoch >= 1 AND epoch <= 2147483647", name="ck_agent_memory_epoch"),
 )
+_context = sa.Table(
+    "agent_protected_contexts",
+    _metadata,
+    sa.Column("thread_id", sa.String(64), sa.ForeignKey("agent_conversations.thread_id"), primary_key=True, nullable=False),
+)
 
 
 def upgrade():
     bind = op.get_bind()
     inspector = sa.inspect(bind)
-    if _table.name in inspector.get_table_names():
-        frozen = importlib.import_module("deerflow.persistence.migrations.versions.0035_agent_conversations")
-        frozen._validate_existing(inspector, _table)
-        if inspector.get_indexes(_table.name):
-            raise RuntimeError("Incompatible instance memory indexes")
-    else:
-        _table.create(bind)
+    frozen = importlib.import_module("deerflow.persistence.migrations.versions.0035_agent_conversations")
+    for table in (_table, _context):
+        if table.name in inspector.get_table_names():
+            frozen._validate_existing(inspector, table)
+            if inspector.get_indexes(table.name):
+                raise RuntimeError("Incompatible instance memory indexes")
+        else:
+            table.create(bind)
 
 
 def downgrade():
     bind = op.get_bind()
-    if _table.name not in sa.inspect(bind).get_table_names():
-        return
-    if bind.execute(sa.select(sa.literal(1)).select_from(_table).limit(1)).first() is not None:
-        raise RuntimeError("Refusing to erase used instance memory")
-    _table.drop(bind)
+    existing = sa.inspect(bind).get_table_names()
+    for table in (_context, _table):
+        if table.name in existing and bind.execute(sa.select(sa.literal(1)).select_from(table).limit(1)).first() is not None:
+            raise RuntimeError("Refusing to erase used instance memory or context provenance")
+    for table in (_context, _table):
+        if table.name in existing:
+            table.drop(bind)

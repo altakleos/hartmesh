@@ -1094,7 +1094,13 @@ async def _branch_thread_with_reservation(
 
         await source_execution.validate()
         await source_execution.authority.create(
-            actor=source_execution.requester, instance_id=source_execution.instance.id, thread_id=new_thread_id, metadata=branch_metadata, display_name=display_name, permission=AgentPermission.USE | AgentPermission.MANAGE
+            actor=source_execution.requester,
+            instance_id=source_execution.instance.id,
+            thread_id=new_thread_id,
+            metadata=branch_metadata,
+            display_name=display_name,
+            permission=AgentPermission.USE | AgentPermission.MANAGE,
+            source_thread_id=thread_id,
         )
 
     # Copy materialized values with replace semantics: reducer channels must

@@ -14,7 +14,7 @@ from test_agent_instances import create
 from test_agent_instances import instances as instances
 
 from deerflow.agent_instances.contract import AgentPermission
-from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
+from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentProtectedContextRow
 from deerflow.runtime.events.store.memory import MemoryRunEventStore
 from deerflow.runtime.runs.manager import RunManager
 from deerflow.runtime.runs.store.memory import MemoryRunStore
@@ -97,10 +97,14 @@ async def test_http_shared_run_evidence_is_visible_to_inspector_but_mutations_ar
 
 
 @pytest.mark.asyncio
-async def test_stream_stops_before_a_frame_after_current_grant_is_revoked(instances, monkeypatch):
+@pytest.mark.parametrize("protected", [False, True])
+async def test_stream_stops_before_a_frame_after_current_grant_is_revoked(instances, monkeypatch, protected):
     agents, authority, threads, sf = await conversations(instances)
     agent = await create(agents, custody="company", supervisor=BOB)
-    chat = await authority.create(actor=ALICE, instance_id=agent.id, creation_id=operation())
+    chat = await authority.create(actor=BOB if protected else ALICE, instance_id=agent.id, creation_id=operation())
+    if protected:
+        async with sf() as session, session.begin():
+            session.add(AgentProtectedContextRow(thread_id=chat["thread_id"]))
     app = app_for(agents, authority, threads, monkeypatch)
     opened, release = asyncio.Event(), asyncio.Event()
 
@@ -119,13 +123,33 @@ async def test_stream_stops_before_a_frame_after_current_grant_is_revoked(instan
         try:
             await asyncio.wait_for(opened.wait(), 3)
             async with sf() as session, session.begin():
-                await session.delete(await session.get(AgentInstanceGrantRow, (agent.id, "bob")))
+                if protected:
+                    (await session.get(AgentInstanceGrantRow, (agent.id, "bob"))).permissions = int(AgentPermission.USE)
+                else:
+                    await session.delete(await session.get(AgentInstanceGrantRow, (agent.id, "bob")))
             release.set()
             response = await asyncio.wait_for(task, 3)
             assert "must-not-disclose" not in response.text
         finally:
             release.set()
             await asyncio.gather(task, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_protected_own_use_cannot_read_http_history_or_run_evidence(instances, monkeypatch):
+    agents, authority, threads, sf = await conversations(instances)
+    agent = await create(agents, custody="company", supervisor=BOB)
+    chat = await authority.create(actor=BOB, instance_id=agent.id, creation_id=operation())
+    async with sf() as session, session.begin():
+        session.add(AgentProtectedContextRow(thread_id=chat["thread_id"]))
+        (await session.get(AgentInstanceGrantRow, (agent.id, "bob"))).permissions = int(AgentPermission.USE)
+    app = app_for(agents, authority, threads, monkeypatch)
+    record = await app.state.run_manager.create(chat["thread_id"], user_id="bob")
+    endpoint = f"/api/threads/{chat['thread_id']}"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        for method, suffix in (("GET", ""), ("POST", "/history"), ("GET", "/runs/" + record.run_id)):
+            response = await client.request(method, endpoint + suffix)
+            assert response.status_code == 404, response.text
 
 
 @pytest.mark.asyncio

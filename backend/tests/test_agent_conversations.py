@@ -9,7 +9,7 @@ from test_agent_instances import instances as instances
 
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentPermission
 from deerflow.agent_instances.conversations import AgentConversations
-from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentInstanceGrantRow, AgentInstanceRow
+from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentInstanceGrantRow, AgentInstanceRow, AgentProtectedContextRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
 
@@ -19,6 +19,7 @@ async def conversations(instances):
     async with sf.kw["bind"].begin() as connection:
         await connection.run_sync(lambda c: ThreadMetaRow.__table__.create(c))
         await connection.run_sync(lambda c: AgentConversationRow.__table__.create(c))
+        await connection.run_sync(lambda c: AgentProtectedContextRow.__table__.create(c))
     authority = AgentConversations(agents)
     threads = ThreadMetaRepository(sf, instance_authority=authority)
     return agents, authority, threads, sf
@@ -224,7 +225,7 @@ async def test_worker_bookkeeping_and_manager_edit_use_one_sql_lock_order(instan
             if task == "agent-manager-edit" and locked:
                 manager_started.set()
             result = await original(session, statement, *args, **kwargs)
-            if task == "agent-worker-bookkeeping" and locked:
+            if task == "agent-worker-bookkeeping" and locked and "FROM storage_spaces" not in str(statement):
                 order.append(str(statement))
                 if len(order) == 1:
                     first_lock.set()

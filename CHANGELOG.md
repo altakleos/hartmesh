@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole-instance Inspect access; Use-only execution has memory disabled. Clear,
   replacement import and lifecycle changes fence older delayed writes. Unsupported
   scoped backends fail explicitly without requester/global fallback.
+  Preserve current Inspect requirements for memory-bearing and cross-requester
+  copied history, and check conversation/Home recipients before context delivery.
 
 ### Schema changes
 
@@ -39,9 +41,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Append `0035_agent_conversations` with one additive binding/retry table retaining
   deleted-chat tombstones. Existing tables and configuration format are unchanged;
   downgrade refuses to erase used bindings.
-- Append `0036_agent_instance_memory` with one instance-owned document/epoch table
-  for facts and all summaries. Existing tables and configuration format are
-  unchanged; downgrade refuses to erase used memory.
+- Append `0036_agent_instance_memory` with an instance-owned document/epoch table
+  and a protected-conversation provenance table. Existing tables and configuration
+  format are unchanged; downgrade refuses to erase used memory or provenance.
 
 ## [2.2.0+hartmesh.43] - 2026-10-08
 

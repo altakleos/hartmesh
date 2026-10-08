@@ -55,6 +55,8 @@ Those conversations use the adopted definition and one qualified Docker Home
 across chats, with current Use/Inspect/Manage grants. They inherit no requester
 files, private skills, memory or credentials. DeerMem facts and summaries use a
 separate instance scope, with current audience checks and stale-write fencing.
+Memory-bearing and cross-requester copied history require current Inspect;
+references and branches check their destination audience before copying context.
 Lifecycle/UI controls follow; existing default/custom-agent chats retain their behavior.
 
 The [Storage Spaces foundation](docs/STORAGE_SPACES.md) adds stable resource

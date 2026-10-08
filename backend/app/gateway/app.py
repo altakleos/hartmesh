@@ -332,7 +332,7 @@ async def _shutdown_memory_backend(*, retrieval_warm_finished: bool, instance_me
             from deerflow.agents.memory import get_memory_manager
 
             manager = await asyncio.to_thread(get_memory_manager)
-            flush_timeout = max(0, flush_deadline - time.monotonic())
+            flush_timeout = max(0, flush_deadline - time.monotonic()) if instance_memory is not None else app_cfg.memory.shutdown_flush_timeout_seconds
             completed = await asyncio.to_thread(manager.shutdown_flush, flush_timeout)
             if completed:
                 logger.info("Memory queue flush completed within %.1fs", flush_timeout)

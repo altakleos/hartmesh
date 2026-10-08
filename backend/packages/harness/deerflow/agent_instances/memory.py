@@ -32,7 +32,7 @@ from deerflow.agents.memory.backends.deermem.deermem.core.storage import (
     normalize_memory_data,
     utc_now_iso_z,
 )
-from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentInstanceGrantRow, AgentInstanceRow, AgentMemoryRow
+from deerflow.persistence.agent_instances.model import AgentConversationRow, AgentInstanceGrantRow, AgentInstanceRow, AgentMemoryRow, AgentProtectedContextRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
 from deerflow.spaces.contract import Permission, SpaceDenied
 from deerflow.utils.file_io import await_drained
@@ -166,6 +166,9 @@ class InstanceMemory:
                         raise AgentDenied("Instance memory execution is inactive")
                     if AgentConfig.model_validate(scope.execution.definition.config).memory_enabled is False:
                         raise AgentDenied("Instance memory is disabled by its definition")
+                    await scope.execution.authority.destination_audience(session, identity, binding, memory=True)
+                    if await session.get(AgentProtectedContextRow, scope.execution.thread_id) is None:
+                        session.add(AgentProtectedContextRow(thread_id=scope.execution.thread_id))
                 elif write and (not scope.management_write or identity.status != "active"):
                     raise AgentDenied("Instance memory mutation requires active management admission")
                 row = await session.get(AgentMemoryRow, identity.id)
@@ -492,7 +495,7 @@ def execution_memory_enabled(execution, config):
     from deerflow.agents.memory.backends.deermem.deer_mem import DeerMem
     from deerflow.agents.memory.manager import _resolve_manager_class
 
-    if not isinstance(execution, AgentExecution) or not execution.execution_allowed or not config.enabled or execution.definition.config.get("memory_enabled", True) is False:
+    if not isinstance(execution, AgentExecution) or not execution.execution_allowed or not execution.memory_audience_allowed or not config.enabled or execution.definition.config.get("memory_enabled", True) is False:
         return False
     if getattr(execution.instance, "permissions", AgentPermission(0)) & AgentPermission.INSPECT != AgentPermission.INSPECT:
         return False
