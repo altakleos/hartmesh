@@ -18,6 +18,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from _storage_spaces_native_test_support import prepare_consumer_container
 
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 
@@ -131,6 +132,146 @@ while True: time.sleep(.1)
             await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_qualified_company_wiki_nonhuman_actor_survives_native_replacement(backing, tmp_path):
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
+    from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow
+    from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
+    from deerflow.runtime import user_context
+    from deerflow.spaces.attachments import ResourceMount, SpaceAttachments
+    from deerflow.spaces.contract import Permission, PrincipalRef, ResolvedPrincipal, SpaceConflict, SpaceDenied
+    from deerflow.spaces.docker import DockerStorageAdapter
+    from deerflow.spaces.facade import HostStorageProvider, storage_actor_scope
+    from deerflow.spaces.principals import HostPrincipalResolver
+    from deerflow.spaces.registry import SpaceRegistry
+    from deerflow.spaces.service import SpaceFiles
+
+    catalog, volume, image, containment = backing
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'consumer-authority.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all, tables=[m.__table__ for m in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, SpaceFileOperationRow, SpaceAttachmentRow, SpaceMountRow, SpaceBackupRow)])
+    owner, worker, outsider = PrincipalRef("human", "wiki-owner"), PrincipalRef("nonhuman", "worker:wiki"), PrincipalRef("human", "outsider")
+    active = {owner: ResolvedPrincipal(owner, True), worker: ResolvedPrincipal(worker), outsider: ResolvedPrincipal(outsider)}
+
+    async def lookup(reference):
+        return active.get(reference)
+
+    files = SpaceFiles(SpaceRegistry(async_sessionmaker(engine, expire_on_commit=False), HostPrincipalResolver(human=lookup, nonhuman=lookup)), catalog)
+    provider = HostStorageProvider(lambda: files)
+    containers = []
+    program = [""]
+
+    def prepare(plan):
+        return prepare_consumer_container(plan, image, program[0], containers, containment)
+
+    docker = DockerStorageAdapter(prepare=prepare)
+    attachments = SpaceAttachments(files, docker)
+    token = user_context._current_user.set(None)
+    try:
+        with storage_actor_scope(owner):
+            administrator = await provider.current()
+            resource = await administrator.provision(name="Restricted wiki", custody="company")
+            from deerflow_extension_api import StorageActor
+
+            resource = await administrator.grant(
+                space_id=resource.id, generation=1, subject=StorageActor("nonhuman", worker.subject_id), permissions=int(Permission.READ | Permission.WRITE | Permission.EXPORT), acknowledge_existing_data=True
+            )
+        with storage_actor_scope(outsider), pytest.raises(SpaceDenied):
+            await (await provider.current()).get(space_id=resource.id)
+        with storage_actor_scope(worker):
+            assert user_context.get_current_user() is None
+            consumer = await provider.current()
+            assert consumer.actor.kind == "nonhuman" and consumer.capabilities.actor_kinds == ("human", "nonhuman")
+            await consumer.mkdir(space_id=resource.id, generation=resource.generation, operation_id=uuid.uuid4().hex, path="pages")
+            revision = await consumer.write(space_id=resource.id, generation=resource.generation, operation_id=uuid.uuid4().hex, path="pages/home.md", content=b"# Home\nFirst\n", create=True)
+            await consumer.write(space_id=resource.id, generation=resource.generation, operation_id=uuid.uuid4().hex, path="pages/home.md", content=b"# Home\nSecond\n", expected_sha256=revision)
+            source_reference = {"space_id": resource.id, "path": "pages/home.md"}
+            await consumer.write(space_id=resource.id, generation=resource.generation, operation_id=uuid.uuid4().hex, path="sources.json", content=json.dumps(source_reference).encode("utf-8"), create=True)
+            script = b"""import pathlib,sqlite3
+root=pathlib.Path(__file__).parent
+db=sqlite3.connect(root/'index.sqlite')
+db.execute('PRAGMA journal_mode=WAL')
+db.execute('CREATE TABLE IF NOT EXISTS pages (path TEXT PRIMARY KEY, body TEXT)')
+for page in (root/'pages').glob('*.md'):
+    db.execute('INSERT OR REPLACE INTO pages VALUES (?,?)',(page.name,page.read_text()))
+db.commit(); db.close()
+"""
+            await consumer.write(space_id=resource.id, generation=resource.generation, operation_id=uuid.uuid4().hex, path="index_pages.py", content=script, create=True)
+        program[0] = "import runpy,time,pathlib; root=pathlib.Path('/mnt/spaces/wiki'); runpy.run_path(str(root/'index_pages.py')); (root/'indexed').write_text('ready');\nwhile True: time.sleep(.1)"
+        attachment = await attachments.attach(actor=worker, incarnation=uuid.uuid4().hex, resources=[ResourceMount(resource.id, resource.generation, "wiki", writable=True)])
+        deadline = asyncio.get_running_loop().time() + 15
+        while not (volume.data_path / "indexed").exists():
+            assert asyncio.get_running_loop().time() < deadline, "Native wiki index did not become ready"
+            await asyncio.sleep(0.05)
+        with storage_actor_scope(worker), pytest.raises(SpaceConflict):
+            await consumer.write(space_id=resource.id, generation=resource.generation, operation_id=uuid.uuid4().hex, path="conflicting-host-edit", content=b"x", create=True)
+        await attachments.retire(actor=owner, space_id=resource.id, expected_generation=resource.generation, attachment_ids=[attachment.id])
+        program[0] = (
+            "import sqlite3,json,time,pathlib; root=pathlib.Path('/mnt/spaces/wiki'); db=sqlite3.connect(root/'index.sqlite'); "
+            "body=db.execute('SELECT body FROM pages WHERE path=?',('home.md',)).fetchone()[0]; db.close(); "
+            "(root/'replacement.json').write_text(json.dumps({'body':body,'source':json.loads((root/'sources.json').read_text())}));\nwhile True: time.sleep(.1)"
+        )
+        replacement = await attachments.attach(actor=worker, incarnation=uuid.uuid4().hex, resources=[ResourceMount(resource.id, resource.generation, "wiki", writable=True)])
+        deadline = asyncio.get_running_loop().time() + 15
+        while not (volume.data_path / "replacement.json").exists():
+            assert asyncio.get_running_loop().time() < deadline, "Replacement did not read retained wiki data"
+            await asyncio.sleep(0.05)
+        await attachments.retire(actor=owner, space_id=resource.id, expected_generation=resource.generation, attachment_ids=[replacement.id])
+        with storage_actor_scope(worker):
+            independent = await provider.current()
+            assert json.loads(await independent.read(space_id=resource.id, path="replacement.json", max_bytes=1000)) == {"body": "# Home\nSecond\n", "source": source_reference}
+        del active[worker]
+        from deerflow_extension_api import StorageIdentityRequired
+
+        with storage_actor_scope(worker), pytest.raises(StorageIdentityRequired):
+            await consumer.read(space_id=resource.id, path="pages/home.md", max_bytes=100)
+        with storage_actor_scope(owner):
+            retained = await administrator.get(space_id=resource.id)
+            assert retained.id == resource.id and retained.custody == "company" and retained.custodian is None
+            assert await administrator.read(space_id=resource.id, path="pages/home.md", max_bytes=100) == b"# Home\nSecond\n"
+    finally:
+        user_context._current_user.reset(token)
+        try:
+            for container, attachment_id in containers:
+                docker.fence(container, attachment_id)
+        except Exception:
+            containment["confirmed"] = False
+            raise
+        finally:
+            await engine.dispose()
+
+
+def test_real_create_with_lost_acknowledgement_preserves_backing_until_verified_absent(backing):
+    from deerflow.spaces.attachments import AttachmentPlan, NativeView
+    from deerflow.spaces.contract import PrincipalRef
+    from deerflow.spaces.docker import DockerStorageAdapter
+
+    _, volume, image, containment = backing
+    adapter = DockerStorageAdapter(prepare=lambda _plan: pytest.fail("This test creates only through its owned fixture helper"))
+    plan = AttachmentPlan(uuid.uuid4().hex, uuid.uuid4().hex, PrincipalRef("nonhuman", "worker:fixture"), adapter.host_id, (NativeView(uuid.uuid4().hex, 1, str(volume.data_path), "/mnt/spaces/wiki", True),))
+    tracked, created = [], []
+
+    def real_create_then_error(arguments, **kwargs):
+        result = subprocess.run(arguments, **kwargs)
+        created.append(result.stdout.strip())
+        raise subprocess.TimeoutExpired(arguments, 30)
+
+    try:
+        with pytest.raises(subprocess.TimeoutExpired):
+            prepare_consumer_container(plan, image, "pass", tracked, containment, runner=real_create_then_error)
+        assert created and not tracked and containment["confirmed"] is False
+        inspection = subprocess.run(["docker", "inspect", "--format", "{{.State.Status}}", created[0]], check=True, capture_output=True, text=True, timeout=15)
+        assert inspection.stdout.strip() == "created"
+    finally:
+        for identity in created:
+            adapter.fence(identity, plan.id)
+        if created:
+            containment["confirmed"] = True
+
+
 @pytest.fixture(scope="module")
 def prepared(tmp_path_factory):
     if os.environ.get("HARTMESH_REQUIRE_MANAGED_STORAGE") != "1":
@@ -229,6 +370,100 @@ def test_native_repository_binary_and_database_survive_a_new_container(backing):
     assert second == {"title": "Home", "binary": 256}
     with backing[1].filesystem() as fs:
         assert fs.read_bytes(".git/HEAD", max_bytes=100) == b"ref: refs/heads/main\n"
+
+
+def test_real_git_branches_tests_and_internal_links_on_qualified_backing(backing):
+    """Git runs on the qualified host; source edits/tests run in native containers."""
+    executable = shutil.which("git")
+    assert executable, "Repository qualification requires preinstalled Git"
+    volume = backing[1]
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
+    environment.update(GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_SYSTEM=os.devnull)
+
+    def git(*arguments):
+        return subprocess.run(
+            [executable, "-c", "gc.auto=0", "-c", f"safe.directory={volume.data_path}", "-c", "init.templateDir=", "-c", "user.name=Storage fixture", "-c", "user.email=storage@example.test", *arguments],
+            cwd=volume.data_path,
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        ).stdout.strip()
+
+    git("init", "--initial-branch=main")
+    with volume.filesystem() as fs:
+        fs.mkdir("src")
+        fs.write_atomic("src/value.py", b"VALUE = 1\n", expected_sha256=None, create=True)
+        fs.write_atomic("run_tests.py", b"import runpy\nassert runpy.run_path('/data/src/value.py')['VALUE'] == 1\n", expected_sha256=None, create=True)
+        fs.write_atomic("binary.bin", bytes(range(256)), expected_sha256=None, create=True)
+    os.symlink("src/value.py", volume.data_path / "current.py")
+    git("add", ".")
+    git("commit", "-m", "Initial fixture")
+    initial = git("rev-parse", "HEAD")
+    git("switch", "-c", "fixture-edit")
+    first = _native(
+        backing,
+        "import json,runpy; runpy.run_path('/data/run_tests.py'); open('/data/src/value.py','w').write('VALUE = 2\\n'); "
+        "open('/data/run_tests.py','w').write(\"import runpy\\nassert runpy.run_path('/data/src/value.py')['VALUE'] == 2\\n\"); "
+        "runpy.run_path('/data/run_tests.py'); print(json.dumps({'value':runpy.run_path('/data/current.py')['VALUE']}))",
+    )
+    assert first == {"value": 2}
+    git("add", "src/value.py", "run_tests.py")
+    git("commit", "-m", "Native fixture edit")
+    changed = git("rev-parse", "HEAD")
+    assert changed != initial
+    git("switch", "main")
+    with volume.filesystem() as fs:
+        assert fs.read_bytes("current.py", max_bytes=100) == b"VALUE = 1\n"
+    git("switch", "fixture-edit")
+    second = _native(backing, "import json,runpy; runpy.run_path('/data/run_tests.py'); print(json.dumps({'binary':list(open('/data/binary.bin','rb').read()),'value':runpy.run_path('/data/current.py')['VALUE']}))")
+    assert second == {"binary": list(range(256)), "value": 2}
+    assert git("status", "--porcelain") == ""
+    git("fsck", "--strict")
+
+
+def test_sqlite_transactions_and_committed_rows_survive_real_disk_exhaustion(backing):
+    result = _native(
+        backing,
+        """import sqlite3,json
+db=sqlite3.connect('/data/full.sqlite')
+db.execute('PRAGMA journal_mode=DELETE')
+db.execute('CREATE TABLE entries (id INTEGER PRIMARY KEY, payload BLOB)')
+db.execute('INSERT INTO entries VALUES (1,?)',(b'retained',)); db.commit()
+db.execute('BEGIN IMMEDIATE')
+peer=sqlite3.connect('/data/full.sqlite',timeout=0)
+try:
+    peer.execute('BEGIN IMMEDIATE')
+    raise AssertionError('Second writer bypassed SQLite locking')
+except sqlite3.OperationalError as exc:
+    lock=exc.sqlite_errorcode
+finally:
+    peer.close(); db.rollback()
+db.execute('INSERT INTO entries VALUES (2,?)',(b'rolled-back',)); db.rollback()
+assert db.execute('SELECT COUNT(*) FROM entries').fetchone()==(1,)
+committed=1; error=None
+try:
+    for identifier in range(2,202):
+        db.execute('INSERT INTO entries VALUES (?,?)',(identifier,b'x'*(1<<20)))
+        db.commit(); committed+=1
+except sqlite3.OperationalError as exc:
+    error=exc.sqlite_errorcode; db.rollback()
+finally:
+    db.close()
+with sqlite3.connect('/data/full.sqlite') as reopened:
+    integrity=reopened.execute('PRAGMA integrity_check').fetchone()[0]
+    count=reopened.execute('SELECT COUNT(*) FROM entries').fetchone()[0]
+    first=reopened.execute('SELECT payload FROM entries WHERE id=1').fetchone()[0].decode()
+print(json.dumps({'error':error,'lock':lock,'integrity':integrity,'committed':committed,'rows':count,'first':first}))
+""",
+    )
+    import sqlite3
+
+    assert result["error"] == sqlite3.SQLITE_FULL and result["lock"] == sqlite3.SQLITE_BUSY
+    assert result["integrity"] == "ok" and result["first"] == "retained"
+    assert result["rows"] == result["committed"] > 1
+    backing[0].verify_reserve()
 
 
 def test_host_created_files_and_folders_are_usable_by_the_native_view(backing):

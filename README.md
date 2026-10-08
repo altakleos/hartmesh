@@ -57,6 +57,9 @@ fresh qualified resources behind their existing routes. Legacy folders are not
 adopted or moved. Shared access requires explicit resource grants; company
 custody does not grant access. Disable a convenience feature without deleting its
 resource; its generic folder remains available under current grants.
+The [consumer handoff](docs/STORAGE_SPACES_CONSUMER.md) covers asynchronous callers,
+trusted nonhuman identity, wiki/repository/SQLite qualification and supported
+single-host native attachments.
 The [backing requirements](docs/STORAGE_SPACES.md#qualified-linux-backing) describe
 the fixed filesystem byte/inode bounds and platform reserve. Administrators can
 create quiesced backups, restore with current grants, archive and delete through

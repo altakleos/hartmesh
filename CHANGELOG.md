@@ -48,8 +48,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Resource mode rejects legacy AIO/local sandbox path mappings until those
   adapters supply actual resource admission and writer fencing. The qualified
   direct Docker resource attachment API remains available to trusted consumers.
+- Qualify restricted company wiki/index workloads for validated nonhuman callers,
+  actual Git operations with native edits/tests, and SQLite transaction integrity
+  under real filesystem exhaustion. Saved resources survive actual chat deletion
+  and optional feature removal. Publish the asynchronous consumer example and
+  capability, deployment and recovery handoff; native CI requires all 15 cases.
 
 ### Schema changes
+
+- Consumer readiness qualification adds no database or configuration schema
+  changes; the head remains `0033_storage_features`, configuration version 53.
 
 - The extension storage facade adds no database or config schema changes;
   its stage ended at `0032_storage_lifecycle`, config version 53.
