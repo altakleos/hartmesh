@@ -220,6 +220,22 @@ def _sweep_project_documents_dir(documents_dir: Path, *, protected: set[Path], c
 def _reconcile_storage(paths: Paths, *, user_id: str | None, rows: list[dict], guard_cutoff: datetime, report: SweepReport) -> None:
     """Worker-thread: storage reconciliation across the swept users' trees."""
     cutoff_ts = guard_cutoff.timestamp()
+    if getattr(paths, "resource_shelf", False):
+        # Ordinary native files never become disposable feature orphans.
+        # Only this controller's private staging is eligible for its sweep.
+        if user_id is None:
+            raise ValueError("Resource shelf reconciliation requires an admitted owner")
+        control = paths._volume("hm.projects", user_id).control_path
+        for directory in (control / "project-staging", control / "project-conversion"):
+            if not directory.is_dir() or directory.is_symlink():
+                continue
+            for parent, _directories, filenames in os.walk(directory, followlinks=False):
+                for filename in filenames:
+                    candidate = Path(parent) / filename
+                    if not candidate.is_symlink() and candidate.stat().st_mtime < cutoff_ts:
+                        candidate.unlink()
+                        report.staging_removed += 1
+        return
     protected_by_user: dict[str, set[Path]] = {}
     for row in rows:
         owner = row.get("user_id")

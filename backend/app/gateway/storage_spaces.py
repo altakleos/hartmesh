@@ -40,6 +40,7 @@ def human_lookup(repository):
 
 
 async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session_factory) -> None:
+    app.state.storage_spaces_enabled = config.enabled
     app.state.storage_spaces = None
     if not config.enabled:
         return

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -68,7 +69,8 @@ async def test_stream_refuses_link_swapped_after_preflight(tmp_path: Path, monke
 
     monkeypatch.setattr(module, preflight, checked_then_swapped)
     monkeypatch.setattr(module, "acting_user_id", lambda request: "owner")
-    response = await handler.__wrapped__("reports/report.txt", request=SimpleNamespace(), download=False)
+    # This anchor isolates descriptor serving from all HTTP admission wrappers.
+    response = await inspect.unwrap(handler)("reports/report.txt", request=SimpleNamespace(), download=False)
     with pytest.raises(HTTPException) as exc:
         await _run(response)
     assert exc.value.status_code == 400

@@ -14,6 +14,7 @@ its storage implementation lives in ``deerflow.runtime.events.store.db`` and
 there is no matching entity directory.
 """
 
+from deerflow.features.resources import StorageFeatureLinkRow
 from deerflow.persistence.agents.model import AgentRow
 from deerflow.persistence.channel_connections.model import (
     ChannelConnectionRow,
@@ -61,6 +62,7 @@ __all__ = [
     "ScheduledTaskRow",
     "ScheduledTaskRunRow",
     "SharedPublicationRow",
+    "StorageFeatureLinkRow",
     "SpaceRow",
     "SpaceGrantRow",
     "SpaceEventRow",

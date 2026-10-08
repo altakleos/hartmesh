@@ -47,9 +47,10 @@ it introduces no second loader, policy language or per-customer browser build.
 
 Storage Spaces is HartMesh's persistent folder resource foundation. The resource and file
 delivery adds identity, custody, mandatory access and a generic browser/API.
-Existing My Files, Shared and Projects continue through their current routes
-and mounts. Native attachment and recovery adapters are described below;
-feature extraction and the Agent Execution consumer qualification remain pending.
+My Files, Shared and Projects keep their compatibility routes. In qualified
+resource mode they use fresh resources through default first-party plugins.
+Legacy folders are neither adopted nor copied. The Agent Execution consumer
+qualification remains a separate final stage.
 
 Each resource has a stable ID and opaque backing handle. Display names are
 labels: renaming changes neither location, ownership nor permissions. Personal
@@ -294,5 +295,70 @@ recovery controllers cannot be bypassed by this native recovery surface.
 
 The additive `0032_storage_lifecycle` migration adds attachment, mount and backup
 facts after `0031`, preserving previous ancestry and all existing feature bytes.
-Used containment/backup facts cannot be downgraded away. Feature facade/plugin
-extraction and final wiki/repository/nonhuman qualification are later stages.
+Used containment/backup facts cannot be downgraded away. Final wiki/repository/nonhuman qualification remains a later stage.
+
+
+## Default first-party features
+
+Enabling `storage_spaces` loads three ordinary extension entries by default:
+`deerflow.features.plugins:install_my_files`, `:install_shared` and
+`:install_projects`. Explicit entries in `plugins` override their defaults,
+including `enabled: false` to omit a feature. Each supplies a business resource
+action and the existing app-scoped service lifecycle. Shared also supplies an
+exact controller recovery action. There is one loader and no feature installer.
+
+My Files and Projects each link an owner to one private native resource. The
+relationship is persisted atomically with resource/backing creation; rename,
+restart and feature disable preserve IDs. Revoked or deleted links do not lazily
+allocate replacement roots. Projects remain owner-filtered conversation groups
+and shelves: sharing a resource does not broaden project metadata audiences.
+Instructions/indexes remain transient, untrusted and resolved at run admission.
+Shelf content is hash checked in resource mode. Retention purges referenced trash
+under its existing rules and collects private staging; it never deletes ordinary
+native files as apparent feature orphans. Project archive/restore updates project
+metadata without permanently archiving/tombstoning its backing resource.
+
+Shared is a company-custodied mediated resource bound to the `hm.shared`
+`publication` controller version 1. Its first provisioning requires current
+company provisioning authority. Only persisted explicit grants admit additional
+readers/publishers; use ordinary resource ADMIN grant requests with acknowledgement
+of existing data. READ/EXPORT permit settled browsing and downloads, OPERATE admits
+publication/removal, and controller recovery also requires ADMIN. Company custody
+itself grants no access and no ordinary user can bootstrap company authority.
+Generic writes and writable resource attachments remain denied for Shared.
+
+Compatibility Keep/Publish/Remove calls use the installed enabled service plus
+current resource permissions. Publication from My Files also requires source
+READ/EXPORT and disclosure authority. Publishing explicitly discloses that file
+to the Shared resource audience. The original copy, live-byte deduplication,
+conflict suffixes, provenance and publication-ID-fenced Undo are retained. Undo
+removes only fresh publications from the operation; it is not file version rollback.
+
+Copy stages, removal payloads, conversion temporary files and bounded host receipts
+live under the qualified private control root, on the same byte/inode-limited
+filesystem and outside every generic data view. A domain workflow commits its
+intent before effects and holds private filesystem locks while its domain
+repository uses independent SQL transactions. It drains cancellation. Reads do
+not hold a SQL writer across domain callbacks or client streaming; the stream
+opens one confined inode under fresh resource admission. Read-only requests never
+reconcile pending removals.
+
+A lost publication acknowledgement first checks its preassigned exact publication
+ID. Committed records preserve their bytes. Unknown outcomes keep bytes and an
+operation-bound private receipt. The installed enabled Shared controller's
+`recover` action accepts only an exact pending operation ID/current generation,
+reconciles recorded publication/journal identities and refuses unknown receipts.
+No generic native recovery downgrade bypasses it. Live host-operation locks
+prevent recovery from declaring a still-running callback retired. Disabling or
+removing the feature keeps resources, grants, rows and bytes; affected behavior
+is unavailable, while settled generic reads/export obey the persisted core floor.
+
+AIO thread mounts and local path mappings do not implement qualified resource
+attachment admission/fencing and explicitly reject resource mode. They never
+mount legacy files/shared directories as fallback. Trusted consumers may use the
+qualified direct Docker attachment API described above; the neutral extension
+facade continues to report native attachments unsupported.
+
+The additive `0033_storage_features` migration creates
+`hm_storage_feature_links`. Used relationships cannot be downgraded away.
+Configuration remains version 53; no legacy-directory adoption is implemented.

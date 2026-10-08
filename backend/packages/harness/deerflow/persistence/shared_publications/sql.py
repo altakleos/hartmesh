@@ -45,10 +45,11 @@ class SharedPublicationRepository:
         published_by: str,
         from_thread_id: str | None,
         from_path: str | None,
+        publication_id: str | None = None,
     ) -> dict:
         """Record that *published_by* put these bytes at *path*."""
         row = SharedPublicationRow(
-            publication_id=str(uuid.uuid4()),
+            publication_id=publication_id or str(uuid.uuid4()),
             path=path,
             size=size,
             sha256=sha256,
@@ -59,6 +60,9 @@ class SharedPublicationRepository:
         )
         async with self._sf() as session:
             session.add(row)
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
@@ -114,6 +118,9 @@ class SharedPublicationRepository:
                 return None
             row.removed_by = removed_by
             row.removed_at = datetime.now(UTC)
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)

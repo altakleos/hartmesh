@@ -23,6 +23,7 @@ from pydantic import BaseModel
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_project_repo, get_thread_store
+from app.gateway.storage_features import storage_feature
 from deerflow.config.paths import Paths, get_paths
 from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.uploads.manager import list_files_in_dir, output_artifact_url, upload_artifact_url
@@ -102,6 +103,7 @@ async def _list_thread_files(paths: Paths, *, user_id: str, thread_id: str, file
 @router.get("", response_model=ThreadFilesResponse)
 @require_permission("projects", "read")
 @require_permission("threads", "read")
+@storage_feature("hm.projects", write=False)
 async def list_project_thread_files(
     project_id: str,
     request: Request,

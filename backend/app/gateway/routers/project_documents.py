@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config, get_project_document_repo, get_project_repo, get_thread_store
 from app.gateway.routers.uploads import DEFAULT_MAX_FILE_SIZE, UPLOAD_CHUNK_SIZE, _get_upload_limit
+from app.gateway.storage_features import current_feature_service, storage_feature
 from app.gateway.upload_ingestion import ThreadUploadIngestionService, UnsafeFilenameError, UnsafeUploadDestinationError
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import Paths, get_paths
@@ -85,6 +86,21 @@ class ProjectDocumentUploadResponse(BaseModel):
     deduplicated: bool
 
 
+async def _stage_feature_document(request, paths, *, user_id, **values):
+    service = current_feature_service(request, "hm.projects")
+    return await service.execute("stage-document", **values) if service else await stage_document_bytes(paths, user_id=user_id, **values)
+
+
+async def _add_feature_document(request, repo, paths, *, user_id, **values):
+    service = current_feature_service(request, "hm.projects")
+    return await service.execute("commit-document", **values) if service else await add_staged_document(repo, paths, user_id=user_id, **values)
+
+
+async def _attach_feature_copy(request, repo, paths, *, user_id, **values):
+    service = current_feature_service(request, "hm.projects")
+    return await service.execute("attach-copy", **values) if service else await stage_document_copy_for_attach(repo, paths, user_id=user_id, **values)
+
+
 def _to_response(row: dict, *, content_missing: bool = False) -> ProjectDocumentResponse:
     return ProjectDocumentResponse(
         id=row["id"],
@@ -139,6 +155,7 @@ async def _stream_upload(file: UploadFile) -> AsyncIterator[bytes]:
 
 @router.get("", response_model=ProjectDocumentListResponse)
 @require_permission("projects", "read")
+@storage_feature("hm.projects", write=False)
 async def list_project_documents(
     project_id: str,
     request: Request,
@@ -163,6 +180,7 @@ async def list_project_documents(
 
 @router.post("", response_model=ProjectDocumentUploadResponse, status_code=201)
 @require_permission("projects", "write")
+@storage_feature("hm.projects", write=True)
 async def upload_project_document(
     project_id: str,
     request: Request,
@@ -189,7 +207,7 @@ async def upload_project_document(
     paths = get_paths()
     max_file_size = _get_upload_limit(config, "max_file_size", DEFAULT_MAX_FILE_SIZE, legacy_key="max_single_file_size")
     try:
-        staged = await stage_document_bytes(paths, user_id=user_id, project_id=project_id, chunks=_stream_upload(file), max_bytes=max_file_size)
+        staged = await _stage_feature_document(request, paths, user_id=user_id, project_id=project_id, chunks=_stream_upload(file), max_bytes=max_file_size)
     except ShelfUploadTooLargeError:
         raise HTTPException(status_code=413, detail=f"File too large: {display_name}")
     except ValueError:
@@ -199,7 +217,8 @@ async def upload_project_document(
         await run_file_io(staged.staging_path.unlink, True)
         raise HTTPException(status_code=400, detail="Empty file")
 
-    result = await add_staged_document(
+    result = await _add_feature_document(
+        request,
         get_project_document_repo(request),
         paths,
         user_id=user_id,
@@ -267,6 +286,7 @@ def _resolve_thread_source(paths: Paths, *, user_id: str, thread_id: str, kind: 
 @router.post("/from-thread", response_model=ProjectDocumentUploadResponse, status_code=201)
 @require_permission("projects", "write")
 @require_permission("threads", "read")
+@storage_feature("hm.projects", write=True)
 async def promote_thread_file_to_shelf(
     project_id: str,
     body: PromoteThreadFileRequest,
@@ -301,7 +321,7 @@ async def promote_thread_file_to_shelf(
 
     max_file_size = _get_upload_limit(config, "max_file_size", DEFAULT_MAX_FILE_SIZE, legacy_key="max_single_file_size")
     try:
-        staged = await stage_document_bytes(paths, user_id=user_id, project_id=project_id, chunks=read_file_chunks(source, chunk_size=UPLOAD_CHUNK_SIZE), max_bytes=max_file_size)
+        staged = await _stage_feature_document(request, paths, user_id=user_id, project_id=project_id, chunks=read_file_chunks(source, chunk_size=UPLOAD_CHUNK_SIZE), max_bytes=max_file_size)
     except ShelfUploadTooLargeError:
         raise HTTPException(status_code=413, detail=f"File too large: {display_name}")
     except ValueError:
@@ -311,7 +331,8 @@ async def promote_thread_file_to_shelf(
         await run_file_io(staged.staging_path.unlink, True)
         raise HTTPException(status_code=400, detail="Empty file")
 
-    result = await add_staged_document(
+    result = await _add_feature_document(
+        request,
         repo,
         paths,
         user_id=user_id,
@@ -335,6 +356,7 @@ async def promote_thread_file_to_shelf(
 @router.post("/{document_id}/attach-to-thread/{thread_id}", response_model=AttachDocumentResponse)
 @require_permission("projects", "write")
 @require_permission("threads", "write", owner_check=True, require_existing=True)
+@storage_feature("hm.projects", write=True)
 async def attach_project_document_to_thread(
     project_id: str,
     document_id: str,
@@ -364,7 +386,7 @@ async def attach_project_document_to_thread(
     user_id = get_effective_user_id()
     paths = get_paths()
     try:
-        staged = await stage_document_copy_for_attach(repo, paths, user_id=user_id, project_id=project_id, document_id=document_id)
+        staged = await _attach_feature_copy(request, repo, paths, user_id=user_id, project_id=project_id, document_id=document_id)
     except ShelfContentMissingError:
         raise HTTPException(status_code=409, detail="content_missing")
     except ValueError:
@@ -409,6 +431,7 @@ async def attach_project_document_to_thread(
 
 @router.get("/{document_id}/content")
 @require_permission("projects", "read")
+@storage_feature("hm.projects", write=False)
 async def get_project_document_content(
     project_id: str,
     document_id: str,
@@ -470,7 +493,7 @@ async def get_project_document_content(
     # regardless of ``download``, exactly like the artifacts router, and
     # ``download=true`` attaches everything.
     inline = not download and media_type is not None and _is_inline_viewable_mime_type(media_type)
-    return FileResponse(
+    response = FileResponse(
         serving_path,
         media_type=media_type or "application/octet-stream",
         filename=filename,
@@ -479,10 +502,14 @@ async def get_project_document_content(
         headers={"X-Content-Type-Options": "nosniff"},
         content_disposition_type="inline" if inline else "attachment",
     )
+    response._project_original = original
+    response._project_document = dict(row)
+    return response
 
 
 @router.delete("/{document_id}", status_code=204)
 @require_permission("projects", "delete")
+@storage_feature("hm.projects", write=True)
 async def delete_project_document(project_id: str, document_id: str, request: Request) -> None:
     """Move one document to trash (204). Restore/purge are the Slice-D trash tier.
 

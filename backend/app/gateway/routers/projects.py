@@ -8,6 +8,7 @@ from pydantic import BaseModel, Field, field_validator
 
 from app.gateway.authz import require_permission
 from app.gateway.deps import get_config, get_project_repo, get_thread_store
+from app.gateway.storage_features import current_feature_service, storage_feature
 from deerflow.config.app_config import AppConfig, get_app_config
 from deerflow.config.projects_config import ProjectsConfig
 from deerflow.runtime.secret_context import redact_metadata_secrets
@@ -75,6 +76,15 @@ class ProjectThreadResponse(BaseModel):
         return redact_metadata_secrets(value)
 
 
+def _project_backend(request):
+    service = current_feature_service(request, "hm.projects")
+    if service:
+        from deerflow.features.behaviors import ProjectRepositoryFacade
+
+        return ProjectRepositoryFacade(service)
+    return get_project_repo(request)
+
+
 def _to_response(row: dict) -> ProjectResponse:
     return ProjectResponse(
         id=row["id"],
@@ -115,21 +125,24 @@ def _validate_instructions_length(instructions: str | None) -> None:
 
 @router.post("", response_model=ProjectResponse, status_code=201)
 @require_permission("projects", "write")
+@storage_feature("hm.projects", write=True)
 async def create_project(body: ProjectCreateRequest, request: Request) -> ProjectResponse:
     _validate_instructions_length(body.instructions)
-    repo = get_project_repo(request)
+    repo = _project_backend(request)
     return _to_response(await repo.create(name=body.name, instructions=body.instructions, presentation=body.presentation))
 
 
 @router.get("", response_model=ProjectListResponse)
 @require_permission("projects", "read")
+@storage_feature("hm.projects", write=False)
 async def list_projects(request: Request, status: ProjectStatus | None = None) -> ProjectListResponse:
-    repo = get_project_repo(request)
+    repo = _project_backend(request)
     return ProjectListResponse(projects=[_to_response(r) for r in await repo.list(status=status)])
 
 
 @router.get("/config", response_model=ProjectsConfigResponse)
 @require_permission("projects", "read")
+@storage_feature("hm.projects", write=False)
 async def get_projects_config(request: Request, config: AppConfig = Depends(get_config)) -> ProjectsConfigResponse:
     """Projects config for the UI (instructions byte cap, trash retention).
 
@@ -145,8 +158,9 @@ async def get_projects_config(request: Request, config: AppConfig = Depends(get_
 
 @router.get("/{project_id}", response_model=ProjectResponse)
 @require_permission("projects", "read")
+@storage_feature("hm.projects", write=False)
 async def get_project(project_id: str, request: Request) -> ProjectResponse:
-    row = await get_project_repo(request).get(project_id)
+    row = await _project_backend(request).get(project_id)
     if row is None:
         raise _not_found()
     return _to_response(row)
@@ -154,9 +168,10 @@ async def get_project(project_id: str, request: Request) -> ProjectResponse:
 
 @router.patch("/{project_id}", response_model=ProjectResponse)
 @require_permission("projects", "write")
+@storage_feature("hm.projects", write=True)
 async def patch_project(project_id: str, body: ProjectPatchRequest, request: Request) -> ProjectResponse:
     _validate_instructions_length(body.instructions)
-    row = await get_project_repo(request).patch(project_id, name=body.name, instructions=body.instructions, presentation=body.presentation)
+    row = await _project_backend(request).patch(project_id, name=body.name, instructions=body.instructions, presentation=body.presentation)
     if row is None:
         raise _not_found()
     return _to_response(row)
@@ -164,8 +179,9 @@ async def patch_project(project_id: str, body: ProjectPatchRequest, request: Req
 
 @router.post("/{project_id}/archive", response_model=ProjectResponse)
 @require_permission("projects", "write")
+@storage_feature("hm.projects", write=True)
 async def archive_project(project_id: str, request: Request) -> ProjectResponse:
-    row = await get_project_repo(request).set_status(project_id, "archived")
+    row = await _project_backend(request).set_status(project_id, "archived")
     if row is None:
         raise _not_found()
     return _to_response(row)
@@ -173,8 +189,9 @@ async def archive_project(project_id: str, request: Request) -> ProjectResponse:
 
 @router.post("/{project_id}/restore", response_model=ProjectResponse)
 @require_permission("projects", "write")
+@storage_feature("hm.projects", write=True)
 async def restore_project(project_id: str, request: Request) -> ProjectResponse:
-    row = await get_project_repo(request).set_status(project_id, "active")
+    row = await _project_backend(request).set_status(project_id, "active")
     if row is None:
         raise _not_found()
     return _to_response(row)
@@ -182,16 +199,18 @@ async def restore_project(project_id: str, request: Request) -> ProjectResponse:
 
 @router.delete("/{project_id}", status_code=204)
 @require_permission("projects", "delete")
+@storage_feature("hm.projects", write=True)
 async def delete_project(project_id: str, request: Request) -> None:
-    if not await get_project_repo(request).delete(project_id):
+    if not await _project_backend(request).delete(project_id):
         raise _not_found()
 
 
 @router.get("/{project_id}/threads", response_model=list[ProjectThreadResponse])
 @require_permission("projects", "read")
 @require_permission("threads", "read")
+@storage_feature("hm.projects", write=False)
 async def list_project_threads(project_id: str, request: Request, limit: int = Query(default=100, ge=1, le=1000), offset: int = Query(default=0, ge=0)) -> list[ProjectThreadResponse]:
-    if await get_project_repo(request).get(project_id) is None:
+    if await _project_backend(request).get(project_id) is None:
         raise _not_found()
     # Active members only, mirroring the sidebar's `archived: false` lists:
     # an archived chat leaves the project's pages the same way it leaves the

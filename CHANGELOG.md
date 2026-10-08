@@ -11,7 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Add host-only stable space identity, personal/company custody, native/mediated
   mutation modes, opaque feature bindings and explicit typed human/nonhuman grants.
-  Current My Files, Shared and Projects behavior and byte locations are preserved.
+  Existing compatibility routes retain their authorization and response contracts.
 - Serialize resource/grant changes with generation checks and typed authority
   events. Unknown/retired actors, malformed persisted state and stale requests
   fail closed independently of optional authorization.
@@ -36,10 +36,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scoped mediated operations require the installed compatible controller.
   Resource pages reuse the existing browser host and check current grants.
 
+- Register default My Files, Shared publication/recovery and Projects features
+  through the existing plugin loader when qualified storage is enabled. Explicit
+  disabled loader entries override defaults. Fresh resources have persistent
+  feature links; disabling a feature never removes its data or grants.
+- Keep publication deduplication, suffix conflicts, provenance and exact Undo.
+  Private staging/journals stay outside generic folders. Lost database
+  acknowledgements retain committed copies; unknown outcomes retain receipts for
+  exact installed-controller recovery. Project shelves remain user owned, with
+  transient untrusted latest context and reversible metadata archive/restore.
+- Resource mode rejects legacy AIO/local sandbox path mappings until those
+  adapters supply actual resource admission and writer fencing. The qualified
+  direct Docker resource attachment API remains available to trusted consumers.
+
 ### Schema changes
 
 - The extension storage facade adds no database or config schema changes;
-  migration head remains `0032_storage_lifecycle`, config version 53.
+  its stage ended at `0032_storage_lifecycle`, config version 53.
 
 - Database migration `0030_storage_spaces` adds `storage_spaces`,
   `storage_space_grants` and `storage_space_events` after the released
@@ -54,6 +67,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `storage_space_mounts` and `storage_space_backups` after `0031`; used containment
   and backup facts cannot be erased by downgrade. No config schema change in this
   stage: configuration remains version 53.
+
+- Migration `0033_storage_features` adds `hm_storage_feature_links`, binding
+  first-party namespace/owner keys uniquely to stable resource IDs. It follows
+  `0032` and refuses downgrade of used relationships. No config schema change:
+  configuration remains version 53. No legacy-folder adoption bridge is included.
 
 ## [2.2.0+hartmesh.42] - 2026-10-07
 

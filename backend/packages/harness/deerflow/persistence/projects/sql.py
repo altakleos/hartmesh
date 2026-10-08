@@ -81,6 +81,9 @@ class ProjectRepository:
         )
         async with self._sf() as session:
             session.add(row)
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
@@ -131,6 +134,9 @@ class ProjectRepository:
                 row.instructions = instructions
             if presentation is not None:
                 row.presentation = presentation
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
@@ -149,6 +155,9 @@ class ProjectRepository:
             if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
                 return None
             row.status = status
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
@@ -270,6 +279,9 @@ class ProjectDocumentRepository:
                 dedup_stmt = dedup_stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
             existing = (await session.execute(dedup_stmt)).scalars().first()
             if existing is not None:
+                from deerflow.spaces.workflows import mark_effect
+
+                mark_effect()
                 await session.commit()
                 return self._row_to_dict(existing)
             if place_file is not None:
@@ -292,6 +304,9 @@ class ProjectDocumentRepository:
                 updated_at=now,
             )
             session.add(row)
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
@@ -414,6 +429,9 @@ class ProjectDocumentRepository:
             if resolved_user_id is not None:
                 stmt = stmt.where(ProjectDocumentRow.user_id == resolved_user_id)
             result = await session.execute(stmt)
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             return result.rowcount > 0
 
@@ -474,6 +492,9 @@ class ProjectDocumentRepository:
             row = self._row_to_dict(locked)
             # Drained: the lock is never released over an in-flight staging copy.
             staged = await await_drained(stage(row))
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             return row, staged
 
@@ -514,6 +535,9 @@ class ProjectDocumentRepository:
             # Drained: a cancelled conversion finishes its worker (and any
             # publish) before the document lock unwinds (§6.3).
             result = await await_drained(convert(row))
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             return row, result
 
@@ -642,6 +666,9 @@ class ProjectDocumentRepository:
                 # mutation inside the transaction — the discarded namespace
                 # cleanup follows commit (§8.2).
                 result = await session.execute(sa_delete(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id, ProjectDocumentRow.trashed_at.is_not(None)))
+                from deerflow.spaces.workflows import mark_effect
+
+                mark_effect()
                 await session.commit()
                 if result.rowcount == 0:
                     return "not_found", None
@@ -651,6 +678,9 @@ class ProjectDocumentRepository:
             source.project_id = target_project_id
             source.trashed_at = None
             source.trash_origin = None
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             await session.refresh(source)
             return "restored", self._row_to_dict(source)
@@ -732,5 +762,8 @@ class ProjectDocumentRepository:
                     await session.rollback()
                     raise
             result = await session.execute(sa_delete(ProjectDocumentRow).where(ProjectDocumentRow.id == document_id, ProjectDocumentRow.trashed_at.is_not(None)))
+            from deerflow.spaces.workflows import mark_effect
+
+            mark_effect()
             await session.commit()
             return result.rowcount > 0

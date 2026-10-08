@@ -3,6 +3,8 @@ import logging
 import os
 import re
 import shutil
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path, PureWindowsPath
 
 from deerflow.config.runtime_paths import runtime_home
@@ -276,6 +278,18 @@ class Paths:
             return files_dir
         files_dir.chmod(0o777)
         return files_dir
+
+    def user_files_control_dir(self, user_id: str) -> Path | None:
+        return None
+
+    def shared_control_dir(self) -> Path | None:
+        return None
+
+    def project_staging_dir(self, user_id: str, project_id: str) -> Path:
+        return self.project_documents_dir(user_id, project_id) / ".staging"
+
+    def project_conversion_dir(self, user_id: str) -> Path | None:
+        return None
 
     def shared_dir(self) -> Path:
         """The company's Shared area: `{base_dir}/shared/`.
@@ -628,10 +642,26 @@ class Paths:
 # ── Singleton ────────────────────────────────────────────────────────────
 
 _paths: Paths | None = None
+_scoped_paths = ContextVar("host_scoped_paths", default=None)
+
+
+@contextmanager
+def paths_scope(paths: Paths):
+    """Trusted host admission only; runtime payloads cannot choose filesystem roots."""
+    if not isinstance(paths, Paths):
+        raise TypeError("Scoped paths require a host Paths adapter")
+    token = _scoped_paths.set(paths)
+    try:
+        yield
+    finally:
+        _scoped_paths.reset(token)
 
 
 def get_paths() -> Paths:
     """Return the global Paths singleton (lazy-initialized)."""
+    scoped = _scoped_paths.get()
+    if scoped is not None:
+        return scoped
     global _paths
     if _paths is None:
         _paths = Paths()

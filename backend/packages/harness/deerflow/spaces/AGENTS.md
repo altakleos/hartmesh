@@ -86,3 +86,12 @@ once and drain reads before close. Active content downloads; reads never cache.
 Tests: `tests/test_storage_spaces_*.py`, migrations `0030`–`0032` and the
 separate mandatory native-volume Docker tier. Append new Alembic revisions;
 never change shipped ancestry or erase used custody/grant/event tables.
+
+Host cross-session workflows commit intents before domain effects and hold private
+filesystem locks outside SQL while the feature repository commits. Every core
+admission probes those locks; accepting a live callback as retired is forbidden.
+Drain cancellation, preserve unknown results, and distinguish confirmed pre-effect
+rejections. Bounded exact-ID receipts live in private control, never data mounts.
+Default first-party contributions/compatibility/context adapters are under
+`features/` and Gateway `storage_features.py`; see the [feature contract](../../../../../docs/STORAGE_SPACES.md#default-first-party-features).
+Migration `0033` persists their opaque unique relationships; no legacy adoption.

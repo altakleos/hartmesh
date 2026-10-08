@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from contextvars import ContextVar
 
 from deerflow_extension_api.storage import StorageOperationPending
@@ -42,6 +43,12 @@ class SpaceFiles:
         self.attachment_guard = None
 
     async def _guard(self, session, admitted, requests, operation_id):
+        from deerflow.spaces.workflows import _owner, probe
+
+        owner = _owner.get()
+        for key, (row, _grant) in admitted.items():
+            if owner is None or owner[0] is not self or key not in owner[1]:
+                await run_file_io(probe, await self._volume(session, row))
         pending = (await session.execute(select(SpaceFileOperationRow).where(SpaceFileOperationRow.space_id.in_(admitted), SpaceFileOperationRow.phase == "pending"))).scalars().all()
         if any((row.space_id, row.operation_id) != operation_id for row in pending):
             raise SpaceOperationPending("A file operation has an unconfirmed outcome; recovery is required")
@@ -59,38 +66,41 @@ class SpaceFiles:
                 if attachment.phase != "active" or requests[mount.space_id][0] & (Permission.WRITE | Permission.ADMIN):
                     raise SpaceOperationPending("Storage attachment provider is required to confirm containment")
 
+    @asynccontextmanager
+    async def provisioning(self, *, actor, name, custody, mode, feature=None):
+        """Host-only atomic provisioning boundary for feature-owned SQL links."""
+        async with self.registry.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (session, row, permissions):
+            used = set((await session.execute(select(SpaceBackingRow.slot_id))).scalars())
+            volume = None
+            for slot_id in sorted(set(self.catalog.volumes) - used):
+                candidate = await run_file_io(self.catalog.verify, slot_id)
+                if await run_file_io(self._empty, candidate):
+                    volume = candidate
+                    break
+            if volume is None:
+                raise SpaceConflict("No empty qualified backing capacity remains")
+            spec = volume.spec
+            session.add(
+                SpaceBackingRow(
+                    backing_handle=row.backing_handle,
+                    space_id=row.id,
+                    slot_id=spec.slot_id,
+                    filesystem_uuid=spec.filesystem_uuid,
+                    max_bytes=spec.max_bytes,
+                    max_inodes=spec.max_inodes,
+                    root_inode=volume.root_inode,
+                    control_inode=volume.control_inode,
+                )
+            )
+            await session.flush()
+            yield session, self.registry._view(row, int(permissions))
+        self._verified[spec.slot_id] = volume
+
     async def create(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None) -> Space:
-        # Unique slot/filesystem constraints arbitrate simultaneous PostgreSQL
-        # allocators. A conflict rolls back the entire resource and retries the
-        # remaining inventory; no orphan resource or recycled tombstone root.
         for _attempt in range(len(self.catalog.volumes) + 1):
             try:
-                async with self.registry.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (session, row, permissions):
-                    used = set((await session.execute(select(SpaceBackingRow.slot_id))).scalars())
-                    volume = None
-                    for slot_id in sorted(set(self.catalog.volumes) - used):
-                        candidate = await run_file_io(self.catalog.verify, slot_id)
-                        if await run_file_io(self._empty, candidate):
-                            volume = candidate
-                            break
-                    if volume is None:
-                        raise SpaceConflict("No empty qualified backing capacity remains")
-                    spec = volume.spec
-                    session.add(
-                        SpaceBackingRow(
-                            backing_handle=row.backing_handle,
-                            space_id=row.id,
-                            slot_id=spec.slot_id,
-                            filesystem_uuid=spec.filesystem_uuid,
-                            max_bytes=spec.max_bytes,
-                            max_inodes=spec.max_inodes,
-                            root_inode=volume.root_inode,
-                            control_inode=volume.control_inode,
-                        )
-                    )
-                    await session.flush()
-                    space = self.registry._view(row, int(permissions))
-                self._verified[spec.slot_id] = volume
+                async with self.provisioning(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (_session, space):
+                    pass
                 return space
             except IntegrityError:
                 continue
@@ -209,6 +219,116 @@ class SpaceFiles:
 
         # This drains the entire admitted mutation, including its final SQL
         # commit, before a cancelled caller can release host ownership.
+        return await await_drained(perform())
+
+    async def run_read_workflow(self, *, actor, requests, call, controller_admission=None):
+        """Drain a read callback outside SQL while private locks prevent changes."""
+        from deerflow.spaces.workflows import _owner, _read_only, acquire, close
+
+        async def perform():
+            descriptors = []
+            token = None
+            read_token = _read_only.set(True)
+            try:
+                async with self.registry.admitted(actor=actor, requests=requests) as (session, rows):
+                    if controller_admission is not None:
+                        await controller_admission(session, rows)
+                    volumes = {key: await self._volume(session, row) for key, (row, _) in rows.items()}
+                    descriptors = await run_file_io(acquire, volumes)
+                    token = _owner.set((self, frozenset(rows)))
+                result = await call(volumes)
+                async with self.registry.admitted(actor=actor, requests=requests) as (session, rows):
+                    if controller_admission is not None:
+                        await controller_admission(session, rows)
+                return result
+            finally:
+                _read_only.reset(read_token)
+                if token is not None:
+                    _owner.reset(token)
+                await run_file_io(close, descriptors)
+
+        return await await_drained(perform())
+
+    async def run_workflow(self, *, actor, requests, destination_id, operation_id, request, call, controller_admission=None, reconcile=False):
+        """Host-only domain work spanning its own SQL sessions and file publication.
+
+        Private process-held filesystem locks prevent accepting/replaying a live
+        writer. Durable intent prevents permissive fallback after process death.
+        No SQL writer is held while the domain repository commits its own work.
+        """
+        from deerflow.spaces.workflows import WorkflowReceipt, WorkflowRejected, _effect, _owner, _receipt, acquire, close
+
+        self._operation_id(operation_id)
+        generation = requests[destination_id][1]
+        if generation is None:
+            raise ValueError("Host workflows require a lifecycle generation")
+
+        async def perform():
+            descriptors = []
+            token = None
+            effect_token = _effect.set([False])
+            receipt_token = None
+            receipt = None
+            try:
+                async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id) if reconcile else None) as (session, rows):
+                    if controller_admission is not None:
+                        await controller_admission(session, rows)
+                    volumes = {key: await self._volume(session, row) for key, (row, _) in rows.items()}
+                    descriptors = await run_file_io(acquire, volumes)
+                    token = _owner.set((self, frozenset(rows)))
+                    if reconcile:
+                        existing = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
+                        if existing is None or existing.phase != "pending" or existing.request != request or existing.generation != generation:
+                            raise SpaceOperationPending("No matching controller workflow intent exists")
+                    else:
+                        session.add(SpaceFileOperationRow(space_id=destination_id, operation_id=operation_id, actor_kind=actor.kind, actor_id=actor.subject_id, generation=generation, phase="pending", request=request))
+                async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, rows):
+                    if controller_admission is not None:
+                        await controller_admission(session, rows)
+                try:
+                    receipt = WorkflowReceipt(volumes[destination_id], operation_id, request)
+                    if reconcile:
+                        await run_file_io(receipt.load)
+                    else:
+                        await run_file_io(receipt.save)
+                    receipt_token = _receipt.set(receipt)
+                    result = await call(volumes)
+                    async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, rows):
+                        if controller_admission is not None:
+                            await controller_admission(session, rows)
+                        intent = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
+                        if intent.phase != "pending":
+                            raise SpaceOperationPending("The host workflow reservation changed")
+                        intent.phase = "complete"
+                        intent.result = {"value": None, "facts": receipt.value["facts"], "resolution": "controller-reconciled" if reconcile else "confirmed"}
+                    try:
+                        await run_file_io(receipt.remove)
+                    except OSError:
+                        # A confirmed operation is not replayed for private cleanup.
+                        pass
+                    return result
+                except WorkflowRejected as exc:
+                    if _effect.get()[0]:
+                        raise SpaceOperationPending("The rejected workflow may have published an effect") from exc
+                    async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, _rows):
+                        intent = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
+                        intent.phase = "failed"
+                        intent.result = {"resolution": "rejected-before-effect"}
+                    try:
+                        await run_file_io(receipt.remove)
+                    except OSError:
+                        pass
+                    raise exc.error
+                except Exception as exc:
+                    raise SpaceOperationPending("Host workflow outcome is pending; preserve data and required feature recovery") from exc
+            finally:
+                if receipt_token is not None:
+                    _receipt.reset(receipt_token)
+                _effect.reset(effect_token)
+                if token is not None:
+                    _owner.reset(token)
+                await run_file_io(close, descriptors)
+
         return await await_drained(perform())
 
     async def write(self, *, actor: PrincipalRef, space_id: str, expected_generation: int, operation_id: str, path: str, content: bytes, expected_sha256: str | None = None, create: bool = False) -> str:
