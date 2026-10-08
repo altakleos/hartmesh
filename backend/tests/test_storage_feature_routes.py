@@ -64,6 +64,12 @@ async def feature_app(tmp_path, request, monkeypatch):
         app.state.shared_publications_repo = SharedPublicationRepository(sf)
         app.state.project_repo = ProjectRepository(sf)
         app.state.project_document_repo = ProjectDocumentRepository(sf)
+        from types import SimpleNamespace
+
+        from app.gateway.deps import get_config
+        from deerflow.config.projects_config import ProjectsConfig
+
+        app.dependency_overrides[get_config] = lambda: SimpleNamespace(uploads={}, projects=ProjectsConfig())
         from app.gateway.routers import project_documents, projects, trash
 
         app.include_router(files_router.router)
@@ -281,3 +287,11 @@ async def test_altered_shelf_document_is_never_attached_under_old_provenance(fea
     response = await client.post(f"/api/projects/{project}/documents/{document['id']}/attach-to-thread/{THREAD}")
     assert response.status_code == 409 and response.json()["detail"] == "content_missing", response.text
     assert (await client.get(f"/api/projects/{project}")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_feature_wrapper_preserves_annotated_thread_id_validation(feature_app):
+    client = feature_app[0]
+    response = await client.post(f"/api/threads/{'a' * 65}/files", json={"path": "/mnt/user-data/outputs/report.txt"})
+    assert response.status_code == 422, response.text
+    assert any("thread_id" in error["loc"] for error in response.json()["detail"])

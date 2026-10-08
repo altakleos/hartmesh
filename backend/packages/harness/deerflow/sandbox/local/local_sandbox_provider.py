@@ -322,9 +322,14 @@ class LocalSandboxProvider(SandboxProvider):
         from deerflow_extension_api.storage import StorageUnsupported
 
         from deerflow.config import get_app_config
+        from deerflow.config.app_config import peek_loaded_app_config
         from deerflow.config.paths import get_paths
 
-        if getattr(getattr(get_app_config(), "storage_spaces", None), "enabled", False) is True:
+        try:
+            resource_config = get_app_config()
+        except FileNotFoundError:
+            resource_config = peek_loaded_app_config()
+        if getattr(getattr(resource_config, "storage_spaces", None), "enabled", False) is True:
             raise StorageUnsupported("Local path mappings do not implement confined resource attachments and writer fencing")
         paths = get_paths()
         effective_user_id = LocalSandboxProvider._effective_acquire_user_id(user_id)

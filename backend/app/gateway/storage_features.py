@@ -46,7 +46,7 @@ def storage_feature(namespace, *, write=False):
 
     def decorate(function):
         signature = inspect.signature(function)
-        hints = get_type_hints(function)
+        hints = get_type_hints(function, include_extras=True)
 
         @wraps(function)
         async def dispatch(*args, **kwargs):
