@@ -121,7 +121,7 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
         with execution_scope(first.execution) as environment:
             environment.provider = first
             runtime = SimpleNamespace(context={AGENT_EXECUTION_CONTEXT_KEY: first.execution, "thread_id": first.execution.thread_id}, state={"thread_data": first.execution.thread_paths})
-            presentation = await await_drained(run_file_io(validate_presentation, runtime, ["/mnt/user-data/outputs/result.txt"], written_after=started))
+            presentation = await await_drained(asyncio.to_thread(validate_presentation, runtime, ["/mnt/user-data/outputs/result.txt"], written_after=started))
         assert presentation.presented == ["/mnt/user-data/outputs/result.txt"], presentation.refused
         assert presentation.sizes == {"/mnt/user-data/outputs/result.txt": 13}
         await await_drained(run_file_io(first.close))

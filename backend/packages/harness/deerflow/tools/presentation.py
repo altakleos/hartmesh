@@ -149,6 +149,9 @@ def validate_presentation(runtime: Any, paths: Sequence[Any] | None, *, written_
 
     presented: list[str] = []
     sizes: dict[str, int] = {}
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+    execution = (getattr(runtime, "context", None) or {}).get(AGENT_EXECUTION_CONTEXT_KEY)
     for path in requested:
         try:
             virtual_path, actual_path = resolve_presented_filepath(runtime, path)
@@ -156,9 +159,17 @@ def validate_presentation(runtime: Any, paths: Sequence[Any] | None, *, written_
             refused.append((path, "outside this conversation's outputs"))
             continue
         try:
-            metadata = os.stat(actual_path)
+            if isinstance(execution, AgentExecution):
+                from deerflow.agent_instances.presentation import output_metadata
+
+                metadata = output_metadata(execution, virtual_path.removeprefix("/mnt/user-data/outputs/"))
+            else:
+                metadata = os.stat(actual_path)
         except OSError:
             refused.append((path, "does not exist"))
+            continue
+        except ValueError:
+            refused.append((path, "output metadata is unavailable or outside the admitted outputs"))
             continue
         if not stat.S_ISREG(metadata.st_mode):
             refused.append((path, "not a regular file"))

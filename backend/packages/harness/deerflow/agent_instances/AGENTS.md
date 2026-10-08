@@ -63,6 +63,10 @@ isolated Python and protected directory descriptors. This bounded root setup
 never opens Home targets; the nonroot SDK creates Home children and confirms cwd.
 Reject layout conflicts/failures before publishing a provider. Instance bash
 does not execute a command when changing to Home fails.
+Output presentation reads only metadata through confined output descriptors on
+the admitted Home backing, with current resident READ and captured generation.
+It requires the exact prepared execution; container paths are never host paths.
+References remain mutable and confer no human retrieval permission.
 
 Public skill scope is read-only and excludes private/legacy/integration storage,
 including late activation and primed caches. Capture bounded public bytes and record
