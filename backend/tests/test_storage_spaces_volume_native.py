@@ -109,12 +109,14 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
         from deerflow.tools.presentation import validate_presentation
 
         started = time.time()
-        await await_drained(
+        creation = await await_drained(
             run_file_io(
                 first.sandbox.execute_command,
-                "cd /mnt/user-data/workspace && python3 -c \"import os; assert os.getcwd() == '/mnt/spaces/home'; open('uploads/input.txt','w').write('input'); open('outputs/result.txt','w').write('native output')\"",
+                "cd /mnt/user-data/workspace && python3 -c \"import os; print('physical cwd:', os.getcwd()); assert os.getcwd() == '/mnt/spaces/home'; "
+                "open('uploads/input.txt','w').write('input'); open('outputs/result.txt','w').write('native output'); print('HARTMESH_OUTPUT_CREATED')\"",
             )
         )
+        assert "HARTMESH_OUTPUT_CREATED" in creation.splitlines(), creation
         assert await await_drained(run_file_io(first.sandbox.read_file, "/mnt/spaces/home/outputs/result.txt")) == "native output"
         with execution_scope(first.execution) as environment:
             environment.provider = first
