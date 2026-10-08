@@ -1,10 +1,10 @@
 {
   "schema": 1,
-  "version": "2.2.0+hartmesh.43",
-  "run_id": 37745640349,
+  "version": "2.2.0+hartmesh.44",
+  "run_id": 37818996925,
   "run_attempt": 1,
   "artifacts": {
-    "sqlite": "sha256:ef8b75634b1188ec7f8b1fb14f2e4b270f243896f1502880dc90528764af487b",
-    "postgres-redis": "sha256:823c495b005a486e70818b959143eb61ec26e40efbdf0b3a92488b19be0570bb"
+    "sqlite": "sha256:18aaa657d7a69e799c69b33512d749f49ec35b3154f7e0eb7e57e8db4485c88a",
+    "postgres-redis": "sha256:b9f03c1b2e1fdc9c23dd15415cbab82a137d56920cb399b93b571da129c4e9bd"
   }
 }

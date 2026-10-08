@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.44] - 2026-10-08
+
 ### Persistent agent instances
 
 - Add distinct non-login instances, personal/company custody, human supervision,
@@ -48,18 +50,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Schema changes
 
-- Append `0034_agent_instances` after release 43's `0033` head with three additive
-  tables for adopted revisions, instances and grants; existing tables are unchanged.
-  Downgrade refuses to erase used identity/history. Configuration format is unchanged.
-- Append `0035_agent_conversations` with one additive binding/retry table retaining
-  deleted-chat tombstones. Existing tables and configuration format are unchanged;
-  downgrade refuses to erase used bindings.
-- Append `0036_agent_instance_memory` with an instance-owned document/epoch table
-  and a protected-conversation provenance table. Existing tables and configuration
-  format are unchanged; downgrade refuses to erase used memory or provenance.
-- Append `0037_agent_lifecycle` with one additive exact-scope lifecycle-intent table.
-  Existing tables/configuration format remain unchanged; used intents cannot be
-  erased by downgrade. Published ancestry remains unchanged.
+Compared with `v2.2.0+hartmesh.43`, the database head advances from
+`0033_storage_features` to `0037_agent_lifecycle` through four additive
+migrations, adding seven tables. Existing application tables and columns
+are unchanged.
+
+- `0034_agent_instances` adds `agent_definition_revisions`, `agent_instances`
+  and `agent_instance_grants`: immutable adopted definitions, stable non-login
+  identities, personal/company custody, supervision, generations and access.
+- `0035_agent_conversations` adds `agent_conversations`: durable instance
+  bindings, creation retries and deleted-chat tombstones.
+- `0036_agent_instance_memory` adds `agent_instance_memory` for instance-owned
+  documents/epochs and `agent_protected_contexts` for persisted Inspect-required
+  provenance on memory-bearing or cross-requester copied conversations.
+- `0037_agent_lifecycle` adds `agent_lifecycle_operations`: captured requests,
+  exact Home/attachment scope, pending/complete/abandoned outcomes and resolver
+  attribution for durable lifecycle recovery.
+
+Normal Gateway bootstrap applies the additive migrations on SQLite and
+PostgreSQL. Existing chat-scoped agents remain compatible; operators need no
+file conversion or legacy-folder adoption. Downgrading used instance,
+conversation, memory, provenance or lifecycle tables is refused to preserve
+identity, authorization and recovery facts. The release freezes its migration
+ancestry for future published-head upgrade checks.
+
+### Configuration and deployment
+
+Configuration format remains version 53. Persistent instance management requires
+`agents_api.enabled: true`, a durable database and enabled, provider-qualified
+Storage Spaces. Storage Spaces remains disabled by default. Native instance
+execution currently uses the verified direct single-host Linux Docker AIO
+adapter; unsupported providers or scoped-memory backends fail explicitly.
+Existing default/custom-agent chats retain their normal behavior.
+
+Use `/workspace/instances` to create and manage residents, then start their
+server-bound conversations. Bound chats use Home for ordinary file uploads and
+withhold unsupported legacy browser, sidecar and scheduling controls. Homes and
+Projects are browsed through Spaces; selected file/memory transfers remain
+explicit. See [the persistent agent guide](https://github.com/altakleos/hartmesh/blob/v2.2.0+hartmesh.44/docs/AGENT_EXECUTION.md) for setup,
+permissions, recovery and supported boundaries.
 
 ## [2.2.0+hartmesh.43] - 2026-10-08
 
