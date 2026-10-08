@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0+hartmesh.43] - 2026-10-08
+
 ### Storage Spaces
 
 - Add host-only stable space identity, personal/company custody, native/mediated
@@ -56,30 +58,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Schema changes
 
-- Consumer readiness qualification adds no database or configuration schema
-  changes; the head remains `0033_storage_features`, configuration version 53.
+Compared with `v2.2.0+hartmesh.42`, the database head advances from
+`0029_shared_publications` to `0033_storage_features` through four additive
+migrations. Existing application tables and columns are unchanged.
 
-- The extension storage facade adds no database or config schema changes;
-  its stage ended at `0032_storage_lifecycle`, config version 53.
+- `0030_storage_spaces` adds `storage_spaces`, `storage_space_grants` and
+  `storage_space_events`: stable identity/custody, explicit typed permissions,
+  lifecycle generations, optional controller binding and authority events.
+- `0031_storage_files` adds `storage_space_backings` and
+  `storage_space_file_operations`: qualified volume/root identity, byte/inode
+  limits and durable operation requests, outcomes and recovery state.
+- `0032_storage_lifecycle` adds `storage_space_attachments`,
+  `storage_space_mounts` and `storage_space_backups`: exact environment identity,
+  admitted resource modes/generations, containment state and backup integrity.
+- `0033_storage_features` adds `hm_storage_feature_links`: unique persistent
+  first-party namespace/owner relationships to stable resource IDs.
 
-- Database migration `0030_storage_spaces` adds `storage_spaces`,
-  `storage_space_grants` and `storage_space_events` after the released
-  `0029_shared_publications` head. No existing data is moved. Downgrade refuses
-  to erase these tables after first use.
-- Migration `0031_storage_files` adds stable backing bindings and durable file
-  operation intents after `0030_storage_spaces`; used bindings/intents cannot be
-  downgraded away. Existing feature data stays in place. Config version 53 adds
-  disabled-by-default, startup-only `storage_spaces` with an explicit provider
-  inventory path; memory database mode cannot enable this durable feature.
-- Migration `0032_storage_lifecycle` adds `storage_space_attachments`,
-  `storage_space_mounts` and `storage_space_backups` after `0031`; used containment
-  and backup facts cannot be erased by downgrade. No config schema change in this
-  stage: configuration remains version 53.
+Normal Gateway bootstrap applies these migrations on SQLite and PostgreSQL.
+They do not move existing file data or adopt legacy folders. Downgrading used
+storage identity, backing, operation, attachment, backup or feature-link tables
+is refused to preserve authorization and recovery facts. The release freezes
+its ancestry and upgrade plan for future published-head checks.
 
-- Migration `0033_storage_features` adds `hm_storage_feature_links`, binding
-  first-party namespace/owner keys uniquely to stable resource IDs. It follows
-  `0032` and refuses downgrade of used relationships. No config schema change:
-  configuration remains version 53. No legacy-folder adoption bridge is included.
+### Configuration changes
+
+Configuration version advances from 52 to 53. The startup-only
+`storage_spaces` section is disabled by default. Enabling it requires a trusted
+provider-prepared and mounted volume inventory, a persistent SQLite/PostgreSQL
+database and Gateway restart. Qualified mode uses explicit resource grants and
+fresh feature resources; it does not convert existing folders. Legacy AIO/local
+thread mappings cannot serve qualified resources. The supported native adapter
+is the verified direct single-host Linux Docker API described in the
+[consumer handoff](https://github.com/altakleos/hartmesh/blob/v2.2.0+hartmesh.43/docs/STORAGE_SPACES_CONSUMER.md).
 
 ## [2.2.0+hartmesh.42] - 2026-10-07
 
