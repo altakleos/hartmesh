@@ -84,3 +84,17 @@ must reject pending lifecycle intents. Explicit company targets copy approved
 business data, then use existing resource/memory transfer; no private inheritance.
 
 Managers with current Home ADMIN can abandon an obsolete pending lifecycle operation only after its exact captured environments are confirmed fenced. The intent and original actor remain recorded; grants are unchanged and the agent stays suspended until explicit restore. Existing-chat legacy uploads, browser and sidecar actions require a positive unbound lookup.
+
+The authority middleware adds the current AI employee display name only as
+sanitized transient human-role data; never interpolate editable identity into
+system text or persist this projection in checkpoints. Scope disclosures do not
+include principal IDs, grants, credentials or host paths.
+
+`agents/runtime_scope.py` builds an immutable per-assembly description after tool
+filtering. Instance file facts require the exact host `AgentExecution` and its
+matching prepared `InstanceSandboxProvider`. Inspection/unprepared assemblies
+say unavailable, never advertise requester files. Ordinary conversations retain
+their own layout. Lead and child prompts share runtime layout, actual actions and
+memory scope; never persist this projection or accept it from a client. The
+bounded operational-facts disclosure exception excludes prompts, SOUL, credentials,
+authority objects, internal host details and membership lists.

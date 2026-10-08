@@ -112,7 +112,7 @@ def test_a_call_whose_every_entry_is_set_aside_is_still_answered(tmp_path: Path)
     result = with_presentation(_runtime(_outputs(tmp_path)), "ok", present=[7, ""], tool_call_id="call-1")
 
     assert isinstance(result, str)
-    assert "Nothing was presented: the user has not received these files." in result
+    assert "Nothing was presented: no output reference was registered for these files." in result
     assert result.count("Not attached:") == 2
 
 
@@ -261,7 +261,7 @@ def test_when_nothing_survives_the_result_is_text_that_says_why(tmp_path: Path) 
     result = with_presentation(_runtime(outputs_dir), "Traceback …\n", present=[f"{OUT}/r.pdf"], tool_call_id="call-1")
 
     assert isinstance(result, str)
-    assert result == f"Traceback …\n\nNothing was presented: the user has not received this file.\nNot attached: {OUT}/r.pdf (does not exist)."
+    assert result == f"Traceback …\n\nNothing was presented: no output reference was registered for this file.\nNot attached: {OUT}/r.pdf (does not exist)."
 
 
 def test_the_trailer_is_bounded_and_echoes_the_models_text_clean(tmp_path: Path) -> None:
@@ -457,3 +457,11 @@ def test_present_files_tags_its_result_like_any_presenting_tool(tmp_path: Path) 
 
     assert isinstance(result, Command)
     assert result.update["messages"][0].additional_kwargs[PRESENTED_FILES_KEY] == [f"{OUT}/r.pdf"]
+
+
+def test_presentation_describes_registration_without_claiming_client_delivery():
+    from deerflow.tools.presentation import describe_presentation
+
+    text = describe_presentation(Presentation(presented=[f"{OUT}/result.md"], sizes={f"{OUT}/result.md": 3}))
+    assert "registered" in text and "retrieval" in text
+    assert "delivered with this turn" not in text

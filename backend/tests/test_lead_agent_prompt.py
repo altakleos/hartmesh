@@ -721,7 +721,7 @@ def test_system_prompt_template_contains_file_editing_workflow_rule():
     reviewers flagged. The numeric cap lives in the server-side guard
     (see test_write_file_tool_size_guard.py), which is where it belongs.
     """
-    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE + prompt_module.WORKING_DIRECTORY_TEMPLATE + prompt_module.FILE_EDITING_REMINDER + prompt_module.IMAGE_REMINDER
     # Section anchor — keeps the rule discoverable in the assembled prompt.
     assert "File Editing Workflow" in template
     # Behavioural anchors — if either of these disappears, the model will
@@ -731,7 +731,7 @@ def test_system_prompt_template_contains_file_editing_workflow_rule():
 
 
 def test_system_prompt_template_requires_virtual_paths_for_output_images():
-    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE + prompt_module.WORKING_DIRECTORY_TEMPLATE + prompt_module.FILE_EDITING_REMINDER + prompt_module.IMAGE_REMINDER
 
     assert "![Chart](/mnt/user-data/outputs/chart.png)" in template
     assert "Never use a bare or workspace-relative filename" in template
@@ -743,7 +743,7 @@ def test_system_prompt_template_preserves_placeholders():
     consumed by apply_prompt_template(). A missing placeholder would
     crash prompt rendering at runtime.
     """
-    template = prompt_module.SYSTEM_PROMPT_TEMPLATE
+    template = prompt_module.SYSTEM_PROMPT_TEMPLATE + prompt_module.WORKING_DIRECTORY_TEMPLATE + prompt_module.FILE_EDITING_REMINDER + prompt_module.IMAGE_REMINDER
     for ph in (
         "{agent_name}",
         "{soul}",

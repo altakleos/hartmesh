@@ -99,6 +99,29 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
                 "c.execute('create table work (value text)'); c.execute('insert into work values (?)', ('retained',)); c.commit(); c.close()\"",
             )
         )
+        # Exercise physical Home cwd, then same-call presentation against the
+        # qualified native backing rather than a Gateway /mnt pathname.
+        import time
+        from types import SimpleNamespace
+
+        from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
+        from deerflow.agent_instances.runtime import execution_scope
+        from deerflow.tools.presentation import validate_presentation
+
+        started = time.time()
+        await await_drained(
+            run_file_io(
+                first.sandbox.execute_command,
+                "cd /mnt/user-data/workspace && python3 -c \"import os; assert os.getcwd() == '/mnt/spaces/home'; open('uploads/input.txt','w').write('input'); open('outputs/result.txt','w').write('native output')\"",
+            )
+        )
+        assert await await_drained(run_file_io(first.sandbox.read_file, "/mnt/spaces/home/outputs/result.txt")) == "native output"
+        with execution_scope(first.execution) as environment:
+            environment.provider = first
+            runtime = SimpleNamespace(context={AGENT_EXECUTION_CONTEXT_KEY: first.execution, "thread_id": first.execution.thread_id}, state={"thread_data": first.execution.thread_paths})
+            presentation = await await_drained(run_file_io(validate_presentation, runtime, ["/mnt/user-data/outputs/result.txt"], written_after=started))
+        assert presentation.presented == ["/mnt/user-data/outputs/result.txt"], presentation.refused
+        assert presentation.sizes == {"/mnt/user-data/outputs/result.txt": 13}
         await await_drained(run_file_io(first.close))
         two = await authority.create(actor=bob, instance_id=instance.id, thread_id=uuid.uuid4().hex)
         second = await prepare_environment(await authority.execution(actor=bob, thread_id=two["thread_id"]), baseline_provider=baseline, app_config=app_config)

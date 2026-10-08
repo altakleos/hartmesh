@@ -70,6 +70,6 @@ def test_present_files_uses_runtime_user_through_real_agent_graph(tmp_path, monk
     assert final_state["thread_data"]["outputs_path"] == str(outputs_dir)
     tool_messages = [message for message in final_state["messages"] if isinstance(message, ToolMessage)]
     assert len(tool_messages) == 1
-    assert tool_messages[0].content == "Successfully presented files"
+    assert tool_messages[0].content == "Successfully presented files. Registered mutable output references; existence, contents and human retrieval are not confirmed. Current file access still applies."
     assert final_state["artifacts"] == ["/mnt/user-data/outputs/report.md"]
     assert not paths.sandbox_outputs_dir(thread_id, user_id="default").exists()

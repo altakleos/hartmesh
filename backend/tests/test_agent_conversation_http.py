@@ -259,3 +259,46 @@ async def test_browser_socket_ownership_cannot_reopen_requester_sessions_for_bou
     agent = await create(agents)
     chat = await authority.create(actor=ALICE, instance_id=agent.id, creation_id=operation())
     assert not await _browser_thread_owned_by(threads, chat["thread_id"], "alice")
+
+
+@pytest.mark.asyncio
+async def test_registered_instance_outputs_recheck_human_read_export_and_revocation(instances, monkeypatch):
+    from app.gateway.routers import artifacts, spaces
+    from deerflow.spaces.contract import Permission
+    from deerflow.tools.builtins.present_file_tool import present_file_tool
+
+    agents, authority, threads, _ = await conversations(instances)
+    agent = await create(agents, custody="company", supervisor=BOB)
+    files = agents.files
+    home = await files.registry.get(actor=ALICE, space_id=agent.home_id)
+    await files.mkdir(actor=ALICE, space_id=home.id, expected_generation=home.generation, operation_id=operation(), path="outputs")
+    for path, content in (("outputs/result.txt", b"result"), ("outputs/page.html", b"<html>active</html>")):
+        await files.write(actor=ALICE, space_id=home.id, expected_generation=home.generation, operation_id=operation(), path=path, content=content, create=True)
+    chat = await authority.create(actor=ALICE, instance_id=agent.id, creation_id=operation())
+    execution = await authority.execution(actor=ALICE, thread_id=chat["thread_id"])
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
+
+    runtime = SimpleNamespace(context={"thread_id": chat["thread_id"], AGENT_EXECUTION_CONTEXT_KEY: execution}, state={"thread_data": execution.thread_paths})
+    reference = "/mnt/user-data/outputs/result.txt"
+    # Registration is valid even when the path is missing; retrieval has its own result.
+    registered = present_file_tool.func(runtime=runtime, filepaths=[reference, "/mnt/user-data/outputs/missing.txt"], tool_call_id="present")
+    assert registered.update["artifacts"] == [reference, "/mnt/user-data/outputs/missing.txt"]
+    app = app_for(agents, authority, threads, monkeypatch)
+    app.state.storage_spaces = files
+    monkeypatch.setattr(spaces, "get_current_user_from_request", AsyncMock(return_value=SimpleNamespace(id=BOB.subject_id)))
+    monkeypatch.setattr(artifacts, "get_paths", lambda: pytest.fail("No requester path fallback"), raising=False)
+    home = await files.registry.set_grant(actor=ALICE, space_id=home.id, subject=BOB, permissions=Permission.READ, expected_generation=home.generation)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test", cookies={"access_token": "fixture"}) as client:
+        endpoint = f"/api/threads/{chat['thread_id']}/artifacts/mnt/user-data/outputs/"
+        read = await client.get(endpoint + "result.txt")
+        assert read.status_code == 200 and read.content == b"result"
+        assert (await client.get(endpoint + "missing.txt")).status_code == 404
+        assert (await client.get(endpoint + "result.txt", params={"download": "true"})).status_code == 403
+        safe = await client.get(endpoint + "page.html")
+        assert safe.status_code == 200 and safe.headers["content-disposition"].startswith("attachment")
+        home = await files.registry.set_grant(actor=ALICE, space_id=home.id, subject=BOB, permissions=Permission.READ | Permission.EXPORT, expected_generation=home.generation, acknowledge_existing_data=True)
+        exported = await client.get(endpoint + "result.txt", params={"download": "true"})
+        assert exported.status_code == 200 and exported.content == b"result"
+        await files.registry.set_grant(actor=ALICE, space_id=home.id, subject=BOB, permissions=Permission(0), expected_generation=home.generation)
+        assert (await client.get(endpoint + "result.txt")).status_code == 404
+        assert registered.update["artifacts"][0] == reference
