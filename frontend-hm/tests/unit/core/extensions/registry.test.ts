@@ -24,14 +24,18 @@ test("resource capability requires backend negotiation and snapshots its version
     async () => new Response(code),
   );
   let reads = 0;
-  const resourceModule = Object.defineProperty({ ...extension }, "resourceApiVersion", {
-    get() {
-      reads++;
-      if (reads > 1) throw new Error("Repeated getter");
-      return 1;
+  const resourceModule = Object.defineProperty(
+    { ...extension },
+    "resourceApiVersion",
+    {
+      get() {
+        reads++;
+        if (reads > 1) throw new Error("Repeated getter");
+        return 1;
+      },
+      enumerable: true,
     },
-    enumerable: true,
-  });
+  );
   const result = await loadFrontendExtensions(
     [{ ...entry, storage_api_version: 1 }],
     async () => ({ default: resourceModule }),
