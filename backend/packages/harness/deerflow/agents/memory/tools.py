@@ -36,10 +36,21 @@ def _resolve_scope(runtime: Runtime | None = None) -> tuple[str | None, str]:
     scoped correctly across request/task boundaries.
     """
     context = getattr(runtime, "context", None)
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+    execution = context.get(AGENT_EXECUTION_CONTEXT_KEY) if isinstance(context, dict) else None
+    if isinstance(execution, AgentExecution):
+        return execution.definition.config["name"].lower(), execution.requester.subject_id
     agent_name = None
     if isinstance(context, dict) and context.get("agent_name"):
         agent_name = str(context["agent_name"])
     return agent_name, resolve_runtime_user_id(runtime)
+
+
+def _manager(runtime):
+    from deerflow.agent_instances.memory import runtime_memory_manager
+
+    return runtime_memory_manager(runtime, get_memory_manager)
 
 
 def _memory_content_key(content: str) -> str:
@@ -71,7 +82,7 @@ def memory_search_tool(
     """
     agent_name, user_id = _resolve_scope(runtime)
     try:
-        results = get_memory_manager().search(
+        results = _manager(runtime).search(
             query,
             top_k=limit,
             user_id=user_id,
@@ -116,7 +127,7 @@ def memory_add_tool(
         if not normalized_content:
             return json.dumps({"error": "empty content"})
         content_key = _memory_content_key(normalized_content)
-        manager = get_memory_manager()
+        manager = _manager(runtime)
         existing_facts = manager.get_memory(agent_name=agent_name, user_id=user_id).get("facts", [])
         # Fast-path duplicate rejection to spare a write attempt in the common
         # case. The authoritative check lives in the backend's create critical
@@ -184,7 +195,7 @@ def memory_update_tool(
     """
     agent_name, user_id = _resolve_scope(runtime)
     try:
-        manager = get_memory_manager()
+        manager = _manager(runtime)
         try:
             manager.update_fact(
                 fact_id,
@@ -222,7 +233,7 @@ def memory_delete_tool(runtime: Runtime, fact_id: str) -> str:
     """
     agent_name, user_id = _resolve_scope(runtime)
     try:
-        manager = get_memory_manager()
+        manager = _manager(runtime)
         try:
             manager.delete_fact(fact_id, agent_name=agent_name, user_id=user_id)
         except NotImplementedError:

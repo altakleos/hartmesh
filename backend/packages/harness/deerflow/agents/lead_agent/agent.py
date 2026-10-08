@@ -958,6 +958,18 @@ def _complete_assembly(
 
 
 def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> LeadAgentAssembly:
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+    execution = _get_runtime_config(config).get(AGENT_EXECUTION_CONTEXT_KEY)
+    if isinstance(execution, AgentExecution):
+        from deerflow.agents.memory.manager import memory_execution_scope
+
+        with memory_execution_scope(execution):
+            return _assemble_lead_agent_body(config, app_config=app_config)
+    return _assemble_lead_agent_body(config, app_config=app_config)
+
+
+def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) -> LeadAgentAssembly:
     # Lazy import to avoid circular dependency
     from deerflow.tools import get_available_tools
     from deerflow.tools.builtins import setup_agent, update_agent
@@ -1006,6 +1018,10 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     else:
         agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
     memory_enabled = not instance_execution and getattr(agent_config, "memory_enabled", True) is not False
+    if instance_execution:
+        from deerflow.agent_instances.memory import execution_memory_enabled
+
+        memory_enabled = execution_memory_enabled(instance_execution, resolved_app_config.memory)
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
     allowed_subagents = getattr(agent_config, "allowed_subagents", None) if agent_config is not None else None
@@ -1380,7 +1396,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     if instance_execution:
         from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
 
-        middlewares.insert(0, InstanceAuthorityMiddleware())
+        middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=memory_enabled))
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,

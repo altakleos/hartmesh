@@ -28,6 +28,7 @@ DISTRIBUTION_REVISIONS = (
     "0033_storage_features",
     "0034_agent_instances",
     "0035_agent_conversations",
+    "0036_agent_instance_memory",
 )
 
 

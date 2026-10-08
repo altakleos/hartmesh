@@ -770,6 +770,12 @@ def _get_memory_context(
             return ""
 
         manager = get_memory_manager()
+        from deerflow.agents.memory.manager import current_memory_execution
+
+        execution = current_memory_execution()
+        if execution is not None:
+            user_id = execution.requester.subject_id
+            agent_name = execution.definition.config["name"].lower()
         memory_content = manager.get_context(
             user_id=user_id or resolve_runtime_user_id(None),
             agent_name=agent_name,

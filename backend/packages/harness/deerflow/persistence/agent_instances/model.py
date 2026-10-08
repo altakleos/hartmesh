@@ -62,3 +62,13 @@ class AgentConversationRow(Base):
     instance_id: Mapped[str] = mapped_column(String(32), ForeignKey("agent_instances.id"), index=True)
     requester_id: Mapped[str] = mapped_column(String(128))
     creation_id: Mapped[str] = mapped_column(String(32))
+
+
+class AgentMemoryRow(Base):
+    """Platform memory belongs to an instance, including every summary field."""
+
+    __tablename__ = "agent_instance_memory"
+    __table_args__ = (CheckConstraint("epoch >= 1 AND epoch <= 2147483647", name="ck_agent_memory_epoch"),)
+    instance_id: Mapped[str] = mapped_column(String(32), ForeignKey("agent_instances.id"), primary_key=True)
+    epoch: Mapped[int] = mapped_column(Integer)
+    document: Mapped[dict] = mapped_column(JSON)

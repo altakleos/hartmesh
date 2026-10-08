@@ -678,5 +678,9 @@ async def test_instance_compaction_never_loads_or_flushes_requester_memory(monke
 
     monkeypatch.setattr(context_compaction, "_create_compaction_middleware", capture)
     accessor = _FakeAccessor({"messages": [HumanMessage(content="old"), AIMessage(content="answer"), HumanMessage(content="new")]}, metadata={CHECKPOINT_AGENT_NAME_METADATA_KEY: "analyst"})
-    result = await compact_thread_context(accessor, bound.thread_id, app_config=_model_app_config("model"), user_id="requester", agent_execution=bound)
+    from deerflow.config.memory_config import MemoryConfig
+
+    app_config = _model_app_config("model")
+    app_config.memory = MemoryConfig(enabled=False)
+    result = await compact_thread_context(accessor, bound.thread_id, app_config=app_config, user_id="requester", agent_execution=bound)
     assert result.compacted and captured["skip_memory_flush"] is True

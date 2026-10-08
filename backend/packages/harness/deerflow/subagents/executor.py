@@ -1072,9 +1072,10 @@ class SubagentExecutor:
         # to avoid multiple SystemMessages which some LLM APIs don't support.
         bound_tools = list(tools if tools is not None else self.tools)
         if self.agent_execution is not None:
+            from deerflow.agent_instances.memory import execution_memory_enabled
             from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
 
-            middlewares.insert(0, InstanceAuthorityMiddleware())
+            middlewares.insert(0, InstanceAuthorityMiddleware(require_memory_audience=execution_memory_enabled(self.agent_execution, (self.app_config or get_app_config()).memory)))
         agent = create_agent(
             model=model,
             tools=bound_tools,

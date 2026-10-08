@@ -179,6 +179,10 @@ async def compact_thread_context(
         agent_config=agent_config,
     )
     memory_enabled = agent_execution is None and binding_known and (checkpoint_agent_name is None or (agent_config is not None and getattr(agent_config, "memory_enabled", True) is not False))
+    if agent_execution is not None:
+        from deerflow.agent_instances.memory import execution_memory_enabled
+
+        memory_enabled = await asyncio.to_thread(execution_memory_enabled, agent_execution, resolved_app_config.memory)
     middleware = _create_compaction_middleware(
         app_config=resolved_app_config,
         keep=keep,
@@ -215,6 +219,11 @@ async def compact_thread_context(
         # toast) instead of a compacted=False result that reads as "does not need
         # compaction".
         raise ContextCompactionFailed("summary generation failed") from exc
+    finally:
+        if agent_execution is not None:
+            from deerflow.agent_instances.memory import finish_execution_memory
+
+            finish_execution_memory(agent_execution)
     if result is None:
         return ThreadCompactionResult(thread_id=thread_id, compacted=False, reason="not_enough_messages")
 

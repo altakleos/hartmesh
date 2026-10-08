@@ -485,6 +485,9 @@ def _process_file_lock(lock_path: Path, timeout_seconds: float) -> Iterator[None
 
 
 class MemoryStorage(abc.ABC):
+    def before_extraction(self) -> None:
+        """Optional scope admission before any judging or model call."""
+
     @abc.abstractmethod
     def load(self, agent_name: str | None = None, *, user_id: str | None = None) -> dict[str, Any]: ...
 

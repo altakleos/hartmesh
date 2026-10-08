@@ -25,6 +25,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   private skills/memory/credentials and unsupported legacy instance adapters.
   Record public-package capture revisions separately from live host catalogs.
 
+- Add SQL-backed instance DeerMem facts and summaries across native prompt/tool
+  execution, passive capture, compaction and management/import/export. Require
+  whole-instance Inspect access; Use-only execution has memory disabled. Clear,
+  replacement import and lifecycle changes fence older delayed writes. Unsupported
+  scoped backends fail explicitly without requester/global fallback.
+
 ### Schema changes
 
 - Append `0034_agent_instances` after release 43's `0033` head with three additive
@@ -32,7 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Downgrade refuses to erase used identity/history. Configuration format is unchanged.
 - Append `0035_agent_conversations` with one additive binding/retry table retaining
   deleted-chat tombstones. Existing tables and configuration format are unchanged;
-  downgrade refuses to erase used bindings. Scoped instance memory follows.
+  downgrade refuses to erase used bindings.
+- Append `0036_agent_instance_memory` with one instance-owned document/epoch table
+  for facts and all summaries. Existing tables and configuration format are
+  unchanged; downgrade refuses to erase used memory.
 
 ## [2.2.0+hartmesh.43] - 2026-10-08
 

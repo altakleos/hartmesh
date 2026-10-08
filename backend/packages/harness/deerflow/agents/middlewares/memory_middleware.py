@@ -200,7 +200,9 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
 
         # Hand raw messages to the manager; the backend filters to user + final-AI
         # turns, validates, detects correction/reinforcement, and enqueues.
-        get_memory_manager().add(
+        from deerflow.agent_instances.memory import runtime_memory_manager
+
+        runtime_memory_manager(runtime, get_memory_manager).add(
             thread_id,
             messages,
             agent_name=self._agent_name,
@@ -217,7 +219,9 @@ class MemoryMiddleware(AgentMiddleware[MemoryMiddlewareState]):
         if add_args is None:
             return None
         thread_id, messages, user_id, trace_id = add_args
-        manager = await asyncio.to_thread(get_memory_manager)
+        from deerflow.agent_instances.memory import runtime_memory_manager
+
+        manager = await asyncio.to_thread(runtime_memory_manager, runtime, get_memory_manager)
         await manager.aadd(
             thread_id,
             messages,

@@ -25,7 +25,9 @@ def memory_flush_hook(event: SummarizationEvent, pii_redaction_config: PiiRedact
         return
 
     user_id = resolve_runtime_user_id(event.runtime)
-    get_memory_manager().add_nowait(
+    from deerflow.agent_instances.memory import runtime_memory_manager
+
+    runtime_memory_manager(event.runtime, get_memory_manager).add_nowait(
         event.thread_id,
         redact_queued_messages(list(event.messages_to_summarize), pii_redaction_config),
         agent_name=event.agent_name,

@@ -108,8 +108,8 @@ bindings unavailable instead of restoring creator-owner access.
 ## Delivery stages and schema
 
 Identity, creation, revisions, homes, rename, durable conversations and runtime
-binding are implemented. Instance memory remains disabled until its scoped
-backend stage; lifecycle/product controls and the UI selector follow. No separate
+binding and instance memory are implemented. Lifecycle/product controls and
+the UI selector follow. No separate
 file manager, storage ACL engine or background scheduler is introduced.
 
 Migration `0034_agent_instances` adds `agent_definition_revisions`,
@@ -122,3 +122,48 @@ Migration `0035_agent_conversations` adds one binding table with the instance
 reference, original requester and retry identity. It retains deleted-chat
 tombstones and has no user/thread deletion cascade. Existing application tables
 and configuration format are unchanged. Downgrade refuses to erase used bindings.
+
+## Instance memory
+
+Default DeerMem instances keep facts and every summary field in the application
+database under stable instance identity. They start empty, including company
+instances; no creator-private summary or user/global bucket is read. Legacy
+chats keep their existing file-backed memory. General wiki/knowledge files still
+belong to Home and keep their ordinary Storage Spaces behavior. SQL platform
+memory checks Home audience/lifecycle through READ admission; it does not claim
+an exclusive filesystem-edit window over a live native attachment.
+
+Current Inspect and Home READ admit whole-instance memory. Native execution also
+requires Use; Use-only execution disables injection, tools, capture and compaction
+flush. Losing Inspect stops further model/tool dispatch for a run that already
+injected instance memory. Definition `memory_enabled: false` and global memory
+disabling prevent execution reads and capture. Manual management remains available
+under Inspect, or Manage plus Inspect for edits, and provider memory/agent ceilings.
+Conversation-derived memories are shared instance data for this explicit audience.
+
+Facts and summaries use DeerMem's existing extraction, safety filters, capacity
+policy and lexical/relevance ranking. Derived access/eviction metadata stays in
+SQL; instance data/retrieval uses no private file/index fallback. Normal
+host singleton initialization for legacy memory remains unchanged. Instance search currently uses
+bounded lexical/relevance ranking, rather than a disk FTS5 index. Remote backends,
+custom storage providers and custom retrieval factories have no qualified instance
+adapter: execution memory is disabled and management returns 501. Legacy usage
+of those backends is unchanged.
+
+`GET /api/agent-instances/{id}/memory` and `/memory/export` return the admitted
+document. `/memory/facts` supports POST and PATCH/DELETE by fact ID. DELETE
+`/memory` clears facts and summaries. POST `/memory/import` accepts an explicit
+`document` replacement. Read needs `agents:read` and `memory:read`; mutation needs
+`agents:write`, `memory:read` and `memory:write` in addition to mandatory grants.
+Imports normalize/cap facts and replace only this instance's summaries.
+
+Clear/import advance a SQL epoch in the same commit. Queued jobs retain their
+original epoch across reload/CAS retries; generation, current grants, Home and
+conversation incarnation are rechecked before commit. Extraction holds no SQL
+locks during model calls. Shutdown drains the bounded queues while the original
+host loop is live and retires scopes that exceed its shared flush budget.
+Documents are limited to 4 MiB, 10,000 facts and 64 KiB per fact/summary.
+
+Migration `0036_agent_instance_memory` adds only `agent_instance_memory` after
+`0035`, with an instance foreign key and epoch. No user-deletion cascade applies.
+Used memory cannot be erased by downgrade; configuration format is unchanged.
