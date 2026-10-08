@@ -14,7 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from deerflow.agent_instances.contract import ALL_AGENT_PERMISSIONS, AgentConflict, AgentDenied, AgentInstance, AgentPermission, DefinitionSnapshot, InstanceIdentity
 from deerflow.agent_instances.directory import InstanceDirectory
-from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow
+from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow
 from deerflow.persistence.spaces.model import SpaceGrantRow
 from deerflow.spaces.contract import Custody, MutationMode, Permission, PrincipalRef, SpaceConflict, validate_generation, validate_name
 from deerflow.spaces.service import SpaceCapacityExhausted, SpaceFiles
@@ -55,7 +55,7 @@ class AgentInstances:
             raise ValueError("Invalid persisted agent permissions")
         return AgentInstance(**vars(InstanceIdentity.from_row(row)), permissions=AgentPermission(permissions))
 
-    async def _read(self, actor, instance_id, permission):
+    async def _read(self, actor, instance_id, permission, *, include_deleted=False):
         await self._human(actor)
         if not isinstance(permission, AgentPermission) or not 1 <= int(permission) <= 7:
             raise ValueError("A valid instance permission is required")
@@ -64,7 +64,7 @@ class AgentInstances:
                 await session.execute(
                     select(AgentInstanceRow, AgentInstanceGrantRow.permissions)
                     .join(AgentInstanceGrantRow, AgentInstanceGrantRow.instance_id == AgentInstanceRow.id)
-                    .where(AgentInstanceRow.id == instance_id, AgentInstanceRow.status != "deleted", AgentInstanceGrantRow.user_id == actor.subject_id)
+                    .where(AgentInstanceRow.id == instance_id, True if include_deleted else AgentInstanceRow.status != "deleted", AgentInstanceGrantRow.user_id == actor.subject_id)
                 )
             ).one_or_none()
         if result is None:
@@ -74,10 +74,10 @@ class AgentInstances:
             raise AgentDenied("This agent operation is not granted")
         return view
 
-    async def get(self, *, actor, instance_id, permission=AgentPermission.INSPECT):
-        return await self._read(actor, instance_id, permission)
+    async def get(self, *, actor, instance_id, permission=AgentPermission.INSPECT, include_deleted=False):
+        return await self._read(actor, instance_id, permission, include_deleted=include_deleted)
 
-    async def list(self, *, actor, limit=100, offset=0):
+    async def list(self, *, actor, limit=100, offset=0, include_deleted=False):
         await self._human(actor)
         if type(limit) is not int or not 1 <= limit <= 500 or type(offset) is not int or offset < 0:
             raise ValueError("Invalid instance pagination")
@@ -86,7 +86,7 @@ class AgentInstances:
                 await session.execute(
                     select(AgentInstanceRow, AgentInstanceGrantRow.permissions)
                     .join(AgentInstanceGrantRow, AgentInstanceGrantRow.instance_id == AgentInstanceRow.id)
-                    .where(AgentInstanceGrantRow.user_id == actor.subject_id, AgentInstanceRow.status != "deleted")
+                    .where(AgentInstanceGrantRow.user_id == actor.subject_id, True if include_deleted else AgentInstanceRow.status != "deleted")
                     .order_by(AgentInstanceRow.created_at, AgentInstanceRow.id)
                     .limit(limit)
                     .offset(offset)
@@ -133,6 +133,9 @@ class AgentInstances:
             try:
                 async with self._sf() as session, session.begin():
                     await self._reserve_writer(session)
+                    source = None
+                    if request.get("copy_from"):
+                        source = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == request["copy_from"]).with_for_update())).scalar_one_or_none()
                     row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.creator_id == actor.subject_id, AgentInstanceRow.creation_id == creation_id).with_for_update())).scalar_one_or_none()
                     if row is not None:
                         if row.creation_request != request:
@@ -144,6 +147,16 @@ class AgentInstances:
                             raise AgentDenied("Creation retry requires current management access")
                         await self._stored_definition(session, row.definition_revision)
                         return self._view(row, grant.permissions)
+                    if request.get("copy_from"):
+                        source_grant = await session.get(AgentInstanceGrantRow, (request["copy_from"], actor.subject_id))
+                        required = int(AgentPermission.INSPECT | AgentPermission.MANAGE)
+                        if source is None or source_grant is None or source.custody != "personal" or source.owner_id != actor.subject_id or source.status in {"deleted", "provisioning"} or source_grant.permissions & required != required:
+                            raise AgentDenied("Company copying requires the current personal custodian with Inspect and Manage")
+                        if source.generation != request["copy_generation"]:
+                            raise AgentConflict("Personal source changed; review it before copying")
+                        captured = await self._stored_definition(session, source.definition_revision)
+                        if DefinitionSnapshot.capture(owner_id=actor.subject_id, config=captured.config, soul=captured.soul) != definition or request["custody"] != "company":
+                            raise AgentConflict("Company copy must use the current source business definition")
                     resolved = await self._human(actor)
                     if request["custody"] == "company" and resolved.can_provision_company is not True:
                         raise AgentDenied("Company agents require current host provisioning authority")
@@ -266,7 +279,7 @@ class AgentInstances:
             await session.flush()
             return self._view(row, int(ALL_AGENT_PERMISSIONS))
 
-    async def create(self, *, actor, creation_id, name, custody, supervisor, definition):
+    async def create(self, *, actor, creation_id, name, custody, supervisor, definition, copy_from=None, copy_generation=None):
         validate_name(name)
         SpaceFiles._operation_id(creation_id)
         if custody not in {"personal", "company"}:
@@ -279,6 +292,12 @@ class AgentInstances:
         if definition.owner_id != actor.subject_id:
             raise AgentDenied("Adopting a custom definition requires its current owner")
         request = {"name": name, "custody": custody, "supervisor_id": supervisor.subject_id, "definition_name": definition.config["name"]}
+        if copy_from is not None:
+            SpaceFiles._operation_id(copy_from)
+            validate_generation(copy_generation)
+            request.update(copy_from=copy_from, copy_generation=copy_generation)
+        elif copy_generation is not None:
+            raise ValueError("Copy generation requires a source instance")
 
         async def perform():
             instance = await self._enroll(actor, request, definition, creation_id)
@@ -318,6 +337,8 @@ class AgentInstances:
                 await self._human(actor)
                 if row.generation != expected_generation or row.generation >= 2**31 - 1 or row.status == "provisioning":
                     raise AgentConflict("Stale generation or incomplete agent provisioning")
+                if await session.scalar(select(AgentLifecycleRow.operation_id).where(AgentLifecycleRow.instance_id == instance_id, AgentLifecycleRow.phase == "pending")) is not None:
+                    raise AgentConflict("Resolve the pending lifecycle operation before renaming")
                 row.name = name
                 row.generation += 1
                 row.updated_at = datetime.now(UTC)

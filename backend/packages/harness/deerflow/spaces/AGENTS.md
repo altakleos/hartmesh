@@ -105,3 +105,9 @@ maps the public API to functional SQL and mandatory native evidence. The native
 tier requires 16 cases without skips, including real AIO two-chat persistence;
 directory fixtures never qualify quotas. `resume` rechecks exact mounts, current
 generations, audience and immutable container identity without prepare/start.
+
+`retire` accepts a host-only admission callback after locking scoped attachments
+inside its first ADMIN transaction, before pending/effects. Domain conditions add
+to mandatory resource checks. A rejected callback rolls back and propagates its
+effect-free failure; uncertain provider/commit outcomes remain pending. Never pass
+callbacks from HTTP/plugin data or convert an empty captured scope to all-current.

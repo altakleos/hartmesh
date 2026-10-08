@@ -23,6 +23,12 @@ is provider-only. The bilingual notice uses only configured provider support lin
 
 ## Project Overview
 
+`/workspace/instances` uses current grants/provider ceilings, account/role caches
+and retired-action fences. Retry exact intents;202 stays pending. Chat identity
+comes from server binding. Home/Projects reuse Spaces; legacy uploads/browser/
+sidecar/scheduling stay withheld. Memory uses instance APIs/all summaries only.
+Company targets start empty; transfer data explicitly through admitted APIs.
+
 `/workspace/spaces` uses account-scoped queries and host grants. Send captured
 generation/SHA for edits and attachment IDs for retirement; preserve conflict
 drafts. Abort account/component work and late navigation. ADMIN recovery needs

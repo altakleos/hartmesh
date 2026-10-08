@@ -234,11 +234,13 @@ class SpaceAttachments:
 
         return await await_drained(perform())
 
-    async def retire(self, *, actor, space_id, expected_generation, operation_id=None, attachment_ids=None):
+    async def retire(self, *, actor, space_id, expected_generation, operation_id=None, attachment_ids=None, admission=None):
         """ADMIN authorizes containment, including RO handles, on this resource.
 
         Removing the entire environment also closes its other resource handles.
         It changes no membership or custody. Never erase attachment records.
+        A host-only admission callback adds domain conditions/intent in the first
+        qualified ADMIN transaction, before any containment effect.
         """
         validate_generation(expected_generation)
         if attachment_ids is not None and (not isinstance(attachment_ids, (tuple, list)) or not 1 <= len(attachment_ids) <= 32 or any(not isinstance(v, str) or not re.fullmatch(r"[0-9a-f]{32}", v) for v in attachment_ids)):
@@ -250,6 +252,8 @@ class SpaceAttachments:
         async def perform():
             token = _operation.set(("retire", None))
             requests = {space_id: (Permission.ADMIN, expected_generation)}
+            callback_rejected = False
+            effects_possible = False
             try:
                 async with self.registry.admitted(actor=actor, requests=requests, operation_id=exemption) as (session, _):
                     records = {a.id: a for a, _mount in await self._current(session, [space_id], lock=True)}
@@ -258,11 +262,19 @@ class SpaceAttachments:
                         if set(attachment_ids) != bound:
                             raise SpaceConflict("Retirement scope does not belong to the resource")
                         records = {key: value for key, value in records.items() if key in bound}
+                    identities = [(a.id, a.container_id) for a in records.values()]
+                    if admission is not None:
+                        try:
+                            await admission(session, tuple(identities))
+                        except Exception:
+                            callback_rejected = True
+                            raise
+                    # From here, transaction commit/physical outcomes may be uncertain.
+                    effects_possible = True
                     for record in records.values():
                         if record.host_id != self.provider.host_id:
                             raise AttachmentPending("Cross-host containment is unsupported")
                         record.phase = "fence_pending"
-                    identities = [(a.id, a.container_id) for a in records.values()]
                 async with self.registry.admitted(actor=actor, requests=requests, operation_id=exemption) as (session, _):
                     for attachment_id, container_id in identities:
                         record = (await session.execute(select(SpaceAttachmentRow).where(SpaceAttachmentRow.id == attachment_id).with_for_update())).scalar_one()
@@ -283,6 +295,8 @@ class SpaceAttachments:
             except (SpaceDenied, AttachmentPending):
                 raise
             except Exception as exc:
+                if callback_rejected or (isinstance(exc, SpaceConflict) and not effects_possible):
+                    raise
                 raise AttachmentPending("Storage attachment containment remains pending") from exc
             finally:
                 _operation.reset(token)

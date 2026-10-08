@@ -11,7 +11,7 @@ from sqlalchemy import func, select
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, AgentPermission, DefinitionSnapshot
 from deerflow.agent_instances.directory import InstanceDirectory
 from deerflow.agent_instances.service import AgentInstances
-from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow
+from deerflow.persistence.agent_instances.model import AgentDefinitionRevisionRow, AgentInstanceGrantRow, AgentInstanceRow, AgentLifecycleRow
 from deerflow.spaces.contract import InvalidPrincipal, Permission, PrincipalRef, SpaceDenied
 from deerflow.spaces.principals import HostPrincipalResolver
 
@@ -23,6 +23,7 @@ async def instances(tmp_path, request):
             await connection.run_sync(lambda c: AgentDefinitionRevisionRow.__table__.create(c))
             await connection.run_sync(lambda c: AgentInstanceRow.__table__.create(c))
             await connection.run_sync(lambda c: AgentInstanceGrantRow.__table__.create(c))
+            await connection.run_sync(lambda c: AgentLifecycleRow.__table__.create(c))
         human = files.registry._resolver._human
         directory = InstanceDirectory(sf, human=human)
         files.registry._resolver = HostPrincipalResolver(human=human, nonhuman=directory.lookup)
@@ -375,11 +376,16 @@ async def test_frozen_migration_rebuilds_the_same_tables_on_both_backends(instan
 
     def rebuild(connection):
         before = columns(connection)
+        # This fixture includes current dependents; qualify the immutable0034
+        # rebuild without asking it to drop later-owned foreign keys.
+        assert connection.execute(select(AgentLifecycleRow.instance_id).limit(1)).first() is None
+        AgentLifecycleRow.__table__.drop(connection)
         with Operations.context(MigrationContext.configure(connection)):
             module.upgrade()  # Canonical check/FK validation on ORM-created tables.
             module.downgrade()
             module.upgrade()  # Actual frozen DDL creation, including PostgreSQL.
         assert columns(connection) == before
+        AgentLifecycleRow.__table__.create(connection)
 
     async with sf.kw["bind"].begin() as connection:
         await connection.run_sync(rebuild)

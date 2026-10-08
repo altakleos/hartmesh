@@ -1,7 +1,8 @@
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
-The distribution ends in `0034_agent_instances`, after `0033_storage_features`.
-It adds adopted definition revisions, persistent instances and delegated grants;
+The distribution ends in `0037_agent_lifecycle`, after instance identity0034,
+conversations0035 and memory/provenance0036. These follow0033_storage_features.
+They add adopted revisions, instances/grants, bindings, memory and lifecycle intent;
 existing application tables remain unchanged. Used instance facts cannot be
 erased by downgrade. The preceding `0032_storage_lifecycle` follows `0031`/`0030`.
 These add resource/grant/event, backing/operation and containment/backup facts

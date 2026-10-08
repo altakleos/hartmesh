@@ -31,6 +31,7 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
     from deerflow.agent_instances.contract import DefinitionSnapshot
     from deerflow.agent_instances.conversations import AgentConversations
     from deerflow.agent_instances.directory import InstanceDirectory
+    from deerflow.agent_instances.lifecycle import InstanceLifecycle
     from deerflow.agent_instances.runtime import prepare_environment
     from deerflow.agent_instances.service import AgentInstances
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
@@ -83,7 +84,7 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
         config_mounts=[],
         environment={key: "true" for key in ("DISABLE_BROWSER", "DISABLE_JUPYTER", "DISABLE_CODE_SERVER", "DISABLE_VNC", "DISABLE_MCP_BROWSER", "DISABLE_NODEJS_REPL")},
     )
-    first = second = None
+    first = second = third = None
     containment["confirmed"] = False
     try:
         one = await authority.create(actor=alice, instance_id=instance.id, thread_id=uuid.uuid4().hex)
@@ -111,6 +112,17 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
         assert "# Team wiki" in await await_drained(run_file_io(second.sandbox.read_file, "/mnt/spaces/home/wiki/home.md"))
         # Storage owns containment; SDK closure and chat deletion leave home intact.
         await await_drained(run_file_io(second.close))
+        lifecycle = InstanceLifecycle(agents)
+        stopped = await lifecycle.change(actor=alice, instance_id=instance.id, expected_generation=instance.generation, operation_id=uuid.uuid4().hex, action="suspend")
+        assert stopped["complete"] and stopped["instance"].status == "suspended"
+        assert await files.read(actor=alice, space_id=instance.home_id, path="wiki/home.md", max_bytes=1024) == b"# Team wiki\n"
+        restored = await lifecycle.change(actor=alice, instance_id=instance.id, expected_generation=stopped["instance"].generation, operation_id=uuid.uuid4().hex, action="restore")
+        assert restored["complete"] and restored["instance"].home_id == instance.home_id
+        third = await prepare_environment(await authority.execution(actor=bob, thread_id=two["thread_id"]), baseline_provider=baseline, app_config=app_config)
+        assert third.sandbox.id != second.sandbox.id
+        assert await await_drained(run_file_io(third.sandbox.read_file, "/mnt/spaces/home/wiki/home.md")) == "# Team wiki\n"
+        assert "retained" in await await_drained(run_file_io(third.sandbox.execute_command, "python3 -c \"import sqlite3; print(sqlite3.connect('/mnt/spaces/home/catalog.sqlite').execute('select value from work').fetchone()[0])\""))
+        await await_drained(run_file_io(third.close))
         home = await files.registry.get(actor=alice, space_id=instance.home_id)
         await files.attachments.retire(actor=alice, space_id=home.id, expected_generation=home.generation)
         containment["confirmed"] = True
@@ -119,6 +131,8 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
             await await_drained(run_file_io(first.close))
         if second is not None:
             await await_drained(run_file_io(second.close))
+        if third is not None:
+            await await_drained(run_file_io(third.close))
         if not containment["confirmed"] and getattr(files, "attachments", None) is not None:
             home = await files.registry.get(actor=alice, space_id=instance.home_id)
             await files.attachments.retire(actor=alice, space_id=home.id, expected_generation=home.generation)

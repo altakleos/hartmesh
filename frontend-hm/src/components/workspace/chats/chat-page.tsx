@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
@@ -33,7 +34,11 @@ import { TodoList } from "@/components/workspace/todo-list";
 import { TokenUsageIndicator } from "@/components/workspace/token-usage-indicator";
 import { useActiveGoal } from "@/components/workspace/use-active-goal";
 import { Welcome } from "@/components/workspace/welcome";
+import { useConversationInstance } from "@/core/agent-instances/hooks";
+import { useAgentsApiEnabled } from "@/core/agents";
 import { useBrowserControlEnabled } from "@/core/features";
+import { useStorageSpacesEnabled } from "@/core/features";
+import { useFeatures } from "@/core/features/hooks";
 import { useI18n } from "@/core/i18n/hooks";
 import {
   buildHumanInputResponseText,
@@ -81,6 +86,22 @@ export default function ChatPage() {
   const [settings, setSettings] = useThreadSettings(threadId);
   const [localSettings, setLocalSettings] = useLocalSettings();
   const { enabled: browserControlEnabled } = useBrowserControlEnabled();
+  const { enabled: instancesApiEnabled } = useAgentsApiEnabled();
+  const { enabled: spacesEnabled } = useStorageSpacesEnabled();
+  const discovery = useFeatures((features) => features);
+  const bindingRequired =
+    !isNewThread && !isMock && instancesApiEnabled && spacesEnabled;
+  const resident = useConversationInstance(threadId, bindingRequired);
+  const instance = resident.data?.instance;
+  // Unknown/error responses cannot authorize unsupported legacy workflows.
+  const legacyCapabilities =
+    isNewThread ||
+    isMock ||
+    (discovery.isSuccess &&
+      (!bindingRequired ||
+        (resident.isSuccess &&
+          !resident.isError &&
+          resident.data.instance === null)));
   const { tokenUsageEnabled } = useModels();
   const threadTokenUsage = useThreadTokenUsage(
     isNewThread || isMock ? undefined : threadId,
@@ -184,13 +205,17 @@ export default function ChatPage() {
 
   const handleSubmit = useCallback(
     (message: PromptInputMessage, options?: InputBoxSubmitOptions) => {
+      if (!legacyCapabilities && message.files.length > 0) {
+        toast.error(t.agentInstances.home);
+        return;
+      }
       const sendPromise = sendMessage(threadId, message, undefined, options);
       if (message.files.length > 0) {
         return sendPromise;
       }
       void sendPromise;
     },
-    [sendMessage, threadId],
+    [sendMessage, threadId, legacyCapabilities, t.agentInstances.home],
   );
   const handleSubmitHumanInput = useCallback(
     async (request: HumanInputRequest, response: HumanInputResponse) => {
@@ -260,7 +285,8 @@ export default function ChatPage() {
     ? localSettings.tokenUsage.inlineMode
     : "off";
   const hasTodos = (thread.values.todos?.length ?? 0) > 0;
-  const browserEnabled = !isNewThread && !isMock && browserControlEnabled;
+  const browserEnabled =
+    !isNewThread && !isMock && browserControlEnabled && legacyCapabilities;
   const { activeGoal, hasGoal, setLocalGoal } = useActiveGoal(
     threadId,
     thread.values.goal,
@@ -280,6 +306,7 @@ export default function ChatPage() {
         parentThreadId={threadId}
         context={settings.context}
         isMock={isMock}
+        enabled={legacyCapabilities}
       >
         <ChatBox threadId={threadId} browserEnabled={browserEnabled}>
           <div className="relative flex size-full min-h-0 justify-between">
@@ -293,6 +320,14 @@ export default function ChatPage() {
             >
               {!isMock && <SidebarTrigger className="md:hidden" />}
               <div className="flex min-w-0 flex-1 items-center text-sm font-medium">
+                {instance && (
+                  <Link
+                    className="mr-2 truncate text-sm underline"
+                    href={`/workspace/instances?instance=${instance.id}`}
+                  >
+                    {instance.name}
+                  </Link>
+                )}
                 <ThreadTitle
                   threadId={threadId}
                   thread={thread}
@@ -310,7 +345,7 @@ export default function ChatPage() {
                   env.NEXT_PUBLIC_STATIC_WEBSITE_ONLY !== "true" && (
                     <ThreadSubagentBatches threadId={threadId} />
                   )}
-                {!isNewThread && !isMock && (
+                {!isNewThread && !isMock && legacyCapabilities && (
                   <ThreadScheduledTasksLink threadId={threadId} />
                 )}
                 {tokenUsageEnabled ? (
@@ -329,7 +364,15 @@ export default function ChatPage() {
                 ) : (
                   <ContextUsageBadge contextUsage={contextUsage} />
                 )}
-                <SidecarTrigger />
+                {legacyCapabilities && <SidecarTrigger />}
+                {instance?.home_id && (
+                  <Link
+                    className="text-sm underline"
+                    href={`/workspace/spaces?space=${instance.home_id}`}
+                  >
+                    {t.agentInstances.home}
+                  </Link>
+                )}
                 {browserEnabled && <BrowserTrigger />}
                 <ExportTrigger threadId={threadId} />
                 {!isMock && threadMetadata.data && (
@@ -436,6 +479,7 @@ export default function ChatPage() {
                   )}
                   {mountedRef.current ? (
                     <InputBox
+                      allowAttachments={legacyCapabilities}
                       className={cn(
                         "bg-background/5 w-full",
                         isWelcomeMode && "-translate-y-2 sm:-translate-y-4",

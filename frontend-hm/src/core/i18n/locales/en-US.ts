@@ -15,6 +15,83 @@ import type { Translations } from "./types";
 
 export function createEnUS(product: string): Translations {
   return {
+    agentInstances: {
+      unconfirmed:
+        "The request outcome is not confirmed. Refresh or retry the same request to check its state.",
+      abandon: "Abandon contained operation",
+      abandoned:
+        "An obsolete operation was abandoned without changing grants or reactivating the agent.",
+
+      title: "Agent instances",
+      description:
+        "Persistent personal and company agents with their own Home and memory.",
+      unavailable:
+        "Persistent instances require enabled agent management and qualified Storage Spaces.",
+      name: "Name",
+      custody: "Custody",
+      personal: "Personal",
+      company: "Company",
+      supervisor: "Supervisor user ID",
+      definition: "Definition",
+      create: "Create instance",
+      start: "Start conversation",
+      home: "Open Home",
+      spaces: "Browse Spaces and Projects",
+      manage: "Manage instance",
+      rename: "Rename",
+      suspend: "Suspend",
+      archive: "Archive",
+      delete: "Remove agent",
+      restore: "Restore",
+      adopt: "Adopt definition",
+      supervise: "Change supervisor",
+      grant: "Update access",
+      member: "Member user ID",
+      use: "Use",
+      inspect: "Inspect",
+      manageAccess: "Manage",
+      grantsNotice:
+        "Agent permissions and Home access are separate. Edit resource grants in Spaces.",
+      retention:
+        "These actions stop the agent’s environment and retain Home data and human grants. Shared Projects are retained.",
+      pending:
+        "Containment pending. The agent cannot run; stopping its environment is not yet confirmed.",
+      retry: "Retry captured operation",
+      refresh: "Refresh",
+      loading: "Loading…",
+      none: "No instances yet.",
+      more: "Load more",
+      memory: "Instance memory",
+      memoryNotice:
+        "This is shared instance memory for its current Inspect audience. It never includes private user memory.",
+      fact: "New fact",
+      addFact: "Add fact",
+      removeFact: "Remove fact",
+      clearMemory: "Clear memory",
+      exportMemory: "Export memory",
+      importMemory: "Import memory",
+      replaceMemory: "Replace memory",
+      confirm: "Confirm action",
+      confirmMemory:
+        "Clear or replacement import retires queued writes and changes the whole instance memory.",
+      companyCopy: "Create company copy",
+      companyCopyNotice:
+        "Create a separate company instance, then explicitly copy selected Home files in Spaces and export/import memory. Credentials are not copied.",
+      status: "Status",
+      active: "Active",
+      suspended: "Suspended",
+      archived: "Archived",
+      deleted: "Removed",
+      provisioning: "Provisioning",
+      instructions: "Adopted instructions",
+      businessDefinition: "Definition name",
+      useOnly:
+        "Use permits your own unprotected conversation; instance memory requires Inspect.",
+      operationError: "Agent operation failed. Refresh before retrying.",
+      source: "Original definition",
+      memoryUnavailable:
+        "Memory is unavailable under the current grants or backend.",
+    },
     storageSpaces: {
       confirmAction: "Confirm action",
       recovery: "Backups and recovery",
