@@ -343,6 +343,7 @@ async def test_resource_http_and_durable_binding_use_the_qualified_volume(backin
     from app.gateway.routers.spaces import router
     from deerflow.persistence.base import Base
     from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
+    from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow
     from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
     from deerflow.spaces.contract import Custody, MutationMode, PrincipalRef, ResolvedPrincipal
     from deerflow.spaces.principals import HostPrincipalResolver
@@ -358,7 +359,7 @@ async def test_resource_http_and_durable_binding_use_the_qualified_volume(backin
 
     try:
         async with engine.begin() as c:
-            await c.run_sync(Base.metadata.create_all, tables=[model.__table__ for model in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, SpaceFileOperationRow)])
+            await c.run_sync(Base.metadata.create_all, tables=[model.__table__ for model in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, SpaceFileOperationRow, SpaceAttachmentRow, SpaceMountRow, SpaceBackupRow)])
         sf = async_sessionmaker(engine, expire_on_commit=False)
         registry = SpaceRegistry(sf, HostPrincipalResolver(human=lookup))
         service = SpaceFiles(registry, catalog)

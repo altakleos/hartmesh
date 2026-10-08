@@ -85,7 +85,9 @@ it("requires review before restoring and uses the current resource generation", 
   fireEvent.click(screen.getByRole("button", { name: "Restore files" }));
   const dialog = screen.getByRole("dialog");
   expect(
-    within(dialog).getByRole("button", { name: "Confirm action" }).hasAttribute("disabled"),
+    within(dialog)
+      .getByRole("button", { name: "Confirm action" })
+      .hasAttribute("disabled"),
   ).toBe(true);
   expect(state.lifecycle).not.toHaveBeenCalled();
   fireEvent.click(within(dialog).getByRole("checkbox"));
