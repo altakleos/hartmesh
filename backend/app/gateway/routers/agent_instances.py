@@ -18,6 +18,7 @@ from deerflow.persistence.agents import get_agent_store
 from deerflow.spaces.contract import PrincipalRef, SpaceConflict, SpaceDenied
 from deerflow.spaces.filesystem import FilesystemUnavailable
 from deerflow.utils.file_io import await_drained, run_file_io
+from deerflow.utils.thread_id import ThreadId
 
 
 class InstanceRoute(APIRoute):
@@ -230,7 +231,7 @@ async def create_conversation(instance_id: str, body: CreateConversation, reques
 @router.get("/conversations/{thread_id}/instance")
 @require_permission("agents", "read")
 @require_permission("threads", "read")
-async def conversation_instance(thread_id: str, request: Request):
+async def conversation_instance(thread_id: ThreadId, request: Request):
     from deerflow.agent_instances.contract import AgentPermission
 
     await _service(request)
