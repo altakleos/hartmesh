@@ -11,7 +11,9 @@ registration is in `persistence/models/__init__.py`. Pre-existing tables must
 match frozen columns, defaults, keys, checks and FK behavior; PostgreSQL check
 predicates are compared through server-canonicalized temporary definitions.
 Downgrade refuses to erase used resource, binding or operation facts. Historical
-ancestry fixtures stay immutable. See `deerflow/spaces/AGENTS.md` for the
+ancestry fixtures stay immutable. Release44 freezes head0037 in
+`tests/fixtures/migrations/release_44_ancestry.json`; keep the release39/43
+fixtures unchanged and append future DDL after the published head. See `deerflow/spaces/AGENTS.md` for the
 mandatory resource boundary and staged qualification limits.
 
 DeerFlow's application tables (`runs`, `threads_meta`, `feedback`, `users`, `run_events`, plus the four `channel_*` tables) are owned by alembic via a **hybrid bootstrap** strategy. LangGraph's checkpointer tables (`checkpoints`, `checkpoint_blobs`, `checkpoint_writes`, `checkpoint_migrations`) live in the same database but are owned by LangGraph and excluded from alembic's view via `migrations/_env_filters.py::include_object`.
