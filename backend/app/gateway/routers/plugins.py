@@ -4,9 +4,11 @@ import asyncio
 import hashlib
 import json
 import logging
+from dataclasses import asdict
 from types import MappingProxyType
 
 from deerflow_extension_api.auth import resolve_principal
+from deerflow_extension_api.storage import StorageConflict, StorageIdentityRequired, StorageOperationPending, StorageUnavailable
 from fastapi import APIRouter, HTTPException, Request, Response
 
 from deerflow.extensions.browser_assets import LoadedBrowserAssets, valid_asset_path
@@ -30,6 +32,9 @@ async def list_plugins(request: Request, response: Response):
     entries = []
     for source, plugin in request.app.state.extensions.plugins:
         settings = plugin_settings(source, plugin)
+        provider = getattr(request.app.state, "extension_storage", None)
+        if plugin.storage_api_version == 1 and provider is not None:
+            provider = provider.for_plugin(source, plugin, lambda: request.app.state.extensions)
         module = plugin.frontend
         if isinstance(module, LoadedBrowserAssets):
             revision = module.revision
@@ -59,6 +64,9 @@ async def list_plugins(request: Request, response: Response):
                 "artifact_presentations": [
                     {"id": item.id, "suffixes": list(item.suffixes), "source_max_bytes": item.source_max_bytes, "preview_max_bytes": item.preview_max_bytes, "projection_marker": item.projection_marker} for item in plugin.artifacts
                 ],
+                "storage_api_version": plugin.storage_api_version,
+                "actor_kinds": list(plugin.actor_kinds),
+                "storage_capabilities": asdict(provider.capabilities) if plugin.storage_api_version == 1 and provider is not None else None,
             }
         )
     return entries
@@ -149,7 +157,46 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
         raise HTTPException(422, "Plugin action requires a JSON object.") from exc
     try:
         async with asyncio.timeout(30):
+            if plugin.api_version == 4:
+                from deerflow_extension_api.storage import StorageActor
+
+                from app.gateway.routers.spaces import _ERRORS, _actor, _http_error
+                from deerflow.spaces.facade import HostStorageProvider, storage_actor_scope
+
+                actor = await _actor(request)
+                if actor.kind not in plugin.actor_kinds:
+                    raise HTTPException(403, "This plugin does not support the host actor.")
+                with storage_actor_scope(actor):
+                    storage = resource = None
+                    if plugin.storage_api_version == 1:
+                        provider = getattr(request.app.state, "extension_storage", None)
+                        if not isinstance(provider, HostStorageProvider):
+                            raise HTTPException(501, "Host resource storage is unavailable.")
+                        try:
+                            storage = await provider.for_plugin(source, plugin, lambda: request.app.state.extensions).current()
+                            requested_resource = request.headers.get("x-deerflow-resource")
+                            if requested_resource is not None:
+                                resource = await storage.get(space_id=requested_resource)
+                        except _ERRORS as exc:
+                            raise _http_error(exc) from None
+                        except NotImplementedError as exc:
+                            raise HTTPException(501, "Host resource storage is unavailable.") from exc
+                    return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), actor=StorageActor(actor.kind, actor.subject_id), storage=storage, resource=resource))
             return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings)))
+    except HTTPException:
+        raise
+    except StorageIdentityRequired as exc:
+        raise HTTPException(401, "A current host storage identity is required.") from exc
+    except StorageOperationPending as exc:
+        raise HTTPException(409, "Resource operation outcome is pending; inspect recovery before another mutation.") from exc
+    except StorageUnavailable as exc:
+        raise HTTPException(503, "Resource backing is currently unavailable.") from exc
+    except StorageConflict as exc:
+        raise HTTPException(409, "Resource state conflicts with this request; inspect recovery if its outcome is pending.") from exc
+    except PermissionError as exc:
+        raise HTTPException(403, "Current storage authority is required.") from exc
+    except NotImplementedError as exc:
+        raise HTTPException(501, "Required host capability is unavailable.") from exc
     except TimeoutError as exc:
         raise HTTPException(504, "Plugin action timed out.") from exc
     except ValueError as exc:

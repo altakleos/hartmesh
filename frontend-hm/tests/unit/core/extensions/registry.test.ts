@@ -19,6 +19,32 @@ const entry = {
 const extension = { apiVersion: 1, module: entry.module };
 const code = "export default {apiVersion: 1, module: 'bookmarks.v1'};";
 
+test("resource capability requires backend negotiation and snapshots its version once", async () => {
+  rs.spyOn(globalThis, "fetch").mockImplementation(
+    async () => new Response(code),
+  );
+  let reads = 0;
+  const resourceModule = Object.defineProperty({ ...extension }, "resourceApiVersion", {
+    get() {
+      reads++;
+      if (reads > 1) throw new Error("Repeated getter");
+      return 1;
+    },
+    enumerable: true,
+  });
+  const result = await loadFrontendExtensions(
+    [{ ...entry, storage_api_version: 1 }],
+    async () => ({ default: resourceModule }),
+  );
+  expect(result[0]?.error).toBeUndefined();
+  expect(result[0]?.extension?.resourceApiVersion).toBe(1);
+  expect(reads).toBe(1);
+  const unsupported = await loadFrontendExtensions([entry], async () => ({
+    default: { ...extension, resourceApiVersion: 1 },
+  }));
+  expect(unsupported[0]?.error).toBeTruthy();
+});
+
 test("filing registration captures a callable once and leaves page-only modules compatible", async () => {
   rs.spyOn(globalThis, "fetch").mockImplementation(
     async () => new Response(code),

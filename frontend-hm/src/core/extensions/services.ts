@@ -21,7 +21,10 @@ export function bindFrontendServices(
   base: HostServices,
   entry: FrontendContribution,
   signal?: AbortSignal,
+  resourceId?: string,
 ): FrontendServices {
+  if (resourceId !== undefined && !/^[0-9a-f]{32}$/.test(resourceId))
+    throw new Error("Invalid storage resource reference");
   return {
     async conversationText(context) {
       signal?.throwIfAborted();
@@ -67,6 +70,7 @@ export function bindFrontendServices(
               method: "POST",
               headers: {
                 "Content-Type": "application/json",
+                ...(resourceId ? { "X-Deerflow-Resource": resourceId } : {}),
                 ...(entry.viewer_id
                   ? { "X-Deerflow-Plugin-Viewer": entry.viewer_id }
                   : {}),

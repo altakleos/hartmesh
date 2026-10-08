@@ -106,10 +106,22 @@ class ExtensionRegistry(ExtensionRegistryContract):
         return self._current_source
 
     def plugin(self, contribution: PluginContribution) -> bool:
-        if not isinstance(contribution, PluginContribution) or contribution.api_version not in (1, 2, 3):
+        if not isinstance(contribution, PluginContribution) or type(contribution.api_version) is not int or contribution.api_version not in (1, 2, 3, 4):
             raise ValueError("Unsupported plugin contract")
-        if contribution.artifacts and contribution.api_version not in (2, 3):
+        if contribution.artifacts and contribution.api_version not in (2, 3, 4):
             raise ValueError("Artifact presentations require plugin contract v2")
+        if contribution.storage_api_version is not None or contribution.actor_kinds != ("human",) or contribution.storage_controller is not None:
+            if contribution.api_version != 4:
+                raise ValueError("Storage and typed actors require plugin contract v4")
+        if contribution.storage_api_version is not None and (type(contribution.storage_api_version) is not int or contribution.storage_api_version != 1):
+            raise ValueError("Unsupported resource storage contract")
+        if not contribution.actor_kinds or len(set(contribution.actor_kinds)) != len(contribution.actor_kinds) or any(kind not in ("human", "nonhuman") for kind in contribution.actor_kinds):
+            raise ValueError("Unsupported typed plugin actor kinds")
+        if contribution.storage_controller is not None:
+            from deerflow_extension_api.storage import StorageController
+
+            if not isinstance(contribution.storage_controller, StorageController) or contribution.storage_api_version != 1:
+                raise ValueError("A storage controller requires a typed resource contract")
         if not contribution.frontend and not contribution.backend and not contribution.tools and not contribution.artifacts:
             raise ValueError("A plugin must contribute a browser module, backend action or tool")
         self._validate_artifact_presentations(contribution)
@@ -119,7 +131,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         for tool in contribution.tools:
             if not isinstance(tool.purpose, str) or tool.purpose not in {"business", "management"}:
                 raise ValueError("Unsupported model tool purpose")
-            if tool.purpose == "management" and contribution.api_version != 3:
+            if tool.purpose == "management" and contribution.api_version not in (3, 4):
                 raise ValueError("Management declarations require plugin contract v3")
             if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", tool.name) or tool.name in tool_names or not tool.description or not inspect.iscoroutinefunction(tool.handler):
                 raise ValueError("Model tools require unique names, descriptions and async handlers")
@@ -129,7 +141,7 @@ class ExtensionRegistry(ExtensionRegistryContract):
         for action in contribution.backend:
             if not isinstance(action.purpose, str) or action.purpose not in {"business", "management"}:
                 raise ValueError("Unsupported backend action purpose")
-            if action.purpose == "management" and contribution.api_version != 3:
+            if action.purpose == "management" and contribution.api_version not in (3, 4):
                 raise ValueError("Management declarations require plugin contract v3")
             if not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", action.name) or action.name in names or not inspect.iscoroutinefunction(action.handler):
                 raise ValueError("Backend actions require unique names and async handlers")

@@ -59,6 +59,12 @@ create quiesced backups, restore with current grants, archive and delete through
 the generic recovery controls. A trusted consumer can attach native roots on the
 qualified direct Linux Docker host; uncertain containment blocks takeover.
 Feature migration and final consumer qualification remain subsequent stages.
+Installed extensions can negotiate storage contract v1 with plugin contract v4.
+Actions, model tools and services use host-bound resource capabilities and typed
+actors; nonhuman callers never impersonate a human owner. Resource pages request
+`?space=<stable-id>` and the host checks current grants before mounting or invoking
+actions. Older page/action contracts remain supported. See the
+[extension storage contract](docs/STORAGE_SPACES.md#extension-storage-contract).
 
 Editable artifact previews capture at most 2 MiB so their SHA-256 and byte ranges
 describe the same bytes. Larger artifacts stream from one opened file without a

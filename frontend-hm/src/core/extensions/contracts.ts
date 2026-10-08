@@ -8,6 +8,24 @@ export type ExtensionSettings = Readonly<
   Record<string, boolean | number | string>
 >;
 export type SurfaceSlot = "page";
+export type StorageResourceContext = Readonly<{
+  id: string;
+  name: string;
+  mode: "native" | "mediated";
+  generation: number;
+  permissions: number;
+}>;
+export type StorageCapabilityContext = Readonly<{
+  api_version: 1;
+  available: boolean;
+  actor_kinds: ("human" | "nonhuman")[];
+  files: boolean;
+  provision: boolean;
+  grants: boolean;
+  mediated_mutations: boolean;
+  native_attachments: boolean;
+  quiesced_recovery: boolean;
+}>;
 export type SurfaceContext = {
   namespace: string;
   locale: string;
@@ -17,6 +35,9 @@ export type SurfaceContext = {
   callBackend: FrontendServices["callBackend"];
   /** Host resolves current thread ownership before navigating; unavailable on older hosts. */
   openConversation?: (threadId: string) => Promise<void>;
+  /** Host reads current grants; a URL/payload is only a requested resource. */
+  resource?: StorageResourceContext;
+  storageCapabilities?: StorageCapabilityContext;
 };
 export type PluginSurface = {
   id: string;
@@ -42,6 +63,9 @@ export type FrontendContribution = {
   settings: ExtensionSettings;
   backend_actions?: string[];
   artifact_presentations?: ArtifactPresentationDescriptor[];
+  storage_api_version?: 1 | null;
+  actor_kinds?: ("human" | "nonhuman")[];
+  storage_capabilities?: StorageCapabilityContext | null;
 };
 export type ArtifactPresentationDescriptor = {
   id: string;
@@ -134,6 +158,7 @@ export interface FrontendExtension {
   artifacts?: PluginArtifactSurface[];
   /** Optional filing policy from installed code; passive files cannot register it. */
   fileFilingApiVersion?: 1;
+  resourceApiVersion?: 1;
   fileCollection?: (
     context: FileCollectionContext,
   ) => { collection: string } | null;

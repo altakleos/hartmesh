@@ -60,7 +60,7 @@ def plugin_tool_name(namespace, name):
     return f"ext_{re.sub('[^a-z0-9_]', '_', namespace)[:20]}_{name[:25]}_{digest}"
 
 
-def _build_tool(source, plugin, declaration):
+def _build_tool(source, plugin, declaration, loaded=None):
     schema = deepcopy(dict(declaration.input_schema))
     validator = Draft202012Validator(schema)
 
@@ -90,6 +90,23 @@ def _build_tool(source, plugin, declaration):
                 MappingProxyType(settings),
                 context.get("thread_id"),
             )
+            if plugin.api_version == 4:
+                from deerflow_extension_api.storage import StorageActor
+
+                from deerflow.spaces.facade import STORAGE_PROVIDER_CONTEXT_KEY, HostStorageProvider, _current_actor
+
+                actor = _current_actor()
+                if actor.kind not in plugin.actor_kinds or (actor.kind == "nonhuman" and declaration.purpose == "management"):
+                    raise ToolException("This plugin does not support the host actor.")
+                storage = None
+                if plugin.storage_api_version == 1:
+                    provider = context.get(STORAGE_PROVIDER_CONTEXT_KEY)
+                    if not isinstance(provider, HostStorageProvider):
+                        raise ToolException("Host resource storage is unavailable.")
+                    from deerflow.extensions import get_loaded_extensions
+
+                    storage = await provider.for_plugin(source, plugin, lambda: loaded if loaded is not None else get_loaded_extensions()).current()
+                tool_context = ToolContext(ExtensionPrincipal(actor.subject_id) if actor.kind == "human" else None, MappingProxyType(settings), context.get("thread_id"), actor=StorageActor(actor.kind, actor.subject_id), storage=storage)
             async with asyncio.timeout(30):
                 result = await declaration.handler(MappingProxyType(payload), tool_context)
             encoded = json.dumps(result, ensure_ascii=False, allow_nan=False)
@@ -124,7 +141,7 @@ def build_plugin_tools(loaded, *, groups=None, reserved_names=()):
                 continue
             if groups is not None and declaration.group not in groups:
                 continue
-            tool = _build_tool(source, plugin, declaration)
+            tool = _build_tool(source, plugin, declaration, loaded)
             if tool.name in names:
                 raise ValueError(f"Plugin tool name collision: {tool.name}")
             names.add(tool.name)

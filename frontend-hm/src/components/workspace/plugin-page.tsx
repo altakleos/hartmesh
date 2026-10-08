@@ -13,9 +13,11 @@ import { PluginSurfaces } from "./plugin-surfaces";
 export function PluginPage({
   namespace,
   surfaceId,
+  resourceId,
 }: {
   namespace: string;
   surfaceId: string;
+  resourceId?: string;
 }) {
   const query = useFrontendExtensions();
   const { locale, t } = useI18n();
@@ -46,6 +48,7 @@ export function PluginPage({
                   slot="page"
                   namespace={namespace}
                   surfaceId={surfaceId}
+                  resourceId={resourceId}
                 />
               ) : (
                 <div className="space-y-4">

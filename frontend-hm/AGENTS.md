@@ -23,14 +23,15 @@ is provider-only. The bilingual notice uses only configured provider support lin
 
 ## Project Overview
 
-`/workspace/spaces` uses the startup `/api/features` storage capability and
-account-scoped `core/spaces` queries. References are space ID + relative path,
-independent of threads. Host grants/mode/status govern writes and export.
-Keep editor drafts on conflicts; send their loaded generation and SHA-256.
-Combine account and component cancellation; late creates never navigate. Active text is
-rendered as text, while downloads retain host MIME/content-disposition rules.
-Recovery requires ADMIN/current generation and explicit restore/delete acceptance;
-retirement sends captured attachment IDs so retries cannot stop replacements.
+`/workspace/spaces` uses account-scoped queries and host grants. Send captured
+generation/SHA for edits and attachment IDs for retirement; preserve conflict
+drafts. Abort account/component work and late navigation. ADMIN recovery needs
+explicit restore/delete acceptance. Active content remains text/download only.
+
+Existing extension pages negotiate resource API v1. Resolve `?space=<id>` under
+current grants before mounting, pass immutable resource facts, and bind action
+headers independently of payload. Abort retired reads/mounts/actions; backend
+rechecks access. See [the contract](../docs/STORAGE_SPACES.md#extension-storage-contract).
 
 `ArtifactFileControls` serves passive/native renderers through explicit exports,
 collection suggestions, bounded live probes and existing storage/Undo lifetimes.

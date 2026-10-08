@@ -17,6 +17,7 @@ DEFAULT_AGENT_NAME_METADATA_VALUE: Final[str] = "__default__"
 # Clients can never supply it: it is popped from both run-config sections at
 # Gateway admission and refused by the run worker's runtime-context merge.
 PROJECT_CONTEXT_KEY: Final[str] = "__deerflow_project_context"
+STORAGE_PROVIDER_CONTEXT_KEY: Final[str] = "__deerflow_storage_provider"
 
 
 def checkpoint_agent_binding_metadata(metadata: object) -> dict[str, str]:

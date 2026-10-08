@@ -12,6 +12,7 @@ import re
 from collections.abc import Callable
 from contextvars import ContextVar
 
+from deerflow_extension_api.storage import StorageOperationPending
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -27,7 +28,7 @@ MAX_TRANSFER_BYTES = 64 * 1024 * 1024
 _reservation = ContextVar("storage_lifecycle_reservation", default=None)
 
 
-class SpaceOperationPending(SpaceConflict):
+class SpaceOperationPending(StorageOperationPending, SpaceConflict):
     """An interrupted operation needs explicit recovery before further access."""
 
 
@@ -158,7 +159,7 @@ class SpaceFiles:
         if (operation.actor_kind, operation.actor_id, operation.generation, operation.request) != (actor.kind, actor.subject_id, generation, request):
             raise SpaceConflict("The operation ID already identifies a different request")
 
-    async def _mutate(self, *, actor, requests, destination_id, operation_id, request, call):
+    async def _mutate(self, *, actor, requests, destination_id, operation_id, request, call, controller_admission=None):
         self._operation_id(operation_id)
         generation = requests[destination_id][1]
         if generation is None:
@@ -166,6 +167,8 @@ class SpaceFiles:
 
         async def perform():
             async with self.registry.admitted(actor=actor, requests=requests, operation_id=(destination_id, operation_id)) as (session, rows):
+                if controller_admission is not None:
+                    await controller_admission(session, rows)
                 existing = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
                 if existing is not None:
                     self._same_operation(existing, actor, generation, request)
@@ -183,6 +186,8 @@ class SpaceFiles:
                     operation = await session.get(SpaceFileOperationRow, (destination_id, operation_id))
                     self._same_operation(operation, actor, generation, request)
                     volumes = {key: await self._volume(session, row) for key, (row, _) in rows.items()}
+                    if controller_admission is not None:
+                        await controller_admission(session, rows)
                     if request["action"] == "copy":
                         await self._transfer_audience(session, rows, actor, request)
                     result = await run_file_io(call, volumes)
