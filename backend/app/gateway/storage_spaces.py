@@ -6,6 +6,8 @@ from app.gateway.auth.mode import account_refusal
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, is_auth_disabled
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
+from deerflow.agent_instances.directory import InstanceDirectory
+from deerflow.agent_instances.service import AgentInstances
 from deerflow.config.storage_spaces_config import StorageSpacesConfig
 from deerflow.spaces.backings import PreparedVolumeCatalog
 from deerflow.spaces.contract import PrincipalRef, ResolvedPrincipal
@@ -42,6 +44,7 @@ def human_lookup(repository):
 async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session_factory) -> None:
     app.state.storage_spaces_enabled = config.enabled
     app.state.storage_spaces = None
+    app.state.agent_instances = None
     if not config.enabled:
         return
     if session_factory is None:
@@ -53,5 +56,8 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
         await run_file_io(catalog.verify, slot_id)
     if not catalog.volumes:
         raise RuntimeError("Storage spaces require at least one qualified provider volume")
-    registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human_lookup(SQLiteUserRepository(session_factory))))
+    human = human_lookup(SQLiteUserRepository(session_factory))
+    directory = InstanceDirectory(session_factory, human=human)
+    registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human, nonhuman=directory.lookup))
     app.state.storage_spaces = SpaceFiles(registry, catalog)
+    app.state.agent_instances = AgentInstances(app.state.storage_spaces, directory)

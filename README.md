@@ -47,6 +47,13 @@ interrupted removal from its recorded outcome. An unavailable or inconsistent
 record keeps the bytes staged and returns a retryable error. Preserve this hidden
 directory with Shared storage and its publication database when backing up or restoring.
 
+[Persistent agent instances](docs/AGENT_EXECUTION.md) add resident non-login
+identities, personal/company custody, adopted custom definition revisions and
+stable Storage Spaces homes, created before the first chat. The opt-in management
+API supports inspection and generation-checked rename. Conversation/runtime
+binding, isolated memory and lifecycle controls are subsequent implementation
+stages; existing default/custom-agent chats retain their behavior.
+
 The [Storage Spaces foundation](docs/STORAGE_SPACES.md) adds stable resource
 identity, personal/company custody and explicit typed grants. Company custody
 does not make data public. With a qualified provider volume inventory and a
@@ -65,7 +72,6 @@ the fixed filesystem byte/inode bounds and platform reserve. Administrators can
 create quiesced backups, restore with current grants, archive and delete through
 the generic recovery controls. A trusted consumer can attach native roots on the
 qualified direct Linux Docker host; uncertain containment blocks takeover.
-Feature migration and final consumer qualification remain subsequent stages.
 Installed extensions can negotiate storage contract v1 with plugin contract v4.
 Actions, model tools and services use host-bound resource capabilities and typed
 actors; nonhuman callers never impersonate a human owner. Resource pages request

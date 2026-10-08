@@ -192,7 +192,7 @@ watcher. Do not replace it with a bare `uvicorn --reload`: agent tasks write
 Python and other runtime files below `DEER_FLOW_HOME`, which would otherwise
 restart the Gateway during an active run.
 
-More specific `AGENTS.md` files in backend code directories contain the subsystem sections split from this file. Follow the nearest file in the directory tree.
+Follow the nearest subsystem guide, including [agent instances](packages/harness/deerflow/agent_instances/AGENTS.md).
 
 ## Architecture
 

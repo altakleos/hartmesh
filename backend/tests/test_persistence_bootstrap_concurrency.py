@@ -174,6 +174,10 @@ async def test_cancelled_bootstrap_keeps_sqlite_lock_until_alembic_worker_finish
     monkeypatch.setattr(bootstrap_mod, "_stamp", blocking_stamp)
     monkeypatch.setattr(bootstrap_mod, "_upgrade", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(bootstrap_mod, "_reflect_state", recording_reflect)
+    # This unit boundary proves worker/lock ownership, not the growing schema's
+    # DDL speed. Real schema creation has separate bootstrap/migration coverage.
+    # Keep actual connections/reflection and the deliberately blocked worker.
+    monkeypatch.setattr(bootstrap_mod, "_run_create_all_sync", lambda _connection: None)
 
     first = asyncio.create_task(bootstrap_schema(engine, backend="sqlite"))
     second: asyncio.Task[None] | None = None

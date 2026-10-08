@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Persistent agent instances
+
+- Add distinct non-login instances, personal/company custody, human supervision,
+  adopted custom-definition revisions and qualified Storage Spaces homes before
+  the first chat. Existing default/custom-agent chats remain compatible.
+- Add opt-in, provider-gated management APIs with mandatory Use/Inspect/Manage
+  grants, generation-checked rename, durable creation retries and owned write
+  cancellation. Incomplete provisioning never exposes an executable principal.
+- Keep company identities independent of creator login and keep ready retries
+  from restoring revoked home access. Runtime binding and scoped memory follow.
+
+### Schema changes
+
+- Append `0034_agent_instances` after release 43's `0033` head with three additive
+  tables for adopted revisions, instances and grants; existing tables are unchanged.
+  Downgrade refuses to erase used identity/history. Configuration format is unchanged.
+
 ## [2.2.0+hartmesh.43] - 2026-10-08
 
 ### Storage Spaces

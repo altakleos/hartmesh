@@ -29,6 +29,10 @@ MAX_TRANSFER_BYTES = 64 * 1024 * 1024
 _reservation = ContextVar("storage_lifecycle_reservation", default=None)
 
 
+class SpaceCapacityExhausted(SpaceConflict):
+    """A definite effect-free refusal: no empty qualified backing slot remains."""
+
+
 class SpaceOperationPending(StorageOperationPending, SpaceConflict):
     """An interrupted operation needs explicit recovery before further access."""
 
@@ -78,7 +82,7 @@ class SpaceFiles:
                     volume = candidate
                     break
             if volume is None:
-                raise SpaceConflict("No empty qualified backing capacity remains")
+                raise SpaceCapacityExhausted("No empty qualified backing capacity remains")
             spec = volume.spec
             session.add(
                 SpaceBackingRow(
