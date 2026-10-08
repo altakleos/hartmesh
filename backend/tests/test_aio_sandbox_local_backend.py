@@ -869,6 +869,23 @@ def _capture_start_container_command(monkeypatch, backend: LocalContainerBackend
     return captured_cmd
 
 
+def test_storage_preparation_reuses_builder_without_starting_environment(monkeypatch):
+    backend = _restricted_backend()
+    captured = []
+
+    def fake_run(command, **kwargs):
+        captured.append((command, kwargs))
+        return SimpleNamespace(stdout="a" * 64, stderr="", returncode=0)
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+    identity = backend._start_container("prepared-space", 0, [("/provider/data", "/mnt/spaces/home", False)], publish_port=False, network_override="bridge", start=False)
+    assert identity == "a" * 64
+    command, kwargs = captured[-1]
+    assert command[:2] == ["docker", "create"] and "-d" not in command
+    assert "--cap-drop=ALL" in command and kwargs["timeout"] == 30
+    assert "type=bind,src=/provider/data,dst=/mnt/spaces/home" in command
+
+
 def test_resolve_docker_bind_host_defaults_loopback_for_localhost(monkeypatch):
     monkeypatch.delenv("DEER_FLOW_SANDBOX_BIND_HOST", raising=False)
     monkeypatch.delenv("DEER_FLOW_SANDBOX_HOST", raising=False)

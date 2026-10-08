@@ -22,7 +22,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add opt-in resource/file APIs and the Spaces browser, with folder navigation,
   uploads/downloads, text revisions and explicit audience-checked copies. Durable
   operation intents retain uncertain outcomes; browser saves require serialized
-  host edit admission. Native attachments and recovery are subsequent stages.
+  host edit admission.
+- Add durable execution-incarnation attachments with native RO/RW roots and
+  audience admission on a verified direct Linux Docker host. Exact-container
+  retirement fences child writers; unknown containment, adapter loss and lease
+  expiry never permit takeover or completed write revocation.
+- Add quiesced filesystem backups, integrity-checked restore using current grants,
+  read-only archive, permanent deletion tombstones and generic recovery controls.
+  Backup/restore staging shares resource limits; uncertain SQL/publication outcomes
+  retain evidence and displaced bytes instead of replaying changes.
 
 ### Schema changes
 
@@ -35,6 +43,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   downgraded away. Existing feature data stays in place. Config version 53 adds
   disabled-by-default, startup-only `storage_spaces` with an explicit provider
   inventory path; memory database mode cannot enable this durable feature.
+- Migration `0032_storage_lifecycle` adds `storage_space_attachments`,
+  `storage_space_mounts` and `storage_space_backups` after `0031`; used containment
+  and backup facts cannot be erased by downgrade. No config schema change in this
+  stage: configuration remains version 53.
 
 ## [2.2.0+hartmesh.42] - 2026-10-07
 

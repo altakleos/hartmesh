@@ -52,6 +52,7 @@ rs.mock("@/core/spaces/hooks", () => ({
     },
     refetch: rs.fn(),
   }),
+  useSpaceRecovery: () => ({ data: undefined, refetch: rs.fn() }),
   useSpaceFiles: () => ({
     data: { files: state.files, truncated: false },
     refetch: rs.fn(),

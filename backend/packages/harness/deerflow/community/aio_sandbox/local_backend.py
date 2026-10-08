@@ -1845,6 +1845,7 @@ class LocalContainerBackend(SandboxBackend):
         extra_environment: dict[str, str] | None = None,
         labels: dict[str, str] | None = None,
         extra_hosts: dict[str, str] | None = None,
+        start: bool = True,
     ) -> str:
         """Start a new container.
 
@@ -1861,7 +1862,9 @@ class LocalContainerBackend(SandboxBackend):
         Raises:
             RuntimeError: If container fails to start.
         """
-        cmd = [self._runtime, "run"]
+        if type(start) is not bool or (not start and self._runtime != "docker"):
+            raise ValueError("Stopped environment preparation requires Docker")
+        cmd = [self._runtime, "run" if start else "create"]
 
         # Docker-only security hardening. The sandbox container executes
         # untrusted, model-authored code, so it must not run with the
@@ -2007,7 +2010,9 @@ class LocalContainerBackend(SandboxBackend):
                 # the legit name=<custom-net> long form all keep working.
                 cmd.extend(["--network", network])
 
-        cmd.extend(["--rm", "-d"])
+        cmd.append("--rm")
+        if start:
+            cmd.append("-d")
         if publish_port:
             if self._runtime == "docker":
                 port_mapping = f"{_resolve_docker_bind_host()}:{port}:8080"
@@ -2071,7 +2076,7 @@ class LocalContainerBackend(SandboxBackend):
         logger.info(f"Starting container using {self._runtime}: {log_cmd}")
 
         try:
-            result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, **({"timeout": 30} if not start else {}))
             container_id = result.stdout.strip()
             logger.info(f"Started container {container_name} (ID: {container_id}) using {self._runtime}")
             return container_id

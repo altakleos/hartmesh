@@ -89,6 +89,45 @@ async def test_pat_without_resource_scope_is_explicitly_unsupported(space_file_s
 
 
 @pytest.mark.asyncio
+async def test_lifecycle_routes_use_current_admin_and_never_accept_actor_or_paths(space_file_storage):
+    from deerflow.spaces.contract import Permission
+
+    service, _, _ = space_file_storage
+    space = await home(service)
+    await service.registry.set_grant(actor=ALICE, space_id=space.id, expected_generation=1, subject=BOB, permissions=Permission.READ, acknowledge_existing_data=True)
+    base = f"/api/spaces/{space.id}"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=request_app(service)), base_url="http://test") as client:
+        assert (await client.post(base + "/lifecycle", json={"action": "backup", "generation": 2, "operation_id": operation(), "actor": "alice"})).status_code == 422
+        backup = await client.post(base + "/lifecycle", json={"action": "backup", "generation": 2, "operation_id": operation()})
+        assert backup.status_code == 200 and backup.json()["consistency"] == "quiesced-filesystem"
+        assert (await client.get(base + "/recovery")).json()["backups"][0]["id"] == backup.json()["id"]
+        archived = await client.post(base + "/lifecycle", json={"action": "archive", "generation": 2, "operation_id": operation()})
+        assert archived.status_code == 200 and archived.json()["status"] == "archived"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=request_app(service, BOB)), base_url="http://test") as client:
+        assert (await client.get(base + "/recovery")).status_code == 403
+        assert (await client.post(base + "/lifecycle", json={"action": "delete", "generation": 3, "operation_id": operation()})).status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_pending_operation_keeps_resource_and_recovery_visible(space_file_storage):
+    from deerflow.persistence.spaces.files import SpaceFileOperationRow
+
+    service, sf, _ = space_file_storage
+    space = await home(service)
+    op = operation()
+    async with sf() as session, session.begin():
+        session.add(SpaceFileOperationRow(space_id=space.id, operation_id=op, actor_kind=ALICE.kind, actor_id=ALICE.subject_id, generation=1, phase="pending", request={"action": "write", "path": "page"}))
+    base = f"/api/spaces/{space.id}"
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=request_app(service)), base_url="http://test") as client:
+        metadata = await client.get(base)
+        assert metadata.status_code == 200 and metadata.json()["storage_state"] == "recovery-pending"
+        status = await client.get(base + "/recovery")
+        assert status.status_code == 200 and status.json()["operations"][0]["phase"] == "pending"
+        assert (await client.post(base + "/recovery", json={"operation_id": op, "generation": 1, "acknowledge_uncertain_outcome": False})).status_code == 400
+        assert (await client.post(base + "/recovery", json={"operation_id": op, "generation": 1, "acknowledge_uncertain_outcome": True})).status_code == 200
+
+
+@pytest.mark.asyncio
 async def test_stalled_download_releases_sql_before_streaming_an_open_inode(space_file_storage, monkeypatch):
     import asyncio
     import hashlib

@@ -16,6 +16,7 @@ from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from app.gateway.routers._file_http import DescriptorFileResponse
 from deerflow.spaces.contract import Custody, InvalidPrincipal, MutationMode, Permission, PrincipalRef, SpaceConflict, SpaceDenied, SpaceNotFound
 from deerflow.spaces.filesystem import FilesystemUnavailable, _path
+from deerflow.spaces.recovery import SpaceRecovery
 from deerflow.spaces.service import MAX_TRANSFER_BYTES, SpaceFiles
 from deerflow.utils.file_io import await_drained, run_file_io
 
@@ -117,6 +118,24 @@ class CopyRequest(StrictRequest):
     acknowledge_disclosure: bool = False
 
 
+class LifecycleRequest(StrictRequest):
+    operation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    generation: int = Field(ge=1)
+    action: Literal["backup", "restore", "archive", "delete"]
+    backup_id: str | None = Field(default=None, pattern=r"^[0-9a-f]{32}$")
+
+
+class RecoveryRequest(StrictRequest):
+    operation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    generation: int = Field(ge=1)
+    acknowledge_uncertain_outcome: bool
+
+
+class RetireAttachmentsRequest(StrictRequest):
+    generation: int = Field(ge=1, le=2**31 - 1)
+    attachment_ids: list[str] = Field(min_length=1, max_length=32)
+
+
 @router.get("")
 async def list_spaces(request: Request, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
     actor = await _actor(request)
@@ -135,7 +154,45 @@ async def get_space(space_id: str, request: Request):
     actor = await _actor(request)
     service = _service(request)
     space = await service.registry.get(actor=actor, space_id=space_id)
-    return {**jsonable_encoder(asdict(space)), "quota": await service.quota(actor=actor, space_id=space_id)}
+    try:
+        quota = await service.quota(actor=actor, space_id=space_id)
+    except SpaceConflict:
+        return {**jsonable_encoder(asdict(space)), "storage_state": "recovery-pending"}
+    return {**jsonable_encoder(asdict(space)), "quota": quota, "storage_state": "available"}
+
+
+@router.get("/{space_id}/recovery")
+async def recovery_status(space_id: str, request: Request):
+    return await SpaceRecovery(_service(request)).status(actor=await _actor(request), space_id=space_id)
+
+
+@router.post("/{space_id}/recovery")
+async def accept_observed_state(space_id: str, body: RecoveryRequest, request: Request):
+    await SpaceRecovery(_service(request)).accept_current_state(
+        actor=await _actor(request), space_id=space_id, expected_generation=body.generation, operation_id=body.operation_id, acknowledge_uncertain_outcome=body.acknowledge_uncertain_outcome
+    )
+    return {"complete": True, "resolution": "owner-accepted-current-state"}
+
+
+@router.post("/{space_id}/lifecycle")
+async def resource_lifecycle(space_id: str, body: LifecycleRequest, request: Request):
+    if (body.action == "restore") != (body.backup_id is not None):
+        raise ValueError("Only restore requires a resource backup identity")
+    recovery = SpaceRecovery(_service(request))
+    arguments = {"actor": await _actor(request), "space_id": space_id, "expected_generation": body.generation, "operation_id": body.operation_id}
+    if body.action == "restore":
+        arguments["backup_id"] = body.backup_id
+    result = await getattr(recovery, body.action)(**arguments)
+    return jsonable_encoder(asdict(result))
+
+
+@router.post("/{space_id}/attachments/retire")
+async def retire_attachments(space_id: str, body: RetireAttachmentsRequest, request: Request):
+    provider = getattr(_service(request), "attachments", None)
+    if provider is None:
+        raise HTTPException(501, "The attachment provider must reconnect before containment can be confirmed")
+    await provider.retire(actor=await _actor(request), space_id=space_id, expected_generation=body.generation, attachment_ids=body.attachment_ids)
+    return {"complete": True}
 
 
 @router.patch("/{space_id}")

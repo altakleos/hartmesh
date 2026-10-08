@@ -43,13 +43,19 @@ generation and request. Drain the entire owned mutation before cancellation.
 Cross-space copy needs source READ/EXPORT, destination WRITE, and source ADMIN
 plus explicit acknowledgement when destination readers broaden the audience.
 
-New roots admit serialized host file operations only; no native attachment is
-advertised yet. Browser revisions run inside that host edit window. There is no
-archive/delete/restore completion or writer-stop claim. Later adapters must
-fence actual writers before completing those operations; lease expiry alone
-never proves retirement. A metadata generation is a stale-request fence, not
-a filesystem fence. Files, mounts, quotas and feature migration require their
-own qualification before consumer readiness.
+Host edits require an exclusive window with no native attachments. The host-only
+attachment service reserves durable intents, commits exact container identity
+before activation, and fences by confirmed removal on one direct Linux Docker
+host. Missing/foreign identity, unknown containment and adapter loss stay pending;
+leases never prove retirement. Reject remote/remapped daemon namespaces and extra
+mounts. Joint views require audience admission. No chat or task lifecycle owns it.
+
+Native recovery quiesces all mounts, records backup identity before I/O and
+validates archived trees before publication. Restore keeps root identity/current
+grants and advances generation. Retain displaced bytes until SQL completion;
+separately recorded cleanup failures consume quota. Archive is readable; delete
+keeps tombstones/bindings/retention data. Owner-accepted uncertain state is failed,
+not replayed or claimed complete. Mediated recovery requires its controller.
 
 `filesystem.py` uses Linux openat2 BENEATH/NO_MAGICLINKS/NO_XDEV and owned
 descriptors; ordinary dotfiles/internal relative links remain data. Private
@@ -67,6 +73,6 @@ opened under current admission. Release SQL before streaming the owned inode;
 slow clients must not reserve SQLite's global application writer. Open only
 once and drain reads before close. Active content downloads; reads never cache.
 
-Tests: `tests/test_storage_spaces_*.py`, migrations `0030`/`0031` and the
+Tests: `tests/test_storage_spaces_*.py`, migrations `0030`–`0032` and the
 separate mandatory native-volume Docker tier. Append new Alembic revisions;
 never change shipped ancestry or erase used custody/grant/event tables.

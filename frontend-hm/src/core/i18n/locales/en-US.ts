@@ -16,6 +16,30 @@ import type { Translations } from "./types";
 export function createEnUS(product: string): Translations {
   return {
     storageSpaces: {
+      confirmAction: "Confirm action",
+      recovery: "Backups and recovery",
+      recoveryNotice:
+        "These actions retire attached environments. Backups and restore staging use this space’s capacity.",
+      backup: "Create backup",
+      archive: "Archive space",
+      deleteSpace: "Delete space",
+      restore: "Restore files",
+      consistentBackup: "Files captured after writers stopped",
+      attachedEnvironments: "Attached environments",
+      retireEnvironments: "Retire these environments",
+      providerUnavailable:
+        "The storage provider must reconnect before access can be retired.",
+      pendingOperation: "Unconfirmed operation",
+      acceptCurrentState: "Accept current file state",
+      restoreNotice:
+        "This replaces the current files with the selected backup. Current memberships stay in effect.",
+      deleteNotice:
+        "This removes the visible files and permanently closes the space. Retained backups remain under the retention policy.",
+      acceptStateNotice:
+        "The previous operation has an uncertain outcome. Accepting keeps the files exactly as they are and clears the pending state; it does not replay or claim completion of the previous operation. Inspect the files and recovery evidence first.",
+      confirmLifecycle: "I have reviewed the effect of this action",
+      recoveryPending:
+        "File access is paused until the owner resolves pending recovery.",
       title: "Spaces",
       description:
         "Files and folders that belong to a space, independently of any conversation.",

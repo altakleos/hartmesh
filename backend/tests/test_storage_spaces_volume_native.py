@@ -6,6 +6,7 @@ dedicated CI job requires the fixture and rejects every skipped test.
 
 from __future__ import annotations
 
+import asyncio
 import errno
 import hashlib
 import importlib.util
@@ -19,6 +20,115 @@ from pathlib import Path
 import pytest
 
 from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
+
+
+@pytest.mark.asyncio
+async def test_real_attachment_fences_children_and_replaces_environment(backing, tmp_path):
+    """A real container can span calls; exact removal stops every mounted writer."""
+    import sqlite3
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
+    from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow
+    from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
+    from deerflow.spaces.attachments import ResourceMount, SpaceAttachments
+    from deerflow.spaces.contract import Custody, MutationMode, PrincipalRef, ResolvedPrincipal, SpaceConflict
+    from deerflow.spaces.docker import ATTACHMENT_LABEL, HOST_LABEL, DockerStorageAdapter
+    from deerflow.spaces.principals import HostPrincipalResolver
+    from deerflow.spaces.recovery import SpaceRecovery
+    from deerflow.spaces.registry import SpaceRegistry
+    from deerflow.spaces.service import SpaceFiles
+
+    catalog, volume, image, containment = backing
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'native-authority.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all, tables=[m.__table__ for m in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, SpaceFileOperationRow, SpaceAttachmentRow, SpaceMountRow, SpaceBackupRow)])
+    actor = PrincipalRef("human", "native-fixture")
+
+    async def lookup(reference):
+        return ResolvedPrincipal(reference) if reference == actor else None
+
+    files = SpaceFiles(SpaceRegistry(async_sessionmaker(engine, expire_on_commit=False), HostPrincipalResolver(human=lookup)), catalog)
+    containers = []
+
+    def prepare(plan):
+        args = [
+            "docker",
+            "create",
+            "--pull=never",
+            "--name",
+            "hartmesh-attachment-" + plan.id,
+            "--label",
+            ATTACHMENT_LABEL + "=" + plan.id,
+            "--label",
+            HOST_LABEL + "=" + plan.host_id,
+            "--read-only",
+            "--user",
+            "1000:1000",
+            "--cap-drop=ALL",
+            "--security-opt",
+            "no-new-privileges",
+            "--network",
+            "none",
+            "--memory",
+            "128m",
+            "--pids-limit",
+            "64",
+        ]
+        for view in plan.views:
+            args += ["--mount", "type=bind,src=" + view.source + ",dst=" + view.destination + ("" if view.writable else ",readonly")]
+        program = """import os,time,sqlite3
+root='/mnt/spaces/home'
+db=sqlite3.connect(root+'/pages.sqlite')
+db.execute('PRAGMA journal_mode=WAL')
+db.execute('CREATE TABLE IF NOT EXISTS pages (body TEXT)')
+db.execute("INSERT INTO pages VALUES ('committed')")
+db.commit()
+if os.fork()==0:
+    while True:
+        with open(root+'/child','ab') as f: f.write(b'x'); f.flush(); os.fsync(f.fileno())
+        time.sleep(.02)
+while True: time.sleep(.1)
+"""
+        result = subprocess.run([*args, image, "python", "-c", program], capture_output=True, text=True, check=True, timeout=30)
+        containers.append((result.stdout.strip(), plan.id))
+        return result.stdout.strip()
+
+    provider = DockerStorageAdapter(prepare=prepare)
+    mounts = SpaceAttachments(files, provider)
+    recovery = SpaceRecovery(files, attachments=mounts)
+    try:
+        space = await files.create(actor=actor, name="native", custody=Custody.personal(actor), mode=MutationMode.NATIVE)
+        await mounts.attach(actor=actor, incarnation=uuid.uuid4().hex, resources=[ResourceMount(space.id, 1, "home", writable=True)])
+        deadline = asyncio.get_running_loop().time() + 15
+        while not (volume.data_path / "child").exists():
+            assert asyncio.get_running_loop().time() < deadline, "Native child did not begin writing"
+            await asyncio.sleep(0.05)
+        with pytest.raises(SpaceConflict):
+            await mounts.attach(actor=actor, incarnation=uuid.uuid4().hex, resources=[ResourceMount(space.id, 1, "home", writable=True)])
+        backup = await recovery.backup(actor=actor, space_id=space.id, expected_generation=1, operation_id=uuid.uuid4().hex)
+        before = (volume.data_path / "child").read_bytes()
+        await asyncio.sleep(0.2)
+        assert (volume.data_path / "child").read_bytes() == before
+        assert (volume.data_path / "pages.sqlite-wal").exists(), "Fixture must exercise interrupted SQLite WAL"
+        await recovery.restore(actor=actor, space_id=space.id, expected_generation=1, operation_id=uuid.uuid4().hex, backup_id=backup.id)
+        with sqlite3.connect(volume.data_path / "pages.sqlite") as restored:
+            assert restored.execute("PRAGMA integrity_check").fetchone() == ("ok",)
+            assert restored.execute("SELECT body FROM pages").fetchall() == [("committed",)]
+        # A new environment sees persisted files under the same resource ID.
+        await mounts.attach(actor=actor, incarnation=uuid.uuid4().hex, resources=[ResourceMount(space.id, 2, "home", writable=True)])
+        await mounts.retire(actor=actor, space_id=space.id, expected_generation=2)
+    finally:
+        try:
+            for container, attachment_id in containers:
+                provider.fence(container, attachment_id)
+        except Exception:
+            containment["confirmed"] = False
+            raise
+        finally:
+            await engine.dispose()
 
 
 @pytest.fixture(scope="module")
@@ -233,6 +343,7 @@ async def test_resource_http_and_durable_binding_use_the_qualified_volume(backin
     from app.gateway.routers.spaces import router
     from deerflow.persistence.base import Base
     from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
+    from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow
     from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
     from deerflow.spaces.contract import Custody, MutationMode, PrincipalRef, ResolvedPrincipal
     from deerflow.spaces.principals import HostPrincipalResolver
@@ -248,7 +359,7 @@ async def test_resource_http_and_durable_binding_use_the_qualified_volume(backin
 
     try:
         async with engine.begin() as c:
-            await c.run_sync(Base.metadata.create_all, tables=[model.__table__ for model in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, SpaceFileOperationRow)])
+            await c.run_sync(Base.metadata.create_all, tables=[model.__table__ for model in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, SpaceFileOperationRow, SpaceAttachmentRow, SpaceMountRow, SpaceBackupRow)])
         sf = async_sessionmaker(engine, expire_on_commit=False)
         registry = SpaceRegistry(sf, HostPrincipalResolver(human=lookup))
         service = SpaceFiles(registry, catalog)

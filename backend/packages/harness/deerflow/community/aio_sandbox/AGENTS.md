@@ -1,5 +1,10 @@
 # AIO Sandbox
 
+`LocalContainerBackend._start_container(start=False)` prepares a stopped Docker
+environment with the existing builder. Only host storage admission may activate
+it after durable exact-ID registration and mount/containment verification. This
+adds no thread identity or lease-based writer proof; see `deerflow/spaces/AGENTS.md`.
+
 Prewarming admits at most one speculative create per provider, before executor
 submission. Busy requests skip immediately; the dedicated one-worker executor
 has no admission queue and consumes neither default nor real-acquire workers.

@@ -2,7 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 
 import { useAuth } from "@/core/auth/AuthProvider";
 
-import { getSpace, listSpaceFiles, listSpaces } from "./api";
+import { getSpace, getSpaceRecovery, listSpaceFiles, listSpaces } from "./api";
 
 export function useSpaces(enabled: boolean) {
   const { user } = useAuth();
@@ -29,6 +29,16 @@ export function useSpaceFiles(id: string, path: string, enabled: boolean) {
   return useQuery({
     queryKey: ["space-files", user?.id, id, path],
     queryFn: ({ signal }) => listSpaceFiles(id, path, signal),
+    enabled,
+    staleTime: 0,
+  });
+}
+
+export function useSpaceRecovery(id: string, enabled: boolean) {
+  const { user } = useAuth();
+  return useQuery({
+    queryKey: ["space-recovery", user?.id, id],
+    queryFn: ({ signal }) => getSpaceRecovery(id, signal),
     enabled,
     staleTime: 0,
   });

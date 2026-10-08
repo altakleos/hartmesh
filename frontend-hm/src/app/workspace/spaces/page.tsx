@@ -13,6 +13,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
+import { SpaceRecoveryPanel } from "@/components/workspace/space-recovery-panel";
 import {
   WorkspaceBody,
   WorkspaceContainer,
@@ -152,16 +153,33 @@ export default function SpacesPage() {
               ) : (
                 space.data &&
                 !space.error && (
-                  <SpaceBrowser
-                    key={`${user?.id}:${space.data.id}:${path}`}
-                    space={space.data}
-                    spaces={spaces.data?.spaces ?? []}
-                    path={path}
-                    navigate={(folder) => navigate(space.data.id, folder)}
-                    refresh={() => {
-                      void space.refetch();
-                    }}
-                  />
+                  <>
+                    {(space.data.permissions & 8) !== 0 &&
+                      space.data.mode === "native" && (
+                        <SpaceRecoveryPanel
+                          key={`${user?.id}:${space.data.id}`}
+                          space={space.data}
+                          refresh={() => {
+                            void space.refetch();
+                            void spaces.refetch();
+                          }}
+                        />
+                      )}
+                    {space.data.storage_state === "recovery-pending" ? (
+                      <p role="status">{t.storageSpaces.recoveryPending}</p>
+                    ) : (
+                      <SpaceBrowser
+                        key={`${user?.id}:${space.data.id}:${path}`}
+                        space={space.data}
+                        spaces={spaces.data?.spaces ?? []}
+                        path={path}
+                        navigate={(folder) => navigate(space.data.id, folder)}
+                        refresh={() => {
+                          void space.refetch();
+                        }}
+                      />
+                    )}
+                  </>
                 )
               )}
             </>
