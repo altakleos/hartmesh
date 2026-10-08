@@ -87,7 +87,7 @@ Use `/workspace/instances` to create and manage residents, then start their
 server-bound conversations. Bound chats use Home for ordinary file uploads and
 withhold unsupported legacy browser, sidecar and scheduling controls. Homes and
 Projects are browsed through Spaces; selected file/memory transfers remain
-explicit. See [the persistent agent guide](docs/AGENT_EXECUTION.md) for setup,
+explicit. See [the persistent agent guide](https://github.com/altakleos/hartmesh/blob/v2.2.0+hartmesh.44/docs/AGENT_EXECUTION.md) for setup,
 permissions, recovery and supported boundaries.
 
 ## [2.2.0+hartmesh.43] - 2026-10-08
