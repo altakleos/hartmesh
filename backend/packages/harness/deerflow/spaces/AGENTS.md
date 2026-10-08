@@ -42,6 +42,10 @@ expected generation, and commit the new generation with its event atomically.
 Retired members remain revocable; retired administrators cannot satisfy the
 last-active-administrator guard. No optional authorization setting bypasses
 these checks. Unknown or malformed persisted facts fail closed.
+Host-only grant admission callbacks add domain preconditions under the same
+resource lock; they never bypass mandatory grants or reach browser/plugin input.
+Consumers acquire their own SQL parent after the resource parent. A callback
+rejection rolls back the grant, event and generation together.
 
 `SpaceFiles` binds a qualified empty inventory slot atomically to resource
 creation. Slot/UUID uniqueness prevents duplicate allocation; used bindings

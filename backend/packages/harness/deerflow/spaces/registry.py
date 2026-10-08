@@ -205,7 +205,7 @@ class SpaceRegistry:
             row.name = name
         return self._view(row, grant.permissions)
 
-    async def set_grant(self, *, actor: PrincipalRef, space_id: str, subject: PrincipalRef, permissions: Permission, expected_generation: int, acknowledge_existing_data: bool = False) -> Space:
+    async def set_grant(self, *, actor: PrincipalRef, space_id: str, subject: PrincipalRef, permissions: Permission, expected_generation: int, acknowledge_existing_data: bool = False, admission=None) -> Space:
         if not isinstance(subject, PrincipalRef):
             raise InvalidPrincipal("Membership requires a typed principal")
         if not isinstance(permissions, Permission):
@@ -218,6 +218,11 @@ class SpaceRegistry:
         async with self._mutation(actor=actor, space_id=space_id, expected_generation=expected_generation, action="grant" if permissions else "revoke", details=details) as (session, row, actor_grant):
             if permissions:
                 await self._actor(subject)
+            # A host domain condition may fence stale workflows under this
+            # resource lock. It never replaces mandatory authority and is not
+            # exposed through the public storage/HTTP contract.
+            if admission is not None:
+                await admission(session)
             permissions = validate_permissions(permissions, MutationMode(row.mode))
             existing = await self._grant(session, row, subject)
             previous = _stored_permissions(existing.permissions, MutationMode(row.mode)) if existing else Permission(0)

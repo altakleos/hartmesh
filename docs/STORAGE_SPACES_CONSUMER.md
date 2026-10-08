@@ -23,8 +23,11 @@ Trusted authentication/embedding code binds the verified reference with
 `storage_actor_scope`; request JSON, actor IDs and caller-selected user/thread
 aliases do not authenticate it. No human user or AgentInstance row is required.
 
-The default Gateway configures human resolution. A nonhuman directory and its
-trusted authentication adapter must be supplied by the consumer. Advertised
+The Gateway configures human resolution and the persistent agent-instance
+directory when Storage Spaces is enabled. Instance creation and management are
+described in [Agent Execution](AGENT_EXECUTION.md); conversation execution binding
+is a subsequent stage. Other embedding consumers supply their own nonhuman
+directory and trusted authentication adapter. Advertised
 `actor_kinds` includes `nonhuman` only when that resolver exists. First-party
 My Files/Shared/Projects convenience features remain human workflows. PATs have
 no storage scopes, and ownerless internal requests are rejected.
