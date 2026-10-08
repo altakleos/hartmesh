@@ -12,6 +12,7 @@ from test_agent_execution_runtime import execution
 @pytest.mark.asyncio
 async def test_repeated_cancellation_drains_native_package_upload_before_close(monkeypatch):
     from deerflow.agent_instances import public_skills, runtime
+    from deerflow.agent_instances.docker_transport import DockerControlTransport
     from deerflow.community.aio_sandbox import aio_sandbox
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
     from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
@@ -26,7 +27,7 @@ async def test_repeated_cancellation_drains_native_package_upload_before_close(m
             self.id = "d" * 32
 
         def execute_command(self, *args):
-            return "OK"
+            return "HARTMESH_HOME_READY"
 
         def update_file(self, path, content):
             entered.set()
@@ -54,6 +55,7 @@ async def test_repeated_cancellation_drains_native_package_upload_before_close(m
             return SimpleNamespace(status_code=200)
 
     monkeypatch.setattr(aio_sandbox, "AioSandbox", SDK)
+    monkeypatch.setattr(DockerControlTransport, "prepare_home_aliases", lambda self: None)
     monkeypatch.setattr(runtime.httpx, "Client", Ready)
     monkeypatch.setattr(DockerStorageAdapter, "from_local_backend", lambda backend: SimpleNamespace(host_id="fixture"))
     monkeypatch.setattr(public_skills, "capture_public_skills", lambda *args: public_skills.PublicSkillCapture("e" * 64, frozenset({"fixture"}), (("public/fixture/SKILL.md", b"fixture"),)))

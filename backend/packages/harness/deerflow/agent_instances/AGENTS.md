@@ -58,6 +58,11 @@ existing AIO SDK. Address immutable Docker IDs, not container IPs. Drain prepara
 and closure across cancellation; unknown outcomes retain native intents. SDK closure,
 leases and ordinary completion never fence or replace physical writers. Children
 inherit the full Home mount; tool filtering is not a narrower filesystem boundary.
+The exact-container transport establishes fixed compatibility aliases using
+isolated Python and protected directory descriptors. This bounded root setup
+never opens Home targets; the nonroot SDK creates Home children and confirms cwd.
+Reject layout conflicts/failures before publishing a provider. Instance bash
+does not execute a command when changing to Home fails.
 
 Public skill scope is read-only and excludes private/legacy/integration storage,
 including late activation and primed caches. Capture bounded public bytes and record

@@ -465,3 +465,24 @@ def test_presentation_describes_registration_without_claiming_client_delivery():
     text = describe_presentation(Presentation(presented=[f"{OUT}/result.md"], sizes={f"{OUT}/result.md": 3}))
     assert "registered" in text and "retrieval" in text
     assert "delivered with this turn" not in text
+
+
+def test_instance_bash_stops_if_home_cwd_is_unavailable(tmp_path, monkeypatch):
+    import shlex
+    import subprocess
+
+    from test_agent_execution_runtime import execution
+
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
+
+    output = tmp_path / "must-not-exist"
+
+    def execute(sandbox, command, **kwargs):
+        command = command.replace("/mnt/user-data/workspace", shlex.quote(str(tmp_path / "missing")))
+        return subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=5).stderr
+
+    _patch_remote_bash(monkeypatch, execute)
+    runtime = _runtime(_outputs(tmp_path))
+    runtime.context[AGENT_EXECUTION_CONTEXT_KEY] = execution()
+    sandbox_tools.bash_tool.func(runtime, "touch " + shlex.quote(str(output)), "", None, "call-cwd")
+    assert not output.exists()

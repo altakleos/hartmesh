@@ -63,3 +63,54 @@ def test_instance_sdk_download_root_is_explicit_and_does_not_change_legacy_guard
     finally:
         bound.close()
         ordinary.close()
+
+
+def test_layout_initialization_is_fixed_and_exact_container_only():
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    DockerControlTransport("a" * 64, runner=run).prepare_home_aliases()
+    command, options = calls[0]
+    assert command[:11] == ["docker", "exec", "--user", "0", "--workdir", "/", "a" * 64, "/usr/bin/python3", "-I", "-S", "-c"]
+    assert options["timeout"] == 30
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("collision", ["directory", "wrong-link", "parent-link", "writable-parent", None])
+def test_layout_script_confines_alias_creation_without_touching_home(tmp_path, collision):
+    import os
+    import subprocess
+    import sys
+
+    from deerflow.agent_instances.docker_transport import _HOME_ALIASES
+
+    mount = tmp_path / "mnt"
+    mount.mkdir(mode=0o755)
+    parent = mount / "user-data"
+    if collision == "parent-link":
+        parent.symlink_to(tmp_path, target_is_directory=True)
+    else:
+        parent.mkdir(mode=0o755)
+    if collision == "directory":
+        (parent / "workspace").mkdir()
+    elif collision == "wrong-link":
+        (parent / "workspace").symlink_to(tmp_path)
+    elif collision == "writable-parent":
+        parent.chmod(0o777)
+    script = _HOME_ALIASES.replace('"/mnt"', repr(str(mount)))
+    result = subprocess.run([sys.executable, "-I", "-S", "-c", script], capture_output=True, timeout=5)
+    assert (result.returncode == 0) == (collision is None), result.stderr
+    assert not (mount / "spaces").exists()  # Targets are never opened or created as root.
+    if collision is None:
+        assert os.readlink(parent / "workspace") == "/mnt/spaces/home"
+        assert os.readlink(parent / "outputs") == "/mnt/spaces/home/outputs"
+        assert subprocess.run([sys.executable, "-I", "-S", "-c", script], capture_output=True, timeout=5).returncode == 0
+
+
+def test_layout_failure_never_claims_prepared():
+    transport = DockerControlTransport("a" * 64, runner=lambda *a, **kw: SimpleNamespace(returncode=1))
+    with pytest.raises(httpx.TransportError, match="layout"):
+        transport.prepare_home_aliases()

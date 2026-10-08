@@ -2521,7 +2521,12 @@ def bash_tool(
                 truncate=_truncate_bash_output,
             )
         ensure_thread_directories_exist(runtime)
-        command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
+        from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+        if isinstance((runtime.context or {}).get(AGENT_EXECUTION_CONTEXT_KEY), AgentExecution):
+            command = f"cd {VIRTUAL_PATH_PREFIX}/workspace && {{\n{command}\n}}"
+        else:
+            command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
         command = user_prefix + (identity_prefix or "") + command
         try:
             from deerflow.config.app_config import get_app_config

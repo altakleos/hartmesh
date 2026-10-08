@@ -11,6 +11,34 @@ import httpx
 _MAX_REQUEST = 16 * 1024 * 1024
 _MAX_RESPONSE = 64 * 1024 * 1024
 
+# Fixed container-only layout. Never open targets in the resident's writable Home.
+# Isolated Python and descriptor-bound root-owned parents keep resident data out
+# of this narrowly privileged initialization.
+_HOME_ALIASES = r"""
+import os, stat
+def directory(path, parent=None):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent)
+    info = os.fstat(fd)
+    if info.st_uid != os.geteuid() or info.st_mode & 0o022:
+        os.close(fd)
+        raise ValueError('Untrusted alias parent')
+    return fd
+mount = directory("/mnt")
+try:
+    try: os.mkdir('user-data', 0o755, dir_fd=mount)
+    except FileExistsError: pass
+    aliases = directory('user-data', mount)
+    try:
+        for name, target in (('workspace', '/mnt/spaces/home'), ('uploads', '/mnt/spaces/home/uploads'), ('outputs', '/mnt/spaces/home/outputs')):
+            try: os.symlink(target, name, dir_fd=aliases)
+            except FileExistsError: pass
+            info = os.stat(name, dir_fd=aliases, follow_symlinks=False)
+            if not stat.S_ISLNK(info.st_mode) or os.readlink(name, dir_fd=aliases) != target:
+                raise ValueError('Conflicting Home alias')
+    finally: os.close(aliases)
+finally: os.close(mount)
+"""
+
 _FORWARD = r"""
 import base64, json, sys, urllib.error, urllib.request
 data = json.load(sys.stdin)
@@ -34,6 +62,19 @@ class DockerControlTransport(httpx.BaseTransport):
         if not isinstance(container_id, str) or not re.fullmatch(r"[0-9a-f]{64}", container_id):
             raise ValueError("Control transport requires an exact immutable Docker identity")
         self.container_id, self.runner = container_id, runner
+
+    def prepare_home_aliases(self):
+        """Create only fixed container aliases; no root access to Home contents."""
+        try:
+            result = self.runner(
+                ["docker", "exec", "--user", "0", "--workdir", "/", self.container_id, "/usr/bin/python3", "-I", "-S", "-c", _HOME_ALIASES],
+                capture_output=True,
+                timeout=30,
+            )
+            if result.returncode:
+                raise ValueError("Alias setup failed")
+        except (OSError, subprocess.SubprocessError, ValueError) as exc:
+            raise httpx.TransportError("The admitted instance layout could not be established") from exc
 
     def handle_request(self, request):
         if request.url.scheme != "http" or request.url.host != "127.0.0.1" or request.url.port != 8080:

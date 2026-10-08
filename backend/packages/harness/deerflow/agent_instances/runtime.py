@@ -176,15 +176,15 @@ async def prepare_environment(execution, *, baseline_provider=None, app_config=N
     await await_drained(run_file_io(ready))
     sandbox = AioSandbox(attached.id, url, home_dir="/mnt/spaces/home", control_transport=transport, download_roots=("/mnt/spaces/home", "/mnt/user-data/workspace", "/mnt/user-data/uploads", "/mnt/user-data/outputs"))
     try:
-        await await_drained(
+        await await_drained(run_file_io(transport.prepare_home_aliases))
+        layout = await await_drained(
             run_file_io(
                 sandbox.execute_command,
-                "mkdir -p /mnt/spaces/home/uploads /mnt/spaces/home/outputs /mnt/user-data"
-                " && ln -sfn /mnt/spaces/home /mnt/user-data/workspace"
-                " && ln -sfn /mnt/spaces/home/uploads /mnt/user-data/uploads"
-                " && ln -sfn /mnt/spaces/home/outputs /mnt/user-data/outputs",
+                "mkdir -p /mnt/spaces/home/uploads /mnt/spaces/home/outputs && cd /mnt/user-data/workspace && test \"$(pwd -P)\" = /mnt/spaces/home && printf 'HARTMESH_HOME_READY\\n'",
             )
         )
+        if "HARTMESH_HOME_READY" not in layout.splitlines():
+            raise AgentDenied("The admitted Home layout is unconfirmed")
         # Per-run references name a content-addressed home cache. This changes
         # no process-global alias or physical attachment; ordinary home edits
         # remain data and cannot change the host definition/tool authority.
