@@ -84,10 +84,6 @@ regression exercises the production extractor under a generous process deadline.
 
 Customer management: [admission rules](docs/CONFIGURATION.md#customer-administration).
 
-Persistent instances: [identity and creation rules](packages/harness/deerflow/agent_instances/AGENTS.md).
-Definitions remain separate from resident principals, custody and homes; current
-instance authority supplements provider ceilings and consumes Storage Spaces.
-
 ## Important Development Guidelines
 
 Redis login counters use bounded WATCH/MULTI, committing TTLs atomically and
@@ -196,7 +192,7 @@ watcher. Do not replace it with a bare `uvicorn --reload`: agent tasks write
 Python and other runtime files below `DEER_FLOW_HOME`, which would otherwise
 restart the Gateway during an active run.
 
-More specific `AGENTS.md` files in backend code directories contain the subsystem sections split from this file. Follow the nearest file in the directory tree.
+Follow the nearest subsystem guide, including [agent instances](packages/harness/deerflow/agent_instances/AGENTS.md).
 
 ## Architecture
 
