@@ -20,6 +20,19 @@ from deerflow.spaces.recovery import SpaceRecovery
 from deerflow.spaces.service import SpaceFiles
 
 _actor = ContextVar("host_storage_actor", default=None)
+_credential_allowed = ContextVar("host_storage_credential_allowed", default=True)
+
+
+@contextmanager
+def storage_credential_scope(allowed: bool):
+    """Host credential admission, inherited by asynchronous run/service work."""
+    if type(allowed) is not bool:
+        raise InvalidPrincipal("Credential admission requires a host boolean")
+    token = _credential_allowed.set(allowed)
+    try:
+        yield
+    finally:
+        _credential_allowed.reset(token)
 
 
 @contextmanager
@@ -35,6 +48,8 @@ def storage_actor_scope(reference: PrincipalRef):
 
 
 def _current_actor():
+    if _credential_allowed.get() is not True:
+        raise SpaceDenied("This credential has no supported storage resource scopes")
     return _actor.get() or current_human_principal()
 
 

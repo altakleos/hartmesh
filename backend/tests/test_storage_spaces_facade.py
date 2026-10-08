@@ -311,6 +311,14 @@ async def test_real_storage_tool_uses_host_nonhuman_actor_and_rejects_claimed_ru
         result = await invoke()
     assert json.loads(result.content) == {"kind": "nonhuman", "id": "worker:wiki", "count": 0}
     assert calls[0].principal is None and calls[0].actor.subject_id == "worker:wiki"
+    from deerflow.spaces.facade import storage_credential_scope
+
+    with storage_actor_scope(ALICE), storage_credential_scope(False):
+        denied = await invoke()
+        assert denied.status == "error"
+        assert len(calls) == 1
+        with pytest.raises(PermissionError):
+            await HostStorageProvider(lambda: files).current()
 
 
 def test_worker_does_not_accept_payload_as_storage_provider():

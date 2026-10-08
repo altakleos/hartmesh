@@ -31,6 +31,9 @@ handles cannot cross account context; every operation rechecks active identities
 and current grants. Mediated primitives use OPERATE plus the installed controller
 binding/settings in both intent and publication admissions. Provider capabilities
 are explicit; absent storage/identity never returns an empty successful result.
+Host credential admission is inherited by asynchronous work. PATs have no resource
+scope: middleware denies facade actor projection and the Gateway omits their run
+provider. Setting a typed actor cannot override a denied credential context.
 
 Every metadata mutation reserves SQLite's writer before reading or locks the
 Postgres parent row before grants. Revalidate actor/positive grant target inside

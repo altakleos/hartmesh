@@ -204,8 +204,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # because they were resolved fresh from the owning user above.
             permissions = [permission for permission in permissions if permission in pat_scopes]
         request.state.auth = AuthContext(user=user, permissions=permissions)
+        from app.gateway.storage_spaces import supports_storage_credentials
+        from deerflow.spaces.facade import storage_credential_scope
+
         token = set_current_user(user)
         try:
-            return await call_next(request)
+            # A token's legacy route scopes do not imply resource capability.
+            # Child run/service tasks inherit this restriction with the actor.
+            with storage_credential_scope(supports_storage_credentials(request)):
+                return await call_next(request)
         finally:
             reset_current_user(token)

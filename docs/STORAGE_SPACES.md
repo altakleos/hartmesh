@@ -14,6 +14,10 @@ actor has a kind and subject ID and no human `principal`. Only trusted host
 authentication/embedding code binds `storage_actor_scope`; claimed runtime or
 payload identities never authenticate a caller. Storage calls accept no actor
 parameter and recheck the live host binding, identity directory and current grants.
+Personal access tokens have no storage scopes; the same denial follows inherited
+tool/service work, and token runs receive no storage provider.
+Trusted internal calls require an attributed owner; an ownerless internal or
+scheduled request never becomes the synthetic default resource owner.
 Services receive a lazy `deps.storage` provider: `capabilities.available=False`
 and explicit unsupported errors distinguish a missing adapter from an empty root.
 The public errors distinguish `StorageIdentityRequired`, `StorageAccessDenied`,

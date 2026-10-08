@@ -856,6 +856,15 @@ def get_subagent_batch_service(request: Request):
     return val
 
 
+def get_extension_storage_provider(request: Request):
+    """Do not place an unsupported token resource capability on run context."""
+    from app.gateway.storage_spaces import supports_storage_credentials
+
+    if not supports_storage_credentials(request):
+        return None
+    return getattr(request.app.state, "extension_storage", None)
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -879,7 +888,7 @@ def get_run_context(request: Request) -> RunContext:
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
-        storage_provider=getattr(request.app.state, "extension_storage", None),
+        storage_provider=get_extension_storage_provider(request),
         customer_administration_policy=request_customer_administration_policy(request),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
     )
