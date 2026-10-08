@@ -181,6 +181,12 @@ class RuntimeDeliveryMiddleware(AgentMiddleware[AgentState]):
         return {"scope": "thread outputs root", "source": "filesystem diff", "curation": "model selection wins"}
 
     async def _snapshot(self, runtime: Runtime | None, *, reuse_baseline: bool = False) -> Any:
+        from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+        if isinstance((getattr(runtime, "context", None) or {}).get(AGENT_EXECUTION_CONTEXT_KEY), AgentExecution):
+            # Instance Home edits are ordinary persistent work. They neither
+            # scan a requester's directories nor require automatic delivery.
+            return None
         thread_id = _thread_id(runtime)
         if not thread_id:
             return None

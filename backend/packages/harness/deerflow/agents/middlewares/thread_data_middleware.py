@@ -99,9 +99,14 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         if thread_id is None:
             raise ValueError("Thread ID is required in runtime context or config.configurable")
 
+        from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+        execution = context.get(AGENT_EXECUTION_CONTEXT_KEY)
         user_id = resolve_runtime_user_id(runtime)
 
-        if self._lazy_init:
+        if isinstance(execution, AgentExecution):
+            paths = execution.thread_paths
+        elif self._lazy_init:
             # Lazy initialization: only compute paths, don't create directories
             paths = self._get_thread_paths(thread_id, user_id=user_id)
         else:

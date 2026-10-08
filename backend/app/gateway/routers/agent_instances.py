@@ -63,6 +63,10 @@ class RenameInstance(StrictRequest):
     name: str = Field(min_length=1, max_length=128)
 
 
+class CreateConversation(StrictRequest):
+    creation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+
+
 async def _load_definition(request, actor, name):
     # Explicit owner selection stays inside trusted host code. The browser
     # cannot send another owner's ID, a snapshot, revision or capability grant.
@@ -126,3 +130,14 @@ async def adopted_definition(instance_id: str, request: Request):
 async def rename_instance(instance_id: str, body: RenameInstance, request: Request):
     instance = await (await _service(request)).rename(actor=await _actor(request), instance_id=instance_id, expected_generation=body.generation, name=body.name)
     return jsonable_encoder(asdict(instance))
+
+
+@router.post("/{instance_id}/conversations", status_code=201)
+@require_permission("threads", "write")
+@require_permission("agents", "read")
+async def create_conversation(instance_id: str, body: CreateConversation, request: Request):
+    await _service(request)
+    authority = getattr(request.app.state, "agent_conversations", None)
+    if authority is None:
+        raise HTTPException(501, "Agent conversation runtime is unavailable")
+    return await authority.create(actor=await _actor(request), instance_id=instance_id, creation_id=body.creation_id)

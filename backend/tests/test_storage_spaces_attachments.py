@@ -36,6 +36,10 @@ class ContainedProvider:
             raise RuntimeError("Daemon unavailable")
         return [key for key, value in self.containers.items() if value.id == attachment_id]
 
+    def verify_active(self, container, plan):
+        if self.uncertain or self.containers.get(container) != plan or container not in self.started:
+            raise RuntimeError("The exact admitted environment is unavailable")
+
 
 @pytest_asyncio.fixture(params=["sqlite", "postgres"])
 async def storage(tmp_path, request):
@@ -60,6 +64,37 @@ async def test_attachment_survives_calls_and_blocks_host_editor(storage):
     async with sf() as session:
         assert (await session.execute(select(SpaceAttachmentRow))).scalar_one().phase == "fenced"
     await files.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="page", content=b"persisted", create=True)
+
+
+@pytest.mark.asyncio
+async def test_verified_attachment_resume_does_not_create_another_writer(storage):
+    files, sf, _, mounts, provider = storage
+    space = await home(files)
+    incarnation = operation()
+    resources = [ResourceMount(space.id, 1, "home", writable=True)]
+    attached = await mounts.attach(actor=ALICE, incarnation=incarnation, resources=resources)
+    resumed = await SpaceAttachments(files, provider).resume(actor=ALICE, incarnation=incarnation, resources=resources)
+    assert resumed == attached and len(provider.started) == len(provider.containers) == 1
+    provider.uncertain = True
+    with pytest.raises(AttachmentPending):
+        await mounts.resume(actor=ALICE, incarnation=incarnation, resources=resources)
+    assert len(provider.containers) == 1
+
+
+@pytest.mark.asyncio
+async def test_resume_rejects_changed_resource_or_fenced_environment(storage):
+    files, sf, _, mounts, provider = storage
+    space = await home(files)
+    incarnation = operation()
+    resources = [ResourceMount(space.id, 1, "home", writable=True)]
+    await mounts.attach(actor=ALICE, incarnation=incarnation, resources=resources)
+    with pytest.raises(SpaceConflict):
+        await mounts.resume(actor=ALICE, incarnation=incarnation, resources=[ResourceMount(space.id, 1, "renamed", writable=True)])
+    with pytest.raises(SpaceDenied):
+        await mounts.resume(actor=BOB, incarnation=incarnation, resources=resources)
+    await mounts.retire(actor=ALICE, space_id=space.id, expected_generation=1)
+    with pytest.raises(AttachmentPending):
+        await mounts.resume(actor=ALICE, incarnation=incarnation, resources=resources)
 
 
 @pytest.mark.asyncio

@@ -27,6 +27,7 @@ DISTRIBUTION_REVISIONS = (
     "0032_storage_lifecycle",
     "0033_storage_features",
     "0034_agent_instances",
+    "0035_agent_conversations",
 )
 
 

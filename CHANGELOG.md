@@ -16,13 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   grants, generation-checked rename, durable creation retries and owned write
   cancellation. Incomplete provisioning never exposes an executable principal.
 - Keep company identities independent of creator login and keep ready retries
-  from restoring revoked home access. Runtime binding and scoped memory follow.
+  from restoring revoked home access.
+- Bind server-minted conversations to adopted instances in the existing worker,
+  graphs and journals. Reuse a qualified Docker AIO Home across chats and branches;
+  ordinary Home edits need no delivery manifest, and deleting a chat retains Home.
+- Apply current grants to lists, history, evidence, streams, export, cancellation
+  and deletion while preserving human run attribution. Withhold requester files,
+  private skills/memory/credentials and unsupported legacy instance adapters.
+  Record public-package capture revisions separately from live host catalogs.
 
 ### Schema changes
 
 - Append `0034_agent_instances` after release 43's `0033` head with three additive
   tables for adopted revisions, instances and grants; existing tables are unchanged.
   Downgrade refuses to erase used identity/history. Configuration format is unchanged.
+- Append `0035_agent_conversations` with one additive binding/retry table retaining
+  deleted-chat tombstones. Existing tables and configuration format are unchanged;
+  downgrade refuses to erase used bindings. Scoped instance memory follows.
 
 ## [2.2.0+hartmesh.43] - 2026-10-08
 

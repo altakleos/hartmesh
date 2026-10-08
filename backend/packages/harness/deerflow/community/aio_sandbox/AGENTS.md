@@ -5,6 +5,10 @@ environment with the existing builder. Only host storage admission may activate
 it after durable exact-ID registration and mount/containment verification. This
 adds no thread identity or lease-based writer proof; see `deerflow/spaces/AGENTS.md`.
 
+Instance SDK clients may use host-owned immutable-container control transport and
+explicit admitted download roots. Legacy clients retain their existing root guard.
+Keep the same HTTP protocol and SDK; no IP fallback or requester mounts are allowed.
+
 Prewarming admits at most one speculative create per provider, before executor
 submission. Busy requests skip immediately; the dedicated one-worker executor
 has no admission queue and consumes neither default nor real-acquire workers.

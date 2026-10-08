@@ -202,7 +202,7 @@ class DockerStorageAdapter:
         if labels.get(ATTACHMENT_LABEL) != attachment_id or labels.get(HOST_LABEL) != self.host_id:
             raise StorageAdapterUnsupported("Container does not belong to this host attachment")
 
-    def _validate(self, container, plan):
+    def _validate(self, container, plan, *, active=False):
         self._same_host()
         if plan.host_id != self.host_id:
             raise StorageAdapterUnsupported("Attachment was prepared for another host")
@@ -238,8 +238,13 @@ class DockerStorageAdapter:
             actual.add((mount.get("Source"), mount.get("Destination"), mount["RW"]))
         if actual != expected:
             raise StorageAdapterUnsupported("Environment roots differ from admitted resource views")
-        if (entry.get("State") or {}).get("Status") != "created" or (entry.get("State") or {}).get("Running") is not False:
+        status = "running" if active else "created"
+        if (entry.get("State") or {}).get("Status") != status or (entry.get("State") or {}).get("Running") is not active:
             raise StorageAdapterUnsupported("Attachment preparation must leave its environment stopped")
+        return entry
+
+    def verify_active(self, container, plan):
+        return self._validate(container, plan, active=True)
 
     def prepare(self, plan):
         self._same_host()

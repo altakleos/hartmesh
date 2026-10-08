@@ -212,6 +212,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # A token's legacy route scopes do not imply resource capability.
             # Child run/service tasks inherit this restriction with the actor.
             with storage_credential_scope(supports_storage_credentials(request)):
-                return await call_next(request)
+                from app.gateway.agent_conversations import admit_request
+
+                try:
+                    await admit_request(request)
+                except HTTPException as exc:
+                    return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+                from app.gateway.agent_conversations import guard_response
+
+                return guard_response(request, await call_next(request))
         finally:
             reset_current_user(token)

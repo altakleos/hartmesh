@@ -246,7 +246,10 @@ async def read_conversation(scope: Any, thread_id: str, record: dict[str, Any] |
     decides which graph reads the checkpoint, and its times head the transcript.
     """
     feed = await feed_messages(get_run_event_store(scope), get_run_manager(scope), thread_id, user_id=user_id)
-    accessor, config = build_checkpoint_state_accessor(scope, thread_id=thread_id, assistant_id=(record or {}).get("assistant_id"))
+    from app.gateway.agent_conversations import inspection_for_read
+
+    inspection = await inspection_for_read(scope, thread_id, user_id=user_id)
+    accessor, config = build_checkpoint_state_accessor(scope, thread_id=thread_id, assistant_id=(record or {}).get("assistant_id"), **({"agent_inspection": inspection} if inspection is not None else {}))
     snapshot = await accessor.aget(config)
     values = serialize_channel_values_for_api(snapshot.values or {}) if ((snapshot.config or {}).get("configurable") or {}).get("checkpoint_id") else {}
     checkpoint = values.get("messages") if isinstance(values.get("messages"), list) else []

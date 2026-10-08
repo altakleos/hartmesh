@@ -187,6 +187,12 @@ def get_enabled_skills_for_config(app_config: AppConfig | None = None, user_id: 
     to load public + user-level custom skills. Otherwise falls back to the
     global storage (public + global custom fallback).
     """
+    from deerflow.agent_instances.public_skills import public_skill_scope_enabled
+
+    if public_skill_scope_enabled():
+        # Instance activation must see current public packages even when a
+        # legacy caller primed this config object's mixed-category cache.
+        return list(get_or_new_skill_storage(app_config=app_config).load_skills(enabled_only=True))
     if app_config is None:
         return _get_enabled_skills()
 
@@ -1106,6 +1112,7 @@ def apply_prompt_template(
     memory_enabled: bool = True,
     interaction_policy: RunInteractionPolicy | None = None,
     bash_available: bool = True,
+    adopted_soul: str | None = None,
 ) -> str:
     interaction_policy = interaction_policy or RunInteractionPolicy.interactive()
     # Include subagent section only if enabled (from runtime parameter)
@@ -1212,8 +1219,8 @@ def apply_prompt_template(
         clarification_reminder=interaction_policy.clarification_reminder,
         agent_name=agent_name or product_name(app_config),
         product_name=product_name(app_config),
-        soul=get_agent_soul(agent_name, user_id=user_id),
-        self_update_section=_build_self_update_section(agent_name),
+        soul=("<soul>\n" + html.escape(adopted_soul, quote=False) + "\n</soul>\n") if adopted_soul is not None else get_agent_soul(agent_name, user_id=user_id),
+        self_update_section="" if adopted_soul is not None else _build_self_update_section(agent_name),
         skills_section=skills_section,
         deferred_tools_section=deferred_tools_section,
         mcp_routing_hints_section=mcp_routing_hints_section,

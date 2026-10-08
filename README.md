@@ -50,9 +50,11 @@ directory with Shared storage and its publication database when backing up or re
 [Persistent agent instances](docs/AGENT_EXECUTION.md) add resident non-login
 identities, personal/company custody, adopted custom definition revisions and
 stable Storage Spaces homes, created before the first chat. The opt-in management
-API supports inspection and generation-checked rename. Conversation/runtime
-binding, isolated memory and lifecycle controls are subsequent implementation
-stages; existing default/custom-agent chats retain their behavior.
+API supports inspection, generation-checked rename and instance conversations.
+Those conversations use the adopted definition and one qualified Docker Home
+across chats, with current Use/Inspect/Manage grants. They inherit no requester
+files, private skills, memory or credentials. Scoped memory and lifecycle/UI
+controls follow; existing default/custom-agent chats retain their behavior.
 
 The [Storage Spaces foundation](docs/STORAGE_SPACES.md) adds stable resource
 identity, personal/company custody and explicit typed grants. Company custody

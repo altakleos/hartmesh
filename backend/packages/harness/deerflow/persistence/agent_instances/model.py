@@ -51,3 +51,14 @@ class AgentInstanceGrantRow(Base):
     instance_id: Mapped[str] = mapped_column(String(32), ForeignKey("agent_instances.id"), primary_key=True)
     user_id: Mapped[str] = mapped_column(String(128), primary_key=True)
     permissions: Mapped[int] = mapped_column(Integer)
+
+
+class AgentConversationRow(Base):
+    """Keep the binding after chat deletion so legacy missing-row access cannot win."""
+
+    __tablename__ = "agent_conversations"
+    __table_args__ = (UniqueConstraint("requester_id", "creation_id", name="uq_agent_conversations_creation"),)
+    thread_id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    instance_id: Mapped[str] = mapped_column(String(32), ForeignKey("agent_instances.id"), index=True)
+    requester_id: Mapped[str] = mapped_column(String(128))
+    creation_id: Mapped[str] = mapped_column(String(32))

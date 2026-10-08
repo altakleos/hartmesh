@@ -938,7 +938,19 @@ async def task_tool(
     # which must not stall the calling event loop (issue #5172).
     if run_extensions is not None:
         available_tools_kwargs["extensions"] = run_extensions
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+    agent_execution = parent_context.get(AGENT_EXECUTION_CONTEXT_KEY)
+    if not isinstance(agent_execution, AgentExecution):
+        agent_execution = None
+    if agent_execution is not None:
+        await agent_execution.validate()
+        available_tools_kwargs.update(include_mcp=False, include_upload_tool=False)
     tools = await run_assembly(get_available_tools, **available_tools_kwargs)
+    if agent_execution is not None:
+        from deerflow.agent_instances.runtime import instance_tools
+
+        tools = instance_tools(tools)
 
     # Create executor
     executor_kwargs = {
@@ -970,6 +982,8 @@ async def task_tool(
         # system-channel authority over framework instructions.
         "acceptance_criteria": acceptance_criteria,
     }
+    if agent_execution is not None:
+        executor_kwargs["agent_execution"] = agent_execution
     # Carry the host-captured lifecycle, including legacy None, without
     # inventing a legacy scope for missing context or re-reading thread state.
     if THREAD_INCARNATION_CONTEXT_KEY in parent_context:

@@ -34,6 +34,13 @@ _user_scoped_storage_lock = threading.Lock()
 
 
 def get_or_new_skill_storage(**kwargs) -> SkillStorage:
+    from deerflow.agent_instances.public_skills import PublicSkillStorage, public_skill_scope_enabled
+
+    storage = _get_unscoped_skill_storage(**kwargs)
+    return PublicSkillStorage(storage) if public_skill_scope_enabled() else storage
+
+
+def _get_unscoped_skill_storage(**kwargs) -> SkillStorage:
     """Return a ``SkillStorage`` instance — either a new one or the process singleton.
 
     **New instance** is created (never cached) when:
@@ -118,7 +125,13 @@ def get_or_new_user_skill_storage(user_id: str, **kwargs) -> SkillStorage:
     creation races. When the cache exceeds ``_MAX_USER_SCOPED_STORAGES``, the
     least-recently-accessed entry is evicted (true LRU, not FIFO).
     """
+    from deerflow.agent_instances.public_skills import public_skill_scope_enabled
     from deerflow.config import get_app_config
+
+    if public_skill_scope_enabled():
+        from deerflow.agent_instances.contract import AgentDenied
+
+        raise AgentDenied("Instance execution cannot inherit requester skill storage")
     from deerflow.config.paths import make_safe_user_id
 
     safe_id = make_safe_user_id(user_id)

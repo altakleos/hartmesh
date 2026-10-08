@@ -655,3 +655,28 @@ async def test_manual_compaction_fails_closed_without_valid_checkpoint_agent_bin
     assert captured["skip_memory_flush"] is expected_skip
     if checkpoint_metadata == {}:
         assert "checkpoint carries no agent binding" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_instance_compaction_never_loads_or_flushes_requester_memory(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from test_agent_execution_runtime import execution
+
+    bound = execution()
+    bound.authority.validate = AsyncMock()
+
+    def private(*args, **kwargs):
+        raise AssertionError("Instance compaction must not resolve a private agent")
+
+    monkeypatch.setattr(context_compaction, "_safe_load_agent_config", private)
+    captured = {}
+
+    def capture(**kwargs):
+        captured.update(kwargs)
+        return _FakeCompactionMiddleware()
+
+    monkeypatch.setattr(context_compaction, "_create_compaction_middleware", capture)
+    accessor = _FakeAccessor({"messages": [HumanMessage(content="old"), AIMessage(content="answer"), HumanMessage(content="new")]}, metadata={CHECKPOINT_AGENT_NAME_METADATA_KEY: "analyst"})
+    result = await compact_thread_context(accessor, bound.thread_id, app_config=_model_app_config("model"), user_id="requester", agent_execution=bound)
+    assert result.compacted and captured["skip_memory_flush"] is True

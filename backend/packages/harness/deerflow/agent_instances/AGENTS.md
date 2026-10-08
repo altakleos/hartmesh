@@ -38,5 +38,25 @@ company identity or homes.
 `test_agent_instances.py` covers both SQL backends and actual storage APIs with
 injected directories/backings; these fixtures never qualify native quotas. The
 mandatory Storage Spaces Linux Docker tier owns native filesystem proof.
-Runtime binding, scoped memory and full lifecycle/product controls are later
-stages consuming these identities and qualified attachments.
+`AgentConversations` owns durable bindings, retry keys and deleted-chat tombstones.
+Never infer binding from JSON metadata or requester ownership. SQL audience filters
+precede pagination; current Inspect or original requester Use admits reads. Manage
+controls mutations, while Use controls execution and stopping one's own run.
+Worker bookkeeping locks thread then instance, matching repository mutations.
+
+`AgentExecution` is host-only and carries human requester separately from resident,
+adopted revision, Home and thread incarnation. Reject client copies and never persist
+the object. Inspection projections cannot execute. Validate on the original host
+loop before model/tool calls, including isolated child loops and worker threads.
+
+`runtime.prepare_environment` consumes exact admitted native attachments and the
+existing AIO SDK. Address immutable Docker IDs, not container IPs. Drain preparation
+and closure across cancellation; unknown outcomes retain native intents. SDK closure,
+leases and ordinary completion never fence or replace physical writers. Children
+inherit the full Home mount; tool filtering is not a narrower filesystem boundary.
+
+Public skill scope is read-only and excludes private/legacy/integration storage,
+including late activation and primed caches. Capture bounded public bytes and record
+their native revision separately from live host activation. Home copies are mutable
+data, not authority or immutable execution evidence. Memory is disabled until Stage3.
+No scheduling, background tasks or separate storage/file-manager API is introduced.

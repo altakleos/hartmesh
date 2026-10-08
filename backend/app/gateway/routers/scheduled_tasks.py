@@ -198,6 +198,9 @@ async def create_scheduled_task(request: Request, body: ScheduledTaskCreateReque
     if body.context_mode == "reuse_thread":
         if not body.thread_id:
             raise HTTPException(status_code=422, detail="reuse_thread requires thread_id")
+        from app.gateway.agent_conversations import reject_legacy_binding
+
+        await reject_legacy_binding(request, body.thread_id)
         if not await thread_store.check_access(body.thread_id, str(user.id), require_existing=True):
             raise HTTPException(status_code=404, detail="Thread not found")
     if body.schedule_type not in {"once", "cron", "interval"}:
@@ -290,6 +293,9 @@ async def update_scheduled_task(task_id: str, request: Request, body: ScheduledT
     if effective_context_mode == "reuse_thread":
         if not effective_thread_id:
             raise HTTPException(status_code=422, detail="reuse_thread requires thread_id")
+        from app.gateway.agent_conversations import reject_legacy_binding
+
+        await reject_legacy_binding(request, str(effective_thread_id))
         thread_store = get_thread_store(request)
         if not await thread_store.check_access(str(effective_thread_id), str(user.id), require_existing=True):
             raise HTTPException(status_code=404, detail="Thread not found")

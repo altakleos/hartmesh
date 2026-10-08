@@ -1126,6 +1126,11 @@ async def _run_scope_user_id(request: Request, thread_id: str) -> str | None:
     / ``list_by_run_ids`` order deterministically (latest wins, ``feedback_id``
     breaks ties) to keep that well-defined.
     """
+    if getattr(getattr(getattr(request, "app", None), "state", None), "agent_conversations", None) is not None:
+        from app.gateway.agent_conversations import require_conversation
+
+        if await require_conversation(request, thread_id):
+            return None
     # Tolerate state-less request stand-ins used by focused unit tests.
     state = getattr(request, "state", None)
     user = getattr(state, "user", None)
@@ -1260,6 +1265,9 @@ async def cancel_run(
     if record is None or record.thread_id != thread_id:
         raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
 
+    from app.gateway.agent_conversations import require_run_cancellation
+
+    await require_run_cancellation(request, record)
     outcome = await run_mgr.cancel(run_id, action=action)
 
     # Success paths — the run was cancelled locally, durably requested from
@@ -1363,6 +1371,9 @@ async def _stream_existing_run(
 
     # Cancel if an action was requested (stop-button / interrupt flow)
     if action is not None:
+        from app.gateway.agent_conversations import require_run_cancellation
+
+        await require_run_cancellation(request, record)
         outcome = await run_mgr.cancel(run_id, action=action)
         if outcome == CancelOutcome.taken_over:
             # The run was on another worker and is now marked ``error`` in the

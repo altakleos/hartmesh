@@ -2398,6 +2398,10 @@ def _lark_cli_env_from_runtime(runtime: Runtime, command: str, *, sandbox_paths:
     the overlay carries only the broker URL + runtime PATH — the config/data
     directories are never injected into the sandbox.
     """
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+    if isinstance((runtime.context or {}).get(AGENT_EXECUTION_CONTEXT_KEY), AgentExecution):
+        return None
     if not _LARK_CLI_COMMAND_RE.search(command):
         return None
     try:

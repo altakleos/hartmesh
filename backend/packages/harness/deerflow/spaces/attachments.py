@@ -120,6 +120,58 @@ class SpaceAttachments:
             if destination_readers - audiences[key] and (not grant.permissions & Permission.ADMIN or acknowledgement is not True):
                 raise SpaceDenied("Joint mount audience requires source disclosure authority and acknowledgement")
 
+    async def resume(self, *, actor, resources, incarnation=None):
+        """Revalidate an exact durable active view without preparing or starting.
+
+        Absence returns None. Pending containment never means absence. A host
+        may select its sole existing resource view after restart; it may not
+        shrink, widen, relabel or change the actor of that environment.
+        """
+        if not isinstance(resources, (tuple, list)) or not 1 <= len(resources) <= 32 or any(not isinstance(r, ResourceMount) for r in resources):
+            raise ValueError("Request bounded typed resource mounts")
+        if len({r.space_id for r in resources}) != len(resources) or len({r.alias for r in resources}) != len(resources):
+            raise ValueError("Duplicate resource roots or aliases are unsupported")
+        if incarnation is not None and (not isinstance(incarnation, str) or not re.fullmatch(r"[0-9a-f]{32}", incarnation)):
+            raise ValueError("An exact execution incarnation is required")
+        if not isinstance(actor, PrincipalRef):
+            raise SpaceDenied("An authenticated resource actor is required")
+        async with self.registry._sf() as session:
+            query = select(SpaceAttachmentRow).where(SpaceAttachmentRow.actor_kind == actor.kind, SpaceAttachmentRow.actor_id == actor.subject_id)
+            if incarnation is not None:
+                query = query.where(SpaceAttachmentRow.incarnation == incarnation)
+            else:
+                query = query.join(SpaceMountRow).where(SpaceMountRow.space_id.in_([r.space_id for r in resources]), SpaceAttachmentRow.phase != "fenced").distinct()
+            candidates = (await session.execute(query)).scalars().all()
+        if not candidates:
+            # Still authenticate/read the requested resources before returning
+            # absence, so a foreign caller cannot use this as a discovery API.
+            async with self.registry.admitted(actor=actor, requests={r.space_id: (Permission.READ, r.generation) for r in resources}):
+                return None
+        if len(candidates) != 1:
+            raise SpaceConflict("The requested resources do not identify one attachment")
+        candidate = candidates[0]
+        token = _operation.set(("attach", candidate.id))
+        try:
+            requests = {r.space_id: (Permission.READ | (Permission.WRITE if r.writable else Permission(0)), r.generation) for r in resources}
+            async with self.registry.admitted(actor=actor, requests=requests) as (session, rows):
+                record = (await session.execute(select(SpaceAttachmentRow).where(SpaceAttachmentRow.id == candidate.id).with_for_update())).scalar_one()
+                if record.phase != "active" or record.host_id != self.provider.host_id or record.container_id is None:
+                    raise AttachmentPending("The recorded environment is not a confirmed active attachment")
+                mounted = (await session.execute(select(SpaceMountRow).where(SpaceMountRow.attachment_id == record.id))).scalars().all()
+                if {(m.space_id, m.generation, m.alias, bool(m.writable)) for m in mounted} != {(r.space_id, r.generation, r.alias, r.writable) for r in resources}:
+                    raise SpaceConflict("The durable attachment differs from the requested view")
+                await self._audience(session, rows, resources, False)
+                volumes = {key: await self.files._volume(session, row) for key, (row, _) in rows.items()}
+                plan = AttachmentPlan(record.id, record.incarnation, actor, self.provider.host_id, tuple(NativeView(r.space_id, r.generation, str(volumes[r.space_id].data_path), "/mnt/spaces/" + r.alias, r.writable) for r in resources))
+                await run_file_io(self.provider.verify_active, record.container_id, plan)
+                return Attachment(record.id, record.incarnation, record.host_id, record.container_id)
+        except (SpaceDenied, SpaceConflict, ValueError):
+            raise
+        except Exception as exc:
+            raise AttachmentPending("Attachment reuse is unconfirmed; preserve its containment record") from exc
+        finally:
+            _operation.reset(token)
+
     async def attach(self, *, actor, incarnation, resources, acknowledge_disclosure=False):
         if not isinstance(incarnation, str) or not re.fullmatch(r"[0-9a-f]{32}", incarnation):
             raise ValueError("A distinct execution incarnation UUID is required")

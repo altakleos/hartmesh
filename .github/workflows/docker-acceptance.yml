@@ -43,6 +43,11 @@ jobs:
           docker pull python:3.12-slim
           writer_ref=$(docker image inspect --format '{{index .RepoDigests 0}}' python:3.12-slim)
           echo "HARTMESH_STORAGE_WRITER_IMAGE=$writer_ref" >> "$GITHUB_ENV"
+      - name: Prepare pinned instance AIO image
+        run: |
+          instance_image=$(backend/.venv/bin/python -c 'import yaml; print(yaml.safe_load(open("deploy/compose/config.yaml", encoding="utf-8"))["sandbox"]["image"])')
+          docker pull "$instance_image"
+          echo "HARTMESH_INSTANCE_AIO_IMAGE=$instance_image" >> "$GITHUB_ENV"
       - name: Qualify actual disk, inode, staging and native view limits
         working-directory: backend
         run: |
@@ -50,6 +55,7 @@ jobs:
           mkdir -p "$task_tmp"
           sudo env PYTHONPATH="$PWD" PYTHON_DOTENV_DISABLED=1 \
             HARTMESH_REQUIRE_MANAGED_STORAGE=1 HARTMESH_STORAGE_WRITER_IMAGE="$HARTMESH_STORAGE_WRITER_IMAGE" \
+            HARTMESH_INSTANCE_AIO_IMAGE="$HARTMESH_INSTANCE_AIO_IMAGE" \
             TMPDIR="$task_tmp" "$PWD/.venv/bin/python" -m pytest \
             tests/test_storage_spaces_volume_native.py --maxfail=1 -q --tb=short \
             --basetemp="$task_tmp/fixtures" --junitxml="$task_tmp/native.xml"
@@ -58,7 +64,7 @@ jobs:
           import xml.etree.ElementTree as ET
           tree = ET.parse(sys.argv[1])
           cases = tree.findall(".//testcase")
-          assert len(cases) >= 15, "Required managed-storage cases were not collected"
+          assert len(cases) >= 16, "Required managed-storage and instance AIO cases were not collected"
           assert not tree.findall(".//skipped"), "Managed-storage merge qualification cannot skip"
           assert not tree.findall(".//failure") and not tree.findall(".//error")
           PY
