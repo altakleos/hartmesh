@@ -44,8 +44,8 @@ def test_each_distribution_revision_follows_the_one_before():
         previous = revision
 
 
-def _assert_published_upgrade(script: ScriptDirectory) -> None:
-    published = json.loads((Path(__file__).parent / "fixtures/migrations/release_39_ancestry.json").read_text(encoding="utf-8"))
+def _assert_published_upgrade(script: ScriptDirectory, fixture_name: str = "release_39_ancestry.json") -> None:
+    published = json.loads((Path(__file__).parent / "fixtures/migrations" / fixture_name).read_text(encoding="utf-8"))
     for revision, ancestry in published["revisions"].items():
         actual = script.get_revision(revision)
         assert actual.down_revision == ancestry["down_revision"], f"Published parent changed: {revision}"
@@ -55,12 +55,14 @@ def _assert_published_upgrade(script: ScriptDirectory) -> None:
     assert upgrade == [revision for revision in fresh if revision not in published["revisions"]]
 
 
-def test_published_ancestry_and_previous_release_upgrade_plan():
-    _assert_published_upgrade(ScriptDirectory(str(bootstrap._MIGRATIONS_DIR)))
+@pytest.mark.parametrize("fixture_name", ["release_39_ancestry.json", "release_43_ancestry.json"])
+def test_published_ancestry_and_previous_release_upgrade_plan(fixture_name):
+    _assert_published_upgrade(ScriptDirectory(str(bootstrap._MIGRATIONS_DIR)), fixture_name)
 
 
 @pytest.mark.parametrize("reparent_published", [False, True], ids=["append-import", "reject-inserted-ancestor"])
-def test_future_import_is_executed_from_published_head(tmp_path, reparent_published):
+@pytest.mark.parametrize("fixture_name", ["release_39_ancestry.json", "release_43_ancestry.json"])
+def test_future_import_is_executed_from_published_head(tmp_path, reparent_published, fixture_name):
     """An inserted ancestor can pass fresh/head checks but be skipped on upgrade."""
     versions = tmp_path / "versions"
     shutil.copytree(bootstrap._MIGRATIONS_DIR / "versions", versions, ignore=shutil.ignore_patterns("__pycache__"))
@@ -76,7 +78,7 @@ def test_future_import_is_executed_from_published_head(tmp_path, reparent_publis
     if reparent_published:
         assert script._upgrade_revs("head", DISTRIBUTION_REVISIONS[-1]) == []
         with pytest.raises(AssertionError, match="Published parent changed"):
-            _assert_published_upgrade(script)
+            _assert_published_upgrade(script, fixture_name)
     else:
         assert [step.revision.revision for step in script._upgrade_revs("head", DISTRIBUTION_REVISIONS[-1])] == [imported]
-        _assert_published_upgrade(script)
+        _assert_published_upgrade(script, fixture_name)

@@ -1,0 +1,147 @@
+{
+  "release": "v2.2.0+hartmesh.43",
+  "migration_source_commit": "24710eee56126959f0205447562fef37d90d1f8f",
+  "head": "0033_storage_features",
+  "revisions": {
+    "0001_baseline": {
+      "down_revision": null,
+      "depends_on": null
+    },
+    "0002_runs_token_usage": {
+      "down_revision": "0001_baseline",
+      "depends_on": null
+    },
+    "0003_scheduled_tasks": {
+      "down_revision": "0002_runs_token_usage",
+      "depends_on": null
+    },
+    "0004_run_ownership": {
+      "down_revision": "0003_scheduled_tasks",
+      "depends_on": null
+    },
+    "0005_run_stop_reason": {
+      "down_revision": "0004_run_ownership",
+      "depends_on": null
+    },
+    "0006_agents": {
+      "down_revision": "0005_run_stop_reason",
+      "depends_on": null
+    },
+    "0007_scheduled_run_active_index": {
+      "down_revision": "0006_agents",
+      "depends_on": null
+    },
+    "0008_thread_operation_kind": {
+      "down_revision": "0007_scheduled_run_active_index",
+      "depends_on": null
+    },
+    "0009_webhook_dedupe": {
+      "down_revision": "0008_thread_operation_kind",
+      "depends_on": null
+    },
+    "0010_run_cancel_request": {
+      "down_revision": "0009_webhook_dedupe",
+      "depends_on": null
+    },
+    "0011_mcp_tasks": {
+      "down_revision": "0010_run_cancel_request",
+      "depends_on": null
+    },
+    "0012_mcp_task_results": {
+      "down_revision": "0011_mcp_tasks",
+      "depends_on": null
+    },
+    "0013_mcp_task_notifications": {
+      "down_revision": "0012_mcp_task_results",
+      "depends_on": null
+    },
+    "0014_managed_subagents": {
+      "down_revision": "0013_mcp_task_notifications",
+      "depends_on": null
+    },
+    "0015_scheduled_task_enqueue": {
+      "down_revision": "0014_managed_subagents",
+      "depends_on": null
+    },
+    "0016_subagent_batches": {
+      "down_revision": "0015_scheduled_task_enqueue",
+      "depends_on": null
+    },
+    "0017_personal_access_tokens": {
+      "down_revision": "0016_subagent_batches",
+      "depends_on": null
+    },
+    "0018_oauth_identity_pg_partial": {
+      "down_revision": "0017_personal_access_tokens",
+      "depends_on": null
+    },
+    "0019_projects": {
+      "down_revision": "0018_oauth_identity_pg_partial",
+      "depends_on": null
+    },
+    "0019_thread_incarnations": {
+      "down_revision": "0021_batch_acceptance",
+      "depends_on": null
+    },
+    "0020_threads_meta_project_id": {
+      "down_revision": "0019_projects",
+      "depends_on": null
+    },
+    "0021_batch_acceptance": {
+      "down_revision": "0020_threads_meta_project_id",
+      "depends_on": null
+    },
+    "0022_scheduled_occurrence_seq": {
+      "down_revision": "0019_thread_incarnations",
+      "depends_on": null
+    },
+    "0023_run_change_seq": {
+      "down_revision": "0022_scheduled_occurrence_seq",
+      "depends_on": null
+    },
+    "0023_user_preferences": {
+      "down_revision": "0023_run_change_seq",
+      "depends_on": null
+    },
+    "0024_project_documents": {
+      "down_revision": "0023_user_preferences",
+      "depends_on": null
+    },
+    "0025_repair_run_change_seq": {
+      "down_revision": "0024_project_documents",
+      "depends_on": null
+    },
+    "0026_mcp_task_lease_tokens": {
+      "down_revision": "0025_repair_run_change_seq",
+      "depends_on": null
+    },
+    "0027_account_access": {
+      "down_revision": "0026_mcp_task_lease_tokens",
+      "depends_on": null
+    },
+    "0028_provider_keys": {
+      "down_revision": "0027_account_access",
+      "depends_on": null
+    },
+    "0029_shared_publications": {
+      "down_revision": "0028_provider_keys",
+      "depends_on": null
+    },
+    "0030_storage_spaces": {
+      "down_revision": "0029_shared_publications",
+      "depends_on": null
+    },
+    "0031_storage_files": {
+      "down_revision": "0030_storage_spaces",
+      "depends_on": null
+    },
+    "0032_storage_lifecycle": {
+      "down_revision": "0031_storage_files",
+      "depends_on": null
+    },
+    "0033_storage_features": {
+      "down_revision": "0032_storage_lifecycle",
+      "depends_on": null
+    }
+  }
+}
