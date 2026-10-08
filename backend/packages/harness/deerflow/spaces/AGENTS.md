@@ -95,3 +95,7 @@ rejections. Bounded exact-ID receipts live in private control, never data mounts
 Default first-party contributions/compatibility/context adapters are under
 `features/` and Gateway `storage_features.py`; see the [feature contract](../../../../../docs/STORAGE_SPACES.md#default-first-party-features).
 Migration `0033` persists their opaque unique relationships; no legacy adoption.
+
+Consumer readiness: [the handoff](../../../../../docs/STORAGE_SPACES_CONSUMER.md)
+maps the public API to functional SQL and mandatory native evidence. The native
+tier requires 15 cases without skips; directory fixtures never qualify quotas.

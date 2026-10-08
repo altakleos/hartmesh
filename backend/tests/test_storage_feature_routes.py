@@ -1,3 +1,4 @@
+import hashlib
 from uuid import uuid4
 
 import httpx
@@ -295,3 +296,51 @@ async def test_feature_wrapper_preserves_annotated_thread_id_validation(feature_
     response = await client.post(f"/api/threads/{'a' * 65}/files", json={"path": "/mnt/user-data/outputs/report.txt"})
     assert response.status_code == 422, response.text
     assert any("thread_id" in error["loc"] for error in response.json()["detail"])
+
+
+@pytest.mark.asyncio
+async def test_saved_bytes_survive_actual_thread_deletion_and_optional_feature_removal(feature_app):
+    from langgraph.checkpoint.memory import InMemorySaver
+    from langgraph.store.memory import InMemoryStore
+
+    from app.gateway.routers import spaces, threads
+    from deerflow.persistence.thread_meta.memory import MemoryThreadMetaStore
+    from deerflow.runtime import RunManager
+    from deerflow.runtime.runs.store.memory import MemoryRunStore
+
+    client, app, files, _, paths, alice, _, _ = feature_app
+    store = InMemoryStore()
+    app.state.thread_store = MemoryThreadMetaStore(store)
+    app.state.checkpointer = InMemorySaver()
+    app.state.run_store = MemoryRunStore()
+    app.state.run_manager = RunManager(store=app.state.run_store)
+    app.include_router(threads.router)
+    app.include_router(spaces.router)
+    await app.state.thread_store.create(THREAD, user_id=str(alice.id), metadata={"title": "Source"})
+    outputs = paths.sandbox_outputs_dir(THREAD, user_id=str(alice.id))
+    outputs.mkdir(parents=True)
+    (outputs / "saved.md").write_bytes(b"Retained beyond the source chat\n")
+    kept = await client.post(f"/api/threads/{THREAD}/files", json={"path": "/mnt/user-data/outputs/saved.md"})
+    assert kept.status_code == 201, kept.text
+    actor = PrincipalRef("human", str(alice.id))
+    resource = (await files.registry.list(actor=actor))[0]
+    deleted = await client.delete(f"/api/threads/{THREAD}")
+    assert deleted.status_code == 200, deleted.text
+    assert await app.state.thread_store.get(THREAD, user_id=str(alice.id)) is None
+    assert not paths.thread_dir(THREAD, user_id=str(alice.id)).exists()
+    assert (await client.get("/api/files/saved.md")).content == b"Retained beyond the source chat\n"
+    for _, service in app.state.extensions.services:
+        await service.stop()
+    empty, errors = load_extensions([])
+    assert not errors and not empty.plugins
+    app.state.extensions = empty
+    unavailable = await client.get("/api/files")
+    assert unavailable.status_code == 503, unavailable.text
+    endpoint = f"/api/spaces/{resource.id}/content"
+    retained = await client.get(endpoint, params={"path": "saved.md"})
+    assert retained.status_code == 200 and retained.content == b"Retained beyond the source chat\n", retained.text
+    updated = await client.put(
+        endpoint, params={"path": "saved.md", "generation": resource.generation, "operation_id": uuid4().hex, "expected_sha256": hashlib.sha256(retained.content).hexdigest()}, content=b"Edited with no feature plugins\n"
+    )
+    assert updated.status_code == 200, updated.text
+    assert (await client.get(endpoint, params={"path": "saved.md"})).content == b"Edited with no feature plugins\n"

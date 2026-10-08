@@ -49,8 +49,9 @@ Storage Spaces is HartMesh's persistent folder resource foundation. The resource
 delivery adds identity, custody, mandatory access and a generic browser/API.
 My Files, Shared and Projects keep their compatibility routes. In qualified
 resource mode they use fresh resources through default first-party plugins.
-Legacy folders are neither adopted nor copied. The Agent Execution consumer
-qualification remains a separate final stage.
+Legacy folders are neither adopted nor copied. The
+[consumer handoff](STORAGE_SPACES_CONSUMER.md) specifies the asynchronous API,
+trusted nonhuman adapter, native workloads and supported deployment limits.
 
 Each resource has a stable ID and opaque backing handle. Display names are
 labels: renaming changes neither location, ownership nor permissions. Personal
@@ -295,7 +296,9 @@ recovery controllers cannot be bypassed by this native recovery surface.
 
 The additive `0032_storage_lifecycle` migration adds attachment, mount and backup
 facts after `0031`, preserving previous ancestry and all existing feature bytes.
-Used containment/backup facts cannot be downgraded away. Final wiki/repository/nonhuman qualification remains a later stage.
+Used containment/backup facts cannot be downgraded away. The mandatory native tier
+also qualifies restricted nonhuman wiki access, actual Git operations and SQLite
+transactions at capacity; see the [consumer evidence](STORAGE_SPACES_CONSUMER.md#qualification-evidence-and-feature-independence).
 
 
 ## Default first-party features
