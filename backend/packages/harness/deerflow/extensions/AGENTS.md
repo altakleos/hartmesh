@@ -1,7 +1,7 @@
 ### Python Extension System (Runtime and Distribution)
 
 Artifact presentations use the existing trusted plugin contribution and startup
-lifecycle. The dependency-free extension API `0.2.6` exports `ArtifactPresentation`;
+lifecycle. The dependency-free extension API `0.2.7` exports `ArtifactPresentation`;
 artifact-bearing `PluginContribution` explicitly negotiates `api_version=2`, while
 page-only v1 contributions remain compatible. Registration validates literal
 suffixes, IDs, strict byte budgets and unique compatibility queries atomically.
@@ -17,6 +17,20 @@ Business contributions retain their default purpose and v1/v2 compatibility.
 Management execution checks active delegation, attributed admin authority and
 `plugin_management` namespace write authorization. Contributed raw management
 routes must use the existing common host guard. No flag enables a package installer.
+
+Plugin contract v4 negotiates `storage_api_version=1`, explicit `actor_kinds` and
+an optional `StorageController`. Existing action/tool/dependency contracts gain
+optional host-bound storage and typed actor fields; v1–v3 positional calls remain
+compatible. Nonhuman contexts have `principal=None`, never a substituted owner.
+The host validates current actors/grants on every resource call. Only trusted host
+adapters enter `storage_actor_scope`; runtime JSON/user/thread IDs cannot select it.
+The worker owns and clears its private storage-provider key. Services receive a
+lazy app-scoped provider because they start before storage initialization.
+Mediated operations require the exact installed namespace/controller/metadata
+binding and fresh enabled settings inside both durable admissions. Missing,
+disabled or incompatible controllers preserve data and deny affected mutations.
+Business file actions retain resource grants; management actions retain decision
+0017 guards. Reuse this registry/loader/actions/browser lifecycle, not another host.
 
 Third-party Python packages can expose an `install(registry, config)` function and be
 loaded, in deterministic order, from the startup-only top-level `plugins:` list in

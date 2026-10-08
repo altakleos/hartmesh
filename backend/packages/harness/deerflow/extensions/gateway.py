@@ -580,6 +580,7 @@ async def start_services(
     session_factory: Any | None,
     *,
     run_evidence_reader: Any | None = None,
+    storage: Any | None = None,
     attempted_services: list[tuple[str, Any]] | None = None,
 ) -> list[Diagnostic]:
     """Start extension services in registration order, failing open per item."""
@@ -592,6 +593,7 @@ async def start_services(
         policy=project_host_policy(app_config),
         session_factory=session_factory,
         run_evidence_reader=run_evidence_reader,
+        storage=storage,
     )
     for entry in extensions.services:
         source, service = entry

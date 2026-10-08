@@ -95,12 +95,40 @@ from deerflow_extension_api.runtime_bridge import (
 )
 from deerflow_extension_api.settings import SettingsField
 from deerflow_extension_api.state import ExtensionData
+from deerflow_extension_api.storage import (
+    ResourceReference,
+    ResourceStorage,
+    StorageAccessDenied,
+    StorageActor,
+    StorageCapabilities,
+    StorageConflict,
+    StorageController,
+    StorageIdentityRequired,
+    StorageOperationPending,
+    StorageProvider,
+    StorageResource,
+    StorageUnavailable,
+    StorageUnsupported,
+)
 
 #: Contract version. Before 1.0, minors may break and patches are additive.
 #: From 1.0 on, bump the major for breaking changes.
-API_VERSION = "0.2.6"
+API_VERSION = "0.2.7"
 
 __all__ = [
+    "StorageAccessDenied",
+    "StorageIdentityRequired",
+    "StorageConflict",
+    "StorageOperationPending",
+    "StorageUnavailable",
+    "StorageUnsupported",
+    "ResourceReference",
+    "ResourceStorage",
+    "StorageActor",
+    "StorageCapabilities",
+    "StorageController",
+    "StorageProvider",
+    "StorageResource",
     "ModelInvocationError",
     "ModelInvocationFailed",
     "ModelInvocationRequest",

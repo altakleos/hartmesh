@@ -11,6 +11,25 @@ const contributions = z
     z.object({
       namespace: z.string().regex(/^[a-z][a-z0-9_.-]{0,95}$/),
       viewer_id: z.string().nullable().optional(),
+      storage_api_version: z.literal(1).nullable().optional(),
+      actor_kinds: z
+        .array(z.enum(["human", "nonhuman"]))
+        .max(2)
+        .optional(),
+      storage_capabilities: z
+        .object({
+          api_version: z.literal(1),
+          available: z.boolean(),
+          actor_kinds: z.array(z.enum(["human", "nonhuman"])).max(2),
+          files: z.boolean(),
+          provision: z.boolean(),
+          grants: z.boolean(),
+          mediated_mutations: z.boolean(),
+          native_attachments: z.boolean(),
+          quiesced_recovery: z.boolean(),
+        })
+        .nullable()
+        .optional(),
       module: z.string().nullable(),
       backend_actions: z.array(z.string()).optional(),
       entry: z.string().nullable(),

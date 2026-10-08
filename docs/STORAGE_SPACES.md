@@ -1,5 +1,48 @@
 # Storage Spaces
 
+## Extension storage contract
+
+The dependency-free `deerflow-extension-api` 0.2.7 adds `StorageActor`,
+`StorageCapabilities`, `StorageResource`, `ResourceReference`, `StorageController`,
+`ResourceStorage` and `StorageProvider`. A `PluginContribution(api_version=4,
+storage_api_version=1)` explicitly negotiates these additions. Old contributions
+and positional action/tool contexts retain their behavior.
+
+An action/tool receives optional `context.actor`, `context.storage` and a
+host-resolved `context.resource` for a resource-bound browser action. A nonhuman
+actor has a kind and subject ID and no human `principal`. Only trusted host
+authentication/embedding code binds `storage_actor_scope`; claimed runtime or
+payload identities never authenticate a caller. Storage calls accept no actor
+parameter and recheck the live host binding, identity directory and current grants.
+Personal access tokens have no storage scopes; the same denial follows inherited
+tool/service work, and token runs receive no storage provider.
+Trusted internal calls require an attributed owner; an ownerless internal or
+scheduled request never becomes the synthetic default resource owner.
+Services receive a lazy `deps.storage` provider: `capabilities.available=False`
+and explicit unsupported errors distinguish a missing adapter from an empty root.
+The public errors distinguish `StorageIdentityRequired`, `StorageAccessDenied`,
+`StorageConflict`, `StorageOperationPending`, `StorageUnavailable` and
+`StorageUnsupported`. Pending outcomes need explicit recovery rather than a
+new automatic mutation. The facade advertises native attachments as unsupported;
+qualified attachments currently use the separate trusted host consumer API.
+
+Native operations expose resource discovery/provisioning/grants, confined file
+reads/edits/transfers/export and qualified lifecycle/recovery. Cross-resource
+copies retain source EXPORT and audience admission. A declared `StorageController`
+binds mediated writes/removes/directory operations to an exact namespace, name and
+metadata version under OPERATE. Fresh installed/enabled facts are checked inside
+both durable admissions. Disable/remove/upgrade preserves resource facts and
+readable data; generic native writes never replace the required controller.
+Mediated lifecycle recovery remains unsupported without qualified feature recovery.
+
+The existing browser module may add `resourceApiVersion: 1`. Its ordinary page
+URL accepts `?space=<stable-id>`; the host resolves current access before mounting,
+passes immutable resource facts and negotiated storage capabilities, and sends
+`X-Deerflow-Resource` independently of action payloads. Backend actions recheck
+that resource under the current actor. Account/unmount cancellation rejects late
+metadata/mounts/actions. This extends the installed registry and assets lifecycle;
+it introduces no second loader, policy language or per-customer browser build.
+
 ## Resource registry
 
 Storage Spaces is HartMesh's persistent folder resource foundation. The resource and file

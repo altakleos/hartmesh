@@ -62,6 +62,7 @@ from deerflow.runtime.context_keys import (
     CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
     DEFAULT_AGENT_NAME_METADATA_VALUE,
     PROJECT_CONTEXT_KEY,
+    STORAGE_PROVIDER_CONTEXT_KEY,
     checkpoint_agent_binding_metadata,
 )
 from deerflow.runtime.customer_administration import (
@@ -235,6 +236,7 @@ def _release_run_scoped_references(
         "__run_journal",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
+        STORAGE_PROVIDER_CONTEXT_KEY,
     }
     try:
         from deerflow.extensions import EXTENSION_SNAPSHOT_CONTEXT_KEY
@@ -593,6 +595,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
             RUNTIME_PRESENTED_FILES_CONTEXT_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
             CONVERSATION_READER_CONTEXT_KEY,
+            STORAGE_PROVIDER_CONTEXT_KEY,
             THREAD_INCARNATION_CONTEXT_KEY,
             THREAD_INCARNATION_METADATA_GUARD_KEY,
             "is_subagent",
@@ -625,6 +628,7 @@ def _build_runtime_context(
     thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
     customer_administration_policy: CustomerAdministrationPolicy | None = None,
     customer_management_actor: CustomerManagementActor | None = None,
+    storage_provider: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -639,6 +643,10 @@ def _build_runtime_context(
     ``langgraph.pregel.main`` where ``parent_runtime.merge(...)`` is invoked.
     """
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+    from deerflow.spaces.facade import HostStorageProvider
+
+    if isinstance(storage_provider, HostStorageProvider):
+        runtime_ctx[STORAGE_PROVIDER_CONTEXT_KEY] = storage_provider
     if thread_incarnation is not _THREAD_INCARNATION_UNSET:
         runtime_ctx[THREAD_INCARNATION_CONTEXT_KEY] = thread_incarnation
     if isinstance(caller_context, dict):
@@ -717,6 +725,7 @@ class RunContext:
     on_run_completed: Any | None = field(default=None)
     # The host binds this capability to one run's authenticated reader and references.
     conversation_reader: Any | None = field(default=None)
+    storage_provider: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -725,6 +734,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
+        configurable.pop(STORAGE_PROVIDER_CONTEXT_KEY, None)
         configurable.pop(CUSTOMER_ADMINISTRATION_CONTEXT_KEY, None)
         configurable.pop(CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY, None)
     existing_context = config.get("context")
@@ -1280,6 +1290,7 @@ async def _run_agent(
             thread_incarnation=thread_incarnation,
             customer_administration_policy=ctx.customer_administration_policy,
             customer_management_actor=ctx.customer_management_actor,
+            storage_provider=ctx.storage_provider,
         )
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this

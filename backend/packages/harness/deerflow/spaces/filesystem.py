@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from deerflow_extension_api.storage import StorageUnavailable
+
 from deerflow.spaces.contract import SpaceConflict
 
 
@@ -27,7 +29,7 @@ class UnsafeSpacePath(ValueError):
     """The relative name, link or node cannot be safely operated on."""
 
 
-class FilesystemUnavailable(RuntimeError):
+class FilesystemUnavailable(StorageUnavailable):
     """This platform cannot supply the required confined operation."""
 
 

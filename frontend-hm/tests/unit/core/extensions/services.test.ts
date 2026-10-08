@@ -24,6 +24,31 @@ beforeEach(() => {
   rs.clearAllMocks();
 });
 
+test("resource binding travels in the host header independently of action payload", async () => {
+  const resourceId = "a".repeat(32);
+  const services = bindFrontendServices(
+    { conversationText, showMessage: rs.fn() },
+    entry,
+    undefined,
+    resourceId,
+  );
+  request.mockResolvedValue({ ok: true, json: async () => ({}) });
+  await services.callBackend("stats", {
+    space_id: "b".repeat(32),
+    actor: "other",
+  });
+  const [, init] = request.mock.calls[0]! as [string, RequestInit];
+  expect(init.headers).toMatchObject({ "X-Deerflow-Resource": resourceId });
+  expect(() =>
+    bindFrontendServices(
+      { conversationText, showMessage: rs.fn() },
+      entry,
+      undefined,
+      "../unsafe",
+    ),
+  ).toThrow();
+});
+
 test("retired host services neither read a transcript nor emit a late message or backend request", async () => {
   const controller = new AbortController();
   const conversationText = rs.fn(async () => "visible");

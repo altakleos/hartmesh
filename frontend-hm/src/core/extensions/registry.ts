@@ -134,13 +134,22 @@ export async function loadFrontendExtensions(
           throw new Error("Unsupported browser asset transport");
         }
         controller.signal.throwIfAborted();
+        const resourceApiVersion = loadedModule?.resourceApiVersion;
         if (
           loadedModule?.apiVersion !== 1 ||
           loadedModule.module !== entry.module ||
+          (resourceApiVersion !== undefined &&
+            (resourceApiVersion !== 1 || entry.storage_api_version !== 1)) ||
           (loadedModule.conversationActions !== undefined &&
             typeof loadedModule.conversationActions !== "function")
         )
           throw new Error("Incompatible browser extension");
+        if (resourceApiVersion === 1) {
+          loadedModule = Object.create(Object.getPrototypeOf(loadedModule), {
+            ...Object.getOwnPropertyDescriptors(loadedModule),
+            resourceApiVersion: { value: 1, enumerable: true },
+          }) as FrontendExtension;
+        }
         if (loadedModule.surfaces !== undefined) {
           const seen = new Set<string>();
           if (

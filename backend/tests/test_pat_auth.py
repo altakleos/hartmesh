@@ -213,6 +213,68 @@ def test_valid_pat_authenticates_without_cookie(client):
     assert response.json() == {"user_id": "user-1", "auth_source": AUTH_SOURCE_PAT}
 
 
+def test_pat_cannot_supply_storage_identity_to_inherited_async_work(client):
+    from deerflow_extension_api import StorageAccessDenied
+
+    from app.gateway.deps import get_extension_storage_provider
+    from deerflow.spaces.facade import _current_actor
+
+    client.app.state.extension_storage = object()
+
+    @client.app.get("/api/threads/storage-probe")
+    async def storage_probe(request: Request):
+        provider = get_extension_storage_provider(request)
+
+        async def inherited():
+            try:
+                actor = _current_actor()
+                return {"allowed": True, "actor": actor.subject_id, "provider": provider is not None}
+            except StorageAccessDenied:
+                return {"allowed": False, "provider": provider is not None}
+
+        return await asyncio.create_task(inherited())
+
+    created = _create_pat(client)
+    client.cookies.clear()
+    response = client.get("/api/threads/storage-probe", headers={"Authorization": f"Bearer {created['token']}"})
+    assert response.status_code == 200
+    assert response.json() == {"allowed": False, "provider": False}
+    _session_cookie(client)
+    assert client.get("/api/threads/storage-probe").json() == {"allowed": True, "actor": "user-1", "provider": True}
+
+
+def test_internal_storage_requires_attributed_owner_even_in_development(client, monkeypatch):
+    from deerflow_extension_api import StorageAccessDenied
+
+    from app.gateway.deps import get_extension_storage_provider
+    from app.gateway.internal_auth import create_internal_auth_headers
+    from deerflow.spaces.facade import _current_actor
+
+    client.app.state.extension_storage = object()
+    monkeypatch.setenv("DEER_FLOW_AUTH_DISABLED", "1")
+    monkeypatch.setenv("DEER_FLOW_ENV", "development")
+
+    @client.app.get("/api/threads/internal-storage-probe")
+    async def probe(request: Request):
+        async def inherited():
+            provider = get_extension_storage_provider(request)
+            try:
+                return {"actor": _current_actor().subject_id, "provider": provider is not None}
+            except StorageAccessDenied:
+                return {"actor": None, "provider": provider is not None}
+
+        return await asyncio.create_task(inherited())
+
+    response = client.get("/api/threads/internal-storage-probe", headers=create_internal_auth_headers())
+    assert response.status_code == 200
+    assert response.json() == {"actor": None, "provider": False}
+    response = client.get("/api/threads/internal-storage-probe", headers=create_internal_auth_headers(owner_user_id="user-1"))
+    assert response.status_code == 200
+    assert response.json() == {"actor": "user-1", "provider": True}
+    scheduled = SimpleNamespace(app=client.app, headers={}, state=SimpleNamespace(user=SimpleNamespace(id="default", system_role="internal"), auth_source="internal"))
+    assert get_extension_storage_provider(scheduled) is None
+
+
 def test_invalid_bearer_never_falls_back_to_session_cookie(client):
     _session_cookie(client)  # victim session is present and valid
     response = client.get("/api/threads/whoami", headers={"Authorization": "Bearer dfp_not-a-real-token"})

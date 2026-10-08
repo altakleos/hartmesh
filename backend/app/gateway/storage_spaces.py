@@ -4,7 +4,8 @@ from pathlib import Path
 
 from app.gateway.auth.mode import account_refusal
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, is_auth_disabled
+from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, is_auth_disabled
+from app.gateway.internal_auth import get_trusted_internal_owner_user_id
 from deerflow.config.storage_spaces_config import StorageSpacesConfig
 from deerflow.spaces.backings import PreparedVolumeCatalog
 from deerflow.spaces.contract import PrincipalRef, ResolvedPrincipal
@@ -12,6 +13,14 @@ from deerflow.spaces.principals import HostPrincipalResolver
 from deerflow.spaces.registry import SpaceRegistry
 from deerflow.spaces.service import SpaceFiles
 from deerflow.utils.file_io import run_file_io
+
+
+def supports_storage_credentials(request) -> bool:
+    """Legacy route scope/default identity is never resource authentication."""
+    source = getattr(getattr(request, "state", None), "auth_source", None)
+    if source == AUTH_SOURCE_INTERNAL:
+        return get_trusted_internal_owner_user_id(request) is not None
+    return source in (AUTH_SOURCE_SESSION, AUTH_SOURCE_AUTH_DISABLED)
 
 
 def human_lookup(repository):

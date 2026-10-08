@@ -31,8 +31,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   read-only archive, permanent deletion tombstones and generic recovery controls.
   Backup/restore staging shares resource limits; uncertain SQL/publication outcomes
   retain evidence and displaced bytes instead of replaying changes.
+- Add extension API 0.2.7 and explicit plugin contract v4 storage negotiation.
+  Existing actions/tools/services receive host-bound resources and typed actors;
+  scoped mediated operations require the installed compatible controller.
+  Resource pages reuse the existing browser host and check current grants.
 
 ### Schema changes
+
+- The extension storage facade adds no database or config schema changes;
+  migration head remains `0032_storage_lifecycle`, config version 53.
 
 - Database migration `0030_storage_spaces` adds `storage_spaces`,
   `storage_space_grants` and `storage_space_events` after the released

@@ -23,6 +23,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from deerflow_extension_api.model_invocation import ModelInvoker
     from deerflow_extension_api.placement import AgentBuildContext, MiddlewarePlacement
     from deerflow_extension_api.run_evidence import RunEvidenceReader
+    from deerflow_extension_api.storage import StorageProvider
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -169,6 +170,7 @@ class ExtensionRuntimeDeps:
     session_factory: Any | None = None
     run_evidence_reader: RunEvidenceReader | None = None
     model_invoker: ModelInvoker | None = None
+    storage: StorageProvider | None = None
 
 
 class ExtensionService(Protocol):

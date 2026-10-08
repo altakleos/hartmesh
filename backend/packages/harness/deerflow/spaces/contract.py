@@ -7,14 +7,16 @@ from dataclasses import dataclass
 from enum import IntFlag, StrEnum
 from typing import Literal
 
+from deerflow_extension_api.storage import StorageAccessDenied, StorageConflict, StorageIdentityRequired
+
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:@+-]{0,127}\Z")
 
 
-class InvalidPrincipal(PermissionError):
+class InvalidPrincipal(StorageIdentityRequired):
     """The trusted identity adapter did not validate this subject."""
 
 
-class SpaceDenied(PermissionError):
+class SpaceDenied(StorageAccessDenied):
     """A known actor lacks mandatory resource authority."""
 
 
@@ -22,7 +24,7 @@ class SpaceNotFound(SpaceDenied):
     """Missing, inaccessible and deleted resources have the same read outcome."""
 
 
-class SpaceConflict(RuntimeError):
+class SpaceConflict(StorageConflict):
     """An operation uses a stale generation or violates a resource invariant."""
 
 

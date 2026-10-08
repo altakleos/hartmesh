@@ -7,18 +7,22 @@ and an authenticated principal for each admitted call; this is not a sandbox.
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
 from deerflow_extension_api.auth import ExtensionPrincipal
 from deerflow_extension_api.settings import FrontendBinding, SettingsContribution, SettingsField, SettingValue
+from deerflow_extension_api.storage import ResourceStorage, StorageActor, StorageController, StorageResource
 
 
 @dataclass(frozen=True)
 class ActionContext:
-    principal: ExtensionPrincipal
+    principal: ExtensionPrincipal | None
     settings: Mapping[str, SettingValue]
+    actor: StorageActor | None = field(default=None, kw_only=True)
+    storage: ResourceStorage | None = field(default=None, kw_only=True)
+    resource: StorageResource | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -32,8 +36,8 @@ class BackendAction:
 class ToolContext(ActionContext):
     """Host-bound identity for a model tool call.
 
-    Resource ownership remains the plugin provider's responsibility,
-    using principal.user_id.
+    Legacy plugins use principal.user_id. Contract v4 uses actor and the
+    host-bound storage capability; nonhuman callers have no human principal.
     """
 
     thread_id: str | None
@@ -121,12 +125,16 @@ class PluginContribution:
     api_version: int = 1
     tools: tuple[ModelTool, ...] = ()
     artifacts: tuple[ArtifactPresentation, ...] = ()
+    storage_api_version: int | None = None
+    actor_kinds: tuple[str, ...] = ("human",)
+    storage_controller: StorageController | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", tuple(self.fields))
         object.__setattr__(self, "backend", tuple(self.backend))
         object.__setattr__(self, "tools", tuple(self.tools))
         object.__setattr__(self, "artifacts", tuple(self.artifacts))
+        object.__setattr__(self, "actor_kinds", tuple(self.actor_kinds))
 
     def settings_contribution(self) -> SettingsContribution:
         return SettingsContribution(

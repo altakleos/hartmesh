@@ -621,6 +621,11 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
         from deerflow.extensions.gateway import start_services, stop_services
 
         extensions = getattr(app.state, "extensions", EMPTY_EXTENSIONS)
+        from deerflow.spaces.facade import HostStorageProvider
+
+        # Services start before storage initialization. Keep capability lookup
+        # lazy and app-scoped so disabled/unavailable storage stays explicit.
+        app.state.extension_storage = HostStorageProvider(lambda: getattr(app.state, "storage_spaces", None))
         attempted_services: list[tuple[str, Any]] = []
 
         async def stop_extension_services() -> None:
@@ -642,6 +647,7 @@ async def langgraph_runtime(app: FastAPI, startup_config: AppConfig) -> AsyncGen
                 config,
                 sf,
                 run_evidence_reader=app.state.run_evidence_reader,
+                storage=app.state.extension_storage,
                 attempted_services=attempted_services,
             )
         )
@@ -850,6 +856,15 @@ def get_subagent_batch_service(request: Request):
     return val
 
 
+def get_extension_storage_provider(request: Request):
+    """Do not place an unsupported token resource capability on run context."""
+    from app.gateway.storage_spaces import supports_storage_credentials
+
+    if not supports_storage_credentials(request):
+        return None
+    return getattr(request.app.state, "extension_storage", None)
+
+
 def get_run_context(request: Request) -> RunContext:
     """Build a :class:`RunContext` from ``app.state`` singletons.
 
@@ -873,6 +888,7 @@ def get_run_context(request: Request) -> RunContext:
         mcp_task_repo=getattr(request.app.state, "mcp_task_repo", None),
         app_config=get_config(),
         extensions=getattr(request.app.state, "extensions", None),
+        storage_provider=get_extension_storage_provider(request),
         customer_administration_policy=request_customer_administration_policy(request),
         on_run_completed=getattr(request.app.state, "scheduled_task_service", None).handle_run_completion if getattr(request.app.state, "scheduled_task_service", None) is not None else None,
     )
