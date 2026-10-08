@@ -6,6 +6,7 @@ from app.gateway.auth.mode import account_refusal
 from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
 from app.gateway.auth_disabled import AUTH_DISABLED_USER_ID, AUTH_SOURCE_AUTH_DISABLED, AUTH_SOURCE_INTERNAL, AUTH_SOURCE_SESSION, is_auth_disabled
 from app.gateway.internal_auth import get_trusted_internal_owner_user_id
+from deerflow.agent_instances.conversations import AgentConversations
 from deerflow.agent_instances.directory import InstanceDirectory
 from deerflow.agent_instances.service import AgentInstances
 from deerflow.config.storage_spaces_config import StorageSpacesConfig
@@ -45,6 +46,10 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
     app.state.storage_spaces_enabled = config.enabled
     app.state.storage_spaces = None
     app.state.agent_instances = None
+    app.state.agent_conversations = AgentConversations(None, session_factory=session_factory) if session_factory is not None else None
+    thread_store = getattr(app.state, "thread_store", None)
+    if thread_store is not None and hasattr(thread_store, "instance_authority"):
+        thread_store.instance_authority = app.state.agent_conversations
     if not config.enabled:
         return
     if session_factory is None:
@@ -61,3 +66,6 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
     registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human, nonhuman=directory.lookup))
     app.state.storage_spaces = SpaceFiles(registry, catalog)
     app.state.agent_instances = AgentInstances(app.state.storage_spaces, directory)
+    app.state.agent_conversations = AgentConversations(app.state.agent_instances)
+    if thread_store is not None and hasattr(thread_store, "instance_authority"):
+        thread_store.instance_authority = app.state.agent_conversations

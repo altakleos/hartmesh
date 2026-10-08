@@ -21,8 +21,14 @@ logger = logging.getLogger(__name__)
 
 
 class ThreadMetaRepository(ThreadMetaStore):
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession], *, instance_authority=None) -> None:
         self._sf = session_factory
+        self.instance_authority = instance_authority
+
+    async def _scope(self, user_id):
+        if self.instance_authority is not None:
+            return await self.instance_authority.clause(user_id)
+        return ThreadMetaRow.user_id == user_id
 
     @staticmethod
     def _row_to_dict(row: ThreadMetaRow) -> dict[str, Any]:
@@ -48,6 +54,7 @@ class ThreadMetaRepository(ThreadMetaStore):
         display_name: str | None = None,
         metadata: dict | None = None,
         project_id: str | None = None,
+        admission=None,
     ) -> dict:
         # Auto-resolve user_id from contextvar when AUTO; explicit None
         # creates an orphan row (used by migration scripts).
@@ -89,12 +96,23 @@ class ThreadMetaRepository(ThreadMetaStore):
                 created_at=now,
                 updated_at=now,
             )
+            from deerflow.persistence.agent_instances.model import AgentConversationRow
+
+            if self.instance_authority is not None and await session.get(AgentConversationRow, thread_id) is not None:
+                from deerflow.agent_instances.contract import AgentDenied
+
+                raise AgentDenied("Conversation identity cannot be reused")
             session.add(row)
+            await session.flush()
+            if admission is not None:
+                await admission(session, row)
             await session.commit()
             await session.refresh(row)
             return self._row_to_dict(row)
 
     async def claim_unowned(self, thread_id: str, owner: str) -> bool:
+        if self.instance_authority is not None and await self.instance_authority.binding(thread_id) is not None:
+            return False
         claim_target = table(
             ThreadMetaRow.__tablename__,
             column(ThreadMetaRow.thread_id.key),
@@ -119,6 +137,8 @@ class ThreadMetaRepository(ThreadMetaStore):
         *,
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> bool:
+        if self.instance_authority is not None and await self.instance_authority.binding(thread_id) is not None:
+            return False
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.set_project")
         from deerflow.persistence.projects.model import ProjectRow
 
@@ -158,7 +178,7 @@ class ThreadMetaRepository(ThreadMetaStore):
                 )
             )
             if resolved_user_id is not None:
-                stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
+                stmt = stmt.where(await self._scope(resolved_user_id))
             result = await session.execute(stmt)
             await session.commit()
             return result.rowcount > 0
@@ -175,7 +195,7 @@ class ThreadMetaRepository(ThreadMetaStore):
             if row is None:
                 return None
             # Enforce owner filter unless explicitly bypassed (user_id=None).
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
+            if not await self._check_ownership(session, thread_id, resolved_user_id):
                 return None
             return self._row_to_dict(row)
 
@@ -201,6 +221,11 @@ class ThreadMetaRepository(ThreadMetaStore):
           delete-idempotence cross-user gap where the row vanishing
           made every other user appear to "own" it.
         """
+        if self.instance_authority is not None and await self.instance_authority.binding(thread_id) is not None:
+            from deerflow.agent_instances.contract import AgentPermission
+            from deerflow.spaces.contract import PrincipalRef
+
+            return await self.instance_authority.allowed(actor=PrincipalRef("human", user_id), thread_id=thread_id, permission=AgentPermission.INSPECT)
         async with self._sf() as session:
             row = await session.get(ThreadMetaRow, thread_id)
             if row is None:
@@ -236,7 +261,7 @@ class ThreadMetaRepository(ThreadMetaStore):
             ThreadMetaRow.thread_id.desc(),
         )
         if resolved_user_id is not None:
-            stmt = stmt.where(ThreadMetaRow.user_id == resolved_user_id)
+            stmt = stmt.where(await self._scope(resolved_user_id))
         if status:
             stmt = stmt.where(ThreadMetaRow.status == status)
 
@@ -271,12 +296,15 @@ class ThreadMetaRepository(ThreadMetaStore):
             result = await session.execute(stmt)
             return [self._row_to_dict(r) for r in result.scalars()]
 
-    async def _check_ownership(self, session: AsyncSession, thread_id: str, resolved_user_id: str | None) -> bool:
+    async def _check_ownership(self, session: AsyncSession, thread_id: str, resolved_user_id: str | None, *, mutation=False) -> bool:
         """Return True if the row exists and is owned (or filter bypassed)."""
         if resolved_user_id is None:
             return True  # explicit bypass
-        row = await session.get(ThreadMetaRow, thread_id)
-        return row is not None and row.user_id == resolved_user_id
+        if mutation and self.instance_authority is not None:
+            allowed = await self.instance_authority.mutation_allowed(session, thread_id, resolved_user_id)
+            if allowed is not None:
+                return allowed
+        return await session.scalar(select(ThreadMetaRow.thread_id).where(ThreadMetaRow.thread_id == thread_id, await self._scope(resolved_user_id))) is not None
 
     async def update_display_name(
         self,
@@ -295,7 +323,7 @@ class ThreadMetaRepository(ThreadMetaStore):
             else:
                 result = await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())
                 row = result.scalar_one_or_none()
-            if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
+            if row is None or not await self._check_ownership(session, thread_id, resolved_user_id, mutation=True):
                 return
             row.display_name = display_name
             metadata = dict(row.metadata_json or {})
@@ -314,7 +342,14 @@ class ThreadMetaRepository(ThreadMetaStore):
     ) -> None:
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_status")
         async with self._sf() as session:
-            if not await self._check_ownership(session, thread_id, resolved_user_id):
+            if session.get_bind().dialect.name == "sqlite":
+                await session.execute(text("BEGIN IMMEDIATE"))
+                row = await session.get(ThreadMetaRow, thread_id)
+            else:
+                row = (await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())).scalar_one_or_none()
+            if row is None:
+                return
+            if not await self._check_ownership(session, thread_id, resolved_user_id, mutation=True):
                 return
             await session.execute(update(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).values(status=status, updated_at=datetime.now(UTC)))
             await session.commit()
@@ -352,7 +387,7 @@ class ThreadMetaRepository(ThreadMetaStore):
                 row = result.scalar_one_or_none()
             if row is None:
                 return
-            if resolved_user_id is not None and row.user_id != resolved_user_id:
+            if not await self._check_ownership(session, thread_id, resolved_user_id, mutation=True):
                 return
             merged = dict(row.metadata_json or {})
             merged.update(metadata)
@@ -375,6 +410,8 @@ class ThreadMetaRepository(ThreadMetaStore):
         user_id: str | None | _AutoSentinel = AUTO,
     ) -> None:
         """Move a thread metadata row to ``owner_user_id``."""
+        if self.instance_authority is not None and await self.instance_authority.binding(thread_id) is not None:
+            return
         resolved_user_id = resolve_user_id(user_id, method_name="ThreadMetaRepository.update_owner")
         async with self._sf() as session:
             if session.get_bind().dialect.name == "sqlite":
@@ -382,7 +419,7 @@ class ThreadMetaRepository(ThreadMetaStore):
                 row = await session.get(ThreadMetaRow, thread_id)
             else:
                 row = (await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())).scalar_one_or_none()
-            if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
+            if row is None or not await self._check_ownership(session, thread_id, resolved_user_id, mutation=True):
                 return
             row.user_id = owner_user_id
             row.updated_at = datetime.now(UTC)
@@ -401,7 +438,7 @@ class ThreadMetaRepository(ThreadMetaStore):
                 row = await session.get(ThreadMetaRow, thread_id)
             else:
                 row = (await session.execute(select(ThreadMetaRow).where(ThreadMetaRow.thread_id == thread_id).with_for_update())).scalar_one_or_none()
-            if row is None or (resolved_user_id is not None and row.user_id != resolved_user_id):
+            if row is None or not await self._check_ownership(session, thread_id, resolved_user_id, mutation=True):
                 return
             await session.delete(row)
             await session.commit()

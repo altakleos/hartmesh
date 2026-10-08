@@ -67,6 +67,11 @@ async def _browser_thread_owned_by(thread_store, thread_id: str, user_id: str) -
     so REST navigation and the Live socket deliberately use a stricter policy:
     only an existing row whose owner exactly matches may drive it.
     """
+    from deerflow.agent_instances.conversations import AgentConversations
+
+    authority = getattr(thread_store, "instance_authority", None)
+    if isinstance(authority, AgentConversations) and await authority.binding(thread_id) is not None:
+        return False
     record = await thread_store.get(thread_id, user_id=user_id)
     return record is not None and record.get("user_id") == user_id
 

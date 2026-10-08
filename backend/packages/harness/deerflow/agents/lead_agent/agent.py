@@ -926,6 +926,13 @@ def _complete_assembly(
     from deerflow.extensions.notify import notify_agent_assembled
 
     resolved_policies = dict(effective_policies)
+    from deerflow.agent_instances.runtime import current_environment
+
+    environment = current_environment()
+    if environment is not None and environment.provider is not None:
+        resolved_policies["public_package_capture_revision"] = environment.provider.skill_revision
+        resolved_policies["skill_catalog_source"] = "current_host_activation"
+        resolved_policies["native_package_copy"] = "mutable_home_data"
     resolved_policies.setdefault(
         "recursion_limit",
         config.get("recursion_limit", "framework-default"),
@@ -967,9 +974,13 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     # Resolve one authoritative identity for every user-scoped factory input.
     # Agent Server's reserved auth fields win over ordinary client-supplied
     # context/configurable values; the embedded Gateway path uses context.user_id.
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
     from deerflow.runtime.user_context import resolve_config_user_id
 
-    resolved_user_id = resolve_config_user_id(config)
+    instance_execution = cfg.get(AGENT_EXECUTION_CONTEXT_KEY)
+    if not isinstance(instance_execution, AgentExecution):
+        instance_execution = None
+    resolved_user_id = None if instance_execution else resolve_config_user_id(config)
 
     requested_model_name: str | None = cfg.get("model_name") or cfg.get("model")
     is_plan_mode = cfg.get("is_plan_mode", False)
@@ -984,10 +995,17 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     is_bootstrap = cfg.get("is_bootstrap", False)
     interaction_policy = resolve_run_interaction_policy(config)
     non_interactive = not interaction_policy.allows_clarification
-    agent_name = validate_agent_name(cfg.get("agent_name"))
+    agent_name = instance_execution.definition.config["name"] if instance_execution else validate_agent_name(cfg.get("agent_name"))
 
-    agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
-    memory_enabled = getattr(agent_config, "memory_enabled", True) is not False
+    if instance_execution:
+        from deerflow.config.agents_config import AgentConfig
+
+        if is_bootstrap:
+            raise ValueError("Persistent instances cannot bootstrap or self-update their definition")
+        agent_config = AgentConfig.model_validate(instance_execution.definition.validated().config)
+    else:
+        agent_config = load_agent_config(agent_name, user_id=resolved_user_id) if not is_bootstrap else None
+    memory_enabled = not instance_execution and getattr(agent_config, "memory_enabled", True) is not False
     # Keep compatibility with lightweight AgentConfig-shaped objects used by
     # integrations that predate caller-level subagent restrictions.
     allowed_subagents = getattr(agent_config, "allowed_subagents", None) if agent_config is not None else None
@@ -998,6 +1016,10 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     if isinstance(config.get("context"), dict):
         config["context"]["subagent_enabled"] = subagent_enabled
     available_skills = _available_skill_names(agent_config, is_bootstrap)
+    if instance_execution:
+        from deerflow.agent_instances.public_skills import public_skill_names
+
+        available_skills = public_skill_names(instance_execution.definition, resolved_app_config)
 
     # Phase 3: enforce skill authorization (Layer 1). Filter the skill
     # allowlist by the provider's "skill" policy so denied skills never
@@ -1114,6 +1136,17 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
             "memory_enabled": memory_enabled,
         }
     )
+
+    if instance_execution:
+        config["metadata"].update(
+            {
+                "agent_instance_id": instance_execution.instance.id,
+                "agent_principal_id": instance_execution.instance.principal.subject_id,
+                "agent_definition_revision": instance_execution.definition.revision,
+                "agent_custody": instance_execution.instance.custody,
+                "requester_id": instance_execution.requester.subject_id,
+            }
+        )
 
     # Inject tracing callbacks at the graph invocation root so a single LangGraph
     # run produces one trace with all node / LLM / tool calls as child spans,
@@ -1287,10 +1320,11 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     # leave it unset, so ``update_agent`` remains available there.
     channel_name = cfg.get("channel_name")
     is_webhook_channel = channel_name in _WEBHOOK_CHANNELS
-    extra_tools = [update_agent] if agent_name and not is_webhook_channel else []
+    extra_tools = [update_agent] if agent_name and not is_webhook_channel and not instance_execution else []
     # Resolve the model once so tool guidance uses the same effective settings.
     chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides)
     raw_tools = get_available_tools(
+        **({"include_mcp": False, "include_upload_tool": False} if instance_execution else {}),
         model_name=model_name,
         groups=agent_config.tool_groups if agent_config else None,
         mcp_plugins=getattr(agent_config, "mcp_plugins", None),
@@ -1299,6 +1333,10 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         app_config=resolved_app_config,
         chat_model=chat_model,
     )
+    if instance_execution:
+        from deerflow.agent_instances.runtime import instance_tools
+
+        raw_tools = instance_tools(raw_tools)
     configured_tools = raw_tools + extra_tools
     configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
     authorization_candidates = [*configured_tools]
@@ -1334,10 +1372,15 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         deferred_setup=setup,
         mcp_routing_middleware=mcp_routing_middleware,
         user_id=resolved_user_id,
+        owns_agent_skill_projection=not bool(instance_execution),
         authorization_provider=_authz_provider,
         skill_authorization=skill_authorization,
         subagent_execution_capacity=subagent_execution_capacity,
     )
+    if instance_execution:
+        from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
+
+        middlewares.insert(0, InstanceAuthorityMiddleware())
     system_prompt = apply_prompt_template(
         subagent_enabled=subagent_enabled,
         max_concurrent_subagents=max_concurrent_subagents,
@@ -1354,6 +1397,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         interaction_policy=interaction_policy,
         memory_enabled=memory_enabled,
         bash_available=has_bash_tool(authorized_tools),
+        adopted_soul=instance_execution.definition.soul if instance_execution else None,
     )
     graph = create_agent(
         model=chat_model,
@@ -1380,6 +1424,19 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
         deferred_names=setup.deferred_names,
         enabled_skills=enabled_skills,
         effective_policies={
+            **(
+                {
+                    "agent_instance": {
+                        "id": instance_execution.instance.id,
+                        "principal_id": instance_execution.instance.principal.subject_id,
+                        "custody": instance_execution.instance.custody,
+                        "definition_revision": instance_execution.definition.revision,
+                        "home_id": instance_execution.instance.home_id,
+                    }
+                }
+                if instance_execution
+                else {}
+            ),
             "bootstrap": False,
             "non_interactive": non_interactive,
             "plan_mode": is_plan_mode,

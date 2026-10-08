@@ -98,6 +98,10 @@ def _setup_executor_classes():
     audit_context_module = importlib.import_module("deerflow.agents.middlewares.audit_context")
     tool_search_module = importlib.import_module("deerflow.tools.builtins.tool_search")
     sandbox_provider_module = importlib.import_module("deerflow.sandbox.sandbox_provider")
+    importlib.import_module("deerflow.agents.middlewares.skill_activation_middleware")
+    importlib.import_module("deerflow.agents.middlewares.skill_tool_policy_middleware")
+    importlib.import_module("deerflow.agents.middlewares.tool_error_handling_middleware")
+    importlib.import_module("deerflow.agents.middlewares.read_before_write_middleware")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
 
     # Remove mocked executor if exists (from conftest.py)
@@ -6173,3 +6177,109 @@ def test_utcnow_helper_returns_utc_aware_datetime(classes):
     assert now.tzinfo is not None
     assert now.utcoffset() is not None
     assert now.utcoffset().total_seconds() == 0.0
+
+
+@pytest.mark.anyio
+async def test_instance_child_receives_host_capability_and_discloses_inherited_filesystem(classes, base_config, monkeypatch):
+    from test_agent_execution_runtime import execution
+
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
+    from deerflow.agent_instances.runtime import current_environment, execution_scope
+    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+
+    bound = execution()
+    executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id=bound.thread_id, user_id="requester", agent_execution=bound)
+    monkeypatch.setattr(executor, "_load_skills", AsyncMock(return_value=[]))
+    captured = {}
+
+    async def stream(state, *, config, context, **kwargs):
+        captured.update(context)
+        assert current_environment().execution is bound
+        assert get_sandbox_provider() is provider
+        assert "mounted Home and filesystem authority" in str(state["messages"][0].content)
+        yield {"messages": [classes["AIMessage"](content="Done", id="child-answer")]}
+
+    provider = object()
+    graph = SimpleNamespace(astream=stream)
+    monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: graph)
+    with execution_scope(bound) as environment:
+        environment.provider = provider
+        result = await executor._aexecute("Do bounded Home work")
+    assert result.status == classes["SubagentStatus"].COMPLETED, result.error
+    assert captured[AGENT_EXECUTION_CONTEXT_KEY] is bound and captured["user_id"] == "requester"
+    assert current_environment() is None
+
+
+@pytest.fixture
+def instance_child_middleware_package(classes):
+    from importlib.machinery import ModuleSpec
+
+    package_module = ModuleType("deerflow.agents.middlewares")
+    package_module.__path__ = [str(Path(__file__).parents[1] / "packages/harness/deerflow/agents/middlewares")]
+    package_module.__spec__ = ModuleSpec(package_module.__name__, loader=None, is_package=True)
+    original = sys.modules[package_module.__name__]
+    sys.modules[package_module.__name__] = package_module
+    try:
+        yield
+    finally:
+        sys.modules[package_module.__name__] = original
+
+
+def test_bound_child_real_middleware_chain_activates_only_public_packages(classes, base_config, monkeypatch, tmp_path, instance_child_middleware_package):
+    from test_agent_execution_runtime import execution
+
+    from deerflow.agent_instances.runtime import execution_scope
+    from deerflow.agents.middlewares import tool_error_handling_middleware as shared_chain
+    from deerflow.agents.middlewares.skill_activation_middleware import SkillActivationMiddleware
+    from deerflow.agents.middlewares.skill_tool_policy_middleware import SkillToolPolicyMiddleware
+    from deerflow.config.app_config import AppConfig
+    from deerflow.skills.storage.local_skill_storage import LocalSkillStorage
+
+    package = tmp_path / "public" / "sample"
+    package.mkdir(parents=True)
+    (package / "SKILL.md").write_text("---\nname: sample\ndescription: Public fixture\n---\nPublic instructions.\n", encoding="utf-8")
+    app_config = AppConfig.model_validate(
+        {
+            "models": [{"name": "fixture", "use": "langchain_openai:ChatOpenAI", "model": "fixture"}],
+            "sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"},
+            "skills": {"path": str(tmp_path)},
+            "summarization": {"enabled": False},
+            "read_before_write": {"enabled": False},
+        }
+    )
+    executor_module = sys.modules["deerflow.subagents.executor"]
+    captured = {}
+    original = shared_chain.build_subagent_runtime_middlewares
+    # Keep the three real skill middleware constructors and child builder;
+    # unrelated base layers are covered by their own chain tests.
+    monkeypatch.setattr(shared_chain, "_build_runtime_middlewares", lambda **kwargs: [shared_chain.ToolErrorHandlingMiddleware(app_config=kwargs["app_config"], user_id=kwargs["user_id"])])
+
+    def build(**kwargs):
+        captured["chain"] = original(**kwargs)
+        return captured["chain"]
+
+    monkeypatch.setattr(shared_chain, "build_subagent_runtime_middlewares", build)
+    monkeypatch.setattr(executor_module, "create_chat_model", lambda **kwargs: object())
+    monkeypatch.setattr(executor_module, "create_agent", lambda **kwargs: SimpleNamespace(get_graph=lambda: SimpleNamespace(nodes={})))
+    # Fixture cycle-breaking module exposes the real global lookup to the chain.
+    from deerflow.agent_instances.public_skills import PublicSkillStorage
+
+    storage = sys.modules["deerflow.skills.storage"]
+
+    monkeypatch.setattr(storage, "get_or_new_skill_storage", lambda **kwargs: PublicSkillStorage(LocalSkillStorage(host_path=str(tmp_path))))
+    bound = execution()
+    executor = classes["SubagentExecutor"](config=base_config, tools=[], app_config=app_config, user_id="requester", agent_execution=bound)
+    executor._available_skill_names = {"sample"}
+    with execution_scope(bound):
+        executor._create_agent()
+        activation = next(m for m in captured["chain"] if isinstance(m, SkillActivationMiddleware))
+        policy = next(m for m in captured["chain"] if isinstance(m, SkillToolPolicyMiddleware))
+        errors = next(m for m in captured["chain"] if isinstance(m, shared_chain.ToolErrorHandlingMiddleware))
+        assert activation._user_id is None and policy._user_id is None and errors._user_id is None
+        assert activation._resolve_activation("/sample").activation is not None
+        legacy = tmp_path / "custom" / "sample"
+        legacy.mkdir(parents=True)
+        (legacy / "SKILL.md").write_text("---\nname: sample\ndescription: Private replacement\n---\nNever inherit.\n", encoding="utf-8")
+        assert activation._resolve_activation("/sample").activation is None
+        assert all(skill.category.value == "public" for skill in policy._storage().load_skills())
+        assert all(skill.category.value == "public" for skill in errors._storage().load_skills())

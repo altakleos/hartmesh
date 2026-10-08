@@ -712,13 +712,16 @@ async def delete_thread_data(thread_id: str, request: Request) -> ThreadDeleteRe
     and removes the thread_meta row from the configured ThreadMetaStore
     (sqlite or memory).
     """
+    from app.gateway.agent_conversations import evidence_user_id
+
+    operation_user_id = await evidence_user_id(request, thread_id, get_effective_user_id())
     run_manager = get_run_manager(request)
     try:
         async with goal_thread_lock(thread_id):
             async with run_manager.reserve_thread_operation(
                 thread_id,
                 kind=ThreadOperationKind.delete,
-                user_id=get_effective_user_id(),
+                user_id=operation_user_id,
             ):
                 return await _delete_thread_data_with_reservation(thread_id, request)
     except ConflictError:
@@ -754,19 +757,32 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     # persisted runs/events/feedback and the thread_meta row all belong to the
     # same owner, so they must not resolve their scope independently.
     user_id = get_effective_user_id()
+    from app.gateway.agent_conversations import require_conversation
+    from deerflow.agent_instances.contract import AgentPermission
+
+    instance_conversation = await require_conversation(request, thread_id, permission=AgentPermission.MANAGE)
+    if instance_conversation:
+        # Logical deletion is the authorization linearization point. It locks
+        # the instance parent against revocation, retains the binding tombstone,
+        # and precedes the trusted cleanup tail in other persistence stores.
+        thread_store = get_thread_store(request)
+        await thread_store.delete(thread_id, user_id=user_id)
+        if await thread_store.get(thread_id, user_id=None) is not None:
+            raise HTTPException(404, "Agent conversation is unavailable")
+        user_id = None
 
     # Legacy IDs may predate the canonical filesystem-safe contract. They can
     # still be removed from metadata/checkpoint stores, but must never be
     # interpolated into a host path during cleanup.
-    try:
-        validate_thread_id(thread_id)
-    except ValueError:
-        response = ThreadDeleteResponse(
-            success=True,
-            message="Skipped local data cleanup for legacy thread ID",
-        )
+    if instance_conversation:
+        response = ThreadDeleteResponse(success=True, message="Conversation deleted; agent home retained")
     else:
-        response = _delete_thread_data(thread_id, user_id=user_id)
+        try:
+            validate_thread_id(thread_id)
+        except ValueError:
+            response = ThreadDeleteResponse(success=True, message="Skipped local data cleanup for legacy thread ID")
+        else:
+            response = _delete_thread_data(thread_id, user_id=user_id)
 
     # Remove checkpoints (best-effort)
     checkpointer = getattr(request.app.state, "checkpointer", None)
@@ -814,13 +830,16 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     # so the deleted thread no longer appears in /threads/search.
     try:
         thread_store = get_thread_store(request)
-        await thread_store.delete(thread_id, user_id=user_id)
+        if not instance_conversation:
+            await thread_store.delete(thread_id, user_id=user_id)
     except Exception:
         logger.debug("Could not delete thread_meta for %s (not critical)", sanitize_log_param(thread_id))
 
     # Tear down any live browser session (best-effort). Sessions are keyed only
     # by thread_id, so leaving one alive after the owner deletes the thread lets
     # a later caller who guesses the id reuse the retained page/cookies.
+    if instance_conversation:
+        return response
     try:
         from deerflow.community.browser_automation import get_browser_session_manager
 
@@ -970,12 +989,14 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def branch_thread(thread_id: ThreadId, body: ThreadBranchRequest, request: Request) -> ThreadBranchResponse:
     """Create a new main-thread branch from a completed assistant turn."""
+    from app.gateway.agent_conversations import evidence_user_id
+
     try:
         async with goal_thread_lock(thread_id):
             async with get_run_manager(request).reserve_thread_operation(
                 thread_id,
                 kind=ThreadOperationKind.branch,
-                user_id=get_effective_user_id(),
+                user_id=await evidence_user_id(request, thread_id, get_effective_user_id()),
             ):
                 return await _branch_thread_with_reservation(thread_id, body, request)
     except ConflictError:
@@ -994,6 +1015,10 @@ async def _branch_thread_with_reservation(
     from app.gateway.deps import get_thread_store
 
     thread_store = get_thread_store(request)
+
+    from app.gateway.agent_conversations import execution_for_run
+
+    source_execution = await execution_for_run(request, thread_id)
 
     source_record = await thread_store.get(thread_id)
     if source_record is None:
@@ -1064,6 +1089,13 @@ async def _branch_thread_with_reservation(
             branch_metadata[_BRANCH_TITLE_SEQUENCE_METADATA_KEY] = title_sequence
     thread_owner_user_id = get_trusted_internal_owner_user_id(request)
     thread_owner_kwargs = {"user_id": thread_owner_user_id} if thread_owner_user_id else {}
+    if source_execution is not None:
+        from deerflow.agent_instances.contract import AgentPermission
+
+        await source_execution.validate()
+        await source_execution.authority.create(
+            actor=source_execution.requester, instance_id=source_execution.instance.id, thread_id=new_thread_id, metadata=branch_metadata, display_name=display_name, permission=AgentPermission.USE | AgentPermission.MANAGE
+        )
 
     # Copy materialized values with replace semantics: reducer channels must
     # not re-merge an already-aggregated value, so every copied reducer value
@@ -1125,6 +1157,8 @@ async def _branch_thread_with_reservation(
         raise HTTPException(status_code=500, detail="Failed to create branch") from None
 
     async def _write_branch_row(project_id: str | None) -> None:
+        if source_execution is not None:
+            return
         try:
             await thread_store.create(
                 new_thread_id,
@@ -1172,7 +1206,9 @@ async def _branch_thread_with_reservation(
         logger.exception("Failed to seed branch history run-events for thread %s", sanitize_log_param(new_thread_id))
         history_seed_mode = "failed"
 
-    if branch_from_latest_turn:
+    if source_execution is not None:
+        workspace_clone_mode = "shared_agent_home"
+    elif branch_from_latest_turn:
         workspace_clone_mode = await _copy_branch_user_data(thread_id, new_thread_id)
     else:
         workspace_clone_mode = "skipped_historical_turn"
@@ -1428,6 +1464,9 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
         )
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
+    from app.gateway.agent_conversations import execution_for_run
+
+    instance_execution = await execution_for_run(request, thread_id)
     keep = body.keep.to_tuple() if body.keep is not None else None
     try:
         async with reserve_checkpoint_write(request, thread_id, user_id=get_effective_user_id()):
@@ -1439,6 +1478,7 @@ async def compact_thread(thread_id: ThreadId, body: ThreadCompactRequest, reques
                 user_id=get_effective_user_id(),
                 agent_name=body.agent_name,
                 model_name=body.model_name,
+                **({"agent_execution": instance_execution} if instance_execution is not None else {}),
             )
     except ConflictError:
         raise HTTPException(status_code=409, detail="Thread has a run in flight. Compact after the run finishes.") from None

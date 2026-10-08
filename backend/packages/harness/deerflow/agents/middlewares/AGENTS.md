@@ -2,12 +2,11 @@
 
 RuntimeDeliveryMiddleware uses the worker's complete output baseline once in
 the first stream via a private ContextVar; see [handoff](../../workspace_changes/AGENTS.md).
-Continuation/final scans stay fresh; spill exclusions must match. New before
-hooks clear stale baselines. Delivery scans have independent walk/file caps;
-missing/partial evidence cannot present files and persists
-`verification.scan_complete: false`, failing completed runs. Notices claim no
-missing paths. Full workspace history remains separate. Read/walk failures mark
-incomplete evidence; metadata-only cancellation stays prompt.
+Continuation/final scans stay fresh; spill exclusions match. Before hooks clear
+stale baselines. Independent walk/file caps and read failures persist
+`verification.scan_complete: false` and fail completion without presenting
+unproven paths. Workspace history is separate; metadata cancellation stays prompt.
+Typed instance Home edits skip requester snapshots and automatic delivery.
 
 Compaction keeps state `SystemMessage`s; transient instructions use request
 wrappers, and fully rescued partitions skip compaction. If latest-user rescue

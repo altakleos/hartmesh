@@ -139,8 +139,15 @@ async def compact_thread_context(
     agent_name: str | None = None,
     model_name: str | None = None,
     app_config: AppConfig | None = None,
+    agent_execution=None,
 ) -> ThreadCompactionResult:
     """Summarize old messages in a thread and write a compacted checkpoint."""
+    from deerflow.agent_instances.conversations import AgentExecution
+
+    if isinstance(agent_execution, AgentExecution):
+        if agent_execution.thread_id != thread_id:
+            raise ValueError("Instance compaction requires its admitted conversation")
+        await agent_execution.validate()
     resolved_app_config = app_config or get_app_config()
     read_config = {"configurable": {"thread_id": thread_id, "checkpoint_ns": ""}}
     snapshot = await accessor.aget(read_config)
@@ -153,7 +160,17 @@ async def compact_thread_context(
     # The body hint may still select a compatible summarization model for
     # legacy state, but it never authorizes or attributes a memory write.
     effective_agent_name = checkpoint_agent_name if binding_known else agent_name
-    agent_config = await asyncio.to_thread(_safe_load_agent_config, effective_agent_name, user_id) if effective_agent_name else None
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+    if isinstance(agent_execution, AgentExecution):
+        from deerflow.config.agents_config import AgentConfig
+
+        await agent_execution.validate()
+        agent_config = AgentConfig.model_validate(agent_execution.definition.config)
+        effective_agent_name = agent_config.name
+    else:
+        agent_execution = None
+        agent_config = await asyncio.to_thread(_safe_load_agent_config, effective_agent_name, user_id) if effective_agent_name else None
     run_model_name = await _aresolve_thread_model_name(
         model_name,
         effective_agent_name,
@@ -161,7 +178,7 @@ async def compact_thread_context(
         resolved_app_config,
         agent_config=agent_config,
     )
-    memory_enabled = binding_known and (checkpoint_agent_name is None or (agent_config is not None and getattr(agent_config, "memory_enabled", True) is not False))
+    memory_enabled = agent_execution is None and binding_known and (checkpoint_agent_name is None or (agent_config is not None and getattr(agent_config, "memory_enabled", True) is not False))
     middleware = _create_compaction_middleware(
         app_config=resolved_app_config,
         keep=keep,
@@ -181,6 +198,8 @@ async def compact_thread_context(
     }
 
     runtime_context = {"thread_id": thread_id, "user_id": user_id}
+    if agent_execution is not None:
+        runtime_context[AGENT_EXECUTION_CONTEXT_KEY] = agent_execution
     if effective_agent_name:
         runtime_context["agent_name"] = effective_agent_name
     runtime = SimpleNamespace(context=runtime_context)
@@ -202,6 +221,8 @@ async def compact_thread_context(
     update_config = dict(snapshot.config)
     if binding_known:
         update_config["metadata"] = {CHECKPOINT_AGENT_NAME_METADATA_KEY: (DEFAULT_AGENT_NAME_METADATA_VALUE if checkpoint_agent_name is None else checkpoint_agent_name)}
+    if agent_execution is not None:
+        await agent_execution.validate()
     updated_config = await accessor.aupdate(
         update_config,
         {

@@ -250,6 +250,9 @@ async def publish(body: PublishRequest, request: Request, response: Response) ->
         # caller publish a legacy conversation's outputs company-wide.
         if await get_thread_store(request).get(thread_id, user_id=user_id) is None:
             raise HTTPException(status_code=404, detail="Thread not found")
+        from app.gateway.agent_conversations import reject_legacy_binding
+
+        await reject_legacy_binding(request, thread_id)
         source = await asyncio.to_thread(_keepable_source, thread_id, normalized, user_id)
     else:
         raise HTTPException(status_code=400, detail=f"Only files under {USER_FILES_VIRTUAL_PREFIX}, {' or '.join(prefix.rstrip('/') for prefix in _CONVERSATION_PREFIXES)} can be published")

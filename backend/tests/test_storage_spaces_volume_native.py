@@ -24,6 +24,109 @@ from deerflow.spaces.backings import BackingUnavailable, PreparedVolumeCatalog
 
 
 @pytest.mark.asyncio
+async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(backing, tmp_path, monkeypatch):
+    """Use the shipped AIO image and existing SDK across immutable-ID control."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from deerflow.agent_instances.contract import DefinitionSnapshot
+    from deerflow.agent_instances.conversations import AgentConversations
+    from deerflow.agent_instances.directory import InstanceDirectory
+    from deerflow.agent_instances.runtime import prepare_environment
+    from deerflow.agent_instances.service import AgentInstances
+    from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
+    from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
+    from deerflow.config.app_config import AppConfig
+    from deerflow.config.sandbox_config import SandboxConfig
+    from deerflow.persistence import models  # noqa: F401 -- register complete ORM
+    from deerflow.persistence.base import Base
+    from deerflow.persistence.thread_meta.sql import ThreadMetaRepository
+    from deerflow.spaces.contract import PrincipalRef, ResolvedPrincipal
+    from deerflow.spaces.principals import HostPrincipalResolver
+    from deerflow.spaces.registry import SpaceRegistry
+    from deerflow.spaces.service import SpaceFiles
+    from deerflow.utils.file_io import await_drained, run_file_io
+
+    image = os.environ.get("HARTMESH_INSTANCE_AIO_IMAGE")
+    assert image and "@sha256:" in image, "Native instance qualification requires the pinned shipped AIO image"
+    for key, value in {"DEER_FLOW_SANDBOX_IMAGE_STARTUP_CAPS": "0", "DEER_FLOW_SANDBOX_MEMORY": "768m", "DEER_FLOW_SANDBOX_CPUS": "1", "DEER_FLOW_SANDBOX_PIDS_LIMIT": "128", "DEER_FLOW_SANDBOX_CONTAINER_USER": "1000:1000"}.items():
+        monkeypatch.setenv(key, value)
+    catalog, _, _, containment = backing
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'agent-native.db'}")
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sf = async_sessionmaker(engine, expire_on_commit=False)
+    alice, bob = PrincipalRef("human", "alice"), PrincipalRef("human", "bob")
+
+    async def human(reference):
+        return ResolvedPrincipal(reference, reference == alice) if reference in (alice, bob) else None
+
+    directory = InstanceDirectory(sf, human=human)
+    files = SpaceFiles(SpaceRegistry(sf, HostPrincipalResolver(human=human, nonhuman=directory.lookup)), catalog)
+    agents = AgentInstances(files, directory)
+    authority = AgentConversations(agents)
+    threads = ThreadMetaRepository(sf, instance_authority=authority)
+    instance = await agents.create(
+        actor=alice,
+        creation_id=uuid.uuid4().hex,
+        name="Company analyst",
+        custody="company",
+        supervisor=bob,
+        definition=DefinitionSnapshot.capture(owner_id="alice", config={"name": "analyst", "skills": [], "mcp_plugins": []}, soul="Analyze team work."),
+    )
+    app_config = AppConfig(models=[], sandbox=SandboxConfig(use="deerflow.community.aio_sandbox:AioSandboxProvider"))
+    baseline = object.__new__(AioSandboxProvider)
+    baseline._config = {"ready_timeout": 60}
+    baseline._backend = LocalContainerBackend(
+        image=image,
+        base_port=0,
+        container_prefix="hartmesh-agent-native",
+        config_mounts=[],
+        environment={key: "true" for key in ("DISABLE_BROWSER", "DISABLE_JUPYTER", "DISABLE_CODE_SERVER", "DISABLE_VNC", "DISABLE_MCP_BROWSER", "DISABLE_NODEJS_REPL")},
+    )
+    first = second = None
+    containment["confirmed"] = False
+    try:
+        one = await authority.create(actor=alice, instance_id=instance.id, thread_id=uuid.uuid4().hex)
+        first = await prepare_environment(await authority.execution(actor=alice, thread_id=one["thread_id"]), baseline_provider=baseline, app_config=app_config)
+        await await_drained(
+            run_file_io(
+                first.sandbox.execute_command,
+                "mkdir -p /mnt/spaces/home/wiki /mnt/spaces/home/repo"
+                " && printf '# Team wiki\\n' > /mnt/spaces/home/wiki/home.md"
+                " && git -C /mnt/spaces/home/repo init --quiet"
+                " && python3 -c \"import sqlite3; c=sqlite3.connect('/mnt/spaces/home/catalog.sqlite'); "
+                "c.execute('create table work (value text)'); c.execute('insert into work values (?)', ('retained',)); c.commit(); c.close()\"",
+            )
+        )
+        await await_drained(run_file_io(first.close))
+        two = await authority.create(actor=bob, instance_id=instance.id, thread_id=uuid.uuid4().hex)
+        second = await prepare_environment(await authority.execution(actor=bob, thread_id=two["thread_id"]), baseline_provider=baseline, app_config=app_config)
+        assert first.sandbox.id == second.sandbox.id
+        assert await await_drained(run_file_io(second.sandbox.read_file, "/mnt/spaces/home/wiki/home.md")) == "# Team wiki\n"
+        db = await await_drained(run_file_io(second.sandbox.execute_command, "python3 -c \"import sqlite3; print(sqlite3.connect('/mnt/spaces/home/catalog.sqlite').execute('select value from work').fetchone()[0])\""))
+        assert "retained" in db
+        assert "ref:" in await await_drained(run_file_io(second.sandbox.read_file, "/mnt/spaces/home/repo/.git/HEAD"))
+        await threads.delete(one["thread_id"], user_id="alice")
+        assert (await agents.get(actor=bob, instance_id=instance.id)).home_id == instance.home_id
+        assert "# Team wiki" in await await_drained(run_file_io(second.sandbox.read_file, "/mnt/spaces/home/wiki/home.md"))
+        # Storage owns containment; SDK closure and chat deletion leave home intact.
+        await await_drained(run_file_io(second.close))
+        home = await files.registry.get(actor=alice, space_id=instance.home_id)
+        await files.attachments.retire(actor=alice, space_id=home.id, expected_generation=home.generation)
+        containment["confirmed"] = True
+    finally:
+        if first is not None:
+            await await_drained(run_file_io(first.close))
+        if second is not None:
+            await await_drained(run_file_io(second.close))
+        if not containment["confirmed"] and getattr(files, "attachments", None) is not None:
+            home = await files.registry.get(actor=alice, space_id=instance.home_id)
+            await files.attachments.retire(actor=alice, space_id=home.id, expected_generation=home.generation)
+            containment["confirmed"] = True
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_real_attachment_fences_children_and_replaces_environment(backing, tmp_path):
     """A real container can span calls; exact removal stops every mounted writer."""
     import sqlite3

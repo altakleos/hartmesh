@@ -165,6 +165,21 @@ def prepare_conversation_reader(
     output_limit = _inline_output_limit(app_config)
     thread_store = run_context.thread_store
     event_store = run_context.event_store
+    from deerflow.agent_instances.conversations import AgentExecution
+
+    execution = getattr(run_context, "agent_execution", None)
+    if not isinstance(execution, AgentExecution):
+        execution = None
+
+    async def admitted_source(thread_id: str):
+        if execution is not None:
+            await execution.validate()
+            if await execution.authority.binding(thread_id) != execution.instance.id:
+                return None
+        source = await thread_store.get(thread_id, user_id=user_id)
+        if source is None or (execution is None and source.get("user_id") != user_id):
+            return None
+        return source
 
     def json_room(thread_id: str) -> int | None:
         # Reserve the largest envelope so a result can only come in under the budget.
@@ -174,15 +189,14 @@ def prepare_conversation_reader(
     async def owned_scan(thread_id: str, **scan: Any) -> tuple[list[dict], bool] | None:
         """Scan the visible rows of an owned source; ``None`` when it is unavailable."""
         try:
-            # Strict ownership deliberately excludes legacy shared/unowned rows.
-            source = await thread_store.get(thread_id, user_id=user_id)
-            if source is None or source.get("user_id") != user_id:
+            source = await admitted_source(thread_id)
+            if source is None:
                 return None
-            rows, has_more = await read_visible_message_page(event_store=event_store, run_manager=run_manager, thread_id=thread_id, user_id=user_id, **scan)
+            rows, has_more = await read_visible_message_page(event_store=event_store, run_manager=run_manager, thread_id=thread_id, user_id=None if execution is not None else user_id, **scan)
             # Recheck ownership after storage yields (including deletion during
             # a read); a stale local event feed must not reopen a deleted source.
-            source = await thread_store.get(thread_id, user_id=user_id)
-            if source is None or source.get("user_id") != user_id:
+            current = await admitted_source(thread_id)
+            if current is None or current.get("incarnation") != source.get("incarnation"):
                 return None
         except Exception:
             logger.warning("Unable to read referenced conversation history", exc_info=True)

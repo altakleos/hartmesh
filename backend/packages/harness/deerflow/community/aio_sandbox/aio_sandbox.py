@@ -3,6 +3,7 @@ import contextlib
 import errno
 import logging
 import math
+import posixpath
 import shlex
 import threading
 import time
@@ -201,6 +202,8 @@ class AioSandbox(Sandbox):
         home_dir: str | None = None,
         request_headers: dict[str, str] | None = None,
         default_command_timeout: float | None = None,
+        control_transport: httpx.BaseTransport | None = None,
+        download_roots: tuple[str, ...] | None = None,
     ):
         """Initialize the AIO sandbox.
 
@@ -214,6 +217,13 @@ class AioSandbox(Sandbox):
                 when a command does not provide an explicit timeout.
         """
         super().__init__(id)
+        if download_roots is not None and (
+            not isinstance(download_roots, tuple)
+            or not 1 <= len(download_roots) <= 32
+            or any(not isinstance(root, str) or not root.startswith("/") or root == "/" or "\\" in root or posixpath.normpath(root) != root for root in download_roots)
+        ):
+            raise ValueError("Download roots must be bounded canonical absolute directories")
+        self._download_roots = download_roots or (VIRTUAL_PATH_PREFIX,)
         if default_command_timeout is None:
             self._default_command_timeout = self._DEFAULT_HARD_TIMEOUT
         else:
@@ -231,7 +241,10 @@ class AioSandbox(Sandbox):
         }
         if request_headers:
             client_kwargs["headers"] = dict(request_headers)
-        if sandbox_http_trust_env(base_url):
+        if control_transport is not None:
+            direct_client = httpx.Client(timeout=600, follow_redirects=False, trust_env=False, transport=control_transport)
+            self._client = AioSandboxClient(**client_kwargs, httpx_client=direct_client)
+        elif sandbox_http_trust_env(base_url):
             self._client = AioSandboxClient(**client_kwargs)
         else:
             direct_client = httpx.Client(timeout=600, follow_redirects=True, trust_env=False)
@@ -1485,10 +1498,10 @@ class AioSandbox(Sandbox):
                 raise PermissionError(f"Access denied: path traversal detected in '{path}'")
 
         stripped_path = normalised.lstrip("/")
-        allowed_prefix = VIRTUAL_PATH_PREFIX.lstrip("/")
-        if stripped_path != allowed_prefix and not stripped_path.startswith(f"{allowed_prefix}/"):
-            logger.error("Refused download outside allowed directory: path=%s, allowed_prefix=%s", path, VIRTUAL_PATH_PREFIX)
-            raise PermissionError(f"Access denied: path must be under '{VIRTUAL_PATH_PREFIX}': '{path}'")
+        allowed_roots = getattr(self, "_download_roots", (VIRTUAL_PATH_PREFIX,))
+        if not any(stripped_path == root.lstrip("/") or stripped_path.startswith(root.lstrip("/") + "/") for root in allowed_roots):
+            logger.error("Refused download outside allowed directory: path=%s, allowed_roots=%s", path, allowed_roots)
+            raise PermissionError(f"Access denied: path must be under an admitted download root: '{path}'")
 
         with self._lock:
             try:

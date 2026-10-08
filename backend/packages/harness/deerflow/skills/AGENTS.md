@@ -47,3 +47,8 @@ Provider pack replacement uses Linux atomic directory exchange; unsupported
 hosts/filesystems refuse replacement before changing the existing pack. First
 publication uses an atomic rename. Interrupted cleanup can leave hidden staging
 files, but cannot retire the published baseline.
+
+Instance execution binds a public-only read view, including late activation and
+discovery. Never use user/global custom or legacy fallback inside that scope;
+bypass mixed-category prompt caches. Captured native package revisions and current
+host activation are distinct evidence; mutable Home copies grant no authority.

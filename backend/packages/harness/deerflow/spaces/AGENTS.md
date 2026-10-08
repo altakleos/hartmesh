@@ -102,4 +102,6 @@ Migration `0033` persists their opaque unique relationships; no legacy adoption.
 
 Consumer readiness: [the handoff](../../../../../docs/STORAGE_SPACES_CONSUMER.md)
 maps the public API to functional SQL and mandatory native evidence. The native
-tier requires 15 cases without skips; directory fixtures never qualify quotas.
+tier requires 16 cases without skips, including real AIO two-chat persistence;
+directory fixtures never qualify quotas. `resume` rechecks exact mounts, current
+generations, audience and immutable container identity without prepare/start.

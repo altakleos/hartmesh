@@ -171,7 +171,8 @@ are unsupported by host confinement. Relative links must stay inside their root.
 | Test-fixture creation acknowledgement loss preserves its backing until exact absence | Native real-create-then-error case and `test_storage_spaces_native_fixture_ownership.py` |
 | Missing controller, private state and current grants | Existing facade, workflow, feature-control/publication and attachment tests |
 
-The mandatory Linux Docker merge job executes all 15 native cases and rejects
+The mandatory Linux Docker merge job executes all 15 storage cases plus the
+instance AIO persistence case (16 total) and rejects
 skips. Ordinary directory/SQL fixtures prove functional contracts, not native
 mounts or quotas. Unsupported contributor hosts skip only the separately
 qualified tier and must not self-attest native readiness. The complete default

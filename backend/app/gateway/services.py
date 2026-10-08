@@ -123,6 +123,9 @@ async def reserve_checkpoint_write(
 ) -> AsyncIterator[None]:
     """Serialize an out-of-run checkpoint writer against all thread operations."""
     run_manager = get_run_manager(request)
+    from app.gateway.agent_conversations import evidence_user_id
+
+    user_id = await evidence_user_id(request, thread_id, user_id)
     async with goal_thread_lock(thread_id):
         async with run_manager.reserve_thread_operation(
             thread_id,
@@ -626,6 +629,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: frozenset[str] = (
     frozenset(
         {
             "app_config",
+            "__agent_execution",
             "is_internal",
             "authz_attributes",
             "channel_user_id",
@@ -1181,6 +1185,14 @@ def _build_state_accessor_graph(agent_factory: Any, config: dict[str, Any]) -> A
 
 
 def _state_accessor_graph(agent_factory: Any, assistant_id: str | None, mode: str, snapshot_frequency: int | None, config: dict[str, Any]) -> Any:
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+    from deerflow.agent_instances.runtime import execution_scope
+
+    inspection = (config.get("context") or {}).get(AGENT_EXECUTION_CONTEXT_KEY)
+    if isinstance(inspection, AgentExecution):
+        # Do not reuse a requester/other-instance graph cache for adopted state.
+        with execution_scope(inspection):
+            return _build_state_accessor_graph(agent_factory, config)
     app_config = (config.get("context") or {}).get("app_config")
     key = (assistant_id, mode, snapshot_frequency)
     cached = _cached_state_accessor_graph(key, agent_factory, app_config)
@@ -1284,6 +1296,7 @@ def build_checkpoint_state_accessor(
     thread_id: str,
     assistant_id: str | None = None,
     checkpoint_id: str | None = None,
+    agent_inspection=None,
 ) -> tuple[CheckpointStateAccessor, dict[str, Any]]:
     """Build the mode-selected lead graph used for materialized checkpoint state."""
     ctx = get_run_context(request)
@@ -1295,6 +1308,8 @@ def build_checkpoint_state_accessor(
 
     if ctx.app_config is not None:
         config.setdefault("context", {})["app_config"] = ctx.app_config
+    if agent_inspection is not None:
+        config.setdefault("context", {})["__agent_execution"] = agent_inspection
     inject_checkpoint_mode(config, ctx.checkpoint_channel_mode)
 
     agent_factory = resolve_agent_factory(assistant_id)
@@ -1348,12 +1363,16 @@ async def abuild_checkpoint_state_accessor(
     identity changed while it waited rebuilds instead of reusing the
     winner's graph.
     """
+    from app.gateway.agent_conversations import inspection_for_read
+
+    inspection = await inspection_for_read(request, thread_id)
     return await run_assembly(
         build_checkpoint_state_accessor,
         request,
         thread_id=thread_id,
         assistant_id=assistant_id,
         checkpoint_id=checkpoint_id,
+        **({"agent_inspection": inspection} if inspection is not None else {}),
     )
 
 
@@ -1794,6 +1813,22 @@ async def start_run(
     # bypassing the check -- a leaked internal token must not grant cross-user
     # thread access.
     user = getattr(request.state, "user", None)
+    from app.gateway.agent_conversations import execution_for_run
+
+    instance_execution = await execution_for_run(request, thread_id)
+    if instance_execution is not None:
+        if (getattr(body, "metadata", None) or {}).get("scheduled_task_id"):
+            raise HTTPException(501, "Persistent instance scheduling is outside the current execution contract")
+        if body.assistant_id not in (None, _DEFAULT_ASSISTANT_ID):
+            raise HTTPException(409, "An instance conversation uses its adopted lead definition")
+        require_existing_thread = True
+        owner_user_id = instance_execution.requester.subject_id
+        run_ctx = replace(run_ctx, agent_execution=instance_execution, mcp_task_repo=None, on_run_completed=None)
+        if body.multitask_strategy != "reject":
+            from app.gateway.agent_conversations import require_conversation
+            from deerflow.agent_instances.contract import AgentPermission
+
+            await require_conversation(request, thread_id, permission=AgentPermission.MANAGE)
 
     async def thread_access_allowed() -> bool:
         if user is None:
@@ -1855,6 +1890,24 @@ async def start_run(
             # ``build_run_config``; scrub internal-only keys smuggled there.
             strip_internal_context_keys(config)
 
+        if instance_execution is not None:
+            # Context objects are host-owned and never recovered from config.
+            for section in ("configurable", "context"):
+                values = config.setdefault(section, {})
+                for key in ("agent_name", "is_bootstrap", "secrets", "github_token", "channel_name"):
+                    values.pop(key, None)
+                values["agent_name"] = instance_execution.definition.config["name"]
+            config["context"]["__agent_execution"] = instance_execution
+            run_metadata.update(
+                {
+                    "agent_instance_id": instance_execution.instance.id,
+                    "agent_principal_id": instance_execution.instance.principal.subject_id,
+                    "agent_definition_revision": instance_execution.definition.revision,
+                    "agent_custody": instance_execution.instance.custody,
+                    "requester_id": instance_execution.requester.subject_id,
+                }
+            )
+
         replay_kind = run_metadata.get("replay_kind")
         target_message_id = run_metadata.get("regenerate_from_message_id")
         scope_graph_input = graph_input if isinstance(graph_input, dict) else {"messages": []}
@@ -1886,8 +1939,12 @@ async def start_run(
         scope_assistant_id = scope_runtime_config.get("agent_name") or _DEFAULT_ASSISTANT_ID
         # Bootstrap assembly intentionally does not load an agent config: the
         # new agent may not exist yet and setup_agent creates its definition.
+        from deerflow.config.agents_config import AgentConfig
+
         agent_config = (
-            await _load_scope_agent_config(
+            AgentConfig.model_validate(instance_execution.definition.config)
+            if instance_execution is not None
+            else await _load_scope_agent_config(
                 assistant_id=scope_assistant_id,
                 user_id=owner_user_id or (str(user.id) if user is not None else None),
             )
@@ -1971,6 +2028,8 @@ async def start_run(
         # membership (§10.7). Resolution failure degrades to unassigned with a
         # warning inside the resolver; it never fails the run.
         async def resolve_project():
+            if instance_execution is not None:
+                return None
             return await resolve_project_context(run_ctx.thread_store, getattr(request.app.state, "project_repo", None), thread_id, getattr(request.app.state, "project_document_repo", None))
 
         if getattr(request.app.state, "storage_spaces_enabled", False):
@@ -2116,6 +2175,8 @@ async def start_run(
                 # cannot both succeed across Gateway workers.
                 if require_existing_thread and not await thread_access_allowed():
                     raise HTTPException(status_code=404, detail=f"Thread {thread_id} not found")
+                if instance_execution is not None:
+                    await instance_execution.authority.validate(instance_execution)
                 record = await run_mgr.create_or_reject(
                     thread_id,
                     body.assistant_id,

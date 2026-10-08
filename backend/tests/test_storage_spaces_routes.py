@@ -132,14 +132,26 @@ async def test_stalled_download_releases_sql_before_streaming_an_open_inode(spac
     import asyncio
     import hashlib
     import os
+    from contextlib import asynccontextmanager
 
     from app.gateway.routers.spaces import SpaceFileResponse
+    from deerflow.spaces.contract import Permission
 
     service, _, _ = space_file_storage
     space = await home(service)
     await service.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="old", content=b"original" * 10000, create=True)
-    started, release = asyncio.Event(), asyncio.Event()
+    started, release, admitted_writer = asyncio.Event(), asyncio.Event(), asyncio.Event()
     chunks = []
+    original_admission = service.registry.admitted
+
+    @asynccontextmanager
+    async def observe_admission(**kwargs):
+        async with original_admission(**kwargs) as admitted:
+            if kwargs["requests"].get(space.id, (Permission(0), None))[0] & Permission.WRITE:
+                admitted_writer.set()
+            yield admitted
+
+    monkeypatch.setattr(service.registry, "admitted", observe_admission)
 
     async def send(message):
         if message["type"] == "http.response.body":
@@ -166,14 +178,15 @@ async def test_stalled_download_releases_sql_before_streaming_an_open_inode(spac
     try:
         await asyncio.wait_for(started.wait(), 3)
         writer = asyncio.create_task(service.write(actor=ALICE, space_id=space.id, expected_generation=1, operation_id=operation(), path="old", content=b"replacement", expected_sha256=hashlib.sha256(b"original" * 10000).hexdigest()))
-        done, _ = await asyncio.wait({writer}, timeout=1)
-        admitted_before_stream_finished = bool(done)
+        # Measure the SQL writer admission itself. Completion also includes
+        # durable filesystem sync, whose speed is unrelated to reader locks.
+        await asyncio.wait_for(admitted_writer.wait(), 3)
     finally:
         release.set()
         await stream
         if writer is not None:
             await writer
-    assert admitted_before_stream_finished, "A slow read must not reserve SQLite's global application writer"
+    assert admitted_writer.is_set(), "A slow read must not reserve SQLite's global application writer"
     assert b"".join(chunks) == b"original" * 10000
     assert len(opened) == 1
     assert response._fd is None and response._filesystem is None

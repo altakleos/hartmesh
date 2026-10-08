@@ -356,6 +356,20 @@ async def get_artifact(thread_id: ThreadId, path: str, request: Request, downloa
         - Download file: `/api/threads/abc123/artifacts/mnt/user-data/outputs/data.csv?download=true`
         - Active web content such as `.html`, `.xhtml`, `.svg`, and `.xml` artifacts is always downloaded
     """
+    from app.gateway.agent_conversations import require_conversation
+
+    if await require_conversation(request, thread_id):
+        from app.gateway.routers.spaces import get_content
+
+        prefix = "mnt/user-data/outputs/"
+        if not path.startswith(prefix):
+            raise HTTPException(404, "Only instance home outputs are delivered as artifacts")
+        authority = request.app.state.agent_conversations
+        instance_id = await authority.binding(thread_id)
+        from app.gateway.routers.spaces import _actor
+
+        instance = await authority.instances.get(actor=await _actor(request), instance_id=instance_id)
+        return await get_content(instance.home_id, request, path="outputs/" + path[len(prefix) :], download=download)
     # Trusted internal callers may act on behalf of a thread's owner via the
     # owner-user-id header (honored only after the internal token validates).
     # The header carries the raw platform owner id, while runs store files

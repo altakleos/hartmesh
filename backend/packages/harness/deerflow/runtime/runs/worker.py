@@ -234,6 +234,7 @@ def _release_run_scoped_references(
         CUSTOMER_ADMINISTRATION_CONTEXT_KEY,
         CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY,
         "__run_journal",
+        "__agent_execution",
         CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
         CONVERSATION_READER_CONTEXT_KEY,
         STORAGE_PROVIDER_CONTEXT_KEY,
@@ -260,6 +261,7 @@ def _release_run_scoped_references(
         configurable = runnable_config.get("configurable")
         if isinstance(configurable, dict):
             configurable.pop("__pregel_runtime", None)
+            configurable.pop("__agent_execution", None)
             configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         context = runnable_config.get("context")
         if isinstance(context, dict):
@@ -591,6 +593,7 @@ _SERVER_OWNED_RUNTIME_CONTEXT_KEYS: Final[frozenset[str]] = (
     frozenset(
         {
             "app_config",
+            "__agent_execution",
             CURRENT_RUN_PRE_EXISTING_MESSAGE_IDS_KEY,
             RUNTIME_PRESENTED_FILES_CONTEXT_KEY,
             DEERFLOW_TRACE_METADATA_KEY,
@@ -629,6 +632,7 @@ def _build_runtime_context(
     customer_administration_policy: CustomerAdministrationPolicy | None = None,
     customer_management_actor: CustomerManagementActor | None = None,
     storage_provider: Any | None = None,
+    agent_execution: Any | None = None,
 ) -> dict[str, Any]:
     """Build the dict that becomes ``ToolRuntime.context`` for the run.
 
@@ -643,6 +647,10 @@ def _build_runtime_context(
     ``langgraph.pregel.main`` where ``parent_runtime.merge(...)`` is invoked.
     """
     runtime_ctx: dict[str, Any] = {"thread_id": thread_id, "run_id": run_id}
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+    if isinstance(agent_execution, AgentExecution):
+        runtime_ctx[AGENT_EXECUTION_CONTEXT_KEY] = agent_execution
     from deerflow.spaces.facade import HostStorageProvider
 
     if isinstance(storage_provider, HostStorageProvider):
@@ -726,6 +734,7 @@ class RunContext:
     # The host binds this capability to one run's authenticated reader and references.
     conversation_reader: Any | None = field(default=None)
     storage_provider: Any | None = field(default=None)
+    agent_execution: Any | None = field(default=None)
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -733,6 +742,7 @@ def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> N
     # persistence; the reader capability belongs only to host-owned context.
     configurable = config.get("configurable")
     if isinstance(configurable, dict):
+        configurable.pop("__agent_execution", None)
         configurable.pop(CONVERSATION_READER_CONTEXT_KEY, None)
         configurable.pop(STORAGE_PROVIDER_CONTEXT_KEY, None)
         configurable.pop(CUSTOMER_ADMINISTRATION_CONTEXT_KEY, None)
@@ -963,7 +973,15 @@ async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRe
         host_policy = DENIED_CUSTOMER_ADMINISTRATION
     actor = getattr(kwargs.get("ctx"), "customer_management_actor", None)
     owner_role = customer_management_actor_role(actor)
-    with bind_customer_administration_policy(host_policy), bind_customer_management_actor(actor), bind_customer_management_actor_role(owner_role), turn_phases(correlation_id=resolve_trace_id(), run_id=record.run_id) as journal:
+    from deerflow.agent_instances.runtime import execution_scope
+
+    with (
+        execution_scope(getattr(kwargs.get("ctx"), "agent_execution", None)) as instance_environment,
+        bind_customer_administration_policy(host_policy),
+        bind_customer_management_actor(actor),
+        bind_customer_management_actor_role(owner_role),
+        turn_phases(correlation_id=resolve_trace_id(), run_id=record.run_id) as journal,
+    ):
         # The person waiting hears the phases they can act on as they begin,
         # before any model token, as one advisory ``custom`` frame per stage
         # (``turn_progress.py``). Registered before the first mark so
@@ -982,6 +1000,10 @@ async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRe
         try:
             await _run_agent(bridge, run_manager, record, progress=progress, **kwargs)
         finally:
+            if instance_environment is not None and instance_environment.provider is not None:
+                from deerflow.utils.file_io import await_drained, run_file_io
+
+                await await_drained(run_file_io(instance_environment.provider.close))
             progress.close()
             journal.mark(TurnPhase.TERMINAL)
             journal.set_outcome(str(getattr(record, "status", "unknown")))
@@ -1065,7 +1087,7 @@ async def _run_agent(
     goal_evaluator_model: Any | None = None
     delivery_content: dict[str, Any] | None = None
     goal_completion: _GoalCompletionCandidate | None = None
-    produced_output_paths: list[str] | None = None
+    produced_output_paths: list[str] | None = [] if ctx.agent_execution is not None else None
     # Journal construction moved ahead of preflight so every terminal run can
     # emit a receipt. Completion persistence keeps its prior boundary: before
     # #4272 the journal did not exist until preflight had succeeded, so early
@@ -1145,7 +1167,7 @@ async def _run_agent(
 
         # Keep cancellable preflight work under the worker's terminal guard so
         # cancellation cannot strand a pending RunRecord or stream subscriber.
-        if ctx.mcp_task_repo is not None and record.user_id is not None:
+        if ctx.agent_execution is None and ctx.mcp_task_repo is not None and record.user_id is not None:
             try:
                 if thread_incarnation is _THREAD_INCARNATION_UNSET:
                     raise RuntimeError("MCP task projection requires a server-owned thread incarnation")
@@ -1179,6 +1201,35 @@ async def _run_agent(
             return
         started = True
 
+        if ctx.agent_execution is not None:
+            from deerflow.agent_instances.runtime import current_environment, prepare_environment
+
+            environment = current_environment()
+            if environment is None or environment.execution is not ctx.agent_execution:
+                raise ValueError("Instance execution is missing its trusted host scope")
+            environment.provider = await prepare_environment(ctx.agent_execution, app_config=ctx.app_config)
+            from dataclasses import replace
+
+            ctx = replace(ctx, app_config=environment.provider.app_config)
+            revision = environment.provider.skill_revision
+            config.setdefault("metadata", {})["agent_public_package_revision"] = revision
+            if event_store is not None:
+                await event_store.put(
+                    thread_id=thread_id,
+                    run_id=run_id,
+                    category="system",
+                    event_type="agent.environment",
+                    content={
+                        "instance_id": ctx.agent_execution.instance.id,
+                        "principal_id": ctx.agent_execution.instance.principal.subject_id,
+                        "requester_id": record.user_id,
+                        "definition_revision": ctx.agent_execution.definition.revision,
+                        "public_package_capture_revision": revision,
+                        "home_id": ctx.agent_execution.instance.home_id,
+                        "native_package_copy": "mutable_home_data",
+                    },
+                )
+
         task_id = lead_task_id(run_id)
         if extensions.needs_task_store:
             task_store = ExtensionData(task_id)
@@ -1201,7 +1252,10 @@ async def _run_agent(
 
         if not record.ownership_lost and thread_store is not None:
             try:
-                await thread_store.update_status(thread_id, "running")
+                if ctx.agent_execution is not None:
+                    await ctx.agent_execution.authority.update_run_metadata(ctx.agent_execution, status="running")
+                else:
+                    await thread_store.update_status(thread_id, "running")
             except Exception:
                 logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
         mode = ctx.checkpoint_channel_mode
@@ -1238,7 +1292,7 @@ async def _run_agent(
 
         persist_completion = True
 
-        if event_store is not None:
+        if event_store is not None and ctx.agent_execution is None:
             workspace_changes_user_id = get_effective_user_id()
             workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
@@ -1291,6 +1345,7 @@ async def _run_agent(
             customer_administration_policy=ctx.customer_administration_policy,
             customer_management_actor=ctx.customer_management_actor,
             storage_provider=ctx.storage_provider,
+            agent_execution=ctx.agent_execution,
         )
         # Bind every checkpoint produced by this run to the effective agent
         # identity that produced its state. Manual compaction uses only this
@@ -1671,7 +1726,7 @@ async def _run_agent(
                     user_id=workspace_changes_user_id,
                     extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
-                if event_store is not None
+                if event_store is not None and ctx.agent_execution is None
                 else []
             )
             delivery_content = _delivery_content_with_outputs(
@@ -1909,7 +1964,10 @@ async def _run_agent(
                         ckpt = getattr(ckpt_tuple, "checkpoint", {}) or {}
                         title = ckpt.get("channel_values", {}).get("title")
                         if title:
-                            await thread_store.update_display_name(thread_id, title)
+                            if ctx.agent_execution is not None:
+                                await ctx.agent_execution.authority.update_run_metadata(ctx.agent_execution, display_name=title)
+                            else:
+                                await thread_store.update_display_name(thread_id, title)
                 except Exception:
                     logger.debug("Failed to sync title for thread %s (non-fatal)", thread_id)
 
@@ -1917,7 +1975,10 @@ async def _run_agent(
             if started and not record.ownership_lost and thread_store is not None:
                 try:
                     final_status = "idle" if record.status == RunStatus.success else record.status.value
-                    await thread_store.update_status(thread_id, final_status)
+                    if ctx.agent_execution is not None:
+                        await ctx.agent_execution.authority.update_run_metadata(ctx.agent_execution, status=final_status)
+                    else:
+                        await thread_store.update_status(thread_id, final_status)
                 except Exception:
                     logger.debug("Failed to update thread_meta status for %s (non-fatal)", thread_id)
 

@@ -189,6 +189,18 @@ def get_initialized_sandbox_provider() -> SandboxProvider | None:
 
 
 def get_sandbox_provider(**kwargs) -> SandboxProvider:
+    from deerflow.agent_instances.contract import AgentDenied
+    from deerflow.agent_instances.runtime import current_environment
+
+    environment = current_environment()
+    if environment is not None:
+        if environment.provider is None:
+            raise AgentDenied("Instance storage is not admitted; requester sandbox fallback is forbidden")
+        return environment.provider
+    return get_baseline_sandbox_provider(**kwargs)
+
+
+def get_baseline_sandbox_provider(**kwargs) -> SandboxProvider:
     """Get the sandbox provider singleton.
 
     Returns a cached singleton instance. Use `reset_sandbox_provider()` to clear

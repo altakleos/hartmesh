@@ -801,6 +801,8 @@ _THREAD_INCARNATION_UNSET = object()
 class SubagentExecutor:
     """Executor for running subagents."""
 
+    agent_execution: Any | None = None
+
     def __init__(
         self,
         config: SubagentConfig,
@@ -827,6 +829,7 @@ class SubagentExecutor:
         acceptance_criteria: list[str] | None = None,
         loop_detection_recorder: Any | None = None,
         tool_promotion_recorder: Any | None = None,
+        agent_execution: Any | None = None,
         tool_progress_recorder: Any | None = None,
         context_snapshot: ParentContextSnapshot | None = None,
         thread_incarnation: str | None | object = _THREAD_INCARNATION_UNSET,
@@ -891,6 +894,9 @@ class SubagentExecutor:
                 ordinary task tool at dispatch. Rendered as background data,
                 never as child execution evidence or inherited system authority.
         """
+        from deerflow.agent_instances.conversations import AgentExecution
+
+        self.agent_execution = agent_execution if isinstance(agent_execution, AgentExecution) else None
         self.config = config
         self.app_config = app_config
         self._resolved_app_config = app_config
@@ -1032,7 +1038,7 @@ class SubagentExecutor:
             "deferred_setup": deferred_setup,
             "agent_name": self.config.name,
             "available_skills": self._available_skill_names,
-            "user_id": self.user_id or DEFAULT_USER_ID,
+            "user_id": None if self.agent_execution is not None else self.user_id or DEFAULT_USER_ID,
         }
         if extensions is not None:
             middleware_kwargs["extensions"] = extensions
@@ -1065,6 +1071,10 @@ class SubagentExecutor:
         # system_prompt is included in initial state messages (see _build_initial_state)
         # to avoid multiple SystemMessages which some LLM APIs don't support.
         bound_tools = list(tools if tools is not None else self.tools)
+        if self.agent_execution is not None:
+            from deerflow.agent_instances.middleware import InstanceAuthorityMiddleware
+
+            middlewares.insert(0, InstanceAuthorityMiddleware())
         agent = create_agent(
             model=model,
             tools=bound_tools,
@@ -1232,16 +1242,19 @@ class SubagentExecutor:
             return []
 
         try:
-            from deerflow.skills.storage import get_or_new_user_skill_storage
+            from deerflow.skills.storage import get_or_new_skill_storage, get_or_new_user_skill_storage
 
             storage_kwargs = {"app_config": self.app_config} if self.app_config is not None else {}
-            storage = await asyncio.to_thread(
-                get_or_new_user_skill_storage,
-                self.user_id or DEFAULT_USER_ID,
-                **storage_kwargs,
-            )
+            if self.agent_execution is not None:
+                storage = await asyncio.to_thread(get_or_new_skill_storage, **storage_kwargs)
+            else:
+                storage = await asyncio.to_thread(get_or_new_user_skill_storage, self.user_id or DEFAULT_USER_ID, **storage_kwargs)
             # Use asyncio.to_thread to avoid blocking the event loop (LangGraph ASGI requirement)
             all_skills = await asyncio.to_thread(storage.load_skills, enabled_only=True)
+            if self.agent_execution is not None:
+                from deerflow.skills.types import SkillCategory
+
+                all_skills = [skill for skill in all_skills if skill.category == SkillCategory.PUBLIC]
             logger.info(f"[trace={self.trace_id}] Subagent {self.config.name} loaded {len(all_skills)} enabled skills from disk")
         except Exception:
             logger.exception(f"[trace={self.trace_id}] Failed to load skills for subagent {self.config.name}")
@@ -1256,6 +1269,11 @@ class SubagentExecutor:
             allowed = set(self.config.skills)
         else:
             allowed = None
+
+        if self.agent_execution is not None:
+            requested_skills = self.agent_execution.definition.config.get("skills")
+            parent_allowed = {skill.name for skill in all_skills} if requested_skills is None else set(requested_skills)
+            allowed = parent_allowed if allowed is None else allowed & parent_allowed
 
         # Phase 3: enforce skill authorization (Layer 1). Filter the skill
         # allowlist by the provider's "skill" policy so denied skills never
@@ -1273,7 +1291,7 @@ class SubagentExecutor:
             app_config=resolved_app_config,
             # Same bucket convention as the middleware chain (self.user_id or
             # DEFAULT_USER_ID); only consulted if candidates were not supplied.
-            user_id=self.user_id or DEFAULT_USER_ID,
+            user_id=None if self.agent_execution is not None else self.user_id or DEFAULT_USER_ID,
             candidate_skill_names=[s.name for s in all_skills],
             authorization=self._resolve_skill_authorization(),
         )
@@ -1397,6 +1415,12 @@ class SubagentExecutor:
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
+        if self.agent_execution is not None:
+            system_parts.append(
+                "This delegated task inherits the parent instance's mounted Home and filesystem authority. "
+                "A narrower tool list does not narrow that native filesystem scope. "
+                "Report useful paths to the parent; ordinary Home edits persist across conversations."
+            )
         if self.context_snapshot is not None:
             system_parts.append(SNAPSHOT_SYSTEM_NOTE)
         # RFC #4651 PR3: every subagent — built-in or custom — gets the same
@@ -1434,7 +1458,7 @@ class SubagentExecutor:
                     get_skills_prompt_section,
                     self._available_skill_names,
                     app_config=resolved_app_config,
-                    user_id=self.user_id or DEFAULT_USER_ID,
+                    user_id=None if self.agent_execution is not None else self.user_id or DEFAULT_USER_ID,
                 )
             if skills_section:
                 system_parts.append(skills_section)
@@ -1686,6 +1710,10 @@ class SubagentExecutor:
             # audit). user_id reuses the resolved tracing id; on every
             # authenticated/IM path this equals the parent context value.
             context["user_id"] = self.user_id
+            if self.agent_execution is not None:
+                from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
+
+                context[AGENT_EXECUTION_CONTEXT_KEY] = self.agent_execution
             context["user_role"] = self.user_role
             from deerflow.runtime.customer_administration import CUSTOMER_ADMINISTRATION_CONTEXT_KEY, CUSTOMER_MANAGEMENT_ACTOR_CONTEXT_KEY
 

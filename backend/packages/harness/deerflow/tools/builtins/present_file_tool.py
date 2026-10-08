@@ -1,4 +1,4 @@
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Annotated
 
 from langchain.tools import InjectedToolCallId, tool
@@ -55,6 +55,17 @@ def resolve_presented_filepath(
     thread_id = _get_thread_id(runtime)
     if not thread_id:
         raise ValueError("Thread ID is not available in runtime context or runtime config")
+
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+    if isinstance((runtime.context or {}).get(AGENT_EXECUTION_CONTEXT_KEY), AgentExecution):
+        for prefix in ("/mnt/spaces/home/outputs/", OUTPUTS_VIRTUAL_PREFIX + "/"):
+            if filepath.startswith(prefix):
+                relative = filepath[len(prefix) :]
+                if not relative or any(part in {".", "..", ""} for part in relative.split("/")) or "\\" in relative:
+                    raise ValueError("Only a file within the instance home outputs can be presented")
+                return OUTPUTS_VIRTUAL_PREFIX + "/" + relative, Path("/mnt/spaces/home/outputs") / PurePosixPath(relative)
+        raise ValueError("Only files within the instance home outputs can be presented")
 
     thread_data = runtime.state.get("thread_data") or {}
     outputs_path = thread_data.get("outputs_path")

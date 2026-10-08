@@ -56,11 +56,60 @@ identities. Cancellation drains owned persistent work before returning.
 Company actors survive creator departure; personal actors require an active
 custodian. Ordinary home browsing uses the existing Spaces resource page.
 
+## Conversations and execution
+
+`POST /api/agent-instances/{id}/conversations` requires `agents:read`,
+`threads:write`, and current Use. Send only a UUID-hex `creation_id`; the server
+mints the conversation ID. Exact retries return that chat, and deleted-chat
+retries cannot recreate it or adopt old checkpoint data. Each conversation
+keeps its human requester for attribution; a separate durable binding selects
+the instance and adopted definition.
+
+Inspect reads all of the instance's conversations and evidence. Use also reads
+the caller's own instance conversations. Manage plus the relevant provider
+ceiling controls conversation mutation and deletion. Use can stop the caller's
+own run; stopping another requester or replacing active work requires Manage.
+Current grants control lists before pagination, history, streams, exports and
+run evidence. Revocation stops subsequent SSE frames. JSON metadata cannot bind
+an ordinary chat or change an instance identity.
+
+Instance execution currently requires the qualified direct Linux Docker AIO
+storage adapter. Other transports refuse execution. The existing lead graph,
+run worker, journals and checkpoint accessors remain in use. The environment
+mounts only the instance Home at `/mnt/spaces/home`; its fixed workspace,
+uploads and outputs aliases refer to that Home. SDK requests address the exact
+registered container through Docker control, without a reusable container-IP
+endpoint. A new chat or completed run reuses the admitted attachment. Lease
+expiry, SDK closure and chat deletion do not retire a physical writer or Home.
+
+Ordinary wiki, repository and database edits persist in Home without an artifact
+manifest or automatic delivery requirement. Explicit output presentation uses
+Home's `outputs/` and the existing Space download path. Checkpoint branches keep
+the same instance and Home, instead of copying requester directories. Children
+inherit that native filesystem authority; a smaller tool list does not narrow
+it, and the child prompt states this scope.
+
+The requester supplies attribution and current provider ceilings, rather than
+My Files, private memory, private skills or personal credentials. Instance
+definitions may reference currently enabled public skills. Private/legacy
+packages, uploads tooling and MCP credentials have no instance adapter yet.
+Public package bytes are captured with bounded readers, copied and verified in
+a content-addressed Home cache; they count against Home quotas. Run evidence
+records the admitted package revision separately from the current host skill
+catalog. The native cache remains writable data; its hash/path does not attest
+that later execution bytes are immutable or grant additional authority.
+
+Requester-directory editors, ZIP artifact archives, browser sessions, legacy
+Shared publishing and scheduling return unsupported for bound chats. Use the
+existing Home Space browser for file edits and downloads. Legacy chat features
+keep their existing behavior. Turning managed storage off makes persisted
+bindings unavailable instead of restoring creator-owner access.
+
 ## Delivery stages and schema
 
-Identity, creation, revisions, homes and rename are implemented. Conversation
-and runtime binding, isolated instance memory, and lifecycle/product controls
-are subsequent stages; instances are not yet selectable for chat. No separate
+Identity, creation, revisions, homes, rename, durable conversations and runtime
+binding are implemented. Instance memory remains disabled until its scoped
+backend stage; lifecycle/product controls and the UI selector follow. No separate
 file manager, storage ACL engine or background scheduler is introduced.
 
 Migration `0034_agent_instances` adds `agent_definition_revisions`,
@@ -68,3 +117,8 @@ Migration `0034_agent_instances` adds `agent_definition_revisions`,
 Existing application tables and configuration format are unchanged. Fresh
 bootstrap and normal upgrades register the new tables. Downgrade refuses to
 erase used identity/grant/revision facts; published ancestry stays immutable.
+
+Migration `0035_agent_conversations` adds one binding table with the instance
+reference, original requester and retry identity. It retains deleted-chat
+tombstones and has no user/thread deletion cascade. Existing application tables
+and configuration format are unchanged. Downgrade refuses to erase used bindings.

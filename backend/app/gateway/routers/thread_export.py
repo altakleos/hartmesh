@@ -30,7 +30,9 @@ async def export_thread(thread_id: ThreadId, request: Request, export_format: Li
     """Download one conversation's transcript: what the page shows, as Markdown or JSON (``app.gateway.transcript``)."""
     record = await get_thread_store(request).get(thread_id)
     try:
-        conversation = await transcript.read_conversation(request, thread_id, record, user_id=await get_current_user(request))
+        from app.gateway.agent_conversations import evidence_user_id
+
+        conversation = await transcript.read_conversation(request, thread_id, record, user_id=await evidence_user_id(request, thread_id, await get_current_user(request)))
     except _CHECKPOINT_MODE_ERRORS as exc:
         raise _checkpoint_mode_http_error(exc, thread_id) from exc
     except Exception:
