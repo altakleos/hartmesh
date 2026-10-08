@@ -5,7 +5,13 @@ rs.mock("@/core/config", () => ({ getBackendBaseURL: () => "/backend" }));
 
 import { fetch } from "@/core/api/fetcher";
 import { selectStorageSpacesEnabled } from "@/core/features/api";
-import { createSpace, spaceFileURL, writeSpaceFile } from "@/core/spaces/api";
+import {
+  changeSpaceLifecycle,
+  retireSpaceAttachments,
+  createSpace,
+  spaceFileURL,
+  writeSpaceFile,
+} from "@/core/spaces/api";
 
 const mocked = rs.mocked(fetch);
 const SPACE = "a".repeat(32);
@@ -64,4 +70,29 @@ it("offers storage only after the host reports an available capability", () => {
       storage_spaces: { enabled: true },
     }),
   ).toBe(true);
+});
+
+it("binds lifecycle to resource generation and a unique operation without claimed authority", async () => {
+  mocked.mockResolvedValue(new Response(JSON.stringify({}), { status: 200 }));
+  await changeSpaceLifecycle(SPACE, 7, "restore", "b".repeat(32));
+  const [url, init] = mocked.mock.calls[0]!;
+  expect(url).toBe(`/backend/api/spaces/${SPACE}/lifecycle`);
+  const body = JSON.parse(init!.body as string);
+  expect(body).toEqual({
+    action: "restore",
+    generation: 7,
+    backup_id: "b".repeat(32),
+    operation_id: expect.stringMatching(/^[0-9a-f]{32}$/),
+  });
+});
+
+it("retirement sends the captured attachment IDs instead of ambient current environments", async () => {
+  mocked.mockResolvedValue(
+    new Response(JSON.stringify({ complete: true }), { status: 200 }),
+  );
+  await retireSpaceAttachments(SPACE, 7, ["b".repeat(32)]);
+  expect(JSON.parse(mocked.mock.calls[0]![1]!.body as string)).toEqual({
+    generation: 7,
+    attachment_ids: ["b".repeat(32)],
+  });
 });

@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Callable
+from contextvars import ContextVar
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -23,6 +24,7 @@ from deerflow.spaces.registry import SpaceRegistry, _stored_permissions
 from deerflow.utils.file_io import await_drained, run_file_io
 
 MAX_TRANSFER_BYTES = 64 * 1024 * 1024
+_reservation = ContextVar("storage_lifecycle_reservation", default=None)
 
 
 class SpaceOperationPending(SpaceConflict):
@@ -44,6 +46,17 @@ class SpaceFiles:
             raise SpaceOperationPending("A file operation has an unconfirmed outcome; recovery is required")
         if self.attachment_guard is not None:
             await self.attachment_guard(session, admitted, requests)
+        else:
+            # Adapter loss/restart cannot turn persisted mounts into an
+            # exclusive host edit window. Retain facts until real containment.
+            from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceMountRow
+
+            attachments = (
+                await session.execute(select(SpaceAttachmentRow, SpaceMountRow).join(SpaceMountRow, SpaceMountRow.attachment_id == SpaceAttachmentRow.id).where(SpaceMountRow.space_id.in_(admitted), SpaceAttachmentRow.phase != "fenced"))
+            ).all()
+            for attachment, mount in attachments:
+                if attachment.phase != "active" or requests[mount.space_id][0] & (Permission.WRITE | Permission.ADMIN):
+                    raise SpaceOperationPending("Storage attachment provider is required to confirm containment")
 
     async def create(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None) -> Space:
         # Unique slot/filesystem constraints arbitrate simultaneous PostgreSQL

@@ -58,7 +58,7 @@ jobs:
           import xml.etree.ElementTree as ET
           tree = ET.parse(sys.argv[1])
           cases = tree.findall(".//testcase")
-          assert len(cases) >= 10, "Required managed-storage cases were not collected"
+          assert len(cases) >= 11, "Required managed-storage cases were not collected"
           assert not tree.findall(".//skipped"), "Managed-storage merge qualification cannot skip"
           assert not tree.findall(".//failure") and not tree.findall(".//error")
           PY

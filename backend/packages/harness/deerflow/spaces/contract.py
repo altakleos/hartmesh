@@ -132,3 +132,9 @@ def validate_name(name: str) -> str:
     if not isinstance(name, str) or not name.strip() or len(name) > 128 or any(ord(c) < 32 for c in name):
         raise ValueError("A space label must contain 1–128 characters without control characters")
     return name
+
+
+def validate_generation(value: int) -> int:
+    if type(value) is not int or not 1 <= value <= 2**31 - 1:
+        raise ValueError("A positive bounded resource generation is required")
+    return value

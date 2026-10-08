@@ -54,8 +54,11 @@ persistent database, `/workspace/spaces` offers ordinary folders, dotfiles,
 uploads/downloads, text editing and explicit cross-space copies independently
 of chat. Current Files, Shared and Projects retain their routes and byte locations.
 The [backing requirements](docs/STORAGE_SPACES.md#qualified-linux-backing) describe
-the fixed filesystem byte/inode bounds and platform reserve. Native attachments,
-data recovery and feature migration remain separate delivery stages.
+the fixed filesystem byte/inode bounds and platform reserve. Administrators can
+create quiesced backups, restore with current grants, archive and delete through
+the generic recovery controls. A trusted consumer can attach native roots on the
+qualified direct Linux Docker host; uncertain containment blocks takeover.
+Feature migration and final consumer qualification remain subsequent stages.
 
 Editable artifact previews capture at most 2 MiB so their SHA-256 and byte ranges
 describe the same bytes. Larger artifacts stream from one opened file without a

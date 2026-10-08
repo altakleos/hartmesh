@@ -1,8 +1,8 @@
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
-The distribution now ends in `0031_storage_files`, appended after
-`0030_storage_spaces`. These add generic resource/grant/event tables and durable
-backing/file-operation facts without moving current feature data. Cold startup
+The distribution ends in `0032_storage_lifecycle`, appended after `0031`/`0030`.
+These add resource/grant/event, backing/operation and containment/backup facts
+without moving current feature data. Cold startup
 registration is in `persistence/models/__init__.py`. Pre-existing tables must
 match frozen columns, defaults, keys, checks and FK behavior; PostgreSQL check
 predicates are compared through server-canonicalized temporary definitions.

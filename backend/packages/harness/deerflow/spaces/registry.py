@@ -95,7 +95,7 @@ class SpaceRegistry:
                         raise SpaceNotFound("Space is unavailable")
                     view = self._view(row, grant.permissions)
                     required, generation = requests[space_id]
-                    if view.permissions & required != required or (row.status != "active" and required & Permission.ADMIN):
+                    if view.permissions & required != required:
                         raise SpaceDenied("Space operation is not granted")
                     if generation is not None and row.generation != generation:
                         raise SpaceConflict("Stale space generation")

@@ -29,6 +29,8 @@ independent of threads. Host grants/mode/status govern writes and export.
 Keep editor drafts on conflicts; send their loaded generation and SHA-256.
 Combine account and component cancellation; late creates never navigate. Active text is
 rendered as text, while downloads retain host MIME/content-disposition rules.
+Recovery requires ADMIN/current generation and explicit restore/delete acceptance;
+retirement sends captured attachment IDs so retries cannot stop replacements.
 
 `ArtifactFileControls` serves passive/native renderers through explicit exports,
 collection suggestions, bounded live probes and existing storage/Undo lifetimes.

@@ -16,6 +16,27 @@ import type { Translations } from "./types";
 export function createZhCN(product: string): Translations {
   return {
     storageSpaces: {
+      confirmAction: "确认操作",
+      recovery: "备份与恢复",
+      recoveryNotice:
+        "这些操作会终止已挂载的环境。备份与恢复暂存数据占用此空间的容量。",
+      backup: "创建备份",
+      archive: "归档空间",
+      deleteSpace: "删除空间",
+      restore: "恢复文件",
+      consistentBackup: "停止写入后捕获的文件",
+      attachedEnvironments: "已挂载的环境",
+      retireEnvironments: "终止这些环境",
+      providerUnavailable: "存储提供者必须重新连接才能终止访问。",
+      pendingOperation: "结果未确认的操作",
+      acceptCurrentState: "接受当前文件状态",
+      restoreNotice: "此操作将以所选备份替换当前文件。当前成员权限保持有效。",
+      deleteNotice:
+        "此操作删除可见文件并永久关闭空间。保留的备份仍受保留策略管理。",
+      acceptStateNotice:
+        "上一操作的结果不确定。接受会保持文件原样并清除待恢复状态，不会重放或宣称上一操作完成。请先检查文件与恢复证据。",
+      confirmLifecycle: "我已确认此操作的影响",
+      recoveryPending: "文件访问已暂停，等待所有者解决待恢复事项。",
       title: "存储空间",
       description: "空间中的文件和文件夹独立于任何对话。",
       unavailable: "存储空间不可用",

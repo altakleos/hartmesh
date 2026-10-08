@@ -13,6 +13,7 @@ export interface StorageSpace {
   generation: number;
   status: "active" | "archived";
   permissions: number;
+  storage_state?: "available" | "recovery-pending";
   quota?: {
     max_bytes: number;
     max_inodes: number;
@@ -20,6 +21,82 @@ export interface StorageSpace {
     available_inodes: number;
     editor: string;
   };
+}
+
+export interface SpaceRecovery {
+  backups: {
+    id: string;
+    generation: number;
+    size_bytes: number;
+    consistency: "quiesced-filesystem";
+  }[];
+  operations: {
+    operation_id: string;
+    generation: number;
+    phase: "pending" | "complete" | "failed";
+    request: { action: string };
+  }[];
+  attachments: { id: string; phase: string }[];
+  can_fence: boolean;
+}
+
+export function getSpaceRecovery(id: string, signal?: AbortSignal) {
+  return request<SpaceRecovery>(`${resourceURL(id)}/recovery`, { signal });
+}
+
+export function changeSpaceLifecycle(
+  id: string,
+  generation: number,
+  action: "backup" | "restore" | "archive" | "delete",
+  backupId?: string,
+  signal?: AbortSignal,
+) {
+  return request<unknown>(`${resourceURL(id)}/lifecycle`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      action,
+      generation,
+      operation_id: operationID(),
+      ...(backupId ? { backup_id: backupId } : {}),
+    }),
+    signal,
+  });
+}
+
+export function acceptSpaceCurrentState(
+  id: string,
+  generation: number,
+  operationId: string,
+  signal?: AbortSignal,
+) {
+  return request<{ complete: boolean }>(`${resourceURL(id)}/recovery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      operation_id: operationId,
+      generation,
+      acknowledge_uncertain_outcome: true,
+    }),
+    signal,
+  });
+}
+
+export function retireSpaceAttachments(
+  id: string,
+  generation: number,
+  attachmentIds: string[],
+  signal?: AbortSignal,
+) {
+  return request<{ complete: boolean }>(
+    `${resourceURL(id)}/attachments/retire`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ generation, attachment_ids: attachmentIds }),
+      signal,
+    },
+  );
 }
 
 export interface SpaceFile {

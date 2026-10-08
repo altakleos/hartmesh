@@ -5,8 +5,8 @@
 Storage Spaces is HartMesh's persistent folder resource foundation. The resource and file
 delivery adds identity, custody, mandatory access and a generic browser/API.
 Existing My Files, Shared and Projects continue through their current routes
-and mounts. Native attachment fencing, recovery and feature extraction are
-subsequent delivery stages; the Agent Execution consumer contract is not ready.
+and mounts. Native attachment and recovery adapters are described below;
+feature extraction and the Agent Execution consumer qualification remain pending.
 
 Each resource has a stable ID and opaque backing handle. Display names are
 labels: renaming changes neither location, ownership nor permissions. Personal
@@ -28,8 +28,8 @@ code or grant access.
 
 Resource generations and grants change in one database transaction, with a
 typed authority event. Stale metadata mutations fail. Archive/deletion/restore
-and writable attachment replacement will additionally require actual writer
-fencing; metadata changes and expired leases are insufficient.
+and writable attachment replacement require actual writer fencing; metadata
+changes and expired leases are insufficient.
 
 The additive `0030_storage_spaces` migration creates `storage_spaces`,
 `storage_space_grants` and `storage_space_events`. Existing data is not moved or
@@ -39,8 +39,7 @@ Gateway startup applies the migration through the existing bootstrap.
 
 ## Qualified Linux backing
 
-The opt-in host filesystem adapter exposes a product file API and browser;
-writable runtime attachment is not yet exposed. It supports
+The opt-in host filesystem adapter exposes a product file API and browser. It supports
 ordinary dotfiles, relative internal links, binary files and SQLite through
 Linux `openat2` confinement. Absolute links and nested mount transitions are
 explicitly unsupported by the host browser adapter. Bounded reads can detect
@@ -75,11 +74,11 @@ availability are operator responsibilities; mounts must exist before the host
 loads that inventory. A late durability failure after publishing the inventory
 preserves prepared backings. Existing pools and data are not reformatted.
 
-The mandatory Linux Docker qualification passed all nine native cases without
-skips on the backing implementation. This development host cannot mount the
-fixture; it does not substitute an ordinary directory or claim local native
-qualification. Every category PR must pass the native job again at its final
-head, as well as the ordinary SQLite/PostgreSQL Docker acceptance jobs.
+The mandatory Linux Docker job requires actual mounted backings and rejects
+every skipped native case. This development host cannot mount the fixture; it
+does not substitute ordinary directories or claim local native qualification.
+Every category PR must pass that job at its final head, together with ordinary
+SQLite/PostgreSQL Docker acceptance.
 
 ## Enable and use Spaces
 
@@ -114,9 +113,10 @@ this is not a snapshot of arbitrary concurrent native/database writes.
 
 HTML, SVG, XML and other active content are downloads. The editor displays
 literal text and never executes file contents in the HartMesh origin. Access is
-checked on the resource, including when optional authorization is off. New
-roots currently admit serialized host operations only; native runtime mounts
-remain unavailable until their separate fencing qualification is delivered.
+checked on the resource, including when optional authorization is off. Host
+edits require an exclusive window: an existing native attachment must be
+retired first. The default Gateway has no native execution consumer; a trusted
+host consumer installs the separately qualified attachment adapter.
 
 Browser saves use the loaded SHA-256 inside an exclusive host edit window. A
 stale file, generation or grant fails without silently overwriting or merging
@@ -144,6 +144,10 @@ HTTP registration API. PAT credentials do not yet carry storage scopes.
 | `PUT /api/spaces/{id}/content?...` | Import/create or compare-and-replace bytes |
 | `POST /api/spaces/{id}/files` | Create folder, rename entry or remove file/empty folder |
 | `POST /api/spaces/{id}/import` | Explicit audience-checked cross-space file copy |
+| `GET /api/spaces/{id}/recovery` | ADMIN-only backup, operation and attachment facts |
+| `POST /api/spaces/{id}/recovery` | Explicitly accept uncertain current file state |
+| `POST /api/spaces/{id}/lifecycle` | ADMIN backup, restore, archive or delete |
+| `POST /api/spaces/{id}/attachments/retire` | Retire the captured attachment IDs |
 
 Mutations carry the current resource generation. File mutations also carry a
 new UUID-hex `operation_id`; retrying a completed identical request returns its
@@ -156,5 +160,96 @@ without changing `0030` ancestry. Used bindings and operation facts cannot be
 downgraded away. Root inode identity is checked after service restarts. An intent
 is durable before file publication; if publication or SQL completion is
 uncertain, subsequent access/metadata mutations fail visibly pending recovery.
-No automatic replay reports success or erases the evidence. Provider recovery,
-backup/restore, archive/delete and attachment completion are subsequent stages.
+No automatic replay reports success or erases the evidence.
+
+## Native attachment and containment
+
+`SpaceAttachments` is a host-only API. A consumer supplies its validated actor,
+a fresh execution-incarnation UUID, and typed resource IDs/current generations,
+safe aliases and RO/RW modes. It does not supply authority through physical
+paths or conversation IDs. Roots are mounted only under `/mnt/spaces/{alias}`.
+Resource and alias duplication are refused. A request has at most 32 roots;
+each resource admits at most 32 live/pending attachments. Joint views require
+source EXPORT for cross-resource copying and the same audience-disclosure
+admission as explicit transfers.
+
+An attachment can span many executions and parallel application processes.
+There is one writable environment incarnation per resource, rather than one
+task mutex. READ mounts can coexist; applications retain responsibility for
+their own filesystem/database coordination. Host browser edits require all
+attachments to be retired. Generic mediated RW attachment is always denied.
+
+The initial `DockerStorageAdapter` supports only a direct Linux host whose local
+Unix Docker endpoint and root-owned daemon PID establish the same mount namespace
+as the Gateway. Kernel UNIX socket diagnostics bind the current canonical socket
+inode/device to the listener held by that verified daemon, including inherited
+systemd listeners; the `/var/run` alias must identify the same socket. It refuses
+ambiguous/replaced listeners, alternate/proxied Unix sockets, remote Docker,
+Docker Desktop, namespace-remapped Gateways and unrelated configured mounts.
+Such deployments need a separately qualified daemon-side backing-identity adapter;
+matching pathname strings do not prove matching bytes.
+The local builder helper also rejects restricted-network providers; their
+network controller must be integrated before attaching these resource views.
+
+The existing `LocalContainerBackend` builder can prepare a stopped container.
+Its exact immutable ID commits before activation checks or start. Inspection
+requires the admitted roots/modes, private bind propagation, attachment/host
+labels, no privileges/devices/host PID or network namespace, dropped capabilities
+except the existing small image-startup set, no privilege escalation and no
+restart policy. Images, Gateway configuration, other homes and container-control
+sockets are outside the view. A trusted caller cannot start a pending environment
+independently of the attachment service.
+
+Retirement durably marks containment pending, removes the exact owned container
+and confirms absence, closing child processes and RO handles as well as writers.
+An unknown daemon, missing preparation identity, wrong ownership or host change
+leaves takeover and conflicting mutations unavailable. Lease expiry and a stopped
+but restartable container are never retirement proof. Captured-ID retirement
+retries cannot stop a newly attached replacement. Provider disappearance preserves
+these facts and never restores a host edit window. Normal run completion does
+not retire an attachment.
+
+## Backups, restore and lifecycle
+
+Native-space administrators can open **Backups and recovery** in the generic
+browser. Each operation requires current authority and the resource generation.
+Backup and lifecycle actions retire attached environments first. The filesystem
+must be quiesced, including SQLite writers; a changing SQLite file is never
+copied as a consistent database. Quiesced backups include database journals/WAL,
+ordinary binary files, dotfiles, internal repository metadata and links. Special
+device/FIFO/socket nodes and archives over 100,000 entries are unsupported.
+
+Backups live in private control storage and are labelled `quiesced-filesystem`.
+They, staged replacements and retained displaced trees all count against the
+same fixed byte/inode capacity. Insufficient restore headroom fails without a
+capacity bypass. A backup is file data, not a snapshot of memberships or platform
+metadata. Backup artifact identity is recorded before filesystem work.
+Lifecycle intent and its captured attachment set commit before any retirement;
+concurrent duplicate requests cannot retire a newly attached replacement.
+
+Restore verifies the selected resource's backup, stages and validates its tree,
+preserves the resource/root identity, advances its lifecycle generation and uses
+current grants. It never reinstates removed members. The quiesced host publication
+is serialized but is not an atomic multi-file filesystem transaction. Uncertain
+publication/SQL outcomes remain pending, with displaced bytes retained. Only after
+confirmed SQL completion does separately recorded cleanup reclaim its private
+stage; failed cleanup stays visible and consumes capacity.
+
+Archive preserves readable data while removing effective WRITE/OPERATE. Current
+administrators can still revoke archived memberships. Delete is separate: it
+fences access, removes visible bytes and retains a permanent tombstone, used
+backing identity and private retention data/backups. Deleted capacity is never
+silently reused. Physical retention/purge remains an explicit operator policy;
+delete does not promise secure erasure or automatic pool reclamation.
+
+Pending file operations have an ADMIN recovery view even while file access is
+paused. After inspecting bytes and provider evidence, the owner can explicitly
+accept the current state. This marks the old request failed with an attributed
+resolution; it neither replays it nor claims its intended change completed.
+Partial lifecycle reconciliation advances the generation. Required mediated
+recovery controllers cannot be bypassed by this native recovery surface.
+
+The additive `0032_storage_lifecycle` migration adds attachment, mount and backup
+facts after `0031`, preserving previous ancestry and all existing feature bytes.
+Used containment/backup facts cannot be downgraded away. Feature facade/plugin
+extraction and final wiki/repository/nonhuman qualification are later stages.

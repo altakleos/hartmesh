@@ -2,6 +2,24 @@ import type { LucideIcon } from "lucide-react";
 
 export interface Translations {
   storageSpaces: {
+    confirmAction: string;
+    recovery: string;
+    recoveryNotice: string;
+    backup: string;
+    archive: string;
+    deleteSpace: string;
+    restore: string;
+    consistentBackup: string;
+    attachedEnvironments: string;
+    retireEnvironments: string;
+    providerUnavailable: string;
+    pendingOperation: string;
+    acceptCurrentState: string;
+    restoreNotice: string;
+    deleteNotice: string;
+    acceptStateNotice: string;
+    confirmLifecycle: string;
+    recoveryPending: string;
     title: string;
     description: string;
     unavailable: string;
