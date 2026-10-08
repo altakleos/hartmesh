@@ -176,6 +176,7 @@ def prepare_conversation_reader(
             await execution.validate()
             if await execution.authority.binding(thread_id) != execution.instance.id:
                 return None
+            await execution.authority.context_admission(execution, source_thread_id=thread_id)
         source = await thread_store.get(thread_id, user_id=user_id)
         if source is None or (execution is None and source.get("user_id") != user_id):
             return None

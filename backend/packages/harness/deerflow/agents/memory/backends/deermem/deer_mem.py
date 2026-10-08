@@ -45,7 +45,7 @@ from .deermem.core.paths import DEFAULT_AGENT_BUCKET
 from .deermem.core.prompt import format_memory_for_injection, load_prompt, load_prompt_messages, warm_tiktoken_cache
 from .deermem.core.queue import MemoryUpdateQueue, QueueFull
 from .deermem.core.relevance import build_idf, order_facts_for_query, tokenize, warm_tokenizer
-from .deermem.core.storage import MemoryRevisionConflict, MemoryStorageCorruption, create_storage
+from .deermem.core.storage import MemoryRevisionConflict, MemoryStorage, MemoryStorageCorruption, create_storage
 from .deermem.core.updater import MemoryUpdater, _coerce_source_confidence
 
 logger = logging.getLogger(__name__)
@@ -112,6 +112,26 @@ class DeerMem(MemoryManager):
     # cannot be used with mode="tool".
     supports_search: ClassVar[bool] = True
     supports_agent_scoped_management: ClassVar[bool] = True
+
+    def with_storage(self, storage):
+        """Bind an isolated portable port without initializing file storage.
+
+        No updater, queue, watermark, cache or retrieval connection is reused.
+        The host owns scope admission; configuration/model hooks are preserved.
+        """
+        if not isinstance(storage, MemoryStorage):
+            raise TypeError("An explicit MemoryStorage port is required")
+        instance = self.model_copy()
+        configure = getattr(storage, "configure", None)
+        if callable(configure):
+            configure(instance._config)
+        instance._storage = storage
+        instance._updater = MemoryUpdater(instance._config, storage, instance._llm, prompts_dir=instance._config.prompts_dir, callbacks=instance.callbacks)
+        instance._queue = MemoryUpdateQueue(instance._config, instance._updater)
+        instance._retrieval_lock = threading.RLock()
+        instance._retrieval_warmed_scopes = set()
+        instance._retrieval_fully_warmed = False
+        return instance
 
     def model_post_init(self, __context: Any) -> None:
         """Construct DeerMem's dependencies from ``self.backend_config``.
@@ -557,6 +577,8 @@ class DeerMem(MemoryManager):
         # Cancel same-scope pending extraction before and after clearing so a
         # stale debounce timer cannot rewrite facts during/after the clear.
         self.cancel_by_agent(agent_name, user_id=user_id)
+        if getattr(self._storage, "isolated_summaries", False):
+            return _compat_document(_call_backend(lambda: self._storage.clear_all(user_id=user_id)))
         if agent_name is None:
             memory_data = _call_backend(lambda: self._updater.clear_all_memory_data(user_id=user_id))
         else:
@@ -571,6 +593,8 @@ class DeerMem(MemoryManager):
         user_id: str | None = None,
         agent_name: str | None = None,
     ) -> dict[str, Any]:
+        if getattr(self._storage, "isolated_summaries", False):
+            return _compat_document(_call_backend(lambda: self._storage.replace_from_import(memory_data, agent_name=_resolve_agent_name(agent_name), user_id=user_id, updater=self._updater)))
         imported = _call_backend(
             lambda: self._updater.import_memory_data(
                 memory_data,

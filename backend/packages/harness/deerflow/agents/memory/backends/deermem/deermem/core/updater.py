@@ -1771,6 +1771,7 @@ class MemoryUpdater:
         success = False
         attempted = False
         try:
+            self._storage.before_extraction()
             watermark_key = (thread_id, user_id, agent_name)
             if bypass_watermark:
                 # Emergency flush: extract the carried subset in full.

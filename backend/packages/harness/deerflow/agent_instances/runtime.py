@@ -40,10 +40,14 @@ def execution_scope(execution):
     token = _environment.set(environment)
     try:
         from deerflow.agent_instances.public_skills import public_skill_scope
+        from deerflow.agents.memory.manager import memory_execution_scope
 
-        with storage_actor_scope(execution.instance.principal), public_skill_scope():
+        with storage_actor_scope(execution.instance.principal), public_skill_scope(), memory_execution_scope(execution):
             yield environment
     finally:
+        from deerflow.agent_instances.memory import finish_execution_memory
+
+        finish_execution_memory(execution)
         _environment.reset(token)
 
 

@@ -515,3 +515,14 @@ off must load rather than fail the reload and leave the previous judge running.
 - Signal classification is not admission control and not a write path: it never
   participates in queue admission, never alters `ConversationContext.signals` or
   the union merge, and neither hook touches the journal or the Gateway API.
+
+## Persistent instance scope
+
+`agent_instances/memory.py` supplies the host SQL scope; DeerMem `with_storage`
+rebuilds updater/queue/retrieval wiring through its portable port without local
+file initialization. Facts and all summaries belong to an instance, never a
+fake user or a renamed user bucket. Runtime tools, injection, capture and
+compaction share typed admission and generation/epoch fencing; unsupported
+backend scope is explicit. SQL search uses lexical/relevance ranking without
+disk indexes. Keep the backend portable and legacy contracts unchanged. See
+[instance memory](../../../../../../docs/AGENT_EXECUTION.md#instance-memory).

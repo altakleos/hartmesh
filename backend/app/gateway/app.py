@@ -312,7 +312,7 @@ async def _warm_memory_retrieval(manager) -> None:
         logger.warning("Memory retrieval index rebuild skipped", exc_info=True)
 
 
-async def _shutdown_memory_backend(*, retrieval_warm_finished: bool) -> None:
+async def _shutdown_memory_backend(*, retrieval_warm_finished: bool, instance_memory=None) -> None:
     """Resolve, drain, and close memory within the caller's cancellation shield.
 
     Backend ``close()`` overrides must be quick or internally bounded: unlike
@@ -321,11 +321,18 @@ async def _shutdown_memory_backend(*, retrieval_warm_finished: bool) -> None:
     manager = None
     try:
         app_cfg: AppConfig = await asyncio.to_thread(get_app_config)
+        import time
+
+        flush_deadline = time.monotonic() + app_cfg.memory.shutdown_flush_timeout_seconds
+        if instance_memory is not None:
+            completed = await asyncio.to_thread(instance_memory.shutdown_flush, app_cfg.memory.shutdown_flush_timeout_seconds)
+            if not completed:
+                logger.warning("Instance memory shutdown left unfinished extraction; its scope is retired")
         if app_cfg.memory.enabled:
             from deerflow.agents.memory import get_memory_manager
 
             manager = await asyncio.to_thread(get_memory_manager)
-            flush_timeout = app_cfg.memory.shutdown_flush_timeout_seconds
+            flush_timeout = max(0, flush_deadline - time.monotonic()) if instance_memory is not None else app_cfg.memory.shutdown_flush_timeout_seconds
             completed = await asyncio.to_thread(manager.shutdown_flush, flush_timeout)
             if completed:
                 logger.info("Memory queue flush completed within %.1fs", flush_timeout)
@@ -917,6 +924,7 @@ async def _lifespan_resources(app: FastAPI) -> AsyncGenerator[None, None]:
         await await_drained(
             _shutdown_memory_backend(
                 retrieval_warm_finished=retrieval_warm_finished,
+                instance_memory=getattr(getattr(app.state, "agent_instances", None), "memory_service", None),
             )
         )
 

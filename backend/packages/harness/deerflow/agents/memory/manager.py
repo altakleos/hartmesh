@@ -25,6 +25,8 @@ import sys
 import threading
 from abc import abstractmethod
 from collections.abc import Callable
+from contextlib import contextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from types import ModuleType
 from typing import Any, ClassVar, Literal
@@ -51,6 +53,21 @@ _manager_lock = threading.Lock()
 # rebuild only the judge when memory.prescreen / memory.signal_classification
 # changes. None = no manager built yet (or reset).
 _memory_judge_signature: str | None = None
+_instance_execution = ContextVar("memory_instance_execution", default=None)
+
+
+@contextmanager
+def memory_execution_scope(execution):
+    """Host-only binding, propagated into tool/prompt worker threads."""
+    token = _instance_execution.set(execution)
+    try:
+        yield
+    finally:
+        _instance_execution.reset(token)
+
+
+def current_memory_execution():
+    return _instance_execution.get()
 
 
 def context_query_kwargs(get_context: Callable[..., str], query: str | None) -> dict[str, str | None]:
@@ -1100,7 +1117,7 @@ def _refresh_judge_for_reloaded_config(manager: MemoryManager) -> None:
 
 
 # ── Singleton factory ─────────────────────────────────────────────────────
-def get_memory_manager() -> MemoryManager:
+def _get_host_memory_manager() -> MemoryManager:
     """Return the singleton :class:`MemoryManager` for the active config.
 
     Reads ``MemoryConfig.manager_class`` and resolves it via
@@ -1164,6 +1181,15 @@ def get_memory_manager() -> MemoryManager:
         _memory_judge_signature = _judging_config_signature(cfg)
         logger.info("Memory manager resolved: %s (manager_class=%r)", cls.__name__, manager_class)
         return _memory_manager
+
+
+def get_memory_manager() -> MemoryManager:
+    execution = _instance_execution.get()
+    if execution is not None:
+        from deerflow.agent_instances.memory import get_instance_memory_manager
+
+        return get_instance_memory_manager(execution, _get_host_memory_manager)
+    return _get_host_memory_manager()
 
 
 def memory_read_failures_are_fatal(

@@ -40,7 +40,11 @@ injected directories/backings; these fixtures never qualify native quotas. The
 mandatory Storage Spaces Linux Docker tier owns native filesystem proof.
 `AgentConversations` owns durable bindings, retry keys and deleted-chat tombstones.
 Never infer binding from JSON metadata or requester ownership. SQL audience filters
-precede pagination; current Inspect or original requester Use admits reads. Manage
+precede pagination; current Inspect or original requester Use admits unprotected reads.
+Memory-bearing/cross-requester copies persist Inspect-required provenance; carry it
+through references/branches and honor it on all reads and atomic execution admissions.
+Compare source/destination conversation recipients as well as writable Home readers.
+Manage
 controls mutations, while Use controls execution and stopping one's own run.
 Worker bookkeeping locks thread then instance, matching repository mutations.
 
@@ -58,5 +62,12 @@ inherit the full Home mount; tool filtering is not a narrower filesystem boundar
 Public skill scope is read-only and excludes private/legacy/integration storage,
 including late activation and primed caches. Capture bounded public bytes and record
 their native revision separately from live host activation. Home copies are mutable
-data, not authority or immutable execution evidence. Memory is disabled until Stage3.
+data, not authority or immutable execution evidence. Instance DeerMem facts and
+all summaries use SQL through the portable storage port, with explicit current
+Inspect/Home READ and execution Use. Never substitute user IDs or disk indexes.
+Resource→thread→instance locks admit snapshots/commits; release before extraction.
+Capture epoch when queued and retain it across retries. Clear/import retire old
+epochs atomically; lifecycle generations and conversation tombstones reject stale
+writes. Use-only/disabled/unsupported scopes have no memory fallback. Queues stay
+owned through completion and shared-budget shutdown; do not prune live run queues.
 No scheduling, background tasks or separate storage/file-manager API is introduced.
