@@ -79,3 +79,25 @@ class AgentProtectedContextRow(Base):
 
     __tablename__ = "agent_protected_contexts"
     thread_id: Mapped[str] = mapped_column(String(64), ForeignKey("agent_conversations.thread_id"), primary_key=True)
+
+
+class AgentLifecycleRow(Base):
+    """Exact containment scope survives cancellation, adapter loss and restart."""
+
+    __tablename__ = "agent_lifecycle_operations"
+    __table_args__ = (
+        CheckConstraint("generation >= 1 AND generation < 2147483647", name="ck_agent_lifecycle_generation"),
+        CheckConstraint("phase IN ('pending', 'complete', 'abandoned')", name="ck_agent_lifecycle_phase"),
+        CheckConstraint("prior_status IN ('active', 'suspended', 'archived', 'deleted')", name="ck_agent_lifecycle_prior_status"),
+    )
+    instance_id: Mapped[str] = mapped_column(String(32), ForeignKey("agent_instances.id"), primary_key=True)
+    operation_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    actor_id: Mapped[str] = mapped_column(String(128))
+    generation: Mapped[int] = mapped_column(Integer)
+    home_generation: Mapped[int] = mapped_column(Integer)
+    home_id: Mapped[str] = mapped_column(String(32), ForeignKey("storage_spaces.id"))
+    request: Mapped[dict] = mapped_column(JSON)
+    attachment_ids: Mapped[list] = mapped_column(JSON)
+    phase: Mapped[str] = mapped_column(String(16))
+    prior_status: Mapped[str] = mapped_column(String(16))
+    resolved_by: Mapped[str | None] = mapped_column(String(128), nullable=True)

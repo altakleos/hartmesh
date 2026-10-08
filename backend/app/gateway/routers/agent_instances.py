@@ -3,10 +3,10 @@
 from dataclasses import asdict
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.routing import APIRoute
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from app.gateway.authz import require_permission
 from app.gateway.routers.spaces import StrictRequest, _actor, _http_error
@@ -18,6 +18,7 @@ from deerflow.persistence.agents import get_agent_store
 from deerflow.spaces.contract import PrincipalRef, SpaceConflict, SpaceDenied
 from deerflow.spaces.filesystem import FilesystemUnavailable
 from deerflow.utils.file_io import await_drained, run_file_io
+from deerflow.utils.thread_id import ThreadId
 
 
 class InstanceRoute(APIRoute):
@@ -37,6 +38,8 @@ class InstanceRoute(APIRoute):
                 raise HTTPException(500, "Instance memory data is invalid") from None
             except FileNotFoundError:
                 raise HTTPException(404, "Agent definition is unavailable") from None
+            except NotImplementedError as exc:
+                raise HTTPException(501, str(exc)) from None
             except (SpaceDenied, SpaceConflict, FilesystemUnavailable, ValueError, OSError) as exc:
                 raise _http_error(exc) from None
 
@@ -72,6 +75,13 @@ class CreateConversation(StrictRequest):
     creation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
 
 
+class CreateCompanyCopy(StrictRequest):
+    creation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    generation: int = Field(ge=1, le=2**31 - 1)
+    name: str = Field(min_length=1, max_length=128)
+    supervisor_id: str | None = Field(default=None, min_length=1, max_length=128)
+
+
 async def _load_definition(request, actor, name):
     # Explicit owner selection stays inside trusted host code. The browser
     # cannot send another owner's ID, a snapshot, revision or capability grant.
@@ -88,9 +98,9 @@ async def _load_definition(request, actor, name):
 
 @router.get("")
 @require_permission("agents", "read")
-async def list_instances(request: Request, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0)):
+async def list_instances(request: Request, limit: int = Query(100, ge=1, le=500), offset: int = Query(0, ge=0), include_deleted: bool = False):
     service = await _service(request)
-    instances = await service.list(actor=await _actor(request), limit=limit, offset=offset)
+    instances = await service.list(actor=await _actor(request), limit=limit, offset=offset, include_deleted=include_deleted)
     return {"instances": [jsonable_encoder(asdict(instance)) for instance in instances]}
 
 
@@ -118,8 +128,63 @@ async def create_instance(body: CreateInstance, request: Request):
 
 @router.get("/{instance_id}")
 @require_permission("agents", "read")
-async def get_instance(instance_id: str, request: Request):
-    instance = await (await _service(request)).get(actor=await _actor(request), instance_id=instance_id)
+async def get_instance(instance_id: str, request: Request, include_deleted: bool = False):
+    from deerflow.agent_instances.contract import AgentPermission
+
+    service = await _service(request)
+    actor = await _actor(request)
+    # Use recipients need the identity/control projection, never adopted content.
+    try:
+        instance = await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.INSPECT, include_deleted=include_deleted)
+    except AgentDenied:
+        try:
+            instance = await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.USE, include_deleted=include_deleted)
+        except AgentDenied:
+            instance = await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=include_deleted)
+    return jsonable_encoder(asdict(instance))
+
+
+@router.post("/{instance_id}/company-copy", status_code=201)
+@require_permission("agents", "write")
+@require_permission("agents", "read")
+async def create_company_copy(instance_id: str, body: CreateCompanyCopy, request: Request):
+    from sqlalchemy import select
+
+    from deerflow.agent_instances.contract import AgentPermission
+    from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow, AgentInstanceRow
+
+    service = await _service(request)
+    actor = await _actor(request)
+    supervisor = PrincipalRef("human", body.supervisor_id) if body.supervisor_id is not None else actor
+    existing = await service.creation(actor=actor, creation_id=body.creation_id)
+    if existing is not None:
+        intent, snapshot = existing
+        expected = {"name": body.name, "custody": "company", "supervisor_id": supervisor.subject_id, "definition_name": snapshot.config["name"], "copy_from": instance_id, "copy_generation": body.generation}
+        if intent != expected:
+            raise AgentConflict("Company-copy identity belongs to another request")
+    else:
+        async with service._sf() as session, session.begin():
+            await service._reserve_writer(session)
+            row = (await session.execute(select(AgentInstanceRow).where(AgentInstanceRow.id == instance_id).with_for_update())).scalar_one_or_none()
+            grant = await session.get(AgentInstanceGrantRow, (instance_id, actor.subject_id))
+            if row is None or grant is None:
+                raise AgentDenied("Personal source is unavailable")
+            view = service._view(row, grant.permissions)
+            if (
+                view.custody != "personal"
+                or view.owner_id != actor.subject_id
+                or view.status in {"deleted", "provisioning"}
+                or view.permissions & (AgentPermission.INSPECT | AgentPermission.MANAGE) != AgentPermission.INSPECT | AgentPermission.MANAGE
+            ):
+                raise AgentDenied("Company copying requires the current personal custodian with Inspect and Manage")
+            await service._human(actor)
+            if view.generation != body.generation:
+                raise AgentConflict("Personal source changed; review it before copying")
+            captured = await service._stored_definition(session, view.definition_revision)
+            # Explicit business-data copy under the consenting custodian's namespace.
+            # This grants no old owner identity, credentials or storage membership.
+            snapshot = DefinitionSnapshot.capture(owner_id=actor.subject_id, config=captured.config, soul=captured.soul)
+    instance = await service.create(actor=actor, creation_id=body.creation_id, name=body.name, custody="company", supervisor=supervisor, definition=snapshot, copy_from=instance_id, copy_generation=body.generation)
     return jsonable_encoder(asdict(instance))
 
 
@@ -128,6 +193,21 @@ async def get_instance(instance_id: str, request: Request):
 async def adopted_definition(instance_id: str, request: Request):
     snapshot = await (await _service(request)).definition(actor=await _actor(request), instance_id=instance_id)
     return {"revision": snapshot.revision, "config": snapshot.config, "soul": snapshot.soul}
+
+
+@router.get("/{instance_id}/grants")
+@require_permission("agents", "read")
+async def instance_grants(instance_id: str, request: Request):
+    from sqlalchemy import select
+
+    from deerflow.agent_instances.contract import AgentPermission
+    from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
+
+    service = await _service(request)
+    await service.get(actor=await _actor(request), instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=True)
+    async with service._sf() as session:
+        grants = (await session.execute(select(AgentInstanceGrantRow).where(AgentInstanceGrantRow.instance_id == instance_id).order_by(AgentInstanceGrantRow.user_id))).scalars().all()
+        return {"grants": [{"user_id": grant.user_id, "permissions": grant.permissions} for grant in grants]}
 
 
 @router.patch("/{instance_id}")
@@ -146,6 +226,102 @@ async def create_conversation(instance_id: str, body: CreateConversation, reques
     if authority is None:
         raise HTTPException(501, "Agent conversation runtime is unavailable")
     return await authority.create(actor=await _actor(request), instance_id=instance_id, creation_id=body.creation_id)
+
+
+@router.get("/conversations/{thread_id}/instance")
+@require_permission("agents", "read")
+@require_permission("threads", "read")
+async def conversation_instance(thread_id: ThreadId, request: Request):
+    from deerflow.agent_instances.contract import AgentPermission
+
+    await _service(request)
+    authority = getattr(request.app.state, "agent_conversations", None)
+    actor = await _actor(request)
+    instance_id = await authority.binding(thread_id) if authority is not None else None
+    if instance_id is None:
+        return {"instance": None}
+    if not await authority.allowed(actor=actor, thread_id=thread_id, permission=AgentPermission.INSPECT):
+        raise AgentDenied("Conversation is unavailable")
+    return {"instance": await get_instance(instance_id, request)}
+
+
+class LifecycleChange(StrictRequest):
+    operation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    generation: int = Field(ge=1, lt=2**31 - 1)
+    action: Literal["suspend", "archive", "delete", "restore", "adopt", "supervise", "grant"]
+    definition_name: str | None = Field(default=None, pattern=r"^[a-z0-9-]{1,128}$")
+    supervisor_id: str | None = Field(default=None, min_length=1, max_length=128)
+    member_id: str | None = Field(default=None, min_length=1, max_length=128)
+    permissions: int | None = Field(default=None, ge=0, le=7)
+
+    @model_validator(mode="after")
+    def fields_match_action(self):
+        if (self.action == "adopt") != (self.definition_name is not None) or (self.action == "supervise") != (self.supervisor_id is not None):
+            raise ValueError("Lifecycle action fields do not match")
+        if self.action == "grant":
+            if self.member_id is None or self.permissions is None:
+                raise ValueError("Grant action requires member and permissions")
+        elif self.member_id is not None or self.permissions is not None:
+            raise ValueError("Grant fields require a grant action")
+        return self
+
+
+@router.get("/{instance_id}/lifecycle")
+@require_permission("agents", "read")
+async def lifecycle_status(instance_id: str, request: Request):
+    from deerflow.agent_instances.lifecycle import InstanceLifecycle
+
+    return {"operations": await InstanceLifecycle(await _service(request)).status(actor=await _actor(request), instance_id=instance_id)}
+
+
+@router.post("/{instance_id}/lifecycle")
+@require_permission("agents", "write")
+@require_permission("agents", "read")
+async def change_lifecycle(instance_id: str, body: LifecycleChange, request: Request, response: Response):
+    from deerflow.agent_instances.contract import AgentPermission
+    from deerflow.agent_instances.lifecycle import InstanceLifecycle
+    from deerflow.persistence.agent_instances.model import AgentLifecycleRow
+
+    service = await _service(request)
+    actor = await _actor(request)
+    view = await service.get(actor=actor, instance_id=instance_id, permission=AgentPermission.MANAGE, include_deleted=True)
+    definition = None
+    if body.definition_name is not None:
+        async with service._sf() as session:
+            intent = await session.get(AgentLifecycleRow, (instance_id, body.operation_id))
+            if intent is not None and (intent.actor_id == actor.subject_id or view.custody == "company") and intent.request.get("definition_revision"):
+                definition = await service._stored_definition(session, intent.request["definition_revision"])
+                if definition.config["name"].lower() != body.definition_name:
+                    raise AgentConflict("Lifecycle definition retry changed")
+        definition = definition or await _load_definition(request, actor, body.definition_name)
+    result = await InstanceLifecycle(service).change(
+        actor=actor,
+        instance_id=instance_id,
+        expected_generation=body.generation,
+        operation_id=body.operation_id,
+        action=body.action,
+        definition=definition,
+        supervisor=PrincipalRef("human", body.supervisor_id) if body.supervisor_id is not None else None,
+        member=PrincipalRef("human", body.member_id) if body.member_id is not None else None,
+        permissions=body.permissions,
+    )
+    response.status_code = 200 if result["complete"] else 202
+    return {**result, "instance": jsonable_encoder(asdict(result["instance"]))}
+
+
+class AbandonLifecycle(StrictRequest):
+    operation_id: str = Field(pattern=r"^[0-9a-f]{32}$")
+    generation: int = Field(ge=1, le=2**31 - 1)
+
+
+@router.post("/{instance_id}/lifecycle/abandon")
+@require_permission("agents", "write")
+@require_permission("agents", "read")
+async def abandon_lifecycle(instance_id: str, body: AbandonLifecycle, request: Request):
+    from deerflow.agent_instances.lifecycle import InstanceLifecycle
+
+    result = await InstanceLifecycle(await _service(request)).abandon(actor=await _actor(request), instance_id=instance_id, expected_generation=body.generation, operation_id=body.operation_id)
+    return {**result, "instance": jsonable_encoder(asdict(result["instance"]))}
 
 
 class CreateMemoryFact(StrictRequest):

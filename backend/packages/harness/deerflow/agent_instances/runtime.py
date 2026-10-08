@@ -109,18 +109,12 @@ def instance_tools(tools):
     return retained
 
 
-async def prepare_environment(execution, *, baseline_provider=None, app_config=None):
-    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+async def qualified_attachments(files, *, baseline_provider=None):
+    """Resolve the existing qualified host adapter independently of a first chat."""
     from deerflow.community.aio_sandbox.aio_sandbox_provider import AioSandboxProvider
     from deerflow.community.aio_sandbox.local_backend import LocalContainerBackend
     from deerflow.spaces.docker import DockerStorageAdapter, StorageAdapterUnsupported
 
-    await execution.authority.validate(execution)
-    from deerflow.agent_instances.public_skills import capture_public_skills
-    from deerflow.config.app_config import get_app_config
-
-    app_config = app_config or await await_drained(run_file_io(get_app_config))
-    capture = await await_drained(run_file_io(capture_public_skills, execution.definition, app_config))
     if baseline_provider is None:
         # Resolve before installing the run provider, so no ambient requester
         # environment can ever become the instance's fallback.
@@ -136,7 +130,6 @@ async def prepare_environment(execution, *, baseline_provider=None, app_config=N
     if not isinstance(baseline_provider, AioSandboxProvider) or not isinstance(baseline_provider._backend, LocalContainerBackend):
         raise StorageAdapterUnsupported("Instance execution requires qualified direct-host Docker AIO storage")
     adapter = await await_drained(run_file_io(DockerStorageAdapter.from_local_backend, baseline_provider._backend))
-    files = execution.authority.instances.files
     # One host adapter service per configured inventory; its guard applies to
     # every ordinary file/membership/lifecycle operation, including restarts.
     mounts = getattr(files, "attachments", None)
@@ -144,6 +137,20 @@ async def prepare_environment(execution, *, baseline_provider=None, app_config=N
         mounts = SpaceAttachments(files, adapter)
     elif mounts.provider.host_id != adapter.host_id:
         raise StorageAdapterUnsupported("The home attachment belongs to another qualified host")
+    return baseline_provider, mounts
+
+
+async def prepare_environment(execution, *, baseline_provider=None, app_config=None):
+    from deerflow.community.aio_sandbox.aio_sandbox import AioSandbox
+    from deerflow.spaces.docker import StorageAdapterUnsupported
+
+    await execution.authority.validate(execution)
+    from deerflow.agent_instances.public_skills import capture_public_skills
+    from deerflow.config.app_config import get_app_config
+
+    app_config = app_config or await await_drained(run_file_io(get_app_config))
+    capture = await await_drained(run_file_io(capture_public_skills, execution.definition, app_config))
+    baseline_provider, mounts = await qualified_attachments(execution.authority.instances.files, baseline_provider=baseline_provider)
     resources = [ResourceMount(execution.instance.home_id, execution.home_generation, "home", writable=True)]
     attached = await mounts.resume(actor=execution.instance.principal, resources=resources)
     if attached is None:

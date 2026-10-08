@@ -289,7 +289,7 @@ const ChatBox: React.FC<{
     if (renderedRightPanel === "browser") {
       return <BrowserViewPanel threadId={threadId} className="size-full" />;
     }
-    if (renderedRightPanel === "sidecar") {
+    if (renderedRightPanel === "sidecar" && sidecar) {
       return <SidecarPanel />;
     }
     if (renderedRightPanel === "artifacts" && selectedArtifact) {
@@ -341,6 +341,7 @@ const ChatBox: React.FC<{
     return null;
   }, [
     renderedRightPanel,
+    sidecar,
     selectedArtifact,
     threadId,
     artifacts,

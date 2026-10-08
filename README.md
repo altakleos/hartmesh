@@ -57,7 +57,13 @@ files, private skills, memory or credentials. DeerMem facts and summaries use a
 separate instance scope, with current audience checks and stale-write fencing.
 Memory-bearing and cross-requester copied history require current Inspect;
 references and branches check their destination audience before copying context.
-Lifecycle/UI controls follow; existing default/custom-agent chats retain their behavior.
+`/workspace/instances` provides creation, conversations, adopted definitions,
+supervision, Use/Inspect/Manage access and scoped memory controls. Suspend, archive
+and remove retain Home data and human grants while qualified storage containment
+stops the environment; uncertain outcomes remain visibly pending. Restore rechecks
+current rights. Explicit company copies start with a separate empty Home and memory;
+transfer selected files through Spaces and memory through export/import. Existing
+default/custom-agent chats retain their behavior.
 
 The [Storage Spaces foundation](docs/STORAGE_SPACES.md) adds stable resource
 identity, personal/company custody and explicit typed grants. Company custody
@@ -2741,3 +2747,5 @@ Your unwavering commitment and expertise have been the driving force behind Deer
 ## Star History
 
 [![Star History Chart](https://star-history.dera.page/svg?repos=bytedance/deer-flow&type=Date)](https://star-history.dera.page/#bytedance/deer-flow&Date)
+
+Managers with current Home ADMIN can abandon an obsolete pending lifecycle operation only after its exact captured environments are confirmed fenced. The intent and original actor remain recorded; grants are unchanged and the agent stays suspended until explicit restore. Existing-chat legacy uploads, browser and sidecar actions require a positive unbound lookup.

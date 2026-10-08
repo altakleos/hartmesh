@@ -53,6 +53,22 @@ export function WorkspaceNavChatList() {
             </SidebarMenuButton>
           </SidebarMenuItem>
         )}
+        {spacesEnabled && agentsEnabled && (
+          <SidebarMenuItem>
+            <SidebarMenuButton
+              isActive={pathname.startsWith("/workspace/instances")}
+              asChild
+            >
+              <Link
+                className="text-muted-foreground"
+                href="/workspace/instances"
+              >
+                <BotIcon />
+                <span>{t.agentInstances.title}</span>
+              </Link>
+            </SidebarMenuButton>
+          </SidebarMenuItem>
+        )}
         <SidebarMenuItem>
           <SidebarMenuButton
             isActive={pathname.startsWith("/workspace/files")}

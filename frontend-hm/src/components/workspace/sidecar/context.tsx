@@ -57,12 +57,17 @@ export function SidecarProvider({
   parentThreadId,
   context,
   isMock,
+  enabled = true,
 }: {
   children: ReactNode;
   parentThreadId: string;
   context: ThreadStreamOptions["context"];
   isMock?: boolean;
+  enabled?: boolean;
 }) {
+  const capability = useRef({ enabled, epoch: 0 });
+  if (capability.current.enabled !== enabled)
+    capability.current = { enabled, epoch: capability.current.epoch + 1 };
   const [open, setOpen] = useState(false);
   const [activeReferences, setActiveReferences] = useState<SidecarReference[]>(
     [],
@@ -78,10 +83,12 @@ export function SidecarProvider({
   const sidecarThreadIdRef = useRef<string | null>(null);
   const restoreRequestRef = useRef<{
     parentThreadId: string;
+    epoch: number;
     promise: Promise<string | null>;
   } | null>(null);
 
   const updateSidecarThreadId = useCallback((threadId: string | null) => {
+    if (threadId && !capability.current.enabled) return;
     sidecarThreadIdRef.current = threadId;
     setSidecarThreadId(threadId);
   }, []);
@@ -106,8 +113,20 @@ export function SidecarProvider({
     setConversationQuotes([]);
   }, [context, parentThreadId, updateSidecarThreadId]);
 
+  useEffect(() => {
+    if (!enabled) {
+      setOpen(false);
+      setActiveReferences([]);
+      setConversationQuotes([]);
+      updateSidecarThreadId(null);
+      restoreRequestRef.current = null;
+    }
+  }, [enabled, updateSidecarThreadId]);
+
   const restoreSidecarThread = useCallback(
     async (options?: { force?: boolean }) => {
+      if (!enabled || !capability.current.enabled) return null;
+      const epoch = capability.current.epoch;
       // A non-forced restore trusts the cached id; a forced restore always
       // re-queries the backend so a sidecar deleted elsewhere reconciles to
       // null instead of pointing the trigger at a dead thread (#3555).
@@ -116,7 +135,10 @@ export function SidecarProvider({
       }
 
       const restoreRequest = restoreRequestRef.current;
-      if (restoreRequest?.parentThreadId === parentThreadId) {
+      if (
+        restoreRequest?.parentThreadId === parentThreadId &&
+        restoreRequest.epoch === epoch
+      ) {
         return restoreRequest.promise;
       }
 
@@ -126,7 +148,11 @@ export function SidecarProvider({
       })
         .then((thread) => {
           const threadId = thread?.thread_id ?? null;
-          if (parentThreadIdRef.current !== parentThreadId) {
+          if (
+            parentThreadIdRef.current !== parentThreadId ||
+            !capability.current.enabled ||
+            capability.current.epoch !== epoch
+          ) {
             return null;
           }
           // Reconcile the cache with the backend: adopt a freshly found
@@ -150,12 +176,13 @@ export function SidecarProvider({
 
       restoreRequestRef.current = {
         parentThreadId,
+        epoch,
         promise,
       };
 
       return promise;
     },
-    [isMock, parentThreadId, updateSidecarThreadId],
+    [enabled, isMock, parentThreadId, updateSidecarThreadId],
   );
 
   useEffect(() => {
@@ -164,6 +191,7 @@ export function SidecarProvider({
 
   const openContext = useCallback(
     (nextContext: SidecarContext) => {
+      if (!capability.current.enabled) return;
       const nextReference = createReference(nextContext);
 
       setActiveReferences(
@@ -182,6 +210,7 @@ export function SidecarProvider({
 
   const addContextToConversation = useCallback(
     (nextContext: SidecarContext) => {
+      if (!capability.current.enabled) return;
       const nextReference = createReference(nextContext);
       setConversationQuotes((references) =>
         appendSidecarReference(references, nextReference),
@@ -206,6 +235,7 @@ export function SidecarProvider({
   }, []);
 
   const openSidecar = useCallback(() => {
+    if (!capability.current.enabled) return;
     setOpen(true);
   }, []);
 
@@ -267,7 +297,7 @@ export function SidecarProvider({
   );
 
   return (
-    <SidecarContextObject.Provider value={value}>
+    <SidecarContextObject.Provider value={enabled ? value : null}>
       {children}
     </SidecarContextObject.Provider>
   );

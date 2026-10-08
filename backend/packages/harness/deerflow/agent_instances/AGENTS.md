@@ -71,3 +71,16 @@ epochs atomically; lifecycle generations and conversation tombstones reject stal
 writes. Use-only/disabled/unsupported scopes have no memory fallback. Queues stay
 owned through completion and shared-budget shutdown; do not prune live run queues.
 No scheduling, background tasks or separate storage/file-manager API is introduced.
+
+Lifecycle uses the host-only callback inside qualified attachment retirement:
+resource→attachment→instance, capture exact intent/IDs and withdraw generation
+before effects. Pending never proves containment. Empty/completed retries never
+retire replacements; finalization proves captured IDs fenced under current ADMIN
+and Manage before reconciling Home generation. Retain Home/grants and preserve
+current rights on restore. Company delegates resolve exact intents with original
+actor plus resolver attribution; personal intents remain actor-bound. Fresh adoption
+requires current ownership; retry uses the committed immutable snapshot. Rename
+must reject pending lifecycle intents. Explicit company targets copy approved
+business data, then use existing resource/memory transfer; no private inheritance.
+
+Managers with current Home ADMIN can abandon an obsolete pending lifecycle operation only after its exact captured environments are confirmed fenced. The intent and original actor remain recorded; grants are unchanged and the agent stays suspended until explicit restore. Existing-chat legacy uploads, browser and sidecar actions require a positive unbound lookup.

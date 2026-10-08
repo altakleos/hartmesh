@@ -32,6 +32,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scoped backends fail explicitly without requester/global fallback.
   Preserve current Inspect requirements for memory-bearing and cross-requester
   copied history, and check conversation/Home recipients before context delivery.
+- Add `/workspace/instances` identity, custody, supervision, adopted-definition,
+  permission, conversation and scoped-memory controls. Chat identity comes from
+  the server binding; Home and Projects reuse the existing Spaces browser.
+- Add qualified suspension/archive/removal and explicit restoration with retained
+  Homes and human grants. Durable exact-scope intents expose uncertain containment,
+  fence stale runs and survive cancellation/restart. Current company managers can
+  resolve captured intents after creator departure; personal intents stay actor-bound.
+  Fully contained obsolete intents can be explicitly abandoned, retaining suspended
+  status and original request/actor. Copy admission and grant revocation recheck current
+  rights at commit; existing-chat legacy capabilities wait for confirmed unbound state.
+- Add explicit empty company-copy targets using the consenting personal custodian's
+  captured business definition. Files and memory require selected, explicit transfer;
+  private credentials and personal folders are not inherited.
 
 ### Schema changes
 
@@ -44,6 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Append `0036_agent_instance_memory` with an instance-owned document/epoch table
   and a protected-conversation provenance table. Existing tables and configuration
   format are unchanged; downgrade refuses to erase used memory or provenance.
+- Append `0037_agent_lifecycle` with one additive exact-scope lifecycle-intent table.
+  Existing tables/configuration format remain unchanged; used intents cannot be
+  erased by downgrade. Published ancestry remains unchanged.
 
 ## [2.2.0+hartmesh.43] - 2026-10-08
 

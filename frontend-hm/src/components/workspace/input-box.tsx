@@ -275,6 +275,7 @@ function buildHiddenConversationQuoteMessage({
 
 export function InputBox({
   className,
+  allowAttachments = true,
   disabled,
   autoFocus,
   status = "ready",
@@ -295,6 +296,7 @@ export function InputBox({
   ...props
 }: Omit<ComponentProps<typeof PromptInput>, "onSubmit"> & {
   assistantId?: string | null;
+  allowAttachments?: boolean;
   status?: ChatStatus;
   disabled?: boolean;
   context: Omit<
@@ -2197,7 +2199,27 @@ export function InputBox({
           className,
         )}
         disabled={composerLocked}
-        globalDrop
+        globalDrop={allowAttachments}
+        onDropCapture={
+          allowAttachments
+            ? undefined
+            : (event) => {
+                if (Array.from(event.dataTransfer.types).includes("Files")) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }
+              }
+        }
+        onPasteCapture={
+          allowAttachments
+            ? undefined
+            : (event) => {
+                if (event.clipboardData.files.length) {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }
+              }
+        }
         multiple
         onSubmit={handleSubmit}
         {...props}
@@ -2334,11 +2356,13 @@ export function InputBox({
         </div>
         <PromptInputFooter className="flex flex-wrap gap-2 sm:flex-nowrap">
           <PromptInputTools className="min-w-0 flex-1 flex-wrap">
-            <AddAttachmentsButton
-              className="px-2!"
-              disabled={composerLocked}
-              uploadLimits={uploadLimits}
-            />
+            {allowAttachments && (
+              <AddAttachmentsButton
+                className="px-2!"
+                disabled={composerLocked}
+                uploadLimits={uploadLimits}
+              />
+            )}
             <VoiceInputButton
               disabled={composerLocked}
               listening={voiceListening}

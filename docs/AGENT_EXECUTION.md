@@ -32,7 +32,8 @@ receives explicit home management access. Company custody confers no ambient
 audience or creator-private credentials.
 
 `GET /api/agent-instances` filters current grants in SQL before pagination.
-`GET /api/agent-instances/{id}` requires Inspect; `/definition` exposes its
+`GET /api/agent-instances/{id}` exposes identity to current Use, Inspect or Manage;
+`/definition` requires Inspect and exposes its
 adopted configuration under that same check. `PATCH /api/agent-instances/{id}`
 renames with the current `generation`, Manage, and provider `agents:write`.
 Rename retains principal, custody, revision and home identity. Provider route
@@ -107,9 +108,8 @@ bindings unavailable instead of restoring creator-owner access.
 
 ## Delivery stages and schema
 
-Identity, creation, revisions, homes, rename, durable conversations and runtime
-binding and instance memory are implemented. Lifecycle/product controls and
-the UI selector follow. No separate
+Identity, creation, revisions, homes, rename, durable conversations, runtime,
+instance memory and lifecycle/product controls are implemented. No separate
 file manager, storage ACL engine or background scheduler is introduced.
 
 Migration `0034_agent_instances` adds `agent_definition_revisions`,
@@ -176,3 +176,63 @@ Migration `0036_agent_instance_memory` adds `agent_instance_memory` for the
 instance document/epoch and `agent_protected_contexts` for durable Inspect-required
 conversation provenance after `0035`. No user-deletion cascade applies. Downgrade
 refuses used memory or provenance; configuration format is unchanged.
+
+## Lifecycle and product controls
+
+`/workspace/instances` creates personal/company residents from caller-visible
+definitions, shows custody/supervision/current access, and starts server-minted
+conversations. The existing chat page resolves identity through
+`GET /api/agent-instances/conversations/{thread}/instance`; client metadata cannot
+bind an agent. Instance chats link to Home and withhold unsupported legacy upload,
+browser, sidecar and scheduling controls. Existing-chat legacy capabilities wait
+for successful feature discovery and a positive unbound result; lookup errors
+keep those actions unavailable. Use Home for ordinary file uploads.
+Home/Projects browsing and selected cross-space copies use `/workspace/spaces`;
+the native execution view remains the qualified Home, without ambient requester
+or Project mounts. Existing storage audience/copy checks remain authoritative.
+
+`POST /api/agent-instances/{id}/lifecycle` accepts captured `generation`, UUID-hex
+`operation_id`, and `action`: `suspend`, `archive`, `delete`, `restore`, `adopt`,
+`supervise`, or `grant`. Adoption takes caller-visible `definition_name`, supervision
+takes `supervisor_id`, and grants take `member_id` plus explicit permission bits
+(Use1/Inspect2/Manage4; zero revokes). Agent access and storage membership are
+separate; manage resource grants through Spaces. Domain Manage and current Home
+ADMIN are mandatory, alongside provider `agents:read`/`agents:write` ceilings.
+
+Suspension/archive/removal preserve principal, Home bytes, human storage grants
+and independently owned Projects. Qualified Storage Spaces retirement records the
+exact attachment scope and inactive agent generation atomically before physical
+effects. HTTP202 means containment remains pending, never that the writer stopped.
+GET `/lifecycle` supplies current operation status and captured retry requests.
+Retries reuse the same identity/scope; completed retries cannot stop replacement
+writers. Renaming cannot strand a pending intent. Owned mutations drain cancellation.
+
+Restore requires a retained active, qualified Home, current resident read/write
+grants, a live supervisor/custodian and a valid adopted definition. Conflicting or
+unresolved native views prevent restoration. It restores no old membership and
+does not reconstruct deleted Space backing. Use qualified Space recovery separately
+when storage itself needs recovery. Generations reject older runs and memory jobs.
+Company managers with current Home ADMIN may resolve the exact committed pending
+request after creator departure; original actor remains recorded and `resolved_by`
+identifies the current resolver. Personal intents remain actor-bound. Captured
+adoption retries do not require the mutable source definition to survive.
+`POST /api/agent-instances/{id}/lifecycle/abandon` takes the pending operation ID
+and current instance generation. Current Manage/Home ADMIN may abandon obsolete
+intents only after their exact captured attachment scope is fenced. It records
+`phase=abandoned` and the resolver, keeps grants/request/actor and suspended status,
+and performs no provider effects. Use normal supervision/restore afterward.
+Abandoned retries are terminal and cannot replay old grants or stop replacements.
+
+`POST /api/agent-instances/{personal-id}/company-copy` takes a creation identity,
+captured personal generation, name and optional supervisor. The current personal
+custodian needs Inspect/Manage and current company-provisioning authority. The
+separate company target adopts an explicit copy of the captured business definition;
+its Home and memory start empty. Select file transfers in Spaces under current
+READ/EXPORT/WRITE and disclosure admission, and transfer memory only through explicit
+export/import. Credentials, old principal, private user memory and legacy folders
+are never transferred implicitly. The personal instance remains independent.
+
+Migration `0037_agent_lifecycle` adds `agent_lifecycle_operations` after0036, with
+exact request/Home/attachment identity, original actor, prior status, generation,
+phase and resolver. Existing tables/configuration format are unchanged. Downgrade
+refuses used intents. Historical migrations/ancestry fixtures remain immutable.
