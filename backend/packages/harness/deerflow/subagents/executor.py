@@ -801,6 +801,8 @@ _THREAD_INCARNATION_UNSET = object()
 class SubagentExecutor:
     """Executor for running subagents."""
 
+    agent_execution: Any | None = None
+
     def __init__(
         self,
         config: SubagentConfig,

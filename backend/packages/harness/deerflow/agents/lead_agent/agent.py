@@ -1324,8 +1324,7 @@ def _assemble_lead_agent(config: RunnableConfig, *, app_config: AppConfig) -> Le
     # Resolve the model once so tool guidance uses the same effective settings.
     chat_model = create_chat_model(name=model_name, thinking_enabled=thinking_enabled, reasoning_effort=reasoning_effort, app_config=resolved_app_config, attach_tracing=False, model_overrides=agent_model_overrides)
     raw_tools = get_available_tools(
-        include_mcp=not bool(instance_execution),
-        include_upload_tool=not bool(instance_execution),
+        **({"include_mcp": False, "include_upload_tool": False} if instance_execution else {}),
         model_name=model_name,
         groups=agent_config.tool_groups if agent_config else None,
         mcp_plugins=getattr(agent_config, "mcp_plugins", None),

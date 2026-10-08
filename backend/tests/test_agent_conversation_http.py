@@ -26,6 +26,10 @@ def app_for(agents, authority, threads, monkeypatch, *, actor=BOB, permissions=N
     from app.gateway.routers import threads as thread_routes
 
     app = FastAPI()
+    from deerflow.config.app_config import AppConfig
+
+    config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider"}})
+    monkeypatch.setattr(deps, "get_config", lambda: config)
     app.state.agent_instances = agents
     app.state.agent_conversations = authority
     app.state.thread_store = threads
