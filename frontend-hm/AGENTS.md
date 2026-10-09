@@ -419,3 +419,12 @@ routes, writes the detailed result to `.next/performance-results.json`, and comp
 totals with `performance-budgets.json`. Fix route ownership or split points when a
 budget fails; do not raise a ceiling without documenting and reviewing the measured
 regression.
+
+`/workspace/attention` owns durable Work-backed human requests, separate from chat
+clarification cards. Poll every30 seconds while mounted; zero inactive retention,
+account retirement and failed-current-access handling apply to titles and counts.
+Capture routing/request/response revisions with drafts; never silently rebase a
+human decision or uncertain retry. Linked Work controls lead to Attention, whose
+canonical decision includes every reviewed response ID. Read is independent and
+no response invokes run/resume. Generic inputs survive optional plugin absence;
+file references use existing Spaces and never imply upload or mounting.

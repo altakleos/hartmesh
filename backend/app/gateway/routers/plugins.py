@@ -11,6 +11,7 @@ from deerflow_extension_api.auth import resolve_principal
 from deerflow_extension_api.storage import StorageConflict, StorageIdentityRequired, StorageOperationPending, StorageUnavailable
 from fastapi import APIRouter, HTTPException, Request, Response
 
+from deerflow.agent_instances.contract import AgentConflict, AgentDenied
 from deerflow.extensions.browser_assets import LoadedBrowserAssets, valid_asset_path
 from deerflow.extensions.plugin_tools import plugin_settings
 
@@ -65,6 +66,7 @@ async def list_plugins(request: Request, response: Response):
                     {"id": item.id, "suffixes": list(item.suffixes), "source_max_bytes": item.source_max_bytes, "preview_max_bytes": item.preview_max_bytes, "projection_marker": item.projection_marker} for item in plugin.artifacts
                 ],
                 "storage_api_version": plugin.storage_api_version,
+                "human_input_api_version": plugin.human_input_api_version,
                 "actor_kinds": list(plugin.actor_kinds),
                 "storage_capabilities": asdict(provider.capabilities) if plugin.storage_api_version == 1 and provider is not None else None,
             }
@@ -157,7 +159,7 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
         raise HTTPException(422, "Plugin action requires a JSON object.") from exc
     try:
         async with asyncio.timeout(30):
-            if plugin.api_version == 4:
+            if plugin.api_version in (4, 5):
                 from deerflow_extension_api.storage import StorageActor
 
                 from app.gateway.routers.spaces import _ERRORS, _actor, _http_error
@@ -181,10 +183,25 @@ async def invoke_plugin_action(request: Request, namespace: str, action_name: st
                             raise _http_error(exc) from None
                         except NotImplementedError as exc:
                             raise HTTPException(501, "Host resource storage is unavailable.") from exc
-                    return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), actor=StorageActor(actor.kind, actor.subject_id), storage=storage, resource=resource))
+                    human_input = None
+                    if plugin.human_input_api_version == 1:
+                        from app.gateway.human_input_facade import HostHumanInputActions
+
+                        human_input = HostHumanInputActions(request, source, plugin, action, principal)
+                    try:
+                        return await action.handler(
+                            MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings), actor=StorageActor(actor.kind, actor.subject_id), storage=storage, resource=resource, human_input=human_input)
+                        )
+                    finally:
+                        if human_input is not None:
+                            human_input.retire()
             return await action.handler(MappingProxyType(payload), ActionContext(principal, MappingProxyType(settings)))
     except HTTPException:
         raise
+    except AgentDenied as exc:
+        raise HTTPException(404, "Human Work request is unavailable.") from exc
+    except AgentConflict as exc:
+        raise HTTPException(409, str(exc)) from exc
     except StorageIdentityRequired as exc:
         raise HTTPException(401, "A current host storage identity is required.") from exc
     except StorageOperationPending as exc:

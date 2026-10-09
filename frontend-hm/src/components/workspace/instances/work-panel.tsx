@@ -6,6 +6,7 @@ import { useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { RequestInput } from "@/components/workspace/attention/create";
 import * as api from "@/core/agent-instances/api";
 import type { WorkPolicy } from "@/core/agents/types";
 import { useAuth } from "@/core/auth/AuthProvider";
@@ -222,18 +223,26 @@ function WorkControls({
           <p role="alert">{detail.error.message}</p>
         ) : (
           detail.data && (
-            <WorkDetail
-              key={`${selected}:${formVersion}`}
-              record={detail.data}
-              policy={policy}
-              manager={manage}
-              collaborate={collaborate}
-              disabled={disabled}
-              queryKey={key}
-              submit={(body) =>
-                void execute({ kind: "command", work: selected, body })
-              }
-            />
+            <div>
+              <RequestInput
+                key={`request:${selected}:${formVersion}`}
+                record={detail.data}
+                manager={manage}
+                disabled={disabled || lifecyclePending}
+              />
+              <WorkDetail
+                key={`${selected}:${formVersion}`}
+                record={detail.data}
+                policy={policy}
+                manager={manage}
+                collaborate={collaborate}
+                disabled={disabled}
+                queryKey={key}
+                submit={(body) =>
+                  void execute({ kind: "command", work: selected, body })
+                }
+              />
+            </div>
           )
         ))}
     </section>
@@ -703,69 +712,76 @@ function WorkDetail({
           )}
         </div>
       )}
-      {manager && record.status === "submitted" && record.outcome && (
-        <>
-          <label className="flex items-center gap-2">
-            <input
-              type="checkbox"
-              checked={acceptanceBasis?.revision === record.revision}
-              disabled={disabled}
-              onChange={(event) =>
-                setAcceptanceBasis(event.target.checked ? record : null)
-              }
-            />
-            {copy.acceptUnchecked}
-          </label>
-          <Button
-            disabled={disabled || acceptanceBasis?.revision !== record.revision}
-            onClick={() =>
-              command(
-                "accept",
-                {
-                  outcome_id: record.outcome!.id,
-                  evidence_revision: record.outcome!.evidence_revision,
-                  basis: "outcome_statement",
-                  acknowledge_unchecked_sources: true,
-                },
-                acceptanceBasis ?? record,
-              )
-            }
-          >
-            {copy.accept}
-          </Button>
-        </>
-      )}
-      {record.status === "blocked" && record.blocker && (
-        <>
-          <p>{copy.inputNotice}</p>
-          {collaborate && (
+      {manager &&
+        !record.human_input_request_id &&
+        record.status === "submitted" &&
+        record.outcome && (
+          <>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={acceptanceBasis?.revision === record.revision}
+                disabled={disabled}
+                onChange={(event) =>
+                  setAcceptanceBasis(event.target.checked ? record : null)
+                }
+              />
+              {copy.acceptUnchecked}
+            </label>
             <Button
-              disabled={disabled || !note.trim()}
+              disabled={
+                disabled || acceptanceBasis?.revision !== record.revision
+              }
               onClick={() =>
-                command("input", {
-                  blocker_id: record.blocker!.id,
-                  blocker_revision: record.blocker!.revision,
-                })
+                command(
+                  "accept",
+                  {
+                    outcome_id: record.outcome!.id,
+                    evidence_revision: record.outcome!.evidence_revision,
+                    basis: "outcome_statement",
+                    acknowledge_unchecked_sources: true,
+                  },
+                  acceptanceBasis ?? record,
+                )
               }
             >
-              {copy.input}
+              {copy.accept}
             </Button>
-          )}
-          {manager && record.blocker.kind === "decision" && (
-            <Button
-              disabled={disabled || !note.trim()}
-              onClick={() =>
-                command("decide", {
-                  blocker_id: record.blocker!.id,
-                  blocker_revision: record.blocker!.revision,
-                })
-              }
-            >
-              {copy.decide}
-            </Button>
-          )}
-        </>
-      )}
+          </>
+        )}
+      {!record.human_input_request_id &&
+        record.status === "blocked" &&
+        record.blocker && (
+          <>
+            <p>{copy.inputNotice}</p>
+            {collaborate && (
+              <Button
+                disabled={disabled || !note.trim()}
+                onClick={() =>
+                  command("input", {
+                    blocker_id: record.blocker!.id,
+                    blocker_revision: record.blocker!.revision,
+                  })
+                }
+              >
+                {copy.input}
+              </Button>
+            )}
+            {manager && record.blocker.kind === "decision" && (
+              <Button
+                disabled={disabled || !note.trim()}
+                onClick={() =>
+                  command("decide", {
+                    blocker_id: record.blocker!.id,
+                    blocker_revision: record.blocker!.revision,
+                  })
+                }
+              >
+                {copy.decide}
+              </Button>
+            )}
+          </>
+        )}
       <details onToggle={(event) => setHistoryOpen(event.currentTarget.open)}>
         <summary>{copy.history}</summary>
         {history.isFetching && <p>{t.common.loading}</p>}

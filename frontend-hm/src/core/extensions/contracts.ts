@@ -64,6 +64,7 @@ export type FrontendContribution = {
   backend_actions?: string[];
   artifact_presentations?: ArtifactPresentationDescriptor[];
   storage_api_version?: 1 | null;
+  human_input_api_version?: 1 | null;
   actor_kinds?: ("human" | "nonhuman")[];
   storage_capabilities?: StorageCapabilityContext | null;
 };

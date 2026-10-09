@@ -90,7 +90,7 @@ def _build_tool(source, plugin, declaration, loaded=None):
                 MappingProxyType(settings),
                 context.get("thread_id"),
             )
-            if plugin.api_version == 4:
+            if plugin.api_version in (4, 5):
                 from deerflow_extension_api.storage import StorageActor
 
                 from deerflow.spaces.facade import STORAGE_PROVIDER_CONTEXT_KEY, HostStorageProvider, _current_actor

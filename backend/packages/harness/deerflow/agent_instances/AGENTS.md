@@ -132,3 +132,14 @@ and retain event history. Historical projections do not graft on a newer attempt
 Policy removal preserves authorized history and management. The additive0038
 migration registers Work/attempt/event tables; attempts remain empty until a
 qualified host execution adapter ships. See `docs/AGENT_WORK.md`.
+
+`HumanInput` qualifies only Work as its source. One live request per Work matches
+its single blocker/outcome. Manual creation atomically adds an attributed blocker;
+responses append against request/assignment revisions, while decisions fence the
+row and exact response set. All canonical Work commands synchronize closure inside
+their transaction, including legacy endpoints. Linked blockers reject legacy input.
+Decision locks include original and response-attached sources before instance/Work.
+Read state is separate. Current lifecycle/grants gate responses and inbox counts;
+recipient eligibility never grants access or silently follows supervisor changes.
+History remains inspectable. No request path invokes run or filesystem effects.
+See `docs/HUMAN_INPUT_REQUESTS.md`; additive0039 owns the four new tables.

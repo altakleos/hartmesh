@@ -118,6 +118,7 @@ function nameOfSegment(
   if (!segment) return t.common.home;
   if (segment === "workspace") return t.breadcrumb.workspace;
   if (segment === "chats") return t.breadcrumb.chats;
+  if (segment === "attention") return t.attention.title;
   if (segment === "instances") return t.agentInstances.title;
   return segment[0]?.toUpperCase() + segment.slice(1);
 }

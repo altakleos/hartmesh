@@ -12,6 +12,7 @@ const contributions = z
       namespace: z.string().regex(/^[a-z][a-z0-9_.-]{0,95}$/),
       viewer_id: z.string().nullable().optional(),
       storage_api_version: z.literal(1).nullable().optional(),
+      human_input_api_version: z.literal(1).nullable().optional(),
       actor_kinds: z
         .array(z.enum(["human", "nonhuman"]))
         .max(2)

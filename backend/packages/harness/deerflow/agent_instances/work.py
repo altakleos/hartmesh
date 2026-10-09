@@ -111,7 +111,11 @@ class AgentWork:
         attempt = None
         if current_attempt:
             attempt = (await session.execute(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == snapshot["id"]).order_by(AgentWorkAttemptRow.created_at.desc(), AgentWorkAttemptRow.id.desc()).limit(1))).scalar_one_or_none()
+        from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
+
+        live_request = await session.scalar(select(HumanInputRequestRow.id).where(HumanInputRequestRow.work_id == snapshot["id"], HumanInputRequestRow.state != "closed")) if current_attempt else None
         value.update(
+            human_input_request_id=live_request,
             execution_available=False,
             availability="records_only",
             work_enabled=bool(policy and policy.enabled),
@@ -291,7 +295,9 @@ class AgentWork:
             async with self._sf() as session:
                 await self._parent(session, actor, instance_id, MANAGE)
                 current = await self._row(session, instance_id, work_id)
-                decision_sources = [WorkSource.model_validate(source) for source in (current.blocker or {}).get("sources", [])]
+                from deerflow.agent_instances.human_input import HumanInput
+
+                decision_sources = [WorkSource.model_validate(source) for source in (current.blocker or {}).get("sources", []) + await HumanInput.decision_sources(session, current)]
 
         async def perform():
             async with self._sf() as session, session.begin():
@@ -306,10 +312,20 @@ class AgentWork:
                     raise AgentConflict("Work changed; reload before acting")
                 if await session.scalar(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.work_id == row.id, AgentWorkAttemptRow.status.in_(UNRESOLVED))):
                     raise AgentConflict("An unresolved attempt requires host reconciliation")
-                if request.action == "decide" and (row.blocker or {}).get("sources", []) != [source.model_dump() for source in decision_sources]:
-                    raise AgentConflict("Decision basis changed; reload before acting")
+                if request.action == "decide":
+                    from deerflow.agent_instances.human_input import HumanInput
+
+                    current_sources = (row.blocker or {}).get("sources", []) + await HumanInput.decision_sources(session, row)
+                    if current_sources != [source.model_dump() for source in decision_sources]:
+                        raise AgentConflict("Decision basis changed; reload before acting")
+                    for source in current_sources:
+                        if not await self._can_read_source(session, actor, source):
+                            raise AgentDenied("Decision basis is unavailable")
                 await self._validate_snapshot(session, self._snapshot(row))
                 policy = await self._policy(session, parent)
+                from deerflow.agent_instances.human_input import HumanInput
+
+                await HumanInput(self).work_transition(session, actor, row, request)
                 await self._apply(session, actor, parent, row, policy, request)
                 row.revision += 1
                 row.updated_at = datetime.now(UTC)

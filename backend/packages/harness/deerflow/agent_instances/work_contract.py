@@ -91,6 +91,13 @@ class DelegateWork(AssignmentFields):
     success_criteria: Statement
 
 
+class RequestBasis(StrictModel):
+    id: Key
+    revision: Revision
+    request_revision: Revision
+    response_ids: list[Key] = Field(default_factory=list, max_length=200)
+
+
 class WorkCommand(AssignmentFields):
     operation_id: Key
     expected_revision: Revision
@@ -103,6 +110,7 @@ class WorkCommand(AssignmentFields):
     acknowledge_unchecked_sources: StrictBool = False
     blocker_id: Key | None = None
     blocker_revision: Revision | None = None
+    request_basis: RequestBasis | None = None
 
     @model_validator(mode="after")
     def action_fields(self):
@@ -111,6 +119,8 @@ class WorkCommand(AssignmentFields):
         blocker = {"blocker_id", "blocker_revision"}
         supplied = self.model_fields_set
         allowed = {"operation_id", "expected_revision", "expected_assignment_revision", "action", "note"}
+        if self.action in {"decide", "accept"}:
+            allowed.add("request_basis")
         if self.action == "edit":
             allowed |= assignment
             if not supplied & assignment:

@@ -9,6 +9,7 @@ from test_agent_instances import instances as instances
 from deerflow.agent_instances.contract import AgentConflict, AgentDenied, DefinitionSnapshot
 from deerflow.agent_instances.work import AgentWork
 from deerflow.agent_instances.work_contract import DelegateWork, WorkCommand
+from deerflow.persistence.agent_instances.human_input import HumanInputEventRow, HumanInputReadRow, HumanInputRequestRow, HumanInputResponseRow
 from deerflow.persistence.agent_instances.model import AgentInstanceGrantRow
 from deerflow.persistence.agent_instances.work import AgentWorkAttemptRow, AgentWorkEventRow, AgentWorkRow
 
@@ -20,6 +21,8 @@ async def work(instances):
         await connection.run_sync(lambda c: AgentWorkRow.__table__.create(c))
         await connection.run_sync(lambda c: AgentWorkAttemptRow.__table__.create(c))
         await connection.run_sync(lambda c: AgentWorkEventRow.__table__.create(c))
+        for model in (HumanInputRequestRow, HumanInputResponseRow, HumanInputEventRow, HumanInputReadRow):
+            await connection.run_sync(model.__table__.create)
     snapshot = DefinitionSnapshot.capture(owner_id="alice", config={"name": "analyst", "work_policy": {"enabled": True}}, soul="Maintain useful technical documentation.")
     instance = await create(agents, custody="company", supervisor=BOB, snapshot=snapshot)
     return AgentWork(agents), instance, sf
@@ -285,12 +288,16 @@ async def test_work_migration_rebuild_and_used_downgrade_guard(work):
             return {table.name: [(c["name"], str(c["type"]), c["nullable"]) for c in inspector.get_columns(table.name)] for table in module._tables}
 
         before = columns()
+        for row in (HumanInputReadRow, HumanInputEventRow, HumanInputResponseRow, HumanInputRequestRow):
+            row.__table__.drop(connection)
         with Operations.context(MigrationContext.configure(connection)):
             module.upgrade()
             module.downgrade()
             module.upgrade()
             module.upgrade()
         assert columns() == before
+        for row in (HumanInputRequestRow, HumanInputResponseRow, HumanInputEventRow, HumanInputReadRow):
+            row.__table__.create(connection)
 
     async with sf.kw["bind"].begin() as connection:
         await connection.run_sync(rebuild)
