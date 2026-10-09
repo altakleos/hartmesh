@@ -69,6 +69,14 @@ test("pending containment keeps its exact retry and blocks new conversations", a
           soul: "Adopted company instructions",
         },
       });
+    if (path.endsWith("/work"))
+      return route.fulfill({
+        json: {
+          work: [],
+          availability: "records_only",
+          execution_available: false,
+        },
+      });
     if (path.endsWith("/grants"))
       return route.fulfill({ json: { grants: [] } });
     if (path.endsWith("/memory"))
