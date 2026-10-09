@@ -196,7 +196,12 @@ remain visible as warnings. Rechecking a saved report verifies its recorded inpu
 hashes and saved figures, and requires an explicit rebuild when they differ.
 Default actions prioritize review of any computed warnings before acting on
 the figures; clean reports still offer business suggestions.
-See the [business-report guide](skills/public/business-report/SKILL.md).
+See the [business-report guide](skills/public/business-report/SKILL.md). Saved report preferences now use validated, revision-checked
+read/save/patch/reset operations. Qualified AI employee Home retains them across
+conversations; one-report overrides preserve saved defaults. Independent procedure
+and supplier examples plus an optional human-input plugin exercise the same
+platform capabilities. See [consumer qualification and its evidence limits](docs/AI_EMPLOYEE_QUALIFICATION.md).
+
 
 Historical report cards and their filing policy are supplied by the provider-installed
 [compatibility package](backend/extensions/sources/hartmesh-legacy-report/README.md). The

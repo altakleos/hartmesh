@@ -38,3 +38,13 @@ Compute quality checks before finalizing default action wording. A warning puts
 review of Checks first, ahead of business suggestions, within the three-bullet
 limit; no fallback may claim the checks need no action. Keep clean reports
 useful and preserve numeric calculations and authored-prose validation.
+
+`business_report_settings.py` owns bounded v1 preferences validation and the
+stable adjacent lock, exact expected revision, operation identity, atomic
+replacement and uncertain-outcome reconciliation. Do not move business fields
+into core. Legacy valid v1 reads are byte-preserving; managed writes add optional
+`_mutation` metadata and reset retains a new revision. Reporting build validates
+all fields before applying any, supports temporary field replacement, and retains
+`preferences-used.json` as a hashed supporting bundle member. Prose/render copy
+that exact verified snapshot. Report/view schemas are unchanged. The first-command
+declaration admits report.py so explicit settings-only requests need no build.

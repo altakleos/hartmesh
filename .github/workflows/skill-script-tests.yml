@@ -12,6 +12,10 @@ on:
       - 'skills/public/**'
       - 'backend/tests/skills/**'
       - 'backend/tests/test_skill_load_first_batch_e2e.py'
+      - 'backend/tests/test_consumer_working_data.py'
+      - 'backend/tests/test_work_consumer_journeys.py'
+      - 'backend/tests/_work_consumer_gateway.py'
+      - 'examples/skills/**'
       - 'contracts/artifact_view/**'
       - 'docker/sandbox/Dockerfile'
       - '.github/workflows/skill-script-tests.yml'
@@ -21,6 +25,10 @@ on:
       - 'skills/public/**'
       - 'backend/tests/skills/**'
       - 'backend/tests/test_skill_load_first_batch_e2e.py'
+      - 'backend/tests/test_consumer_working_data.py'
+      - 'backend/tests/test_work_consumer_journeys.py'
+      - 'backend/tests/_work_consumer_gateway.py'
+      - 'examples/skills/**'
       - 'contracts/artifact_view/**'
       - 'docker/sandbox/Dockerfile'
       - '.github/workflows/skill-script-tests.yml'
@@ -70,4 +78,4 @@ jobs:
 
       - name: Run the skill script tests
         working-directory: backend
-        run: PYTHONPATH=. uv run --no-sync pytest tests/skills tests/test_skill_load_first_batch_e2e.py -v -rs
+        run: PYTHONPATH=. uv run --no-sync pytest tests/skills tests/test_skill_load_first_batch_e2e.py tests/test_consumer_working_data.py tests/test_work_consumer_journeys.py -v -rs

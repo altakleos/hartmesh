@@ -233,4 +233,4 @@ def test_business_report_starts_with_its_build():
     skill = parse_skill_file(skill_md, SkillCategory.PUBLIC)
 
     assert skill is not None
-    assert skill.first_command == _BUILD
+    assert skill.first_command == FirstCommand("scripts/report.py", ())

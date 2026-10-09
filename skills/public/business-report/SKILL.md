@@ -1,7 +1,7 @@
 ---
 name: business-report
 description: Use this skill when the user uploads a tabular business export (CSV, XLSX or XLS of jobs, orders, invoices, appointments or sales) and wants a monthly, quarterly or yearly business review, management report or summary they can download, share or send. Produces one report with KPIs, tables, locally drawn charts and a plain-words checks line, rendered as PDF, Word (DOCX) and Excel (XLSX) with the same numbers in each.
-first-command: scripts/report.py build
+first-command: scripts/report.py
 ---
 
 # Business Report Skill
@@ -10,7 +10,7 @@ first-command: scripts/report.py build
 
 One script turns an export into a report draft: `report.json` plus PNG charts, renders that one document to HTML, PDF, DOCX and XLSX, then adds a bounded passive `*.view.json` presentation. Every number in every render comes from `report.json`, so the formats agree by construction. The script runs on the libraries the sandbox image ships, installs nothing, calls no network service (the PDF printer refuses every URL that is not inline data) and never modifies an input file.
 
-The first call for a report is the `build` in Step 1. It reads the export itself and prints what it found, so neither the upload, its sheets nor this directory needs looking at first: the scripts it runs are the ones named below. The runtime holds to that order (the `first-command` line above): the first time this file is read in a conversation, nothing else runs in the sandbox until a build has run, whatever its outcome, or until you answer without a tool.
+The first call for a report is the `build` in Step 1: it reads the export and prints what it found; neither the upload, its sheets nor this directory needs looking at first. For an explicit request to inspect or change lasting preferences, use `report.py preferences` without making a report. The first-command declaration admits this skill-owned script before other sandbox work.
 
 **Script paths.** `$SKILL_DIR` is this skill's own directory — the one holding this `SKILL.md`, which `describe_skill` reports as `Directory` (`Location` is the file inside it). Assign it in every command that runs one of these scripts, as a statement of its own ahead of the script, the way each example below does (`SKILL_DIR="<Directory>"; python …`). Written in front of the script without the `;`, it is not set yet when bash expands that command's own words: the guard stops the command, and without the guard the path is `/scripts/…`. Where a skill is mounted differs between deployments, so no absolute path can be written here.
 
@@ -151,19 +151,34 @@ with the intended choices before claiming they are verified.
 
 ## Saving and preferences
 
-The report directory under `/mnt/user-data/outputs/reports/` is what the user downloads or shares; there is no other place to save it in this deployment, so "save" means it is already there, and you say so.
+Use the host's qualified runtime scope. On a persistent AI employee, the
+existing `/mnt/user-data/outputs/reports/preferences.json` alias belongs to its
+Home and remains available in later conversations. Read only this known file,
+using `report.py preferences read`; use `--prefs` when it exists. In an ordinary
+conversation the same spelling is conversation-scoped; export/import is needed
+for reuse elsewhere. Current Home permissions control access, not the filename.
+Report downloads and sharing still require their own current access.
 
-`preferences.json` holds choices the user wants applied to every report: brand colours, exclusions, summary length, comparisons, charts, currency:
+Save only an explicit lasting choice, such as “use short summaries from now on”. If personal versus shared AI employee
+scope is unclear, clarify before writing. A temporary request affects this
+report only: use `--summary-length standard` to contradict saved `short`, or
+`--prefs-override <v1-json>` for other fields. Override fields and collections
+replace saved values; omitted fields remain. CLI flags then take precedence;
+`--exclude` appends. Saved bytes and revision remain unchanged.
 
-```json
-{"version": 1,
- "brand": {"primary": "#0a6b3d"},
- "exclusions": [{"role": "category", "equals": "Warranty"}],
- "summary_length": "short",
- "comparisons": ["previous_period", "same_period_last_year"]}
-```
+Use the validated [preferences operations](references/preferences.md) to read,
+save, patch or reset. Do not write the saved file directly. A successful save
+acknowledgement names the AI employee, document, current Home-permission audience
+and future scope. For ordinary chat, explain conversation scope. Reset changes
+future defaults only; it does not erase reports, messages or memory. These are
+ordinary working files, not mandate, approval, credential or permission settings.
 
-Write it at `/mnt/user-data/outputs/reports/preferences.json` only when the user states a lasting preference ("always drop warranty jobs", "use our green from now on"); a one-off request changes only this report. When the preference comes with the request that first reads this file, create `reports/` and write the file in the same `bash` command as the build, ahead of it, since nothing else runs in the sandbox before the build. Pass it to every build in this conversation with `--prefs`; `meta.preferences_applied` in `report.json` lists what applied. The file lives with this conversation's outputs, so tell the user in one sentence that the preference applies to reports in this conversation and that they can download the file and upload it next time to apply it again. Do not promise it will be remembered on its own.
+During admitted tracked Work, use the available `read_work_context` and
+`report_work` tools for progress, missing factual input, decisions and outcomes.
+A report script's success is evidence of a generated report, not completion or
+human acceptance. Record relevant missing inputs with their effect and next
+action, preserve useful intermediate work, and assess supplied facts only after
+explicit resumption. Never manufacture a human decision or claim idle monitoring.
 
 ## Branding
 

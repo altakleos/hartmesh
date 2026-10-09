@@ -38,6 +38,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
+    import business_report_settings as settings
     import openpyxl  # noqa: F401  (pandas' xlsx engine; asserted so a missing engine fails here, not mid-build)
     import pandas as pd
     from business_report_common import (
@@ -150,6 +151,7 @@ def resolve_tenant_dir(tenant_dir: str | None) -> str | None:
 def apply_preferences(options: BuildOptions, prefs: dict) -> tuple[BuildOptions, list[str]]:
     """Merge preferences.json into build options; pure, returns what was applied."""
 
+    prefs = settings.validate(prefs)
     merged = copy.deepcopy(options)
     applied: list[str] = []
     brand = prefs.get("brand")
@@ -1474,8 +1476,19 @@ def command_build(args) -> int:
     profile = load_profile(args.profile, tenant_dir)
     options = BuildOptions(brand=load_brand(tenant_dir))
     applied: list[str] = []
-    if args.prefs:
-        options, applied = apply_preferences(options, _load_json_file(args.prefs, "preferences file"))
+    snapshot = settings.read(args.prefs) if args.prefs else None
+    if snapshot:
+        if snapshot["revision"] == "missing":
+            raise InputError("The specified preferences file is missing; use preferences save first or omit --prefs.")
+        options, applied = apply_preferences(options, snapshot["preferences"])
+    override = None
+    if args.prefs_override:
+        override = settings.read(args.prefs_override)
+        if override["revision"] == "missing":
+            raise InputError("The temporary preferences override file is missing.")
+        # Fields and collections replace saved choices for this build only.
+        effective = {**(snapshot["preferences"] if snapshot else {"version": 1}), **override["preferences"]}
+        options, applied = apply_preferences(BuildOptions(brand=load_brand(tenant_dir)), effective)
     for text in args.exclude or []:
         exclusion = normalize_exclusion(text)
         if exclusion is None:
@@ -1488,6 +1501,8 @@ def command_build(args) -> int:
     options.name = args.name
     if args.short:
         options.summary_length = "short"
+    if args.summary_length:
+        options.summary_length = args.summary_length
     mapping_override = _load_json_file(args.mapping, "mapping file") if args.mapping else None
     targets = parse_targets(args.render, "--render")
     ctx = prepare(args.files, args.period, options, mapping_override, profile)
@@ -1506,7 +1521,26 @@ def command_build(args) -> int:
         failed = next(check for check in report["checks"] if check["status"] == "fail")
         sys.stderr.write(f"Report withheld: {failed['text']}\n")
         return EXIT_WITHHELD
-    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, render, lambda stage: draw_charts(charts, stage, options.brand, ctx.currency), bundle_id=args.bundle_id, expected_current=expected, verify_current=False)
+
+    def stage_charts(stage):
+        draw_charts(charts, stage, options.brand, ctx.currency)
+        if snapshot or override:
+            # Supporting bundle member; report and passive-view schemas stay unchanged.
+            write_json(
+                stage / "preferences-used.json",
+                {
+                    "source": args.prefs,
+                    **(snapshot or {"preferences": {"version": 1}, "revision": "missing", "sha256": None}),
+                    "override_source": args.prefs_override,
+                    "override": override,
+                    "effective": effective if args.prefs_override else snapshot["preferences"],
+                    "cli_summary_length": args.summary_length or ("short" if args.short else None),
+                    "cli_currency": args.currency,
+                    "cli_exclusions": args.exclude or [],
+                },
+            )
+
+    report_path = publish_bundle(out_dir, base, report, targets, tenant_dir, render, stage_charts, bundle_id=args.bundle_id, expected_current=expected, verify_current=False)
     print(f"Built draft {report['meta']['draft']}: {report['meta']['title']} -> {report_path}")
     if previous and any(check["id"] == "prose_numbers" for check in previous.get("checks", [])):
         print("The previous draft carried written text (summary or actions); this rebuild replaced it with the computed text. Run prose again if it still applies.")
@@ -1529,6 +1563,11 @@ def command_show(args) -> int:
 
 def _stage_report_charts(report: dict, source: Path, stage: Path) -> None:
     manifest = bundle_manifest(source) if source.parent.parent.name == "drafts" else None
+    if manifest and "preferences-used.json" in manifest["sha256"]:
+        captured = (source.parent / "preferences-used.json").read_bytes()
+        if hashlib.sha256(captured).hexdigest() != manifest["sha256"]["preferences-used.json"]:
+            raise InputError("The retained preferences snapshot changed. Restore the verified draft.")
+        (stage / "preferences-used.json").write_bytes(captured)
     for chart in report["charts"]:
         png = chart_path(source, chart["png"])
         if png is None:
@@ -1723,7 +1762,9 @@ def build_parser() -> argparse.ArgumentParser:
     build_parser_.add_argument("--out", required=True, help="Directory for the report, its charts and checks.json")
     build_parser_.add_argument("--mapping", help="JSON file: {role: column or null} to settle a question from inspect")
     build_parser_.add_argument("--profile", help="Profile name or path (default: services-generic)")
-    build_parser_.add_argument("--prefs", help="preferences.json to apply")
+    build_parser_.add_argument("--prefs", help="Validated preferences.json to apply")
+    build_parser_.add_argument("--prefs-override", help="Temporary v1 preferences; fields replace saved choices for this build only")
+    build_parser_.add_argument("--summary-length", choices=("short", "standard"), help="Override saved summary length for this build only")
     build_parser_.add_argument("--tenant", help="Tenant bundle directory (default: /mnt/tenant when present)")
     build_parser_.add_argument("--exclude", action="append", help="role=value or column=value; repeatable")
     build_parser_.add_argument("--title", help="Report title (default from the profile)")
@@ -1763,6 +1804,9 @@ def build_parser() -> argparse.ArgumentParser:
     checks_parser.add_argument("files", nargs="*", help="The input files (default: the ones recorded in the report)")
     checks_parser.add_argument("--tenant", help="Tenant bundle directory (default: /mnt/tenant when present)")
     checks_parser.set_defaults(handler=command_checks)
+    preferences_parser = commands.add_parser("preferences", help="Validate/read/save/patch/reset consumer-owned preferences")
+    preferences_parser.add_argument("arguments", nargs=argparse.REMAINDER)
+    preferences_parser.set_defaults(handler=lambda args: settings.main(args.arguments))
     return parser
 
 
@@ -1806,7 +1850,7 @@ def main(argv: list[str] | None = None) -> int:
     except DecisionNeeded as decision:
         sys.stderr.write(f"Decision needed: {decision.question}\n{json.dumps(decision.details, indent=2, ensure_ascii=False)}\n")
         return EXIT_DECISION_NEEDED
-    except InputError as error:
+    except (InputError, settings.SettingsError) as error:
         sys.stderr.write(f"Error: {error}\n")
         return EXIT_WITHHELD
 

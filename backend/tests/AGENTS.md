@@ -151,3 +151,13 @@ original hashes; never resolve symlinks first. Document `files` lists only ZIP
 entries actually copied, including after quota skips or copy rollback. The export
 is a best-effort readable snapshot, not an automatic restore format or a global
 transaction. Preserve worker draining, disk limits, splitting and manifest hashes.
+
+## AI employee consumer qualification
+
+Consumer qualification lives in `test_work_consumer_journeys.py` (production
+Work tools/worker with deterministic graph and reopened SQL/services),
+`test_consumer_working_data.py`, and `test_work_input_example.py` (actual optional
+package over the canonical human facade). Keep business formats in consumer
+packages. Native proof stays in the mandatory no-skip storage tier; deterministic
+fixtures and model smoke are separate evidence. No consumer path selects host
+identity or bypasses native containment.
