@@ -53,7 +53,8 @@ def _seed_pre_0007_with_duplicates(db_path: Path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     sync_engine = sa.create_engine(f"sqlite:///{db_path.as_posix()}")
     try:
-        Base.metadata.create_all(sync_engine)
+        # Work did not exist at this historical stamp; its frozen migrations own creation.
+        Base.metadata.create_all(sync_engine, tables=[table for table in Base.metadata.sorted_tables if not table.name.startswith(("agent_work", "human_input_"))])
         with sync_engine.begin() as conn:
             # Drop only the partial unique index — its absence is what permits
             # duplicate active rows to exist in the first place.

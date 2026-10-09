@@ -1,4 +1,4 @@
-"""Bounded human commands. Execution and outcome reporting are host-only later work."""
+"""Bounded human commands. Execution and outcome reporting have separate host-only contracts."""
 
 from datetime import UTC, datetime
 from typing import Annotated, Literal
@@ -102,7 +102,7 @@ class WorkCommand(AssignmentFields):
     operation_id: Key
     expected_revision: Revision
     expected_assignment_revision: Revision
-    action: Literal["edit", "cancel", "reopen", "changes_requested", "reconcile_mandate", "accept", "input", "decide"]
+    action: Literal["edit", "cancel", "reopen", "changes_requested", "reconcile_mandate", "reconcile_attempt", "accept", "input", "decide"]
     note: Statement | None = None
     outcome_id: Key | None = None
     evidence_revision: Revision | None = None
@@ -111,6 +111,8 @@ class WorkCommand(AssignmentFields):
     blocker_id: Key | None = None
     blocker_revision: Revision | None = None
     request_basis: RequestBasis | None = None
+    attempt_id: Key | None = None
+    containment_operation_id: Key | None = None
 
     @model_validator(mode="after")
     def action_fields(self):
@@ -128,6 +130,10 @@ class WorkCommand(AssignmentFields):
             for key in ("objective", "success_criteria", "priority", "review_required", "sources"):
                 if key in supplied and getattr(self, key) is None:
                     raise ValueError(f"{key} cannot be null")
+        elif self.action == "reconcile_attempt":
+            allowed |= {"attempt_id", "containment_operation_id"}
+            if not self.attempt_id or not self.containment_operation_id or not self.note:
+                raise ValueError("Attempt reconciliation needs exact containment and an effects-review note")
         elif self.action == "accept":
             allowed |= review
             if not self.outcome_id or self.evidence_revision is None or self.basis is None or not self.acknowledge_unchecked_sources:

@@ -57,3 +57,9 @@ the immutable publication ID. Recovery must match both record ID and path before
 using the persisted removal outcome; ambiguity refuses access and preserves bytes.
 Drain every removal/recovery worker before releasing either lock. Filesystem lock
 semantics on multi-Gateway shared storage still require deployment qualification.
+
+Work activation uses the existing `start_run` adapter with a host-only attempt
+capability and stable run idempotency key. Require agents read/write and runs create,
+Use+Inspect, and an existing bound conversation; no request body conveys authority.
+Manager edits/cancellation of unresolved Work additionally require runs cancel and
+retry the persisted exact stop intent. Human-input replies never invoke activation.

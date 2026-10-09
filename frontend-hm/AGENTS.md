@@ -28,13 +28,18 @@ and retired-action fences. Retry exact intents;202 stays pending. Chat identity
 comes from server binding. Home/Projects reuse Spaces; legacy uploads/browser/
 sidecar/scheduling stay withheld. Memory uses instance APIs/all summaries only.
 Company targets start empty; transfer data explicitly through admitted APIs.
-Work controls are explicitly records-only. Use+Inspect delegates with adopted
+Work controls separate delegation, explicit activation and review. Use+Inspect delegates with adopted
 policy defaults; Manage+Inspect changes assignments and reviews exact statements.
 Retain uncertain mutation bodies/IDs, retire actions on account/permission changes,
 and capture revisions for drafts and acknowledgements. Source projections carry
 read-only availability metadata: strip it from command DTOs and require explicit
 consent before replacing unavailable references. Definition policy settings do not
-change an existing instance until deliberate adoption. No Run/Resume shortcut.
+change an existing instance until deliberate adoption. Activation requires current
+Use+Inspect plus run/agent ceilings. Preserve conversation creation and activation
+identities across unknown replies; receipt recovery never changes the bound thread.
+Unresolved attempts prohibit replacement. Polling preserves captured draft/review
+bases. Candidate reports are separate from submitted outcomes; a response starts no
+run. Recovery uses exact completed containment receipts and current Home ADMIN.
 
 `/workspace/spaces` uses account-scoped queries and host grants. Send captured
 generation/SHA for edits and attachment IDs for retirement; preserve conflict

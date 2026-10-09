@@ -31,7 +31,7 @@ class AgentWork:
 
     async def _parent(self, session, actor, instance_id, permission, *, lock=False):
         query = select(AgentInstanceRow).where(AgentInstanceRow.id == instance_id)
-        row = (await session.execute(query.with_for_update() if lock else query)).scalar_one_or_none()
+        row = (await session.execute(query.with_for_update().execution_options(populate_existing=True) if lock else query)).scalar_one_or_none()
         await self.agents._human(actor)
         grant = await session.get(AgentInstanceGrantRow, (instance_id, actor.subject_id))
         if row is None or grant is None or row.status == "provisioning":
@@ -114,14 +114,36 @@ class AgentWork:
         from deerflow.persistence.agent_instances.human_input import HumanInputRequestRow
 
         live_request = await session.scalar(select(HumanInputRequestRow.id).where(HumanInputRequestRow.work_id == snapshot["id"], HumanInputRequestRow.state != "closed")) if current_attempt else None
+        suggestion = (
+            await session.scalar(
+                select(AgentWorkEventRow).where(AgentWorkEventRow.work_id == snapshot["id"], AgentWorkEventRow.action == "suggest", AgentWorkEventRow.actor_kind == "nonhuman").order_by(AgentWorkEventRow.revision.desc()).limit(1)
+            )
+            if current_attempt
+            else None
+        )
         value.update(
+            suggestion={"id": suggestion.id, "statement": suggestion.request["statement"]} if suggestion else None,
             human_input_request_id=live_request,
-            execution_available=False,
-            availability="records_only",
+            execution_available=True,
+            availability="explicit_activation",
             work_enabled=bool(policy and policy.enabled),
             needs_mandate_reconciliation=parent.definition_revision != snapshot["definition_revision"],
             current_contents="not_checked",
-            attempt={"id": attempt.id, "status": attempt.status, "assignment_revision": attempt.assignment_revision} if attempt else None,
+            attempt={
+                "id": attempt.id,
+                "status": attempt.status,
+                "assignment_revision": attempt.assignment_revision,
+                "instance_generation": attempt.instance_generation,
+                "thread_id": attempt.thread_id,
+                "run_id": attempt.run_id,
+                "activation_id": attempt.activation_id,
+                "activation_request": attempt.request,
+                "requester_id": attempt.requester_id,
+                "candidate": await self._redact(session, actor, attempt.candidate),
+                "settled_at": _date(attempt.settled_at) if attempt.settled_at else None,
+            }
+            if attempt
+            else None,
         )
         return value
 
@@ -172,6 +194,7 @@ class AgentWork:
                     "assignment_revision": event.assignment_revision,
                     "created_at": _date(event.created_at),
                     "note": event.request.get("note"),
+                    "report": await self._redact(session, actor, {k: event.request[k] for k in ("statement", "sources", "attempt_id", "run_id", "status") if k in event.request}) if event.actor_kind == "nonhuman" else None,
                     "record": await self._project(session, actor, parent, event.result, current_attempt=False),
                 }
                 for event in events
@@ -180,7 +203,7 @@ class AgentWork:
     @staticmethod
     async def _row(session, instance_id, work_id, *, lock=False):
         query = select(AgentWorkRow).where(AgentWorkRow.id == work_id, AgentWorkRow.instance_id == instance_id)
-        row = (await session.execute(query.with_for_update() if lock else query)).scalar_one_or_none()
+        row = (await session.execute(query.with_for_update().execution_options(populate_existing=True) if lock else query)).scalar_one_or_none()
         if row is None:
             raise AgentDenied("Work is unavailable")
         return row
@@ -287,7 +310,7 @@ class AgentWork:
 
         return await await_drained(perform())
 
-    async def command(self, *, actor, instance_id, work_id, request: WorkCommand):
+    async def command(self, *, actor, instance_id, work_id, request: WorkCommand, can_stop=False):
         request = WorkCommand.model_validate(request.model_dump(exclude_unset=True))
         await self.agents._human(actor)
         decision_sources = []
@@ -302,6 +325,10 @@ class AgentWork:
         async def perform():
             async with self._sf() as session, session.begin():
                 await self.agents._reserve_writer(session)
+                if request.action == "reconcile_attempt":
+                    candidate = await session.get(AgentInstanceRow, instance_id)
+                    if candidate is not None:
+                        await session.execute(select(SpaceRow).where(SpaceRow.id == candidate.home_id).with_for_update())
                 await self._lock_sources(session, decision_sources if request.action == "decide" else request.sources)
                 parent, _ = await self._parent(session, actor, instance_id, DELEGATE if request.action == "input" else MANAGE, lock=True)
                 row = await self._row(session, instance_id, work_id, lock=True)
@@ -310,8 +337,14 @@ class AgentWork:
                     return receipt
                 if row.revision != request.expected_revision or row.assignment_revision != request.expected_assignment_revision or row.revision >= 2147483647:
                     raise AgentConflict("Work changed; reload before acting")
-                if await session.scalar(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.work_id == row.id, AgentWorkAttemptRow.status.in_(UNRESOLVED))):
-                    raise AgentConflict("An unresolved attempt requires host reconciliation")
+                active_attempt = await session.scalar(select(AgentWorkAttemptRow).where(AgentWorkAttemptRow.work_id == row.id, AgentWorkAttemptRow.status.in_(UNRESOLVED)))
+                if active_attempt is not None:
+                    if request.action not in {"edit", "cancel", "reconcile_attempt"}:
+                        raise AgentConflict("An unresolved attempt requires host reconciliation")
+                    if request.action != "reconcile_attempt" and not can_stop:
+                        raise AgentDenied("Changing active Work requires the run cancellation capability")
+                    if request.action != "reconcile_attempt":
+                        active_attempt.status = "stopping"
                 if request.action == "decide":
                     from deerflow.agent_instances.human_input import HumanInput
 
@@ -336,7 +369,30 @@ class AgentWork:
 
     async def _apply(self, session, actor, parent, row, policy, request):
         action = request.action
-        if action in {"edit", "reconcile_mandate"}:
+        if action == "reconcile_attempt":
+            from deerflow.agent_instances.lifecycle import InstanceLifecycle
+
+            attempt = await session.get(AgentWorkAttemptRow, request.attempt_id)
+            containment = await session.get(AgentLifecycleRow, (parent.id, request.containment_operation_id))
+            home = await session.get(SpaceRow, parent.home_id)
+            grant = await session.get(SpaceGrantRow, (parent.home_id, "human", actor.subject_id))
+            if home is None or grant is None or not self.agents.files.registry._view(home, grant.permissions).permissions & Permission.ADMIN:
+                raise AgentDenied("Attempt recovery requires current Home ADMIN")
+            if (
+                not attempt
+                or attempt.work_id != row.id
+                or attempt.status not in UNRESOLVED
+                or not containment
+                or containment.phase not in {"complete", "abandoned"}
+                or containment.generation < attempt.instance_generation
+                or containment.home_id != parent.home_id
+                or not await InstanceLifecycle._scope_fenced(session, containment)
+            ):
+                raise AgentConflict("The exact prior execution must be contained before recovery")
+            # Preserve candidate/effect history. Containment proves cessation, not success.
+            attempt.status, attempt.settled_at = "failed", datetime.now(UTC)
+            row.next_action = "Prior attempt contained; inspect its effects before explicitly resuming."
+        elif action in {"edit", "reconcile_mandate"}:
             if row.status not in {"open", "blocked"}:
                 raise AgentConflict("Changes requested or Reopen is required before assignment edits")
             if action == "edit":

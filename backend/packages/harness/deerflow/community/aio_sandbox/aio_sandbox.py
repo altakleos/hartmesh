@@ -259,6 +259,7 @@ class AioSandbox(Sandbox):
         # Set to True after bash.exec answers 404 (image predates /v1/bash/*),
         # so later env-bearing calls fail fast instead of re-hitting HTTP (#3921).
         self._bash_exec_unsupported = False
+        self._execution_outcome_uncertain = threading.Event()
         self._session_creation_state_lock = threading.Lock()
         self._shell_session_creation_state = _SessionCreationState()
         self._bash_session_creation_state = _SessionCreationState()
@@ -402,8 +403,8 @@ class AioSandbox(Sandbox):
         except Exception as e:
             logger.warning(f"Error closing AioSandbox client for {self.id}: {e}")
 
-    @staticmethod
     def _cleanup_session_best_effort(
+        self,
         client,
         session_id: str,
         *,
@@ -416,6 +417,7 @@ class AioSandbox(Sandbox):
                 **({"request_options": request_options} if request_options is not None else {}),
             )
         except Exception as cleanup_error:
+            self._execution_outcome_uncertain.set()
             logger.warning(
                 "Failed to release shell session %s (%s): %s",
                 session_id,
@@ -446,6 +448,7 @@ class AioSandbox(Sandbox):
                 request_options=self._bounded_cleanup_request_options(),
             )
         except Exception as cleanup_error:
+            self._execution_outcome_uncertain.set()
             logger.warning(
                 "Failed to release transient bash session %s: %s",
                 session_id,
@@ -496,6 +499,11 @@ class AioSandbox(Sandbox):
                 tuple(self._shell_session_creation_state.ambiguous),
                 tuple(self._bash_session_creation_state.ambiguous),
             )
+
+    @property
+    def execution_outcome_uncertain(self) -> bool:
+        """Monotonic evidence for host Work settlement; closing sockets cannot clear it."""
+        return self._execution_outcome_uncertain.is_set()
 
     @property
     def requires_container_recycle(self) -> bool:
@@ -1063,15 +1071,15 @@ class AioSandbox(Sandbox):
             "max_retries": 0,
         }
 
-    @classmethod
-    def _transport_timeout_error(cls, timeout: float) -> str:
-        request_timeout = cls._command_request_options(timeout)["timeout_in_seconds"]
+    def _transport_timeout_error(self, timeout: float) -> str:
+        self._execution_outcome_uncertain.set()
+        request_timeout = self._command_request_options(timeout)["timeout_in_seconds"]
         return f"Error: Sandbox command response timed out after {request_timeout} seconds; command outcome is unknown and the command was not retried."
 
-    @classmethod
-    def _transport_failure_error(cls, error: httpx.TransportError, timeout: float) -> str:
+    def _transport_failure_error(self, error: httpx.TransportError, timeout: float) -> str:
+        self._execution_outcome_uncertain.set()
         if isinstance(error, httpx.TimeoutException):
-            return cls._transport_timeout_error(timeout)
+            return self._transport_timeout_error(timeout)
         return "Error: Sandbox command transport failed; command outcome is unknown and the command was not retried."
 
     @staticmethod
@@ -1086,22 +1094,23 @@ class AioSandbox(Sandbox):
     def _unexpected_status_notice(cls, status: str) -> str:
         return f"Error: Sandbox command returned an unexpected status '{status}'; command outcome is unknown and the command was not retried."
 
-    @classmethod
     def _render_shell_output(
-        cls,
+        self,
         output: str,
         exit_code: int | None,
         *,
         status: str | None,
         timeout: float,
     ) -> str:
+        if status == "no_change_timeout" or self._is_unexpected_shell_status(status):
+            self._execution_outcome_uncertain.set()
         if status == "hard_timeout":
-            notice = cls._format_timeout_notice(timeout)
+            notice = self._format_timeout_notice(timeout)
             output = f"{output}\n{notice}" if output else notice
             return f"{output}\nExit Code: 124"
 
         if status == "no_change_timeout":
-            effective_no_change_timeout = cls._effective_no_change_timeout(timeout)
+            effective_no_change_timeout = self._effective_no_change_timeout(timeout)
             notice = f"Command produced no output change for {effective_no_change_timeout} seconds; it may still be running. Command outcome is unknown and was not retried."
             return f"{output}\n{notice}" if output else notice
 
@@ -1109,8 +1118,8 @@ class AioSandbox(Sandbox):
             notice = "Command was terminated because its shell session ended."
             return f"{output}\n{notice}" if output else notice
 
-        if cls._is_unexpected_shell_status(status):
-            notice = cls._unexpected_status_notice(status)
+        if self._is_unexpected_shell_status(status):
+            notice = self._unexpected_status_notice(status)
             return f"{output}\n{notice}" if output else notice
 
         if exit_code not in (0, None):
@@ -1417,11 +1426,13 @@ class AioSandbox(Sandbox):
                         return output, status
 
                     if status == "running":
+                        self._execution_outcome_uncertain.set()
                         notice = "Error: Sandbox command returned a non-terminal running status; command outcome is unknown and was not retried."
                         output = f"{output}\n{notice}" if output else notice
                         return output, status
 
                     if status not in (None, "completed"):
+                        self._execution_outcome_uncertain.set()
                         notice = self._unexpected_status_notice(status)
                         output = f"{output}\n{notice}" if output else notice
                         return output, status
@@ -1431,8 +1442,8 @@ class AioSandbox(Sandbox):
                         # output text (acceptance-checklist evidence).
                         output = f"{output}\nExit Code: {exit_code}" if output else f"Command exited with code {exit_code}"
                     return output if output else "(no output)", status
-                except httpx.TimeoutException:
-                    return self._transport_timeout_error(timeout), "transport_timeout"
+                except httpx.TransportError as exc:
+                    return self._transport_failure_error(exc, timeout), "transport_timeout"
                 except ApiError as e:
                     if self._is_missing_shell_session_error(e):
                         if attempt == 0:
@@ -1627,6 +1638,7 @@ class AioSandbox(Sandbox):
                 else:
                     self._client.file.write_file(file=path, content=content)
             except Exception as e:
+                self._execution_outcome_uncertain.set()
                 logger.error(f"Failed to write file in sandbox: {e}")
                 raise
 
@@ -1736,5 +1748,6 @@ class AioSandbox(Sandbox):
                 base64_content = base64.b64encode(content).decode("utf-8")
                 self._client.file.write_file(file=path, content=base64_content, encoding="base64")
             except Exception as e:
+                self._execution_outcome_uncertain.set()
                 logger.error(f"Failed to update file in sandbox: {e}")
                 raise

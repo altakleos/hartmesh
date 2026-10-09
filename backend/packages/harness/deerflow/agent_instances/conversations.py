@@ -30,6 +30,16 @@ class AgentExecution:
     owner_loop: object | None = field(default=None, compare=False, repr=False)
     execution_allowed: bool = True
     memory_audience_allowed: bool = True
+    work: object | None = field(default=None, compare=False, repr=False)
+
+    async def _validate(self):
+        await self.authority.validate(self)
+        if self.work is not None:
+            from deerflow.agent_instances.work_execution import WorkAttempt
+
+            if not isinstance(self.work, WorkAttempt):
+                raise AgentDenied("The Work capability is unavailable")
+            await self.work.validate(self)
 
     @property
     def thread_paths(self):
@@ -37,10 +47,10 @@ class AgentExecution:
 
     async def validate(self):
         if self.owner_loop is None or asyncio.get_running_loop() is self.owner_loop:
-            return await self.authority.validate(self)
+            return await self._validate()
         if not self.owner_loop.is_running():
             raise AgentDenied("The host execution authority is unavailable")
-        future = asyncio.run_coroutine_threadsafe(self.authority.validate(self), self.owner_loop)
+        future = asyncio.run_coroutine_threadsafe(self._validate(), self.owner_loop)
         return await asyncio.wrap_future(future)
 
     def validate_sync(self):
@@ -52,7 +62,7 @@ class AgentExecution:
             current = None
         if current is self.owner_loop:
             raise AgentDenied("Synchronous instance operations cannot block their authority loop")
-        return asyncio.run_coroutine_threadsafe(self.authority.validate(self), self.owner_loop).result()
+        return asyncio.run_coroutine_threadsafe(self._validate(), self.owner_loop).result()
 
 
 class AgentConversations:
@@ -305,7 +315,7 @@ class AgentConversations:
         if await self.instances.directory.human(PrincipalRef("human", recipient)) is not None and await self._can_read(session, destination, recipient) and not await self._can_read(session, source, recipient):
             raise AgentDenied("Destination conversation audience cannot read referenced context")
 
-    async def context_admission(self, execution, *, mark_memory=False, source_thread_id=None):
+    async def context_admission(self, execution, *, mark_memory=False, mark_work=False, source_thread_id=None):
         """Resource→thread→instance snapshot/marker; no model or SDK calls."""
         async with self.instances.files.registry.admitted(actor=execution.instance.principal, requests={execution.instance.home_id: (Permission.READ, execution.home_generation)}) as (session, _):
             ids = sorted({execution.thread_id, source_thread_id or execution.thread_id})
@@ -332,6 +342,8 @@ class AgentConversations:
             await self.instances._human(execution.requester)
             if grant is None or type(grant.permissions) is not int or not 1 <= grant.permissions <= 7 or not grant.permissions & int(AgentPermission.USE) or not await self._can_read(session, binding, execution.requester.subject_id):
                 raise AgentDenied("Agent context access changed")
+            if mark_work and not grant.permissions & int(AgentPermission.INSPECT):
+                raise AgentDenied("Work context requires current Inspect")
             source = binding
             if source_thread_id is not None:
                 source = await session.get(AgentConversationRow, source_thread_id)
@@ -343,12 +355,12 @@ class AgentConversations:
                 await self.destination_audience(session, identity, source)
             bearing = await session.get(AgentProtectedContextRow, source.thread_id) is not None
             destination_bearing = await session.get(AgentProtectedContextRow, execution.thread_id) is not None
-            if (bearing or destination_bearing or mark_memory) and not compatible:
+            if (bearing or destination_bearing or mark_memory or mark_work) and not compatible:
                 raise AgentDenied("Protected memory context audience is incompatible with writable Home")
             cross_requester = source.requester_id != binding.requester_id
             if cross_requester and not grant.permissions & int(AgentPermission.INSPECT):
                 raise AgentDenied("Copied context requires current Inspect")
-            if (bearing or mark_memory or cross_requester) and await session.get(AgentProtectedContextRow, execution.thread_id) is None:
+            if (bearing or mark_memory or mark_work or cross_requester) and await session.get(AgentProtectedContextRow, execution.thread_id) is None:
                 session.add(AgentProtectedContextRow(thread_id=execution.thread_id))
             return compatible
 

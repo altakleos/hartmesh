@@ -72,6 +72,8 @@ class AgentWorkAttemptRow(Base):
     run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     incarnation: Mapped[str | None] = mapped_column(String(64), nullable=True)
     request: Mapped[dict] = mapped_column(JSON)
+    candidate: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
+    settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 

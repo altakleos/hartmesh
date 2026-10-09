@@ -315,9 +315,28 @@ export interface WorkRecord extends Omit<WorkAssignment, "sources"> {
     question: string;
     resolution?: { actor_id: string; statement: string };
   } | null;
-  attempt: { id: string; status: string } | null;
-  execution_available: false;
-  availability: "records_only";
+  suggestion?: { id: string; statement: string } | null;
+  attempt: {
+    id: string;
+    status:
+      | "starting"
+      | "running"
+      | "stopping"
+      | "uncertain"
+      | "succeeded"
+      | "failed"
+      | "cancelled";
+    thread_id?: string;
+    run_id?: string | null;
+    activation_id?: string;
+    activation_request?: WorkActivation;
+    requester_id?: string;
+    candidate?: WorkRecord["outcome"];
+    settled_at?: string | null;
+    instance_generation?: number;
+  } | null;
+  execution_available: boolean;
+  availability: "explicit_activation" | "records_only";
   work_enabled: boolean;
   needs_mandate_reconciliation: boolean;
   current_contents: "not_checked";
@@ -334,6 +353,7 @@ export interface WorkCommand extends Partial<WorkAssignment> {
     | "reopen"
     | "changes_requested"
     | "reconcile_mandate"
+    | "reconcile_attempt"
     | "accept"
     | "input"
     | "decide";
@@ -344,6 +364,8 @@ export interface WorkCommand extends Partial<WorkAssignment> {
   acknowledge_unchecked_sources?: boolean;
   blocker_id?: string;
   blocker_revision?: number;
+  attempt_id?: string;
+  containment_operation_id?: string;
   request_basis?: {
     id: string;
     revision: number;
@@ -360,6 +382,13 @@ export interface WorkEvent {
   assignment_revision: number;
   created_at: string;
   note: string | null;
+  report?: {
+    statement?: string;
+    sources?: VisibleWorkSource[];
+    attempt_id?: string;
+    run_id?: string;
+    status?: string;
+  } | null;
   record: WorkRecord;
 }
 function workBase(instance: string, work?: string) {
@@ -391,6 +420,25 @@ export function commandWork(
 ) {
   return write<WorkRecord>(
     `${workBase(instance, work)}/commands`,
+    "POST",
+    body,
+    signal,
+  );
+}
+export interface WorkActivation {
+  operation_id: string;
+  expected_revision: number;
+  expected_assignment_revision: number;
+  thread_id: string;
+}
+export function activateWork(
+  instance: string,
+  work: string,
+  body: WorkActivation,
+  signal?: AbortSignal,
+) {
+  return write<WorkRecord>(
+    `${workBase(instance, work)}/activate`,
     "POST",
     body,
     signal,

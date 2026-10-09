@@ -108,7 +108,7 @@ memory scope; never persist this projection or accept it from a client. The
 bounded operational-facts disclosure exception excludes prompts, SOUL, credentials,
 authority objects, internal host details and membership lists.
 
-`AgentWork` owns records-only obligations and human commands. Current Inspect
+`AgentWork` owns obligations and human commands; `WorkExecution` owns host attempts. Current Inspect
 filters before pagination; delegation/factual input adds Use, management adds
 Manage, and HTTP read/write ceilings remain independent. Never add status,
 outcome, attempt or activation writes to the human command DTO. `work_policy`
@@ -130,8 +130,8 @@ attempt and exact evidence-set revision, with explicit statement-only review.
 Current contents remain unchecked. Changes requested/Reopen clear current bindings
 and retain event history. Historical projections do not graft on a newer attempt.
 Policy removal preserves authorized history and management. The additive0038
-migration registers Work/attempt/event tables; attempts remain empty until a
-qualified host execution adapter ships. See `docs/AGENT_WORK.md`.
+migration registers Work/attempt/event tables. Explicit activation reserves attempts
+before existing run admission. See `docs/AGENT_WORK.md`.
 
 `HumanInput` qualifies only Work as its source. One live request per Work matches
 its single blocker/outcome. Manual creation atomically adds an attributed blocker;
@@ -143,3 +143,19 @@ Read state is separate. Current lifecycle/grants gate responses and inbox counts
 recipient eligibility never grants access or silently follows supervisor changes.
 History remains inspectable. No request path invokes run or filesystem effects.
 See `docs/HUMAN_INPUT_REQUESTS.md`; additive0039 owns the four new tables.
+
+Work attempts bind the exact host run before native dispatch. Current Use+Inspect,
+mandate, assignment, source and destination audience checks apply before every
+model/tool call; row-only progress does not retire the attempt. Mark protected
+context independently of memory. `read_work_context` pages replies; `report_work`
+is host-capability bound, with nonhuman attribution and exact idempotent intent.
+Factual assessment/revision acknowledges every response. Derived Work is bounded
+by adopted policy and awaits separate activation. No human authority is model-writable.
+
+Candidate promotion follows durable terminal success and confirmed owned command
+cleanup, SDK closure and no unresolved transport/session evidence. Refresh locked
+Work rows after pre-lock snapshots. SDK close or a lease alone does not prove native
+containment. Late/reused terminal observations remain uncertain. Qualified recovery
+requires current Home ADMIN, exact completed lifecycle scope and captured IDs fenced;
+it preserves effects/candidates without success. Additive0040 owns candidate/settled
+columns and request/event attribution; never rewrite0038/0039.

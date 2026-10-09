@@ -294,7 +294,7 @@ export function RequestDetail({ id }: { id: string }) {
       </p>
       <Link
         className="underline"
-        href={`/workspace/instances?instance=${r.instance_id}`}
+        href={`/workspace/instances?instance=${r.instance_id}&work=${r.work_id}`}
       >
         {c.openWork}
       </Link>

@@ -73,8 +73,8 @@ test("pending containment keeps its exact retry and blocks new conversations", a
       return route.fulfill({
         json: {
           work: [],
-          availability: "records_only",
-          execution_available: false,
+          availability: "explicit_activation",
+          execution_available: true,
         },
       });
     if (path.endsWith("/grants"))
@@ -223,7 +223,7 @@ for (const outcome of ["bound", "failed", "unbound"] as const) {
   });
 }
 
-test("Work delegation is records-only, retries exactly and retains management history", async ({
+test("Work delegation requires separate activation, retries exactly and retains management history", async ({
   page,
 }) => {
   mockLangGraphAPI(page);
@@ -243,7 +243,7 @@ test("Work delegation is records-only, retries exactly and retains management hi
   page.on("request", (request) => {
     if (
       request.method() === "POST" &&
-      /\/(runs|resume|run)$/.test(new URL(request.url()).pathname)
+      /\/(runs|resume|run|activate)$/.test(new URL(request.url()).pathname)
     )
       executionRequests.push(request.url());
   });
@@ -277,8 +277,8 @@ test("Work delegation is records-only, retries exactly and retains management hi
           review: null,
           blocker: null,
           attempt: null,
-          execution_available: false,
-          availability: "records_only",
+          execution_available: true,
+          availability: "explicit_activation",
           work_enabled: true,
           needs_mandate_reconciliation: false,
           created_at: "2026-10-09T00:00:00Z",
@@ -334,8 +334,8 @@ test("Work delegation is records-only, retries exactly and retains management hi
       return route.fulfill({
         json: {
           work: stored ? [stored] : [],
-          availability: "records_only",
-          execution_available: false,
+          availability: "explicit_activation",
+          execution_available: true,
         },
       });
     if (path.includes("/work/")) return route.fulfill({ json: stored });
@@ -364,7 +364,7 @@ test("Work delegation is records-only, retries exactly and retains management hi
   });
   await page.goto(`/workspace/instances?instance=${id}`);
   await expect(
-    page.getByText(/Records only\. Delegation saves an assignment/),
+    page.getByText(/Delegation saves an assignment\. Work on this or Resume/),
   ).toBeVisible();
   await page
     .getByLabel("Objective", { exact: true })
@@ -385,6 +385,9 @@ test("Work delegation is records-only, retries exactly and retains management hi
     page.getByRole("button", { name: "Cancel Work", exact: true }),
   ).toBeVisible();
   expect(postCount).toBe(2);
+  await expect(
+    page.getByRole("button", { name: "Work on this", exact: true }),
+  ).toBeEnabled();
   await page.getByRole("button", { name: "Cancel Work", exact: true }).click();
   await expect(
     page.getByRole("button", {
