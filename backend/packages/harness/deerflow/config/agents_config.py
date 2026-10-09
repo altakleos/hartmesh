@@ -16,6 +16,7 @@ from typing import Annotated, Literal
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, StringConstraints, field_validator, model_validator
 
 from deerflow.config.paths import get_paths
+from deerflow.config.work_policy import WorkPolicy
 from deerflow.knowledge_scope import KnowledgeScope
 from deerflow.runtime.user_context import get_effective_user_id
 
@@ -224,6 +225,8 @@ class AgentConfig(BaseModel):
     # Default for new Gateway turns; explicit message scope overrides it.
     # Kept outside managed fields so harness self-updates preserve the binding.
     knowledge_scope: KnowledgeScope | None = None
+    # Human-managed; changing a definition does not change an adopted instance.
+    work_policy: WorkPolicy | None = None
     # Controls which deployment-level subagents this custom agent may invoke:
     # None = all currently enabled definitions, [] = none, list = allowlist.
     # The default Lead Agent has no AgentConfig and therefore keeps access to

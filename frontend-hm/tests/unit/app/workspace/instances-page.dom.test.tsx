@@ -92,6 +92,7 @@ function show() {
   return { ...render(ui()), ui };
 }
 beforeEach(() => {
+  rs.mocked(api.listWork).mockResolvedValue({ work: [] });
   state.enabled = true;
   state.userId = "alice";
   state.permissions = 7;

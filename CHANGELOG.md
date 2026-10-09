@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Work records and management
+
+- Add optional adopted-definition Work policy and durable assignments with
+  current-access visibility, attributed history, revision-checked management
+  and exact retry receipts. Keep the platform generic; domain procedures remain
+  in definitions, skills and trusted extensions.
+- Add records-only Work controls to the instance page and policy opt-in to
+  custom-definition settings. Delegation and human responses do not run the AI
+  employee. Activation, completion reporting and addressed attention remain
+  unavailable in this stage.
+- Separate factual input, manager decisions and acceptance of an exact outcome
+  statement. File references require current source access; the UI explicitly
+  labels their current contents unchecked.
+
+### Schema changes
+
+- Add migration `0038_agent_work` after published `0037_agent_lifecycle`, creating
+  `agent_work`, `agent_work_attempts` and `agent_work_events`. Used records have
+  no user/chat deletion cascade and cannot be erased by downgrade. Attempt rows
+  are reserved for future host activation; these APIs create none.
+- Add optional `work_policy` to custom agent definitions. Existing adopted
+  documents retain their exact bytes/hashes; missing policy disables new Work.
+  No consumer file-format change, data movement or configuration-version bump.
+
 ## [2.2.0+hartmesh.44] - 2026-10-08
 
 ### Persistent agent instances

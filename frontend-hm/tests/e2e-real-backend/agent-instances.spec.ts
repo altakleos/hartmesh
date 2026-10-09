@@ -69,6 +69,14 @@ test("pending containment keeps its exact retry and blocks new conversations", a
           soul: "Adopted company instructions",
         },
       });
+    if (path.endsWith("/work"))
+      return route.fulfill({
+        json: {
+          work: [],
+          availability: "records_only",
+          execution_available: false,
+        },
+      });
     if (path.endsWith("/grants"))
       return route.fulfill({ json: { grants: [] } });
     if (path.endsWith("/memory"))
@@ -214,3 +222,179 @@ for (const outcome of ["bound", "failed", "unbound"] as const) {
     await expect(page.getByRole("textbox").first()).toBeFocused();
   });
 }
+
+test("Work delegation is records-only, retries exactly and retains management history", async ({
+  page,
+}) => {
+  mockLangGraphAPI(page);
+  await page.route("**/api/features", (route) =>
+    route.fulfill({
+      json: {
+        agents_api: { enabled: true },
+        storage_spaces: { enabled: true },
+      },
+    }),
+  );
+  let stored: Record<string, unknown> | null = null;
+  let delegated: Record<string, unknown> | null = null;
+  let postCount = 0;
+  const history: Record<string, unknown>[] = [];
+  const executionRequests: string[] = [];
+  page.on("request", (request) => {
+    if (
+      request.method() === "POST" &&
+      /\/(runs|resume|run)$/.test(new URL(request.url()).pathname)
+    )
+      executionRequests.push(request.url());
+  });
+  await page.route("**/api/spaces**", (route) =>
+    route.fulfill({ json: { spaces: [] } }),
+  );
+  await page.route("**/api/agent-instances**", async (route) => {
+    const path = new URL(route.request().url()).pathname;
+    const isPost = route.request().method() === "POST";
+    if (path.endsWith("/work") && isPost) {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      postCount += 1;
+      if (delegated) expect(body).toEqual(delegated);
+      else {
+        delegated = body;
+        stored = {
+          ...body,
+          id: "c".repeat(32),
+          instance_id: id,
+          creator_id: "default",
+          definition_revision: resident.definition_revision,
+          revision: 1,
+          assignment_revision: 1,
+          status: "open",
+          review_required: true,
+          review_state: "none",
+          sources: [],
+          progress: "",
+          next_action: "",
+          outcome: null,
+          review: null,
+          blocker: null,
+          attempt: null,
+          execution_available: false,
+          availability: "records_only",
+          work_enabled: true,
+          needs_mandate_reconciliation: false,
+          created_at: "2026-10-09T00:00:00Z",
+          updated_at: "2026-10-09T00:00:00Z",
+        };
+        history.unshift({
+          id: "event-one",
+          actor_id: "default",
+          actor_kind: "human",
+          action: "delegate",
+          revision: 1,
+          assignment_revision: 1,
+          created_at: stored.created_at,
+          record: { ...stored },
+          note: null,
+        });
+        return route.fulfill({
+          status: 503,
+          json: { detail: "Simulated lost acknowledgement after commit" },
+        });
+      }
+      return route.fulfill({ status: 201, json: stored });
+    }
+    if (path.endsWith("/commands") && isPost) {
+      const body = route.request().postDataJSON() as Record<string, unknown>;
+      expect(body).toMatchObject({
+        action: "cancel",
+        expected_revision: 1,
+        expected_assignment_revision: 1,
+      });
+      stored = {
+        ...stored,
+        status: "cancelled",
+        revision: 2,
+        assignment_revision: 2,
+      };
+      history.unshift({
+        id: "event-two",
+        actor_id: "default",
+        actor_kind: "human",
+        action: "cancel",
+        revision: 2,
+        assignment_revision: 2,
+        created_at: "2026-10-09T00:01:00Z",
+        record: { ...stored },
+        note: null,
+      });
+      return route.fulfill({ json: stored });
+    }
+    if (path.endsWith("/history"))
+      return route.fulfill({ json: { events: history } });
+    if (path.endsWith("/work"))
+      return route.fulfill({
+        json: {
+          work: stored ? [stored] : [],
+          availability: "records_only",
+          execution_available: false,
+        },
+      });
+    if (path.includes("/work/")) return route.fulfill({ json: stored });
+    if (path.endsWith("/definition"))
+      return route.fulfill({
+        json: {
+          revision: resident.definition_revision,
+          config: {
+            name: "analyst",
+            work_policy: { enabled: true, review_required: true },
+          },
+          soul: "Maintain useful documentation",
+        },
+      });
+    if (path.endsWith("/lifecycle"))
+      return route.fulfill({ json: { operations: [] } });
+    if (path.endsWith("/grants"))
+      return route.fulfill({ json: { grants: [] } });
+    if (path.endsWith("/memory"))
+      return route.fulfill({
+        status: 501,
+        json: { detail: "Scoped memory unavailable in this fixture" },
+      });
+    if (path.endsWith("/" + id)) return route.fulfill({ json: resident });
+    return route.fulfill({ json: { instances: [resident] } });
+  });
+  await page.goto(`/workspace/instances?instance=${id}`);
+  await expect(
+    page.getByText(/Records only\. Delegation saves an assignment/),
+  ).toBeVisible();
+  await page
+    .getByLabel("Objective", { exact: true })
+    .fill("Review the deployment guide");
+  await page
+    .getByLabel("Success criteria", { exact: true })
+    .fill("Explain verified gaps");
+  await page
+    .getByRole("button", { name: "Delegate Work", exact: true })
+    .click();
+  await expect(
+    page.getByText(/The request outcome is unconfirmed/),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Retry same request", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Cancel Work", exact: true }),
+  ).toBeVisible();
+  expect(postCount).toBe(2);
+  await page.getByRole("button", { name: "Cancel Work", exact: true }).click();
+  await expect(
+    page.getByRole("button", {
+      name: "Review the deployment guide · Cancelled · Normal",
+      exact: true,
+    }),
+  ).toBeVisible();
+  await page.getByText("History", { exact: true }).click();
+  await expect(
+    page.getByText("Human: default", { exact: false }).first(),
+  ).toBeVisible();
+  expect(executionRequests).toEqual([]);
+});

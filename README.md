@@ -70,6 +70,13 @@ current rights. Explicit company copies start with a separate empty Home and mem
 transfer selected files through Spaces and memory through export/import. Existing
 default/custom-agent chats retain their behavior.
 
+[Work records](docs/AGENT_WORK.md) let authorized humans delegate objectives,
+set success criteria and manage an AI employee’s shared commitments across
+conversations. Enable Work in a custom definition’s settings, then explicitly
+adopt that definition for the instance. The instance page labels this capability
+**records only**: saving or responding to Work does not start execution. Current
+Inspect grants control visibility; referenced files retain separate access checks.
+
 The [Storage Spaces foundation](docs/STORAGE_SPACES.md) adds stable resource
 identity, personal/company custody and explicit typed grants. Company custody
 does not make data public. With a qualified provider volume inventory and a

@@ -24,6 +24,7 @@ from app.gateway.health import READINESS_CHECKPOINTER_CONFIG_ATTR, readiness_pay
 from app.gateway.routers import (
     account_export,
     agent_instances,
+    agent_work,
     agents,
     artifacts,
     assistants_compat,
@@ -1259,6 +1260,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     # Agents API is mounted at /api/agents
     app.include_router(agents.router)
     app.include_router(agent_instances.router)
+    app.include_router(agent_work.router)
     # Projects API is mounted at /api/projects
     app.include_router(projects.router)
     # Project document shelf API is mounted at /api/projects/{id}/documents

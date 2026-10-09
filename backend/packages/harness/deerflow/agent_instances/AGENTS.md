@@ -107,3 +107,28 @@ their own layout. Lead and child prompts share runtime layout, actual actions an
 memory scope; never persist this projection or accept it from a client. The
 bounded operational-facts disclosure exception excludes prompts, SOUL, credentials,
 authority objects, internal host details and membership lists.
+
+`AgentWork` owns records-only obligations and human commands. Current Inspect
+filters before pagination; delegation/factual input adds Use, management adds
+Manage, and HTTP read/write ceilings remain independent. Never add status,
+outcome, attempt or activation writes to the human command DTO. `work_policy`
+is human-managed and becomes effective only through existing definition adoption;
+model self-update cannot change it or synthesize defaults into old snapshots.
+
+Mutations reserve the SQLite writer or lock sorted source resources → instance
+→ Work. Capture persisted decision sources before locking and compare them again
+under the parent/Work locks. Idempotency binds instance/actor-kind/actor/Work/exact
+request and rechecks current authority before returning a redacted receipt.
+Sources are bounded Space locators, admitted against the current Inspect audience;
+every current/history/retry projection rechecks source READ. No automatic source
+content copying or file-version claim. Plain-text human input is an explicit
+shared disclosure, never a canonical decision by implication.
+
+Assignment changes supersede blockers; typed blocker/outcome/review payloads bind
+exact assignment revisions. Outcome acceptance requires a matching reconciled
+attempt and exact evidence-set revision, with explicit statement-only review.
+Current contents remain unchecked. Changes requested/Reopen clear current bindings
+and retain event history. Historical projections do not graft on a newer attempt.
+Policy removal preserves authorized history and management. The additive0038
+migration registers Work/attempt/event tables; attempts remain empty until a
+qualified host execution adapter ships. See `docs/AGENT_WORK.md`.
