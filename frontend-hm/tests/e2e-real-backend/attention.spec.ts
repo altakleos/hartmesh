@@ -53,7 +53,14 @@ test("Attention discovers addressed input without opening an AI employee and rep
   page.on("request", (request) => {
     const path = new URL(request.url()).pathname;
     if (request.method() === "POST" && /\/runs(?:\/|$)/.test(path)) runs++;
-    if (path === "/workspace/instances") overviews++;
+  });
+  page.on("framenavigated", (frame) => {
+    // Production Link prefetches are not visits to the AI employee overview.
+    if (
+      frame === page.mainFrame() &&
+      new URL(frame.url()).pathname === "/workspace/instances"
+    )
+      overviews++;
   });
   await page.route("**/api/agent-instances/**/work/**", (route) =>
     route.fulfill({
