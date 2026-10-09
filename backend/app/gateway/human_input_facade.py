@@ -78,6 +78,14 @@ class HostHumanInputActions(HumanInputActions):
         if operation in {"list", "get"}:
             args["can_write"] = "agents:write" in permissions
         try:
-            return await (work.command if operation == "work_command" else getattr(service, operation))(actor=actor, **args)
+            if operation == "work_command":
+                from app.gateway.work_execution import dispatch_work_stop
+
+                can_stop = "runs:cancel" in permissions
+                result = await work.command(actor=actor, **args, can_stop=can_stop)
+                if can_stop:
+                    await dispatch_work_stop(request, work, actor=actor, instance_id=args["instance_id"], work_id=args["work_id"])
+                return result
+            return await getattr(service, operation)(actor=actor, **args)
         except TypeError:
             raise HTTPException(422, "Missing or invalid human action arguments") from None

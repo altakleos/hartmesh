@@ -25,7 +25,7 @@ export function createEnUS(product: string): Translations {
       unavailable:
         "Attention is unavailable with the current deployment or permissions.",
       notice:
-        "Replies are saved without starting a run. AI employee execution and assessment are not available yet.",
+        "Replies are saved without starting a run. Open Work to explicitly resume the AI employee.",
       question: "Question",
       reason: "Why it is needed",
       expected: "Expected response",
@@ -78,7 +78,7 @@ export function createEnUS(product: string): Translations {
       requestLink: "View requests in Attention",
       unchecked: "Current file contents are unchecked.",
       noAssessment:
-        "Information awaits assessment during future explicit Work execution.",
+        "Information awaits assessment. An authorized human can open Work and explicitly resume the AI employee.",
       outcome: "Submitted outcome statement",
       state: "Request state",
       activity: "Last activity",
@@ -89,19 +89,49 @@ export function createEnUS(product: string): Translations {
         "New requests require active, reconciled Work with an enabled policy.",
     },
     agentWork: {
+      newConversation: "Use a new execution conversation",
+      reconcileAttempt: "Reconcile contained attempt",
+      containmentReceipt: "Completed containment operation",
+      containmentNotice:
+        "The server verifies that this exact prior environment is fenced. Recovery preserves reports and effects; it does not declare success or resume execution.",
+
+      responsibilities: "Responsibilities",
+      currentWork: "Current work on this page",
+      needsInput: "Needs attention on this page",
+      recentOutcomes: "Recent outcomes on this page",
+      activate: "Work on this",
+      resume: "Resume",
+      recoverActivation: "Recover activation receipt",
+      execution: "Execution attempt",
+      openConversation: "Open execution conversation",
+      candidate:
+        "Completion report awaiting confirmation; not submitted for review.",
+      uncertain:
+        "Execution or cleanup remains uncertain. A manager with Home ADMIN must contain the prior environment and reconcile this attempt before another activation.",
+      suggestion: "Suggested follow-up",
+      delegateSuggestion: "Prepare delegation",
+      attemptStatus: {
+        starting: "Starting",
+        running: "Running",
+        stopping: "Stop pending",
+        uncertain: "Outcome uncertain",
+        succeeded: "Finished",
+        failed: "Failed",
+        cancelled: "Cancelled",
+      },
       resetResponse: "Reset response for current record",
       replaceUnavailable:
         "Replace the reference list, including removal of unavailable references.",
       title: "Work",
       recordsOnly:
-        "Records only. Delegation saves an assignment; AI employee execution is not available yet.",
+        "Delegation saves an assignment. Work on this or Resume explicitly starts the AI employee; replies and due targets never start a run.",
       visibility:
         "Tracked delegation requires Use and Inspect, including visibility into this AI employee’s shared work.",
       policyDisabled:
         "To delegate, enable Work in the definition’s settings, then deliberately adopt that definition for this AI employee. Existing records remain available.",
       policyEnabled: "Enable tracked Work",
       policyNotice:
-        "This changes the definition. Existing AI employees keep their adopted policy until a manager adopts the updated definition. Execution remains unavailable.",
+        "This changes the definition. Existing AI employees keep their adopted policy until a manager adopts the updated definition. Execution requires a separate explicit activation.",
       reviewRequired: "Require human review",
       responsibility: "Responsibility",
       objective: "Objective",

@@ -19,14 +19,25 @@ rs.mock("@/core/auth/AuthProvider", () => ({
     },
   }),
 }));
-rs.mock("@/core/agent-instances/api", { spy: true });
+rs.mock("@/core/agent-instances/api", () => ({
+  ...rs.requireActual<typeof api>("@/core/agent-instances/api"),
+  listWork: rs.fn(),
+  getWork: rs.fn(),
+  workHistory: rs.fn(),
+  delegateWork: rs.fn(),
+  commandWork: rs.fn(),
+  createInstanceConversation: rs.fn(),
+  activateWork: rs.fn(),
+}));
 rs.mock("@/core/spaces/api", () => ({
   listSpaces: rs.fn().mockResolvedValue({ spaces: [] }),
+  getSpace: rs.fn().mockResolvedValue({ permissions: 0 }),
 }));
 import { WorkPanel } from "@/components/workspace/instances/work-panel";
 import * as api from "@/core/agent-instances/api";
 import { FileActionLifetimeProvider } from "@/core/file-areas/file-action-lifetime";
 import { I18nProvider } from "@/core/i18n/context";
+import { getSpace } from "@/core/spaces/api";
 
 const instance: api.AgentInstance = {
   id: "a".repeat(32),
@@ -63,8 +74,8 @@ function record(): api.WorkRecord {
     review: null,
     blocker: null,
     attempt: null,
-    execution_available: false,
-    availability: "records_only",
+    execution_available: true,
+    availability: "explicit_activation",
     work_enabled: true,
     needs_mandate_reconciliation: false,
     current_contents: "not_checked",
@@ -72,7 +83,13 @@ function record(): api.WorkRecord {
     updated_at: "2026-10-09T00:00:00Z",
   };
 }
-function show(permissions = 7, canWrite = true, enabled = true) {
+function show(
+  permissions = 7,
+  canWrite = true,
+  enabled = true,
+  canActivate = false,
+  operations: api.LifecycleOperation[] = [],
+) {
   const client = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
@@ -84,6 +101,10 @@ function show(permissions = 7, canWrite = true, enabled = true) {
             instance={{ ...instance, permissions }}
             policy={{ enabled, review_required: true }}
             canRead
+            canActivate={canActivate}
+            canCreateConversation={canActivate}
+            canStop={canActivate}
+            lifecycleOperations={operations}
             canWrite={canWrite}
             lifecyclePending={false}
           />
@@ -94,6 +115,18 @@ function show(permissions = 7, canWrite = true, enabled = true) {
   return { ...render(ui()), ui, client };
 }
 beforeEach(() => {
+  rs.mocked(getSpace)
+    .mockReset()
+    .mockResolvedValue({
+      id: instance.home_id!,
+      backing_handle: "test",
+      name: "Home",
+      custody: { kind: "company", principal: null },
+      mode: "native",
+      generation: 1,
+      status: "active",
+      permissions: 0,
+    });
   state.user = "alice";
   rs.mocked(api.listWork).mockReset().mockResolvedValue({ work: [] });
   rs.mocked(api.getWork)
@@ -102,8 +135,265 @@ beforeEach(() => {
   rs.mocked(api.workHistory).mockReset().mockResolvedValue({ events: [] });
   rs.mocked(api.delegateWork).mockReset().mockResolvedValue(record());
   rs.mocked(api.commandWork).mockReset().mockResolvedValue(record());
+  rs.mocked(api.createInstanceConversation)
+    .mockReset()
+    .mockResolvedValue({ thread_id: "work-chat" });
+  rs.mocked(api.activateWork).mockReset().mockResolvedValue(record());
 });
 afterEach(cleanup);
+it("allows exact containment recovery while its activation acknowledgement remains pending", async () => {
+  rs.mocked(getSpace).mockResolvedValue({
+    id: instance.home_id!,
+    backing_handle: "test",
+    name: "Home",
+    custody: { kind: "company", principal: null },
+    mode: "native",
+    generation: 1,
+    status: "active",
+    permissions: 15,
+  });
+  let current = record();
+  const operations: api.LifecycleOperation[] = [];
+  rs.mocked(api.listWork).mockImplementation(async () => ({ work: [current] }));
+  rs.mocked(api.getWork).mockImplementation(async () => current);
+  rs.mocked(api.activateWork).mockImplementationOnce(
+    async (_instance, _work, body) => {
+      current = {
+        ...current,
+        revision: 2,
+        attempt: {
+          id: "e".repeat(32),
+          status: "starting",
+          activation_id: body.operation_id,
+          instance_generation: 1,
+          thread_id: body.thread_id,
+        },
+      };
+      throw new Error("lost acknowledgement");
+    },
+  );
+  const view = show(7, true, true, true, operations);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Work on this" }));
+  await screen.findByRole("button", { name: "Retry same request" });
+  operations.push({
+    operation_id: "f".repeat(32),
+    generation: 1,
+    action: "suspend",
+    complete: true,
+  });
+  view.rerender(view.ui());
+  fireEvent.click(screen.getByRole("button", { name: "Refresh Work" }));
+  fireEvent.change(
+    await screen.findByLabelText("Completed containment operation"),
+    { target: { value: operations[0]!.operation_id } },
+  );
+  const notes = screen.getAllByLabelText("Note or response");
+  fireEvent.change(notes[notes.length - 1]!, {
+    target: { value: "Environment contained" },
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reconcile contained attempt" }),
+  );
+  await waitFor(() => expect(api.commandWork).toHaveBeenCalledTimes(1));
+  expect(rs.mocked(api.commandWork).mock.calls[0]?.[2]).toMatchObject({
+    action: "reconcile_attempt",
+    attempt_id: current.attempt!.id,
+    expected_revision: 2,
+  });
+  expect(api.activateWork).toHaveBeenCalledTimes(1);
+});
+it("reconciles the exact contained attempt using captured revisions and a human note", async () => {
+  rs.mocked(getSpace).mockResolvedValue({
+    id: instance.home_id!,
+    backing_handle: "test",
+    name: "Home",
+    custody: { kind: "company", principal: null },
+    mode: "native",
+    generation: 1,
+    status: "active",
+    permissions: 15,
+  });
+  const current: api.WorkRecord = {
+    ...record(),
+    attempt: {
+      id: "e".repeat(32),
+      status: "uncertain",
+      instance_generation: 1,
+    },
+  };
+  rs.mocked(api.listWork).mockResolvedValue({ work: [current] });
+  rs.mocked(api.getWork).mockResolvedValue(current);
+  const intent = "f".repeat(32);
+  show(7, true, true, true, [
+    { operation_id: intent, action: "suspend", generation: 1, complete: true },
+  ]);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  fireEvent.change(
+    await screen.findByLabelText("Completed containment operation"),
+    { target: { value: intent } },
+  );
+  const notes = screen.getAllByLabelText("Note or response");
+  fireEvent.change(notes[notes.length - 1]!, {
+    target: { value: "Native environment contained; inspect effects" },
+  });
+  fireEvent.click(
+    screen.getByRole("button", { name: "Reconcile contained attempt" }),
+  );
+  await waitFor(() => expect(api.commandWork).toHaveBeenCalledTimes(1));
+  expect(rs.mocked(api.commandWork).mock.calls[0]?.[2]).toMatchObject({
+    action: "reconcile_attempt",
+    attempt_id: current.attempt!.id,
+    containment_operation_id: intent,
+    expected_revision: 1,
+    expected_assignment_revision: 1,
+  });
+  expect(api.activateWork).not.toHaveBeenCalled();
+});
+it("resumes settled Work in an explicitly chosen new conversation", async () => {
+  const current: api.WorkRecord = {
+    ...record(),
+    attempt: {
+      id: "e".repeat(32),
+      status: "succeeded",
+      thread_id: "deleted-chat",
+    },
+  };
+  rs.mocked(api.listWork).mockResolvedValue({ work: [current] });
+  rs.mocked(api.getWork).mockResolvedValue(current);
+  show(7, true, true, true);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  fireEvent.click(
+    await screen.findByLabelText("Use a new execution conversation"),
+  );
+  fireEvent.click(screen.getByRole("button", { name: "Resume" }));
+  await waitFor(() => expect(api.activateWork).toHaveBeenCalledTimes(1));
+  expect(api.createInstanceConversation).toHaveBeenCalledTimes(1);
+  expect(rs.mocked(api.activateWork).mock.calls[0]?.[2].thread_id).toBe(
+    "work-chat",
+  );
+});
+it("recovers a stale activation rejection when current Work confirms no reservation", async () => {
+  rs.mocked(api.listWork).mockResolvedValue({ work: [record()] });
+  rs.mocked(api.activateWork).mockRejectedValue(
+    new api.InstanceApiError(409, "Work changed"),
+  );
+  show(7, true, true, true);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Work on this" }));
+  expect(await screen.findByRole("alert")).toHaveProperty(
+    "textContent",
+    "Work changed",
+  );
+  await waitFor(() =>
+    expect(
+      screen.getByRole("button", {
+        name: "Work on this",
+      }),
+    ).toHaveProperty("disabled", false),
+  );
+  expect(
+    screen.queryByRole("button", { name: "Retry same request" }),
+  ).toBeNull();
+  expect(api.activateWork).toHaveBeenCalledTimes(1);
+});
+it("retries the same activation after a lost acknowledgement without creating another conversation", async () => {
+  rs.mocked(api.listWork).mockResolvedValue({ work: [record()] });
+  rs.mocked(api.activateWork).mockRejectedValueOnce(new Error("response lost"));
+  show(7, true, true, true);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Work on this" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Retry same request" }),
+  );
+  await waitFor(() => expect(api.activateWork).toHaveBeenCalledTimes(2));
+  expect(api.createInstanceConversation).toHaveBeenCalledTimes(1);
+  expect(rs.mocked(api.activateWork).mock.calls[0]?.[2]).toEqual(
+    rs.mocked(api.activateWork).mock.calls[1]?.[2],
+  );
+  expect(rs.mocked(api.activateWork).mock.calls[0]?.[2]).toMatchObject({
+    thread_id: "work-chat",
+    expected_revision: 1,
+    expected_assignment_revision: 1,
+  });
+});
+it("retries a lost conversation acknowledgement using the same creation identity", async () => {
+  rs.mocked(api.listWork).mockResolvedValue({ work: [record()] });
+  rs.mocked(api.createInstanceConversation).mockRejectedValueOnce(
+    new Error("response lost"),
+  );
+  show(7, true, true, true);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  fireEvent.click(await screen.findByRole("button", { name: "Work on this" }));
+  fireEvent.click(
+    await screen.findByRole("button", { name: "Retry same request" }),
+  );
+  await waitFor(() => expect(api.activateWork).toHaveBeenCalledTimes(1));
+  expect(rs.mocked(api.createInstanceConversation).mock.calls[0]?.[1]).toBe(
+    rs.mocked(api.createInstanceConversation).mock.calls[1]?.[1],
+  );
+});
+it("keeps uncertain completion reports separate from review and forbids replacement", async () => {
+  const current: api.WorkRecord = {
+    ...record(),
+    attempt: {
+      id: "e".repeat(32),
+      status: "uncertain",
+      thread_id: "work-chat",
+      candidate: {
+        id: "f".repeat(32),
+        statement: "Provisional result",
+        evidence_revision: 1,
+        sources: [],
+      },
+    },
+  };
+  rs.mocked(api.listWork).mockResolvedValue({ work: [current] });
+  rs.mocked(api.getWork).mockResolvedValue(current);
+  show(7, true, true, true);
+  fireEvent.click(
+    await screen.findByRole("button", {
+      name: "Review the guide · Open · Normal",
+    }),
+  );
+  expect(await screen.findByText("Provisional result")).toBeTruthy();
+  expect(
+    screen.getByText(/Completion report awaiting confirmation/),
+  ).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Resume" })).toBeNull();
+  expect(
+    screen.queryByRole("button", { name: "Accept outcome statement" }),
+  ).toBeNull();
+  expect(
+    screen
+      .getByRole("link", { name: "Open execution conversation" })
+      .getAttribute("href"),
+  ).toBe("/workspace/chats/work-chat");
+});
 it("explains shared visibility before Use-only humans can compose or read Work", () => {
   show(1);
   expect(
@@ -115,9 +405,7 @@ it("explains shared visibility before Use-only humans can compose or read Work",
 it("delegates records without claiming execution and retries an uncertain response exactly", async () => {
   rs.mocked(api.delegateWork).mockRejectedValueOnce(new Error("response lost"));
   show(3);
-  expect(
-    screen.getByText(/AI employee execution is not available yet/),
-  ).toBeTruthy();
+  expect(screen.getByText(/Delegation saves an assignment/)).toBeTruthy();
   expect(screen.queryByRole("button", { name: /^(Run|Resume)$/ })).toBeNull();
   expect(screen.queryByLabelText("Priority")).toBeNull();
   fireEvent.change(screen.getByLabelText("Objective"), {

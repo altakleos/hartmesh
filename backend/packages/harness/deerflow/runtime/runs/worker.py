@@ -1000,10 +1000,28 @@ async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRe
         try:
             await _run_agent(bridge, run_manager, record, progress=progress, **kwargs)
         finally:
-            if instance_environment is not None and instance_environment.provider is not None:
-                from deerflow.utils.file_io import await_drained, run_file_io
+            cleanup_settled = False
+            try:
+                cleanup_known = True
+                if instance_environment is not None and instance_environment.provider is not None:
+                    from deerflow.utils.file_io import await_drained, run_file_io
 
-                await await_drained(run_file_io(instance_environment.provider.close))
+                    sandbox = instance_environment.provider.sandbox
+                    cleanup_known = not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))
+                    await await_drained(run_file_io(instance_environment.provider.close))
+                    cleanup_known = cleanup_known and not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))
+                cleanup_settled = cleanup_known
+            finally:
+                execution = getattr(kwargs.get("ctx"), "agent_execution", None)
+                if execution is not None and execution.work is not None:
+                    try:
+                        # The ordinary completion hook precedes SDK cleanup. Work
+                        # promotion needs this later boundary and a durable status.
+                        stored = await run_manager._store.get(record.run_id, user_id=record.user_id) if run_manager._store is not None else None
+                        settled = bool(cleanup_settled and execution.work.owned_cleanup_confirmed and stored and stored.get("status") == record.status.value and stored.get("stop_reason") != "orphan_recovered")
+                        await execution.work.finish(execution, record, settled=settled)
+                    except Exception:
+                        logger.warning("Work settlement remains pending for run %s", record.run_id, exc_info=True)
             progress.close()
             journal.mark(TurnPhase.TERMINAL)
             journal.set_outcome(str(getattr(record, "status", "unknown")))
@@ -1164,6 +1182,9 @@ async def _run_agent(
                 track_token_usage=getattr(run_events_config, "track_token_usage", True),
                 progress_reporter=lambda snapshot: run_manager.update_run_progress(run_id, **snapshot),
             )
+
+        if ctx.agent_execution is not None and ctx.agent_execution.work is not None:
+            await ctx.agent_execution.work.bind(ctx.agent_execution, record, thread_incarnation)
 
         # Keep cancellable preflight work under the worker's terminal guard so
         # cancellation cannot strand a pending RunRecord or stream subscriber.
@@ -2057,6 +2078,8 @@ async def _run_agent(
                     from deerflow.sandbox.lease import release_sandbox_execution_lease_async
 
                     await release_sandbox_execution_lease_async(runtime_ctx)
+                    if ctx.agent_execution is not None and ctx.agent_execution.work is not None:
+                        ctx.agent_execution.work.owned_cleanup_confirmed = True
                 except Exception:
                     logger.warning("Failed to release sandbox execution lease for run %s", run_id, exc_info=True)
                 except BaseException as exc:

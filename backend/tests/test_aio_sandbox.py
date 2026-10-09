@@ -136,6 +136,36 @@ def test_async_shell_polling_returns_only_the_current_command_output(sandbox):
     sandbox._client.shell.wait_for_process.assert_called_once()
 
 
+def test_work_completion_preserves_failed_session_cleanup(sandbox):
+    sandbox._client.shell.cleanup_session.side_effect = RuntimeError("control unavailable")
+    sandbox._cleanup_session_best_effort(sandbox._client, "owned-session", context="test")
+    assert sandbox.execution_outcome_uncertain
+    sandbox.close()
+    assert sandbox.execution_outcome_uncertain
+
+
+def test_work_completion_preserves_unknown_command_outcome(sandbox):
+    assert not sandbox.execution_outcome_uncertain
+    sandbox._transport_failure_error(httpx.ReadTimeout("lost response"), 30)
+    assert sandbox.execution_outcome_uncertain
+
+
+@pytest.mark.parametrize("operation", ["write", "append", "update", "env"])
+def test_work_completion_preserves_lost_mutation_reply(sandbox, operation):
+    error = httpx.ReadError("reply lost after dispatch")
+    if operation == "env":
+        sandbox._client.bash.exec.side_effect = error
+        assert "transport failed" in sandbox.execute_command("echo done", env={"EXAMPLE": "value"})
+    else:
+        sandbox._client.file.write_file.side_effect = error
+        with pytest.raises(httpx.ReadError):
+            if operation == "update":
+                sandbox.update_file("/result.txt", b"value")
+            else:
+                sandbox.write_file("/result.txt", "value", append=operation == "append")
+    assert sandbox.execution_outcome_uncertain
+
+
 def test_async_cancel_does_not_clean_the_shell_before_its_parent_abort(sandbox):
     polling = threading.Event()
     release_poll = threading.Event()

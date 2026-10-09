@@ -75,3 +75,8 @@ recovery applies only before dispatch was accepted.
 Cancelled callers wait for the abort control's bounded completion before normal
 session cleanup. Cleanup itself kills foreground processes and must not overtake
 the parent-shell kill, or Bash can execute the rest of the cancelled command.
+
+`execution_outcome_uncertain` is monotonic per SDK client. Lost command/mutating-file
+replies and failed session cleanup prevent Work completion confirmation even when
+socket close returns. `requires_container_recycle` also covers pending/ambiguous
+session creation. Neither flag grants permission to retire a native storage writer.

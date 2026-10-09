@@ -73,9 +73,11 @@ default/custom-agent chats retain their behavior.
 [Work records](docs/AGENT_WORK.md) let authorized humans delegate objectives,
 set success criteria and manage an AI employee’s shared commitments across
 conversations. Enable Work in a custom definition’s settings, then explicitly
-adopt that definition for the instance. The instance page labels this capability
-**records only**: saving or responding to Work does not start execution. Current
-Inspect grants control visibility; referenced files retain separate access checks.
+adopt that definition for the instance. **Work on this** and **Resume** explicitly
+start an AI employee attempt; saving an assignment or response never starts a run.
+The Work page separates progress, blockers, execution attempts and human review.
+Current Inspect grants control visibility; referenced files retain separate access
+checks. Uncertain execution requires qualified containment and explicit recovery.
 [Attention](docs/HUMAN_INPUT_REQUESTS.md) gives human collaborators addressed
 requests for information, decisions and review, with current-access counts,
 routing recovery and attributed replies. Responses never start an AI employee

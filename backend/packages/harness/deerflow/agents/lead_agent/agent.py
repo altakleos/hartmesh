@@ -1360,6 +1360,10 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         from deerflow.agent_instances.runtime import instance_tools
 
         raw_tools = instance_tools(raw_tools)
+        if instance_execution.work is not None:
+            from deerflow.agent_instances.work_tools import read_work_context, report_work
+
+            raw_tools.extend([read_work_context, report_work])
     configured_tools = raw_tools + extra_tools
     configured_tools = [tool for tool in configured_tools if tool.name not in interaction_policy.disabled_tool_names]
     authorization_candidates = [*configured_tools]

@@ -238,10 +238,12 @@ async def test_request_migration_roundtrip_and_used_history_protection(attention
 
     def rebuild(conn):
         with Operations.context(MigrationContext.configure(conn)):
+            importlib.import_module("deerflow.persistence.migrations.versions.0040_work_execution").downgrade()
             migration.upgrade()
             migration.downgrade()
             migration.upgrade()
             migration.upgrade()
+            importlib.import_module("deerflow.persistence.migrations.versions.0040_work_execution").upgrade()
 
     async with sf.kw["bind"].begin() as conn:
         await conn.run_sync(rebuild)

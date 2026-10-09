@@ -141,7 +141,7 @@ class HumanInput:
             rows = (await session.execute(select(HumanInputEventRow).where(HumanInputEventRow.request_id == request_id).order_by(HumanInputEventRow.revision.desc()).limit(limit + 1).offset(offset))).scalars().all()
             return {
                 "events": await self.work._redact(
-                    session, actor, [{"id": r.id, "actor_id": r.actor_id, "actor_kind": "human", "action": r.action, "revision": r.revision, "request": r.request, "created_at": _date(r.created_at)} for r in rows[:limit]]
+                    session, actor, [{"id": r.id, "actor_id": r.actor_id, "actor_kind": r.actor_kind, "action": r.action, "revision": r.revision, "request": r.request, "created_at": _date(r.created_at)} for r in rows[:limit]]
                 ),
                 "has_more": len(rows) > limit,
             }
@@ -152,7 +152,7 @@ class HumanInput:
             if await session.scalar(select(AgentWorkEventRow.id).where(AgentWorkEventRow.instance_id == instance_id, AgentWorkEventRow.operation_id == request.operation_id)):
                 raise AgentConflict("Operation identity belongs to another Work command")
             return None
-        if event.actor_id != actor.subject_id or event.request != request.model_dump(mode="json", exclude_unset=True) or (request_id and event.request_id != request_id):
+        if event.actor_kind != "human" or event.actor_id != actor.subject_id or event.request != request.model_dump(mode="json", exclude_unset=True) or (request_id and event.request_id != request_id):
             raise AgentConflict("Operation identity belongs to another actor or request")
         parent, work, row = await self._lookup(session, actor, event.request_id)
         if work_id is not None and work.id != work_id:
@@ -184,8 +184,8 @@ class HumanInput:
         row.revision += 1
         row.updated_at = datetime.now(UTC)
 
-    async def _mutable_work(self, session, parent, work):
-        if await session.scalar(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.work_id == work.id, AgentWorkAttemptRow.status.in_(UNRESOLVED))):
+    async def _mutable_work(self, session, parent, work, *, responding=False):
+        if not responding and await session.scalar(select(AgentWorkAttemptRow.id).where(AgentWorkAttemptRow.work_id == work.id, AgentWorkAttemptRow.status.in_(UNRESOLVED))):
             raise AgentConflict("An unresolved attempt requires host reconciliation")
         await self.work._validate_snapshot(session, self.work._snapshot(work))
         if work.revision >= 2147483647:
@@ -281,7 +281,7 @@ class HumanInput:
                     return receipt
                 if row.state == "closed" or not self._source_current(row, work) or (row.request_revision, row.assignment_revision) != (request.expected_request_revision, request.expected_assignment_revision):
                     raise AgentConflict("The request changed; reload before replying")
-                await self._mutable_work(session, parent, work)
+                await self._mutable_work(session, parent, work, responding=True)
                 await self.work._admit_sources(session, actor, parent, request.sources)
                 if request.choice is not None and request.choice not in row.choices:
                     raise AgentConflict("Choice is not offered by this request")

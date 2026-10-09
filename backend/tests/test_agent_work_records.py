@@ -44,7 +44,7 @@ async def test_delegation_is_idempotent_attributed_and_records_only(work):
     assert await service.delegate(actor=ALICE, instance_id=instance.id, request=body) == first
     assert first["status"] == "open" and first["review_required"] is True
     assert first["assignment_revision"] == first["revision"] == 1
-    assert first["creator_id"] == "alice" and first["execution_available"] is False
+    assert first["creator_id"] == "alice" and first["execution_available"] is True
     assert first["attempt"] is None
     history = await service.history(actor=BOB, instance_id=instance.id, work_id=first["id"])
     assert len(history) == 1 and history[0]["actor_id"] == "alice"
@@ -285,9 +285,11 @@ async def test_work_migration_rebuild_and_used_downgrade_guard(work):
     def rebuild(connection):
         def columns():
             inspector = inspect(connection)
-            return {table.name: [(c["name"], str(c["type"]), c["nullable"]) for c in inspector.get_columns(table.name)] for table in module._tables}
+            return {table.name: sorted((c["name"], str(c["type"]), c["nullable"]) for c in inspector.get_columns(table.name)) for table in module._tables}
 
         before = columns()
+        with Operations.context(MigrationContext.configure(connection)):
+            importlib.import_module("deerflow.persistence.migrations.versions.0040_work_execution").downgrade()
         for row in (HumanInputReadRow, HumanInputEventRow, HumanInputResponseRow, HumanInputRequestRow):
             row.__table__.drop(connection)
         with Operations.context(MigrationContext.configure(connection)):
@@ -295,9 +297,9 @@ async def test_work_migration_rebuild_and_used_downgrade_guard(work):
             module.downgrade()
             module.upgrade()
             module.upgrade()
+            importlib.import_module("deerflow.persistence.migrations.versions.0039_human_input").upgrade()
+            importlib.import_module("deerflow.persistence.migrations.versions.0040_work_execution").upgrade()
         assert columns() == before
-        for row in (HumanInputRequestRow, HumanInputResponseRow, HumanInputEventRow, HumanInputReadRow):
-            row.__table__.create(connection)
 
     async with sf.kw["bind"].begin() as connection:
         await connection.run_sync(rebuild)
@@ -339,7 +341,7 @@ async def test_http_work_ceiling_visibility_and_no_execution_shortcuts(work, mon
                         f"/api/agent-instances/{instance.id}/work/{record['id']}/commands", json={"operation_id": operation(), "expected_revision": 1, "expected_assignment_revision": 1, "action": "cancel", **forged}
                     )
                     assert response.status_code == 422
-                assert (await client.get(f"/api/agent-instances/{instance.id}/work")).json()["execution_available"] is False
+                assert (await client.get(f"/api/agent-instances/{instance.id}/work")).json()["execution_available"] is True
 
 
 @pytest.mark.asyncio

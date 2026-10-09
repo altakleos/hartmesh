@@ -174,3 +174,13 @@ the admitted group keeps its records on success or completes rollback on failure
 This is a store-local guarantee, not a change to RunJournal cancellation policy or
 JSONL's single-process deployment constraint. Regression coverage is in
 `tests/test_jsonl_event_store_cancellation.py`.
+
+### Explicit Work attempt settlement
+
+The owning worker records its host attempt/run association before fallible admission
+checks, then validates current assignment before native preparation. No await may be
+inserted between durable run creation and task attachment. After ordinary finalization,
+Work candidate promotion additionally requires durable matching terminal status,
+confirmed command-scope cleanup, SDK closure and no pending/ambiguous session or
+mutating-operation outcome. Unknowns remain unresolved. An idempotent recovered
+terminal run is not proof of cleanup; qualified containment owns recovery.

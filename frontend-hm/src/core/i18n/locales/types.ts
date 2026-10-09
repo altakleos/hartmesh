@@ -67,7 +67,35 @@ export interface Translations {
     | "createUnavailable",
     string
   >;
-  agentWork: Record<
+  agentWork: {
+    attemptStatus: Record<
+      | "starting"
+      | "running"
+      | "stopping"
+      | "uncertain"
+      | "succeeded"
+      | "failed"
+      | "cancelled",
+      string
+    >;
+  } & Record<
+    | "newConversation"
+    | "reconcileAttempt"
+    | "containmentReceipt"
+    | "containmentNotice"
+    | "responsibilities"
+    | "currentWork"
+    | "needsInput"
+    | "recentOutcomes"
+    | "activate"
+    | "resume"
+    | "recoverActivation"
+    | "execution"
+    | "openConversation"
+    | "candidate"
+    | "uncertain"
+    | "suggestion"
+    | "delegateSuggestion"
     | "resetResponse"
     | "replaceUnavailable"
     | "title"

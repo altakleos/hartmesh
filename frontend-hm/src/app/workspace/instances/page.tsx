@@ -389,6 +389,11 @@ function InstanceControls() {
                 policy={adopted.error ? null : adopted.data?.config.work_policy}
                 canRead={ceiling("agents:read")}
                 canWrite={ceiling("agents:write")}
+                canActivate={ceiling("runs:create")}
+                canCreateConversation={ceiling("threads:write")}
+                canStop={ceiling("runs:cancel")}
+                initialWork={search.get("work")}
+                lifecycleOperations={lifecycle.data?.operations}
                 lifecyclePending={!!(unresolved ?? pending)}
               />
               {(current.permissions & USE) !== 0 &&

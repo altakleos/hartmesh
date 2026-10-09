@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Explicit Work execution and supervision
+
+- Start or resume an AI employee's exact assignment through the existing runtime,
+  with durable attempt identities, current access checks and duplicate-safe retries.
+- Add attributed progress, human-input requests and factual assessment, completion
+  candidates, policy-bounded derived Work and visible follow-up suggestions.
+  A successful run alone does not complete Work or replace required human review.
+- Show current Work, needs attention, recent outcomes and separate attempt status.
+  Keep replies independent from execution and preserve earlier reports in history.
+- Fence stale reports after manager changes and retain uncertain command/cleanup
+  outcomes until qualified containment and explicit recovery. Ordinary conversations
+  continue to work without a Work record.
+
 ### Human-input requests and Attention
 
 - Add addressed information, decision and review requests with current-access
@@ -23,14 +36,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   current-access visibility, attributed history, revision-checked management
   and exact retry receipts. Keep the platform generic; domain procedures remain
   in definitions, skills and trusted extensions.
-- Add records-only Work controls to the instance page and policy opt-in to
-  custom-definition settings. Delegation and human responses do not run the AI
-  employee. Activation and completion reporting remain unavailable.
+- Add Work controls to the instance page and policy opt-in to custom-definition
+  settings. Delegation and human responses do not run the AI employee; explicit
+  activation is separate.
 - Separate factual input, manager decisions and acceptance of an exact outcome
   statement. File references require current source access; the UI explicitly
   labels their current contents unchecked.
 
 ### Schema changes
+
+- Add `0040_work_execution` after0039: nullable completion-candidate and settlement
+  columns on Work attempts, plus human/nonhuman creator and event attribution on
+  human-input records. Existing attribution defaults to human. Used execution facts
+  prevent downgrade; adopted hashes and consumer formats remain unchanged.
 
 - Add migration `0039_human_input` after0038, creating request, response, event
   and read-state tables. No existing table or consumer file format changes.
@@ -38,7 +56,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add migration `0038_agent_work` after published `0037_agent_lifecycle`, creating
   `agent_work`, `agent_work_attempts` and `agent_work_events`. Used records have
   no user/chat deletion cascade and cannot be erased by downgrade. Attempt rows
-  are reserved for future host activation; these APIs create none.
+  are reserved by explicit host activation before a run is admitted.
 - Add optional `work_policy` to custom agent definitions. Existing adopted
   documents retain their exact bytes/hashes; missing policy disables new Work.
   No consumer file-format change, data movement or configuration-version bump.

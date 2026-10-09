@@ -32,6 +32,7 @@ DISTRIBUTION_REVISIONS = (
     "0037_agent_lifecycle",
     "0038_agent_work",
     "0039_human_input",
+    "0040_work_execution",
 )
 
 

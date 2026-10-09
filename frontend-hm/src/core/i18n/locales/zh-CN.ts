@@ -23,7 +23,7 @@ export function createZhCN(product: string): Translations {
       all: "共享请求",
       empty: "此视图暂无请求。",
       unavailable: "当前部署或权限不支持关注事项。",
-      notice: "回复会被保存，但不会启动运行。AI 员工执行和评估尚不可用。",
+      notice: "回复会被保存，但不会启动运行。打开 Work，显式恢复 AI 员工执行。",
       question: "问题",
       reason: "原因",
       expected: "预期回复",
@@ -72,7 +72,8 @@ export function createZhCN(product: string): Translations {
         "引用不会为 AI 员工上传或挂载文件。传输请使用已授权的 Home 存储控件，且需要独占写入窗口。上传与回复是独立操作。",
       requestLink: "在关注事项中查看请求",
       unchecked: "尚未核查文件当前内容。",
-      noAssessment: "信息将等待后续显式 Work 执行时评估。",
+      noAssessment:
+        "信息等待评估。获得授权的人类可打开 Work，显式恢复 AI 员工执行。",
       outcome: "已提交的结果陈述",
       state: "请求状态",
       activity: "最近活动",
@@ -82,17 +83,47 @@ export function createZhCN(product: string): Translations {
       createUnavailable: "新请求需要启用策略且已协调的活动 Work。",
     },
     agentWork: {
+      newConversation: "使用新的执行会话",
+      reconcileAttempt: "核对已隔离的尝试",
+      containmentReceipt: "已完成的隔离操作",
+      containmentNotice:
+        "服务器会验证此先前环境已被隔离。恢复会保留报告和效果，但不会宣告成功或恢复执行。",
+
+      responsibilities: "职责",
+      currentWork: "本页当前工作",
+      needsInput: "本页待关注工作",
+      recentOutcomes: "本页近期结果",
+      activate: "执行此工作",
+      resume: "恢复执行",
+      recoverActivation: "恢复启动回执",
+      execution: "执行尝试",
+      openConversation: "打开执行会话",
+      candidate: "完成报告正在等待确认；尚未提交审核。",
+      uncertain:
+        "执行或清理结果尚不确定。拥有 Home ADMIN 权限的管理员必须先隔离先前环境并核对本次尝试，才能再次启动。",
+      suggestion: "建议的后续工作",
+      delegateSuggestion: "准备委派",
+      attemptStatus: {
+        starting: "正在启动",
+        running: "正在运行",
+        stopping: "等待停止",
+        uncertain: "结果不确定",
+        succeeded: "运行结束",
+        failed: "失败",
+        cancelled: "已取消",
+      },
       resetResponse: "为当前记录重置回复",
       replaceUnavailable: "替换引用列表，包括删除不可访问的引用。",
       title: "工作",
-      recordsOnly: "仅记录。委派会保存任务；AI 员工执行功能尚未开放。",
+      recordsOnly:
+        "委派会保存任务。“执行此工作”或“恢复执行”会显式启动 AI 员工；回复和截止目标不会启动运行。",
       visibility:
         "跟踪委派需要 Use 和 Inspect 权限，包括查看此 AI 员工的共享工作。",
       policyDisabled:
         "要委派，请在定义设置中启用工作，再为此 AI 员工采用该定义。现有记录仍可访问。",
       policyEnabled: "启用工作跟踪",
       policyNotice:
-        "此设置更改定义。管理员采用新定义之前，现有 AI 员工保留已采用的策略。执行功能仍不可用。",
+        "此设置更改定义。管理员采用新定义之前，现有 AI 员工保留已采用的策略。执行需要单独显式启动。",
       reviewRequired: "要求人工审核",
       responsibility: "职责",
       objective: "目标",

@@ -6,8 +6,10 @@ The question, reason and expected response are shared with current Work inspecto
 HartMesh handles attribution, current access, routing and history. Domain rules
 and specialist validation remain in skills and optional trusted plugins.
 
-This stage supports authenticated human creation and management. AI employee
-request creation, factual assessment and Work execution are not available yet.
+Authenticated humans can create and manage requests. During explicit Work
+execution, the AI employee can ask for input and assess the exact set of factual
+replies, or revise an inadequate factual question. Human decisions and outcome
+acceptance remain authenticated human actions.
 Saving a response never starts or resumes a run. An inbox entry proves availability
 in the application, not that a person noticed it. No external notification,
 email, reminder or background activation is implied.
@@ -125,3 +127,8 @@ Additive migration `0039_human_input` follows `0038_agent_work`. It adds
 `human_input_reads`. No user/chat cascade can erase used requests; downgrade
 refuses used data. Existing Work tables, adopted definition hashes, consumer
 file formats and runtime configuration versions are unchanged.
+
+Migration `0040_work_execution` adds explicit human/nonhuman attribution to request
+creation and history events. Existing records default to human attribution.
+Replies remain human-attributed. **Open Work** selects the exact source assignment;
+**Resume** is a separate authorized action after a reply is saved.

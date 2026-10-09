@@ -4,7 +4,7 @@
 
 LangGraph agents use sandbox execution, persistent memory, delegation and extensible tools in isolated threads.
 
-Instance runtime and records-only Work: [guide](packages/harness/deerflow/agent_instances/AGENTS.md).
+Instance runtime and Work: [guide](packages/harness/deerflow/agent_instances/AGENTS.md).
 
 **Architecture**:
 - **Gateway API** (port 8001): REST API plus embedded LangGraph-compatible agent runtime

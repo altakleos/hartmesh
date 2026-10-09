@@ -1738,6 +1738,7 @@ async def start_run(
     *,
     idempotency_key: str | None = None,
     require_existing_thread: bool = False,
+    work_attempt: Any | None = None,
 ) -> RunRecord:
     """Create a RunRecord and launch the background agent task.
 
@@ -1816,6 +1817,12 @@ async def start_run(
     from app.gateway.agent_conversations import execution_for_run
 
     instance_execution = await execution_for_run(request, thread_id)
+    if work_attempt is not None:
+        from deerflow.agent_instances.work_execution import WorkAttempt
+
+        if not isinstance(work_attempt, WorkAttempt) or instance_execution is None:
+            raise HTTPException(409, "Work activation requires a host-owned instance attempt")
+        instance_execution = replace(instance_execution, work=work_attempt)
     if instance_execution is not None:
         if (getattr(body, "metadata", None) or {}).get("scheduled_task_id"):
             raise HTTPException(501, "Persistent instance scheduling is outside the current execution contract")
@@ -1875,6 +1882,10 @@ async def start_run(
         # id, disagreeing with the response header, the logs, and the
         # checkpoint. The caller's own metadata keys are preserved.
         run_metadata = dict(body.metadata) if isinstance(body.metadata, dict) else {}
+        for key in ("agent_work_id", "agent_work_attempt_id"):
+            run_metadata.pop(key, None)
+        if work_attempt is not None:
+            run_metadata.update(agent_work_id=work_attempt.work_id, agent_work_attempt_id=work_attempt.attempt_id)
         run_metadata[DEERFLOW_TRACE_METADATA_KEY] = ensure_trace_id()
 
         config = build_run_config(thread_id, body.config, run_metadata, assistant_id=body.assistant_id)
