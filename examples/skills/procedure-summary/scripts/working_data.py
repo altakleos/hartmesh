@@ -1,4 +1,4 @@
-"""Example-owned bounded settings and cooperative, revision-checked mutations.
+"""Example-owned bounded settings; skill-result-acceptance-fixture.
 
 The stable sidecar lock coordinates these writers only. Native edits can bypass it.
 Receipts are ordinary data, never authenticated authority. No platform imports.

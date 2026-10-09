@@ -39,6 +39,16 @@ def test_unknown_scanner_content_is_not_automatically_allowed(reply):
     assert json.loads(result["content"])["decision"] == "block"
 
 
+@pytest.mark.parametrize("package", ["supplier-comparison", "procedure-summary"])
+def test_every_example_source_is_registered_with_fixture_scanner(reply, package):
+    root = PROVIDER.parents[2] / "examples/skills" / package
+    sources = sorted(path for path in root.rglob("*") if path.suffix in {".md", ".py"})
+    assert sources
+    for source in sources:
+        result = reply(scanner(source.read_text(encoding="utf-8")))
+        assert json.loads(result["content"])["decision"] == "allow", source.relative_to(root)
+
+
 def test_skill_run_starts_with_real_canonical_skill_read(reply):
     result = reply(
         {
