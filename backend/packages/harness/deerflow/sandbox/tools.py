@@ -2440,9 +2440,9 @@ def bash_tool(
       it is killed at the command timeout.
     - A command that writes files the user should receive under `/mnt/user-data/outputs` can hand them
       over in the same call: name them under `present`. Once the command has run, each named file that
-      exists and was written by it is delivered with this turn and named back under "Presented to the
-      user"; one that does not exist afterwards, or that the command did not write, is named on a
-      "Not attached:" line with the reason and is not delivered. Do not call `present_files` for files
+      has qualifying metadata is registered as a mutable output reference and named under "Presented to
+      the user". This validates observed metadata, not immutable contents or completed human retrieval;
+      current access still applies. Missing or stale outputs are named on a "Not attached:" line. Do not call `present_files` for files
       named under "Presented to the user" (that would attach them a second time), and do not list a
       directory to check that they exist.
 
@@ -2521,7 +2521,12 @@ def bash_tool(
                 truncate=_truncate_bash_output,
             )
         ensure_thread_directories_exist(runtime)
-        command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
+        from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+        if isinstance((runtime.context or {}).get(AGENT_EXECUTION_CONTEXT_KEY), AgentExecution):
+            command = f"cd {VIRTUAL_PATH_PREFIX}/workspace && {{\n{command}\n}}"
+        else:
+            command = f"cd {VIRTUAL_PATH_PREFIX}/workspace; {command}"
         command = user_prefix + (identity_prefix or "") + command
         try:
             from deerflow.config.app_config import get_app_config

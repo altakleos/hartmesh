@@ -55,6 +55,11 @@ Those conversations use the adopted definition and one qualified Docker Home
 across chats, with current Use/Inspect/Manage grants. They inherit no requester
 files, private skills, memory or credentials. DeerMem facts and summaries use a
 separate instance scope, with current audience checks and stale-write fencing.
+The AI employee's runtime guidance describes its admitted persistent Home and
+available file tools. Files survive conversations; clearing recalled memory does
+not remove them. Presenting an output registers a mutable reference: viewing it
+still requires current Home READ, and explicit downloading also requires EXPORT.
+A registered reference does not certify a completed download or immutable bytes.
 Memory-bearing and cross-requester copied history require current Inspect;
 references and branches check their destination audience before copying context.
 `/workspace/instances` provides creation, conversations, adopted definitions,

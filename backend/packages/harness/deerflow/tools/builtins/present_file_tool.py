@@ -118,10 +118,11 @@ def present_file_tool(
     When NOT to use the present_files tool:
     - When you only need to read file contents for your own processing
     - For temporary or intermediate files not meant for user viewing
-    - For files a tool result already named under "Presented to the user": they are delivered, and calling this tool would attach them a second time
+    - For files a tool result already named under "Presented to the user": their references are registered, and calling this tool would attach them a second time
 
     Notes:
     - Call this tool after creating files and moving them to the `/mnt/user-data/outputs` directory, unless the call that wrote them already presented them (the `bash` tool's `present` argument does this in the same call).
+    - Success registers mutable output references. It does not verify existence, file bytes, human READ/EXPORT permission or completed retrieval.
     - This tool can be safely called in parallel with other tools. State updates are handled by a reducer to prevent conflicts.
 
     Args:
@@ -142,7 +143,7 @@ def present_file_tool(
             "artifacts": normalized_paths,
             "messages": [
                 ToolMessage(
-                    "Successfully presented files",
+                    "Successfully presented files. Registered mutable output references; existence, contents and human retrieval are not confirmed. Current file access still applies.",
                     tool_call_id=tool_call_id,
                     additional_kwargs={PRESENTED_FILES_KEY: list(dict.fromkeys(normalized_paths))},
                 )

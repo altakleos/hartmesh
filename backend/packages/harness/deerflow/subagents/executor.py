@@ -1416,12 +1416,13 @@ class SubagentExecutor:
         system_parts: list[str] = []
         if self.config.system_prompt:
             system_parts.append(self.config.system_prompt)
-        if self.agent_execution is not None:
-            system_parts.append(
-                "This delegated task inherits the parent instance's mounted Home and filesystem authority. "
-                "A narrower tool list does not narrow that native filesystem scope. "
-                "Report useful paths to the parent; ordinary Home edits persist across conversations."
-            )
+        from deerflow.agents.runtime_scope import build_runtime_scope
+
+        runtime_scope = build_runtime_scope(execution=self.agent_execution, tools=authorized_tools)
+        from deerflow.agents.lead_agent.prompt import build_ordinary_file_context
+
+        ordinary_extras = build_ordinary_file_context(app_config=resolved_app_config, tools=runtime_scope.tools) if runtime_scope.mode == "conversation" else ""
+        system_parts.append(runtime_scope.working_directory(delegated=True, ordinary_extras=ordinary_extras))
         if self.context_snapshot is not None:
             system_parts.append(SNAPSHOT_SYSTEM_NOTE)
         # RFC #4651 PR3: every subagent — built-in or custom — gets the same

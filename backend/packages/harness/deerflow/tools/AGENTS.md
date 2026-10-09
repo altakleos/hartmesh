@@ -76,3 +76,8 @@ from captured child tool messages only when the final/partial report cites those
 opaque source links. This preserves retrieval evidence across the delegation
 boundary without placing provider IDs in model-visible text. Never reconstruct
 source records from the child's prose or replace them with fresh provider reads.
+
+Presentation registers mutable output references, not a completed human transfer.
+`present_files` does not establish file existence. Same-call `bash.present`
+validates observed metadata; neither bypasses current Home READ or explicit
+EXPORT at retrieval. Preserve `PRESENTED_FILES_KEY` and deduplication semantics.

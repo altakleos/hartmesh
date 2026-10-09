@@ -50,6 +50,7 @@ from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
 from deerflow.agents.middlewares.token_usage_middleware import TokenUsageMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_lead_runtime_middlewares
 from deerflow.agents.middlewares.view_image_middleware import ViewImageMiddleware
+from deerflow.agents.runtime_scope import build_runtime_scope
 from deerflow.agents.task_continuity.tools import append_task_continuity_tools
 from deerflow.agents.thread_state import get_thread_state_schema, normalize_middleware_state_schemas
 from deerflow.authz.principal import build_principal_from_context
@@ -1271,6 +1272,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
             subagent_execution_capacity=subagent_execution_capacity,
             interaction_policy=interaction_policy,
             memory_enabled=memory_enabled,
+            runtime_scope=build_runtime_scope(tools=authorized_tools, memory_enabled=memory_enabled and resolved_app_config.memory.enabled),
             bash_available=has_bash_tool(authorized_tools),
         )
         graph = create_agent(
@@ -1419,6 +1421,7 @@ def _assemble_lead_agent_body(config: RunnableConfig, *, app_config: AppConfig) 
         memory_enabled=memory_enabled,
         bash_available=has_bash_tool(authorized_tools),
         adopted_soul=instance_execution.definition.soul if instance_execution else None,
+        runtime_scope=build_runtime_scope(execution=instance_execution, tools=authorized_tools, memory_enabled=memory_enabled and resolved_app_config.memory.enabled),
     )
     graph = create_agent(
         model=chat_model,

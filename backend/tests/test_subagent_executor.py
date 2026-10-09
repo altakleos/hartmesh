@@ -56,6 +56,7 @@ _LANGGRAPH_HAS_ROOT_LINEAGE_STREAM_REGRESSION = Version(package_version("langgra
 
 def _default_app_config():
     return SimpleNamespace(
+        sandbox=SimpleNamespace(use="", mounts=[]),
         tool_search=SimpleNamespace(enabled=False),
         authorization=SimpleNamespace(enabled=False),
         skills=SimpleNamespace(
@@ -103,6 +104,10 @@ def _setup_executor_classes():
     importlib.import_module("deerflow.agents.middlewares.tool_error_handling_middleware")
     importlib.import_module("deerflow.agents.middlewares.read_before_write_middleware")
     sandbox_overwrite_module = importlib.import_module("deerflow.sandbox.overwrite")
+
+    importlib.import_module("deerflow.agents.runtime_scope")
+    importlib.import_module("deerflow.agent_instances.runtime")
+    importlib.import_module("deerflow.agents.lead_agent.prompt")
 
     # Remove mocked executor if exists (from conftest.py)
     if "deerflow.subagents.executor" in sys.modules:
@@ -578,6 +583,18 @@ class TestAgentConstruction:
         assert await executor._load_skills() == []
         user_storage.assert_called_once_with("default")
         global_storage.assert_not_called()
+
+    @pytest.mark.anyio
+    async def test_ordinary_child_retains_configured_mount_guidance(self, classes, base_config, monkeypatch):
+        from deerflow.config.app_config import AppConfig
+
+        config = AppConfig.model_validate({"sandbox": {"use": "deerflow.sandbox.local:LocalSandboxProvider", "mounts": [{"host_path": "/operator/docs", "container_path": "/mnt/reference", "read_only": True}]}})
+        executor = classes["SubagentExecutor"](config=base_config, tools=[], thread_id="ordinary", parent_model="fixture-model", app_config=config)
+        monkeypatch.setattr(executor, "_load_skills", AsyncMock(return_value=[]))
+        state, _, _ = await executor._build_initial_state("Read the configured reference")
+        prompt = str(state["messages"][0].content)
+        assert "Custom mount: `/mnt/reference`" in prompt and "read-only" in prompt
+        assert "/operator/docs" not in prompt
 
     @pytest.mark.anyio
     async def test_build_initial_state_consolidates_system_prompt_and_skill_discovery(
@@ -6184,7 +6201,7 @@ async def test_instance_child_receives_host_capability_and_discloses_inherited_f
     from test_agent_execution_runtime import execution
 
     from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY
-    from deerflow.agent_instances.runtime import current_environment, execution_scope
+    from deerflow.agent_instances.runtime import InstanceSandboxProvider, current_environment, execution_scope
     from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 
     bound = execution()
@@ -6196,10 +6213,14 @@ async def test_instance_child_receives_host_capability_and_discloses_inherited_f
         captured.update(context)
         assert current_environment().execution is bound
         assert get_sandbox_provider() is provider
-        assert "mounted Home and filesystem authority" in str(state["messages"][0].content)
+        prompt = str(state["messages"][0].content)
+        assert "mounted Home and filesystem authority" in prompt
+        assert "persist across conversations" in prompt
+        assert "../outputs" not in prompt and "../uploads" not in prompt
+        assert "list_uploaded_files" not in prompt
         yield {"messages": [classes["AIMessage"](content="Done", id="child-answer")]}
 
-    provider = object()
+    provider = InstanceSandboxProvider(bound, SimpleNamespace(id="qualified-native"))
     graph = SimpleNamespace(astream=stream)
     monkeypatch.setattr(executor, "_create_agent", lambda *args, **kwargs: graph)
     with execution_scope(bound) as environment:

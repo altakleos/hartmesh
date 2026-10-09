@@ -149,6 +149,9 @@ def validate_presentation(runtime: Any, paths: Sequence[Any] | None, *, written_
 
     presented: list[str] = []
     sizes: dict[str, int] = {}
+    from deerflow.agent_instances.conversations import AGENT_EXECUTION_CONTEXT_KEY, AgentExecution
+
+    execution = (getattr(runtime, "context", None) or {}).get(AGENT_EXECUTION_CONTEXT_KEY)
     for path in requested:
         try:
             virtual_path, actual_path = resolve_presented_filepath(runtime, path)
@@ -156,9 +159,17 @@ def validate_presentation(runtime: Any, paths: Sequence[Any] | None, *, written_
             refused.append((path, "outside this conversation's outputs"))
             continue
         try:
-            metadata = os.stat(actual_path)
+            if isinstance(execution, AgentExecution):
+                from deerflow.agent_instances.presentation import output_metadata
+
+                metadata = output_metadata(execution, virtual_path.removeprefix("/mnt/user-data/outputs/"))
+            else:
+                metadata = os.stat(actual_path)
         except OSError:
             refused.append((path, "does not exist"))
+            continue
+        except ValueError:
+            refused.append((path, "output metadata is unavailable or outside the admitted outputs"))
             continue
         if not stat.S_ISREG(metadata.st_mode):
             refused.append((path, "not a regular file"))
@@ -193,7 +204,7 @@ def describe_presentation(presentation: Presentation) -> str:
     lines: list[str] = []
     if presentation.presented:
         count = len(presentation.presented)
-        lines.append(f"{PRESENTED_PHRASE}: {count} file{'s' if count != 1 else ''}, delivered with this turn. Do not call present_files for them: that would attach them a second time.")
+        lines.append(f"{PRESENTED_PHRASE}: {count} file{'s' if count != 1 else ''}, registered as mutable output references. Metadata was validated; human retrieval still requires current access. Do not call present_files for them again.")
         # The byte count is the runtime's own stat of the file it just
         # delivered. In a released-profile qualification run the model followed a successful write
         # with three more shell calls to check the file existed and how big it
@@ -201,7 +212,7 @@ def describe_presentation(presentation: Presentation) -> str:
         # own re-reading is not.
         lines.extend(f"  {path} ({presentation.sizes[path]:,} byte{'' if presentation.sizes[path] == 1 else 's'})" if path in presentation.sizes else f"  {path}" for path in presentation.presented)
     elif presentation.refused:
-        lines.append(f"Nothing was presented: the user has not received {'this file' if len(presentation.refused) == 1 else 'these files'}.")
+        lines.append(f"Nothing was presented: no output reference was registered for {'this file' if len(presentation.refused) == 1 else 'these files'}.")
     for path, reason in presentation.refused[:MAX_DESCRIBED_REFUSALS]:
         lines.append(f"{NOT_ATTACHED_PHRASE}: {_echo(path)} ({reason}).")
     remaining = len(presentation.refused) - MAX_DESCRIBED_REFUSALS

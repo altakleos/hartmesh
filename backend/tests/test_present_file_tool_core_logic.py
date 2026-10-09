@@ -31,7 +31,7 @@ def test_present_files_normalizes_host_outputs_path(tmp_path):
     )
 
     assert result.update["artifacts"] == ["/mnt/user-data/outputs/report.md"]
-    assert result.update["messages"][0].content == "Successfully presented files"
+    assert result.update["messages"][0].content == "Successfully presented files. Registered mutable output references; existence, contents and human retrieval are not confirmed. Current file access still applies."
 
 
 def test_present_files_keeps_virtual_outputs_path(tmp_path, monkeypatch):
@@ -79,7 +79,7 @@ def test_present_files_uses_runtime_user_for_virtual_outputs_path(tmp_path, monk
     )
 
     assert result.update["artifacts"] == ["/mnt/user-data/outputs/report.md"]
-    assert result.update["messages"][0].content == "Successfully presented files"
+    assert result.update["messages"][0].content == "Successfully presented files. Registered mutable output references; existence, contents and human retrieval are not confirmed. Current file access still applies."
     assert not paths.sandbox_outputs_dir(thread_id, user_id="default").exists()
 
 
@@ -108,7 +108,7 @@ def test_present_files_uses_config_thread_id_when_context_missing(tmp_path, monk
     )
 
     assert result.update["artifacts"] == ["/mnt/user-data/outputs/summary.json"]
-    assert result.update["messages"][0].content == "Successfully presented files"
+    assert result.update["messages"][0].content == "Successfully presented files. Registered mutable output references; existence, contents and human retrieval are not confirmed. Current file access still applies."
 
 
 def test_present_files_rejects_paths_outside_outputs(tmp_path):

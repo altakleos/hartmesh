@@ -68,18 +68,14 @@ def test_build_subagent_section_is_empty_for_explicit_hard_deny(monkeypatch) -> 
     assert prompt_module._build_subagent_section(3, allowed_subagents=[]) == ""
 
 
-def test_bash_subagent_prompt_mentions_workspace_relative_paths() -> None:
+def test_builtin_children_leave_runtime_paths_to_assembly():
     from deerflow.subagents.builtins.bash_agent import BASH_AGENT_CONFIG
-
-    assert "Treat `/mnt/user-data/workspace` as the default working directory for file IO" in BASH_AGENT_CONFIG.system_prompt
-    assert "`hello.txt`, `../uploads/input.csv`, and `../outputs/result.md`" in BASH_AGENT_CONFIG.system_prompt
-
-
-def test_general_purpose_subagent_prompt_mentions_workspace_relative_paths() -> None:
     from deerflow.subagents.builtins.general_purpose import GENERAL_PURPOSE_CONFIG
 
-    assert "Treat `/mnt/user-data/workspace` as the default working directory for coding and file IO" in GENERAL_PURPOSE_CONFIG.system_prompt
-    assert "`hello.txt`, `../uploads/input.csv`, and `../outputs/result.md`" in GENERAL_PURPOSE_CONFIG.system_prompt
+    for config in (BASH_AGENT_CONFIG, GENERAL_PURPOSE_CONFIG):
+        assert "../uploads" not in config.system_prompt
+        assert "../outputs" not in config.system_prompt
+        assert "Deployment-configured custom mounts" not in config.system_prompt
 
 
 def test_general_purpose_subagent_prompt_prohibits_task_tool() -> None:

@@ -1215,9 +1215,14 @@ async def test_begin_notification_launch_is_fenced_by_reclaimed_token(tmp_path, 
 
 
 @pytest.mark.asyncio
-async def test_recovered_launching_at_retry_budget_reconciles_successful_run(tmp_path):
+async def test_recovered_launching_at_retry_budget_reconciles_successful_run(tmp_path, monkeypatch):
+    import app.mcp_tasks.service as notification_service
+
     repo = await _make_repo(tmp_path)
     now = datetime.now(UTC)
+    # Dispatch can finish more than one second after its original claim.
+    completed_at = now + timedelta(seconds=2)
+    monkeypatch.setattr(notification_service, "_notification_completion_time", lambda *, not_before: max(not_before, completed_at))
     await _create_working_task(repo, task_id="task-launching-success", now=now)
     poll_claim = await repo.claim_due_tasks(now=now, lease_owner="poller", lease_seconds=60, limit=1)
     await repo.apply_snapshot(
@@ -1269,7 +1274,10 @@ async def test_recovered_launching_at_retry_budget_reconciles_successful_run(tmp
         now=now,
     )
 
-    reconcile_at = now + timedelta(seconds=1)
+    dispatched_record = await repo.get("task-launching-success", user_id="user-1", thread_id="thread-1", thread_incarnation=None)
+    assert dispatched_record is not None and dispatched_record["notification_status"] == "dispatched"
+    reconcile_at = datetime.fromisoformat(dispatched_record["next_notification_at"])
+    assert reconcile_at == completed_at
     dispatched = await repo.claim_notification_work(
         now=reconcile_at,
         lease_owner="notifier-b",

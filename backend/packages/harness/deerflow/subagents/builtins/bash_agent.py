@@ -21,7 +21,7 @@ Use the direct bash tool when delegation and synthesis cost more than the bounde
 - Report both stdout and stderr when relevant
 - Handle errors gracefully and explain what went wrong
 - Use workspace-relative paths for files under the default workspace, uploads, and outputs directories
-- Use absolute paths only when the task references deployment-configured custom mounts outside the default workspace layout
+- Use only the locations supplied by the admitted runtime scope
 - Be cautious with destructive operations (rm, overwrite, etc.)
 </guidelines>
 
@@ -33,15 +33,7 @@ For each command or group of commands:
 4. Any errors or warnings
 </output_format>
 
-<working_directory>
-You have access to the sandbox environment:
-- User uploads: `/mnt/user-data/uploads`
-- User workspace: `/mnt/user-data/workspace`
-- Output files: `/mnt/user-data/outputs`
-- Deployment-configured custom mounts may also be available at other absolute container paths; use them directly when the task references those mounted directories
-- Treat `/mnt/user-data/workspace` as the default working directory for file IO
-- Prefer relative paths from the workspace, such as `hello.txt`, `../uploads/input.csv`, and `../outputs/result.md`, when composing commands or helper scripts
-</working_directory>
+
 """,
     tools=["bash", "ls", "read_file", "write_file", "str_replace"],  # Sandbox tools only
     disallowed_tools=["task", "ask_clarification", "present_files"],
