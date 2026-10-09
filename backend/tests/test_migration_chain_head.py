@@ -62,13 +62,13 @@ def _assert_published_upgrade(script: ScriptDirectory, fixture_name: str = "rele
     assert upgrade == [revision for revision in fresh if revision not in published["revisions"]]
 
 
-@pytest.mark.parametrize("fixture_name", ["release_39_ancestry.json", "release_43_ancestry.json", "release_44_ancestry.json"])
+@pytest.mark.parametrize("fixture_name", ["release_39_ancestry.json", "release_43_ancestry.json", "release_44_ancestry.json", "release_45_ancestry.json"])
 def test_published_ancestry_and_previous_release_upgrade_plan(fixture_name):
     _assert_published_upgrade(ScriptDirectory(str(bootstrap._MIGRATIONS_DIR)), fixture_name)
 
 
 @pytest.mark.parametrize("reparent_published", [False, True], ids=["append-import", "reject-inserted-ancestor"])
-@pytest.mark.parametrize("fixture_name", ["release_39_ancestry.json", "release_43_ancestry.json", "release_44_ancestry.json"])
+@pytest.mark.parametrize("fixture_name", ["release_39_ancestry.json", "release_43_ancestry.json", "release_44_ancestry.json", "release_45_ancestry.json"])
 def test_future_import_is_executed_from_published_head(tmp_path, reparent_published, fixture_name):
     """An inserted ancestor can pass fresh/head checks but be skipped on upgrade."""
     versions = tmp_path / "versions"
