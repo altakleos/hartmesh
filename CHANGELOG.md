@@ -7,59 +7,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Explicit Work execution and supervision
+## [2.2.0+hartmesh.45] - 2026-10-09
 
-- Start or resume an AI employee's exact assignment through the existing runtime,
-  with durable attempt identities, current access checks and duplicate-safe retries.
-- Add attributed progress, human-input requests and factual assessment, completion
-  candidates, policy-bounded derived Work and visible follow-up suggestions.
-  A successful run alone does not complete Work or replace required human review.
-- Show current Work, needs attention, recent outcomes and separate attempt status.
-  Keep replies independent from execution and preserve earlier reports in history.
-- Fence stale reports after manager changes and retain uncertain command/cleanup
-  outcomes until qualified containment and explicit recovery. Ordinary conversations
-  continue to work without a Work record.
+### AI employee Work and supervision
+
+- Delegate durable assignments with objectives, priorities, review requirements,
+  attributed history and current-access visibility. Optional adopted-definition
+  Work policy keeps business procedures in definitions, skills and extensions.
+- Explicitly start or resume an assignment through the existing runtime, with
+  persistent attempt identities, duplicate-safe retries and current authority.
+  Track progress, blockers, intermediate work and outcomes without reconstructing
+  old conversations. Ordinary conversations still need no Work record.
+- Add factual-input assessment, policy-bounded derived Work and visible follow-up
+  suggestions. A successful run alone does not complete Work or replace required
+  human review. Derived assignments also require explicit activation.
+- Preserve uncertain execution/cleanup outcomes for containment and recovery;
+  reject stale reports after assignment or supervisor changes. Retain earlier
+  reports and exact outcome review history.
 
 ### Human-input requests and Attention
 
-- Add addressed information, decision and review requests with current-access
-  inbox counts, explicit routing recovery, independent read state and concurrent
-  attributed replies. Human responses never start execution or imply approval.
-- Couple canonical Work decisions and request closure in one transaction.
-  Preserve exact retries and reject stale routing/review forms.
+- Add a generic Attention inbox for addressed information, decision and review
+  requests, with current-access counts, routing recovery, independent read state
+  and concurrent attributed replies.
+- Keep factual replies separate from authenticated decisions and outcome review.
+  Human responses never implicitly start or resume an AI employee run.
 - Add optional plugin contract v5 / human-input facade v1 for authenticated human
-  actions. Generic controls remain available without specialist plugins.
+  actions. Generic Attention remains complete when optional plugins are absent,
+  disabled, incompatible or unavailable.
 
-### Work records and management
+### Runtime scope and consumer working data
 
-- Add optional adopted-definition Work policy and durable assignments with
-  current-access visibility, attributed history, revision-checked management
-  and exact retry receipts. Keep the platform generic; domain procedures remain
-  in definitions, skills and trusted extensions.
-- Add Work controls to the instance page and policy opt-in to custom-definition
-  settings. Delegation and human responses do not run the AI employee; explicit
-  activation is separate.
-- Separate factual input, manager decisions and acceptance of an exact outcome
-  statement. File references require current source access; the UI explicitly
-  labels their current contents unchecked.
+- Describe actual conversation/Home persistence, memory availability and admitted
+  tools consistently in lead and delegated runtime context. Qualify native file
+  handover against current requester permissions.
+- Add validated reporting preferences with read/save/patch/reset, revisions,
+  cooperative locks, exact retries and explicit uncertain-publication handling.
+  Temporary overrides leave saved choices unchanged; retained report bundles
+  preserve the settings snapshot through later prose/render operations.
+- Add independent procedure and supplier examples with their own working-data
+  formats, plus an optional quote-response extension using the generic human
+  facade. Examples are source packages, not automatically installed or enabled.
 
 ### Schema changes
 
-- Add `0040_work_execution` after0039: nullable completion-candidate and settlement
-  columns on Work attempts, plus human/nonhuman creator and event attribution on
-  human-input records. Existing attribution defaults to human. Used execution facts
-  prevent downgrade; adopted hashes and consumer formats remain unchanged.
+Compared with `v2.2.0+hartmesh.44`, the database head advances from
+`0037_agent_lifecycle` to `0040_work_execution` through three additive migrations.
+Seven tables are added; application tables present in release 44 are unchanged.
 
-- Add migration `0039_human_input` after0038, creating request, response, event
-  and read-state tables. No existing table or consumer file format changes.
+- `0038_agent_work` adds `agent_work`, `agent_work_attempts` and
+  `agent_work_events` for assignments, reserved execution attempts and attributed
+  history. Work records do not cascade away with user/chat deletion.
+- `0039_human_input` adds `human_input_requests`, `human_input_responses`,
+  `human_input_events` and `human_input_reads` for durable requests, replies,
+  exact command receipts and independent read state.
+- `0040_work_execution` adds nullable `candidate` and `settled_at` columns to
+  `agent_work_attempts`, `creator_kind` to `human_input_requests`, and
+  `actor_kind` to `human_input_events`. Existing attribution defaults to human.
 
-- Add migration `0038_agent_work` after published `0037_agent_lifecycle`, creating
-  `agent_work`, `agent_work_attempts` and `agent_work_events`. Used records have
-  no user/chat deletion cascade and cannot be erased by downgrade. Attempt rows
-  are reserved by explicit host activation before a run is admitted.
-- Add optional `work_policy` to custom agent definitions. Existing adopted
-  documents retain their exact bytes/hashes; missing policy disables new Work.
-  No consumer file-format change, data movement or configuration-version bump.
+Normal Gateway bootstrap applies these migrations on SQLite and PostgreSQL.
+Existing instances, conversations and adopted definition bytes/hashes are retained;
+no data reset or file migration is required. Downgrades refuse to erase used Work,
+human-input or execution history, including AI employee attribution. The release
+freezes its migration ancestry for future upgrade checks.
+
+### Configuration and file formats
+
+- Configuration format remains version 53. Work is opt-in through an adopted
+  definition's `work_policy`; existing instances require deliberate adoption to
+  enable it. Current Use/Inspect/Manage grants and provider ceilings still apply.
+- Managed consumer v1 settings gain optional `_mutation` revision/receipt metadata.
+  Valid legacy reporting preferences are read without rewriting; invalid or unknown
+  fields/versions are rejected as a whole. Reset retains an empty v1 document with
+  a new revision. Report and passive-view schemas are unchanged.
+- Qualified instance execution retains the supported direct Linux Docker AIO
+  deployment requirements. This release adds no idle monitoring, clock/event
+  activation or implicit execution after a human reply.
+
+### Qualification
+
+Deterministic Work journeys, retained files, real native storage, browser behavior
+and production Docker integration are covered separately. Bounded actual-model
+qualification remains pending; this release does not claim measured model judgment
+or autonomous reliability. See the [qualification guide](https://github.com/altakleos/hartmesh/blob/v2.2.0+hartmesh.45/docs/AI_EMPLOYEE_QUALIFICATION.md).
 
 ## [2.2.0+hartmesh.44] - 2026-10-08
 
