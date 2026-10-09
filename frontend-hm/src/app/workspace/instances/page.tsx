@@ -7,6 +7,7 @@ import { useId, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { WorkPanel } from "@/components/workspace/instances/work-panel";
 import {
   WorkspaceBody,
   WorkspaceContainer,
@@ -383,6 +384,13 @@ function InstanceControls() {
                 </Link>
               )}
               {!canInspect && <p>{copy.useOnly}</p>}
+              <WorkPanel
+                instance={current}
+                policy={adopted.error ? null : adopted.data?.config.work_policy}
+                canRead={ceiling("agents:read")}
+                canWrite={ceiling("agents:write")}
+                lifecyclePending={!!(unresolved ?? pending)}
+              />
               {(current.permissions & USE) !== 0 &&
                 current.status === "active" &&
                 ceiling("threads:write") && (

@@ -63,6 +63,12 @@ export function AgentSettingsDialog({
   const { subagents } = useSubagents();
   const updateAgent = useUpdateAgent();
 
+  const [workEnabled, setWorkEnabled] = useState(
+    agent.work_policy?.enabled ?? false,
+  );
+  const [workReview, setWorkReview] = useState(
+    agent.work_policy?.review_required ?? true,
+  );
   const [model, setModel] = useState(agent.model ?? DEFAULT_MODEL_VALUE);
   const [temperature, setTemperature] = useState(
     agent.model_settings?.temperature != null
@@ -134,6 +140,16 @@ export function AgentSettingsDialog({
       await updateAgent.mutateAsync({
         name: agent.name,
         request: {
+          ...(workEnabled !== (agent.work_policy?.enabled ?? false) ||
+          workReview !== (agent.work_policy?.review_required ?? true)
+            ? {
+                work_policy: {
+                  ...agent.work_policy,
+                  enabled: workEnabled,
+                  review_required: workReview,
+                },
+              }
+            : {}),
           model: model === DEFAULT_MODEL_VALUE ? null : model,
           model_settings: parsedSettings.modelSettings,
           thinking_enabled: supportsThinking
@@ -165,6 +181,28 @@ export function AgentSettingsDialog({
         </DialogHeader>
 
         <div className="space-y-4 py-1">
+          <fieldset className="space-y-2 rounded border p-3">
+            <legend>{t.agentWork.title}</legend>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={workEnabled}
+                onChange={(event) => setWorkEnabled(event.target.checked)}
+              />
+              {t.agentWork.policyEnabled}
+            </label>
+            <label className="flex items-center gap-2">
+              <input
+                type="checkbox"
+                checked={workReview}
+                onChange={(event) => setWorkReview(event.target.checked)}
+              />
+              {t.agentWork.reviewRequired}
+            </label>
+            <p className="text-muted-foreground text-sm">
+              {t.agentWork.policyNotice}
+            </p>
+          </fieldset>
           {/* Default model */}
           <div className="space-y-1.5">
             <span className="text-sm font-medium">

@@ -168,3 +168,14 @@ async def test_plugin_selection_persists_empty_omitted_and_null(_agent_env):
     cleared = await update_agent("selected", AgentUpdateRequest(mcp_plugins=None))
     assert cleared.mcp_plugins is None
     assert cleared.skills == ["research"]
+
+
+async def test_work_policy_is_human_managed_optional_and_preserves_omitted_fields(_agent_env):
+    first = await create_agent_endpoint(AgentCreateRequest(name="work-owner", work_policy={"enabled": True, "review_required": True}, soul="Maintain documents"))
+    assert first.work_policy.enabled
+    updated = await update_agent("work-owner", AgentUpdateRequest(description="New description"))
+    assert updated.work_policy.enabled
+    fetched = await get_agent("work-owner")
+    assert fetched.work_policy.review_required
+    disabled = await update_agent("work-owner", AgentUpdateRequest(work_policy=None))
+    assert disabled.work_policy is None

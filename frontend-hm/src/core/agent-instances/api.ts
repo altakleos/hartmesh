@@ -1,3 +1,4 @@
+import type { WorkPolicy } from "@/core/agents/types";
 import { awaitAbortable } from "@/core/api/abort";
 import { fetch } from "@/core/api/fetcher";
 import { getBackendBaseURL } from "@/core/config";
@@ -158,6 +159,7 @@ export function getInstanceDefinition(id: string, signal?: AbortSignal) {
       description?: string;
       model?: string;
       memory_enabled?: boolean;
+      work_policy?: WorkPolicy | null;
     };
     soul: string;
   }>(`${base(id)}/definition`, { signal });
@@ -267,5 +269,134 @@ export function abandonInstanceLifecycle(
     "POST",
     body,
     signal,
+  );
+}
+
+export type WorkPriority = "low" | "normal" | "high" | "urgent";
+export type WorkSource = { kind: "space_file"; space_id: string; path: string };
+export type VisibleWorkSource = WorkSource | { kind: "unavailable" };
+export interface WorkAssignment {
+  objective: string;
+  success_criteria: string;
+  responsibility?: string | null;
+  priority?: WorkPriority;
+  due_at?: string | null;
+  review_required?: boolean;
+  sources?: WorkSource[];
+}
+export interface WorkRecord extends Omit<WorkAssignment, "sources"> {
+  id: string;
+  instance_id: string;
+  creator_id: string;
+  definition_revision: string;
+  assignment_revision: number;
+  revision: number;
+  status: "open" | "blocked" | "submitted" | "completed" | "cancelled";
+  progress: string;
+  next_action: string;
+  sources: VisibleWorkSource[];
+  review_state: "none" | "pending" | "accepted" | "reported";
+  outcome: {
+    id: string;
+    statement: string;
+    evidence_revision: number;
+    sources: VisibleWorkSource[];
+  } | null;
+  review: {
+    actor_id: string;
+    basis: "outcome_statement";
+    accepted_at: string;
+  } | null;
+  blocker: {
+    id: string;
+    revision: number;
+    kind: "information" | "decision";
+    question: string;
+    resolution?: { actor_id: string; statement: string };
+  } | null;
+  attempt: { id: string; status: string } | null;
+  execution_available: false;
+  availability: "records_only";
+  work_enabled: boolean;
+  needs_mandate_reconciliation: boolean;
+  current_contents: "not_checked";
+  created_at: string;
+  updated_at: string;
+}
+export interface WorkCommand extends Partial<WorkAssignment> {
+  operation_id: string;
+  expected_revision: number;
+  expected_assignment_revision: number;
+  action:
+    | "edit"
+    | "cancel"
+    | "reopen"
+    | "changes_requested"
+    | "reconcile_mandate"
+    | "accept"
+    | "input"
+    | "decide";
+  note?: string;
+  outcome_id?: string;
+  evidence_revision?: number;
+  basis?: "outcome_statement";
+  acknowledge_unchecked_sources?: boolean;
+  blocker_id?: string;
+  blocker_revision?: number;
+}
+export interface WorkEvent {
+  id: string;
+  actor_id: string;
+  actor_kind: "human" | "nonhuman";
+  action: string;
+  revision: number;
+  assignment_revision: number;
+  created_at: string;
+  note: string | null;
+  record: WorkRecord;
+}
+function workBase(instance: string, work?: string) {
+  if (work && !/^[0-9a-f]{32}$/.test(work))
+    throw new Error("Invalid Work identity");
+  return `${base(instance)}/work${work ? `/${work}` : ""}`;
+}
+export function listWork(instance: string, offset = 0, signal?: AbortSignal) {
+  return request<{ work: WorkRecord[] }>(
+    `${workBase(instance)}?limit=50&offset=${offset}`,
+    { signal },
+  );
+}
+export function getWork(instance: string, work: string, signal?: AbortSignal) {
+  return request<WorkRecord>(workBase(instance, work), { signal });
+}
+export function delegateWork(
+  instance: string,
+  body: WorkAssignment & { operation_id: string },
+  signal?: AbortSignal,
+) {
+  return write<WorkRecord>(workBase(instance), "POST", body, signal);
+}
+export function commandWork(
+  instance: string,
+  work: string,
+  body: WorkCommand,
+  signal?: AbortSignal,
+) {
+  return write<WorkRecord>(
+    `${workBase(instance, work)}/commands`,
+    "POST",
+    body,
+    signal,
+  );
+}
+export function workHistory(
+  instance: string,
+  work: string,
+  offset = 0,
+  signal?: AbortSignal,
+) {
+  return request<{ events: WorkEvent[] }>(
+    `${workBase(instance, work)}/history?limit=50&offset=${offset}`,
+    { signal },
   );
 }

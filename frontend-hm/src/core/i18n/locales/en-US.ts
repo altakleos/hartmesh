@@ -15,6 +15,82 @@ import type { Translations } from "./types";
 
 export function createEnUS(product: string): Translations {
   return {
+    agentWork: {
+      resetResponse: "Reset response for current record",
+      replaceUnavailable:
+        "Replace the reference list, including removal of unavailable references.",
+      title: "Work",
+      recordsOnly:
+        "Records only. Delegation saves an assignment; AI employee execution is not available yet.",
+      visibility:
+        "Tracked delegation requires Use and Inspect, including visibility into this AI employee’s shared work.",
+      policyDisabled:
+        "To delegate, enable Work in the definition’s settings, then deliberately adopt that definition for this AI employee. Existing records remain available.",
+      policyEnabled: "Enable tracked Work",
+      policyNotice:
+        "This changes the definition. Existing AI employees keep their adopted policy until a manager adopts the updated definition. Execution remains unavailable.",
+      reviewRequired: "Require human review",
+      responsibility: "Responsibility",
+      objective: "Objective",
+      criteria: "Success criteria",
+      priority: "Priority",
+      due: "Due target (local time; does not schedule execution)",
+      delegate: "Delegate Work",
+      sharedNotice:
+        "The assignment and notes are shared with this AI employee’s Inspect audience. Include only information you intend to share.",
+      empty: "No Work records yet.",
+      open: "Open",
+      blocked: "Blocked",
+      submitted: "Ready for review",
+      completed: "Completed",
+      cancelled: "Cancelled",
+      low: "Low",
+      normal: "Normal",
+      high: "High",
+      urgent: "Urgent",
+      edit: "Edit assignment",
+      save: "Save assignment",
+      cancelEdit: "Discard draft",
+      cancel: "Cancel Work",
+      reopen: "Reopen Work",
+      changes_requested: "Request changes",
+      reconcile_mandate: "Revalidate under adopted mandate",
+      accept: "Accept outcome statement",
+      reconcileNeeded:
+        "The adopted mandate changed. A manager must revalidate this assignment before future execution.",
+      note: "Note or response",
+      input: "Supply factual input",
+      decide: "Record manager decision",
+      inputNotice:
+        "Factual input does not resolve a blocker or approve a decision. No response starts execution.",
+      unchecked:
+        "Current contents not checked. References do not certify that a file exists or that its contents were reviewed.",
+      acceptUnchecked:
+        "I accept the recorded outcome statement, acknowledging unchecked or unavailable file contents.",
+      unavailableSource: "Source unavailable",
+      sources: "Source references",
+      space: "Storage Space",
+      path: "Relative file path",
+      addSource: "Add reference",
+      removeSource: "Remove reference",
+      history: "History",
+      previous: "Previous page",
+      next: "Next page",
+      refresh: "Refresh Work",
+      retry: "Retry same request",
+      unconfirmed:
+        "The request outcome is unconfirmed. Retry the same request to recover its recorded result.",
+      error:
+        "Work operation failed. Review the current record before retrying.",
+      progress: "Progress",
+      nextAction: "Next action",
+      lastActivity: "Last activity",
+      acceptedBy: "Accepted by human reviewer",
+      reportedComplete: "AI employee reported complete",
+      creator: "Delegated by",
+      human: "Human",
+      nonhuman: "AI employee",
+    },
     agentInstances: {
       unconfirmed:
         "The request outcome is not confirmed. Refresh or retry the same request to check its state.",
