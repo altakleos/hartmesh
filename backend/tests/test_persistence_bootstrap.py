@@ -92,9 +92,9 @@ async def _alembic_version(engine) -> str | None:
 
 
 async def _seed_legacy_without_column(engine) -> None:
-    """Build the pre-#3658 schema: create_all, then drop the new column."""
+    """Build baseline-era tables, then drop the later token-usage column."""
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=[Base.metadata.tables[name] for name in _BASELINE_TABLE_NAMES]))
     async with engine.begin() as conn:
         # SQLite supports DROP COLUMN from 3.35.0; the test runner pins recent
         # Python which bundles a 3.40+ sqlite, so this is safe.
@@ -103,7 +103,7 @@ async def _seed_legacy_without_column(engine) -> None:
 
 async def _seed_legacy_with_column(engine) -> None:
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=[Base.metadata.tables[name] for name in _BASELINE_TABLE_NAMES]))
 
 
 async def _seed_legacy_missing_channel_tables(engine) -> None:
@@ -111,12 +111,11 @@ async def _seed_legacy_missing_channel_tables(engine) -> None:
 
     Models the worst-case legacy DB the bootstrap layer has to repair -- a
     user who upgraded across multiple releases and never had the channel_*
-    tables provisioned in the first place. We achieve it by running the full
-    ``create_all`` and then dropping the channel_* tables in FK-dependency
+    tables provisioned in the first place. We achieve it by creating only baseline-era tables and then dropping the channel_* tables in FK-dependency
     order (credentials/conversations reference channel_connections).
     """
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=[Base.metadata.tables[name] for name in _BASELINE_TABLE_NAMES]))
     async with engine.begin() as conn:
         for table in (
             "channel_credentials",

@@ -361,7 +361,7 @@ async def test_terminal_lock_refresh_observes_concurrent_manager_cancellation(ex
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", [None, "lease", "command", "session", "cancel_before_bind"])
+@pytest.mark.parametrize("failure", [None, "lease", "command", "session", "cancel_before_bind", "unknown_provider"])
 async def test_real_worker_admission_and_cleanup_control_work_promotion(execution, monkeypatch, failure):
     from unittest.mock import AsyncMock, patch
 
@@ -390,6 +390,8 @@ async def test_real_worker_admission_and_cleanup_control_work_promotion(executio
     with patch("deerflow.community.aio_sandbox.aio_sandbox.AioSandboxClient"):
         sandbox = AioSandbox(id="worker-test", base_url="http://localhost:8080")
     provider = InstanceSandboxProvider(admitted, sandbox, app_config=AppConfig(sandbox={"use": "deerflow.sandbox.local.local_sandbox_provider:LocalSandboxProvider"}), skill_revision="test-public-capture")
+    if failure == "unknown_provider":
+        provider = SimpleNamespace(app_config=provider.app_config, skill_revision=provider.skill_revision, close=lambda: None)
     prepared = AsyncMock(return_value=provider)
     monkeypatch.setattr("deerflow.agent_instances.runtime.prepare_environment", prepared)
     if failure == "lease":

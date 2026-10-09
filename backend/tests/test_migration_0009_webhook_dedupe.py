@@ -30,7 +30,8 @@ async def test_migration_0009_creates_composite_pk_table_and_is_idempotent(tmp_p
         # 0009 upgrade actually exercises its create_table path (not the
         # idempotent early-return). Stamp at 0004 so bootstrap upgrades to head.
         sync = sa.create_engine(f"sqlite:///{db_path}")
-        Base.metadata.create_all(sync)
+        # Work did not exist at this historical stamp; its frozen migrations own creation.
+        Base.metadata.create_all(sync, tables=[table for table in Base.metadata.sorted_tables if not table.name.startswith(("agent_work", "human_input_"))])
         with sync.begin() as conn:
             conn.execute(sa.text("DROP TABLE IF EXISTS webhook_deliveries"))
             conn.execute(sa.text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32) NOT NULL)"))

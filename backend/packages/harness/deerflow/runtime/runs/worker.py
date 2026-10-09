@@ -1006,7 +1006,7 @@ async def run_agent(bridge: StreamBridge, run_manager: RunManager, record: RunRe
                 if instance_environment is not None and instance_environment.provider is not None:
                     from deerflow.utils.file_io import await_drained, run_file_io
 
-                    sandbox = instance_environment.provider.sandbox
+                    sandbox = getattr(instance_environment.provider, "sandbox", None)
                     cleanup_known = not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))
                     await await_drained(run_file_io(instance_environment.provider.close))
                     cleanup_known = cleanup_known and not (getattr(sandbox, "requires_container_recycle", True) or getattr(sandbox, "execution_outcome_uncertain", True))

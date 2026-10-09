@@ -17,7 +17,8 @@ async def test_migration_interrupts_legacy_queue_and_adds_claim_fields(tmp_path:
     db_path = tmp_path / "deer.db"
     sync = sa.create_engine(f"sqlite:///{db_path}")
     try:
-        Base.metadata.create_all(sync)
+        # Work did not exist at this historical stamp; its frozen migrations own creation.
+        Base.metadata.create_all(sync, tables=[table for table in Base.metadata.sorted_tables if not table.name.startswith(("agent_work", "human_input_"))])
         with sync.begin() as conn:
             conn.execute(sa.text("DROP INDEX uq_scheduled_task_run_active"))
             conn.execute(sa.text("ALTER TABLE scheduled_task_runs DROP COLUMN attempt_count"))

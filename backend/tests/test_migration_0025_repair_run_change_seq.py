@@ -42,7 +42,8 @@ def _seed_database_that_skipped_0023(db_path) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
     sync_engine = sa.create_engine(f"sqlite:///{db_path.as_posix()}")
     try:
-        Base.metadata.create_all(sync_engine)
+        # Work did not exist at this historical stamp; its frozen migrations own creation.
+        Base.metadata.create_all(sync_engine, tables=[table for table in Base.metadata.sorted_tables if not table.name.startswith(("agent_work", "human_input_"))])
         with sync_engine.begin() as conn:
             # Remove everything 0023_run_change_seq owns.
             conn.execute(sa.text("DROP INDEX IF EXISTS ix_runs_change_seq"))
