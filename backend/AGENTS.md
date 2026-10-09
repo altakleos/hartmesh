@@ -408,11 +408,3 @@ See `docs/` directory for detailed documentation:
 
 Historical report compatibility is installed from `extensions/sources/hartmesh-legacy-report`;
 the generic host owns authorization, limits, source SHA and drained I/O.
-
-Consumer qualification lives in `test_work_consumer_journeys.py` (production
-Work tools/worker with deterministic graph and reopened SQL/services),
-`test_consumer_working_data.py`, and `test_work_input_example.py` (actual optional
-package over the canonical human facade). Keep business formats in consumer
-packages. Native proof stays in the mandatory no-skip storage tier; deterministic
-fixtures and model smoke are separate evidence. No consumer path selects host
-identity or bypasses native containment.
