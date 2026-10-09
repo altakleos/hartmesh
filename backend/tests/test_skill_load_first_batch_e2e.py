@@ -234,7 +234,7 @@ def test_the_first_thing_the_sandbox_runs_for_a_report_is_the_build(report_app):
     beside = after_first_batch["inspect-beside-read"]
     assert beside.status == "error"
     assert _text(beside).startswith("Not run: this call was chosen in the same message that loads the business-report skill's instructions"), _text(beside)
-    assert "`scripts/report.py build`" in _text(beside)
+    assert "`scripts/report.py`" in _text(beside)
     assert "xl/workbook.xml" not in _text(beside)
 
     # Each inspection chosen after the read returned is refused, however often
@@ -243,7 +243,7 @@ def test_the_first_thing_the_sandbox_runs_for_a_report_is_the_build(report_app):
     for request, call_id in ((requests[2], "inspect-again"), (requests[3], "inspect-months"), (requests[4], "read-upload")):
         refused = _tool_results(request)[call_id]
         assert refused.status == "error"
-        assert _text(refused).startswith("Not run: The business-report skill's work starts with `scripts/report.py build`"), _text(refused)
+        assert _text(refused).startswith("Not run: The business-report skill's work starts with `scripts/report.py`"), _text(refused)
         assert "xl/workbook.xml" not in _text(refused)
         assert "parts" not in _text(refused)
         assert "[Content_Types]" not in _text(refused)

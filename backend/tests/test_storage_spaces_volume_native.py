@@ -124,10 +124,35 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
             presentation = await await_drained(asyncio.to_thread(validate_presentation, runtime, ["/mnt/user-data/outputs/result.txt"], written_after=started))
         assert presentation.presented == ["/mnt/user-data/outputs/result.txt"], presentation.refused
         assert presentation.sizes == {"/mnt/user-data/outputs/result.txt": 13}
+        # Run the actual three consumer writers on qualified Home. These are
+        # test-owned executable copies, not evidence of private-skill admission.
+        import shlex
+
+        consumer_settings = [
+            ("reporting", "skills/public/business-report/scripts/business_report_settings.py", "summary_length", "short", "preferences"),
+            ("operations", "examples/skills/procedure-summary/scripts/working_data.py", "include_caveats", False, "settings"),
+            ("vendor", "examples/skills/supplier-comparison/scripts/working_data.py", "show_delivery", False, "settings"),
+        ]
+        consumer_revisions = {}
+        await await_drained(run_file_io(first.sandbox.execute_command, "mkdir -p /mnt/spaces/home/qualification"))
+        for consumer, source, field, value, key in consumer_settings:
+            code = (Path(__file__).resolve().parents[2] / source).read_text(encoding="utf-8")
+            await await_drained(run_file_io(first.sandbox.write_file, f"/mnt/spaces/home/qualification/{consumer}.py", code))
+            payload = json.dumps({"version": 1, field: value})
+            await await_drained(run_file_io(first.sandbox.write_file, f"/mnt/spaces/home/qualification/{consumer}-request.json", payload))
+            command = f"python3 /mnt/spaces/home/qualification/{consumer}.py save /mnt/spaces/home/workflow-data/{consumer}/settings.json --from /mnt/spaces/home/qualification/{consumer}-request.json --expected missing --operation initial"
+            output = await await_drained(run_file_io(first.sandbox.execute_command, command))
+            receipt = next(json.loads(line) for line in output.splitlines() if line.startswith('{"'))
+            assert receipt[key][field] == value
+            consumer_revisions[consumer] = receipt["revision"]
         await await_drained(run_file_io(first.close))
         two = await authority.create(actor=bob, instance_id=instance.id, thread_id=uuid.uuid4().hex)
         second = await prepare_environment(await authority.execution(actor=bob, thread_id=two["thread_id"]), baseline_provider=baseline, app_config=app_config)
         assert first.sandbox.id == second.sandbox.id
+        for consumer, _, field, value, key in consumer_settings:
+            output = await await_drained(run_file_io(second.sandbox.execute_command, f"python3 /mnt/spaces/home/qualification/{consumer}.py read /mnt/spaces/home/workflow-data/{consumer}/settings.json"))
+            receipt = next(json.loads(line) for line in output.splitlines() if line.startswith('{"'))
+            assert receipt["revision"] == consumer_revisions[consumer] and receipt[key][field] == value
         assert await await_drained(run_file_io(second.sandbox.read_file, "/mnt/spaces/home/wiki/home.md")) == "# Team wiki\n"
         db = await await_drained(run_file_io(second.sandbox.execute_command, "python3 -c \"import sqlite3; print(sqlite3.connect('/mnt/spaces/home/catalog.sqlite').execute('select value from work').fetchone()[0])\""))
         assert "retained" in db
@@ -145,6 +170,11 @@ async def test_agent_two_chats_use_one_qualified_home_with_real_aio_protocol(bac
         assert restored["complete"] and restored["instance"].home_id == instance.home_id
         third = await prepare_environment(await authority.execution(actor=bob, thread_id=two["thread_id"]), baseline_provider=baseline, app_config=app_config)
         assert third.sandbox.id != second.sandbox.id
+        for consumer, _, _, _, key in consumer_settings:
+            command = f"python3 /mnt/spaces/home/qualification/{consumer}.py reset /mnt/spaces/home/workflow-data/{consumer}/settings.json --expected {shlex.quote(consumer_revisions[consumer])} --operation reset-after-replacement"
+            output = await await_drained(run_file_io(third.sandbox.execute_command, command))
+            receipt = next(json.loads(line) for line in output.splitlines() if line.startswith('{"'))
+            assert receipt[key] == {"version": 1} and receipt["revision"] != consumer_revisions[consumer]
         assert await await_drained(run_file_io(third.sandbox.read_file, "/mnt/spaces/home/wiki/home.md")) == "# Team wiki\n"
         assert "retained" in await await_drained(run_file_io(third.sandbox.execute_command, "python3 -c \"import sqlite3; print(sqlite3.connect('/mnt/spaces/home/catalog.sqlite').execute('select value from work').fetchone()[0])\""))
         await await_drained(run_file_io(third.close))

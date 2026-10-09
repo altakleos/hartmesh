@@ -8,6 +8,7 @@ import re
 from decimal import ROUND_HALF_UP, Decimal
 
 from documents import pdf, publish, read_input, text, text_list, workbook
+from working_data import read, validate
 
 
 def amount(value, field, scale, maximum):
@@ -19,9 +20,14 @@ def amount(value, field, scale, maximum):
     return result
 
 
-def build(input_path, output):
+def build(input_path, output, settings_path=None, show_delivery=None):
     raw, source = read_input(input_path)
-    title = text(source.get("title", "Supplier comparison"), "title", 256)
+    snapshot = read(settings_path) if settings_path else None
+    choices = snapshot["settings"] if snapshot else {"version": 1}
+    if show_delivery is not None:
+        choices = {**choices, "show_delivery": show_delivery}
+    validate(choices)
+    title = text(choices.get("project", source.get("title", "Supplier comparison")), "title", 256)
     suppliers = source.get("suppliers")
     if not isinstance(suppliers, list) or not 1 <= len(suppliers) <= 50:
         raise ValueError("Invalid suppliers: supply 1 to 50 quotations.")
@@ -49,6 +55,10 @@ def build(input_path, output):
         "Currency",
         "Delivery",
     ]
+    if not choices.get("show_delivery", True):
+        rows = [row[:-1] for row in rows]
+        columns = columns[:-1]
+        caveat += " Delivery omitted from this presentation; supplied terms remain in the retained source."
     blocks = [
         {
             "type": "text",
@@ -83,7 +93,7 @@ def build(input_path, output):
     }
     paragraphs = [title, caveat, *[" | ".join(row) for row in rows], *notes]
     workbook_rows = [[title], columns, *rows, [caveat], *[[item] for item in notes]]
-    return publish(
+    result = publish(
         output,
         "comparison",
         raw,
@@ -97,15 +107,18 @@ def build(input_path, output):
             ),
         ],
     )
+    return {**result, "settings_used": snapshot, "effective": choices}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--settings")
+    parser.add_argument("--show-delivery", choices=("yes", "no"))
     arguments = parser.parse_args()
     try:
-        result = build(arguments.input, arguments.output)
+        result = build(arguments.input, arguments.output, arguments.settings, None if arguments.show_delivery is None else arguments.show_delivery == "yes")
     except (OSError, ValueError, TypeError, RecursionError) as error:
         parser.exit(1, f"Cannot build comparison: {error}\n")
     print(json.dumps(result, ensure_ascii=False))

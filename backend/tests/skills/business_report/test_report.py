@@ -202,7 +202,7 @@ def test_warning_action_preserves_business_actions_and_authored_prose_rules(repo
 
 def test_script_installs_nothing_never_shells_out_and_runs_on_the_image_python() -> None:
     modules = sorted((SKILL_DIR / "scripts").glob("*.py"))
-    assert [module.name for module in modules] == ["business_report_common.py", "business_report_publish.py", "business_report_render.py", "business_report_sections.py", "business_report_view.py", "report.py"]
+    assert [module.name for module in modules] == ["business_report_common.py", "business_report_publish.py", "business_report_render.py", "business_report_sections.py", "business_report_settings.py", "business_report_view.py", "report.py"]
     for module in modules:
         source = module.read_text(encoding="utf-8")
         ast.parse(source, feature_version=(3, 10))
@@ -908,7 +908,6 @@ def test_preferences_merge_into_the_build_options_and_list_what_applied(report) 
         "exclusions": [{"role": "category", "equals": "Warranty"}],
         "summary_length": "short",
         "charts": ["revenue_by_period"],
-        "unknown_key": True,
     }
 
     merged, applied = report.apply_preferences(options, prefs)

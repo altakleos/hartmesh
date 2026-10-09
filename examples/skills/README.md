@@ -32,3 +32,12 @@ verify the source facts or certify operational safety.
 
 See the [qualification journey](../../docs/skill-result-qualification.md) for
 real Docker/browser execution and the separate read-only AIO check.
+
+Both examples also own `scripts/working_data.py`: bounded v1 settings with
+revision-checked read/validate/save/patch/reset, stable cooperative locks and exact
+retry receipts. Their SKILL.md files describe persistence scope and one-output
+overrides. Procedure owns `include_caveats`/`heading`; comparison owns
+`show_delivery`/`project`. They import neither core nor reporting settings code.
+These independent implementations share a tested pattern, not a platform service.
+See [AI employee qualification](../../docs/AI_EMPLOYEE_QUALIFICATION.md) for the
+distinct consumer, lifecycle, native, browser and actual-model evidence tiers.

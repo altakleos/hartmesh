@@ -247,6 +247,8 @@ def build_report(ctx: BuildContext, previous_draft: int, compute_checks) -> tupl
             sections.append(section)
     wanted = options.charts
     if wanted is not None:
+        for missing in sorted(set(wanted) - charts.keys()):
+            notes.append(f"Requested chart {missing} is unavailable for these inputs and profile.")
         for section in sections:
             section["charts"] = [chart for chart in section.get("charts", []) if chart in wanted]
         charts = {chart_id: data for chart_id, data in charts.items() if chart_id in wanted}
