@@ -31,6 +31,7 @@ DISTRIBUTION_REVISIONS = (
     "0036_agent_instance_memory",
     "0037_agent_lifecycle",
     "0038_agent_work",
+    "0039_human_input",
 )
 
 

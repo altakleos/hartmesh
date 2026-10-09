@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from deerflow_extension_api.auth import ExtensionPrincipal
+from deerflow_extension_api.human_input import HumanInputActions
 from deerflow_extension_api.settings import FrontendBinding, SettingsContribution, SettingsField, SettingValue
 from deerflow_extension_api.storage import ResourceStorage, StorageActor, StorageController, StorageResource
 
@@ -23,6 +24,7 @@ class ActionContext:
     actor: StorageActor | None = field(default=None, kw_only=True)
     storage: ResourceStorage | None = field(default=None, kw_only=True)
     resource: StorageResource | None = field(default=None, kw_only=True)
+    human_input: HumanInputActions | None = field(default=None, kw_only=True)
 
 
 @dataclass(frozen=True)
@@ -128,6 +130,7 @@ class PluginContribution:
     storage_api_version: int | None = None
     actor_kinds: tuple[str, ...] = ("human",)
     storage_controller: StorageController | None = None
+    human_input_api_version: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "fields", tuple(self.fields))

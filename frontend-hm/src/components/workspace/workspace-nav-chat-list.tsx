@@ -20,6 +20,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { AttentionNav } from "@/components/workspace/attention/nav";
 import { useAgentsApiEnabled } from "@/core/agents";
 import { useStorageSpacesEnabled } from "@/core/features";
 import { useI18n } from "@/core/i18n/hooks";
@@ -32,6 +33,7 @@ export function WorkspaceNavChatList() {
   return (
     <SidebarGroup className="pt-1">
       <SidebarMenu>
+        {spacesEnabled && agentsEnabled && <AttentionNav />}
         <SidebarMenuItem>
           <SidebarMenuButton isActive={pathname === "/workspace/chats"} asChild>
             <Link className="text-muted-foreground" href="/workspace/chats">

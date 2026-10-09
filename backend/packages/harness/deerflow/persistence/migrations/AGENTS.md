@@ -1,9 +1,9 @@
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
-The distribution ends in `0038_agent_work`, after lifecycle0037, instance identity0034,
+The distribution ends in `0039_human_input`, after Work0038, lifecycle0037, instance identity0034,
 conversations0035 and memory/provenance0036. These follow0033_storage_features.
 They add adopted revisions, instances/grants, bindings, memory, lifecycle intent
-and generic Work/attempt/event records;
+and generic Work/attempt/event and human-input request/response/event/read records;
 existing application tables remain unchanged. Used instance facts cannot be
 erased by downgrade. The preceding `0032_storage_lifecycle` follows `0031`/`0030`.
 These add resource/grant/event, backing/operation and containment/backup facts

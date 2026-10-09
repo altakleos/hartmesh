@@ -8,7 +8,8 @@ adopted instructions, skills and trusted extensions, not Work schemas.
 This capability is **records only**. Saving an assignment, providing input,
 recording a decision or changing a due target does not execute the AI employee.
 There is no Work Run/Resume endpoint, background trigger, completion-reporting
-endpoint or addressed attention inbox in this stage. Ordinary conversations
+endpoint in this stage. The [Attention inbox](HUMAN_INPUT_REQUESTS.md)
+supports human-created requests and attributed responses. Ordinary conversations
 remain available independently.
 
 ## Enable and use
@@ -46,8 +47,8 @@ the exact outcome or, where review was not required, **AI employee reported
 complete**. Cancelled means a manager withdrew the commitment. A run ending does
 not prove an outcome is complete.
 
-New records start Open. Human commands cannot invent a blocker or completion
-report. Review/input controls operate only on canonical host records; this
+New records start Open. A manager can create a linked human-input request, atomically blocking open
+Work. Human commands cannot invent a completion report. Review/input controls operate only on canonical host records; this
 stage has no producer for new AI employee submissions. Submitted assignments
 require **Request changes** before editing; Completed/Cancelled assignments
 require **Reopen Work**. Both clear current outcome/review bindings and preserve
@@ -113,3 +114,8 @@ unresolved attempt per Work. Human APIs create no attempts. Future host executio
 must reconcile exact run/operation outcomes before declaring attempts terminal.
 Work history has no user/chat cascade; downgrades refuse to erase used tables.
 No existing rows, consumer files or adopted definition hashes are rewritten.
+
+Human-input migration `0039_human_input` adds requests, responses, receipts and
+read state after0038. Canonical Work transitions synchronize linked requests in
+the same transaction; their decision/review commands require exact request and
+response-set acknowledgement. See [Attention](HUMAN_INPUT_REQUESTS.md).

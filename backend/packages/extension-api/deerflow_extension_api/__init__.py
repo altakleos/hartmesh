@@ -43,6 +43,7 @@ from deerflow_extension_api.contracts import (
     TaskOutcome,
     extension,
 )
+from deerflow_extension_api.human_input import HumanInputActions
 from deerflow_extension_api.model_invocation import (
     ModelInvocationError,
     ModelInvocationFailed,
@@ -140,6 +141,7 @@ __all__ = [
     "ModelOutputValidationError",
     "ModelUsage",
     "ActionContext",
+    "HumanInputActions",
     "ArtifactPresentation",
     "BackendAction",
     "BrowserAssets",

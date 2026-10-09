@@ -68,7 +68,7 @@ function base(id?: string) {
   return `${getBackendBaseURL()}/api/agent-instances${id ? `/${id}` : ""}`;
 }
 
-async function request<T>(url: string, init?: RequestInit): Promise<T> {
+export async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const signal = AbortSignal.any([
     AbortSignal.timeout(20_000),
     ...(init?.signal ? [init.signal] : []),
@@ -96,7 +96,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
   return payload as T;
 }
 
-function write<T>(
+export function write<T>(
   url: string,
   method: string,
   body: unknown,
@@ -285,6 +285,7 @@ export interface WorkAssignment {
   sources?: WorkSource[];
 }
 export interface WorkRecord extends Omit<WorkAssignment, "sources"> {
+  human_input_request_id?: string | null;
   id: string;
   instance_id: string;
   creator_id: string;
@@ -343,6 +344,12 @@ export interface WorkCommand extends Partial<WorkAssignment> {
   acknowledge_unchecked_sources?: boolean;
   blocker_id?: string;
   blocker_revision?: number;
+  request_basis?: {
+    id: string;
+    revision: number;
+    request_revision: number;
+    response_ids: string[];
+  };
 }
 export interface WorkEvent {
   id: string;

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Human-input requests and Attention
+
+- Add addressed information, decision and review requests with current-access
+  inbox counts, explicit routing recovery, independent read state and concurrent
+  attributed replies. Human responses never start execution or imply approval.
+- Couple canonical Work decisions and request closure in one transaction.
+  Preserve exact retries and reject stale routing/review forms.
+- Add optional plugin contract v5 / human-input facade v1 for authenticated human
+  actions. Generic controls remain available without specialist plugins.
+
 ### Work records and management
 
 - Add optional adopted-definition Work policy and durable assignments with
@@ -15,13 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in definitions, skills and trusted extensions.
 - Add records-only Work controls to the instance page and policy opt-in to
   custom-definition settings. Delegation and human responses do not run the AI
-  employee. Activation, completion reporting and addressed attention remain
-  unavailable in this stage.
+  employee. Activation and completion reporting remain unavailable.
 - Separate factual input, manager decisions and acceptance of an exact outcome
   statement. File references require current source access; the UI explicitly
   labels their current contents unchecked.
 
 ### Schema changes
+
+- Add migration `0039_human_input` after0038, creating request, response, event
+  and read-state tables. No existing table or consumer file format changes.
 
 - Add migration `0038_agent_work` after published `0037_agent_lifecycle`, creating
   `agent_work`, `agent_work_attempts` and `agent_work_events`. Used records have

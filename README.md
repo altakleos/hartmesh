@@ -76,6 +76,10 @@ conversations. Enable Work in a custom definition’s settings, then explicitly
 adopt that definition for the instance. The instance page labels this capability
 **records only**: saving or responding to Work does not start execution. Current
 Inspect grants control visibility; referenced files retain separate access checks.
+[Attention](docs/HUMAN_INPUT_REQUESTS.md) gives human collaborators addressed
+requests for information, decisions and review, with current-access counts,
+routing recovery and attributed replies. Responses never start an AI employee
+run. Domain rules remain in skills and optional trusted plugins.
 
 The [Storage Spaces foundation](docs/STORAGE_SPACES.md) adds stable resource
 identity, personal/company custody and explicit typed grants. Company custody

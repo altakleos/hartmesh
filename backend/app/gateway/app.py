@@ -39,6 +39,7 @@ from app.gateway.routers import (
     feedback,
     files,
     github_webhooks,
+    human_input,
     input_polish,
     integrations,
     knowledge,
@@ -1261,6 +1262,7 @@ This gateway provides runtime endpoints for agent runs plus custom endpoints for
     app.include_router(agents.router)
     app.include_router(agent_instances.router)
     app.include_router(agent_work.router)
+    app.include_router(human_input.router)
     # Projects API is mounted at /api/projects
     app.include_router(projects.router)
     # Project document shelf API is mounted at /api/projects/{id}/documents

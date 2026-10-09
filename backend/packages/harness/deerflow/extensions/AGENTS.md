@@ -454,3 +454,10 @@ No online settings write API is added. `plugin_tools.py` joins normal tool assem
 the run's extension snapshot; task delegation passes that snapshot explicitly. Browser
 public-field projection is an allowlist. Package code is trusted, not sandboxed. See
 `docs/full-stack-plugins.md` and the independently packaged bookmark example.
+
+Plugin contract v5 explicitly negotiates `human_input_api_version=1` for existing
+human backend actions. `ActionContext.human_input` is retired on action exit and
+rechecks current installation/settings, action authority, human identity and
+agents ceilings on each call. It delegates bounded commands to canonical Work
+services. Model tools receive no handle; passive views stay non-executable.
+Unsupported versions fail registration rather than silently omit the capability.
