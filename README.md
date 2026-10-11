@@ -595,7 +595,7 @@ creation while keeping host assignment available.
 
 The Compose profile reads seven optional storage settings and runs a bounded
 preparation one-shot from the same pinned backend image. Storage stays off when
-`HARTMESH_USERS` is absent; AI assistant/AI employee creation remains disabled
+`HARTMESH_USERS` is absent; AI assistant/AI employee counts render as zero
 while their execution support is being completed. The data disk must be a shared
 mount even with those settings absent; see the
 [Compose pre-flight check](deploy/compose/README.md#storage-and-agents).
