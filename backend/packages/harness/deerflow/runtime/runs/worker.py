@@ -26,7 +26,7 @@ import threading
 import time
 import weakref
 from collections.abc import Callable, Coroutine, Mapping
-from contextlib import AbstractAsyncContextManager
+from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from contextvars import Context
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -735,6 +735,8 @@ class RunContext:
     conversation_reader: Any | None = field(default=None)
     storage_provider: Any | None = field(default=None)
     agent_execution: Any | None = field(default=None)
+    # Trusted host scope only; never part of runtime payloads or checkpoints.
+    chat_storage_scope: Callable[..., AbstractAsyncContextManager[Any]] | None = None
 
 
 def _install_runtime_context(config: dict, runtime_context: dict[str, Any]) -> None:
@@ -1118,6 +1120,8 @@ async def _run_agent(
     # finally is safe even if an exception fires before streaming begins.
     subagent_events: _SubagentEventBuffer | None = None
     started = False
+    chat_storage_stack = AsyncExitStack()
+    chat_files_available = True
 
     async def _finish_cancellation(
         action: str,
@@ -1313,7 +1317,12 @@ async def _run_agent(
 
         persist_completion = True
 
-        if event_store is not None and ctx.agent_execution is None:
+        if ctx.agent_execution is None and ctx.chat_storage_scope is not None:
+            prepared_chat = await chat_storage_stack.enter_async_context(ctx.chat_storage_scope(user_id=get_effective_user_id(), thread_id=thread_id))
+            if prepared_chat is not None:
+                chat_files_available = prepared_chat.mounts.user is not None
+
+        if event_store is not None and ctx.agent_execution is None and chat_files_available:
             workspace_changes_user_id = get_effective_user_id()
             workspace_excluded_dir_names = _workspace_excluded_dir_names(ctx.app_config)
             try:
@@ -1747,7 +1756,7 @@ async def _run_agent(
                     user_id=workspace_changes_user_id,
                     extra_excluded_dir_names=workspace_excluded_dir_names,
                 )
-                if event_store is not None and ctx.agent_execution is None
+                if event_store is not None and ctx.agent_execution is None and chat_files_available
                 else []
             )
             delivery_content = _delivery_content_with_outputs(
@@ -1789,12 +1798,16 @@ async def _run_agent(
         if cancel_action is not None:
             await _finish_cancellation(cancel_action)
         else:
+            from deerflow.agent_instances.contract import Refusal
+
+            refusal = {"reason": exc.reason, "status": exc.status, **exc.extra} if isinstance(exc, Refusal) else {}
             await bridge.publish(
                 run_id,
                 "error",
                 {
                     "message": error_msg,
                     "name": type(exc).__name__,
+                    **refusal,
                 },
             )
 
@@ -1860,7 +1873,7 @@ async def _run_agent(
                     logger.warning("Failed to flush journal for run %s", run_id, exc_info=True)
 
                 if delivery_content is None:
-                    if not persist_completion:
+                    if not persist_completion or not chat_files_available:
                         # Preflight/admission failed before execution started;
                         # no output scan was due for this run.
                         produced_output_paths = []
@@ -2092,6 +2105,12 @@ async def _run_agent(
                         run_id,
                     )
                 finally:
+                    try:
+                        await chat_storage_stack.aclose()
+                    except BaseException as exc:
+                        if lease_cleanup_interrupt is None:
+                            lease_cleanup_interrupt = exc
+                        logger.warning("Chat storage scope cleanup failed for run %s; completing local cleanup first", run_id, exc_info=True)
                     _release_run_scoped_references(
                         runnable_configs,
                         runtime_ctx,

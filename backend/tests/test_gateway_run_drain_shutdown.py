@@ -147,7 +147,8 @@ async def test_shutdown_is_noop_without_inflight_runs():
 
 
 @pytest.mark.asyncio
-async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeypatch):
+@pytest.mark.parametrize("startup_failure", [False, True])
+async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeypatch, startup_failure):
     """Drain runs before services, then close runtime resources in stack order.
 
     Patches every ``langgraph_runtime`` collaborator down to trivial stand-ins so
@@ -161,6 +162,24 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     from deerflow.extensions.registry import ExtensionRegistry
 
     events: list[str] = []
+    metadata_entered, metadata_release = asyncio.Event(), asyncio.Event()
+
+    async def held_metadata():
+        metadata_entered.set()
+        await metadata_release.wait()
+        assert "engine_closed" not in events
+        events.append("metadata_drained")
+
+    async def recheck():
+        try:
+            await asyncio.Event().wait()
+        finally:
+            assert "engine_closed" not in events
+            events.append("recheck_drained")
+
+    def start_owned_storage():
+        app.state.agent_execution = SimpleNamespace(adapter_task=None, metadata_task=asyncio.create_task(held_metadata()), company_task=None, mount_task=None, mount_cleanup_task=None, mount_verify_task=None, mount_cleanup=None)
+        app.state.storage_recheck_task = asyncio.create_task(recheck())
 
     @asynccontextmanager
     async def probe_checkpointer(_config):
@@ -185,6 +204,9 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
 
     async def fake_init_engine(_db):
         events.append("engine_initialized")
+        if startup_failure:
+            start_owned_storage()
+            raise RuntimeError("partial engine startup failed")
 
     def fake_session_factory():
         events.append("session_factory_resolved")
@@ -195,6 +217,9 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
 
     async def spy_shutdown(self, *, timeout):  # noqa: ANN001
         events.append("runs_drained")
+
+    async def spy_chat_storage_close(_app):
+        events.append("chat_storage_closed")
 
     def spy_set_extension_notify_loop(loop):  # noqa: ANN001
         assert loop is asyncio.get_running_loop()
@@ -212,6 +237,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     monkeypatch.setattr("deerflow.runtime.events.store.make_run_event_store", lambda _cfg: object())
     monkeypatch.setattr("deerflow.persistence.thread_meta.make_thread_store", lambda _sf, _store: object())
     monkeypatch.setattr(RunManager, "shutdown", spy_shutdown, raising=False)
+    monkeypatch.setattr("app.gateway.chat_storage.close_chat_storage_host", spy_chat_storage_close)
     monkeypatch.setattr("deerflow.extensions.notify.set_extension_notify_loop", spy_set_extension_notify_loop)
     monkeypatch.setattr("deerflow.extensions.notify.reset_extension_notify_loop", spy_reset_extension_notify_loop)
 
@@ -230,8 +256,31 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     app.state.extensions = registry.build()
     startup_config = SimpleNamespace(database=SimpleNamespace(backend="memory", checkpoint_channel_mode="full", checkpoint_delta=SimpleNamespace(snapshot_frequency=10)), run_events=None)
 
-    async with langgraph_runtime(app, startup_config):
-        pass
+    async def scenario():
+        if startup_failure:
+            with pytest.raises(RuntimeError, match="partial engine startup failed"):
+                async with langgraph_runtime(app, startup_config):
+                    pytest.fail("Failed startup admitted runtime work")
+        else:
+            async with langgraph_runtime(app, startup_config):
+                start_owned_storage()
+                await metadata_entered.wait()
+
+    task = asyncio.create_task(scenario())
+    try:
+        await asyncio.wait_for(metadata_entered.wait(), 2)
+        await asyncio.sleep(0.03)
+        assert not task.done() and "engine_closed" not in events
+        metadata_release.set()
+        await asyncio.wait_for(task, 2)
+    finally:
+        metadata_release.set()
+        await asyncio.gather(task, return_exceptions=True)
+    assert events.index("metadata_drained") < events.index("engine_closed")
+    assert events.index("recheck_drained") < events.index("engine_closed")
+    if startup_failure:
+        assert "service_started" not in events
+        return
 
     assert "runs_drained" in events, "langgraph_runtime never drained in-flight runs on shutdown"
     assert "service_started" in events
@@ -240,6 +289,7 @@ async def test_langgraph_runtime_drains_runs_before_closing_checkpointer(monkeyp
     assert events.index("engine_initialized") < events.index("session_factory_resolved")
     assert events.index("session_factory_resolved") < events.index("service_started")
     assert events.index("runs_drained") < events.index("service_stopped")
+    assert events.index("runs_drained") < events.index("chat_storage_closed") < events.index("checkpointer_closed")
     assert events.index("service_stopped") < events.index("store_closed")
     assert events.index("store_closed") < events.index("checkpointer_closed")
     assert events.index("checkpointer_closed") < events.index("engine_closed")

@@ -46,8 +46,17 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
                       Default is True for optimal performance.
         """
         super().__init__()
+        self._explicit_paths = bool(base_dir)
         self._paths = Paths(base_dir) if base_dir else get_paths()
         self._lazy_init = lazy_init
+
+    def _invocation_paths(self):
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        current = get_paths()
+        if not self._explicit_paths and isinstance(current, ChatStoragePaths):
+            return current
+        return self._paths
 
     def _get_thread_paths(self, thread_id: str, user_id: str | None = None) -> dict[str, str]:
         """Get the paths for a thread's data directories.
@@ -64,14 +73,20 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
             thread of everyone. A caller that passes no user (the legacy
             thread layout) gets no files entry.
         """
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        locations = self._invocation_paths()
+        if isinstance(locations, ChatStoragePaths):
+            locations.check_thread_capacity(thread_id, user_id=user_id)
+            return locations.thread_data(thread_id, user_id=user_id)
         paths = {
-            "workspace_path": str(self._paths.sandbox_work_dir(thread_id, user_id=user_id)),
-            "uploads_path": str(self._paths.sandbox_uploads_dir(thread_id, user_id=user_id)),
-            "outputs_path": str(self._paths.sandbox_outputs_dir(thread_id, user_id=user_id)),
+            "workspace_path": str(locations.sandbox_work_dir(thread_id, user_id=user_id)),
+            "uploads_path": str(locations.sandbox_uploads_dir(thread_id, user_id=user_id)),
+            "outputs_path": str(locations.sandbox_outputs_dir(thread_id, user_id=user_id)),
         }
         if user_id is not None:
-            paths["files_path"] = str(self._paths.user_files_dir(user_id))
-        paths["shared_path"] = str(self._paths.shared_dir())
+            paths["files_path"] = str(locations.user_files_dir(user_id))
+        paths["shared_path"] = str(locations.shared_dir())
         return paths
 
     def _create_thread_directories(self, thread_id: str, user_id: str | None = None) -> dict[str, str]:
@@ -84,9 +99,22 @@ class ThreadDataMiddleware(AgentMiddleware[ThreadDataMiddlewareState]):
         Returns:
             Dictionary with the created directory paths.
         """
-        self._paths.ensure_thread_dirs(thread_id, user_id=user_id)
-        self._paths.ensure_shared_dir()
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        locations = self._invocation_paths()
+        if isinstance(locations, ChatStoragePaths):
+            if locations.mounts(thread_id, user_id=user_id).user is not None:
+                locations.ensure_thread_dirs(thread_id, user_id=user_id)
+            return locations.thread_data(thread_id, user_id=user_id)
+        locations.ensure_thread_dirs(thread_id, user_id=user_id)
+        locations.ensure_shared_dir()
         return self._get_thread_paths(thread_id, user_id=user_id)
+
+    @override
+    async def abefore_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:
+        from deerflow.utils.file_io import await_drained, run_file_io
+
+        return await await_drained(run_file_io(self.before_agent, state, runtime))
 
     @override
     def before_agent(self, state: ThreadDataMiddlewareState, runtime: Runtime) -> dict | None:

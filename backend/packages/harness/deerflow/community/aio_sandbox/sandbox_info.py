@@ -54,6 +54,8 @@ class SandboxInfo:
     # Process-local warm-pool continuation. Never serialize it: another
     # Gateway cannot inherit this client's execution/session ownership.
     default_shell_state: tuple[str, str | None] | None = field(default=None, repr=False, compare=False)
+    # Actual Docker profile; never inferred from a persisted/client sandbox ID.
+    chat_storage_enabled: bool | None = field(default=None, repr=False, compare=False)
 
     def to_dict(self) -> dict:
         return {

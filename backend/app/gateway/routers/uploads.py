@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from app.gateway.authz import require_permission, try_acquire_sandbox_for_request
 from app.gateway.deps import get_config
 from app.gateway.upload_ingestion import ThreadUploadIngestionService, UnsafeFilenameError, UnsafeUploadDestinationError
+from deerflow.agent_instances.contract import Refusal
 from deerflow.config.app_config import AppConfig
 from deerflow.config.paths import get_paths
 from deerflow.runtime.user_context import get_effective_user_id
@@ -437,7 +438,7 @@ async def upload_files(
             if not file.filename:
                 continue
             try:
-                file_info = await service.ingest_chunks(_stream_upload_file(file), display_name=file.filename)
+                file_info = await service.ingest_chunks(_stream_upload_file(file), display_name=file.filename, expected_size=getattr(file, "size", None))
             except UnsafeFilenameError:
                 logger.warning(f"Skipping file with unsafe filename: {file.filename!r}")
                 continue
@@ -445,7 +446,7 @@ async def upload_files(
                 logger.warning("Skipping upload with unsafe destination %s: %s", file.filename, e)
                 skipped_files.append(e.filename)
                 continue
-            except HTTPException as e:
+            except (HTTPException, Refusal) as e:
                 await service.cleanup_written()
                 raise e
             except Exception as e:
@@ -466,6 +467,10 @@ async def upload_files(
             message=message,
             skipped_files=skipped_files,
         )
+    except BaseException:
+        if service._chat_upload is not None:
+            await service.cleanup_written()
+        raise
     finally:
         await service.aclose()
 
@@ -485,6 +490,13 @@ async def get_upload_limits(
 @require_permission("threads", "read", owner_check=True)
 async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadListResponse:
     """List all files in a thread's uploads directory."""
+    from app.gateway.agent_conversations import reject_legacy_binding
+    from app.gateway.chat_files import prepare_chat_files
+
+    await reject_legacy_binding(request, thread_id)
+    access = await prepare_chat_files(request, thread_id)
+    if access is not None:
+        return UploadListResponse(**await access.list_uploads(request))
     try:
         result = await run_file_io(_list_uploaded_files_for_thread, thread_id, get_effective_user_id())
     except ValueError as e:
@@ -497,6 +509,13 @@ async def list_uploaded_files(thread_id: ThreadId, request: Request) -> UploadLi
 @require_permission("threads", "delete", owner_check=True, require_existing=True)
 async def delete_uploaded_file(thread_id: ThreadId, filename: str, request: Request) -> dict:
     """Delete a file from a thread's uploads directory."""
+    from app.gateway.agent_conversations import reject_legacy_binding
+    from app.gateway.chat_files import prepare_chat_files
+
+    await reject_legacy_binding(request, thread_id)
+    access = await prepare_chat_files(request, thread_id)
+    if access is not None:
+        return await access.delete_upload(request, filename)
     try:
         return await run_file_io(_delete_uploaded_file_for_thread, thread_id, filename, get_effective_user_id())
     except FileNotFoundError:

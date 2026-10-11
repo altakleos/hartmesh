@@ -97,9 +97,9 @@ writable attachments remain denied. Creating a new account assigns its personal
 Space and company READ/EXPORT grant after the account commits. Typed Compose
 plans enforce user seats across local and SSO creation; the operator can release
 a disabled account's seat. Background repair and released-volume cleanup arrive
-in later integration changes. Trusted host integrations can now route conversation
-folders into their selected data roots; Compose chat mounts arrive in the next
-integration change. Legacy folders are not adopted or moved. Shared access requires explicit resource grants; company
+in later integration changes. Qualified ordinary chats use the assigned User Space
+for conversation files and My Files, with Shared mounted read-only. Legacy folders
+are not adopted or moved. Shared access requires explicit resource grants; company
 custody does not grant access. Disable a convenience feature without deleting its
 resource; its generic folder remains available under current grants.
 The [consumer handoff](docs/STORAGE_SPACES_CONSUMER.md) covers asynchronous callers,
@@ -601,6 +601,24 @@ With managed storage enabled, missing or unverified backings leave the Gateway
 running with durable history and Work records available. Startup logs report
 storage and execution availability; failed Docker admission is retried every
 minute. Inventory changes and offline growth take effect after a Gateway restart.
+
+Ordinary chats in an enabled, qualified storage deployment keep workspace,
+uploads and outputs in the person's assigned User Space. My Files uses that
+same Space; Shared uses a read-only company bind. Missing or unverified personal
+storage lets the chat continue with text and reports files as unavailable.
+Unsupported storage credentials also run chats without files. Uploads and edits
+stage privately on the qualified volume and report `files-full` with HTTP 507
+when capacity or inode headroom is exhausted. Free room by deleting files or old
+conversations. Artifact reads retain range requests and installed preview plugins.
+Deleting a conversation confirms its containers are gone before removing its files.
+Branching the latest turn copies workspace, uploads and outputs into a separate
+quota-counted conversation; historical turns and chats without personal storage
+copy message history without files. A failed branch rolls back its new files and
+conversation records.
+Managed-chat integration currently refuses Save/Share, project file promotion
+and listing, run ZIP archives, browser screenshot navigation and skill installation
+from a conversation. These operations keep working in ordinary deployments with
+managed storage disabled; their managed adapters follow in a separate change.
 
 `/api/features` reports storage readiness, account seats, AI assistant/AI employee
 allowances and the caller's file readiness. `/health` reports storage and agent

@@ -1,5 +1,17 @@
 # Workspace change evidence
 
+Native ordinary chats use `spaces/chat_snapshots.py`: refresh current User
+admission on the owning Gateway loop before and after scanning, and require the
+same role/root incarnation. Open roots, every walked directory and every regular
+file through the pinned confined filesystem. A directory device check alone
+cannot reject same-device bind mounts or file mounts; retain `NO_XDEV` at every
+entry and compare walked/admitted directory inodes. The scanner's optional
+descriptor callbacks keep these checks independent of its default host-root
+behavior. Native text evidence uses the existing memory budget, with no legacy
+disk cache. Cancellation drains the complete native scan before closing the
+volume. A chat without personal files returns empty evidence without filesystem
+work; a lost admission cannot publish a partial successful delivery scan.
+
 `scanner.py` enumerates only run-owned workspace/outputs roots. Open files
 relative to the walked directory descriptor with no-follow/nonblocking flags;
 derive hashes, text and metadata from that same verified regular file. Never

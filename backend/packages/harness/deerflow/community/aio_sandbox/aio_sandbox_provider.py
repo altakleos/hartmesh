@@ -27,6 +27,7 @@ from collections.abc import Callable
 from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import ExitStack
 from contextvars import ContextVar
+from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
 
@@ -69,7 +70,7 @@ from deerflow.runtime.user_context import get_effective_user_id
 from deerflow.sandbox.acquire_serialization import AcquireSerializer
 from deerflow.sandbox.exceptions import SandboxCapacityExceededError
 from deerflow.sandbox.identity import derive_sandbox_scope_token
-from deerflow.sandbox.lease import run_sync_lifecycle_operation
+from deerflow.sandbox.lease import cleanup_unheld_sandbox, run_sync_lifecycle_operation
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import SandboxProvider
 from deerflow.skills.types import SkillCategory
@@ -77,7 +78,7 @@ from deerflow.utils.file_io import await_drained
 
 from .aio_sandbox import AioSandbox
 from .backend import SANDBOX_LOCAL_PROVIDER_READY_TIMEOUT, DestroyOutcome, SandboxBackend, normalize_ready_timeout, wait_for_sandbox_ready, wait_for_sandbox_ready_async
-from .local_backend import LocalContainerBackend
+from .local_backend import ChatMountMismatch, LocalContainerBackend
 from .ownership import (
     OwnershipBackendError,
     RenewOutcome,
@@ -329,6 +330,16 @@ class SandboxSlotsBusyError(RuntimeError):
     def __init__(self, sandbox_id: str) -> None:
         super().__init__(f"No free sandbox slot for {sandbox_id} and eviction was not allowed")
         self.sandbox_id = sandbox_id
+
+
+@dataclass(frozen=True)
+class _ChatCandidate:
+    provider: object = field(repr=False)
+    sandbox_id: str
+    client: object = field(repr=False)
+    info: SandboxInfo = field(repr=False)
+    container_id: str
+    identity: tuple[str, str]
 
 
 class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
@@ -1665,15 +1676,25 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         from deerflow.config import get_app_config
         from deerflow.config.app_config import peek_loaded_app_config
+        from deerflow.config.paths import peek_scoped_paths
 
         try:
             resource_config = get_app_config()
         except FileNotFoundError:
             resource_config = peek_loaded_app_config()
-        if getattr(getattr(resource_config, "storage_spaces", None), "enabled", False) is True:
-            raise StorageUnsupported("AIO thread mounts do not implement resource attachment admission and writer fencing")
-        paths = get_paths()
+        paths = peek_scoped_paths()
         effective_user_id = AioSandboxProvider._effective_acquire_user_id(user_id)
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        if isinstance(paths, ChatStoragePaths):
+            if paths.has_personal_files:
+                paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
+            mounts = paths.mounts(thread_id, user_id=effective_user_id)
+            mounts.validate_sources()
+            return list(mounts.binds)
+        if getattr(getattr(resource_config, "storage_spaces", None), "enabled", False) is True:
+            raise StorageUnsupported("AIO thread mounts require fresh owning-loop storage admission and filesystem writer fencing")
+        paths = get_paths()
         paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
 
         mounts = [
@@ -2191,12 +2212,18 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         Handles SIGTERM, SIGINT, and SIGHUP (terminal close) to ensure
         sandbox containers are cleaned up even when the user closes the terminal.
         """
+        if self._storage_host() is not None:
+            # The Gateway owns asynchronous teardown. Its owner loop must keep
+            # running while prewarm workers await fresh admission callbacks.
+            return
         self._original_sigterm = signal.getsignal(signal.SIGTERM)
         self._original_sigint = signal.getsignal(signal.SIGINT)
         self._original_sighup = signal.getsignal(signal.SIGHUP) if hasattr(signal, "SIGHUP") else None
 
         def signal_handler(signum, frame):
-            self.shutdown()
+            host = self._storage_host()
+            if host is None or not host.is_owner_loop:
+                self.shutdown()
             if signum == signal.SIGTERM:
                 original = self._original_sigterm
             elif hasattr(signal, "SIGHUP") and signum == signal.SIGHUP:
@@ -2265,6 +2292,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             existing_id = self._thread_sandboxes[key]
             if root_scoped_identity and existing_id != expected_id:
                 stale_id = existing_id
+                info = self._sandbox_infos.get(existing_id)
+                client = self._sandboxes.get(existing_id)
             elif self._being_torn_down_locally(existing_id):
                 # A reaper thread in this process is stopping this container.
                 # Same answer as a peer's `del:` lease: cold-start instead.
@@ -2289,8 +2318,21 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 effective_user_id,
                 thread_id,
             )
-            self.destroy(stale_id)
+            if self.requires_chat_storage_validation:
+                self._retire_chat_candidate(stale_id, client, info)
+            else:
+                self.destroy(stale_id)
             return None
+
+        if self.requires_chat_storage_validation:
+            try:
+                self.validate_storage_candidate(existing_id, thread_id=thread_id, user_id=effective_user_id)
+            except ChatMountMismatch:
+                with self._lock:
+                    client = self._sandboxes.get(existing_id)
+
+                self._retire_chat_candidate(existing_id, client, info)
+                return None
 
         alive = self._check_tracked_sandbox_alive(existing_id, info) if info is not None else True
         if alive is False:
@@ -2932,6 +2974,160 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     # ── Core: acquire / get / release / shutdown ─────────────────────────
 
+    @staticmethod
+    def _thread_lock_path(paths, thread_id, sandbox_id, *, user_id):
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        if isinstance(paths, ChatStoragePaths):
+            from deerflow.spaces.chat_gate import conversation_lock_path
+
+            # One identity across policy IDs; preparing a lock never creates
+            # data directories before the cross-process creation fence is held.
+            return conversation_lock_path(paths, thread_id, user_id=user_id)
+        else:
+            paths.ensure_thread_dirs(thread_id, user_id=user_id)
+            root = paths.thread_dir(thread_id, user_id=user_id)
+        return root / f"{sandbox_id}.lock"
+
+    def _storage_host(self):
+        from deerflow.spaces.chat_bridge import get_chat_storage_host
+
+        host = getattr(self, "_chat_storage_host", None)
+        if host is not None:
+            return host
+        installed = get_chat_storage_host()
+        if installed is not None:
+            with self._lock:
+                if getattr(self, "_chat_storage_host", None) is None:
+                    self._chat_storage_host = installed
+                return self._chat_storage_host
+        return None
+
+    @property
+    def requires_chat_storage_validation(self):
+        from deerflow.config.app_config import peek_loaded_app_config
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        config = peek_loaded_app_config()
+        return isinstance(get_paths(), ChatStoragePaths) or self._storage_host() is not None or getattr(getattr(config, "storage_spaces", None), "enabled", False) is True
+
+    def _fresh_projection(self, prepared, thread_id, user_id):
+        from deerflow.spaces.backings import BackingUnavailable
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        if prepared is None or not isinstance(prepared.paths, ChatStoragePaths) or (prepared.mounts.user_id, prepared.mounts.thread_id) != (user_id, thread_id):
+            raise BackingUnavailable("Chat storage admission returned another scope")
+        current = get_paths()
+        if isinstance(current, ChatStoragePaths) and current.routing_signature() != prepared.paths.routing_signature():
+            raise BackingUnavailable("Chat storage routing changed; start a new run")
+        return prepared
+
+    @contextlib.contextmanager
+    def _chat_scope(self, thread_id, user_id):
+        from deerflow_extension_api.storage import StorageUnsupported
+
+        from deerflow.config.paths import paths_scope
+
+        if not self.requires_chat_storage_validation:
+            yield None
+            return
+        host = self._storage_host()
+        if host is None or thread_id is None:
+            raise StorageUnsupported("Chat storage requires its live host and conversation identity")
+        prepared = self._fresh_projection(host.prepare_sync(user_id, thread_id), thread_id, user_id)
+        prepared.paths.check_thread_capacity(thread_id, user_id=user_id)
+        with paths_scope(prepared.paths):
+            yield prepared
+
+    @contextlib.asynccontextmanager
+    async def _chat_scope_async(self, thread_id, user_id):
+        from deerflow_extension_api.storage import StorageUnsupported
+
+        from deerflow.config.paths import paths_scope
+        from deerflow.utils.file_io import await_drained, run_file_io
+
+        if not self.requires_chat_storage_validation:
+            yield None
+            return
+        host = self._storage_host()
+        if host is None or thread_id is None:
+            raise StorageUnsupported("Chat storage requires its live host and conversation identity")
+        prepared = self._fresh_projection(await host.prepare_async(user_id, thread_id), thread_id, user_id)
+        await await_drained(run_file_io(prepared.paths.check_thread_capacity, thread_id, user_id=user_id))
+        with paths_scope(prepared.paths):
+            yield prepared
+
+    def _candidate_identity(self, sandbox_id, thread_id, user_id, allow_unscoped_borrow):
+        from deerflow.spaces.backings import BackingUnavailable
+
+        with self._lock:
+            identity = self._active_sandbox_identity.get(sandbox_id)
+            client, info = self._sandboxes.get(sandbox_id), self._sandbox_infos.get(sandbox_id)
+        if client is None or info is None or identity is None or identity[0] != user_id or (not allow_unscoped_borrow and identity != (user_id, thread_id)):
+            raise BackingUnavailable("Retained chat storage has no matching owner identity")
+        return client, info, identity
+
+    def _validate_chat_candidate(self, sandbox_id, prepared, snapshot):
+        from deerflow.spaces.backings import BackingUnavailable
+
+        client, info, identity = snapshot
+        if not isinstance(self._backend, LocalContainerBackend):
+            raise BackingUnavailable("Chat storage requires the qualified local Docker backend")
+        prepared.mounts.validate_sources()
+        container_id = self._backend.validate_thread_mounts(info, mounts=prepared.mounts, protected_roots=getattr(prepared, "protected_roots", ()))
+        with self._lock:
+            if self._sandboxes.get(sandbox_id) is not client or self._sandbox_infos.get(sandbox_id) is not info or self._active_sandbox_identity.get(sandbox_id) != identity:
+                raise BackingUnavailable("Chat client incarnation changed during inspection")
+            if info.container_id is None:
+                info.container_id = container_id
+            if info.container_id != container_id:
+                raise BackingUnavailable("Chat container incarnation changed during inspection")
+        return _ChatCandidate(self, sandbox_id, client, info, container_id, identity)
+
+    def storage_candidate_is_current(self, candidate):
+        if candidate is None:
+            return not self.requires_chat_storage_validation
+        if not isinstance(candidate, _ChatCandidate) or candidate.provider is not self:
+            return False
+        with self._lock:
+            return (
+                candidate.sandbox_id not in getattr(self, "_cleanup_pending", {})
+                and self._sandboxes.get(candidate.sandbox_id) is candidate.client
+                and self._sandbox_infos.get(candidate.sandbox_id) is candidate.info
+                and candidate.info.container_id == candidate.container_id
+                and self._active_sandbox_identity.get(candidate.sandbox_id) == candidate.identity
+            )
+
+    def validate_storage_candidate(self, sandbox_id, *, thread_id, user_id, allow_unscoped_borrow=False):
+        if not self.requires_chat_storage_validation:
+            return None
+        snapshot = self._candidate_identity(sandbox_id, thread_id, user_id, allow_unscoped_borrow)
+        identity = snapshot[2]
+        with self._chat_scope(identity[1], identity[0]) as prepared:
+            token = self._validate_chat_candidate(sandbox_id, prepared, snapshot)
+            self._fresh_projection(self._storage_host().prepare_sync(identity[0], identity[1]), identity[1], identity[0])
+            if not self.storage_candidate_is_current(token):
+                from deerflow.spaces.backings import BackingUnavailable
+
+                raise BackingUnavailable("Chat client changed after admission")
+            return token
+
+    async def validate_storage_candidate_async(self, sandbox_id, *, thread_id, user_id, allow_unscoped_borrow=False):
+        from deerflow.utils.file_io import await_drained, run_file_io
+
+        if not self.requires_chat_storage_validation:
+            return None
+        snapshot = self._candidate_identity(sandbox_id, thread_id, user_id, allow_unscoped_borrow)
+        identity = snapshot[2]
+        async with self._chat_scope_async(identity[1], identity[0]) as prepared:
+            token = await await_drained(run_file_io(self._validate_chat_candidate, sandbox_id, prepared, snapshot))
+            self._fresh_projection(await self._storage_host().prepare_async(identity[0], identity[1]), identity[1], identity[0])
+            if not self.storage_candidate_is_current(token):
+                from deerflow.spaces.backings import BackingUnavailable
+
+                raise BackingUnavailable("Chat client changed after admission")
+            return token
+
     def acquire(self, thread_id: str | None = None, *, user_id: str | None = None) -> str:
         """Acquire a sandbox environment and return its ID.
 
@@ -2948,10 +3144,127 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             The ID of the acquired sandbox environment.
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
-        if thread_id:
-            with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
-                return self._acquire_internal(thread_id, user_id=effective_user_id)
-        return self._acquire_internal(thread_id, user_id=effective_user_id)
+        with self._chat_scope(thread_id, effective_user_id):
+            if thread_id:
+                with self._acquire_serializer.hold(self._thread_key(thread_id, effective_user_id)):
+                    for attempt in range(2):
+                        with self._lock:
+                            previous = dict(self._sandboxes)
+                        result = self._acquire_internal(thread_id, user_id=effective_user_id)
+                        if self.requires_chat_storage_validation:
+                            try:
+                                self.validate_storage_candidate(result, thread_id=thread_id, user_id=effective_user_id)
+                            except BaseException as exc:
+                                self._rollback_chat_admission(result, previous)
+                                if isinstance(exc, ChatMountMismatch) and attempt == 0:
+                                    self._assert_chat_cleanup_absent(result)
+                                    continue
+                                raise
+                        break
+            else:
+                result = self._acquire_internal(thread_id, user_id=effective_user_id)
+            return result
+
+    def _retire_chat_candidate(self, sandbox_id, client, info):
+        from deerflow.spaces.backings import BackingUnavailable
+
+        if client is None or info is None or not info.container_id:
+            raise BackingUnavailable("The previous chat client identity is unknown")
+
+        def cleanup():
+            with self._lock:
+                if self._sandboxes.get(sandbox_id) is not client or self._sandbox_infos.get(sandbox_id) is not info:
+                    raise BackingUnavailable("Chat client changed before replacement")
+                self._mark_cleanup_pending_locked(sandbox_id, DestroyOutcome.UNKNOWN)
+            self._destroy_tracked(sandbox_id, still_reapable=lambda: self._sandboxes.get(sandbox_id) is client and self._sandbox_infos.get(sandbox_id) is info)
+
+        if not cleanup_unheld_sandbox(self, sandbox_id, cleanup, defer_release=False):
+            raise BackingUnavailable("The previous chat client is still held by another execution")
+        self._assert_chat_cleanup_absent(sandbox_id)
+
+    @contextlib.asynccontextmanager
+    async def conversation_cleanup_scope(self, paths, thread_id, *, user_id):
+        """Fence creation and host writes through physical/logical deletion.
+
+        This is a host lifecycle capability, not ordinary file admission. The
+        caller already holds the exact thread's durable delete reservation and
+        refreshes its resource incarnation after teardown before removing files.
+        """
+        from deerflow.spaces.backings import BackingUnavailable
+        from deerflow.spaces.chat_gate import conversation_gate
+
+        if not isinstance(self._backend, LocalContainerBackend) or self._backend._runtime != "docker":
+            raise BackingUnavailable("Conversation cleanup requires strict local Docker inventory")
+        key = self._thread_key(thread_id, user_id)
+        async with self._acquire_serializer.hold_async(key):
+            async with conversation_gate(paths, thread_id, user_id=user_id):
+                await run_sync_lifecycle_operation(self._retire_conversation_containers, key)
+                yield
+
+    def _retire_conversation_containers(self, key):
+        from deerflow.spaces.backings import BackingUnavailable
+
+        observed = {info.sandbox_id: info for info in self._backend.list_running(strict=True) if info.owner == key}
+        with self._lock:
+            known = {sid for sid, owner in (*self._active_sandbox_identity.items(), *self._warm_pool_identity.items()) if owner == key}
+        for sandbox_id in sorted(known | observed.keys()):
+            actual = observed.get(sandbox_id)
+
+            def cleanup():
+                with self._lock:
+                    warm = self._warm_pool.get(sandbox_id)
+                    current = self._sandbox_infos.get(sandbox_id) or (warm[0] if warm is not None else None)
+                    identity = self._active_sandbox_identity.get(sandbox_id) or self._warm_pool_identity.get(sandbox_id)
+                if current is None:
+                    if actual is None:
+                        return
+                    if not self._claim_ownership(sandbox_id, for_destroy=True):
+                        raise BackingUnavailable("Conversation container belongs to another Gateway")
+                    with self._lock:
+                        if sandbox_id in self._sandbox_infos or sandbox_id in self._warm_pool or sandbox_id in self._starting:
+                            raise BackingUnavailable("Conversation container changed during cleanup")
+                        self._warm_pool[sandbox_id] = (actual, time.time())
+                        self._warm_pool_identity[sandbox_id] = key
+                        current, identity = actual, key
+                if identity != key or not current.container_id or (actual is not None and current.container_id != actual.container_id):
+                    raise BackingUnavailable("Conversation container incarnation is unknown or changed")
+                with self._lock:
+                    self._mark_cleanup_pending_locked(sandbox_id, DestroyOutcome.UNKNOWN)
+                self._destroy_tracked(sandbox_id, still_reapable=lambda: self._sandbox_infos.get(sandbox_id) is current or self._warm_pool.get(sandbox_id, (None, 0.0))[0] is current)
+
+            if not cleanup_unheld_sandbox(self, sandbox_id, cleanup, defer_release=False):
+                raise BackingUnavailable("Conversation container is retained by another execution")
+            self._assert_chat_cleanup_absent(sandbox_id)
+        if any(info.owner == key for info in self._backend.list_running(strict=True)):
+            raise BackingUnavailable("Conversation container absence is not confirmed")
+
+    def _assert_chat_cleanup_absent(self, sandbox_id):
+        from deerflow.spaces.backings import BackingUnavailable
+
+        with self._lock:
+            if sandbox_id in self._sandboxes or sandbox_id in self._sandbox_infos or sandbox_id in self._warm_pool or sandbox_id in self._starting:
+                raise BackingUnavailable("Previous chat mount cleanup is not confirmed")
+
+    def _rollback_chat_admission(self, sandbox_id, previous):
+        """Drain a newly admitted client without destroying a borrowed holder."""
+        with self._lock:
+            client = self._sandboxes.get(sandbox_id)
+            if client is None or previous.get(sandbox_id) is client:
+                return
+            self._mark_cleanup_pending_locked(sandbox_id, DestroyOutcome.UNKNOWN)
+        try:
+            cleanup_unheld_sandbox(
+                self,
+                sandbox_id,
+                lambda: self._destroy_tracked(
+                    sandbox_id,
+                    still_reapable=lambda: self._sandboxes.get(sandbox_id) is client,
+                ),
+            )
+        except Exception:
+            # The existing destroy path retains failed teardown in the warm
+            # quarantine and counts it against replicas until absence is known.
+            logger.warning("Failed chat admission cleanup remains pending for %s", sandbox_id, exc_info=True)
 
     # ── Prewarm: the first turn's container, built while the person types ──
 
@@ -2983,7 +3296,9 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     async def prewarm_async(self, thread_id: str, *, user_id: str | None = None) -> str | None:
         """Build and park ``thread_id``'s sandbox without blocking the event loop."""
-        admitted = self._submit_prewarm(thread_id, user_id=user_id)
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        async with self._chat_scope_async(thread_id, effective_user_id):
+            admitted = self._submit_prewarm(thread_id, user_id=effective_user_id)
         if admitted is None:
             return None
         worker, stop = admitted
@@ -3008,8 +3323,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def prewarm(self, thread_id: str, *, user_id: str | None = None) -> str | None:
         """Run one admitted speculative build, or skip it immediately if busy."""
-        admitted = self._submit_prewarm(thread_id, user_id=user_id)
-        return admitted[0].result() if admitted is not None else None
+        effective_user_id = self._effective_acquire_user_id(user_id)
+        with self._chat_scope(thread_id, effective_user_id):
+            admitted = self._submit_prewarm(thread_id, user_id=effective_user_id)
+            return admitted[0].result() if admitted is not None else None
 
     def _submit_prewarm(self, thread_id: str, *, user_id: str | None) -> tuple[Future[str | None], threading.Event] | None:
         effective_user_id = self._effective_acquire_user_id(user_id)
@@ -3027,8 +3344,8 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             return future, stop
 
     def _stop_prewarm_worker(self) -> None:
-        # Draining a concurrent future needs no event-loop callback. In
-        # particular, synchronous shutdown can safely run on the loop thread.
+        # Admission may be waiting for the host loop. The lifecycle guard keeps
+        # this join on a worker while the owning loop continues to serve it.
         with self._lock:
             self._prewarm_closed = True
             stop = getattr(self, "_prewarm_stop", None)
@@ -3039,6 +3356,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             executor.shutdown(wait=True, cancel_futures=True)
 
     def _prewarm(self, thread_id: str, *, user_id: str) -> str | None:
+        with self._chat_scope(thread_id, user_id):
+            return self._prewarm_in_scope(thread_id, user_id=user_id)
+
+    def _prewarm_in_scope(self, thread_id: str, *, user_id: str) -> str | None:
         """Build and park the container ``thread_id``'s first turn would build.
 
         The container a turn acquires is named by ``(user, thread)`` and shaped
@@ -3064,8 +3385,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 if self._thread_sandboxes.get(key) is not None or sandbox_id in self._warm_pool:
                     return None
             paths = get_paths()
-            paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
-            lock_path = paths.thread_dir(thread_id, user_id=effective_user_id) / f"{sandbox_id}.lock"
+            lock_path = self._thread_lock_path(paths, thread_id, sandbox_id, user_id=effective_user_id)
             # The same cross-process lock an acquisition takes, so a turn
             # arriving in another worker serializes with this build instead of
             # colliding with it on the container name.
@@ -3081,7 +3401,15 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                         # what to do with it.
                         return None
                     try:
+                        with self._lock:
+                            previous = dict(self._sandboxes)
                         created = self._create_sandbox(thread_id, sandbox_id, user_id=effective_user_id, allow_eviction=False)
+                        if self.requires_chat_storage_validation:
+                            try:
+                                self.validate_storage_candidate(created, thread_id=thread_id, user_id=effective_user_id)
+                            except BaseException:
+                                self._rollback_chat_admission(created, previous)
+                                raise
                     except SandboxSlotsBusyError:
                         logger.info("Not prewarming a sandbox for thread %s: every slot is taken", thread_id)
                         return None
@@ -3198,10 +3526,26 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         sandboxes.
         """
         effective_user_id = self._effective_acquire_user_id(user_id)
-        if thread_id:
-            async with self._acquire_serializer.hold_async(self._thread_key(thread_id, effective_user_id)):
-                return await self._acquire_internal_async(thread_id, user_id=effective_user_id)
-        return await self._acquire_internal_async(thread_id, user_id=effective_user_id)
+        async with self._chat_scope_async(thread_id, effective_user_id):
+            if thread_id:
+                async with self._acquire_serializer.hold_async(self._thread_key(thread_id, effective_user_id)):
+                    for attempt in range(2):
+                        with self._lock:
+                            previous = dict(self._sandboxes)
+                        result = await self._acquire_internal_async(thread_id, user_id=effective_user_id)
+                        if self.requires_chat_storage_validation:
+                            try:
+                                await self.validate_storage_candidate_async(result, thread_id=thread_id, user_id=effective_user_id)
+                            except BaseException as exc:
+                                await await_drained(run_sync_lifecycle_operation(self._rollback_chat_admission, result, previous))
+                                if isinstance(exc, ChatMountMismatch) and attempt == 0:
+                                    self._assert_chat_cleanup_absent(result)
+                                    continue
+                                raise
+                        break
+            else:
+                result = await self._acquire_internal_async(thread_id, user_id=effective_user_id)
+            return result
 
     def _acquire_internal(self, thread_id: str | None, *, user_id: str) -> str:
         """Internal sandbox acquisition with two-layer consistency.
@@ -3281,8 +3625,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """
         paths = get_paths()
         effective_user_id = self._effective_acquire_user_id(user_id)
-        paths.ensure_thread_dirs(thread_id, user_id=effective_user_id)
-        lock_path = paths.thread_dir(thread_id, user_id=effective_user_id) / f"{sandbox_id}.lock"
+        lock_path = self._thread_lock_path(paths, thread_id, sandbox_id, user_id=effective_user_id)
 
         with open(lock_path, "a", encoding="utf-8") as lock_file:
             locked = False
@@ -3313,15 +3656,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         """Async counterpart to ``_discover_or_create_with_lock``."""
         paths = get_paths()
         effective_user_id = self._effective_acquire_user_id(user_id)
-        await asyncio.to_thread(paths.ensure_thread_dirs, thread_id, user_id=effective_user_id)
-
-        def _lock_path():
-            # Worker thread: thread_dir() resolves through Paths.base_dir, which is
-            # a syscall — the same reason ensure_thread_dirs directly above it, and
-            # every later step of this coroutine, is offloaded.
-            return paths.thread_dir(thread_id, user_id=effective_user_id) / f"{sandbox_id}.lock"
-
-        lock_path = await asyncio.to_thread(_lock_path)
+        lock_path = await asyncio.to_thread(self._thread_lock_path, paths, thread_id, sandbox_id, user_id=effective_user_id)
 
         lock_file = await asyncio.to_thread(_open_lock_file, lock_path)
         locked = False
@@ -3463,6 +3798,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             thread_id,
             user_id=effective_user_id,
         )
+        self._validate_planned_chat_mounts(thread_id, effective_user_id, extra_mounts, config_mount_exclusion_root)
 
         # Admission first: the slot is reserved, an id reserved for teardown is
         # refused, and a saturated deployment is refused -- all before a
@@ -3471,6 +3807,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         self._admit_create(sandbox_id, allow_eviction=allow_eviction)
         try:
             create_kwargs = {}
+            from deerflow.spaces.chat_paths import ChatStoragePaths
+
+            paths = get_paths()
+            if isinstance(paths, ChatStoragePaths) and isinstance(self._backend, LocalContainerBackend):
+                create_kwargs["storage_labels"] = dict(paths.mounts(thread_id, user_id=effective_user_id).labels)
             if config_mount_exclusion_root is not None and not isinstance(self._backend, RemoteSandboxBackend):
                 create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
             if isinstance(self._backend, RemoteSandboxBackend):
@@ -3596,6 +3937,18 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
                 logger.warning("Ownership-fenced rollback of cancelled sandbox %s failed", sandbox_id, exc_info=True)
                 return
 
+    def _validate_planned_chat_mounts(self, thread_id, user_id, extra_mounts, exclusion_root):
+        from deerflow.spaces.backings import BackingUnavailable
+        from deerflow.spaces.chat_paths import ChatStoragePaths
+
+        paths = get_paths()
+        if isinstance(paths, ChatStoragePaths):
+            if not isinstance(self._backend, LocalContainerBackend):
+                raise BackingUnavailable("Chat storage requires the qualified local Docker provider")
+            mounts = paths.mounts(thread_id, user_id=user_id)
+            mounts.validate_sources()
+            self._backend.validate_planned_thread_mounts(extra_mounts, mounts=mounts, protected_roots=paths.protected_roots, config_mount_exclusion_root=exclusion_root)
+
     async def _create_sandbox_async(self, thread_id: str | None, sandbox_id: str, *, user_id: str | None = None) -> str:
         """Async counterpart to ``_create_sandbox``."""
         effective_user_id = self._effective_acquire_user_id(user_id)
@@ -3607,6 +3960,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
             thread_id,
             user_id=effective_user_id,
         )
+        await run_sync_lifecycle_operation(self._validate_planned_chat_mounts, thread_id, effective_user_id, extra_mounts, config_mount_exclusion_root)
 
         # The same admission decision the sync path makes, in its cancellable
         # form. This path used to have no budget at all: it read the count,
@@ -3615,6 +3969,11 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         await self._admit_create_async(sandbox_id)
         try:
             create_kwargs = {}
+            from deerflow.spaces.chat_paths import ChatStoragePaths
+
+            paths = get_paths()
+            if isinstance(paths, ChatStoragePaths) and isinstance(self._backend, LocalContainerBackend):
+                create_kwargs["storage_labels"] = dict(paths.mounts(thread_id, user_id=effective_user_id).labels)
             if config_mount_exclusion_root is not None:
                 create_kwargs["config_mount_exclusion_root"] = config_mount_exclusion_root
             if isinstance(self._backend, RemoteSandboxBackend):
@@ -3737,7 +4096,7 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
         with self._lock:
             recycle_sandbox = self._sandboxes.get(sandbox_id)
 
-        if recycle_sandbox is not None and recycle_sandbox.requires_container_recycle:
+        if recycle_sandbox is not None and (recycle_sandbox.requires_container_recycle or self._cleanup_pending_for(sandbox_id) is not None):
             logger.warning(
                 "Recycling sandbox %s instead of returning it to the warm pool after ambiguous session creation",
                 sandbox_id,
@@ -3891,12 +4250,14 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
     def reset(self) -> None:
         """Release process-local acquire workers when this instance is detached."""
+        self._check_sync_lifecycle()
         self._stop_prewarm_worker()
         self._acquire_serializer.close()
         self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
 
     def shutdown(self) -> None:
         """Shutdown all sandboxes. Thread-safe and idempotent."""
+        self._check_sync_lifecycle()
         with self._lock:
             if self._shutdown_called:
                 return
@@ -3940,3 +4301,10 @@ class AioSandboxProvider(WarmPoolLifecycleMixin[SandboxInfo], SandboxProvider):
 
         self._acquire_serializer.close()
         self._acquire_worker_executor.shutdown(wait=False, cancel_futures=True)
+
+    def _check_sync_lifecycle(self):
+        from deerflow_extension_api.storage import StorageUnsupported
+
+        host = self._storage_host()
+        if host is not None and host.is_owner_loop:
+            raise StorageUnsupported("Chat storage lifecycle must be drained off the owning loop")

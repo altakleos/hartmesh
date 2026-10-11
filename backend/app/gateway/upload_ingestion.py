@@ -156,6 +156,7 @@ class ThreadUploadIngestionService:
         self._written_paths: list[Path] = []
         self._sync_targets: list[tuple[Path, str]] = []
         self._total_size = 0
+        self._chat_upload = None
 
     async def __aenter__(self) -> ThreadUploadIngestionService:
         await self.open()
@@ -185,6 +186,21 @@ class ThreadUploadIngestionService:
         """
         uploads = _uploads()
         self._limits = uploads._get_upload_limits(self._config)
+        if self._request is not None:
+            from app.gateway.agent_conversations import require_conversation
+
+            if await require_conversation(self._request, self._thread_id):
+                raise HTTPException(501, "Use the AI agent's Home Space for uploads")
+        from app.gateway.chat_files import prepare_chat_files
+
+        access = await prepare_chat_files(self._request, self._thread_id)
+        if access is not None:
+            from app.gateway.chat_upload_ingestion import ChatUploadSession
+
+            self._auto_convert = uploads._auto_convert_documents_enabled(self._config)
+            self._chat_upload = ChatUploadSession(self, access)
+            await self._chat_upload.open()
+            return
         self._uploads_dir = await run_file_io(uploads.ensure_uploads_dir, self._thread_id, user_id=self._user_id)
         listing = await run_file_io(uploads.list_files_in_dir, self._uploads_dir)
         self._seen_filenames.update(entry["filename"] for entry in listing["files"])
@@ -225,7 +241,7 @@ class ThreadUploadIngestionService:
             except FileExistsError:
                 name = uploads.claim_unique_filename(name, self._seen_filenames)
 
-    async def ingest_chunks(self, chunks: AsyncIterator[bytes], *, display_name: str) -> dict[str, Any]:
+    async def ingest_chunks(self, chunks: AsyncIterator[bytes], *, display_name: str, expected_size: int | None = None) -> dict[str, Any]:
         """Ingest one file from a chunk stream; return its wire metadata dict.
 
         Owns the per-file pipeline exactly as the ordinary endpoint defines
@@ -240,6 +256,8 @@ class ThreadUploadIngestionService:
         """
         assert self._uploads_dir is not None and self._limits is not None, "open() must run before ingest_chunks()"
         uploads = _uploads()
+        if self._chat_upload is not None:
+            return await self._chat_upload.ingest(chunks, display_name=display_name, expected_size=expected_size, uploads=uploads)
         try:
             original_filename = uploads.normalize_filename(display_name)
         except ValueError as exc:
@@ -391,6 +409,9 @@ class ThreadUploadIngestionService:
         stay in place; the caller does not clean them up, matching ordinary
         upload behavior for sync-phase errors).
         """
+        if self._chat_upload is not None:
+            await self._chat_upload.finalize()
+            return
         uploads = _uploads()
         # Uploaded files are created with 0o600 permissions (owner read/write
         # only). In Docker sandbox deployments the gateway writes as root but
@@ -406,6 +427,9 @@ class ThreadUploadIngestionService:
 
     async def cleanup_written(self) -> None:
         """Remove every file this session wrote (ordinary rejected-request cleanup)."""
+        if self._chat_upload is not None:
+            await self._chat_upload.cleanup_written()
+            return
         if not self._written_paths:
             return
         uploads = _uploads()
@@ -414,6 +438,8 @@ class ThreadUploadIngestionService:
 
     async def aclose(self) -> None:
         """Release the sandbox request lease (failures are logged, never raised)."""
+        if self._chat_upload is not None:
+            await self._chat_upload.aclose()
         if self._sandbox_lease is None:
             return
         try:

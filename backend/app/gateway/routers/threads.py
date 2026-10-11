@@ -750,13 +750,46 @@ def _event_delete_owner_kwargs(delete_by_thread: Any, user_id: str) -> dict[str,
 
 
 async def _delete_thread_data_with_reservation(thread_id: str, request: Request) -> ThreadDeleteResponse:
+    """Hold native creation/write fences through physical and logical cleanup."""
+    from app.gateway.agent_conversations import require_conversation
+    from app.gateway.chat_cleanup import prepare_conversation_cleanup
+    from app.gateway.chat_files import files_unavailable
+    from deerflow.agent_instances.contract import AgentPermission
+    from deerflow.sandbox.lease import run_sync_lifecycle_operation
+    from deerflow.sandbox.sandbox_provider import get_sandbox_provider
+    from deerflow.spaces.backings import BackingUnavailable
+    from deerflow.spaces.contract import InvalidPrincipal
+    from deerflow.spaces.filesystem import FilesystemUnavailable, UnsafeSpacePath
+
+    if not await require_conversation(request, thread_id, permission=AgentPermission.MANAGE):
+        try:
+            validate_thread_id(thread_id)
+        except ValueError:
+            pass  # Existing metadata-only deletion for legacy unsafe IDs.
+        else:
+            cleanup = await prepare_conversation_cleanup(request, thread_id)
+            if cleanup is not None:
+                provider = await run_sync_lifecycle_operation(get_sandbox_provider)
+                try:
+                    async with provider.conversation_cleanup_scope(cleanup.paths, thread_id, user_id=cleanup._actor.subject_id):
+                        removed = await cleanup.remove_files()
+                        response = ThreadDeleteResponse(success=True, message=f"Deleted conversation files for {thread_id}" if removed else f"No conversation files for {thread_id}")
+                        return await _delete_thread_data_impl(thread_id, request, native_response=response, cleanup_owner=cleanup._actor.subject_id)
+                except InvalidPrincipal:
+                    raise HTTPException(401, "Conversation owner is unavailable") from None
+                except (BackingUnavailable, FilesystemUnavailable, UnsafeSpacePath, OSError, RuntimeError):
+                    raise files_unavailable("space-unverified") from None
+    return await _delete_thread_data_impl(thread_id, request)
+
+
+async def _delete_thread_data_impl(thread_id: str, request: Request, *, native_response=None, cleanup_owner=None) -> ThreadDeleteResponse:
     """Delete a thread while its durable exclusive reservation is held."""
     from app.gateway.deps import get_thread_store
 
     # One owner identity for every cleanup step below: the filesystem bucket, the
     # persisted runs/events/feedback and the thread_meta row all belong to the
     # same owner, so they must not resolve their scope independently.
-    user_id = get_effective_user_id()
+    user_id = cleanup_owner or get_effective_user_id()
     from app.gateway.agent_conversations import require_conversation
     from deerflow.agent_instances.contract import AgentPermission
 
@@ -776,6 +809,8 @@ async def _delete_thread_data_with_reservation(thread_id: str, request: Request)
     # interpolated into a host path during cleanup.
     if instance_conversation:
         response = ThreadDeleteResponse(success=True, message="Conversation deleted; agent home retained")
+    elif native_response is not None:
+        response = native_response
     else:
         try:
             validate_thread_id(thread_id)
@@ -923,6 +958,12 @@ async def create_thread(body: ThreadCreateRequest, request: Request) -> ThreadRe
     if existing_record is not None:
         return _existing_thread_response(thread_id, existing_record)
 
+    from app.gateway.chat_storage import check_chat_thread_capacity, prepare_chat_request
+
+    prepared_storage = await prepare_chat_request(request, thread_id)
+    if prepared_storage is not None:
+        await check_chat_thread_capacity(prepared_storage, thread_id)
+
     # Write thread_meta so the thread appears in /threads/search immediately
     from deerflow.persistence.projects import ProjectNotAssignableError
 
@@ -1057,6 +1098,44 @@ async def _branch_thread_with_reservation(
     branch_from_latest_turn = await _branch_targets_latest_turn(source_accessor, source_config, target_message_ids)
 
     new_thread_id = str(uuid.uuid4())
+    from app.gateway.chat_branch import native_branch_scope
+
+    async with native_branch_scope(request, thread_id, new_thread_id, latest=branch_from_latest_turn, ordinary=source_execution is None) as native_mode:
+        return await _materialize_branch(
+            thread_id,
+            body,
+            request,
+            source_record=source_record,
+            source_accessor=source_accessor,
+            source_execution=source_execution,
+            snapshot=snapshot,
+            parent_checkpoint_id=parent_checkpoint_id,
+            replay_base_tuple=replay_base_tuple,
+            branch_from_latest_turn=branch_from_latest_turn,
+            new_thread_id=new_thread_id,
+            native_mode=native_mode,
+        )
+
+
+async def _materialize_branch(
+    thread_id,
+    body,
+    request,
+    *,
+    source_record,
+    source_accessor,
+    source_execution,
+    snapshot,
+    parent_checkpoint_id,
+    replay_base_tuple,
+    branch_from_latest_turn,
+    new_thread_id,
+    native_mode,
+):
+    from app.gateway.deps import get_thread_store
+
+    thread_store = get_thread_store(request)
+    source_metadata = source_record.get("metadata") or {}
     now = now_iso()
     branch_metadata = {
         _BRANCH_METADATA_KEY: True,
@@ -1214,6 +1293,8 @@ async def _branch_thread_with_reservation(
 
     if source_execution is not None:
         workspace_clone_mode = "shared_agent_home"
+    elif native_mode is not None:
+        workspace_clone_mode = native_mode
     elif branch_from_latest_turn:
         workspace_clone_mode = await _copy_branch_user_data(thread_id, new_thread_id)
     else:

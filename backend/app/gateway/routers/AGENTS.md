@@ -19,6 +19,30 @@ thread read/owner gate. Read at most 16 MiB through one no-follow descriptor;
 return at most 1 MiB of card fields with the original bytes' SHA-256 and size.
 Keep parsing/serialization off-loop and drain it on cancellation. No projection
 cache or stored report mutation; `download=true` always returns the original.
+Managed chat file effects use `chat_files.py`/`ChatUploadSession`: fresh human
+User admission, pinned descriptors and private quota-counted stages; Shared reads
+also refresh Company admission. Keep ranges, ZIP-member/projector budgets and
+private no-store responses. Edits recheck admission, revision and parent before
+replacement. Uploads qualify by phase, check every chunk's limits/quota, and commit
+only after final admission. Failure/cancellation drains all stages, including
+project attachments. `ChatFilesFull` uses the central refusal handler. Ordinary
+upload/list/delete/edit refuses instance conversations; use Home APIs.
+
+`chat_cleanup.py` admits only purpose-bound deletion, including unsupported resource
+credentials, without a general User scope. Durable deletion and the stable
+owner/thread gate fence creation through strict container absence, fresh admission,
+per-entry NO_XDEV purge and logical cleanup. Private purge tickets allow retries.
+`chat_branch.py` reserves its target through latest-turn quota-private copying,
+publication and metadata/checkpoint/history writes. Clone only workspace/uploads/
+outputs, with empty ACP; skip symlinks/upload stages. Confined per-entry reads and
+revisions detect source changes. Failure/cancellation drains rollback of exact-owned
+files and target stores. Historical/NoUser copies history only; legacy/AgentHome
+branching keeps its existing behavior. Unsupported credentials never gain general
+Space access.
+Pending native Keep/Share, project promotion/listing, archives, screenshots and
+skill installation call `require_legacy_file_operation` before file effects;
+managed chats refuse explicitly, with no legacy fallback or activation flip.
+
 Malformed/oversized/unsupported projections retain a bounded source-preview
 fallback in the UI; ownership and path denials do not. Platforms without safe
 descriptor-relative reads return 501 so source preview remains available.

@@ -1,8 +1,25 @@
 # AIO Sandbox
 
 With managed storage off, `_get_thread_mounts` retains the release-45 binds and
-does not resolve a Space. Compose's storage-on ordinary chat mounts are deferred;
-do not treat pool admission as support for restricted resident topology.
+does not resolve a Space. Storage-on ordinary chats use a Gateway-owned
+`ChatStorageHost` callback before acquire, prewarm, cache/warm/discovery adoption,
+lease reuse and tool-client return. Exact actual Docker mounts, immutable
+container identity, owner/thread and physical slot labels gate each candidate.
+No qualified User Space means no user-data or ACP bind; Company alone unavailable
+omits Shared. Extra mounts cannot overlay those destinations or expose any pool
+slot, including unassigned slots; check planned mounts before creation and actual
+mounts before return. Without a scoped native projection, reject storage-on mounts
+before resolving default paths; `peek_scoped_paths()` never creates legacy roots.
+Policy skill views stay in the operational area.
+
+A known mount-profile mismatch may retire a client only through the canonical
+no-holder cleanup reservation and ordinary ownership fencing, then reacquire
+once after absence proof. Held clients, unknown inspection/identity and admission
+failures cannot authorize replacement. Keep provider and lease metadata locks
+short; Docker/SQL work runs outside them. Bound-host reset/shutdown cannot join
+prewarm on the owner loop: the Gateway drains them off-loop while admission is
+still alive, then closes the bridge before SQL. Resident topology has a separate
+storage admission and containment lifecycle.
 
 `LocalContainerBackend._start_container(start=False)` prepares a stopped Docker
 environment with the existing builder. Only host storage admission may activate

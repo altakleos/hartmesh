@@ -47,10 +47,15 @@ def storage_actor_scope(reference: PrincipalRef):
         _actor.reset(token)
 
 
+def _bound_principal():
+    """Trusted identity binding only; resource credential admission is separate."""
+    return _actor.get() or current_human_principal()
+
+
 def _current_actor():
     if _credential_allowed.get() is not True:
         raise SpaceDenied("This credential has no supported storage resource scopes")
-    return _actor.get() or current_human_principal()
+    return _bound_principal()
 
 
 def _resource(space):

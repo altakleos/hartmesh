@@ -84,6 +84,9 @@ async def _browser_thread_owned_by(thread_store, thread_id: str, user_id: str) -
 )
 @require_permission("threads", "write", owner_check=True, require_existing=True)
 async def navigate_browser(thread_id: ThreadId, body: BrowserNavigateRequest, request: Request) -> BrowserNavigateResponse:
+    from app.gateway.chat_files import require_legacy_file_operation
+
+    await require_legacy_file_operation(request, thread_id)
     user_id = str(request.state.auth.user.id)
     thread_store = getattr(request.app.state, "thread_store", None)
     if thread_store is None or not await _browser_thread_owned_by(thread_store, thread_id, user_id):

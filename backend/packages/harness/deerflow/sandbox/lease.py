@@ -218,6 +218,7 @@ class SandboxLeaseManager:
         self._bindings_by_owner: dict[str, _LeaseBinding] = {}
         self._owners_by_sandbox: dict[str, set[str]] = {}
         self._release_pending_by_sandbox: set[str] = set()
+        self._cleanup_reservations: set[str] = set()
 
     @staticmethod
     def _thread_key(thread_id: str, user_id: str) -> tuple[str, str]:
@@ -258,7 +259,11 @@ class SandboxLeaseManager:
         key: tuple[str, str],
         *,
         release_on_last: bool,
+        storage_candidate: object = None,
     ) -> tuple[_LeaseBinding | None, bool]:
+        if sandbox_id in self._cleanup_reservations:
+            raise RuntimeError("Sandbox cleanup is in progress; acquire a fresh client")
+        self._check_storage_candidate(storage_candidate)
         existing = self._bindings_by_owner.get(owner_id)
         if existing is not None and existing.thread_key != key:
             raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
@@ -289,6 +294,24 @@ class SandboxLeaseManager:
 
         return previous, release_previous
 
+    def _validate_storage_candidate(self, sandbox_id, key, *, allow_unscoped_borrow=False):
+        if getattr(self._provider, "requires_chat_storage_validation", False) is not True:
+            return None
+        return self._provider.validate_storage_candidate(sandbox_id, thread_id=key[1], user_id=key[0], allow_unscoped_borrow=allow_unscoped_borrow)
+
+    async def _validate_storage_candidate_async(self, sandbox_id, key, *, allow_unscoped_borrow=False):
+        if getattr(self._provider, "requires_chat_storage_validation", False) is not True:
+            return None
+        return await self._provider.validate_storage_candidate_async(sandbox_id, thread_id=key[1], user_id=key[0], allow_unscoped_borrow=allow_unscoped_borrow)
+
+    def _check_storage_candidate(self, token):
+        # Incarnation comparison is pure and short: authorization and Docker
+        # inspection already completed outside the metadata critical section.
+        if getattr(self._provider, "requires_chat_storage_validation", False) is True and not self._provider.storage_candidate_is_current(token):
+            from deerflow.spaces.backings import BackingUnavailable
+
+            raise BackingUnavailable("Chat client changed before holder binding")
+
     def _release_unbound_acquire(self, sandbox_id: str) -> None:
         """Undo a cancelled acquire when no admitted execution uses its result.
 
@@ -308,6 +331,8 @@ class SandboxLeaseManager:
         key: tuple[str, str],
         *,
         release_on_last: bool,
+        allow_unscoped_borrow: bool = False,
+        validate_storage: bool = True,
     ) -> str | None:
         """Return one live owner binding while the caller holds ``key``.
 
@@ -322,20 +347,55 @@ class SandboxLeaseManager:
         if existing.thread_key != key:
             raise RuntimeError(f"Sandbox lease owner {owner_id!r} cannot move between thread identities")
         if self._provider.get(existing.sandbox_id) is not None:
-            if release_on_last and not existing.release_on_last:
-                with self._metadata_lock:
-                    if self._bindings_by_owner.get(owner_id) == existing:
-                        self._bindings_by_owner[owner_id] = _LeaseBinding(
-                            sandbox_id=existing.sandbox_id,
-                            thread_key=existing.thread_key,
-                            release_on_last=True,
-                        )
+            if validate_storage:
+                token = self._validate_storage_candidate(existing.sandbox_id, key, allow_unscoped_borrow=allow_unscoped_borrow)
+            with self._metadata_lock:
+                if validate_storage:
+                    self._check_storage_candidate(token)
+                if self._bindings_by_owner.get(owner_id) != existing:
+                    raise RuntimeError("Sandbox holder changed during storage admission")
+                if release_on_last and not existing.release_on_last:
+                    self._bindings_by_owner[owner_id] = _LeaseBinding(
+                        sandbox_id=existing.sandbox_id,
+                        thread_key=existing.thread_key,
+                        release_on_last=True,
+                    )
             return existing.sandbox_id
 
+        if validate_storage:
+            removed, release_provider = self._discard_missing_owner_binding(owner_id, key)
+            if removed is not None and release_provider:
+                self._provider.release(removed.sandbox_id)
+        return None
+
+    def _discard_missing_owner_binding(self, owner_id, key):
+        with self._metadata_lock:
+            existing = self._bindings_by_owner.get(owner_id)
+        if existing is None:
+            return None, False
+        if existing.thread_key != key:
+            raise RuntimeError("Sandbox lease owner cannot move between thread identities")
+        if self._provider.get(existing.sandbox_id) is not None:
+            return None, False
         with self._metadata_lock:
             if self._bindings_by_owner.get(owner_id) == existing:
-                self._remove_binding_locked(owner_id, request_release=False)
-        return None
+                return self._remove_binding_locked(owner_id, request_release=False)
+        return None, False
+
+    async def _active_owner_binding_async(self, owner_id, key, *, release_on_last, allow_unscoped_borrow=False):
+        sandbox_id = self._active_owner_binding(owner_id, key, release_on_last=release_on_last, validate_storage=False)
+        if sandbox_id is not None:
+            token = await self._validate_storage_candidate_async(sandbox_id, key, allow_unscoped_borrow=allow_unscoped_borrow)
+            with self._metadata_lock:
+                self._check_storage_candidate(token)
+                binding = self._bindings_by_owner.get(owner_id)
+                if binding is None or binding.sandbox_id != sandbox_id or binding.thread_key != key:
+                    raise RuntimeError("Sandbox holder changed during storage admission")
+        else:
+            removed, release_provider = self._discard_missing_owner_binding(owner_id, key)
+            if removed is not None and release_provider:
+                await run_sync_lifecycle_operation(self._provider.release, removed.sandbox_id)
+        return sandbox_id
 
     def _acquire_and_bind(
         self,
@@ -347,13 +407,19 @@ class SandboxLeaseManager:
         release_on_last: bool,
     ) -> str:
         sandbox_id = self._provider.acquire(thread_id, user_id=user_id)
-        with self._metadata_lock:
-            previous, release_previous = self._bind_locked(
-                owner_id,
-                sandbox_id,
-                key,
-                release_on_last=release_on_last,
-            )
+        try:
+            token = self._validate_storage_candidate(sandbox_id, key)
+            with self._metadata_lock:
+                previous, release_previous = self._bind_locked(
+                    owner_id,
+                    sandbox_id,
+                    key,
+                    release_on_last=release_on_last,
+                    storage_candidate=token,
+                )
+        except BaseException:
+            self._release_unbound_acquire(sandbox_id)
+            raise
         if release_previous and previous is not None:
             self._provider.release(previous.sandbox_id)
         return sandbox_id
@@ -396,13 +462,19 @@ class SandboxLeaseManager:
                     exc_info=True,
                 )
             raise cancellation
-        with self._metadata_lock:
-            previous, release_previous = self._bind_locked(
-                owner_id,
-                sandbox_id,
-                key,
-                release_on_last=release_on_last,
-            )
+        try:
+            token = await self._validate_storage_candidate_async(sandbox_id, key)
+            with self._metadata_lock:
+                previous, release_previous = self._bind_locked(
+                    owner_id,
+                    sandbox_id,
+                    key,
+                    release_on_last=release_on_last,
+                    storage_candidate=token,
+                )
+        except BaseException:
+            await run_sync_lifecycle_operation(self._release_unbound_acquire, sandbox_id)
+            raise
         if release_previous and previous is not None:
             await run_sync_lifecycle_operation(
                 self._provider.release,
@@ -427,12 +499,14 @@ class SandboxLeaseManager:
         """
         key = self._thread_key(thread_id, user_id)
         with self._serializer.hold(key):
+            token = self._validate_storage_candidate(sandbox_id, key)
             with self._metadata_lock:
                 previous, release_previous = self._bind_locked(
                     owner_id,
                     sandbox_id,
                     key,
                     release_on_last=release_on_last,
+                    storage_candidate=token,
                 )
             if release_previous and previous is not None:
                 self._provider.release(previous.sandbox_id)
@@ -449,12 +523,14 @@ class SandboxLeaseManager:
         """Async attach without blocking the event loop on a lifecycle lock."""
         key = self._thread_key(thread_id, user_id)
         async with self._serializer.hold_async(key):
+            token = await self._validate_storage_candidate_async(sandbox_id, key)
             with self._metadata_lock:
                 previous, release_previous = self._bind_locked(
                     owner_id,
                     sandbox_id,
                     key,
                     release_on_last=release_on_last,
+                    storage_candidate=token,
                 )
             if release_previous and previous is not None:
                 await run_sync_lifecycle_operation(
@@ -513,6 +589,7 @@ class SandboxLeaseManager:
                 owner_id,
                 key,
                 release_on_last=release_on_last,
+                allow_unscoped_borrow=allow_unscoped_borrow,
             )
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
@@ -527,12 +604,14 @@ class SandboxLeaseManager:
                 )
             )
             if sandbox is not None:
+                token = self._validate_storage_candidate(sandbox_id, key, allow_unscoped_borrow=allow_unscoped_borrow)
                 with self._metadata_lock:
                     previous, release_previous = self._bind_locked(
                         owner_id,
                         sandbox_id,
                         key,
                         release_on_last=release_on_last,
+                        storage_candidate=token,
                     )
                 if release_previous and previous is not None:
                     self._provider.release(previous.sandbox_id)
@@ -557,7 +636,7 @@ class SandboxLeaseManager:
         """Async acquire while preserving the provider's own async hook."""
         key = self._thread_key(thread_id, user_id)
         async with self._serializer.hold_async(key):
-            existing_sandbox_id = self._active_owner_binding(
+            existing_sandbox_id = await self._active_owner_binding_async(
                 owner_id,
                 key,
                 release_on_last=release_on_last,
@@ -586,10 +665,11 @@ class SandboxLeaseManager:
         """Async atomic retain-or-replace transition for a persisted sandbox."""
         key = self._thread_key(thread_id, user_id)
         async with self._serializer.hold_async(key):
-            existing_sandbox_id = self._active_owner_binding(
+            existing_sandbox_id = await self._active_owner_binding_async(
                 owner_id,
                 key,
                 release_on_last=release_on_last,
+                allow_unscoped_borrow=allow_unscoped_borrow,
             )
             if existing_sandbox_id is not None:
                 return existing_sandbox_id
@@ -604,12 +684,14 @@ class SandboxLeaseManager:
                 )
             )
             if sandbox is not None:
+                token = await self._validate_storage_candidate_async(sandbox_id, key, allow_unscoped_borrow=allow_unscoped_borrow)
                 with self._metadata_lock:
                     previous, release_previous = self._bind_locked(
                         owner_id,
                         sandbox_id,
                         key,
                         release_on_last=release_on_last,
+                        storage_candidate=token,
                     )
                 if release_previous and previous is not None:
                     await run_sync_lifecycle_operation(
@@ -680,6 +762,33 @@ class SandboxLeaseManager:
 
 _manager_lock = threading.Lock()
 _managers: dict[int, tuple[SandboxProvider, SandboxLeaseManager]] = {}
+
+
+def cleanup_unheld_sandbox(provider: SandboxProvider, sandbox_id: str, cleanup: Callable[[], None], *, defer_release: bool = True) -> bool:
+    """Fence failed admission cleanup against process-local holder binding.
+
+    Callers also retain their provider acquisition serializer and check the
+    exact client incarnation before destroying. Existing holders defer cleanup
+    to their normal final release. The canonical manager also fences its first
+    concurrent holder; metadata is never held across ownership or Docker I/O.
+    """
+    manager = get_sandbox_lease_manager(provider)
+    with manager._metadata_lock:
+        if manager._owners_by_sandbox.get(sandbox_id):
+            # A failed acquire never established a normal releasing owner.
+            # Even a purely borrowed holder must finish the deferred cleanup.
+            if defer_release:
+                manager._release_pending_by_sandbox.add(sandbox_id)
+            return False
+        if sandbox_id in manager._cleanup_reservations:
+            return False
+        manager._cleanup_reservations.add(sandbox_id)
+    try:
+        cleanup()
+        return True
+    finally:
+        with manager._metadata_lock:
+            manager._cleanup_reservations.discard(sandbox_id)
 
 
 def get_sandbox_lease_manager(provider: SandboxProvider) -> SandboxLeaseManager:

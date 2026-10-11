@@ -67,6 +67,24 @@ def resolve_presented_filepath(
                 return OUTPUTS_VIRTUAL_PREFIX + "/" + relative, Path("/mnt/spaces/home/outputs") / PurePosixPath(relative)
         raise ValueError("Only files within the instance home outputs can be presented")
 
+    from deerflow.spaces.chat_paths import ChatStoragePaths
+    from deerflow.spaces.filesystem import _path
+
+    paths = get_paths()
+    if isinstance(paths, ChatStoragePaths):
+        if not paths.has_personal_files:
+            raise ValueError("This chat has no personal files available; respond with text")
+        outputs_dir = paths.sandbox_outputs_dir(thread_id, user_id=resolve_runtime_user_id(runtime))
+        if filepath.startswith(OUTPUTS_VIRTUAL_PREFIX + "/"):
+            relative = filepath.removeprefix(OUTPUTS_VIRTUAL_PREFIX + "/")
+        else:
+            try:
+                relative = Path(filepath).relative_to(outputs_dir).as_posix()
+            except ValueError:
+                raise ValueError("Only the current conversation's outputs can be presented") from None
+        relative = _path(relative)
+        return OUTPUTS_VIRTUAL_PREFIX + "/" + relative, outputs_dir / relative
+
     thread_data = runtime.state.get("thread_data") or {}
     outputs_path = thread_data.get("outputs_path")
     if not outputs_path:
