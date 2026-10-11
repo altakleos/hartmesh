@@ -1,9 +1,12 @@
 """Host identity and startup wiring for mandatory, chat-independent storage."""
 
 import asyncio
+import json
 import logging
 import os
+import subprocess
 import time
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -75,6 +78,12 @@ class ExecutionStatus:
     unverified: dict[str, str] = field(default_factory=dict)
     hold_since: datetime | None = None
     mount_pending: bool = False
+    mount_task: asyncio.Future | None = None
+    mount_cleanup: str | None = None
+    mount_cleanup_task: asyncio.Future | None = None
+    mount_verify_task: asyncio.Future | None = None
+    mount_reverify: bool = False
+    mount_retry_at: float = 0
     adapter_task: asyncio.Future | None = None
     metadata_task: asyncio.Future | None = None
     pending_reconcile: list[str] = field(default_factory=list)
@@ -147,6 +156,158 @@ async def storage_health(app):
     return {"storage": storage.state, "agents": agents}
 
 
+STORAGE_KEYS = ("HARTMESH_USERS", "HARTMESH_USER_STORAGE_GIB", "HARTMESH_AI_ASSISTANTS_PER_USER", "HARTMESH_AI_ASSISTANT_STORAGE_GIB", "HARTMESH_AI_EMPLOYEES", "HARTMESH_AI_EMPLOYEE_STORAGE_GIB", "HARTMESH_COMPANY_STORAGE_GIB")
+STORAGE_INIT_VERBS = {"mount-all": 60}
+STORAGE_INIT_CLEANUP_SECONDS = 5
+
+
+def _remove_storage_init(name: str) -> bool:
+    try:
+        result = subprocess.run(["docker", "rm", "--force", name], capture_output=True, text=True, timeout=STORAGE_INIT_CLEANUP_SECONDS, check=False)
+        if result.returncode == 0:
+            return True
+        # The timed-out CLI may have left an in-flight daemon create request.
+        # A point-in-time empty listing cannot prove it will never appear.
+        # Keep the owned name uncertain until a removal is acknowledged.
+        return False
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _storage_init_call(command: list[str], *, name: str, verb: str, limit: int) -> dict:
+    entered = time.monotonic()
+    document = {"command": verb, "returncode": 2, "note": "storage-init printed no result"}
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=limit, check=False)
+        try:
+            candidate = json.loads(result.stdout)
+        except (ValueError, TypeError):
+            candidate = None
+        if isinstance(candidate, dict) and type(candidate.get("returncode")) is int and candidate["returncode"] in (0, 1, 2) and isinstance(candidate.get("note"), str):
+            document = candidate
+    except subprocess.TimeoutExpired:
+        document = {"command": verb, "returncode": 2, "timed_out": True, "note": f"storage-init {verb} did not finish in {limit} s"}
+        if not _remove_storage_init(name):
+            document["cleanup_pending"] = name
+    except OSError as exc:
+        document = {"command": verb, "returncode": 2, "note": f"storage-init {verb} could not be started", "error": type(exc).__name__}
+    note = document["note"]
+    if document.get("error"):
+        note += f": {document['error']}"
+    logger.info("storage: storage-init %s exit %s in %.1f s (%s)", verb, document["returncode"], time.monotonic() - entered, note)
+    return document
+
+
+async def run_storage_init(verb: str) -> dict:
+    if verb not in STORAGE_INIT_VERBS:
+        raise ValueError("The Gateway may run storage-init mount-all only")
+    image = os.environ.get("HARTMESH_STORAGE_INIT_IMAGE", "").strip()
+    if not image:
+        return {"command": verb, "returncode": 0, "skipped": True, "note": "storage-init image unset"}
+    name = f"hartmesh-storage-init-{verb}-{uuid.uuid4().hex[:8]}"
+    data_dir = os.environ.get("HARTMESH_DATA_DIR", "/srv/hartmesh")
+    command = [
+        "docker",
+        "run",
+        "--rm",
+        "--name",
+        name,
+        "--label",
+        f"hartmesh.storage.init={verb}",
+        "--privileged",
+        "--pid",
+        "host",
+        "--network",
+        "none",
+        "--memory",
+        "128m",
+        "--memory-swap",
+        "128m",
+        "--pids-limit",
+        "64",
+        "--workdir",
+        "/app/backend",
+        "--env",
+        "PYTHONPATH=.",
+        "--env",
+        "UV_CACHE_DIR=/tmp/uv-cache",
+        "--env",
+        f"HARTMESH_DATA_DIR={data_dir}",
+    ]
+    for key in STORAGE_KEYS:
+        command.extend(("--env", f"{key}={os.environ.get(key, '')}"))
+    command.extend(("--mount", f"type=bind,src={data_dir}/spaces,dst={data_dir}/spaces,bind-propagation=rslave", "--entrypoint", "uv", image, "run", "--no-sync", "python", "-m", "app.gateway.storage_init", verb))
+    return await await_drained(run_file_io(_storage_init_call, command, name=name, verb=verb, limit=STORAGE_INIT_VERBS[verb]))
+
+
+async def _mount_step(app, *, timeout: float) -> bool:
+    status = app.state.agent_execution
+    deadline = time.monotonic() + timeout
+    if status.mount_cleanup is not None:
+        if status.mount_cleanup_task is None:
+            status.mount_cleanup_task = asyncio.ensure_future(run_file_io(_remove_storage_init, status.mount_cleanup))
+            status.mount_cleanup_task.add_done_callback(_observe)
+        task = status.mount_cleanup_task
+        done, _ = await asyncio.wait({task}, timeout=max(0, deadline - time.monotonic()))
+        if not done:
+            return False
+        status.mount_cleanup_task = None
+        if not task.result():
+            return False
+        status.mount_cleanup = None
+    if status.mount_task is None:
+        if time.monotonic() < status.mount_retry_at:
+            return False
+        status.mount_task = asyncio.ensure_future(run_storage_init("mount-all"))
+        status.mount_task.add_done_callback(_observe)
+    task = status.mount_task
+    done, _ = await asyncio.wait({task}, timeout=max(0, deadline - time.monotonic()))
+    if not done:
+        status.mount_pending = True
+        status.storage_reason, status.storage_text = "admission-failed", "storage-init mount-all did not finish in 60 s"
+        return False
+    status.mount_task = None
+    try:
+        result = task.result()
+    except Exception:
+        result = {"returncode": 2, "timed_out": True, "note": "storage-init mount-all did not complete"}
+    if result.get("timed_out") or result.get("cleanup_pending"):
+        status.mount_pending = True
+        status.mount_cleanup = result.get("cleanup_pending")
+        status.mount_retry_at = time.monotonic() + RECHECK_SECONDS
+        status.storage_reason, status.storage_text = "admission-failed", result["note"]
+        return False
+    if status.mount_pending and result["returncode"] != 0:
+        status.mount_retry_at = time.monotonic() + RECHECK_SECONDS
+        return False
+    status.mount_pending = False
+    return True
+
+
+def _verify_catalog(catalog):
+    errors = {}
+    for slot in catalog.volumes:
+        try:
+            catalog.verify(slot)
+        except Exception as exc:
+            errors[slot] = str(exc)
+    return errors
+
+
+async def _mount_verification_step(app, *, timeout: float) -> bool:
+    status = app.state.agent_execution
+    if status.mount_verify_task is None:
+        status.mount_verify_task = asyncio.ensure_future(run_file_io(_verify_catalog, app.state.storage_spaces.catalog))
+        status.mount_verify_task.add_done_callback(_observe)
+    task = status.mount_verify_task
+    done, _ = await asyncio.wait({task}, timeout=timeout)
+    if not done:
+        return False
+    status.unverified = task.result()
+    status.mount_verify_task = None
+    return True
+
+
 def _read_pool(config):
     path = Path(config.inventory_path)
     reason, text = None, None
@@ -156,12 +317,7 @@ def _read_pool(config):
         catalog = PreparedVolumeCatalog([], data_disk=path.parent, reserve_bytes=RESERVE_BYTES, reserve_inodes=RESERVE_INODES)
         reason = "storage-pool-missing" if isinstance(exc, FileNotFoundError) else "inventory-unreadable"
         text = f"no inventory at {path}" if isinstance(exc, FileNotFoundError) else str(exc)
-    unverified = {}
-    for slot in catalog.volumes:
-        try:
-            catalog.verify(slot)
-        except Exception as exc:
-            unverified[slot] = str(exc)
+    unverified = _verify_catalog(catalog)
     fit = None
     if config.plan is not None:
         try:
@@ -310,6 +466,21 @@ async def storage_recheck(app):
         counts = await _metadata_step(app, timeout=0)
         if counts is None:
             return
+    if status.mount_pending:
+        if status.mount_task is not None and not status.mount_task.done():
+            return
+        if status.mount_cleanup_task is not None and not status.mount_cleanup_task.done():
+            return
+        if not await _mount_step(app, timeout=STORAGE_INIT_VERBS["mount-all"]):
+            return
+        status.mount_reverify = True
+    if status.mount_reverify:
+        if not await _mount_verification_step(app, timeout=ADAPTER_LIMIT_SECONDS):
+            return
+        status.mount_reverify = False
+        counts = await _metadata_step(app, timeout=ADAPTER_LIMIT_SECONDS)
+        if counts is None:
+            return
     if status.adapter_task is not None and not status.adapter_task.done():
         return
     if await _adapter_step(app, timeout=ADAPTER_LIMIT_SECONDS):
@@ -345,10 +516,31 @@ async def close_storage_spaces(app):
         status = getattr(app.state, "agent_execution", None)
         owned = [getattr(app.state, "storage_inventory_task", None)]
         if status is not None:
-            owned.extend((status.adapter_task, status.metadata_task))
+            owned.extend((status.adapter_task, status.metadata_task, status.mount_task, status.mount_cleanup_task, status.mount_verify_task))
         owned = [task for task in owned if task is not None]
         if owned:
             await asyncio.gather(*owned, return_exceptions=True)
+        if status is not None:
+            if status.mount_task is not None and not status.mount_task.cancelled():
+                try:
+                    result = status.mount_task.result()
+                except Exception:
+                    result = {}
+                status.mount_cleanup = result.get("cleanup_pending") or status.mount_cleanup
+            if status.mount_cleanup_task is not None and not status.mount_cleanup_task.cancelled():
+                try:
+                    removed = status.mount_cleanup_task.result()
+                except Exception:
+                    removed = False
+                if removed:
+                    status.mount_cleanup = None
+            if status.mount_cleanup is not None:
+                status.mount_cleanup_task = asyncio.ensure_future(run_file_io(_remove_storage_init, status.mount_cleanup))
+                status.mount_cleanup_task.add_done_callback(_observe)
+                if await status.mount_cleanup_task:
+                    status.mount_cleanup = None
+                else:
+                    logger.warning("storage: storage-init cleanup remains unconfirmed (%s)", status.mount_cleanup)
 
     await await_drained(drain())
 
@@ -403,6 +595,10 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
         return
     if session_factory is None:
         raise RuntimeError("Storage spaces require a durable database; memory mode is unsupported")
+    status = app.state.agent_execution
+    if os.environ.get("HARTMESH_STORAGE_INIT_IMAGE", "").strip():
+        await _mount_step(app, timeout=min(STORAGE_INIT_VERBS["mount-all"], max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())))
+    mount_reason, mount_text = status.storage_reason, status.storage_text
     read = asyncio.ensure_future(run_file_io(_read_pool, config))
     app.state.storage_inventory_task = read
     read.add_done_callback(_observe)
@@ -414,6 +610,8 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
         catalog = PreparedVolumeCatalog([], data_disk=Path(config.inventory_path).parent, reserve_bytes=RESERVE_BYTES, reserve_inodes=RESERVE_INODES)
         status.storage_reason, status.storage_text = "inventory-unreadable", "inventory validation did not finish within the startup budget"
         app.state.storage_inventory_task = read
+    if status.mount_pending and status.storage_reason is None:
+        status.storage_reason, status.storage_text = mount_reason, mount_text
     human = human_lookup(SQLiteUserRepository(session_factory))
     directory = InstanceDirectory(session_factory, human=human)
     registry = SpaceRegistry(session_factory, HostPrincipalResolver(human=human, nonhuman=directory.lookup))
@@ -422,10 +620,10 @@ async def initialize_storage_spaces(app, config: StorageSpacesConfig, *, session
     app.state.agent_conversations = AgentConversations(app.state.agent_instances)
     if thread_store is not None and hasattr(thread_store, "instance_authority"):
         thread_store.instance_authority = app.state.agent_conversations
-    counts = await _metadata_step(app, timeout=max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic()))
+    counts = None if status.mount_pending else await _metadata_step(app, timeout=max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic()))
     app.state.agent_instances.execution_probe = lambda instance_id=None: execution_state(app, instance_id)
     app.state.agent_instances.allowance_of = lambda kind: allowance(app, kind)
-    if status.storage_reason is None and status.metadata_task is None:
+    if status.storage_reason is None and status.metadata_task is None and not status.mount_pending:
         await _adapter_step(app, timeout=min(ADAPTER_LIMIT_SECONDS, max(0, entered + STARTUP_BUDGET_SECONDS - time.monotonic())))
     await _startup_lines(app, counts=counts)
     app.state.storage_recheck_stop = asyncio.Event()

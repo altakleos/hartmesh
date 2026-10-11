@@ -66,6 +66,13 @@ rewrites both services and the Gateway helper image together. Storage stays off
 with `HARTMESH_USERS` absent and agent creation counts remain zero. No additional
 schema or configuration version changes.
 
+The Gateway's optional helper-image setting enables a bounded `mount-all` call
+before storage verification. Only that verb is admitted. Timeout ownership and
+cleanup survive startup deadlines and cancellation; uncertain removal blocks a
+duplicate mount. A successful retry reverifies the pinned catalogue before
+admission, while stronger inventory/disk failures remain unavailable. No
+additional schema or configuration version changes.
+
 ## [2.2.0+hartmesh.45] - 2026-10-09
 
 ### AI employee Work and supervision
