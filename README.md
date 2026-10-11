@@ -97,7 +97,9 @@ writable attachments remain denied. Creating a new account assigns its personal
 Space and company READ/EXPORT grant after the account commits. Typed Compose
 plans enforce user seats across local and SSO creation; the operator can release
 a disabled account's seat. Background repair and released-volume cleanup arrive
-in later integration changes. Legacy folders are not adopted or moved. Shared access requires explicit resource grants; company
+in later integration changes. Trusted host integrations can now route conversation
+folders into their selected data roots; Compose chat mounts arrive in the next
+integration change. Legacy folders are not adopted or moved. Shared access requires explicit resource grants; company
 custody does not grant access. Disable a convenience feature without deleting its
 resource; its generic folder remains available under current grants.
 The [consumer handoff](docs/STORAGE_SPACES_CONSUMER.md) covers asynchronous callers,

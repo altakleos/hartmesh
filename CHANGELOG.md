@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Conversation path foundation
+
+Trusted host integrations can route conversation folders into an explicitly
+selected data root while keeping the existing thread leaf layout and Docker
+source paths aligned. Projected thread directories use `0770` and descriptor
+traversal refuses symlinked or foreign-filesystem descendants. The callback
+selects paths only; coordinated Compose chat admission and mounts follow in the
+next integration change. This change adds no database schema changes.
+
 ### Assigned feature storage
 
 My Files and Projects now look up one assigned user Space by its role link;

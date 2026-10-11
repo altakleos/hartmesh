@@ -1,9 +1,11 @@
+import errno
 import hashlib
 import logging
 import os
 import re
 import shutil
-from contextlib import contextmanager
+from collections.abc import Callable
+from contextlib import ExitStack, contextmanager
 from contextvars import ContextVar
 from pathlib import Path, PureWindowsPath
 
@@ -146,6 +148,9 @@ class Paths:
         2. DEER_FLOW_HOME environment variable
         3. Caller project fallback: `{project_root}/.deer-flow`
     """
+
+    # Trusted, pure host projection only. Roots grant no filesystem authority.
+    thread_root_resolver: Callable[[str], Path | None] | None = None
 
     def __init__(self, base_dir: str | Path | None = None) -> None:
         self._base_dir = Path(base_dir).resolve() if base_dir is not None else None
@@ -401,6 +406,27 @@ class Paths:
         """Host path for a thread-scoped skill projection."""
         return _join_host_path(self.host_thread_dir(thread_id, user_id=user_id), "skills_view")
 
+    def _projected_thread_root(self, thread_id: str, user_id: str | None) -> Path | None:
+        """Validate IDs before consulting a pure, operation-scoped host callback."""
+        _validate_thread_id(thread_id)
+        if user_id is None:
+            return None
+        _validate_user_id(user_id)
+        if self.thread_root_resolver is None:
+            return None
+        root = self.thread_root_resolver(user_id)
+        if root is not None and (not isinstance(root, Path) or not root.is_absolute()):
+            raise ValueError("Thread root resolver must return an absolute host Path or None")
+        return root
+
+    def _thread_location(self, thread_id: str, user_id: str | None) -> tuple[Path, Path | None]:
+        root = self._projected_thread_root(thread_id, user_id)
+        if root is not None:
+            return root / "conversations" / thread_id, root
+        if user_id is not None:
+            return self.user_dir(user_id) / "threads" / thread_id, None
+        return self.base_dir / "threads" / thread_id, None
+
     def thread_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
         Host path for a thread's data.
@@ -410,6 +436,11 @@ class Paths:
         Otherwise (legacy layout):
             `{base_dir}/threads/{thread_id}/`
 
+        A trusted `thread_root_resolver` may return an absolute root for the
+        user, yielding `<root>/conversations/<thread_id>/`. An absent resolver
+        or None result keeps the legacy layout. It must not perform SQL or
+        filesystem verification; the host admits the root before routing.
+
         This directory contains a `user-data/` subdirectory that is mounted
         as `/mnt/user-data/` inside the sandbox.
 
@@ -417,9 +448,7 @@ class Paths:
             ValueError: If `thread_id` or `user_id` contains unsafe characters (path
                         separators or `..`) that could cause directory traversal.
         """
-        if user_id is not None:
-            return self.user_dir(user_id) / "threads" / _validate_thread_id(thread_id)
-        return self.base_dir / "threads" / _validate_thread_id(thread_id)
+        return self._thread_location(thread_id, user_id)[0]
 
     def sandbox_work_dir(self, thread_id: str, *, user_id: str | None = None) -> Path:
         """
@@ -502,7 +531,10 @@ class Paths:
         return self.thread_dir(thread_id, user_id=user_id) / "user-data"
 
     def host_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> str:
-        """Host path for a thread directory, preserving Windows path syntax."""
+        """Docker source path; projected roots must also be visible at this host path."""
+        root = self._projected_thread_root(thread_id, user_id)
+        if root is not None:
+            return str(root / "conversations" / thread_id)
         if user_id is not None:
             return _join_host_path(self._host_base_dir_str(), "users", _validate_user_id(user_id), "threads", _validate_thread_id(thread_id))
         return _join_host_path(self._host_base_dir_str(), "threads", _validate_thread_id(thread_id))
@@ -554,24 +586,55 @@ class Paths:
     def ensure_thread_dirs(self, thread_id: str, *, user_id: str | None = None) -> None:
         """Create all standard sandbox directories for a thread.
 
-        Directories are created with mode 0o777 so that sandbox containers
-        (which may run as a different UID than the host backend process) can
-        write to the volume-mounted paths without "Permission denied" errors.
-        The explicit chmod() call is necessary because Path.mkdir(mode=...) is
-        subject to the process umask and may not yield the intended permissions.
+        Legacy leaves retain 0o777 for different container/host UIDs. A projected
+        thread uses 0o770 for its directory, user-data and four leaves, leaving
+        the supplied root and conversations parent unchanged. Resolve once so
+        all creation and permission changes use the same host projection.
 
         Includes the ACP workspace directory so it can be volume-mounted into
         the sandbox container at ``/mnt/acp-workspace`` even before the first
         ACP agent invocation.
         """
-        for d in [
-            self.sandbox_work_dir(thread_id, user_id=user_id),
-            self.sandbox_uploads_dir(thread_id, user_id=user_id),
-            self.sandbox_outputs_dir(thread_id, user_id=user_id),
-            self.acp_workspace_dir(thread_id, user_id=user_id),
-        ]:
+        thread, root = self._thread_location(thread_id, user_id)
+        if root is not None:
+            self._ensure_projected_thread_dirs(root, thread_id)
+            return
+        user_data = thread / "user-data"
+        directories = [user_data / "workspace", user_data / "uploads", user_data / "outputs", thread / "acp-workspace"]
+        for d in directories:
             d.mkdir(parents=True, exist_ok=True)
             d.chmod(0o777)
+
+    @staticmethod
+    def _ensure_projected_thread_dirs(root: Path, thread_id: str) -> None:
+        """Create below an existing root without following mutable descendant links."""
+        if not all(hasattr(os, name) for name in ("O_DIRECTORY", "O_NOFOLLOW", "fchmod")):
+            raise OSError(errno.ENOTSUP, "Projected threads require descriptor-confined directory creation")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+        with ExitStack() as descriptors:
+            root_fd = os.open(root, flags)
+            descriptors.callback(os.close, root_fd)
+            device = os.fstat(root_fd).st_dev
+
+            def child(parent_fd: int, name: str, *, thread_node: bool = True) -> int:
+                try:
+                    os.mkdir(name, mode=0o770 if thread_node else 0o777, dir_fd=parent_fd)
+                except FileExistsError:
+                    pass
+                descriptor = os.open(name, flags, dir_fd=parent_fd)
+                descriptors.callback(os.close, descriptor)
+                if os.fstat(descriptor).st_dev != device:
+                    raise OSError(errno.EXDEV, "Projected thread directories must stay on the selected filesystem")
+                if thread_node:
+                    os.fchmod(descriptor, 0o770)
+                return descriptor
+
+            conversations = child(root_fd, "conversations", thread_node=False)
+            thread = child(conversations, thread_id)
+            user_data = child(thread, "user-data")
+            for leaf in ("workspace", "uploads", "outputs"):
+                child(user_data, leaf)
+            child(thread, "acp-workspace")
 
     def delete_thread_dir(self, thread_id: str, *, user_id: str | None = None) -> None:
         """Delete all persisted data for a thread.
