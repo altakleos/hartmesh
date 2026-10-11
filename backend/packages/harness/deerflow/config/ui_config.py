@@ -16,8 +16,11 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from deerflow.config.work_policy import WorkPolicy
+
 #: How many starters Home will offer. Past this a grid stops being a choice.
 MAX_STARTERS = 6
+MAX_ROLES = 8
 
 #: The product a deployment that names none is.
 DEFAULT_PRODUCT_NAME = "HartMesh"
@@ -101,6 +104,30 @@ DEFAULT_STARTERS = (
 )
 
 
+class RoleConfig(BaseModel):
+    """A deployment-owned brief copied when an agent is created."""
+
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True, frozen=True)
+
+    id: str = Field(pattern=r"^[a-z0-9-]+$", min_length=1, max_length=40)
+    name: str = Field(min_length=1, max_length=60)
+    description: str = Field(min_length=1, max_length=200)
+    soul: str = Field(min_length=1, max_length=16000)
+    skills: list[str] = Field(default_factory=list, max_length=16)
+    work_policy: WorkPolicy | None = None
+
+    @field_validator("name", "description", "soul")
+    @classmethod
+    def _plain_text(cls, value: str, info: ValidationInfo) -> str:
+        if first_control_or_reordering_character(value, allow_newlines=info.field_name == "soul") is not None:
+            raise ValueError("must not contain control or reordering characters")
+        if any(0x80 <= ord(char) <= 0x9F for char in value):
+            raise ValueError("must not contain control characters")
+        if info.field_name != "soul" and any(char in value for char in "\u2028\u2029"):
+            raise ValueError("must be a single line")
+        return value
+
+
 class UiConfig(BaseModel):
     """Deployment-owned presentation settings for the workspace."""
 
@@ -124,6 +151,15 @@ class UiConfig(BaseModel):
         max_length=MAX_STARTERS,
         description="What Home offers before anyone types. Unset takes the profile's default; an empty list shows no grid.",
     )
+    roles: list[RoleConfig] | None = Field(default=None, max_length=MAX_ROLES)
+
+    @model_validator(mode="after")
+    def _resolve_roles(self) -> "UiConfig":
+        if self.roles is None:
+            self.roles = []
+        if len({role.id for role in self.roles}) != len(self.roles):
+            raise ValueError("every role needs its own id")
+        return self
 
     @field_validator("product_name", mode="before")
     @classmethod

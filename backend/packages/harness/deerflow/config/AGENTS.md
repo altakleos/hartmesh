@@ -48,6 +48,14 @@ their tool-local settings unchanged.
 
 Top-level `recursion_limit` and `max_recursion_limit` are hot-reloaded per Gateway run. The former supplies the default when a request omits or provides an invalid value; the latter caps both configured and client-provided budgets.
 
+Version 54 adds frozen `storage_spaces.plan` counts/capacities, `user_spaces`,
+AI assistant/AI employee counts in `agents_api`, and optional frozen `ui.roles`
+briefs. Role briefs are deployment data, not platform business rules or runtime
+permissions. Their names/descriptions are single-line text; soul permits newlines.
+The Compose template supplies briefs but does not enable storage or agents here.
+Its credential scanner recognizes `ui.roles[].work_policy.responsibilities[].key`
+as a public identifier; adjacent and nested credential fields remain protected.
+
 **Config Caching**: `get_app_config()` caches the parsed config, but automatically reloads it when the resolved config path or file content signature changes. The signature includes file metadata and a content digest, so Gateway and LangGraph reads stay aligned with `config.yaml` edits even on object-store or network mounts where mtime can remain stale. The loader reads the file once through `file_signature.read_config_with_signature` and parses those same bytes, so the recorded signature always describes the parsed content: a write that races the load can only cause one extra reload, never a cache that holds one revision under another revision's signature (which the comparison could never detect).
 
 **Config Hot-Reload Boundary**: Gateway dependencies route through `get_app_config()` on every request, so per-run fields like `models[*].max_tokens`, `summarization.*`, `title.*`, `memory.*`, `subagents.*`, `verification.*`, `tools[*]`, and the agent system prompt pick up `config.yaml` edits on the next message. `AppConfig` is intentionally **not** cached on `app.state` — `lifespan()` keeps a local `startup_config` variable for one-shot bootstrap work and passes it to `langgraph_runtime(app, startup_config)`.

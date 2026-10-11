@@ -66,7 +66,7 @@ class FixtureCatalog:
 
 async def make_storage_fixture(tmp_path, request):
     from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
-    from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow
+    from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow, StorageHostReplacementRow
 
     admin = None
     schema = None
@@ -92,7 +92,9 @@ async def make_storage_fixture(tmp_path, request):
             connection.execute("PRAGMA busy_timeout=30000")
 
     async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all, tables=[row.__table__ for row in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, SpaceFileOperationRow, SpaceAttachmentRow, SpaceMountRow, SpaceBackupRow)])
+        await connection.run_sync(
+            Base.metadata.create_all, tables=[row.__table__ for row in (SpaceRow, SpaceGrantRow, SpaceEventRow, SpaceBackingRow, SpaceFileOperationRow, SpaceAttachmentRow, SpaceMountRow, SpaceBackupRow, StorageHostReplacementRow)]
+        )
     sf = async_sessionmaker(engine, expire_on_commit=False)
     subjects = {ALICE: ResolvedPrincipal(ALICE, True), BOB: ResolvedPrincipal(BOB)}
 

@@ -263,6 +263,11 @@ def _is_credential_field(name: str) -> bool:
     return name.replace("-", "_").rsplit("_", 1)[-1].lower() in CREDENTIAL_SEGMENTS
 
 
+def _is_role_responsibility_key(path: tuple[object, ...]) -> bool:
+    """Recognize the public Work-policy identifier at its exact schema path."""
+    return len(path) == 7 and path[:2] == ("ui", "roles") and isinstance(path[2], int) and path[3:5] == ("work_policy", "responsibilities") and isinstance(path[5], int) and path[6] == "key"
+
+
 def _positions(places: list[tuple[str, int]]) -> str:
     """Name colliding entries by file and position, one file at a time."""
 
@@ -314,7 +319,7 @@ def _credential_problems(value: object, path: tuple[object, ...], problems: list
     if isinstance(value, Mapping):
         for key, item in value.items():
             child = (*path, key)
-            if _is_credential_field(str(key)):
+            if _is_credential_field(str(key)) and not _is_role_responsibility_key(child):
                 # An absent credential is the documented way to configure a
                 # client that needs none; null is the same statement in YAML.
                 if item is not None and not (isinstance(item, str) and _VARIABLE.fullmatch(item)):

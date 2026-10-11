@@ -1348,3 +1348,27 @@ def test_the_profile_ships_the_scheduler_on_with_values_chosen_for_two_sandbox_s
     rendered, _ = render_config.render_text(TEMPLATE.read_text(encoding="utf-8"), render_config.load_catalog(CATALOG), _base_environ())
     document = yaml.safe_load(rendered)
     assert document["scheduler"] == template["scheduler"]
+
+
+def test_role_responsibility_keys_render_as_public_identifiers(render_config: ModuleType) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    role = {"id": "operations", "name": "Operations", "description": "Checks assigned work.", "soul": "Check assigned work.", "work_policy": {"responsibilities": [{"key": "operational-review", "label": "Review"}]}}
+    template["ui"]["roles"] = [role]
+    rendered, _ = render_config.render_text(yaml.safe_dump(template), render_config.load_catalog(CATALOG), _base_environ())
+    assert yaml.safe_load(rendered)["ui"]["roles"] == [role]
+
+
+@pytest.mark.parametrize("location", ["role", "responsibility", "nested-key"])
+def test_role_identifier_exception_does_not_allow_credentials(render_config: ModuleType, location: str) -> None:
+    template = yaml.safe_load(TEMPLATE.read_text(encoding="utf-8"))
+    role = template["ui"]["roles"][0]
+    responsibility = role["work_policy"]["responsibilities"][0]
+    if location == "role":
+        role["key"] = "must-not-be-copied"
+    elif location == "responsibility":
+        responsibility["api_key"] = "must-not-be-copied"
+    else:
+        responsibility["key"] = {"token": "must-not-be-copied"}
+    with pytest.raises(render_config.RenderError, match="credential fields") as exc:
+        render_config.render_text(yaml.safe_dump(template), render_config.load_catalog(CATALOG), _base_environ())
+    assert "must-not-be-copied" not in str(exc.value)

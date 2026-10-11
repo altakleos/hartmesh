@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Schema changes
+
+Compared with `v2.2.0+hartmesh.45`, the database head advances from
+`0040_work_execution` to `0041_storage_host_replacements`. Gateway startup
+upgrades existing SQLite and PostgreSQL databases; empty databases receive the
+same schema directly.
+
+- Add `storage_host_replacements` to record old/new Docker host identities,
+  attachment counts and timestamps.
+- Add nullable `users.released_at`; attachment `fenced_by_kind`, `fenced_by_id`,
+  `fence_reason` and `fenced_at`; and Work-attempt `contained_reason`,
+  `workspace_ready_at` and `attachment_id`.
+- Permit `host` as an actor in `agent_work_events`. This foundation change
+  does not yet write released-seat, containment or host-settlement facts.
+- Downgrade refuses recorded host replacements, released seats, containment
+  attribution, host-settled attempt facts and host events. SQLite also refuses
+  rebuilding attachments referenced by mounts; removing the unused user column
+  requires SQLite 3.35 or later to preserve user preferences.
+
+A release-45 Gateway cannot start on this newer database revision. Returning to
+release 45 requires restoring a database snapshot taken before the upgrade.
+
+### Configuration and deployment
+
+Configuration version 54 adds validated storage planning counts and capacities,
+AI assistant/AI employee counts, and optional deployment-owned role briefs.
+Storage and agent defaults remain disabled; these keys prepare later Compose
+activation work.
+
 ## [2.2.0+hartmesh.45] - 2026-10-09
 
 ### AI employee Work and supervision

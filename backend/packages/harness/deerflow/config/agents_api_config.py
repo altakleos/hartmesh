@@ -6,6 +6,9 @@ from pydantic import BaseModel, Field
 class AgentsApiConfig(BaseModel):
     """Configuration for custom-agent and user-profile management routes."""
 
+    ai_assistants_per_user: int = Field(default=1, ge=0, le=10)
+    ai_employees: int = Field(default=10, ge=0, le=100)
+
     enabled: bool = Field(
         default=False,
         description=("Whether to expose the custom-agent management API over HTTP. When disabled, the gateway rejects read/write access to custom agent SOUL.md, config, and USER.md prompt-management routes."),
