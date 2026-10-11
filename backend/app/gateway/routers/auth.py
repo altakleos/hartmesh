@@ -27,7 +27,7 @@ from app.gateway.auth.login_throttle import (
     normalize_account,
     views_as_payload,
 )
-from app.gateway.auth.mode import sign_on_only, sign_on_required
+from app.gateway.auth.mode import require_live_account, sign_on_only, sign_on_required
 from app.gateway.auth.oidc import OIDCError, OIDCService
 from app.gateway.auth.oidc_state import (
     OIDCStatePayload,
@@ -41,15 +41,22 @@ from app.gateway.auth.oidc_state import (
 )
 from app.gateway.auth.password import equalize_password_timing
 from app.gateway.auth.pat import PAT_MAX_NAME_LENGTH
+from app.gateway.auth.repositories.sqlite import NoSeatLeft
 from app.gateway.auth.session_cookie import ACCESS_TOKEN_COOKIE_NAME, SESSION_PERSISTENCE_COOKIE_NAME, set_session_cookie
 from app.gateway.auth.session_cookie_state import SKIP_AUTH_CSRF_COOKIE_STATE_ATTR
 from app.gateway.auth.user_provisioning import get_or_provision_oidc_user
 from app.gateway.csrf_middleware import CSRF_COOKIE_NAME, _request_origin, auth_csrf_cookie_settings, generate_csrf_token, is_secure_request
 from app.gateway.deps import get_current_user_from_request, get_local_provider, require_admin_user
+from app.gateway.storage_spaces import assign_created_account
 from app.gateway.utils import constant_time_equals
 from deerflow.config.auth_config import OIDCProviderConfig
 
 logger = logging.getLogger(__name__)
+
+
+def _no_seats_error(exc: NoSeatLeft, code: int) -> HTTPException:
+    return HTTPException(code, AuthErrorResponse(code=AuthErrorCode.NO_SEATS_LEFT, message=str(exc)).model_dump())
+
 
 router = APIRouter(prefix="/api/v1/auth", tags=["auth"])
 
@@ -400,6 +407,9 @@ async def login_local(
             )
         raise _invalid_credentials_error()
 
+    # Setup-pending accounts may sign in to choose their password. Disabled or
+    # released accounts must be refused before any new cookie is issued.
+    await asyncio.to_thread(require_live_account, user, completing_setup=True)
     try:
         await store.clear_account(account)
     except LoginThrottleUnavailable:
@@ -459,12 +469,15 @@ async def register(request: Request, response: Response, body: RegisterRequest):
 
     try:
         user = await get_local_provider().create_user(email=body.email, password=body.password, system_role="user")
+    except NoSeatLeft as exc:
+        raise _no_seats_error(exc, status.HTTP_403_FORBIDDEN) from None
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=AuthErrorResponse(code=AuthErrorCode.EMAIL_ALREADY_EXISTS, message="Email already registered").model_dump(),
         )
 
+    await assign_created_account(request.app, user)
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request, remember_me=body.remember_me)
 
@@ -627,12 +640,15 @@ async def add_user(request: Request, response: Response, body: AddUserRequest):
     admin = await require_admin_user(request, detail=_ADD_USER_ADMIN_DETAIL)
     try:
         added = await add_local_account(get_local_provider(), body.email)
+    except NoSeatLeft as exc:
+        raise _no_seats_error(exc, status.HTTP_409_CONFLICT) from None
     except AddAccountRefused as refused:
         if refused.code == AuthErrorCode.SIGN_ON_REQUIRED:
             raise sign_on_required() from None
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=AuthErrorResponse(code=refused.code, message=refused.message).model_dump()) from None
     # The only response that carries the password: nothing between here and
     # the administrator's page may keep a copy.
+    await assign_created_account(request.app, added.user)
     response.headers["Cache-Control"] = "no-store"
     logger.info("Local account added: %s (role user, setup pending) by %s", added.user.email, getattr(admin, "email", "admin"))
     return AddedUserResponse(
@@ -939,6 +955,8 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
 
     try:
         user = await get_local_provider().create_first_admin(email=body.email, password=body.password)
+    except NoSeatLeft as exc:
+        raise _no_seats_error(exc, status.HTTP_409_CONFLICT) from None
     except ValueError:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -948,6 +966,7 @@ async def initialize_admin(request: Request, response: Response, body: Initializ
     if user is None:
         raise already_initialized
 
+    await assign_created_account(request.app, user)
     token = create_access_token(str(user.id), token_version=user.token_version)
     _set_session_cookie(response, token, request, remember_me=body.remember_me)
 
@@ -1213,7 +1232,7 @@ async def oauth_callback(
 
     # ── Provision / link user ────────────────────────────────────────
     try:
-        result = await get_or_provision_oidc_user(provider, provider_config, identity, get_local_provider())
+        result = await get_or_provision_oidc_user(provider, provider_config, identity, get_local_provider(), app=request.app)
     except HTTPException as exc:
         error_map = {
             status.HTTP_403_FORBIDDEN: "sso_not_allowed",

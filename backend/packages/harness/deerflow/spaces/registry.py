@@ -188,14 +188,14 @@ class SpaceRegistry:
                         rows[identifier] = row
                 yield session, rows
 
-    async def host_create(self, *, name, custody, mode, feature, kind):
+    async def host_create(self, *, name, custody, mode, feature, kind, admission=None):
         """Allocate by host authority without an ambient human grant or event."""
         if self.files is None:
             raise SpaceConflict("Host storage allocation is unavailable")
-        return await self.files.assign(kind=kind, actor=None, name=name, custody=custody, mode=mode, feature=feature)
+        return await self.files.assign(kind=kind, actor=None, name=name, custody=custody, mode=mode, feature=feature, admission=admission)
 
     async def host_grant(self, space_id, subject, permissions, *, host_id=None, admission=None):
-        """A resolving human receives explicit authority under the host row lock."""
+        """Grant under the host row lock; return whether the committed grant changed."""
         from deerflow.spaces.attachments import SpaceAttachments
 
         if not isinstance(subject, PrincipalRef) or subject.kind != "human":
@@ -217,7 +217,7 @@ class SpaceRegistry:
             if existing is not None:
                 _stored_permissions(existing.permissions, MutationMode(row.mode))
                 if existing.permissions == int(permissions):
-                    return
+                    return False
             if row.generation >= 2**31 - 1:
                 raise SpaceConflict("Space generation is exhausted; preserve the resource for provider recovery")
             if existing is None:
@@ -230,6 +230,7 @@ class SpaceRegistry:
             if host_id is not None:
                 details["operator_host_id"] = host_id
             session.add(SpaceEventRow(space_id=space_id, generation=row.generation, action="grant", actor_kind="human", actor_id=subject.subject_id, details=details))
+        return True
 
     async def create(self, *, actor: PrincipalRef, name: str, custody: Custody, mode: MutationMode, feature: FeatureBinding | None = None) -> Space:
         async with self.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature) as (_, row, permissions):

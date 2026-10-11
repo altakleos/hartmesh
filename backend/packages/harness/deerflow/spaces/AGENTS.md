@@ -21,6 +21,9 @@ are documented in [the guide](../../../../../docs/STORAGE_SPACES.md).
 admission. Assignable-slot snapshots exclude bound/unclaimed/unverified slots,
 independently of account-seat occupancy. `user_spaces` gates `create` only;
 host assignment remains ungated. Availability uses one shared allowance formula.
+Host-only provisioning admission runs before slot selection/layout, borrowing the
+allocation transaction. It never bypasses custody or principal validation. The
+Gateway serializes role assignment with seat release; business rules stay in app.
 
 `spaces/` owns generic resource identity and mandatory access, independent of
 chats, agent definitions and feature installation. `storage/` remains the

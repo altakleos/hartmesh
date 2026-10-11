@@ -127,7 +127,7 @@ def account_refusal(user: Any) -> str | None:
     derived at every read from ``disabled_identities``), in either mode.
     ``inert``: sign-on only, and the account has no provider identity.
     """
-    if getattr(user, "disabled_at", None) is not None:
+    if getattr(user, "disabled_at", None) is not None or getattr(user, "released_at", None) is not None:
         return ACCOUNT_DISABLED
     if sign_on_only() and not is_provider_account(user):
         return ACCOUNT_INERT
@@ -147,8 +147,9 @@ def require_live_account(user: Any, *, completing_setup: bool = False) -> None:
 
     A pending setup (``user.needs_setup``: the password was set for the
     person, by an administrator adding them or by ``reset_admin``) confines
-    the session to :data:`SETUP_ROUTES`; ``completing_setup`` is true only
-    for a request to one of them. The rule binds sessions and nothing else,
+    the session to :data:`SETUP_ROUTES`; ``completing_setup`` is true when
+    issuing that setup-only session or handling a request to one of them.
+    The rule binds sessions and nothing else,
     because a session is the only credential a set password produces: an
     added account holds no token, channel or schedule and cannot create one
     before setup, and a reset account's tokens were never exposed by the

@@ -491,12 +491,56 @@ without a human actor, grant or event. Creation is serialized and bounded by the
 remaining startup budget; timed-out work is retained and drained on shutdown.
 Later qualification rechecks retry failed company provisioning. An existing
 inactive or incompatible role is retained and reported, never replaced.
-Automatic account assignment and periodic settlement are still deferred. Trusted
-hosts explicitly grant resolving, unreleased humans READ/EXPORT; setup-pending
+New-account requests assign the personal user Space after committing the account,
+then grant company READ/EXPORT independently. Setup-pending accounts qualify;
+allocation or grant failures are logged and preserve successful account creation.
+The assignment is idempotent and retains incompatible or inactive role links.
+Offline-created accounts and failed assignments await periodic repair, which is
+still deferred. Trusted hosts grant resolving, unreleased humans READ/EXPORT; setup-pending
 accounts remain eligible. Company custody itself grants no access. Shared uses
 those permissions for publication/removal, including READ/EXPORT on a My Files
 source. Generic writes and writable resource attachments remain denied to those
 members, including administrators.
+
+Typed Compose plans enforce account seats in the repository's creation
+transaction, including when the pool is unavailable. Disabled accounts still
+occupy seats; released accounts do not. The allowance uses prepared user slots
+and the configured count, retaining existing occupancy when the count is lowered.
+An empty database can always create its first administrator even with no prepared
+slots. Other creation requests receive `no_seats_left` at capacity: registration
+returns 403, administrator creation 409, and SSO returns its refusal redirect.
+The offline `python -m app.gateway.auth.add_user --email ADDRESS` command reads
+the same allowance from inventory without starting Docker; refusal exits 1 and
+reports `allowed` and `in_use`. Storage without a typed plan retains ordinary
+account creation.
+
+The private repository callback `seats_allowed(session)` borrows the already
+locked creation transaction. It must not commit, close the session, or open a
+second connection; the count and insertion share that transaction. Startup binds
+the actual account-creation repository and clears only its owned callback.
+
+The operator can disable local accounts as well as provider identities. Local
+disablement binds the immutable account ID, so changing or reusing its email
+does not transfer that fact. Local accounts do not acquire OAuth fields.
+
+```bash
+python -m app.gateway.auth.accounts disable --email ADDRESS
+python -m app.gateway.auth.accounts release-seat --email ADDRESS
+# Retry cleanup after the address has been released:
+python -m app.gateway.auth.accounts release-seat --id ACCOUNT_UUID
+```
+
+Release requires current disablement and atomically records `released_at`, releases
+the email, and marks the exact owned user Space deleted with one attributed host
+event. Account rows and email provenance remain. Session and running-work cleanup
+follows commit. Exit 2 with `cleanup_pending: true` reports committed release with
+unconfirmed cleanup; retry by ID preserves the timestamp and event while retrying
+cleanup. Released accounts cannot be enabled or reclaim their email through stale
+credential writes. Enablement changes an entire provider identity: if any covered
+account was released, it refuses before changing disablement or held work.
+The existing `released` operator field still denotes email release; `released_at`
+distinguishes a seat release. Physical volume emptying and AI-assistant release are
+subsequent integration changes; a released slot is not yet recycled.
 
 The kernel now supplies explicit host transactions and assignment helpers.
 `host_locked` locks scoped parents in sorted order without resolving a human
@@ -505,6 +549,9 @@ creation writes no human grant or event. `host_grant` requires a resolving human
 nonzero mode-compatible permissions and every attachment fenced; its optional
 admission callback runs inside the transaction before writes or a no-op result.
 The grant, generation and attributed event commit together.
+Host-only provisioning admission runs in the allocation transaction before slot
+selection or layout. App-owned assignment and release serialization prevents a
+concurrent post-commit helper from assigning storage after a seat is released.
 
 An explicit host-write workflow admits the human with READ/EXPORT and records
 `by: host`, while requiring an active native destination and rejecting unresolved

@@ -91,12 +91,14 @@ class SpaceFiles:
                     raise SpaceOperationPending("Storage attachment provider is required to confirm containment", cause="lifecycle")
 
     @asynccontextmanager
-    async def provisioning(self, *, actor, name, custody, mode, feature=None, kind=None):
+    async def provisioning(self, *, actor, name, custody, mode, feature=None, kind=None, admission=None):
         """Host-only atomic provisioning boundary for feature-owned SQL links."""
         if kind is not None and kind not in LAYOUT:
             raise ValueError("Unknown storage kind")
         creation = self.registry._host_creating(name=name, custody=custody, mode=mode, feature=feature) if actor is None else self.registry.creating(actor=actor, name=name, custody=custody, mode=mode, feature=feature)
         async with creation as (session, row, permissions):
+            if admission is not None:
+                await admission(session)
             used = set((await session.execute(select(SpaceBackingRow.slot_id))).scalars())
             volume = None
             for slot_id, candidate_spec in self.catalog.volumes.items():
@@ -162,14 +164,14 @@ class SpaceFiles:
             finally:
                 os.close(fd)
 
-    async def assign(self, *, kind, actor, name, custody, mode, feature=None):
+    async def assign(self, *, kind, actor, name, custody, mode, feature=None, admission=None):
         from deerflow.features.resources import StorageFeatureLinkRow
 
         if kind == "user" and (not isinstance(actor, PrincipalRef) or actor.kind != "human"):
             raise SpaceDenied("User storage assignment requires a human identity")
 
         async def perform():
-            async with self.provisioning(actor=actor, name=name, custody=custody, mode=mode, feature=feature, kind=kind) as (session, space):
+            async with self.provisioning(actor=actor, name=name, custody=custody, mode=mode, feature=feature, kind=kind, admission=admission) as (session, space):
                 role = ("hm.user-space", "human:" + actor.subject_id) if kind == "user" else ("hm.company-space", "company") if kind == "company" else None
                 if role is not None:
                     session.add(StorageFeatureLinkRow(namespace=role[0], key=role[1], space_id=space.id))

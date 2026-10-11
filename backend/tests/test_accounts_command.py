@@ -232,14 +232,14 @@ def test_a_disabled_account_is_refused_by_the_browser_websocket_and_the_langgrap
 
 
 @pytest.mark.anyio
-async def test_the_email_convenience_resolves_exactly_one_provider_account(stores) -> None:
+async def test_email_selectors_refuse_unknown_ambiguous_or_inapplicable_accounts(stores) -> None:
     users, tokens, schedules = stores
     await users.create_user(User(email="local@example.com", password_hash="x", system_role="user"))
     command = AccountsCommand(users, tokens=tokens, schedules=schedules)
     with pytest.raises(CommandError, match="no account has the email"):
         await command.run("disable", email="nobody@example.com")
     with pytest.raises(CommandError, match="no identity-provider identity"):
-        await command.run("disable", email="local@example.com")
+        await command.run("limit-role", email="local@example.com")
     with pytest.raises(CommandError, match="not both"):
         await command.run("disable", email="local@example.com", issuer=ISSUER, subject="x")
     with pytest.raises(CommandError, match="go together"):

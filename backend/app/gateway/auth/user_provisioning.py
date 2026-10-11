@@ -24,12 +24,15 @@ from datetime import UTC, datetime
 from fastapi import HTTPException, status
 from pydantic import ValidationError
 
-from app.gateway.auth.access import admitted_values, refuse_turned_off, role_for
+from app.gateway.auth.access import AccessRefused, admitted_values, refuse_turned_off, role_for
 from app.gateway.auth.local_provider import LocalAuthProvider
+from app.gateway.auth.mode import account_refusal
 from app.gateway.auth.models import User
 from app.gateway.auth.oidc import OIDCIdentity
+from app.gateway.auth.repositories.sqlite import NoSeatLeft, ReleasedAccount
 from deerflow.config.auth_config import OIDCProviderConfig
 from deerflow.persistence.user.access import limited_role
+from deerflow.utils.file_io import run_file_io
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +100,8 @@ async def get_or_provision_oidc_user(
     provider_config: OIDCProviderConfig,
     identity: OIDCIdentity,
     local_provider: LocalAuthProvider,
+    *,
+    app=None,
 ) -> dict:
     """Resolve an OIDC identity to a DeerFlow user.
 
@@ -126,6 +131,7 @@ async def get_or_provision_oidc_user(
     # ever know which issuer it belonged to.
     existing = await local_provider.get_user_by_oauth(provider_id, identity.subject)
     if existing:
+        await _require_current_account(existing, provider_config, identity)
         recorded = getattr(existing, "oauth_issuer", None)
         if recorded is None:
             existing.oauth_issuer = provider_config.issuer
@@ -172,7 +178,7 @@ async def get_or_provision_oidc_user(
         settle(follows, regrade=follows is not None)
         # A targeted write: never the whole row, so a token_version read a
         # moment ago cannot land back over an end-sessions that ran meanwhile.
-        followed = await local_provider.record_sign_in(existing, email=follows)
+        followed = await _record_live_sign_in(local_provider, existing, provider_config, identity, email=follows)
         if follows is not None and not followed:
             # Another account took the address between the holder check and
             # this write. The contract is the same as finding it there in the
@@ -186,7 +192,7 @@ async def get_or_provision_oidc_user(
             )
             # Back to the address the account holds, and the role that one earns.
             settle(None, regrade=True)
-            await local_provider.record_sign_in(existing)
+            await _record_live_sign_in(local_provider, existing, provider_config, identity)
         return {"user": existing, "created": False}
 
     # 2. Verified email requirement
@@ -257,6 +263,16 @@ async def get_or_provision_oidc_user(
             oauth_issuer=provider_config.issuer,
             last_sign_in_at=now,
         )
+    except NoSeatLeft as exc:
+        # Another callback for this same identity may have taken the last seat.
+        # Capacity applies to creation, never to signing in to its committed row.
+        existing = await local_provider.get_user_by_oauth(provider_id, identity.subject)
+        if existing is not None:
+            if await local_provider.is_identity_disabled(provider_config.issuer, identity.subject):
+                raise refuse_turned_off(provider_config, identity) from None
+            await _require_current_account(existing, provider_config, identity)
+            return {"user": existing, "created": False}
+        raise AccessRefused(code="no_seats_left", message=str(exc)) from None
     except ValidationError as exc:
         # The record refused the address itself. This arm comes first because
         # pydantic's ValidationError *is* a ValueError: without it the race
@@ -274,14 +290,34 @@ async def get_or_provision_oidc_user(
         # otherwise the email now belongs to a different account → 409.
         existing = await local_provider.get_user_by_oauth(provider_id, identity.subject)
         if existing:
+            await _require_current_account(existing, provider_config, identity)
             return {"user": existing, "created": False}
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=("An account with this email already exists. Contact your administrator to link it to your SSO account."),
         ) from None
     # The role the account was created with, which a role limit may hold below what was read.
+    if app is not None:
+        from app.gateway.storage_spaces import assign_created_account
+
+        await assign_created_account(app, user)
     logger.info("Auto-created OIDC user %s (provider=%s, role=%s)", email, provider_id, user.system_role)
     return {"user": user, "created": True}
+
+
+async def _require_current_account(user, provider_config, identity):
+    if await run_file_io(account_refusal, user) is not None:
+        raise refuse_turned_off(provider_config, identity)
+    recorded = getattr(user, "oauth_issuer", None)
+    if recorded is not None and _issuer_key(recorded) != _issuer_key(provider_config.issuer):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Your account is linked to a different identity provider. Contact your administrator.")
+
+
+async def _record_live_sign_in(provider, user, config, identity, **values):
+    try:
+        return await provider.record_sign_in(user, **values)
+    except ReleasedAccount:
+        raise refuse_turned_off(config, identity) from None
 
 
 async def _address_that_follows(

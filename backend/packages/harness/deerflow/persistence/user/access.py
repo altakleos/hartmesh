@@ -6,7 +6,9 @@ first sign-in, when no row exists, and the fact must still hold when one
 would be created -- and because one identity can hold an account under each
 provider configured at its issuer, and the fact is the person's. An account
 is disabled exactly when its identity is in ``disabled_identities``, and its
-role is at most the one in ``role_limits``: every read derives both.
+role is at most the one in ``role_limits``: every read derives both. Local
+disablement instead uses a reserved private issuer and immutable account ID;
+it must never match the subject-only fallback for a provider identity.
 """
 
 from __future__ import annotations
@@ -29,6 +31,11 @@ LIMIT_ROLES = ROLES[:-1]
 def issuer_key(issuer: str) -> str:
     """One spelling per issuer: discovery already treats a trailing slash as the same address."""
     return issuer.strip().rstrip("/")
+
+
+def local_account(user) -> bool:
+    """Local access facts bind the immutable row, never its email or OAuth fields."""
+    return not (user.oauth_provider and user.oauth_id)
 
 
 def identity_lock_key(issuer: str, subject: str) -> str:

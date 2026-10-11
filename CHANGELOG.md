@@ -18,8 +18,13 @@ workflows. Qualified Gateway startup now creates one native Company Space withou
 a human creator or ambient grant. Shared uses host-written publication/removal
 with READ/EXPORT destination and source permissions, while direct mutation and
 writable mounts remain denied. Recovery is host-only and shares the outer SQL
-transaction; receipts stay until confirmed commit. Automatic account assignment
-and background settlement remain for later integration changes; defaults stay disabled. No database schema change
+transaction; receipts stay until confirmed commit. New-account requests assign
+personal storage and company READ/EXPORT after account commit; failures retain
+successful creation. Typed Compose plans enforce user seats across local, SSO and
+offline creation. Operators can disable local accounts and release disabled seats
+with stable-ID cleanup retries, preserving rows and provenance. Released accounts
+cannot be enabled or reclaim addresses through stale credential writes. Background
+repair and volume cleanup remain for later integration changes; defaults stay disabled. No database schema change
 is added, but existing feature-link rows now identify resource roles rather than
 one resource per plugin.
 
@@ -50,7 +55,7 @@ same schema directly.
   `fence_reason` and `fenced_at`; and Work-attempt `contained_reason`,
   `workspace_ready_at` and `attachment_id`.
 - Permit `host` as an actor in `agent_work_events`. This foundation change
-  does not yet write released-seat, containment or host-settlement facts.
+  now supports released-seat facts; containment and host settlement remain staged.
 - Downgrade refuses recorded host replacements, released seats, containment
   attribution, host-settled attempt facts and host events. SQLite also refuses
   rebuilding attachments referenced by mounts; removing the unused user column

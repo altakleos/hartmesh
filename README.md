@@ -93,8 +93,11 @@ Shared looks up the company Space. Feature requests never allocate storage. The
 staged Compose build returns a structured 503 when that assignment is missing;
 startup creates the native Company Space after host qualification. Shared publishes
 through host workflows with members holding READ/EXPORT only; direct edits and
-writable attachments remain denied. Automatic account assignment and background
-settlement arrive in later integration changes. Legacy folders are not adopted or moved. Shared access requires explicit resource grants; company
+writable attachments remain denied. Creating a new account assigns its personal
+Space and company READ/EXPORT grant after the account commits. Typed Compose
+plans enforce user seats across local and SSO creation; the operator can release
+a disabled account's seat. Background repair and released-volume cleanup arrive
+in later integration changes. Legacy folders are not adopted or moved. Shared access requires explicit resource grants; company
 custody does not grant access. Disable a convenience feature without deleting its
 resource; its generic folder remains available under current grants.
 The [consumer handoff](docs/STORAGE_SPACES_CONSUMER.md) covers asynchronous callers,

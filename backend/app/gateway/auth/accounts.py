@@ -204,10 +204,12 @@ import time
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from uuid import UUID
 
 from app.gateway.auth.models import User
-from app.gateway.auth.repositories.sqlite import SQLiteUserRepository
-from deerflow.persistence.user.access import LIMIT_ROLES, issuer_key, limited_role
+from app.gateway.auth.repositories.sqlite import ReleasedAccount, SQLiteUserRepository
+from deerflow.config.auth_config import LOCAL_ACCOUNT_ISSUER
+from deerflow.persistence.user.access import LIMIT_ROLES, issuer_key, limited_role, local_account
 
 logger = logging.getLogger(__name__)
 
@@ -222,7 +224,7 @@ ANY_OWNER = "*"
 #: How long a Gateway process counts as live after its last beat.
 LIVE_WINDOW_SECONDS = 90.0
 
-COMMANDS = ("list", "disable", "enable", "end-sessions", "release-email", "limit-role", "lift-role-limit")
+COMMANDS = ("list", "disable", "enable", "end-sessions", "release-email", "release-seat", "limit-role", "lift-role-limit")
 
 #: The forms that take many identities at one issuer in one call (``--subjects``).
 BATCH_COMMANDS = ("disable", "enable", "limit-role", "lift-role-limit")
@@ -572,6 +574,7 @@ def _account_document(user: User) -> dict[str, Any]:
         # parses an email to decide what an account is.
         "released": user.email_released_from is not None,
         "released_from": user.email_released_from,
+        "released_at": _iso(user.released_at),
         "role_limit": user.role_limit,
     }
 
@@ -675,6 +678,7 @@ class AccountsCommand:
         role: str = LIMIT_ROLES[0],
         restore_held: bool = False,
         subjects: list[str] | None = None,
+        account_id: str | None = None,
     ) -> dict[str, Any]:
         # One bound for the whole command: the run wait, the second look for
         # late runs and the connection wait all end by it, so a caller can
@@ -691,21 +695,27 @@ class AccountsCommand:
             # The limit is the person's, so it reaches every account the
             # identity holds: two accounts for one subject are not a guess
             # to refuse here, they are both what is meant.
-            identity, _ = await self._resolve(issuer=issuer, subject=subject, email=email, one_account=False)
+            identity, _ = await self._resolve(issuer=issuer, subject=subject, email=email, one_account=False, account_id=account_id)
             if command == "limit-role":
                 return await self.limit_role(identity, role=role, end_running_work=end_running_work, clock=clock)
             return await self.lift_role_limit(identity, clock=clock)
         clock = SurfaceClock()
-        identity, account = await self._resolve(issuer=issuer, subject=subject, email=email)
+        identity, account = await self._resolve(issuer=issuer, subject=subject, email=email, account_id=account_id, allow_local=command in ("disable", "enable", "end-sessions", "release-seat"))
         if command == "disable":
-            return await self.disable(identity, account, clock=clock)
-        if command == "enable":
-            return await self.enable(identity, account, restore_held=restore_held)
-        if command == "end-sessions":
-            return await self.end_sessions(identity, account, end_running_work=end_running_work)
-        if command == "release-email":
-            return await self.release_email(identity, account)
-        raise CommandError(f"unknown command {command!r}; one of {', '.join(COMMANDS)}")
+            document = await self.disable(identity, account, clock=clock)
+        elif command == "enable":
+            document = await self.enable(identity, account, restore_held=restore_held)
+        elif command == "end-sessions":
+            document = await self.end_sessions(identity, account, end_running_work=end_running_work)
+        elif command == "release-email":
+            document = await self.release_email(identity, account)
+        elif command == "release-seat":
+            document = await self.release_seat(identity, account)
+        else:
+            raise CommandError(f"unknown command {command!r}; one of {', '.join(COMMANDS)}")
+        if identity[0] == LOCAL_ACCOUNT_ISSUER:
+            document["identity"] = {"kind": "local", "id": identity[1], "email": account.email}
+        return document
 
     async def run_many(
         self,
@@ -766,14 +776,33 @@ class AccountsCommand:
 
     # ── Selecting the account ────────────────────────────────────────────
 
-    async def _resolve(self, *, issuer: str | None, subject: str | None, email: str | None, one_account: bool = True) -> tuple[tuple[str, str], User | None]:
+    async def _resolve(self, *, issuer: str | None, subject: str | None, email: str | None, one_account: bool = True, allow_local: bool = False, account_id: str | None = None) -> tuple[tuple[str, str], User | None]:
         by_identity = issuer is not None or subject is not None
+        if account_id is not None:
+            if by_identity or email is not None:
+                raise CommandError("address the account by ID, email or issuer and subject, not several selectors")
+            try:
+                identifier = str(UUID(account_id))
+            except (ValueError, TypeError, AttributeError):
+                raise CommandError("the account ID must be a UUID") from None
+            account = await self._users.get_user_by_id(identifier)
+            if account is None:
+                raise CommandError("no account has this ID")
+            if local_account(account):
+                if not allow_local:
+                    raise CommandError("this command addresses provider accounts")
+                return (LOCAL_ACCOUNT_ISSUER, identifier), account
+            if not account.oauth_issuer:
+                raise CommandError("this provider account has no recorded issuer; address it by issuer and subject")
+            return (issuer_key(account.oauth_issuer), account.oauth_id), account
         if by_identity and email is not None:
             raise CommandError("address the account by --issuer and --subject, or by --email, not both")
         if by_identity:
             if not (issuer or "").strip() or not (subject or "").strip():
                 raise CommandError("--issuer and --subject go together; give both")
             key = (issuer_key(issuer or ""), (subject or "").strip())
+            if key[0] == LOCAL_ACCOUNT_ISSUER:
+                raise CommandError("Local accounts are addressed by email or account ID, not by a provider issuer")
             # Uniqueness is (provider, subject); two configured providers may
             # point at one issuer, and then this pair names two accounts.
             # Acting on whichever came back first would be a wrong-target
@@ -788,6 +817,8 @@ class AccountsCommand:
         account = await self._users.get_user_by_email(email.strip())
         if account is None:
             raise CommandError(f"no account has the email {email.strip()!r}; a person with no account is addressed by --issuer and --subject")
+        if local_account(account) and allow_local:
+            return (LOCAL_ACCOUNT_ISSUER, str(account.id)), account
         if not account.oauth_provider or not account.oauth_id:
             raise CommandError(f"the account with email {email.strip()!r} has no identity-provider identity (a local-password account); this command addresses provider accounts")
         if not account.oauth_issuer:
@@ -804,7 +835,11 @@ class AccountsCommand:
         # would match is not one "without an account".
         issuerless = {entry["subject"] for entry in accounts if entry["subject"] and not entry["issuer"]}
 
+        local_ids = {entry["id"] for entry in accounts if not entry["provider"]}
+
         def has_account(issuer: str, subject: str) -> bool:
+            if issuer == LOCAL_ACCOUNT_ISSUER:
+                return subject in local_ids
             return (issuer, subject) in with_account or subject in issuerless
 
         without = [{"issuer": issuer, "subject": subject, "disabled_at": _iso(disabled_at)} for issuer, subject, disabled_at in await self._users.list_disabled_identities() if not has_account(issuer, subject)]
@@ -815,7 +850,8 @@ class AccountsCommand:
         for issuer, subject, kind, target_id, _ in await self._users.list_all_holds():
             entry = holds.setdefault((issuer, subject), {surface: [] for surface in HELD_SURFACES})
             entry[_surface_of(kind)].append(target_id)
-        held = [{"issuer": issuer, "subject": subject, **entry} for (issuer, subject), entry in holds.items()]
+        held = [({"kind": "local", "id": subject, **entry} if issuer == LOCAL_ACCOUNT_ISSUER else {"issuer": issuer, "subject": subject, **entry}) for (issuer, subject), entry in holds.items()]
+        without = [({"kind": "local", "id": entry["subject"], "disabled_at": entry["disabled_at"]} if entry["issuer"] == LOCAL_ACCOUNT_ISSUER else entry) for entry in without]
         return {"command": "list", "accounts": accounts, "disabled_without_account": without, "role_limits_without_account": limits_without, "holds": held}
 
     async def disable(self, identity: tuple[str, str], account: User | None, *, clock: SurfaceClock | None = None) -> dict[str, Any]:
@@ -1292,17 +1328,18 @@ class AccountsCommand:
     async def enable(self, identity: tuple[str, str], account: User | None, *, restore_held: bool = False) -> dict[str, Any]:
         """Withdraw the refusal. What ``disable`` held stays off unless ``restore_held``, and every ``enable`` discards the record of it.
 
-        A plain ``enable`` discards the record before it withdraws the
-        refusal, so a command stopped in between leaves nothing a later
-        restore could revive. With ``restore_held`` the refusal goes first
+        A plain ``enable`` discards the record and withdraws the refusal in
+        one transaction, after checking every covered account for release.
+        With ``restore_held`` the refusal goes first
         and each held target leaves the record once it is settled, so a
         re-run finishes a restore that was stopped.
         """
         issuer, subject = identity
         record = await self._users.list_holds(issuer, subject)
-        if not restore_held:
-            await self._users.discard_holds(issuer, subject)
-        withdrawn = await self._users.enable_identity(issuer, subject)
+        try:
+            withdrawn = await self._users.enable_identity(issuer, subject, account_id=str(account.id) if account is not None else None, discard_holds=not restore_held)
+        except ReleasedAccount as exc:
+            return {"command": "enable", "error": "released", "id": exc.account_id, "returncode": 1}
         if self._sweeps is not None:
             # So each Gateway takes the person off its refused list now,
             # rather than cut what they open for up to its periodic look.
@@ -1361,6 +1398,68 @@ class AccountsCommand:
                 "(resuming a schedule, or connecting the channel again), and the record of them is discarded, so a later --restore-held cannot turn them on"
             )
         return document
+
+    async def release_seat(self, identity, account):
+        """Retain account rows; host cleanup empties the marked Space in a later pass."""
+        from sqlalchemy import select
+
+        from app.gateway.storage_spaces import serialize_role_assignment
+        from deerflow.features.resources import StorageFeatureLinkRow
+        from deerflow.persistence.spaces.files import SpaceBackingRow
+        from deerflow.persistence.spaces.model import SpaceRow
+        from deerflow.persistence.user.access import DisabledIdentityRow
+        from deerflow.persistence.user.model import UserRow
+        from deerflow.spaces.contract import PrincipalRef, SpaceConflict
+        from deerflow.spaces.recovery import SpaceRecovery
+
+        if account is None:
+            raise CommandError("release-seat requires an existing account")
+        account_id = str(account.id)
+        slot = None
+        async with self._users._sf() as session, session.begin():
+            await self._users.serialize_seats(session)
+            await serialize_role_assignment(session)
+            company = await session.get(StorageFeatureLinkRow, ("hm.company-space", "company"))
+            user = await session.get(StorageFeatureLinkRow, ("hm.user-space", "human:" + account_id))
+            identifiers = sorted({link.space_id for link in (company, user) if link is not None})
+            parents = {}
+            for identifier in identifiers:
+                parents[identifier] = (await session.execute(select(SpaceRow).where(SpaceRow.id == identifier).with_for_update())).scalar_one_or_none()
+            await self._users._hold_identity(session, *identity)
+            current = await session.get(UserRow, account_id, with_for_update=True)
+            if current is None:
+                raise CommandError("release-seat requires an existing account")
+            if not any(row.id == account_id for row in await self._users._covered_rows(session, *identity)):
+                raise CommandError("The selected account no longer belongs to this identity")
+            disabled = await session.get(DisabledIdentityRow, identity, with_for_update=True)
+            if disabled is None:
+                return {"command": "release-seat", "error": "not_disabled", "id": account_id, "returncode": 1}
+            space = parents.get(user.space_id) if user is not None else None
+            if user is not None and (
+                space is None
+                or (space.mode, space.custody_kind, space.custodian_kind, space.custodian_id, space.feature_namespace, space.feature_controller, space.feature_metadata_version)
+                != ("native", "personal", "human", account_id, None, None, None)
+            ):
+                raise SpaceConflict("Release requires the exact owned user Space")
+            if space is not None:
+                backing = await session.get(SpaceBackingRow, space.backing_handle)
+                slot = backing.slot_id if backing is not None else None
+            if current.released_at is None:
+                current.released_at = datetime.now(UTC)
+                if current.email_released_from is None:
+                    current.email_released_from = current.email
+                current.email = released_email_for(account_id)
+                if space is not None:
+                    space.status = "deleted"
+                    SpaceRecovery._advance(session, space, PrincipalRef("human", account_id), "delete", {"retained_backups": False, "retained_binding": True, "by": "host", "cause": "seat-released"})
+        # A retry still reaches unfinished work cleanup after the durable release.
+        try:
+            refreshed = await self._users.get_user_by_id(account_id)
+            cleanup = await self.end_sessions(identity, refreshed, end_running_work=True)
+        except Exception as exc:
+            logger.warning("Account %s is released; cleanup is unconfirmed (%s)", account_id, type(exc).__name__)
+            return {"command": "release-seat", "released": account_id, "assistants": 0, "space": slot, "cleanup_pending": True, "error": "cleanup_unconfirmed", "returncode": EXIT_UNCONFIRMED_RUNS}
+        return {**cleanup, "command": "release-seat", "released": account_id, "assistants": 0, "space": slot, "cleanup_pending": bool(cleanup.get("returncode"))}
 
     async def end_sessions(self, identity: tuple[str, str], account: User | None, *, end_running_work: bool = False) -> dict[str, Any]:
         """End an account's sessions, and its running work only when asked.
@@ -1772,6 +1871,7 @@ async def _run(
     role: str = LIMIT_ROLES[0],
     restore_held: bool = False,
     subjects: list[str] | None = None,
+    account_id: str | None = None,
 ) -> dict[str, Any]:
     from deerflow.config import get_app_config
     from deerflow.persistence.channel_connections import ChannelConnectionRepository
@@ -1802,7 +1902,7 @@ async def _run(
             wait_seconds=wait_seconds,
             **deployment_options(config),
         )
-        return await command_runner.run(command, issuer=issuer, subject=subject, email=email, end_running_work=end_running_work, role=role, restore_held=restore_held, subjects=subjects)
+        return await command_runner.run(command, issuer=issuer, subject=subject, email=email, end_running_work=end_running_work, role=role, restore_held=restore_held, subjects=subjects, account_id=account_id)
     finally:
         await close_engine()
 
@@ -1823,7 +1923,7 @@ class _ArgumentParser(argparse.ArgumentParser):
 
 
 #: The options that take a value: the word after one is never the command.
-_VALUED_OPTIONS = ("--issuer", "--subject", "--email", "--role", "--wait-seconds")
+_VALUED_OPTIONS = ("--issuer", "--subject", "--email", "--id", "--role", "--wait-seconds")
 
 
 def _command_word(argv: list[str]) -> str | None:
@@ -1846,7 +1946,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("command", choices=COMMANDS)
     parser.add_argument("--issuer", help="the identity provider's issuer URL, as configured")
     parser.add_argument("--subject", help="the person's subject at that issuer")
-    parser.add_argument("--email", help="convenience: the account's email, when it resolves to exactly one provider account")
+    parser.add_argument("--email", help="the account's current email")
+    parser.add_argument("--id", dest="account_id", help="stable account UUID; use it to retry cleanup after release changed the email")
     parser.add_argument(
         "--subjects",
         nargs="+",
@@ -1889,7 +1990,7 @@ def main(argv: list[str] | None = None) -> int:
             refusal = f"--subjects belongs to {', '.join(BATCH_COMMANDS[:-1])} and {BATCH_COMMANDS[-1]}"
         elif args.subject is not None:
             refusal = "give --subjects or --subject, not both"
-        elif args.email is not None or not args.issuer:
+        elif args.email is not None or args.account_id is not None or not args.issuer:
             refusal = "--subjects addresses identities at one --issuer; give it, and not --email"
         if refusal is not None:
             print(json.dumps({"command": args.command, "error": refusal}, sort_keys=True), flush=True)
@@ -1918,6 +2019,7 @@ def main(argv: list[str] | None = None) -> int:
                 role=args.role or LIMIT_ROLES[0],
                 restore_held=args.restore_held,
                 subjects=args.subjects,
+                account_id=args.account_id,
             )
         )
     except CommandError as exc:
