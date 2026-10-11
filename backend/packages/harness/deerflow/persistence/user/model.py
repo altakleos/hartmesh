@@ -82,6 +82,7 @@ class UserRow(Base):
     # own; non-NULL is what "released" means, so nothing has to read the
     # shape of the replacement address to know.
     email_released_from: Mapped[str | None] = mapped_column(String(320), nullable=True)
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     __table_args__ = (
         # sqlite_where alone is a SQLAlchemy dialect-specific kwarg -- it

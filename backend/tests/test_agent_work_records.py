@@ -283,12 +283,17 @@ async def test_work_migration_rebuild_and_used_downgrade_guard(work):
     module = importlib.import_module("deerflow.persistence.migrations.versions.0038_agent_work")
 
     def rebuild(connection):
+        from deerflow.persistence.user.model import UserRow
+
+        UserRow.__table__.create(connection, checkfirst=True)
+
         def columns():
             inspector = inspect(connection)
             return {table.name: sorted((c["name"], str(c["type"]), c["nullable"]) for c in inspector.get_columns(table.name)) for table in module._tables}
 
         before = columns()
         with Operations.context(MigrationContext.configure(connection)):
+            importlib.import_module("deerflow.persistence.migrations.versions.0041_storage_host_replacements").downgrade()
             importlib.import_module("deerflow.persistence.migrations.versions.0040_work_execution").downgrade()
         for row in (HumanInputReadRow, HumanInputEventRow, HumanInputResponseRow, HumanInputRequestRow):
             row.__table__.drop(connection)
@@ -299,6 +304,7 @@ async def test_work_migration_rebuild_and_used_downgrade_guard(work):
             module.upgrade()
             importlib.import_module("deerflow.persistence.migrations.versions.0039_human_input").upgrade()
             importlib.import_module("deerflow.persistence.migrations.versions.0040_work_execution").upgrade()
+            importlib.import_module("deerflow.persistence.migrations.versions.0041_storage_host_replacements").upgrade()
         assert columns() == before
 
     async with sf.kw["bind"].begin() as connection:

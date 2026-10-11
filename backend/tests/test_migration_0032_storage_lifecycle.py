@@ -49,7 +49,7 @@ async def test_lifecycle_upgrade_matches_cold_shape_and_keeps_previous_space(tmp
             await c.execute(
                 text("INSERT INTO storage_spaces (id,backing_handle,name,custody_kind,mode,status,generation,created_at,updated_at) VALUES ('retained','root','label','company','native','active',1,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)")
             )
-        await asyncio.to_thread(command.upgrade, config, REVISION)
+        await asyncio.to_thread(command.upgrade, config, "0041_storage_host_replacements")
         async with fresh.begin() as c:
             await c.run_sync(Base.metadata.create_all, tables=[SpaceRow.__table__, *TABLES])
         async with engine.connect() as c:
@@ -111,10 +111,11 @@ async def test_lifecycle_postgres_accepts_partial_ddl_and_refuses_backup_constra
                 callback()
 
         async with engine.begin() as c:
-            await c.run_sync(Base.metadata.create_all, tables=[SpaceRow.__table__, *TABLES])
+            await c.run_sync(Base.metadata.create_all, tables=[SpaceRow.__table__])
+            await c.run_sync(module._metadata.create_all, tables=module._tables)
             await c.run_sync(apply, module.upgrade)
             await c.run_sync(apply, module.downgrade)
-            await c.run_sync(Base.metadata.create_all, tables=[SpaceAttachmentRow.__table__])
+            await c.run_sync(module._storage_space_attachments.create)
             await c.run_sync(apply, module.upgrade)
             assert {t.name for t in TABLES} <= set(await c.run_sync(lambda conn: inspect(conn).get_table_names()))
             await c.execute(text("ALTER TABLE storage_space_backups DROP CONSTRAINT ck_storage_space_backups_size"))

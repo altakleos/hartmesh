@@ -20,13 +20,16 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 53
+config_version: 54
 
 # Generic storage requires persistent SQLite/PostgreSQL and provider-prepared
 # fixed ext4 filesystems; see docs/STORAGE_SPACES.md. Restart after changes.
 storage_spaces:
   enabled: false
   inventory_path: null
+  user_spaces: true
+  # Optional validated counts and capacities; Compose renders the operator plan.
+  plan: null
 
 # Operator-owned management delegation. All permissions default to false;
 # administrator role and optional authorization settings do not override them.
@@ -1458,6 +1461,8 @@ suggestions:
 # is fixed.
 
 ui:
+  # Optional deployment-owned role briefs; no roles are enabled by default.
+  roles: []
   # product_name: HartMesh
   profile: developer
   # starters:
@@ -2566,6 +2571,8 @@ blob_storage:
 # Keep this disabled unless the gateway is behind a trusted authenticated admin boundary.
 agents_api:
   enabled: false
+  ai_assistants_per_user: 1
+  ai_employees: 10
 
 # ============================================================================
 # Skill Self-Evolution Configuration

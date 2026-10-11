@@ -1,9 +1,12 @@
 ### Schema Migrations (`packages/harness/deerflow/persistence/migrations/`)
 
-The distribution ends in `0040_work_execution`, after human input0039, Work0038, lifecycle0037 and identity0034,
+The distribution ends in `0041_storage_host_replacements`, after human input0039, Work0038, lifecycle0037 and identity0034,
 conversations0035 and memory/provenance0036. These follow0033_storage_features.
 They add adopted revisions, instances/grants, bindings, memory, lifecycle intent
 and generic Work/attempt/event and human-input request/response/event/read records;
+0041 adds host replacements, released seats, attachment attribution and Work containment facts,
+and permits host-attributed Work events. Downgrade refuses used facts before DDL; SQLite
+uses native DROP COLUMN for users.released_at to preserve referencing preferences.
 0040 adds attempt candidates/settlement and human/nonhuman input attribution. Used instance facts cannot be
 erased by downgrade. The preceding `0032_storage_lifecycle` follows `0031`/`0030`.
 These add resource/grant/event, backing/operation and containment/backup facts

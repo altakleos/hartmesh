@@ -570,6 +570,14 @@ honor environment proxy settings.
 
 Backend processes automatically pick up `config.yaml` changes on the next config access, so model metadata updates do not require a manual restart during development.
 
+Configuration version 54 accepts optional `storage_spaces.plan` counts and GiB
+capacities, AI assistant/AI employee counts under `agents_api`, and deployment-owned
+role briefs under `ui.roles`. These planning fields prepare Compose storage and
+agent provisioning; this change keeps both features disabled by default. Role
+briefs describe an AI employee's work through configuration and skills. They
+do not grant permissions. See `config.example.yaml` for the fields and
+[the changelog](CHANGELOG.md#unreleased) for the accompanying database schema changes.
+
 Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
 request does not provide one. The default is `100`; valid per-request values
 take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes

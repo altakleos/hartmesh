@@ -175,6 +175,7 @@ class SQLiteUserRepository(UserRepository):
             token_version=row.token_version,
             last_sign_in_at=_aware(row.last_sign_in_at),
             email_released_from=row.email_released_from,
+            released_at=_aware(row.released_at),
             disabled_at=_aware(disabled_at),
             role_limit=role_limit,
         )

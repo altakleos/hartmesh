@@ -37,7 +37,7 @@ from deerflow.persistence.scheduled_task_runs.model import ScheduledTaskRunRow
 from deerflow.persistence.scheduled_tasks.model import ScheduledTaskRow
 from deerflow.persistence.shared_publications.model import SharedPublicationRow
 from deerflow.persistence.spaces.files import SpaceBackingRow, SpaceFileOperationRow
-from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow
+from deerflow.persistence.spaces.lifecycle import SpaceAttachmentRow, SpaceBackupRow, SpaceMountRow, StorageHostReplacementRow
 from deerflow.persistence.spaces.model import SpaceEventRow, SpaceGrantRow, SpaceRow
 from deerflow.persistence.subagent_batches.model import SubagentBatchItemRow, SubagentBatchRow
 from deerflow.persistence.thread_meta.model import ThreadMetaRow
@@ -88,6 +88,7 @@ __all__ = [
     "SpaceAttachmentRow",
     "SpaceMountRow",
     "SpaceBackupRow",
+    "StorageHostReplacementRow",
     "SubagentBatchRow",
     "SubagentBatchItemRow",
     "ThreadMetaRow",

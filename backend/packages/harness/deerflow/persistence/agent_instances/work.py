@@ -75,13 +75,16 @@ class AgentWorkAttemptRow(Base):
     candidate: Mapped[dict | None] = mapped_column(JSON(none_as_null=True), nullable=True)
     settled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    contained_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    workspace_ready_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attachment_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
 
 class AgentWorkEventRow(Base):
     __tablename__ = "agent_work_events"
     __table_args__ = (
         UniqueConstraint("instance_id", "operation_id", name="uq_agent_work_event_operation"),
-        CheckConstraint("actor_kind IN ('human', 'nonhuman')", name="ck_agent_work_event_actor"),
+        CheckConstraint("actor_kind IN ('human', 'nonhuman', 'host')", name="ck_agent_work_event_actor"),
         UniqueConstraint("work_id", "revision", name="uq_agent_work_event_revision"),
         CheckConstraint("revision >= assignment_revision AND assignment_revision >= 1 AND revision <= 2147483647", name="ck_agent_work_event_revision"),
     )

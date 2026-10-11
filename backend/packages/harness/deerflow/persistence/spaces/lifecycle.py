@@ -24,6 +24,22 @@ class SpaceAttachmentRow(Base):
     container_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     phase: Mapped[str] = mapped_column(String(16))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    fenced_by_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    fenced_by_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    fence_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    fenced_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class StorageHostReplacementRow(Base):
+    """An operator's durable attribution of a replaced Docker host."""
+
+    __tablename__ = "storage_host_replacements"
+    __table_args__ = (CheckConstraint("old_host_id <> new_host_id", name="ck_storage_host_replacements_distinct"),)
+
+    old_host_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    new_host_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    attachments_named: Mapped[int] = mapped_column(Integer)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
 class SpaceMountRow(Base):
