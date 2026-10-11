@@ -477,6 +477,14 @@ class TestGetCheckpointer:
 
 
 class TestSyncSingletonThreadSafety:
+    @pytest.fixture(autouse=True)
+    def memory_app_config(self, monkeypatch, reset_state):
+        """Singleton synchronization must not reload the operator's deployment file."""
+        config = SimpleNamespace(checkpointer=CheckpointerConfig(type="memory"), database=DatabaseConfig(backend="memory", checkpoint_channel_mode="full"))
+        monkeypatch.setattr(app_config_module, "get_app_config", lambda: config)
+        monkeypatch.setattr("deerflow.runtime.checkpointer.provider.get_app_config", lambda: config)
+        monkeypatch.setattr("deerflow.runtime.store.provider.get_app_config", lambda: config)
+
     def test_store_reset_clears_singleton(self):
         load_checkpointer_config_from_dict({"type": "memory"})
         store1 = get_store()
