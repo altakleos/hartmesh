@@ -578,6 +578,11 @@ briefs describe an AI employee's work through configuration and skills. They
 do not grant permissions. See `config.example.yaml` for the fields and
 [the changelog](CHANGELOG.md#unreleased) for the accompanying database schema changes.
 
+The backend image includes an opt-in operator CLI for preparing and maintaining
+typed storage pools. It checks disk headroom before preparation and supports
+offline growth that preserves files; see [Storage Spaces](docs/STORAGE_SPACES.md)
+for its privilege requirements and current scope.
+
 Gateway runs use the top-level `recursion_limit` in `config.yaml` when an API
 request does not provide one. The default is `100`; valid per-request values
 take precedence, and `max_recursion_limit` (default `1000`) caps both. Changes

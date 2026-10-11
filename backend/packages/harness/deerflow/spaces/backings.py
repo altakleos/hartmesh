@@ -21,6 +21,9 @@ from pathlib import Path
 
 from deerflow.spaces.filesystem import ConfinedFilesystem, FilesystemUnavailable
 
+RESERVE_BYTES = 1 << 30
+RESERVE_INODES = 1024
+
 
 class BackingUnavailable(FilesystemUnavailable):
     """A backing cannot establish its promised enforcement/capacity facts."""
@@ -49,6 +52,7 @@ class FixedVolumeSpec:
     # Inside a Gateway container the same image may have a different pathname.
     # This operator-supplied host name must match the kernel loop device fact.
     host_image_path: Path | None = None
+    kind: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.slot_id, str) or not re.fullmatch(r"[0-9a-f]{32}", self.slot_id):
@@ -61,6 +65,8 @@ class FixedVolumeSpec:
             raise ValueError("Provider filesystem UUID must be canonical")
         _positive(self.max_bytes, "Volume bytes")
         _positive(self.max_inodes, "Volume inodes")
+        if self.kind is not None and self.kind not in ("user", "assistant", "employee", "company"):
+            raise ValueError("Invalid provider volume kind")
 
 
 @dataclass(frozen=True)
@@ -220,15 +226,19 @@ class PreparedVolumeCatalog:
             not isinstance(value, dict)
             or set(value) != {"schema_version", "data_disk", "reserve_bytes", "reserve_inodes", "volumes"}
             or type(value["schema_version"]) is not int
-            or value["schema_version"] != 1
+            or value["schema_version"] not in (1, 2)
             or not isinstance(value["volumes"], list)
         ):
             raise ValueError("Unsupported provider inventory shape")
         specs = []
         for entry in value["volumes"]:
             required = {"slot_id", "mount_path", "image_path", "filesystem_uuid", "max_bytes", "max_inodes"}
+            if value["schema_version"] == 2:
+                required.add("kind")
             if not isinstance(entry, dict) or not required <= set(entry) or set(entry) - required - {"host_image_path"}:
                 raise ValueError("Invalid provider volume entry")
+            if value["schema_version"] == 2 and entry["kind"] not in ("user", "assistant", "employee", "company"):
+                raise ValueError("Invalid provider volume kind")
             entry = dict(entry)
             for key in ("mount_path", "image_path", "host_image_path"):
                 if key in entry:

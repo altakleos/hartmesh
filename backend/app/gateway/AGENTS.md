@@ -1,5 +1,7 @@
 ### Gateway API (`app/gateway/`)
 
+Storage CLI: [guide](../../../docs/STORAGE_SPACES.md).
+
 Reject external run/state writes with `sandbox`, `thread_data`, or `viewed_images`.
 
 Studio retains sanitized creation metadata.
